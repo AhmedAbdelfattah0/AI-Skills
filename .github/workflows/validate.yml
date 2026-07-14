@@ -10,5 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # Node validator is canonical and cross-platform (also runnable on Windows).
       - name: Run skill validator
-        run: bash scripts/validate.sh
+        run: node scripts/cli.mjs validate

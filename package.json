@@ -1,0 +1,28 @@
+{
+  "name": "ai-skills",
+  "version": "1.0.0",
+  "description": "Personal Claude Code skill library with a cross-platform (Windows/macOS/Linux) installer.",
+  "type": "module",
+  "bin": {
+    "ai-skills": "scripts/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "skills",
+    "scripts/cli.mjs",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "scripts": {
+    "list": "node scripts/cli.mjs list",
+    "install:skills": "node scripts/cli.mjs install",
+    "validate": "node scripts/cli.mjs validate"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AhmedAbdelfattah0/AI-Skills.git"
+  },
+  "license": "MIT"
+}

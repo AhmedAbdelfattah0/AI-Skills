@@ -1,9 +1,68 @@
 # AI-Skills
 
-Single source of truth for my Claude Code skill library. Each skill lives in
-`skills/<name>/` with a `SKILL.md` (plus optional `references/` or `scripts/`).
-The repo is symlinked into `~/.claude/skills`, so editing a skill here and
-committing is the whole update-and-backup loop — no re-install, no `rm -rf`.
+A shareable library of [Claude Code](https://claude.com/claude-code) skills. Each skill lives in
+`skills/<name>/` with a `SKILL.md` (plus optional `references/` or `scripts/`). Installing puts each
+skill into `~/.claude/skills/` where Claude Code picks it up automatically.
+
+There's a **cross-platform installer** (`ai-skills`, a dependency-free Node CLI) that runs on
+**Windows, macOS, and Linux**, so you can install everything or just the skills you want — no clone
+required. A bash equivalent is kept for people who prefer a shell script on Unix.
+
+## Install
+
+### Option A — `npx` (no clone needed, works everywhere)
+
+Requires [Node.js](https://nodejs.org) ≥ 18 (ships with `npx`). This runs the installer straight from
+GitHub:
+
+```bash
+# see what's available
+npx github:AhmedAbdelfattah0/AI-Skills list
+
+# install ALL skills
+npx github:AhmedAbdelfattah0/AI-Skills install
+
+# install ONE skill, or SEVERAL (space-separated)
+npx github:AhmedAbdelfattah0/AI-Skills install security
+npx github:AhmedAbdelfattah0/AI-Skills install security researcher spec-driven
+```
+
+When run this way the source is a throwaway `npx` cache, so skills are **copied** into
+`~/.claude/skills/`. To pick up new skills later, re-run the command. On Windows, run the same lines in
+PowerShell or Command Prompt — `npx` is cross-platform.
+
+### Option B — clone, then install (best if you'll edit or update skills)
+
+```bash
+git clone https://github.com/AhmedAbdelfattah0/AI-Skills.git
+cd AI-Skills
+
+node scripts/cli.mjs list                       # list skills
+node scripts/cli.mjs install                     # install ALL (symlinked)
+node scripts/cli.mjs install security researcher # install only these
+node scripts/cli.mjs install --copy              # install ALL as real files (no symlink)
+```
+
+From a clone, skills are **symlinked** by default, so `git pull` (or editing a `SKILL.md`) updates what
+Claude Code sees with no re-install. Use `--copy` if you'd rather have real files. On **Windows** the
+CLI creates directory *junctions* (no admin rights needed); if a symlink is ever refused, add `--copy`.
+
+> **Optional:** run `npm link` in the clone to get an `ai-skills` command on your PATH, then use
+> `ai-skills install …` anywhere instead of `node scripts/cli.mjs …`.
+
+### Option C — bash installer (macOS / Linux / Git Bash / WSL)
+
+Same behaviour as Option B, no Node required:
+
+```bash
+./scripts/install.sh                     # all skills, symlinked
+./scripts/install.sh security researcher # only these
+./scripts/install.sh --copy              # all skills, real files
+```
+
+### Verify
+
+After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
 
 ## Skills (15)
 
@@ -25,70 +84,59 @@ committing is the whole update-and-backup loop — no re-install, no `rm -rf`.
 | ship-ticket | — |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
 
+Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.
+
 ## Layout
 
 ```
 AI-Skills/
 ├── skills/<name>/SKILL.md         # + optional references/ and scripts/
 ├── scripts/
-│   ├── install.sh                 # symlink (default) or --copy into ~/.claude/skills
+│   ├── cli.mjs                    # cross-platform CLI: list / install / validate
+│   ├── install.sh                 # bash installer (Unix) — all or named skills, --copy
 │   ├── import.sh                  # optional: pull other installed skills into the repo
-│   ├── validate.sh                # lint: name match, frontmatter, script-existence
+│   ├── validate.sh               # bash mirror of the validator (Unix; needs bash ≥ 4)
 │   └── package.sh                 # build dist/<name>.skill zips for backup/sharing
-├── .github/workflows/validate.yml # CI runs validate.sh on push/PR
+├── package.json                   # exposes the `ai-skills` bin for npx / npm link
+├── .github/workflows/validate.yml # CI runs `node scripts/cli.mjs validate` on push/PR
 └── README.md
 ```
 
-## First-time setup (in this folder)
+## Contributing a skill
 
-```bash
-git init
-chmod +x scripts/*.sh
-./scripts/validate.sh              # should print all ✅ (15 skills)
-./scripts/install.sh               # symlink the repo into ~/.claude/skills
-git add -A && git commit -m "Initial skill library (15 skills)"
-# git remote add origin <repo-url> && git push -u origin main
-```
+1. Add `skills/<name>/SKILL.md` (optionally a `references/` and/or `scripts/` folder).
+2. Keep the folder name **exactly equal** to the frontmatter `name:`, and include both `name:` and
+   `description:`.
+3. Validate before pushing — cross-platform:
 
-`import.sh` is optional now — every skill is already in the repo. Use it only if
-a *new* skill gets installed straight into `~/.claude/skills` later and you want
-to fold it back into the repo (it skips skills already tracked here).
+   ```bash
+   node scripts/cli.mjs validate      # any OS with Node
+   ./scripts/validate.sh              # or bash (needs bash ≥ 4; macOS ships 3.2)
+   ```
 
-## Daily loop
+CI runs the same Node validator on every push/PR, so a skill that breaks the rules can't reach `main`.
 
-Edit a `SKILL.md` → it's already live in Claude Code (symlinked) → commit.
+## What the validator enforces
 
-```bash
-./scripts/validate.sh              # optional local check; CI runs it anyway
-git add -A && git commit -m "Update <skill>"
-```
-
-## Another machine
-
-```bash
-git clone <repo-url> && cd AI-Skills
-./scripts/install.sh               # symlink mode
-./scripts/install.sh --copy        # or real files, if the repo path won't match there
-```
-
-## What validate.sh enforces
-
-- **Folder name = frontmatter `name:`** — must match exactly or the skill installs
-  under the wrong name.
+- **Folder name = frontmatter `name:`** — must match exactly, or the skill installs under the wrong name.
 - **Frontmatter present** with both `name:` and `description:`.
-- **Every `.sh` a SKILL.md invokes must exist** — either bundled in the repo
-  (like `spec-driven/scripts/*.sh`) or generated by the skill itself (like
-  nn-guard writing its hook). A call to a script that is neither is the classic
-  exit-127 trap and fails the build.
+- **Every `.sh` a `SKILL.md` invokes must exist** — either bundled in the repo (like
+  `spec-driven/scripts/*.sh`) or generated by the skill itself (like nn-guard writing its hook). A call
+  to a script that is neither is the classic exit-127 trap and fails the build.
 
-CI (`.github/workflows/validate.yml`) runs the same validator, so a skill that
-breaks these can't reach `main`.
+## Backup / sharing archives (optional)
 
-## Note on the copies in this repo
+```bash
+./scripts/package.sh                 # build dist/<name>.skill zips (needs python3; dist/ is gitignored)
+./scripts/package.sh session-logger  # just one
+```
 
-- `session-logger` / `session-restore` are the current inlined versions (no
-  external scripts).
+`.skill` files are plain zips with the skill folder at the root — a `.md` renamed to `.skill` is **not**
+valid, which is why `package.sh` zips programmatically.
+
+## Notes on the copies in this repo
+
+- `session-logger` / `session-restore` are the current inlined versions (no external scripts).
 - `spec-driven` had two dead calls to `session-restore/scripts/restore.sh` and
-  `session-logger/scripts/append.sh` (both removed when those skills were
-  inlined). They're replaced here with the inline equivalents so the workflow
-  can't 127. Its own bundled scripts are untouched.
+  `session-logger/scripts/append.sh` (both removed when those skills were inlined). They're replaced
+  here with the inline equivalents so the workflow can't exit-127. Its own bundled scripts are untouched.
