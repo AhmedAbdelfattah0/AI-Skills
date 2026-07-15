@@ -1,6 +1,6 @@
 ---
 name: ship-ticket
-description: Implement a Jira ticket end-to-end with the locked stack, SOLID, tiered model/cost routing, a mandatory design-source-of-truth read, an implementation-plan gate (written plan artifact; pauses for approval on risky/large/security-sensitive tickets), a pinned + independently-verified + CI-enforced design-parity gate, the two-pass review flow, and the full close-out (PR plus Jira Done plus session log plus compact). ALWAYS trigger when the user types /ship-ticket, /ship.ticket, ship ticket, implement ticket, build ticket, or gives a Jira ticket key or browse URL (for example SCRUM-28 or DAT-15) and asks to implement, build, or ship it. The user passes one argument, the Jira ticket key or URL.
+description: Implement a Jira ticket end-to-end with the locked stack, SOLID, tiered model/cost routing, a mandatory design-source-of-truth read, a plan-mode gate (every ticket is planned in Claude Code plan mode and user-approved before implementation; the approved plan is saved to .specs/plans/), a pinned + independently-verified + CI-enforced design-parity gate, the two-pass review flow, and the full close-out (PR plus Jira Done plus session log plus compact). ALWAYS trigger when the user types /ship-ticket, /ship.ticket, ship ticket, implement ticket, build ticket, or gives a Jira ticket key or browse URL (for example SCRUM-28 or DAT-15) and asks to implement, build, or ship it. The user passes one argument, the Jira ticket key or URL.
 ---
 
 # /ship-ticket — implement a Jira ticket end-to-end
@@ -96,7 +96,7 @@ failure of the gate. If challenged later on why the UI matches the design, you
 should be able to point to the pinned SHA, the token file, and the component
 files you opened here.
 
-## Step 0.75 — Implementation Plan (hard gate; pauses only when it must)
+## Step 0.75 — Plan in Claude Code plan mode (hard gate; every ticket)
 
 Planning is STRONG-model work (see Model / cost routing) — this step is where it
 actually happens, not an assumption. The ticket and the design reference have
@@ -104,14 +104,31 @@ been read; now decide **what to build and how to sequence it** before any Design
 Contract or code. The plan is also the handoff object that makes the model
 tiering real: STRONG plans, MEDIUM builds from the plan.
 
-**Write the plan to `.specs/plans/<TICKET>.md`** (committed with the PR, like the
-GATE 4 artifact) using **exactly this template** — same headings, same order,
-so every plan reads the same way:
+**Use Claude Code's native plan mode — this is the gate's mechanism:**
+
+1. **Enter plan mode now** (the `EnterPlanMode` tool). From here until approval,
+   you research and plan only — no file edits, no code. Plan mode enforces that
+   mechanically, which is the point: the gate doesn't rely on your restraint.
+2. Draft the plan **using exactly the template below** — same headings, same
+   order, so every plan reads the same way.
+3. **Present it through plan mode's approval flow** (`ExitPlanMode`). The user
+   approves, edits, or rejects in the native UI. **Implementation starts only on
+   approval** — an edited plan is the new plan; a rejection sends you back to
+   step 2, not into the code.
+4. **Immediately after approval, save the approved plan verbatim to
+   `.specs/plans/<TICKET>.md`** (committed with the PR, like the GATE 4
+   artifact). Plan mode itself persists nothing — this file is the durable
+   record that the Design Contract derives from, the session log references,
+   and the PR carries.
+
+**Fallback — plan mode unavailable** (headless / workflow / subagent runs):
+write the plan artifact and **STOP**, surfacing sections 1–3 as the approval
+ask. Proceeding without an approval is a Stop-on-failure violation, not a
+judgment call — a plan approved only by its author is not approved.
 
 ```markdown
 # Plan — <TICKET>: <ticket title>
 
-**Decision needed:** YES — <which pause condition tripped> / NO — proceeding
 **Size:** <N> files · <FE / BE / full-stack> · security-sensitive: <yes/no>
 
 ## 1. What & why (read this first)
@@ -156,32 +173,12 @@ Formatting rules that keep it readable:
 - **Short beats complete.** A plan nobody reads gates nothing. If the ticket is
   big, the build-sequence rows get more numerous — the prose does not get longer.
 
-**Pause for user approval before implementing IFF any of these hold:**
-
-- the ticket is **security-sensitive** (auth, tenancy, billing, payments,
-  cross-tenant isolation — same definition as the Security-sensitive note), or
-- it is a **full-stack** ticket (FE + BE), or
-- the build sequence touches **more than ~8 files**, or
-- **Risks & unknowns is non-empty** — any dependency, ambiguity, or blocker-risk
-  surfaced.
-
-Otherwise: post the plan's header + section 1 (What & why) to the user and
-**proceed without waiting** — a small clean ticket stays autonomous.
-
-When a pause IS required, present sections 1–3 as the approval ask — don't dump
-the whole file into chat; link/point to `.specs/plans/<TICKET>.md` for the rest.
-
-When a pause is required and you're running interactively, present the plan and
-wait (Claude Code's plan-mode approval flow is a fine UX for this). When running
-headless / in workflow mode, **STOP and surface the plan** — proceeding past a
-pause condition without approval is a Stop-on-failure violation, not a judgment
-call.
-
 **The plan constrains the contract.** The Design Contract (STEP 0B) emitted next
-draws its file list from the plan's build sequence. A file needed by the
-contract but absent from the plan means the plan was wrong — update the plan
-first, and re-check the pause conditions (a growing file count can newly trip
-one).
+draws its file list from the approved plan's build sequence. A file needed by
+the contract but absent from the plan means the plan was wrong — a **material**
+divergence (new files, changed approach, new risk) goes back through plan mode
+for re-approval and updates `.specs/plans/<TICKET>.md`; don't silently build
+past the plan the user approved.
 
 ## Locked stack
 
@@ -390,10 +387,10 @@ and committed to Git as a numbered file.
 
 9. Run `/session-logger`; ensure the log is written to disk before continuing.
    Record, so the decisions stay auditable after `/compact`:
-   - the **plan artifact path** (`.specs/plans/<TICKET>.md`), whether it paused for
-     approval (and which condition tripped), and any **divergence between the plan
-     and what was actually built** — a silent divergence is the failure this records
-     against
+   - the **approved plan's artifact path** (`.specs/plans/<TICKET>.md`), any
+     **re-approval round-trips** (material divergences that went back through plan
+     mode), and any **divergence between the approved plan and what was actually
+     built** — a silent divergence is the failure this records against
    - which design files were read in Step 0.5 **and the pinned `design_ref` SHA**
    - the **GATE 4 per-screen grade(s), the independent signer, and the artifact path**
    - every **human-approved design deviation** (decision + approver + date) and the
@@ -414,9 +411,10 @@ a visual language, don't mark anything complete, don't push past a failure silen
 
 - You can't fetch the ticket.
 - You can't locate the design system for a UI ticket.
-- A Step 0.75 **pause condition is met and you have no user approval** (including
-  headless/workflow runs, where the pause is always a STOP) — do not start
-  implementing on the strength of your own plan.
+- You're about to write implementation code **without a plan approved through
+  plan mode** (Step 0.75) — including headless/workflow runs where plan mode is
+  unavailable and no user approval was obtained. Do not start implementing on
+  the strength of your own plan.
 - A UI ticket's reference screen is **not committed to git** (unpinnable) — pin it
   first; do not build against an uncommitted reference.
 - GATE 4 grades an owned screen **Major or Not-built** and you cannot fix it or clear
