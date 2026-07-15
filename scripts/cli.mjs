@@ -25,7 +25,18 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
 const SKILLS_DIR = join(REPO_ROOT, 'skills');
-const DEST = join(homedir(), '.claude', 'skills');
+
+// Install targets. SKILL.md is an open standard (agentskills.io, Linux
+// Foundation AAIF) — the same folder works in every tool below; only the
+// directory scanned differs. `agents` (~/.agents/skills) is the interoperable
+// path read by Codex, Gemini CLI, and other standard-compliant tools.
+const TARGETS = {
+  claude: join(homedir(), '.claude', 'skills'),   // Claude Code
+  agents: join(homedir(), '.agents', 'skills'),   // cross-tool: Codex, Gemini CLI, …
+  codex:  join(homedir(), '.agents', 'skills'),   // OpenAI Codex (alias of agents)
+  gemini: join(homedir(), '.gemini', 'skills'),   // Gemini CLI native dir
+};
+const DEFAULT_TARGET = 'claude';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -107,9 +118,40 @@ function cmdList() {
 }
 
 function cmdInstall(args) {
-  const names = args.filter((a) => !a.startsWith('-'));
   const wantCopy = args.includes('--copy') || args.includes('-c');
   const wantLink = args.includes('--link') || args.includes('-l');
+
+  // Parse --target <t1,t2|all> and --dest <path>; remaining bare words = skill names.
+  const names = [];
+  let targetSpec = null;
+  let destOverride = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--target' || a === '-t') targetSpec = args[++i];
+    else if (a.startsWith('--target=')) targetSpec = a.slice('--target='.length);
+    else if (a === '--dest') destOverride = args[++i];
+    else if (a.startsWith('--dest=')) destOverride = a.slice('--dest='.length);
+    else if (!a.startsWith('-')) names.push(a);
+  }
+
+  // Resolve destination directories (deduped — codex and agents share a dir).
+  let destDirs;
+  if (destOverride) {
+    destDirs = [{ label: 'custom', dir: resolve(destOverride) }];
+  } else {
+    const keys = !targetSpec ? [DEFAULT_TARGET]
+      : targetSpec === 'all' ? ['claude', 'agents', 'gemini']
+      : targetSpec.split(',').map((s) => s.trim()).filter(Boolean);
+    const unknown = keys.filter((k) => !TARGETS[k]);
+    if (unknown.length) {
+      console.error(`❌ unknown target(s): ${unknown.join(', ')}`);
+      console.error(`   valid: ${Object.keys(TARGETS).join(', ')}, all — or use --dest <path>`);
+      process.exit(1);
+    }
+    const seen = new Map();
+    for (const k of keys) if (!seen.has(TARGETS[k])) seen.set(TARGETS[k], k);
+    destDirs = [...seen].map(([dir, label]) => ({ label, dir }));
+  }
 
   const available = skillDirs();
   if (available.length === 0) {
@@ -129,34 +171,34 @@ function cmdInstall(args) {
   }
 
   // Mode: explicit flag wins; otherwise copy from an ephemeral source, else link.
-  let mode = wantCopy ? 'copy' : wantLink ? 'link' : (sourceIsEphemeral() ? 'copy' : 'link');
+  const mode = wantCopy ? 'copy' : wantLink ? 'link' : (sourceIsEphemeral() ? 'copy' : 'link');
   // Windows dir symlinks need admin/developer-mode; junctions do not, so we use
   // those under the hood — but if even that fails we tell the user to try --copy.
 
-  mkdirSync(DEST, { recursive: true });
-
-  let ok = 0;
-  for (const name of targets) {
-    const src = join(SKILLS_DIR, name);
-    const dst = join(DEST, name);
-    removeExisting(dst);
-    try {
-      if (mode === 'link') {
-        symlinkSync(src, dst, isWin ? 'junction' : 'dir');
-        console.log(`🔗 linked  ${name}`);
-      } else {
-        cpSync(src, dst, { recursive: true });
-        console.log(`📄 copied  ${name}`);
+  for (const { label, dir } of destDirs) {
+    mkdirSync(dir, { recursive: true });
+    let ok = 0;
+    for (const name of targets) {
+      const src = join(SKILLS_DIR, name);
+      const dst = join(dir, name);
+      removeExisting(dst);
+      try {
+        if (mode === 'link') {
+          symlinkSync(src, dst, isWin ? 'junction' : 'dir');
+          console.log(`🔗 linked  ${name}  → ${label}`);
+        } else {
+          cpSync(src, dst, { recursive: true });
+          console.log(`📄 copied  ${name}  → ${label}`);
+        }
+        ok++;
+      } catch (err) {
+        console.error(`❌ ${name}: ${err.message}`);
+        if (mode === 'link') console.error('   symlink failed — retry with --copy');
       }
-      ok++;
-    } catch (err) {
-      console.error(`❌ ${name}: ${err.message}`);
-      if (mode === 'link') console.error('   symlink failed — retry with --copy');
     }
+    console.log(`\n✅ [${label}] installed ${ok}/${targets.length} skill(s) into ${dir}  (mode: ${mode})\n`);
   }
-
-  console.log(`\n✅ installed ${ok}/${targets.length} skill(s) into ${DEST}  (mode: ${mode})`);
-  if (mode === 'link') console.log(`   edits in ${SKILLS_DIR} are now live in Claude Code.`);
+  if (mode === 'link') console.log(`   edits in ${SKILLS_DIR} are live everywhere they're linked.`);
 }
 
 // Port of scripts/validate.sh — same three invariants, cross-platform.
@@ -227,12 +269,22 @@ Usage:
   ai-skills help                      show this message
 
 Install flags:
-  --copy, -c   copy real files instead of symlinking (needed on ephemeral/npx runs)
-  --link, -l   force symlink even from an ephemeral source
+  --copy, -c            copy real files instead of symlinking (needed on ephemeral/npx runs)
+  --link, -l            force symlink even from an ephemeral source
+  --target, -t <t,...>  which tool(s) to install for — SKILL.md is an open
+                        standard, so the same skills work everywhere:
+                          claude  ~/.claude/skills   (Claude Code — default)
+                          codex   ~/.agents/skills   (OpenAI Codex)
+                          gemini  ~/.gemini/skills   (Gemini CLI)
+                          agents  ~/.agents/skills   (any standard-compliant tool)
+                          all     claude + agents + gemini
+  --dest <path>         install into a custom directory instead
 
 Examples:
   npx github:AhmedAbdelfattah0/AI-Skills install security researcher
-  node scripts/cli.mjs install --copy
+  npx github:AhmedAbdelfattah0/AI-Skills install --target codex
+  node scripts/cli.mjs install --target all
+  node scripts/cli.mjs install security --target claude,codex
   node scripts/cli.mjs list`);
 }
 

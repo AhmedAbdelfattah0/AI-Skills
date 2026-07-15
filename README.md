@@ -1,8 +1,11 @@
 # AI-Skills
 
-A shareable library of [Claude Code](https://claude.com/claude-code) skills. Each skill lives in
-`skills/<name>/` with a `SKILL.md` (plus optional `references/` or `scripts/`). Installing puts each
-skill into `~/.claude/skills/` where Claude Code picks it up automatically.
+A shareable library of AI agent skills in the open
+[`SKILL.md` standard](https://agentskills.io) — built for
+[Claude Code](https://claude.com/claude-code), and equally installable into **OpenAI Codex,
+Gemini CLI, and any other standard-compliant tool** (see
+[Use with other AI tools](#use-with-other-ai-tools-codex-gemini-cli-glm-)). Each skill lives in
+`skills/<name>/` with a `SKILL.md` (plus optional `references/` or `scripts/`).
 
 There's a **cross-platform installer** (`ai-skills`, a dependency-free Node CLI) that runs on
 **Windows, macOS, and Linux**, so you can install everything or just the skills you want — no clone
@@ -25,6 +28,11 @@ npx github:AhmedAbdelfattah0/AI-Skills install
 # install ONE skill, or SEVERAL (space-separated)
 npx github:AhmedAbdelfattah0/AI-Skills install security
 npx github:AhmedAbdelfattah0/AI-Skills install security researcher spec-driven
+
+# install for OTHER AI tools (default is Claude Code) — see "Use with other AI tools"
+npx github:AhmedAbdelfattah0/AI-Skills install --target codex     # OpenAI Codex
+npx github:AhmedAbdelfattah0/AI-Skills install --target gemini    # Gemini CLI
+npx github:AhmedAbdelfattah0/AI-Skills install --target all       # Claude + Codex + Gemini
 ```
 
 When run this way the source is a throwaway `npx` cache, so skills are **copied** into
@@ -41,6 +49,7 @@ node scripts/cli.mjs list                       # list skills
 node scripts/cli.mjs install                     # install ALL (symlinked)
 node scripts/cli.mjs install security researcher # install only these
 node scripts/cli.mjs install --copy              # install ALL as real files (no symlink)
+node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI dirs
 ```
 
 From a clone, skills are **symlinked** by default, so `git pull` (or editing a `SKILL.md`) updates what
@@ -55,14 +64,55 @@ CLI creates directory *junctions* (no admin rights needed); if a symlink is ever
 Same behaviour as Option B, no Node required:
 
 ```bash
-./scripts/install.sh                     # all skills, symlinked
+./scripts/install.sh                     # all skills, symlinked (Claude Code)
 ./scripts/install.sh security researcher # only these
 ./scripts/install.sh --copy              # all skills, real files
+./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
+./scripts/install.sh --target all        # Claude + Codex + Gemini at once
+./scripts/install.sh --dest <path>       # any other tool's skills dir
 ```
 
 ### Verify
 
 After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
+
+## Use with other AI tools (Codex, Gemini CLI, GLM, …)
+
+`SKILL.md` is no longer Claude-only — it's an **open standard**
+([agentskills.io](https://agentskills.io), governed by the Linux Foundation's Agentic AI
+Foundation since Dec 2025) supported by 16+ tools including **OpenAI Codex**, **Gemini CLI**,
+GitHub Copilot, Cursor, OpenCode, and Amp. The same skill folders work as-is; only the
+directory each tool scans differs. Use `--target`:
+
+```bash
+node scripts/cli.mjs install --target codex               # OpenAI Codex   → ~/.agents/skills
+node scripts/cli.mjs install --target gemini              # Gemini CLI     → ~/.gemini/skills
+node scripts/cli.mjs install --target all                 # Claude + Codex + Gemini at once
+node scripts/cli.mjs install security --target claude,codex   # one skill, two tools
+node scripts/cli.mjs install --dest /path/to/dir          # any other tool's skills dir
+```
+
+The same `--target` / `--dest` flags work in all three install paths:
+`npx github:AhmedAbdelfattah0/AI-Skills install --target codex` (no clone needed) and
+`./scripts/install.sh --target codex` (bash) behave identically.
+
+Per-tool notes:
+
+- **OpenAI Codex** — reads `~/.agents/skills` (and `.agents/skills` in a repo). Skills trigger
+  implicitly when your task matches the `description`, or explicitly via `/skills` / `$`-mention.
+  Codex's old "custom prompts" are deprecated in favor of skills.
+- **Gemini CLI** — reads `~/.gemini/skills` and also the interoperable `~/.agents/skills`, so
+  `--target codex` (or `agents`) covers Gemini too. Manage with `/skills enable <name>`.
+- **GLM (Zhipu)** — GLM Coding Plan runs *through* Claude Code or Claude-compatible tools
+  (OpenCode, Cline, …), so a normal `install` already covers it. Nothing extra needed.
+- **Repo-level sharing** — to ship skills with a project instead of a user's machine, use
+  `--dest <repo>/.agents/skills` and commit; Codex and Gemini CLI both scan that path.
+
+**Portability caveat:** every skill loads in every standard-compliant tool, but a few contain
+instructions that only make sense in Claude Code — `nn-guard` installs a Claude Code hook (its
+CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code commands like
+`/compact` and subagents. The knowledge in them still applies; those specific steps are
+Claude-only.
 
 ## Skills (15)
 

@@ -21,9 +21,12 @@ node scripts/cli.mjs validate             # lint every skill; this IS the CI gat
 node scripts/cli.mjs install              # install ALL skills into ~/.claude/skills
 node scripts/cli.mjs install <a> <b>      # install only the named skill(s)
 node scripts/cli.mjs install --copy       # real files instead of symlinks (or --link to force links)
+node scripts/cli.mjs install --target codex|gemini|agents|all   # other AI tools (SKILL.md is an
+                                          # open standard; codex/agents → ~/.agents/skills,
+                                          # gemini → ~/.gemini/skills); --dest <path> for custom dirs
 
 # Bash alternatives (macOS/Linux/Git Bash/WSL):
-./scripts/install.sh [--copy] [names...]  # mirror of cli install (selective + copy supported)
+./scripts/install.sh [--copy] [--target <t,..>|--dest <path>] [names...]  # full mirror of cli install
 ./scripts/validate.sh                     # bash mirror of the validator — needs bash ≥ 4 (see note)
 ./scripts/package.sh [<name>]             # build dist/<name>.skill zips (needs python3)
 ./scripts/import.sh [--force]             # fold an externally-installed skill back into the repo
