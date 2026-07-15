@@ -1,6 +1,6 @@
 ---
 name: ship-ticket
-description: Implement a Jira ticket end-to-end with the locked stack, SOLID, tiered model/cost routing, a mandatory design-source-of-truth read, a pinned + independently-verified + CI-enforced design-parity gate, the two-pass review flow, and the full close-out (PR plus Jira Done plus session log plus compact). ALWAYS trigger when the user types /ship-ticket, /ship.ticket, ship ticket, implement ticket, build ticket, or gives a Jira ticket key or browse URL (for example SCRUM-28 or DAT-15) and asks to implement, build, or ship it. The user passes one argument, the Jira ticket key or URL.
+description: Implement a Jira ticket end-to-end with the locked stack, SOLID, tiered model/cost routing, a mandatory design-source-of-truth read, an implementation-plan gate (written plan artifact; pauses for approval on risky/large/security-sensitive tickets), a pinned + independently-verified + CI-enforced design-parity gate, the two-pass review flow, and the full close-out (PR plus Jira Done plus session log plus compact). ALWAYS trigger when the user types /ship-ticket, /ship.ticket, ship ticket, implement ticket, build ticket, or gives a Jira ticket key or browse URL (for example SCRUM-28 or DAT-15) and asks to implement, build, or ship it. The user passes one argument, the Jira ticket key or URL.
 ---
 
 # /ship-ticket — implement a Jira ticket end-to-end
@@ -96,6 +96,93 @@ failure of the gate. If challenged later on why the UI matches the design, you
 should be able to point to the pinned SHA, the token file, and the component
 files you opened here.
 
+## Step 0.75 — Implementation Plan (hard gate; pauses only when it must)
+
+Planning is STRONG-model work (see Model / cost routing) — this step is where it
+actually happens, not an assumption. The ticket and the design reference have
+been read; now decide **what to build and how to sequence it** before any Design
+Contract or code. The plan is also the handoff object that makes the model
+tiering real: STRONG plans, MEDIUM builds from the plan.
+
+**Write the plan to `.specs/plans/<TICKET>.md`** (committed with the PR, like the
+GATE 4 artifact) using **exactly this template** — same headings, same order,
+so every plan reads the same way:
+
+```markdown
+# Plan — <TICKET>: <ticket title>
+
+**Decision needed:** YES — <which pause condition tripped> / NO — proceeding
+**Size:** <N> files · <FE / BE / full-stack> · security-sensitive: <yes/no>
+
+## 1. What & why (read this first)
+<2–4 plain sentences: what the user gets when this ticket is done, and the
+chosen approach in one line. No jargon — write it for the person approving,
+not for the builder.>
+
+## 2. Build sequence
+| # | Step (plain words) | Files touched | Depends on |
+|---|---|---|---|
+| 1 | Add the state service for X | features/x/services/x-state.service.ts | — |
+| 2 | Build the X list screen | features/x/pages/x-list.page.ts (+html/scss) | 1 |
+
+## 3. Risks & unknowns
+| Risk / unknown | Why it matters | What I'll do |
+|---|---|---|
+| <e.g. spec doesn't say what happens on empty results> | blocks the empty state | ask user / assume Y and flag it |
+
+<or: "None found — checked <what you checked>.">
+
+## 4. How I'll prove it works
+- <one bullet per build step: the test or check that shows it's done>
+- <security-sensitive: the failing test that comes FIRST>
+
+## 5. Not in this ticket
+- <explicitly out of scope — feeds Scope discipline>
+
+## 6. Rejected alternative
+<one line: the other approach considered, and why not>
+```
+
+Formatting rules that keep it readable:
+
+- **Section 1 is the approval surface.** A reader should be able to approve from
+  sections 1–3 alone, in under a minute. Everything below is for the builder.
+- **Plain words in the "Step" column** — "Build the login form", not
+  "Instantiate the auth presentational component per NG-ARCH-03". Rule IDs and
+  MVVM roles belong in the Design Contract, not here.
+- **Tables, not paragraphs**, for sequence and risks — they're scannable and
+  they make an empty risks table impossible to fake ("None found" must name
+  what was checked).
+- **Short beats complete.** A plan nobody reads gates nothing. If the ticket is
+  big, the build-sequence rows get more numerous — the prose does not get longer.
+
+**Pause for user approval before implementing IFF any of these hold:**
+
+- the ticket is **security-sensitive** (auth, tenancy, billing, payments,
+  cross-tenant isolation — same definition as the Security-sensitive note), or
+- it is a **full-stack** ticket (FE + BE), or
+- the build sequence touches **more than ~8 files**, or
+- **Risks & unknowns is non-empty** — any dependency, ambiguity, or blocker-risk
+  surfaced.
+
+Otherwise: post the plan's header + section 1 (What & why) to the user and
+**proceed without waiting** — a small clean ticket stays autonomous.
+
+When a pause IS required, present sections 1–3 as the approval ask — don't dump
+the whole file into chat; link/point to `.specs/plans/<TICKET>.md` for the rest.
+
+When a pause is required and you're running interactively, present the plan and
+wait (Claude Code's plan-mode approval flow is a fine UX for this). When running
+headless / in workflow mode, **STOP and surface the plan** — proceeding past a
+pause condition without approval is a Stop-on-failure violation, not a judgment
+call.
+
+**The plan constrains the contract.** The Design Contract (STEP 0B) emitted next
+draws its file list from the plan's build sequence. A file needed by the
+contract but absent from the plan means the plan was wrong — update the plan
+first, and re-check the pause conditions (a growing file count can newly trip
+one).
+
 ## Locked stack
 
 - **Frontend tasks:** Angular + Signals, MVVM, standalone + OnPush,
@@ -131,8 +218,9 @@ so its "citation" (GATE 4) is a named design decision + a human approver, not an
 Don't conflate the two: passing every `NG-*`/`BE-*` rule does not mean the screen is
 the design.
 
-Before writing code, run the invoked skill's **Design Contract** gate (STEP 0B). No
-file gets written that isn't in the contract.
+Before writing code, run the invoked skill's **Design Contract** gate (STEP 0B),
+deriving its file list from the Step 0.75 plan's build sequence. No file gets
+written that isn't in the contract.
 
 ## Apply SOLID throughout
 
@@ -156,8 +244,8 @@ effort; this may run in workflow mode):
   edits.
 - **MEDIUM (Sonnet)** — most implementation: writing standard components/
   services/endpoints, wiring, tests, applying straightforward review fixes.
-- **STRONG (Opus)** — reasoning-heavy work: **planning and synthesis** (deciding
-  what to build and how to sequence it), architecture/design decisions,
+- **STRONG (Opus)** — reasoning-heavy work: **planning and synthesis** (Step
+  0.75 — deciding what to build and how to sequence it), architecture/design decisions,
   **security-sensitive logic** (auth, tenancy, billing, payments), tricky
   algorithms, and resolving non-trivial review findings.
 
@@ -292,8 +380,8 @@ and committed to Git as a numbered file.
    it**. A skip with no ID, or a parity grade with no independent signer, is a bug in
    the report.
 
-7. Commit and push everything **including `.specs/design-parity/<TICKET>.md`**, open
-   a PR, and report the PR URL.
+7. Commit and push everything **including `.specs/design-parity/<TICKET>.md` and
+   `.specs/plans/<TICKET>.md`**, open a PR, and report the PR URL.
 
 8. Transition the Jira ticket to **"Done"** — **only after the GATE 4 CI check is
    green** — and tell the user the PR is open and ready to merge. (The user merges
@@ -302,6 +390,10 @@ and committed to Git as a numbered file.
 
 9. Run `/session-logger`; ensure the log is written to disk before continuing.
    Record, so the decisions stay auditable after `/compact`:
+   - the **plan artifact path** (`.specs/plans/<TICKET>.md`), whether it paused for
+     approval (and which condition tripped), and any **divergence between the plan
+     and what was actually built** — a silent divergence is the failure this records
+     against
    - which design files were read in Step 0.5 **and the pinned `design_ref` SHA**
    - the **GATE 4 per-screen grade(s), the independent signer, and the artifact path**
    - every **human-approved design deviation** (decision + approver + date) and the
@@ -322,6 +414,9 @@ a visual language, don't mark anything complete, don't push past a failure silen
 
 - You can't fetch the ticket.
 - You can't locate the design system for a UI ticket.
+- A Step 0.75 **pause condition is met and you have no user approval** (including
+  headless/workflow runs, where the pause is always a STOP) — do not start
+  implementing on the strength of your own plan.
 - A UI ticket's reference screen is **not committed to git** (unpinnable) — pin it
   first; do not build against an uncommitted reference.
 - GATE 4 grades an owned screen **Major or Not-built** and you cannot fix it or clear
