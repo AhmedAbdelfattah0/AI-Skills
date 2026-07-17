@@ -76,7 +76,7 @@ find src -type f -name "*.ts" | grep -v "\.spec\.ts" | \
   sort
 ```
 
-Read each file listed. Load `references/auth-secrets.md` + `references/api-web-security.md`. Audit. Accumulate findings.
+Read each file listed. Audit against the auth/secrets + API/web checks in this file (token storage, hashing, JWT expiry, CORS, headers, rate limits). Accumulate findings.
 
 Also run these application-layer checks on the auth surface (absence of a control is itself a finding):
 
@@ -109,7 +109,7 @@ find src -type f -name "*.ts" | grep -v "\.spec\.ts" | \
   grep -viE "(auth|interceptor|checkout|payment)" | sort
 ```
 
-Load `references/input-validation.md` + `references/angular-security.md`. Audit. Add to findings.
+Audit against the input-validation + Angular checks in this file (sanitization, XSS sinks, template injection, form validation). Add to findings.
 
 Also grep for XSS sinks across the frontend (any hit on non-constant/remote data is a finding):
 
@@ -147,7 +147,7 @@ Send this message to the user:
 >
 > Paste what you have — skip files that don't exist."
 
-Load `references/auth-secrets.md` + `references/api-web-security.md`. Audit pasted content.
+Audit pasted content against the auth/secrets + API/web checks in this file.
 
 **If CRITICAL found** → write report, tell user: *"Wave 1 found critical issues. Run `/sec.specify` before continuing."*
 **If clean** → request Wave 2.
@@ -160,7 +160,7 @@ Load `references/auth-secrets.md` + `references/api-web-security.md`. Audit past
 > - `app-routing.module.ts` or `app.routes.ts`
 > - Any `api*.ts` or `http*.ts` files"
 
-Load `references/input-validation.md` + `references/angular-security.md`.
+Audit against the input-validation + Angular checks in this file.
 
 ### Wave 3 — Chat Mode (only if needed)
 
@@ -448,6 +448,12 @@ Shortcut — read task N from tasks.md, load only its reference, apply fix, mark
 
 ---
 
+> **Severity vocabulary note:** this skill's CRITICAL/HIGH/MEDIUM/LOW scale is
+> calibrated to *exploitability* and deliberately differs from the library's
+> code-review bands (Critical/Important/Nit). The mapping between scales lives
+> in `../code-quality/references/review-standard.md` — when reporting alongside
+> a code review, map both to "blocks merge / should fix / note".
+
 ## Severity Guide
 
 | Level | Meaning |
@@ -480,3 +486,22 @@ Shortcut — read task N from tasks.md, load only its reference, apply fix, mark
     client-side crypto.
   - "Latent XSS if future code changes" is LOW/INFO unless a live sink (`innerHTML` /
     `bypassSecurityTrust`) actually renders it now.
+
+---
+
+## What this skill does not do
+
+- Enforce day-to-day secure-coding patterns while writing — the `security`
+  skill owns that; this skill audits what was written.
+- Code-quality review — the code-quality family owns NG-*/BE-* and diff-scoped
+  reviews; this skill deliberately scans whole surfaces (audits are the
+  documented exception to diff-scope).
+- Fix findings uninvoked — findings become spec-tracked tasks
+  (`/sec.specify` → `/sec.implement`); fixes run when asked.
+
+## Success criteria
+
+Working when: every audit ends with a severity-calibrated report (no inherited
+scanner labels), findings carry File:Line + fix, the runtime/deployment pass
+ran (or each unchecked item is itself a finding), and CRITICALs block deploy
+until resolved and re-scanned.

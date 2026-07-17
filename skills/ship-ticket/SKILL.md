@@ -152,6 +152,7 @@ not for the builder.>
 ## 4. How I'll prove it works
 - <one bullet per build step: the test or check that shows it's done>
 - <security-sensitive: the failing test that comes FIRST>
+- <tests assert behavior, not implementation — per the test-quality skill>
 
 ## 5. Not in this ticket
 - <explicitly out of scope — feeds Scope discipline>
@@ -183,20 +184,21 @@ past the plan the user approved.
 ## Locked stack
 
 - **Frontend tasks:** Angular + Signals, MVVM, standalone + OnPush,
-  component-scoped SCSS, EN/AR i18n. Follow the `code-quality` skill — it loads
-  `references/frontend-angular.md` (`NG-*`).
+  component-scoped SCSS, EN/AR i18n. Follow the `angular-code-quality` skill —
+  it owns the `NG-*` rule set.
 - **Backend tasks:** Hono on Cloudflare Workers, Supabase + RLS, service-layer
-  logic (not in routes). Follow the `code-quality` skill — it loads
-  `references/backend.md` (`BE-*`).
+  logic (not in routes). Follow the `backend-code-quality` skill — it owns the
+  `BE-*` rule set.
 - **Full-stack tickets:** one skill, one Design Contract, one Verification Pass
   covering both sides — never two uncoordinated halves.
 - Always follow `CLAUDE.md`.
-- The ticket itself decides whether it's FE, BE, or both — the `code-quality`
-  skill routes to the right rule set(s) from its cached profile.
+- The ticket itself decides whether it's FE, BE, or both — invoke
+  `angular-code-quality`, `backend-code-quality`, or both accordingly (the
+  "code-quality family"); each routes from its cached profile.
 
 ### Rule IDs and tiers (used throughout this workflow)
 
-The `code-quality` skill assigns every rule a stable ID (`NG-ARCH-03`, `BE-WHK-04`, …)
+The code-quality family assigns every rule a stable ID (`NG-ARCH-03`, `BE-WHK-04`, …)
 and one tier:
 
 | Tier | Meaning | Override |
@@ -264,9 +266,12 @@ and committed to Git as a numbered file.
 
 ## When implementation is complete
 
-1. Run lint, build, and Vitest — fix any failures.
+1. Run lint, build, and Vitest — fix any failures. **Tests green ≠ tests good:**
+   run the `test-quality` guard pass on the test diff before GATE 3 — a must-fix
+   TEST violation (TEST-01/02/08: implementation-detail assertions, unjustified
+   mocks, mocked state objects) blocks the review passes like any FAIL.
 
-2. **Run the `code-quality` skill's Verification Pass (GATE 3).** Emit the
+2. **Run the invoked code-quality-family skill's Verification Pass (GATE 3).** Emit the
    `rule → PASS/FAIL/N-A → evidence` table. Evidence is a file path, a line, or a
    clause — never the word "yes". **Any FAIL blocks the review passes.** Every
    `[NN]` rule is always in force and always appears in the table.
@@ -359,13 +364,17 @@ and committed to Git as a numbered file.
    No ID, no skip — fix the finding. "It conflicts with our conventions" is not a
    citation; that sentence can be written about any finding, which is exactly why
    it must not be accepted. If you reach for the ID and the rule doesn't actually
-   say what you need it to say, the reviewer was right.
+   say what you need it to say, the reviewer was right. (This protocol's
+   canonical, library-wide statement lives at
+   `../code-quality/references/review-standard.md`; the full text is kept here
+   so the workflow is self-contained.)
 
    **A finding that contradicts an `[NN]` rule is never skipped.** If a reviewer and
    an `[NN]` rule disagree, the reviewer is almost certainly right and you have a
    real problem. **STOP and tell the user** — do not skip, do not "note why".
 
-   A skipped finding is a deviation. Record it in `.claude/code-quality/deviations.md`.
+   A skipped finding is a deviation. Record it in the invoked skill's deviations
+   ledger (`.claude/angular-code-quality/deviations.md` or the backend equivalent).
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
@@ -377,7 +386,11 @@ and committed to Git as a numbered file.
    it**. A skip with no ID, or a parity grade with no independent signer, is a bug in
    the report.
 
-7. Commit and push everything **including `.specs/design-parity/<TICKET>.md` and
+7. **Docs owe their change (DOC-06):** if the ticket renamed or changed any
+   documented behavior (symbol, endpoint, flag, default), grep every docs
+   surface (README, docs/, docstrings) for the old name and update it — the
+   `docs-accuracy` skill owns the full rule set. Then commit and push
+   everything **including `.specs/design-parity/<TICKET>.md` and
    `.specs/plans/<TICKET>.md`**, open a PR, and report the PR URL.
 
 8. Transition the Jira ticket to **"Done"** — **only after the GATE 4 CI check is

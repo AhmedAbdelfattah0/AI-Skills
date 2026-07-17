@@ -442,6 +442,24 @@ Rules:
 - Every `[NN]` rule is **always in force** and always appears in the table. `[ARCH]` and `[D]`
   rules appear when the Design Contract named them.
 - A `[NN]` FAIL is stated to the user in plain language, not buried in a table row.
+- **One `AI-FM` row is always in force**: walk the 15 LLM failure modes + The Floor
+  (`../code-quality/references/ai-failure-modes.md`) against the diff and report it like any
+  other rule — `AI-FM | PASS | no catch-alls, no mock returns, imports verified` — or FAIL with
+  the offending mode named. These catch what BE-* rules can't: the model's own biases (e.g. a
+  webhook handler that swallows the signature error it should propagate).
+- **One `TEST` row is in force whenever the diff includes test files** (`*.test.ts`,
+  `test_*.py`, `*_test.py`, `*Test.php`, `*_test.go`, files under `tests/`/`__tests__/`):
+  walk TEST-01..12 from the `test-quality` skill against the test diff —
+  `TEST | PASS | DB mocked only where persistence isn't the subject; real DTOs; parametrized variants`
+  — or FAIL naming the ID. A must-fix violation (TEST-01/02/08) blocks done like any FAIL.
+- **One `DOC` row is in force whenever the diff touches docs surfaces** (`*.md`, docstrings,
+  OpenAPI/route docs): walk DOC-01..10 from the `docs-accuracy` skill — documented endpoints
+  match route registrations; config keys match the code that reads them; renamed symbols
+  grepped across doc surfaces — `DOC | PASS | endpoints match router; 0 false claims` — or
+  FAIL naming the ID. Must-fix violations (DOC-01..04: false claims) block done.
+- **Scope discipline**: the pass verifies the diff, not the repo — pre-existing violations in
+  untouched files are flagged only in an explicit audit, marked `pre-existing`. Full findings
+  contract: `../code-quality/references/review-standard.md`.
 
 Fast mechanical checks (adapt the paths to the stack):
 
@@ -467,3 +485,23 @@ Load only the one the task needs.
 | `references/webhook-safety.md` | Implementing or reviewing any webhook (Web Crypto + Node reference impls) |
 | `references/multi-tenancy-patterns.md` | Designing or reviewing tenant isolation |
 | `references/postgres-rls-migration.sql` | The project specifically uses PostgreSQL + RLS |
+| `../code-quality/references/ai-failure-modes.md` | Before the Verification Pass on any non-trivial diff — the 15 LLM failure modes + The Floor (shared with the `code-quality` skill; if installed standalone and the file is absent, still walk the modes from its summary: no catch-all error swallowing, no impossible-case guards, no single-user abstractions, no mock-success returns, verify imports exist, no speculative flags, refactors preserve behavior) |
+| `../test-quality/references/pytest.md` / `phpunit.md` / `jest-vitest.md` | The diff includes test files — TEST-01..12 concretized per stack (shared with the `test-quality` skill; if absent, walk from its summary: assert behavior not internals, mock only at true boundaries, real DTOs/models not MagicMocks, parametrize value-only variants, real DB when persistence is the subject, regression tests are sacred) |
+
+---
+
+## What this skill does not do
+
+- Frontend code — `angular-code-quality` owns components/templates/state.
+- Test-code review — `test-quality` owns TEST-* (this skill only carries the wiring row).
+- Docs accuracy — `docs-accuracy` owns DOC-* (wiring row only).
+- Security *audits* — `security-audit` owns whole-surface scans and runtime/deployment checks; this skill enforces BE-SEC-*/BE-AUTH-* on the diff.
+- Run linters/tests — judgment layer above the tooling, not a replacement.
+
+## Success criteria
+
+Working when: every endpoint declares its security tier in the Design
+Contract; tenancy is enforced at the data layer, not the route; webhooks
+verify signatures before parsing; the Verification Pass carries evidence for
+every [NN] rule; AI-FM/TEST/DOC rows appear whenever their trigger files are
+in the diff.

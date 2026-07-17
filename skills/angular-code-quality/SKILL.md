@@ -327,6 +327,22 @@ Rules:
 - **N/A requires a reason.** "Not applicable" without a clause is a skipped check.
 - Only list rules **in force** for this task — the ones named in the Design Contract, plus every
   `[NN]` rule, which is always in force.
+- **One `AI-FM` row is always in force**: walk the 15 LLM failure modes + The Floor
+  (`../code-quality/references/ai-failure-modes.md`) against the diff and report it like any
+  other rule — `AI-FM | PASS | no catch-alls, no mock returns, imports verified` — or FAIL with
+  the offending mode named. These catch what NG-* rules can't: the model's own biases.
+- **One `TEST` row is in force whenever the diff includes `*.spec.ts` / `*.test.ts`**: walk
+  TEST-01..12 from the `test-quality` skill against the test diff —
+  `TEST | PASS | mocks only at HttpClient boundary; no near-duplicate bodies; no toBeTruthy()-only tests`
+  — or FAIL naming the ID. A must-fix violation (TEST-01/02/08) blocks done like any FAIL.
+- **One `DOC` row is in force whenever the diff touches docs surfaces** (`*.md`, docstrings,
+  JSDoc): walk DOC-01..10 from the `docs-accuracy` skill — every referenced symbol verified
+  against its definition; renamed symbols grepped across doc surfaces —
+  `DOC | PASS | 12 claims checked, 0 false; old selector name grepped, absent` — or FAIL
+  naming the ID. Must-fix violations (DOC-01..04: false claims) block done.
+- **Scope discipline**: the pass verifies the diff, not the repo — pre-existing violations in
+  untouched files are flagged only in an explicit audit, marked `pre-existing`. Full findings
+  contract: `../code-quality/references/review-standard.md`.
 
 Fast mechanical checks:
 
@@ -348,3 +364,22 @@ Load only when the task needs them.
 |---|---|
 | `references/claude-md-template.md` | No CLAUDE.md exists — scaffold one for the project |
 | `references/design-fidelity.md` | A UI task where the design system must be located and composed |
+| `../code-quality/references/ai-failure-modes.md` | Before the Verification Pass on any non-trivial diff — the 15 LLM failure modes + The Floor (shared with the `code-quality` skill; if installed standalone and the file is absent, still walk the modes from its summary: no catch-all error swallowing, no impossible-case guards, no single-user abstractions, no mock-success returns, verify imports exist, no speculative flags, refactors preserve behavior) |
+| `../test-quality/references/jest-vitest.md` | The diff includes `*.spec.ts`/`*.test.ts` — TEST-01..12 concretized for Jest/Vitest/Angular (shared with the `test-quality` skill; if absent, walk from its summary: assert behavior not internals, mock only at the HttpClient/SDK boundary, real objects not MagicMocks, parametrize value-only variants, no framework-guarantee or toBeTruthy()-only tests, regression tests are sacred) |
+
+---
+
+## What this skill does not do
+
+- Backend code — `backend-code-quality` owns routes/services/data layers.
+- Test-code review — `test-quality` owns TEST-* (this skill only carries the wiring row).
+- Docs accuracy — `docs-accuracy` owns DOC-* (wiring row only).
+- Security *audits* — `security-audit` owns whole-surface scans; this skill enforces NG-SEC-* on the diff.
+- Run linters/tests — it is the judgment layer above the tooling, not a replacement for it.
+
+## Success criteria
+
+Working when: every task ships with a Design Contract before code and a
+Verification Pass with evidence after; no file exists outside the contract;
+deviations carry rule IDs and ledger entries; the AI-FM/TEST/DOC rows appear
+whenever their trigger files are in the diff.

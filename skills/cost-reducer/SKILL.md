@@ -20,13 +20,13 @@ description: >
 - Designing SaaS product features that have usage-based costs
 - Any architecture review — always include a cost lens
 
-Read the relevant reference file based on the context:
+Focus areas by context (all guidance is in this file — no external references):
 
-| Context | Read |
+| Context | Focus |
 |---|---|
-| AI agents, LLM API calls, token usage | `references/services-and-finops.md` |
-| Code patterns, caching, batching | `references/code-level-savings.md` |
-| Cloud infra, storage, compute, DBs | `references/cloud-and-infra.md` |
+| AI agents, LLM API calls, token usage | Model tiering, prompt caching, batching, output caps |
+| Code patterns, caching, batching | Caching, lazy loading, pagination, N+1 elimination |
+| Cloud infra, storage, compute, DBs | Right-sizing, storage classes, egress, serverless vs always-on |
 
 ---
 
@@ -106,6 +106,6 @@ When writing any code that touches paid services, always apply these by default:
 
 ## Reference Files
 
-- `references/services-and-finops.md` — AI services, LLM pricing, SaaS cost patterns
-- `references/code-level-savings.md` — Caching, batching, lazy loading, pagination patterns
-- `references/cloud-and-infra.md` — Azure, Cloudflare, storage, DB, compute optimization
+None — this skill is self-contained. (Deep-dive references on LLM pricing,
+code-level savings, and cloud infra may be added later; verify current
+prices/limits with the `researcher` skill before quoting them.)

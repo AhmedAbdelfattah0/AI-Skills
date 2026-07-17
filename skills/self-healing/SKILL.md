@@ -22,11 +22,11 @@ This skill enables Claude to:
 
 Read the relevant reference file based on the situation:
 
-| Situation | Read |
+| Situation | Read / Focus |
 |---|---|
 | Creating or improving a SKILL.md | `references/skill-creation-guide.md` |
-| Identifying recurring failure patterns | `references/pattern-recognition.md` |
-| Managing what Claude remembers across sessions | `references/memory-management.md` |
+| Identifying recurring failure patterns | (inline below — same-mistake-twice diagnosis, root-cause over symptom) |
+| Managing what Claude remembers across sessions | (inline below — route durable lessons to the right skill or CLAUDE.md) |
 
 ---
 

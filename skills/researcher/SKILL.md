@@ -86,6 +86,26 @@ Before using any researched fact, run this check:
 
 If any answer is NO — find a better source or explicitly flag the uncertainty.
 
+### STEP 3B — Verify each claim against its source of truth
+
+Every claim type has a mechanical check — verify by *reading the source*, not
+by recalling how things usually are:
+
+| Claim type | Source of truth | How |
+|---|---|---|
+| Package exists | The registry (npm/PyPI/crates/pub.dev) | Look up the exact name — 19.6% of model-suggested packages are hallucinated |
+| Version / feature-in-version | Registry + changelog/release notes | The feature must appear in that version's changelog or tag diff |
+| API shape (method, params, return) | Official reference for the *pinned* version | Compare name-by-name; never trust "should look like" |
+| Maintenance status | Release cadence + issue/PR triage activity | Last release date alone lies; check whether issues get answered |
+| Performance claim | A primary benchmark (repo, paper, vendor bench) | A blog post repeating a number is not a source |
+| Security claim | CVE / advisory databases (GHSA, NVD) | Search the package name, check affected-version ranges |
+| Best practice | ≥2 independent, current sources | One vendor's docs is a vendor position, not a practice |
+
+**When you cannot verify:** say so explicitly; downgrade the claim to what you
+*can* verify; never decorate an unverified claim with confident language —
+"should", "appears to", or a direct question to the user beats a fluent
+hallucination.
+
 ---
 
 ## STEP 4 — Report Findings
@@ -108,6 +128,10 @@ Structure your research output clearly:
 
 **Caveats / Warnings:**
 - Anything that might change the answer in different contexts
+
+**Claims ledger:** checked: N · verified: V · contradicted: C · unverifiable: U
+(counts must reconcile with the sources listed — an unverifiable claim is
+reported as such, never silently promoted to a finding)
 
 **Recommendation:**
 - What to do based on the findings

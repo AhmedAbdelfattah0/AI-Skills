@@ -71,6 +71,14 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
   hold per-stack rule sets: `react.md`, `angular.md`, `nodejs.md`, …).
 - **`scripts/`** (optional) — bundled executables the skill invokes.
 
+**Cross-skill references** (load-bearing convention): a skill may point at a sibling skill's
+reference file via a relative path like `../code-quality/references/ai-failure-modes.md` — this
+resolves in the repo layout AND in `~/.claude/skills` (both symlink and copy installs place
+skills side by side). Every such reference MUST carry a one-sentence **fallback summary** in the
+same table row/bullet, so a standalone install (sibling skill absent) degrades gracefully instead
+of silently dropping the check. Used by: angular/backend-code-quality → code-quality's
+ai-failure-modes + test-quality's per-framework files.
+
 ## Two script-delivery patterns
 
 Most skills are pure `SKILL.md`. Two ship scripts, in different ways — mirror the matching pattern when

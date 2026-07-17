@@ -114,11 +114,12 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (15)
+## Skills (17)
 
 | Skill | Extras |
 |---|---|
 | angular-code-quality | `references/` |
+| docs-accuracy | `references/` (claim verification, code samples, docstrings) |
 | backend-code-quality | `references/` |
 | code-quality | `references/` (per-stack rule sets) |
 | cost-reducer | — |
@@ -133,6 +134,7 @@ Claude-only.
 | session-restore | — |
 | ship-ticket | — |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
+| test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
 
 Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.
 
@@ -186,6 +188,10 @@ valid, which is why `package.sh` zips programmatically.
 
 ## Notes on the copies in this repo
 
+- Parts of `test-quality`, `docs-accuracy`, and `code-quality`'s
+  `ai-failure-modes.md` / `universal-principles.md` are adapted from
+  [amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills) (MIT),
+  with primary-source citations in each skill's `sources.md`.
 - `session-logger` / `session-restore` are the current inlined versions (no external scripts).
 - `spec-driven` had two dead calls to `session-restore/scripts/restore.sh` and
   `session-logger/scripts/append.sh` (both removed when those skills were inlined). They're replaced

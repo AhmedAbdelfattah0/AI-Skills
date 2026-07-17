@@ -16,6 +16,7 @@ Every rule lives at layer 1; this map records which also have deterministic cove
 
 | Rule | Signature | Why not edit-time blocking |
 |---|---|---|
+| TEST (focus leak) | `test.only(`, `it.only(`, `describe.only(`, `fit(`, `fdescribe(` | Legitimate while debugging locally; committing one silently skips the rest of the suite — that boundary IS the CI gate. From the `test-quality` skill. **Candidate — enable only after the change protocol (must FAIL on a known-bad sample first).** |
 | NG-CORE-01 | `: any`, `<any>`, `as any` | Matches comments/strings; migration code exists |
 | NG-CORE-03 / BE-Q-02 | `console.log(` | Normal while debugging; the rule forbids *committing* it — that boundary IS the CI gate |
 | BE-SEC-07 | `catch () {}` | Multiline empty catches evade grep anyway; treat as smoke signal |

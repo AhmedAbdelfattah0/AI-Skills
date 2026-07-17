@@ -13,14 +13,15 @@ description: >
 
 ## When to Use This Skill
 
-Security applies to nearly all backend and auth work. Read the relevant reference:
+Security applies to nearly all backend and auth work. Focus areas by topic
+(the rules are in this file; for a full audit use the `security-audit` skill):
 
-| Topic | Read |
+| Topic | Focus |
 |---|---|
-| Auth, passwords, tokens, sessions, secrets | `references/auth-and-secrets.md` |
-| Database queries, SQL, dependencies, supply chain | `references/database-and-deps.md` |
-| Electron, desktop apps, local file access | `references/desktop-security.md` |
-| APIs, CORS, XSS, CSRF, headers, rate limiting | `references/web-security.md` |
+| Auth, passwords, tokens, sessions, secrets | Hashing (argon2/bcrypt), JWT expiry+rotation, secrets in env not code |
+| Database queries, SQL, dependencies, supply chain | Parameterized queries only, RLS, audit deps before adding |
+| Electron, desktop apps, local file access | contextIsolation on, nodeIntegration off, validate IPC |
+| APIs, CORS, XSS, CSRF, headers, rate limiting | Explicit CORS origins, escape output, CSRF tokens, rate limits |
 
 ---
 
@@ -119,7 +120,5 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 ## Reference Files
 
-- `references/auth-and-secrets.md` — Passwords, JWT, OAuth, API keys, session management
-- `references/database-and-deps.md` — SQL injection, parameterized queries, dependency auditing
-- `references/desktop-security.md` — Electron contextIsolation, nodeIntegration, IPC security
-- `references/web-security.md` — CORS, CSP, CSRF, rate limiting, security headers
+None — this skill is self-contained. For deep audits (waves, severity
+calibration, spec-tracked findings) use the `security-audit` skill.
