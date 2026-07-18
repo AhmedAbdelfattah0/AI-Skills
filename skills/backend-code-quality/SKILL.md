@@ -16,6 +16,12 @@ description: >
 
 # Backend Code Quality Skill
 
+> **Family:** this is the **backend specialist** of the code-quality family. The
+> `code-quality` skill is the hub — it owns the shared universal core
+> (`universal-principles.md`, `ai-failure-modes.md`, `review-standard.md`) and
+> routes backend work here for enforced, rule-ID-based review. This skill builds
+> on that core; it does not restate it.
+
 Stack-agnostic. This skill enforces a universal set of backend disciplines and adapts the
 concrete implementation to whatever stack the project uses. It does not assume a language,
 framework, runtime, or datastore. Stack-specific code lives in `references/` and is labeled as a

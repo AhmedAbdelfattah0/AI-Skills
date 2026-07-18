@@ -4,9 +4,12 @@ description: >
   Universal code quality skill that adapts to ANY technology stack and applies
   Clean Code, SOLID, DRY, KISS, YAGNI, and LLM-specific failure-mode checks in
   any programming language — including stacks with no dedicated reference file
-  (Go, Rust, Java, C#, ...). Interviews the user about their stack, generates a
-  tailored quality constitution, and saves it to .code-quality.md in the project
-  root for all future sessions to reference. ALWAYS trigger when: the user says
+  (Go, Rust, Java, C#, ...). It is the hub of the code-quality family: for
+  Angular work it routes to the angular-code-quality skill (NG-* rule IDs), for
+  backend work to backend-code-quality (BE-* rule IDs), and it owns the shared
+  universal core they all build on. Interviews the user about their stack,
+  generates a tailored quality constitution, and saves it to .code-quality.md in
+  the project root for all future sessions to reference. ALWAYS trigger when: the user says
   "set up code quality", "what are best practices for X", "create a component",
   "generate a service", "write a function", "review my code", "review this PR",
   "is this safe to merge?", "make this cleaner", "audit this code", "add a
@@ -25,7 +28,9 @@ description: >
 
 ## Overview
 
-This skill works in two modes:
+This is the **universal front door for code quality** — it works for any stack,
+and hands off to the specialist skills for deep, rule-ID-enforced review. It
+works in four modes:
 
 | Mode | When | Command |
 |---|---|---|
@@ -33,6 +38,29 @@ This skill works in two modes:
 | **Load** | `.code-quality.md` already exists | `/cq.load` (auto on session start) |
 | **Update** | Stack or rules changed | `/cq.update` |
 | **Guard** | After code was written/edited, before presenting or committing | `/cq.guard` (also run proactively) |
+
+---
+
+## The code-quality family — how these skills fit
+
+This skill is the **hub**. It owns the universal, language-agnostic core and
+routes to specialists for depth. They complete each other; none duplicates
+another.
+
+| Skill | Role | What it owns |
+|---|---|---|
+| **code-quality** (this) | Hub / generalist | The interview + `.code-quality.md` constitution, the reactive **MODE D guard**, and the shared core: `references/universal-principles.md` (Clean Code · SOLID · DRY/KISS/YAGNI), `references/ai-failure-modes.md` (the 15 LLM failure modes + The Floor), `references/review-standard.md` (the findings contract). Works for **any** stack — Go, Rust, Java, C#. |
+| **angular-code-quality** | Specialist (frontend) | Enforcement-grade Angular review: the `NG-*` rule IDs, the Design Contract gate, and the evidence-backed Verification Pass. |
+| **backend-code-quality** | Specialist (backend) | Same machinery for the backend: `BE-*` rule IDs, security tiers, tenant isolation, webhook safety. |
+| **test-quality** | Adjacent guard | Test-code failure modes (`TEST-*`) — mock abuse, test bloat, implementation-detail assertions. |
+| **docs-accuracy** | Adjacent guard | Doc/claim verification (`DOC-*`) — every referenced symbol checked against the source. |
+
+**Routing rule:** for an Angular or backend task that needs *enforced* review
+(rule IDs, a Verification Pass, a ticket gate), invoke the matching specialist —
+this hub's per-stack references (`references/angular.md`, `references/nodejs.md`)
+are **constitution-level summaries**, not the enforcement source of truth. The
+two always-load core files above apply in every skill, so the specialists build
+on the same foundation this hub defines.
 
 ---
 
@@ -86,10 +114,10 @@ Based on the user's answers, read the relevant reference files:
 |---|---|
 | **Any stack — always** | `references/universal-principles.md` (Clean Code, SOLID, DRY/KISS/YAGNI) |
 | **Any stack — always** | `references/ai-failure-modes.md` (the model's own failure modes) |
+| **Angular** | **Invoke the `angular-code-quality` skill** for enforced review (`NG-*`, Design Contract, Verification Pass). `references/angular.md` is the constitution-level summary only. |
+| **Node.js / any backend** | **Invoke the `backend-code-quality` skill** for enforced review (`BE-*`, security tiers). `references/nodejs.md` is the constitution-level summary only. |
 | React / Next.js | `references/react.md` |
 | Vue / Nuxt | `references/vue.md` |
-| Angular | `references/angular.md` |
-| Node.js + Express/Fastify | `references/nodejs.md` |
 | PHP (any) | `references/php.md` |
 | Python (any) | `references/python.md` |
 | Tailwind CSS | `references/tailwind.md` |
@@ -100,6 +128,11 @@ The two **always** files are read regardless of stack — `universal-principles.
 language-agnostic engineering layer (it's what makes this skill work for Go, Rust, Java, C#,
 or any stack with no per-stack file), and `ai-failure-modes.md` guards against the model's
 own systematic failure modes, not the stack's.
+
+For **Angular and backend**, the per-stack summaries below exist so a standalone
+`code-quality` install can still write a constitution — but when the specialist
+skill is present, it is the source of truth for those rules. Do not let the
+summary contradict the specialist; if they differ, the specialist wins.
 
 ---
 

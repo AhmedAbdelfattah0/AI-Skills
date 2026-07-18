@@ -217,9 +217,18 @@ so its "citation" (GATE 4) is a named design decision + a human approver, not an
 Don't conflate the two: passing every `NG-*`/`BE-*` rule does not mean the screen is
 the design.
 
-Before writing code, run the invoked skill's **Design Contract** gate (STEP 0B),
-deriving its file list from the Step 0.75 plan's build sequence. No file gets
-written that isn't in the contract.
+**Invoke the code-quality-family skill now — load it, don't just recall it.**
+Based on the ticket (FE / BE / full-stack), invoke `angular-code-quality`
+and/or `backend-code-quality`. The chosen skill governs this build end to end:
+its rules apply to every line, its **Design Contract (STEP 0B)** gates every
+file, and its **Verification Pass is GATE 3** below. Both specialists build on
+the `code-quality` hub's universal core (`ai-failure-modes`,
+`universal-principles`, `review-standard`) — so "invoke the specialist" invokes
+that core too. This is not optional context; a build that never loaded the
+skill has no Design Contract and cannot produce GATE 3.
+
+Then run its **Design Contract** gate (STEP 0B), deriving the file list from the
+Step 0.75 plan's build sequence. No file gets written that isn't in the contract.
 
 ## Apply SOLID throughout
 
@@ -271,10 +280,25 @@ and committed to Git as a numbered file.
    TEST violation (TEST-01/02/08: implementation-detail assertions, unjustified
    mocks, mocked state objects) blocks the review passes like any FAIL.
 
-2. **Run the invoked code-quality-family skill's Verification Pass (GATE 3).** Emit the
-   `rule → PASS/FAIL/N-A → evidence` table. Evidence is a file path, a line, or a
-   clause — never the word "yes". **Any FAIL blocks the review passes.** Every
-   `[NN]` rule is always in force and always appears in the table.
+2. **GATE 3 — Code-Quality Audit.** This is the post-implementation audit by the
+   code-quality family — the skill actually reviewing what you built, not a table
+   filled from memory. It has two parts and both must pass before the review
+   passes run:
+
+   **a. Verification Pass (per-rule, on the contracted files).** Run the invoked
+   specialist's Verification Pass. Emit the `rule → PASS/FAIL/N-A → evidence`
+   table. Evidence is a file path, a line, or a clause — never the word "yes".
+   **Any FAIL blocks the review passes.** Every `[NN]` rule is always in force and
+   always appears; the always-on `AI-FM` row (15 LLM failure modes + The Floor)
+   and the `TEST`/`DOC` rows (when the diff touches tests/docs) are part of it.
+
+   **b. Guard sweep (whole diff).** Beyond the contracted files, run the
+   `code-quality` hub's **MODE D guard** reasoning over the *entire* diff — the
+   `universal-principles` + `ai-failure-modes` walk — to catch what a per-rule
+   table scoped to the contract can miss (a stray catch-all, a mock-success
+   return, a speculative flag in a file the contract didn't foreground). Report
+   findings in the `review-standard` shape (`file:line` + quoted code + fix);
+   fix must-fix findings here, before review.
 
    For UI tickets the pass includes the mechanical Step 0.5 rules: the screen
    composes the shared components (`NG-UI-01`), no hardcoded color outside the

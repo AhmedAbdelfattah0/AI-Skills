@@ -79,6 +79,17 @@ same table row/bullet, so a standalone install (sibling skill absent) degrades g
 of silently dropping the check. Used by: angular/backend-code-quality → code-quality's
 ai-failure-modes + test-quality's per-framework files.
 
+**The code-quality family (hub + specialists):** `code-quality` is the **hub** — the universal
+front door for any stack. It owns the shared core (`references/universal-principles.md`,
+`ai-failure-modes.md`, `review-standard.md`) and the reactive MODE D guard, and it **routes**
+Angular work to `angular-code-quality` (`NG-*`) and backend work to `backend-code-quality`
+(`BE-*`) for enforced, rule-ID-based review. The specialists are separate skills (so they
+auto-trigger and back `ship-ticket`'s GATE 3 + rule-ID skip protocol), not merged into the hub.
+`code-quality`'s per-stack `references/angular.md` and `nodejs.md` are **constitution-level
+summaries only** — each carries a header deferring to the specialist as source of truth, so the
+two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
+hub and specialists route to when a diff touches tests or docs.
+
 ## Two script-delivery patterns
 
 Most skills are pure `SKILL.md`. Two ship scripts, in different ways — mirror the matching pattern when

@@ -12,6 +12,12 @@ description: >
 
 # Angular Code Quality Skill
 
+> **Family:** this is the **frontend specialist** of the code-quality family. The
+> `code-quality` skill is the hub — it owns the shared universal core
+> (`universal-principles.md`, `ai-failure-modes.md`, `review-standard.md`) and
+> routes Angular work here for enforced, rule-ID-based review. This skill builds
+> on that core; it does not restate it.
+
 Design principles here are **enforced, not suggested**. Every rule has a stable ID. Nothing
 gets written until it has been assigned a layer and a rule set (STEP 0B), and nothing is
 called done until every in-force rule reports PASS or N/A with evidence (STEP 8).

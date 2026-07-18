@@ -1,5 +1,11 @@
 # Angular Best Practices Reference
 > Covers: Angular 14–19, Signals (v17+), Standalone components (v15+)
+>
+> **Constitution-level summary only.** For *enforced* Angular review — the
+> `NG-*` rule IDs, the Design Contract hard gate, and the evidence-backed
+> Verification Pass — the **`angular-code-quality` skill is the source of
+> truth**. Use this file to seed a `.code-quality.md` constitution; it must not
+> contradict that skill. If the two ever differ, the skill wins.
 
 ## Architecture: MVVM + Signals
 
