@@ -1,6 +1,22 @@
 ---
 name: design-prompts
-description: Generates structured design prompts for any digital product (SaaS, e-commerce, content, marketplace, mobile, dashboard, marketing site, etc.) in two modes - GREENFIELD (a numbered prompt set for a new design system, master orientation plus per-surface prompts) and UPDATE (a single focused prompt to add or modify one feature without regenerating everything). Trigger when user says - "/design.prompts", "generate design prompts", "create design prompts", "design prompts for [project]", "design brief for [project]", "add [feature] to my design", "update my design with [feature]" - or starts a new design project or wants to extend an existing one. Use when about to feed a design generation tool and a comprehensive prompt is needed instead of ad-hoc instructions. Project-agnostic - works for B2B SaaS, e-commerce, social apps, content platforms, marketplaces, internal tools, dashboards, mobile apps, or any other digital product.
+description: |
+  Generates structured design prompts for any digital product (SaaS, e-commerce,
+  content, marketplace, mobile, dashboard, marketing site, …) in two modes:
+  GREENFIELD (a numbered prompt set for a new design system — master orientation
+  plus per-surface prompts) and UPDATE (one focused prompt to add or modify a
+  single feature without regenerating everything). Project-agnostic.
+
+  Trigger when:
+  - the user types /design.prompts
+  - the user says "generate/create design prompts", "design prompts for
+    [project]", "design brief for [project]", "add [feature] to my design", or
+    "update my design with [feature]"
+  - starting a new design project, or extending an existing one, and a
+    comprehensive prompt is needed instead of ad-hoc instructions
+
+  Do NOT use for: implementing the design in code (use the code-quality family),
+  or one-off visual tweaks that don't need a structured prompt.
 
 ---
 
@@ -849,3 +865,27 @@ This skill works equally well for:
 - Any other digital product with a UI
 
 The skill never imposes naming conventions, layout patterns, or feature lists from one project onto another. Discovery drives everything.
+
+## What this skill does not do
+
+- Generate the design itself — it writes the **prompts** you feed to Claude
+  Design (or another design tool), not the screens.
+- Implement the design in code — that's the code-quality family; `ship-ticket`
+  reads the resulting design set as its source of truth.
+- Impose one project's conventions on another — discovery drives every prompt.
+- Handle a one-off visual tweak that doesn't need a structured prompt.
+
+## Success criteria
+
+Working when: greenfield mode yields a numbered, scope-bounded prompt set whose
+generated designs drop in needing only content swaps (per the Quality bar), and
+update mode changes exactly one feature without regenerating its siblings.
+
+## Troubleshooting
+
+- **Claude Design regenerates too much:** the prompt is missing its OUTPUT clause
+  — bound the scope explicitly.
+- **The feature lands in the wrong place:** the prompt omitted WHERE — name the
+  shell location and a sibling layout reference.
+- **More than 1–2 features to add:** switch that surface to greenfield mode
+  rather than stacking update prompts.

@@ -1,21 +1,25 @@
 ---
 name: test-quality
-description: >
+description: |
   Quality gate for generated or changed TEST code in any language — the layer
   that stops AI test bloat: mock abuse, implementation-detail assertions,
-  near-duplicate test bodies, and tests that catch nothing. ALWAYS trigger
-  when: a coding agent (including you) has just written or edited tests, before
-  presenting or committing them; the user says "write tests for X", "add
-  tests", "test this", "review these tests", "are these tests good?"; or a
-  diff contains test files — *.spec.ts, *.test.ts, *.test.js, test_*.py,
-  *_test.py, *Test.php, *_test.go, or files under tests/, __tests__/, spec/.
-  Also trigger on /tq.guard. Can guide test writing when invoked before the
-  work. DO NOT USE for production/implementation code review (use the
-  code-quality family), CI or test-runner configuration, running or debugging
-  tests (use the project's runner), or coverage-percentage discussions.
+  near-duplicate test bodies, and tests that catch nothing.
+
+  Trigger when:
+  - a coding agent (including you) has just written or edited tests, before
+    presenting or committing them
+  - the user says "write tests for X", "add tests", "test this", "review these
+    tests", or "are these tests good?"
+  - a diff contains test files — *.spec.ts, *.test.ts, test_*.py, *_test.py,
+    *Test.php, *_test.go, or files under tests/, __tests__/, spec/
+  - the user types /tq.guard
+
+  Do NOT use for: production/implementation code review (use the code-quality
+  family), CI or test-runner config, running or debugging tests (use the
+  project's runner), or coverage-percentage discussions.
 ---
 
-# test-quality — review test code before it ships
+# Test Quality
 
 You are reviewing generated or changed test code before it ships. Be a sharp
 reviewer, not a pedantic one: flag what wastes maintenance effort or hides real

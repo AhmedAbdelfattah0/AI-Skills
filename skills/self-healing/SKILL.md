@@ -1,111 +1,109 @@
 ---
 name: self-healing
-description: >
-  Teaches Claude how to improve itself by learning from mistakes, recognizing
-  recurring failure patterns, and updating its own skills and guidelines.
-  ALWAYS trigger this skill when: Claude makes an error it has made before,
-  the user corrects the same type of mistake repeatedly, a task fails and needs
-  recovery, the user says "you always do this wrong" or "again?!", or when
-  a session ends and there are lessons worth preserving. Also use when creating
-  or updating any SKILL.md file — follow the skill creation guide.
+description: |
+  Improve Claude itself by learning from mistakes — recognize recurring failure
+  patterns, diagnose the root cause, and update the right skill or guideline so
+  the mistake can't recur.
+
+  Trigger when:
+  - Claude repeats an error it made before
+  - the user corrects the same mistake again ("you always do this", "again?!")
+  - a task fails and needs recovery
+  - a session ends with lessons worth keeping
+  - you're creating or editing any SKILL.md (follow the skill-creation guide)
+
+  Do NOT use for: one-off fixes with no reusable lesson.
 ---
 
-# Self-Healing Skill
+# Self-Healing
 
-## What This Skill Does
+Turn a mistake into a durable fix. When something goes wrong — especially the
+*second* time — don't just correct the output; find the root cause and update
+the file that would have prevented it.
 
-This skill enables Claude to:
-1. Recognize when it's repeating a mistake
-2. Diagnose why the mistake happened
-3. Update guidelines or skills to prevent recurrence
-4. Recover from failed tasks systematically
+## When this fires
 
-Read the relevant reference file based on the situation:
+Claude repeats an error, the user corrects the same thing again, a task fails
+and needs recovery, a session ends with lessons worth keeping — or you're
+authoring/editing a skill.
 
-| Situation | Read / Focus |
+| Situation | Where to look |
 |---|---|
 | Creating or improving a SKILL.md | `references/skill-creation-guide.md` |
-| Identifying recurring failure patterns | (inline below — same-mistake-twice diagnosis, root-cause over symptom) |
-| Managing what Claude remembers across sessions | (inline below — route durable lessons to the right skill or CLAUDE.md) |
+| Identifying recurring failure patterns | Steps 1–2 below (same-mistake-twice diagnosis, root-cause over symptom) |
+| Deciding what to persist across sessions | Step 4 below (route the lesson to the right skill or CLAUDE.md) |
 
----
+## Step 1 — Recognize the pattern
 
-## STEP 1 — Recognize a Failure Pattern
-
-When something goes wrong, ask:
 ```
-□ Have I made this same type of mistake before in this session?
+□ Have I made this same kind of mistake before this session?
 □ Did the user correct this same issue previously?
-□ Is this a known class of error? (see pattern-recognition.md)
-□ Was there a SKILL.md or CLAUDE.md that I should have followed but didn't?
+□ Is this a known class of error?
+□ Was there a SKILL.md / CLAUDE.md I should have followed but didn't?
 ```
 
-If yes to any — this is a self-healing moment. Don't just fix it. Learn from it.
+Any `yes` → this is a self-healing moment. Don't just fix it — learn from it.
 
----
+## Step 2 — Diagnose the root cause
 
-## STEP 2 — Diagnose the Root Cause
+Name the category before fixing anything:
+
+- **A. Missing context** — I didn't have the information I needed.
+- **B. Wrong assumption** — I assumed something untrue.
+- **C. Skipped step** — I cut a corner in my process.
+- **D. Misread instruction** — I misunderstood the ask.
+- **E. Outdated knowledge** — I used stale information.
+- **F. Wrong tool** — wrong approach for the problem.
+
+## Step 3 — Fix, then prevent
+
+1. Fix the immediate output.
+2. Decide where the prevention belongs:
+   - **This project only** → update `CLAUDE.md`.
+   - **This kind of task always** → update the relevant `SKILL.md`.
+   - **This session only** → note it explicitly before continuing.
+3. Make the prevention **concrete** — vague rules don't work:
 
 ```
-Root cause categories:
-A. Missing context — I didn't have the information I needed
-B. Wrong assumption — I assumed something that wasn't true
-C. Skipped step — I cut a corner in my process
-D. Misread instruction — I misunderstood what was asked
-E. Outdated knowledge — I used stale information
-F. Wrong tool — I used the wrong approach for the problem
+❌ Vague:    "Be more careful with Angular components"
+✅ Concrete: "Check shared/components/ for pf-button before creating a new button"
 ```
 
-Name the root cause before fixing anything.
+## Step 4 — Update the right file
 
----
+- Project-specific rule → `CLAUDE.md` in the project root.
+- Skill improvement → the relevant `SKILL.md` (follow `references/skill-creation-guide.md`).
+- Session note → `session-log.md` (via the `session-logger` skill).
 
-## STEP 3 — Fix + Prevent
+## Step 5 — Verify the fix
 
-```
-1. Fix the immediate problem (correct the output)
-2. Identify where the prevention belongs:
-   - This project only → update CLAUDE.md
-   - This type of task always → update the relevant SKILL.md
-   - This session only → note it explicitly before continuing
-3. Make the prevention concrete — vague rules don't work
-```
-
-**Concrete prevention example:**
-```
-❌ Vague: "Be more careful with Angular components"
-✅ Concrete: "Always check if pf-button exists in shared/components/
-             before creating a new button component"
-```
-
----
-
-## STEP 4 — Update the Right File
-
-```bash
-# For project-specific rules → CLAUDE.md in project root
-# For skill improvements → the relevant SKILL.md
-# For session notes → session-log.md (use session-logger skill)
-```
-
-When updating a SKILL.md, follow `references/skill-creation-guide.md`.
-
----
-
-## STEP 5 — Verify the Fix Works
-
-After applying the fix:
 ```
 □ Re-run the failed step with the correction applied
 □ Confirm the output is now correct
-□ State explicitly what was learned: "Fixed. Root cause was X. Prevention: Y."
+□ State the lesson: "Fixed. Root cause was X. Prevention: Y."
 ```
 
----
+## Core principles
 
-## Rules
+- **Never silently fix** — always name what went wrong and why.
+- **Never repeat apologies** — one acknowledgment, then move on.
+- **Prevention > correction** — updating a skill file beats fixing one output.
+- **Be specific** — "I'll be more careful" is not a prevention strategy.
 
-- **Never silently fix** — always name what went wrong and why
-- **Never repeat apologies** — one acknowledgment, then move forward
-- **Prevention > correction** — updating a skill file is more valuable than fixing one output
-- **Be specific** — "I'll be more careful" is not a prevention strategy
+## What this skill does not do
+
+- Fix code quality per se — route those lessons into the code-quality family's rules.
+- Persist session state — that's `session-logger`.
+- Rewrite skills freely — follow the invariants in `references/skill-creation-guide.md`.
+
+## Success criteria
+
+Working when: a repeated mistake ends with a concrete rule added to the right
+file, stated root cause, and a verified fix — so the same error can't recur.
+
+## Troubleshooting
+
+- **Unsure where the rule belongs:** project-specific → CLAUDE.md; universal →
+  the skill. When in doubt, the narrower scope first.
+- **The lesson is really a detection gap** (a rule keeps slipping through
+  review): route it to `nn-guard` for deterministic enforcement.

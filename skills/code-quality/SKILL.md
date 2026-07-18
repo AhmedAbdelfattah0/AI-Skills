@@ -1,36 +1,36 @@
 ---
 name: code-quality
-description: >
-  Universal code quality skill that adapts to ANY technology stack and applies
-  Clean Code, SOLID, DRY, KISS, YAGNI, and LLM-specific failure-mode checks in
-  any programming language — including stacks with no dedicated reference file
-  (Go, Rust, Java, C#, ...). It is the hub of the code-quality family: for
-  Angular work it routes to the angular-code-quality skill (NG-* rule IDs), for
-  backend work to backend-code-quality (BE-* rule IDs), and it owns the shared
-  universal core they all build on. Interviews the user about their stack,
-  generates a tailored quality constitution, and saves it to .code-quality.md in
-  the project root for all future sessions to reference. ALWAYS trigger when: the user says
-  "set up code quality", "what are best practices for X", "create a component",
-  "generate a service", "write a function", "review my code", "review this PR",
-  "is this safe to merge?", "make this cleaner", "audit this code", "add a
-  feature", "refactor this", "fix this bug", or starts working on ANY code task
-  in a project that does not have a .code-quality.md.
-  Also trigger on: /cq.init, /cq.load, /cq.update, /cq.guard, "configure code quality",
-  "I'm using React / Vue / Node / PHP / Laravel / Express / Next.js / Nuxt",
-  or any mention of a tech stack without an established quality baseline.
-  Additionally run the GUARD pass (MODE D) reactively after writing, editing,
-  refactoring, or fixing non-trivial code — before presenting or committing —
-  without waiting to be asked. DO NOT USE for factual/conceptual questions,
-  CI/tooling config, git workflow, prose writing, or data analysis.
+description: |
+  The universal code-quality hub — applies Clean Code, SOLID, DRY, KISS, YAGNI,
+  and LLM-specific failure-mode checks in ANY language (including stacks with no
+  dedicated reference file — Go, Rust, Java, C#). Owns the shared universal core;
+  routes Angular work to angular-code-quality (NG-*) and backend to
+  backend-code-quality (BE-*). Interviews the user, writes a .code-quality.md
+  constitution, and runs a reactive guard pass (MODE D) after code changes.
+
+  Trigger when:
+  - the user says "set up code quality", "review my code", "review this PR", "is
+    this safe to merge?", "make this cleaner", "audit this code", "refactor this",
+    "fix this bug", or "create a component/service/function"
+  - starting ANY code task in a project that has no .code-quality.md
+  - the user types /cq.init, /cq.load, /cq.update, or /cq.guard
+  - the user mentions a stack (React/Vue/Node/PHP/Laravel/Next.js/Nuxt/…) with no
+    established quality baseline
+  - after writing/editing/refactoring non-trivial code — run the MODE D guard
+    before presenting, without being asked
+
+  Do NOT use for: factual/conceptual questions, CI/tooling config, git workflow,
+  prose writing, or data analysis.
 ---
 
-# Code Quality Skill
+# Code Quality
 
-## Overview
+The universal front door for code quality — works for any stack, and hands off
+to the specialist skills for deep, rule-ID-enforced review.
 
-This is the **universal front door for code quality** — it works for any stack,
-and hands off to the specialist skills for deep, rule-ID-enforced review. It
-works in four modes:
+## Modes
+
+Four modes:
 
 | Mode | When | Command |
 |---|---|---|
@@ -387,3 +387,27 @@ in `references/review-standard.md`; read it for any formal review.
 - **Keep it lean**: The constitution should be actionable checklists, not a textbook
 - **Inline bash only**: All bash runs inline — never reference external `.sh` files that may not exist
 - **Temp file pattern**: Use `mktemp` + `mv` for writing constitution to avoid multiline arg issues
+
+## What this skill does not do
+
+- Enforce Angular or backend rule IDs — it **routes** to `angular-code-quality`
+  (`NG-*`) and `backend-code-quality` (`BE-*`) for that.
+- Review test code or docs — hands those to `test-quality` and `docs-accuracy`.
+- Run linters/type-checkers/tests — it's the judgment layer above the tooling.
+- Deterministically block a PR — that's `nn-guard` (hook + CI).
+
+## Success criteria
+
+Working when: a new project gets a tailored `.code-quality.md`; every later
+session loads it in one line; the MODE D guard runs after non-trivial changes
+without being asked; and Angular/backend work is routed to the specialist rather
+than half-reviewed here.
+
+## Troubleshooting
+
+- **No `.code-quality.md` and the stack is exotic:** the two always-load core
+  files (`universal-principles`, `ai-failure-modes`) still apply — write the
+  constitution from those plus the interview.
+- **Guard feels too broad:** it runs on the diff, not the repo (STEP D1). If
+  it's flagging untouched files, re-scope to the change.
+- **Constitution and this SKILL.md disagree:** the constitution wins.

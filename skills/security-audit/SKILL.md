@@ -1,19 +1,27 @@
 ---
 name: security-audit
-description: >
-  Reasoning-based security audit skill for Angular and web projects. Uses a wave-based
-  scanning strategy to minimize token burn — reads high-risk files first, only scans
-  deeper if needed. Combines vulnerability scanning with spec-driven tracking so findings
-  become tasks that survive across sessions in .specs/security-audit/.
-  ALWAYS trigger when user says: "audit my code", "security check", "check for vulnerabilities",
-  "is my code secure", "security review", "run a security scan", "/sec.audit", "/sec.specify",
-  "/sec.plan", "/sec.tasks", "/sec.implement", "/sec.fix". Also trigger when user shares
-  code involving auth, payments, API calls, guards, interceptors, CORS config, environment
-  files, HTTP headers, file uploads, or reactive forms — even without an explicit security
-  request. Supports both Claude Code (reads from disk) and Claude.ai chat (paste mode).
+description: |
+  Reasoning-based security audit for Angular and web projects. Wave-based
+  scanning minimizes token burn — high-risk files first, deeper only if needed —
+  and findings become spec-tracked tasks that survive across sessions in
+  .specs/security-audit/. Works in Claude Code (reads disk) or claude.ai chat
+  (paste mode).
+
+  Trigger when:
+  - the user says "audit my code", "security check", "check for vulnerabilities",
+    "is my code secure", "security review", or "run a security scan"
+  - the user types /sec.audit, /sec.specify, /sec.plan, /sec.tasks,
+    /sec.implement, or /sec.fix
+  - the user shares code involving auth, payments, API calls, guards,
+    interceptors, CORS config, environment files, HTTP headers, file uploads, or
+    reactive forms — even without an explicit security request
 ---
 
-# Security Audit Skill
+# Security Audit
+
+Token-frugal, reasoning-based security audit — scans highest-risk files first in
+waves, calibrates severity to real exploitability, and turns findings into
+spec-tracked tasks that survive across sessions.
 
 ## Commands
 
@@ -505,3 +513,12 @@ Working when: every audit ends with a severity-calibrated report (no inherited
 scanner labels), findings carry File:Line + fix, the runtime/deployment pass
 ran (or each unchecked item is itself a finding), and CRITICALs block deploy
 until resolved and re-scanned.
+
+## Troubleshooting
+
+- **Token budget tight on a big repo:** that's the point of waves — stop after
+  Wave 1 if it finds CRITICALs; deeper waves may be invalidated by the fixes.
+- **Tempted to inherit a scanner's "High":** re-calibrate to real exploitability
+  (see the Severity Guide) — an internet-exposed DB outranks a latent XSS.
+- **Chat mode (no disk):** request files in waves, never all at once; skip files
+  the user doesn't have rather than blocking.

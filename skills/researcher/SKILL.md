@@ -1,95 +1,88 @@
 ---
 name: researcher
-description: >
-  Teaches Claude how to research topics thoroughly and validate that information
-  is accurate before using it in code, architecture decisions, or recommendations.
-  ALWAYS trigger this skill when the user asks to: investigate a library, compare
-  frameworks, verify an API exists, check if a package is maintained, look up
-  current best practices, validate a technical approach, or whenever Claude is
-  about to make a claim that could be outdated or wrong. Research is a crucial
-  part of any project — never skip it when accuracy matters.
+description: |
+  Research topics thoroughly and validate that information is accurate before
+  using it in code, architecture, or recommendations — never skip it when
+  accuracy matters.
+
+  Trigger when:
+  - investigating a library or comparing frameworks
+  - verifying an API exists or checking whether a package is maintained
+  - looking up current best practices
+  - validating a technical approach
+  - before ANY claim that could be outdated or wrong
+
+  Do NOT use for: questions answerable from the code in front of you, or
+  opinion/preference calls with no factual answer.
 ---
 
-# Researcher Skill
+# Researcher
 
-## When to Use This Skill
+Verify before you rely. This skill turns "I think X" into "X, confirmed against
+its source" — because a confident wrong fact costs more than an honest unknown.
 
-Trigger on any of these patterns:
+## When this fires
+
 - "Is X still maintained / supported?"
-- "What's the best library for...?"
+- "What's the best library for…?"
 - "Does this API / endpoint exist?"
-- "What's the latest version of...?"
+- "What's the latest version of…?"
 - "How does X actually work?"
 - Before recommending any third-party package or service
-- Before making architectural decisions based on assumed facts
+- Before making an architectural decision on an assumed fact
 
----
+## Step 1 — Define the question
 
-## STEP 1 — Define the Research Question
+Write down exactly what you need to know before searching:
 
-Before searching, write down exactly what you need to know:
-- What is the **specific claim** you need to verify?
-- What would **prove it true**? What would **prove it false**?
-- What is the **minimum viable answer** to proceed?
+- The **specific claim** to verify.
+- What would **prove it true**, and what would **prove it false**.
+- The **minimum viable answer** needed to proceed.
 
----
+## Step 2 — Research by type
 
-## STEP 2 — Research Strategy
+**Package / library**
+1. Official docs (not just the README).
+2. Registry (npm/PyPI/pub.dev) last-publish date.
+3. GitHub issues for known bugs or abandonment signals.
+4. Download trend (npmtrends.com).
+5. Compatibility with the project's current dependency versions.
 
-### For Package / Library Research
-```
-1. Check the official docs (not just README)
-2. Check npm/PyPI/pub.dev for last publish date
-3. Check GitHub Issues for known bugs or abandonment signals
-4. Check weekly download trends (npmtrends.com)
-5. Verify it works with the project's current dependency versions
-```
+**API / endpoint**
+1. Official API reference (not blog posts).
+2. Verify path, method, required headers.
+3. Deprecation notices or version changes.
+4. Test with a minimal request if possible.
+5. Note rate limits, auth, pricing.
 
-### For API / Endpoint Research
-```
-1. Find the official API reference (not blog posts)
-2. Verify the endpoint path, method, and required headers
-3. Check for deprecation notices or version changes
-4. Test with a minimal request if possible
-5. Note rate limits, auth requirements, and pricing
-```
+**Best practices**
+1. Prioritize: official docs > framework-team blogs > reputable devs.
+2. Check the publish date — anything older than 18 months needs re-verification.
+3. Match the current framework version — old tutorials show deprecated patterns.
+4. Cross-reference ≥2 independent sources.
 
-### For Best Practices Research
-```
-1. Prioritize: official docs > framework team blogs > reputable devs
-2. Check the publish date — anything older than 18 months needs verification
-3. Look for the current framework version — old tutorials may show deprecated patterns
-4. Cross-reference at least 2 independent sources
-```
+**Comparison / selection**
+1. List all serious candidates (don't skip unpopular-but-better options).
+2. Evaluate on maintenance, community, bundle size, DX, license.
+3. Check whether the existing stack already solves it.
+4. Prefer boring, proven tools unless there's a clear reason not to.
 
-### For Competitive / Comparison Research
-```
-1. List all serious candidates first (don't skip unpopular but better options)
-2. Evaluate on: maintenance status, community size, bundle size, DX, license
-3. Check if the project's existing stack already solves the problem
-4. Prefer boring, proven tools over exciting new ones unless there's a clear reason
-```
-
----
-
-## STEP 3 — Validate Before Concluding
-
-Before using any researched fact, run this check:
+## Step 3 — Validate before concluding
 
 ```
-□ Is the source official or authoritative?
-□ Is it dated within the last 12 months? (or timeless?)
-□ Does it match the specific version being used?
-□ Have I cross-referenced at least one other source?
-□ Am I interpreting it correctly in this context?
+□ Source is official or authoritative
+□ Dated within the last 12 months (or genuinely timeless)
+□ Matches the specific version in use
+□ Cross-referenced against ≥1 other source
+□ Interpreted correctly in this context
 ```
 
-If any answer is NO — find a better source or explicitly flag the uncertainty.
+Any `NO` → find a better source or explicitly flag the uncertainty.
 
-### STEP 3B — Verify each claim against its source of truth
+### Step 3B — Verify each claim against its source of truth
 
-Every claim type has a mechanical check — verify by *reading the source*, not
-by recalling how things usually are:
+Every claim type has a mechanical check — verify by *reading the source*, not by
+recalling how things usually are:
 
 | Claim type | Source of truth | How |
 |---|---|---|
@@ -106,43 +99,50 @@ by recalling how things usually are:
 "should", "appears to", or a direct question to the user beats a fluent
 hallucination.
 
----
-
-## STEP 4 — Report Findings
-
-Structure your research output clearly:
+## Reporting format
 
 ```markdown
 ## Research: [Topic]
 
-**Question:** What exactly was investigated
-
-**Finding:** The clear answer in 1-2 sentences
-
-**Confidence:** High / Medium / Low
-**Reason for confidence level:** Why
+**Question:** what exactly was investigated
+**Finding:** the clear answer in 1–2 sentences
+**Confidence:** High / Medium / Low — and why
 
 **Sources:**
-- [Source name] — [what it confirmed] — [date if relevant]
-- [Source name] — [what it confirmed]
+- [Source] — [what it confirmed] — [date if relevant]
 
-**Caveats / Warnings:**
-- Anything that might change the answer in different contexts
+**Caveats:** anything that changes the answer in a different context
 
 **Claims ledger:** checked: N · verified: V · contradicted: C · unverifiable: U
-(counts must reconcile with the sources listed — an unverifiable claim is
-reported as such, never silently promoted to a finding)
+(counts reconcile with the sources; an unverifiable claim is reported as such,
+never silently promoted to a finding)
 
-**Recommendation:**
-- What to do based on the findings
+**Recommendation:** what to do based on the findings
 ```
 
----
+## Core principles
 
-## Rules
+- **Never assume** — if you don't know for certain, say so and research.
+- **Never use outdated info** — always check source dates.
+- **Flag uncertainty** — "I believe X but haven't verified" beats silent guessing.
+- **Prefer primary sources** — official docs > Stack Overflow > blog posts.
+- **Version-match everything** — Angular 17 advice ≠ Angular 19 advice.
 
-- **Never assume** — if you don't know for certain, say so and research
-- **Never use outdated info** — always check dates on sources
-- **Flag uncertainty** — "I believe X but haven't verified" is always better than silent guessing
-- **Prefer primary sources** — official docs beat Stack Overflow beats blog posts
-- **Version-match everything** — Angular 17 advice ≠ Angular 19 advice
+## What this skill does not do
+
+- Verify the project's *own* docs against its code — that's `docs-accuracy` (`DOC-*`).
+- Make the decision for you — it supplies verified facts; the architecture call is separate.
+- Replace running the code — a claim you can test, test.
+
+## Success criteria
+
+Working when: every third-party claim ships with a source and a confidence
+level, unverifiable claims are labelled (not dressed up), and no recommendation
+rests on an outdated or hallucinated fact.
+
+## Troubleshooting
+
+- **Source unreachable** (private dep, paywalled): apply the cannot-verify
+  protocol — downgrade to what you can confirm, say what you couldn't.
+- **Sources conflict:** prefer the primary and the more recent; report the
+  conflict rather than picking silently.

@@ -1,16 +1,24 @@
 ---
 name: angular-code-quality
-description: >
-  Apply this skill for ANY Angular code generation, component or service creation, architecture
-  analysis, or code review task. Triggers on: "create a component", "generate a service",
-  "write a function", "analyze the architecture", "add a feature", "refactor this", "review my code",
-  or any request involving TypeScript/Angular code. Always read CLAUDE.md first if it exists,
-  then enforce SOLID principles, MVVM pattern, and project conventions before writing a single line.
-  Also use when asked about project structure, patterns, or how to implement something in Angular —
-  even without explicit mention of "SOLID", "MVVM", or "patterns".
+description: |
+  Enforced Angular code quality — the frontend specialist of the code-quality
+  family. Applies SOLID + MVVM + Signals conventions via NG-* rule IDs, a Design
+  Contract gate, and an evidence-backed Verification Pass. Reads CLAUDE.md first.
+
+  Trigger when:
+  - creating a component, service, or feature; analyzing architecture; or
+    reviewing/refactoring any TypeScript/Angular code
+  - asked about Angular project structure, patterns, or how to implement
+    something — even without mentioning "SOLID", "MVVM", or "patterns"
+
+  Do NOT use for: backend code (use backend-code-quality), or the universal
+  constitution/guard for non-Angular stacks (use code-quality).
 ---
 
-# Angular Code Quality Skill
+# Angular Code Quality
+
+Enforced Angular/MVVM/Signals review with stable rule IDs, a Design Contract
+gate, and an evidence-backed Verification Pass — nothing ships unproven.
 
 > **Family:** this is the **frontend specialist** of the code-quality family. The
 > `code-quality` skill is the hub — it owns the shared universal core
@@ -389,3 +397,12 @@ Working when: every task ships with a Design Contract before code and a
 Verification Pass with evidence after; no file exists outside the contract;
 deviations carry rule IDs and ledger entries; the AI-FM/TEST/DOC rows appear
 whenever their trigger files are in the diff.
+
+## Troubleshooting
+
+- **A rule blocks a legitimate pattern:** run the Deviation Protocol (STEP 0C) —
+  cite the rule ID, record the waiver with a `expires:` trigger; never skip silently.
+- **CLAUDE.md and an `[ARCH]` rule disagree:** CLAUDE.md wins project-wide (STEP 0),
+  but never per-file — a second pattern for one concern is drift.
+- **Verification Pass feels heavy for a tiny change:** only rules named in the
+  Design Contract (plus every `[NN]`) need a row — not the whole catalogue.

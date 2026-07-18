@@ -1,6 +1,19 @@
 ---
 name: ship-ticket
-description: Implement a Jira ticket end-to-end with the locked stack, SOLID, tiered model/cost routing, a mandatory design-source-of-truth read, a plan-mode gate (every ticket is planned in Claude Code plan mode and user-approved before implementation; the approved plan is saved to .specs/plans/), a pinned + independently-verified + CI-enforced design-parity gate, the two-pass review flow, and the full close-out (PR plus Jira Done plus session log plus compact). ALWAYS trigger when the user types /ship-ticket, /ship.ticket, ship ticket, implement ticket, build ticket, or gives a Jira ticket key or browse URL (for example SCRUM-28 or DAT-15) and asks to implement, build, or ship it. The user passes one argument, the Jira ticket key or URL.
+description: |
+  Implement a Jira ticket end-to-end: locked stack + SOLID, tiered model/cost
+  routing, a mandatory design-source-of-truth read, a plan-mode gate (planned in
+  Claude Code plan mode and user-approved before implementation; the approved
+  plan is saved to .specs/plans/), a pinned + independently-verified +
+  CI-enforced design-parity gate, the two-pass review flow, and full close-out
+  (PR + Jira Done + session log + compact). Takes one argument: the Jira ticket
+  key or URL.
+
+  Trigger when the user:
+  - types /ship-ticket or /ship.ticket
+  - says "ship ticket", "implement ticket", or "build ticket"
+  - gives a Jira ticket key or browse URL (e.g. SCRUM-28 or DAT-15) and asks to
+    implement, build, or ship it
 ---
 
 # /ship-ticket — implement a Jira ticket end-to-end
@@ -477,3 +490,22 @@ and an unfixed FAIL is not a shipped ticket.
   than stubbing or inventing.
 - GATE 4 diffs the screens this ticket **owns**, not every consumer of a shared
   component — a shared-component change spawns a separate parity-sweep task.
+
+## What this skill does not do
+
+- Define the code rules — it **orchestrates** the code-quality family
+  (`angular-code-quality` / `backend-code-quality`); GATE 3 is their Verification
+  Pass.
+- Run the review engines — it invokes `/review`, `/coderabbit:code-review`,
+  `test-quality`, and `docs-accuracy`, then reconciles their findings.
+- Invent scope — one ticket, one PR; unbuilt dependencies stop the workflow
+  rather than getting stubbed.
+- Merge the PR or run `/compact` — both are the user's action; the skill opens
+  the PR and tells the user.
+
+## Success criteria
+
+Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`,
+a passing GATE 3, an independently-signed GATE 4 for every owned UI screen, both
+review passes reconciled with every skip citing a rule ID, a green CI, Jira in
+Done, and a written session log — no self-attested gate anywhere in the chain.

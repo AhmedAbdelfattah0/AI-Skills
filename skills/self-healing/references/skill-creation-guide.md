@@ -25,6 +25,31 @@ proven across its 17 skills.
   so explicitly in the description — "run after writing X, before presenting,
   without waiting to be asked."
 
+### Description format (house style)
+
+Use a YAML **literal block (`|`)**, not folded (`>`), so bullets are preserved.
+Three parts, in order:
+
+```yaml
+description: |
+  <one-sentence purpose>.
+
+  Trigger when:
+  - <trigger / literal phrase / slash command>
+  - <trigger>
+
+  Do NOT use for: <case> (use <sibling-skill>).
+```
+
+`name:` and `description:` are metadata — they MUST stay lowercase YAML keys.
+Never prefix them with `#` (that makes them YAML comments and breaks the skill).
+
+### Title format (house style)
+
+One H1 that is the skill's name in Title Case (`# Code Quality`, not
+`# Code Quality Skill`), immediately followed by a one-line purpose sentence.
+The H1 is the skill's prominent title; the frontmatter is not display text.
+
 ## Progressive disclosure
 
 `SKILL.md` is the always-loaded operating layer — keep it lean. Deep content

@@ -1,21 +1,27 @@
 ---
 name: docs-accuracy
-description: >
+description: |
   Documentation accuracy gate — verifies that READMEs, API references,
   docstrings, PHPDoc/JSDoc, changelogs, and tutorials tell the truth about the
   code. Core method: documentation is a set of claims, and every claim is
-  checkable against the source. ALWAYS trigger when: docs were just written or
-  edited (by you or another agent), before publishing; a code change touched
-  documented behavior (rename, signature change, new default, removed flag);
-  or the user says "review the docs", "is this documentation accurate",
-  "update the docs", "write a README", "document this API", "add a docstring",
-  "add a changelog entry". Also trigger on /da.guard. DO NOT USE for
-  production code review (code-quality family), test review (test-quality),
-  marketing copy or blog posts, prose style editing of non-technical writing,
-  or doc-site theming.
+  checkable against the source.
+
+  Trigger when:
+  - docs were just written or edited (by you or another agent), before publishing
+  - a code change touched documented behavior (rename, signature change, new
+    default, removed flag)
+  - the user says "review the docs", "is this documentation accurate", "update
+    the docs", "write a README", "document this API", "add a docstring/changelog"
+  - the user types /da.guard
+
+  Do NOT use for: production code review (code-quality family), test review
+  (test-quality), marketing copy or blog posts, prose-style editing of
+  non-technical writing, or doc-site theming.
 ---
 
-# docs-accuracy — verify every claim before docs ship
+# Docs Accuracy
+
+Verify every documentation claim against the source before it ships.
 
 Documentation is a set of claims about a codebase, and every claim is
 checkable. Your job is to check them — **by reading the source, not

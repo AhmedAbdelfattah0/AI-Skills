@@ -1,14 +1,18 @@
 ---
 name: nn-guard
-description: >
-  Installs and manages deterministic enforcement of the code-quality skill's [NN]
-  rules, outside the model's context: a Claude Code PostToolUse hook that checks
-  every file edit the moment it lands, and a CI job that fails the PR on the same
-  rules. Trigger on: /guard.install, /guard.check, /guard.status, /guard.ci,
-  "install the guard", "set up hooks", "enforce NN rules", "add the CI security
-  check", or when the code-quality deviation ledger shows [NN] violations reaching
-  review (a detection gap). Pairs with code-quality (source of the rules) and
-  self-healing (which routes detection gaps here).
+description: |
+  Deterministic enforcement of the code-quality family's [NN] rules, outside the
+  model's context: a Claude Code PostToolUse hook that checks every edit as it
+  lands, plus a CI job that fails the PR on the same rules. Pairs with
+  code-quality (source of the rules) and self-healing (which routes detection
+  gaps here).
+
+  Trigger when:
+  - the user types /guard.install, /guard.check, /guard.status, or /guard.ci
+  - the user says "install the guard", "set up hooks", "enforce NN rules", or
+    "add the CI security check"
+  - the code-quality deviation ledger shows [NN] violations reaching review (a
+    detection gap)
 ---
 
 # NN-Guard — Deterministic `[NN]` Enforcement
@@ -287,3 +291,27 @@ grep -q "nn-guard" .claude/settings.json 2>/dev/null && echo "settings.json: wir
   source), re-run `/guard.install`, re-run the self-test.
 - The self-test is mandatory after every install or change. A check that cannot fail
   checks nothing.
+
+## What this skill does not do
+
+- Define the rules — `code-quality` (and the specialists) own the `[NN]` rules;
+  this skill only *enforces* the greppable ones.
+- Replace judgment review — a rule with no mechanical signature stays skill-only;
+  the hook is a floor, not the whole review.
+- Catch semantic bugs — grep matches signatures, not meaning; it's a smoke
+  detector, not the fire marshal.
+
+## Success criteria
+
+Working when: every greppable `[NN]` rule blocks its known-bad sample at both the
+PostToolUse hook and CI, the self-test passes after every change, and suppressing
+a finding is impossible without a ledger entry naming the rule and reason.
+
+## Troubleshooting
+
+- **Hook didn't fire:** check it's wired in `settings.json` and executable
+  (`/guard.status`); re-run `/guard.install`.
+- **False positive on legitimate code:** add a scoped entry to the exclude list —
+  and record it as a deviation with the rule ID it suppresses.
+- **A new `[NN]` rule has no clean signature:** leave it skill-only; don't fake a
+  mechanical check (that's the `references/enforcement-map.md` change protocol).

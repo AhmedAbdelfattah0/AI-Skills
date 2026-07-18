@@ -1,20 +1,28 @@
 ---
 name: backend-code-quality
-description: >
-  Apply this skill for ANY backend code generation, review, or architecture task —
-  in any language, framework, or runtime. Triggers on: "create an endpoint",
-  "add a route", "write a controller/handler", "write a middleware", "create a
-  webhook handler", "write a migration", "add an API", "review my backend",
-  "refactor this route", or any request that touches server-side code, request
-  handling, database access, authentication, multi-tenancy, webhooks, or background
-  jobs. Always read CLAUDE.md first if it exists and detect the project's stack,
-  then enforce security-first patterns, tenant isolation, input validation, webhook
-  safety, audit integrity, and SOLID before writing a single line. Also use when
-  asked about backend structure, patterns, or how to implement an endpoint — even
-  when no specific framework is named.
+description: |
+  Enforced backend code quality — the backend specialist of the code-quality
+  family, in any language/framework/runtime. Applies BE-* rule IDs, security
+  tiers, tenant isolation, input validation, webhook safety, audit integrity, and
+  SOLID via a Design Contract gate and Verification Pass. Reads CLAUDE.md and
+  detects the stack first.
+
+  Trigger when:
+  - creating an endpoint, route, controller/handler, middleware, webhook handler,
+    or migration; adding an API; or reviewing/refactoring any server-side code
+  - the work touches request handling, database access, auth, multi-tenancy,
+    webhooks, or background jobs
+  - asked about backend structure or how to implement an endpoint — even with no
+    framework named
+
+  Do NOT use for: frontend code (use angular-code-quality), or the universal
+  constitution/guard (use code-quality).
 ---
 
-# Backend Code Quality Skill
+# Backend Code Quality
+
+Enforced, security-first backend review in any stack — rule IDs, endpoint
+security tiers, a Design Contract gate, and an evidence-backed Verification Pass.
 
 > **Family:** this is the **backend specialist** of the code-quality family. The
 > `code-quality` skill is the hub — it owns the shared universal core
@@ -511,3 +519,14 @@ Contract; tenancy is enforced at the data layer, not the route; webhooks
 verify signatures before parsing; the Verification Pass carries evidence for
 every [NN] rule; AI-FM/TEST/DOC rows appear whenever their trigger files are
 in the diff.
+
+## Troubleshooting
+
+- **A rule blocks a legitimate pattern:** run the Deviation Protocol (STEP 0C) —
+  cite the rule ID, record the waiver with a risk note; an `[NN]` waiver is always
+  surfaced to the user in plain language, never buried.
+- **Stack not in `references/`:** the rules are the spine — adapt the concrete
+  snippet to the stack; the principle (parameterized queries, tenant scoping,
+  signature verification) holds regardless.
+- **Unsure of an endpoint's tier:** default to the stricter tier (Privileged over
+  Authenticated) until proven otherwise; an untiered endpoint doesn't get written.

@@ -1,111 +1,117 @@
 ---
 name: cost-reducer
-description: >
-  Teaches Claude how to identify and implement cost-reduction opportunities across
-  AI agents, SaaS products, cloud infrastructure, and codebases. ALWAYS trigger
-  this skill when the user mentions: high API bills, expensive cloud costs, optimizing
-  spend, reducing token usage, cutting infrastructure costs, reviewing architecture
-  for savings, or when about to recommend a paid service that has a cheaper alternative.
-  Also trigger when generating AI agent code — always apply cost-aware patterns by default.
+description: |
+  Identify and implement cost-reduction opportunities across AI agents, SaaS,
+  cloud infrastructure, and code — and apply cost-aware patterns by default when
+  generating code that touches paid services.
+
+  Trigger when:
+  - the user mentions high API bills, cloud costs, optimizing spend, token usage,
+    or cutting infra costs
+  - you're reviewing architecture (always add a cost lens)
+  - you're about to recommend a paid service that has a cheaper alternative
+
+  Do NOT use for: correctness or security review (use the code-quality family),
+  or quoting exact live prices without verifying them via the researcher skill.
 ---
 
-# Cost Reducer Skill
+# Cost Reducer
 
-## When to Use This Skill
+Spend less without breaking things. Name what's actually expensive, then attack
+it in ROI order — and write cost-aware code by default so savings compound
+instead of needing a cleanup later.
 
-- User mentions costs, bills, or budget concerns
-- Reviewing or designing AI agent architecture
-- Choosing between cloud services or tiers
-- Writing code that calls external APIs (LLMs, storage, DB)
-- Designing SaaS product features that have usage-based costs
-- Any architecture review — always include a cost lens
+## When this fires
 
-Focus areas by context (all guidance is in this file — no external references):
+- The user mentions costs, bills, or budget.
+- Designing or reviewing AI-agent architecture.
+- Choosing between cloud services or tiers.
+- Writing code that calls paid services (LLMs, storage, DB).
+- Any architecture review — always include a cost lens.
+
+By context:
 
 | Context | Focus |
 |---|---|
-| AI agents, LLM API calls, token usage | Model tiering, prompt caching, batching, output caps |
-| Code patterns, caching, batching | Caching, lazy loading, pagination, N+1 elimination |
-| Cloud infra, storage, compute, DBs | Right-sizing, storage classes, egress, serverless vs always-on |
+| AI agents, LLM API calls, tokens | Model tiering, prompt caching, batching, output caps |
+| Code patterns | Caching, lazy loading, pagination, N+1 elimination |
+| Cloud infra, storage, DBs | Right-sizing, storage classes, egress, serverless vs always-on |
 
----
+## Step 1 — Identify the cost driver
 
-## STEP 1 — Identify the Cost Driver
-
-Before optimizing, understand what's actually expensive:
+Understand what's expensive before optimizing:
 
 ```
-□ Is it compute? (CPU/memory/serverless invocations)
-□ Is it storage? (DB reads/writes, object storage, bandwidth)
-□ Is it AI/LLM tokens? (input tokens, output tokens, embeddings)
-□ Is it third-party API calls? (per-request pricing)
-□ Is it over-provisioned resources? (idle VMs, unused tiers)
-□ Is it developer time? (complexity that slows iteration = costs money)
+□ Compute? (CPU/memory/serverless invocations)
+□ Storage? (DB reads/writes, object storage, bandwidth)
+□ AI/LLM tokens? (input, output, embeddings)
+□ Third-party API calls? (per-request pricing)
+□ Over-provisioned resources? (idle VMs, unused tiers)
+□ Developer time? (complexity that slows iteration)
 ```
 
-Name the top 1-2 cost drivers before proposing any solution.
+Name the top 1–2 drivers before proposing anything.
 
----
+## Step 2 — Apply the cost-reduction hierarchy
 
-## STEP 2 — Apply the Cost Reduction Hierarchy
+Try in order — highest ROI first:
 
-Always try in this order (highest ROI first):
+1. **ELIMINATE** — do you need this at all? Can the feature be cut?
+2. **CACHE** — can the result be reused? (memory, Redis, DB, CDN)
+3. **BATCH** — can requests be grouped? (fewer API calls, bulk ops)
+4. **DOWNGRADE** — can a cheaper model/tier/service do the same job?
+5. **COMPRESS** — can inputs/outputs be smaller? (prompt trimming, pagination)
+6. **SCHEDULE** — can it run off-peak or async?
+7. **SELF-HOST** — is the managed service ~10× the self-host cost?
 
-```
-1. ELIMINATE  — Do you need this at all? Can the feature be cut?
-2. CACHE      — Can the result be reused? (memory, Redis, DB, CDN)
-3. BATCH      — Can requests be grouped? (fewer API calls, bulk ops)
-4. DOWNGRADE  — Can a cheaper model/tier/service do the same job?
-5. COMPRESS   — Can inputs/outputs be smaller? (prompt trimming, pagination)
-6. SCHEDULE   — Can this run off-peak or async? (avoid peak pricing)
-7. SELF-HOST  — Is the managed service 10x the self-host cost?
-```
-
----
-
-## STEP 3 — Report Savings Clearly
-
-Always quantify when possible:
+## Step 3 — Report savings clearly
 
 ```markdown
 ## Cost Finding: [Area]
 
-**Current cost driver:** What's expensive and why
-**Estimated monthly impact:** $X or X% reduction (if calculable)
+**Current cost driver:** what's expensive and why
+**Estimated monthly impact:** $X or X% (if calculable)
 
 **Recommended fix:**
-- What to change
-- How to implement it (with code snippet if relevant)
+- what to change · how to implement it (code snippet if relevant)
 
-**Trade-offs:**
-- What you give up (latency, complexity, features)
-- Is it worth it at current scale?
-
-**Priority:** High / Medium / Low
-**Effort:** Hours / Days / Weeks
+**Trade-offs:** what you give up (latency, complexity) — worth it at this scale?
+**Priority:** High / Medium / Low   **Effort:** Hours / Days / Weeks
 ```
 
----
+## Step 4 — Cost-aware code defaults
 
-## STEP 4 — Cost-Aware Code Defaults
+When touching paid services, apply by default:
 
-When writing any code that touches paid services, always apply these by default:
-
-```typescript
-// ✅ Always add caching before external calls
-// ✅ Always paginate — never fetch all records
-// ✅ Always set timeouts on external requests
-// ✅ Always use the smallest model that can do the job
-// ✅ Always log token usage / API call counts in dev
-// ❌ Never poll when webhooks/events are available
-// ❌ Never store full LLM responses if only part is needed
-// ❌ Never use premium tier if free tier covers the use case
+```
+✅ Cache before external calls        ❌ Never poll when webhooks/events exist
+✅ Paginate — never fetch all rows    ❌ Never store full LLM responses if part suffices
+✅ Timeouts on external requests      ❌ Never use premium tier if free covers it
+✅ Smallest model that does the job
+✅ Log token/API-call counts in dev
 ```
 
----
+## What this skill does not do
+
+- Judge correctness or security — that's the code-quality family and `security`.
+- Quote live prices from memory — verify current pricing/limits via `researcher`.
+- Micro-optimize prematurely — optimize the named top driver, not everything.
+
+## Success criteria
+
+Working when: every recommendation names the driver and a rough $/% impact,
+fixes are proposed highest-ROI-first, and new code ships cost-aware by default
+(caching, pagination, right-sized models) without being asked.
+
+## Troubleshooting
+
+- **No numbers available:** estimate an order of magnitude and label it an
+  estimate — a ranked qualitative list still beats none.
+- **Savings vs. latency/complexity tension:** state the trade-off and let the
+  user decide at their current scale; don't silently trade one for the other.
 
 ## Reference Files
 
-None — this skill is self-contained. (Deep-dive references on LLM pricing,
-code-level savings, and cloud infra may be added later; verify current
-prices/limits with the `researcher` skill before quoting them.)
+None — self-contained. (Deep-dive references on LLM pricing, code-level savings,
+and cloud infra may be added later; verify current prices/limits with the
+`researcher` skill before quoting them.)

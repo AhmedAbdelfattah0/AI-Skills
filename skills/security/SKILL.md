@@ -1,71 +1,68 @@
 ---
 name: security
-description: >
-  Teaches Claude the most critical security practices when vibecoding — building
-  apps fast without accidentally shipping dangerous vulnerabilities. ALWAYS trigger
-  this skill when: writing auth code, handling passwords or tokens, touching
-  environment variables or secrets, writing database queries, building API endpoints,
-  handling file uploads, or doing any backend work. Security is not optional —
-  apply it by default even when the user doesn't ask for it.
+description: |
+  Secure-by-default coding practices that stop fast-moving work from shipping a
+  vulnerability — apply them by default, even when unasked.
+
+  Trigger when:
+  - writing auth code, or handling passwords, tokens, or secrets
+  - touching environment variables
+  - writing database queries
+  - building API endpoints or handling file uploads
+  - doing any backend work
+
+  Do NOT use for: full-codebase security audits (use security-audit) or backend
+  architecture enforcement (use backend-code-quality).
 ---
 
-# Security Skill
+# Security
 
-## When to Use This Skill
+Secure-by-default coding for fast-moving work — the guardrails that stop a
+vibecoded app from shipping an obvious vulnerability. Apply these **while
+writing**, without being asked. For a full audit of an existing codebase (waves,
+severity calibration, tracked findings), use the `security-audit` skill instead.
 
-Security applies to nearly all backend and auth work. Focus areas by topic
-(the rules are in this file; for a full audit use the `security-audit` skill):
+## When this applies
 
-| Topic | Focus |
+Nearly all backend and auth work. By topic:
+
+| Topic | What to get right |
 |---|---|
-| Auth, passwords, tokens, sessions, secrets | Hashing (argon2/bcrypt), JWT expiry+rotation, secrets in env not code |
-| Database queries, SQL, dependencies, supply chain | Parameterized queries only, RLS, audit deps before adding |
-| Electron, desktop apps, local file access | contextIsolation on, nodeIntegration off, validate IPC |
-| APIs, CORS, XSS, CSRF, headers, rate limiting | Explicit CORS origins, escape output, CSRF tokens, rate limits |
+| Auth, passwords, tokens, sessions | Hash with argon2/bcrypt · JWT expiry + rotation · `httpOnly`+`sameSite`+`secure` cookies |
+| Secrets & config | Secrets in env vars, never in source or tests · `.env` gitignored |
+| Database & dependencies | Parameterized queries only · RLS · audit a dep before adding it |
+| APIs & network | HTTPS only · explicit CORS origins · escape output · CSRF tokens · rate limits |
+| Desktop (Electron) | `contextIsolation` on · `nodeIntegration` off · validate IPC |
 
----
+## The rules
 
-## STEP 1 — Security Checklist (Run Before Every PR)
+### Non-negotiable — never generate these
 
-```
-Secrets & Config:
-□ No API keys, tokens, or passwords in source code
-□ All secrets in environment variables (.env, not committed)
-□ .env is in .gitignore
-□ No hardcoded credentials in tests
+Refuse and explain why if asked to write any of them:
 
-Auth:
-□ Passwords hashed with bcrypt/argon2 (never MD5/SHA1)
-□ JWT tokens have expiry set
-□ Refresh tokens are rotated on use
-□ Auth endpoints are rate-limited
-□ Session cookies have httpOnly + sameSite + secure flags
+- **Hardcoded secrets.** `const ADMIN_PASSWORD = 'admin123'` — secrets come from env vars.
+- **String-concatenated SQL.** `` db.query(`… WHERE id = ${userId}`) `` — parameterize, always.
+- **Plaintext passwords.** `user.password = req.body.password` — hash with argon2/bcrypt.
+- **`eval()` / `Function()` on user input** — there is no safe form of this.
+- **Wildcard CORS in production.** `Access-Control-Allow-Origin: *` — list known origins.
+- **Disabled TLS verification.** `NODE_TLS_REJECT_UNAUTHORIZED = '0'` — never in shipped code.
 
-Input & Data:
-□ All user input is validated server-side (never trust client)
-□ SQL queries use parameterized statements (never string concat)
-□ File uploads validate type + size + scan for malware
-□ API responses don't leak internal error details
+### Always — secure by default
 
-Network:
-□ HTTPS everywhere (no HTTP fallback)
-□ CORS is restricted to known origins (not *)
-□ Security headers are set (CSP, X-Frame-Options, etc.)
-□ Rate limiting on all public endpoints
-```
+- **Never trust the client.** Validate every input server-side, regardless of client validation.
+- **Least privilege.** Every service, token, and user gets the minimum access it needs.
+- **Fail closed.** When in doubt, deny. Never fail open.
+- **No security through obscurity.** A hidden endpoint is not a protected one.
+- **Don't leak internals.** Log stack traces server-side; return a vague message to the user.
 
----
-
-## STEP 2 — Default Secure Patterns
-
-Always write code this way from the start:
+## Secure-by-default patterns
 
 ```typescript
-// ✅ Environment variables — never hardcode
+// ✅ Secrets from env — fail loudly if missing
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-// ✅ Input validation always — even if "internal" API
+// ✅ Validate input even on an "internal" API
 function validatePipelineName(name: unknown): string {
   if (typeof name !== 'string') throw new Error('name must be string');
   if (name.length > 100) throw new Error('name too long');
@@ -73,52 +70,43 @@ function validatePipelineName(name: unknown): string {
   return name;
 }
 
-// ✅ Never expose stack traces to users
-app.use((err: Error, req: Request, res: Response) => {
-  console.error(err);  // log internally
-  res.status(500).json({ error: 'Something went wrong' });  // vague to user
+// ✅ Never expose stack traces
+app.use((err: Error, _req: Request, res: Response) => {
+  console.error(err);                                      // log internally
+  res.status(500).json({ error: 'Something went wrong' }); // vague to the user
 });
 ```
 
----
+## Pre-PR checklist
 
-## STEP 3 — Red Flags to Never Generate
+Run before every PR — a copy-paste gate:
 
-If asked to write any of the following, refuse and explain why:
-
-```typescript
-// ❌ NEVER — hardcoded secret
-const ADMIN_PASSWORD = 'admin123';
-
-// ❌ NEVER — SQL string concatenation
-db.query(`SELECT * FROM users WHERE id = ${userId}`);
-
-// ❌ NEVER — store plain text password
-user.password = req.body.password;
-
-// ❌ NEVER — eval() or Function() with user input
-eval(userProvidedCode);
-
-// ❌ NEVER — wildcard CORS in production
-res.header('Access-Control-Allow-Origin', '*');
-
-// ❌ NEVER — disable SSL verification
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+```
+Secrets    □ no keys/tokens/passwords in source or tests  □ .env gitignored
+Auth       □ argon2/bcrypt (never MD5/SHA1)  □ JWT expiry set  □ refresh rotated
+           □ auth endpoints rate-limited  □ cookies httpOnly+sameSite+secure
+Input      □ all input validated server-side  □ parameterized SQL
+           □ uploads validate type+size  □ errors don't leak internals
+Network    □ HTTPS only  □ CORS restricted (not *)  □ CSP/X-Frame-Options set
+           □ rate limiting on public endpoints
 ```
 
----
+## What this skill does not do
 
-## Rules
+- Full-codebase security audits — use `security-audit` (wave scanning, severity
+  calibration, `.specs/` tracking).
+- Backend architecture/tenancy enforcement — that's `backend-code-quality` (`BE-SEC-*`).
+- Run scanners or dependency audits — it's the judgment layer, not the tooling.
 
-- **Security is not a feature** — it's a default. Apply it without being asked.
-- **Never trust the client** — validate everything server-side regardless of client validation
-- **Least privilege** — every service, token, and user gets the minimum access it needs
-- **Fail closed** — when in doubt, deny access. Never fail open.
-- **No security through obscurity** — hiding the endpoint is not protection
+## Success criteria
 
----
+Working when: secrets never reach source, every input is validated server-side,
+queries are parameterized, and a request to write one of the "never generate"
+patterns is refused with a reason — all without the user having to ask.
 
-## Reference Files
+## Troubleshooting
 
-None — this skill is self-contained. For deep audits (waves, severity
-calibration, spec-tracked findings) use the `security-audit` skill.
+- **Rule collides with a project convention:** the project's documented security
+  policy wins; flag the exception rather than silently downgrading.
+- **Unsure if something is a boundary:** treat external input, payloads, and
+  cross-process data as untrusted and validate. When in doubt, fail closed.
