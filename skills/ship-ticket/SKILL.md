@@ -1,33 +1,107 @@
 ---
 name: ship-ticket
 description: |
-  Implement a Jira ticket end-to-end: locked stack + SOLID, tiered model/cost
-  routing, a mandatory design-source-of-truth read, a plan-mode gate (planned in
-  Claude Code plan mode and user-approved before implementation; the approved
-  plan is saved to .specs/plans/), a pinned + independently-verified +
-  CI-enforced design-parity gate, the two-pass review flow, and full close-out
-  (PR + Jira Done + session log + compact). Takes one argument: the Jira ticket
-  key or URL.
+  Implement a Jira or Azure DevOps ticket end-to-end: locked stack + SOLID,
+  tiered model/cost routing, a mandatory design-source-of-truth read, a
+  plan-mode gate (planned in Claude Code plan mode and user-approved before
+  implementation; the approved plan is saved to .specs/plans/), a pinned +
+  independently-verified + CI-enforced design-parity gate, the two-pass review
+  flow, and full close-out (PR + ticket Done + session log + compact). Companion
+  gates (code-quality family, test-quality, docs-accuracy, CodeRabbit) degrade
+  loudly when not installed — declared, never silently skipped. Takes one
+  argument: the ticket key, work item ID, or URL.
 
   Trigger when the user:
   - types /ship-ticket or /ship.ticket
-  - says "ship ticket", "implement ticket", or "build ticket"
+  - says "ship ticket", "implement ticket", "build ticket", "ship work item",
+    or "implement work item"
   - gives a Jira ticket key or browse URL (e.g. SCRUM-28 or DAT-15) and asks to
     implement, build, or ship it
+  - gives an Azure DevOps work item ID or URL (e.g. 1234, #1234, AB#1234, or a
+    dev.azure.com/…/_workitems/edit/1234 link) and asks to implement, build, or
+    ship it
 ---
 
-# /ship-ticket — implement a Jira ticket end-to-end
+# /ship-ticket — implement a ticket end-to-end (Jira or Azure DevOps)
 
-The user invokes this with a single argument: a **Jira ticket key or URL**
-(e.g. `SCRUM-28`, `DAT-21`, or a full `…/browse/SCRUM-28` link). Run the full
-workflow below for that ticket. Reusable across projects/instances — do **not**
-hardcode any cloudId, site, or project; use whatever Atlassian connection is
-available and resolve the key/URL the user gave.
+The user invokes this with a single argument: a **ticket key, work item ID, or
+URL** (e.g. `SCRUM-28`, a full `…/browse/SCRUM-28` link, `1234`, `AB#1234`, or
+a `dev.azure.com/…/_workitems/edit/1234` link). Run the full workflow below for
+that ticket. Reusable across projects/instances — do **not** hardcode any
+cloudId, site, org, or project; use whatever tracker connection is available
+and resolve the key/URL the user gave.
+
+## Tracker resolution (before Step 0)
+
+The argument names the tracker — resolve it **first**. Everything below is
+tracker-neutral ("the ticket", "Done"); the three tracker-specific operations
+map through this table:
+
+| Argument looks like | Tracker | Fetch the spec | Transition to Done | Link the PR |
+|---|---|---|---|---|
+| `KEY-123` (letters-dash-number), `…/browse/KEY-123`, `*.atlassian.net` URL | **Jira** | Atlassian connection (get issue) | Jira workflow transition to "Done" | PR URL in a ticket comment (or dev-panel link if the integration exists) |
+| bare number `1234`, `#1234`, `AB#1234`, `dev.azure.com` / `visualstudio.com` work-item URL | **Azure DevOps** | `wit_get_work_item` (expand relations) | `wit_update_work_item` → the type's **completed-category state** | `wit_link_work_item_to_pull_request` (Azure Repos PR) or `AB#<id>` in the PR description (GitHub repo with the ADO↔GitHub integration) |
+
+Two ADO-specific rules — do not hardcode around them:
+
+- **"Done" is a state category, not a fixed name.** The completed state depends
+  on the project's process template (Scrum/Basic → `Done`, Agile → `Closed`,
+  CMMI → `Closed`, plus custom processes). Resolve the work item type's actual
+  completed-category state (`wit_get_work_item_type`) and set that — never
+  assume the literal string "Done" exists.
+- **The PR host and the tracker are independent.** An ADO work item's code may
+  live in Azure Repos (open the PR with the ADO repo tools and link it with
+  `wit_link_work_item_to_pull_request`) or on GitHub (open the PR with `gh` and
+  put `AB#<id>` in the PR description so the ADO↔GitHub integration links it;
+  if that integration isn't set up, fall back to `wit_add_artifact_link` /
+  a work item comment carrying the PR URL). Check the repo's `git remote`
+  before choosing.
+
+If the argument is ambiguous (can't tell which tracker) or both trackers are
+plausibly connected and the ID resolves in neither, **STOP and ask the user** —
+do not guess.
+
+## Companion availability check (once, up front)
+
+This workflow orchestrates companion skills and review engines that may not be
+installed everywhere (standalone installs, other machines, other AI tools).
+**Check availability once, before Step 0.75** — a companion is available if it
+appears in the available-skills list (or as a sibling folder in
+`~/.claude/skills`) — and declare the run's mode before any code is written.
+A gate whose engine is missing **degrades loudly, never silently**:
+
+| Companion | Owns | If missing — degraded fallback |
+|---|---|---|
+| `angular-code-quality` / `backend-code-quality` | Design Contract (STEP 0B) + GATE 3a Verification Pass (`NG-*` / `BE-*`) | GATE 3a runs **degraded**: no rule-ID table exists, so instead review every written file against SOLID, the Step 0.5 mechanical rules, and this file's conventions, reporting findings in `file:line` + quoted code + fix shape. The Design Contract degrades to a plain file-list contract derived from the approved plan. **The skip-by-citation protocol collapses to "fix everything"** — with no rule IDs loaded there is nothing to cite, so no review finding may be skipped. |
+| `code-quality` (hub) | MODE D guard sweep (GATE 3b) | Sweep the whole diff yourself for the LLM failure modes (mock-success returns, swallowed errors, speculative flags, stray catch-alls, dead code); note the sweep was unassisted. |
+| `test-quality` | TEST-\* guard on the test diff (step 1) | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
+| `docs-accuracy` | DOC-\* rule set (step 7) | The step-7 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
+| `/coderabbit:code-review` | Second review pass (step 5) | **Skip step 5 entirely.** The run becomes single-pass review; step 6's report says so explicitly instead of reporting a between-passes delta. |
+| `/review` | First review pass (step 4) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context** — GATE 4's independence requirement is about *who* reviews, not the command name, so this fallback still produces a valid signature. |
+| `/session-logger` | Step 9 close-out log | Write the session-log entry yourself to `session-log.md` with the same required content. |
+
+What **never** degrades, because it doesn't depend on an installed skill:
+
+- **Step 0 / 0.5** — reading the ticket and pinning the design reference.
+- **Step 0.75 plan-mode gate** — plan approval is a user action, not a skill.
+- **GATE 4** (UI tickets) — the pin, the committed artifact, the independent
+  signature, and the human-approved deviation record are all workflow-native.
+- **Stop-on-failure** — a missing companion is a *degradation to declare*, not
+  a stop; a degradation you did **not** declare is itself a stop-on-failure
+  violation.
+
+**Declare the mode in three places:** once up front when detected ("running
+degraded: `backend-code-quality` and `/coderabbit:code-review` not installed"),
+in the step-6 report, and in the step-9 session log. A run that silently
+skipped a gate is indistinguishable from a run that failed it.
 
 ## Step 0 — read the ticket first (hard gate)
 
-Fetch and read the ticket's **full spec** before doing anything. If you cannot
-fetch it (auth/IP error, wrong instance, missing permission), **STOP and tell
+Fetch and read the ticket's **full spec** before doing anything, using the
+fetch column of the tracker-resolution table. For ADO, that includes the
+description, acceptance criteria field(s), comments, and linked parents/
+attachments — the spec is often split across them. If you cannot fetch it
+(auth/IP error, wrong instance/org, missing permission), **STOP and tell
 the user** — do not guess the spec, do not proceed.
 
 ## Step 0.5 — read AND pin the design source of truth before writing any UI (hard gate)
@@ -60,7 +134,8 @@ In **every** case there are three things you must open, in this order:
 If the ticket doesn't point at the design files (or names them incompletely),
 search the repo yourself: look for a token/theme file, a `design/` or
 `design-files/` directory, a component library, or a Master-Orientation doc.
-The read is mandatory even when Jira forgets to reference it. If UI is in scope
+The read is mandatory even when the ticket forgets to reference it. If UI is in
+scope
 and you genuinely cannot find any design system, **STOP and ask the user** where
 it lives — do not invent a visual language.
 
@@ -237,11 +312,16 @@ its rules apply to every line, its **Design Contract (STEP 0B)** gates every
 file, and its **Verification Pass is GATE 3** below. Both specialists build on
 the `code-quality` hub's universal core (`ai-failure-modes`,
 `universal-principles`, `review-standard`) — so "invoke the specialist" invokes
-that core too. This is not optional context; a build that never loaded the
-skill has no Design Contract and cannot produce GATE 3.
+that core too. This is not optional context when the skill is installed; a
+build that skipped an *available* specialist has no Design Contract and cannot
+produce GATE 3. **If the specialist is not installed** (per the companion
+availability check), run the degraded fallback from the availability table —
+declared up front, never assumed silently.
 
 Then run its **Design Contract** gate (STEP 0B), deriving the file list from the
 Step 0.75 plan's build sequence. No file gets written that isn't in the contract.
+(Degraded mode: the contract is the plain file list from the approved plan —
+the "no file outside the contract" rule still holds.)
 
 ## Apply SOLID throughout
 
@@ -289,14 +369,18 @@ and committed to Git as a numbered file.
 ## When implementation is complete
 
 1. Run lint, build, and Vitest — fix any failures. **Tests green ≠ tests good:**
-   run the `test-quality` guard pass on the test diff before GATE 3 — a must-fix
-   TEST violation (TEST-01/02/08: implementation-detail assertions, unjustified
-   mocks, mocked state objects) blocks the review passes like any FAIL.
+   run the `test-quality` guard pass on the test diff before GATE 3 (if
+   installed — else the degraded fallback from the availability table) — a
+   must-fix TEST violation (TEST-01/02/08: implementation-detail assertions,
+   unjustified mocks, mocked state objects) blocks the review passes like any
+   FAIL.
 
 2. **GATE 3 — Code-Quality Audit.** This is the post-implementation audit by the
    code-quality family — the skill actually reviewing what you built, not a table
    filled from memory. It has two parts and both must pass before the review
-   passes run:
+   passes run. (If the family isn't installed, both parts run in the degraded
+   form from the availability table — a lighter engine, not a waived gate: its
+   must-fix findings still block review.)
 
    **a. Verification Pass (per-rule, on the contracted files).** Run the invoked
    specialist's Verification Pass. Emit the `rule → PASS/FAIL/N-A → evidence`
@@ -378,18 +462,21 @@ and committed to Git as a numbered file.
    rejects a UI-scoped PR unless `.specs/design-parity/<TICKET>.md` exists, is
    independently signed, and is PASS. A PR is *UI-scoped* when its diff touches
    `apps/**/*.html`, `*.scss`, or component `*.ts` templates — the same signal
-   Step 0.5 uses. Because Jira `Done` follows the merge (step 8), this **hard-gates
-   `Done`** without relying on the agent to self-enforce — closing the "same agent
-   builds it and transitions it" hole.
+   Step 0.5 uses. Because the tracker's `Done` follows the merge (step 8), this
+   **hard-gates `Done`** without relying on the agent to self-enforce — closing
+   the "same agent builds it and transitions it" hole.
 
    If the reference wasn't pinnable at Step 0.5, you cannot run this gate — **STOP**
    (Step 0.5 must pin it first).
 
-4. Run `/review` — for UI tickets this pass also carries the **GATE 4 independent
-   parity check** (impl-vs-reference against the pinned SHA) and produces the
-   independent signature, unless a separate reviewer subagent already did.
+4. Run `/review` (or, if unavailable, the fresh-reviewer-subagent fallback from
+   the availability table) — for UI tickets this pass also carries the **GATE 4
+   independent parity check** (impl-vs-reference against the pinned SHA) and
+   produces the independent signature, unless a separate reviewer subagent
+   already did.
    Fix every finding, **except** a finding that contradicts a specific `[D]` or
-   `[ARCH]` rule you can **name by ID**.
+   `[ARCH]` rule you can **name by ID**. (Degraded GATE 3 = no rule IDs loaded =
+   **no skips at all** — fix every finding.)
 
    **Skipping requires a citation.** Format:
 
@@ -415,28 +502,41 @@ and committed to Git as a numbered file.
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
-5. Then run `/coderabbit:code-review`. Fix remaining findings under the same rule:
-   cite an ID or fix it.
+5. Then run `/coderabbit:code-review` — **if installed.** If not, skip this pass
+   entirely (it was declared up front in the availability check); do not
+   substitute a second self-review and present it as the CodeRabbit pass. When
+   it runs, fix remaining findings under the same rule: cite an ID or fix it.
 
-6. Report what changed between the two review passes, list every skipped finding
-   with its rule ID, and state each owned screen's **final GATE 4 grade + who signed
-   it**. A skip with no ID, or a parity grade with no independent signer, is a bug in
-   the report.
+6. Report what changed between the two review passes (or state explicitly that
+   the run was **single-pass** because `/coderabbit:code-review` isn't
+   installed), list every skipped finding with its rule ID, state each owned
+   screen's **final GATE 4 grade + who signed it**, and restate any **degraded
+   gates** from the availability check. A skip with no ID, a parity grade with
+   no independent signer, or an undeclared degradation is a bug in the report.
 
 7. **Docs owe their change (DOC-06):** if the ticket renamed or changed any
    documented behavior (symbol, endpoint, flag, default), grep every docs
    surface (README, docs/, docstrings) for the old name and update it — the
    `docs-accuracy` skill owns the full rule set. Then commit and push
    everything **including `.specs/design-parity/<TICKET>.md` and
-   `.specs/plans/<TICKET>.md`**, open a PR, and report the PR URL.
+   `.specs/plans/<TICKET>.md`**, open a PR **on the repo's actual host** (Azure
+   Repos via the ADO repo tools, or GitHub via `gh` — per the tracker-resolution
+   table's PR column), link the ticket to the PR the same way, and report the
+   PR URL.
 
-8. Transition the Jira ticket to **"Done"** — **only after the GATE 4 CI check is
-   green** — and tell the user the PR is open and ready to merge. (The user merges
-   manually right after; the workflow has no "In Review" state. For UI tickets, the
-   user is also the human approver of any accepted deviation in step 3c.)
+8. Transition the ticket to **Done** — **only after the GATE 4 CI check is
+   green** — using the tracker-resolution table's transition column (Jira: the
+   "Done" workflow transition; ADO: `wit_update_work_item` to the work item
+   type's resolved completed-category state). Then tell the user the PR is open
+   and ready to merge. (The user merges manually right after; the workflow has
+   no "In Review" state. For UI tickets, the user is also the human approver of
+   any accepted deviation in step 3c.)
 
-9. Run `/session-logger`; ensure the log is written to disk before continuing.
+9. Run `/session-logger` (or, if not installed, write the entry yourself to
+   `session-log.md`); ensure the log is written to disk before continuing.
    Record, so the decisions stay auditable after `/compact`:
+   - the run's **availability mode** — which companion skills were missing and
+     which gates ran degraded (or "full mode — all companions installed")
    - the **approved plan's artifact path** (`.specs/plans/<TICKET>.md`), any
      **re-approval round-trips** (material divergences that went back through plan
      mode), and any **divergence between the approved plan and what was actually
@@ -471,7 +571,9 @@ a visual language, don't mark anything complete, don't push past a failure silen
   it as a **human-approved** accepted deviation — do not mark the ticket Done.
 - A GATE 4 artifact would ship **unsigned by an independent reviewer**, or you're
   about to sign your own build's parity grade.
-- Any PR / Jira / review step fails, or the GATE 4 CI check is not green.
+- Any PR / tracker / review step fails, or the GATE 4 CI check is not green.
+- You can't resolve which tracker the argument belongs to, or the ADO
+  completed-category state can't be determined for the work item type.
 - A review finding contradicts an `[NN]` rule.
 - The Verification Pass reports a FAIL you cannot fix.
 - You want to skip a finding, or claim a design deviation, and cannot name the rule
@@ -506,6 +608,9 @@ and an unfixed FAIL is not a shipped ticket.
 ## Success criteria
 
 Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`,
-a passing GATE 3, an independently-signed GATE 4 for every owned UI screen, both
-review passes reconciled with every skip citing a rule ID, a green CI, Jira in
-Done, and a written session log — no self-attested gate anywhere in the chain.
+a passing GATE 3 (full or **declared** degraded), an independently-signed GATE 4
+for every owned UI screen, the review pass(es) reconciled with every skip citing
+a rule ID, a green CI, the ticket in Done (Jira transition or ADO completed
+state), a PR linked to the ticket, and a written session log naming the run's
+availability mode — no self-attested gate and no silent degradation anywhere in
+the chain.
