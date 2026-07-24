@@ -76,9 +76,9 @@ A gate whose engine is missing **degrades loudly, never silently**:
 | `code-quality` (hub) | MODE D guard sweep (GATE 3b) | Sweep the whole diff yourself for the LLM failure modes (mock-success returns, swallowed errors, speculative flags, stray catch-alls, dead code); note the sweep was unassisted. |
 | `test-quality` | TEST-\* guard on the test diff (step 1) | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
 | `docs-accuracy` | DOC-\* rule set (step 7) | The step-7 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `/coderabbit:code-review` | Second review pass (step 5) | **Skip step 5 entirely.** The run becomes single-pass review; step 6's report says so explicitly instead of reporting a between-passes delta. |
+| `/coderabbit:code-review` | Second review pass — CodeRabbit CLI on the local diff (step 5); the PR-side bot is never waited on | **Skip step 5 entirely.** The run becomes single-pass review; step 6's report says so explicitly instead of reporting a between-passes delta. |
 | `/review` | First review pass (step 4) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context** — GATE 4's independence requirement is about *who* reviews, not the command name, so this fallback still produces a valid signature. |
-| `/session-logger` | Step 9 close-out log | Write the session-log entry yourself to `session-log.md` with the same required content. |
+| `/session-logger` | Step 8 close-out log (written before the single push) | Write the session-log entry yourself to `session-log.md` with the same required content. |
 
 What **never** degrades, because it doesn't depend on an installed skill:
 
@@ -151,7 +151,7 @@ A parity check against a *moving* reference passes vacuously. So before building
   reference was committed. Nothing could have diffed it.)
 - **Record the pinned SHA.** Capture `git rev-parse HEAD -- templates/<app>` (or
   the repo HEAD SHA if the reference isn't isolated to a path) as `design_ref`.
-  Write it in **two** places: the session log (Step 9) and the `design_ref:` line
+  Write it in **two** places: the session log (Step 8) and the `design_ref:` line
   of the GATE 4 artifact. GATE 4 diffs against **this SHA**, not "latest" — so the
   result is reproducible and a later reference edit becomes a *detectable* event
   rather than a silent invalidation of a closed screen.
@@ -462,8 +462,9 @@ and committed to Git as a numbered file.
    rejects a UI-scoped PR unless `.specs/design-parity/<TICKET>.md` exists, is
    independently signed, and is PASS. A PR is *UI-scoped* when its diff touches
    `apps/**/*.html`, `*.scss`, or component `*.ts` templates — the same signal
-   Step 0.5 uses. Because the tracker's `Done` follows the merge (step 8), this
-   **hard-gates `Done`** without relying on the agent to self-enforce — closing
+   Step 0.5 uses. Because the tracker's `Done` transition (step 10) follows the
+   green CI, this **hard-gates `Done`** without relying on the agent to
+   self-enforce — closing
    the "same agent builds it and transitions it" hole.
 
    If the reference wasn't pinnable at Step 0.5, you cannot run this gate — **STOP**
@@ -502,10 +503,18 @@ and committed to Git as a numbered file.
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
-5. Then run `/coderabbit:code-review` — **if installed.** If not, skip this pass
-   entirely (it was declared up front in the availability check); do not
-   substitute a second self-review and present it as the CodeRabbit pass. When
-   it runs, fix remaining findings under the same rule: cite an ID or fix it.
+5. Then run `/coderabbit:code-review` on the **local diff** — **if installed.**
+   This CLI pass is the **authoritative CodeRabbit gate**, and it runs here,
+   before the PR exists. If not installed, skip this pass entirely (it was
+   declared up front in the availability check); do not substitute a second
+   self-review and present it as the CodeRabbit pass. When it runs, fix remaining
+   findings under the same rule: cite an ID or fix it.
+
+   **The PR-side CodeRabbit bot is NOT a second gate — never wait on it.** Once
+   the PR is open (step 9), CodeRabbit's GitHub app re-reviews the same diff. Do
+   **not** poll or block the workflow on that report: it is a duplicate of the
+   review you just ran, and polling it re-costs the wait loop on every push. Read
+   it only if it has already posted; treat it as informational, not a gate.
 
 6. Report what changed between the two review passes (or state explicitly that
    the run was **single-pass** because `/coderabbit:code-review` isn't
@@ -517,24 +526,13 @@ and committed to Git as a numbered file.
 7. **Docs owe their change (DOC-06):** if the ticket renamed or changed any
    documented behavior (symbol, endpoint, flag, default), grep every docs
    surface (README, docs/, docstrings) for the old name and update it — the
-   `docs-accuracy` skill owns the full rule set. Then commit and push
-   everything **including `.specs/design-parity/<TICKET>.md` and
-   `.specs/plans/<TICKET>.md`**, open a PR **on the repo's actual host** (Azure
-   Repos via the ADO repo tools, or GitHub via `gh` — per the tracker-resolution
-   table's PR column), link the ticket to the PR the same way, and report the
-   PR URL.
+   `docs-accuracy` skill owns the full rule set.
 
-8. Transition the ticket to **Done** — **only after the GATE 4 CI check is
-   green** — using the tracker-resolution table's transition column (Jira: the
-   "Done" workflow transition; ADO: `wit_update_work_item` to the work item
-   type's resolved completed-category state). Then tell the user the PR is open
-   and ready to merge. (The user merges manually right after; the workflow has
-   no "In Review" state. For UI tickets, the user is also the human approver of
-   any accepted deviation in step 3c.)
-
-9. Run `/session-logger` (or, if not installed, write the entry yourself to
-   `session-log.md`); ensure the log is written to disk before continuing.
-   Record, so the decisions stay auditable after `/compact`:
+8. **Write the session log BEFORE the push** — so it rides the single gated
+   commit, never a second one. Run `/session-logger` (or, if not installed,
+   write the entry yourself to `session-log.md`); ensure it is on disk before the
+   commit. Everything it records is already known here — none of it needs the PR
+   URL or the CI result, so nothing forces a later commit:
    - the run's **availability mode** — which companion skills were missing and
      which gates ran degraded (or "full mode — all companions installed")
    - the **approved plan's artifact path** (`.specs/plans/<TICKET>.md`), any
@@ -551,7 +549,33 @@ and committed to Git as a numbered file.
    or "matches the design", is worthless the moment the context is gone. That is the
    failure this records against.
 
-10. Then instruct the user to run `/compact` (this is a built-in CLI command you
+9. **One commit, one push, one wait.** Commit **everything in a single commit** —
+   the code, `.specs/plans/<TICKET>.md`, `.specs/design-parity/<TICKET>.md`, the
+   step-7 doc updates, and `session-log.md` — and push it **once**. Open a PR **on
+   the repo's actual host** (Azure Repos via the ADO repo tools, or GitHub via
+   `gh` — per the tracker-resolution table's PR column), link the ticket to the PR
+   the same way, and report the PR URL. Then wait **exactly once** for the CI
+   checks — including the GATE 4 CI check — to report.
+
+   **Do not poll or block on the PR-side CodeRabbit bot** (step 5 already gated
+   the diff via the CLI pass; its PR re-review is informational). **Push nothing
+   further unless a gate actually fails and needs a code fix.** A doc-only commit
+   pushed after the gates go green — a stray session-log tweak, a README touch-up
+   — re-triggers the entire CI + CodeRabbit cycle from scratch and makes the
+   wait-for-gates poll run all over again for nothing. That re-trigger is the
+   waste this ordering (session log written in step 8, everything in this one
+   commit) exists to prevent — so the session log and every artifact go in *this*
+   push, not after it.
+
+10. Transition the ticket to **Done** — **only after the GATE 4 CI check is
+    green** — using the tracker-resolution table's transition column (Jira: the
+    "Done" workflow transition; ADO: `wit_update_work_item` to the work item
+    type's resolved completed-category state). Then tell the user the PR is open
+    and ready to merge. (The user merges manually right after; the workflow has
+    no "In Review" state. For UI tickets, the user is also the human approver of
+    any accepted deviation in step 3c.)
+
+11. Then instruct the user to run `/compact` (this is a built-in CLI command you
     cannot invoke yourself — tell the user to run it).
 
 ## Stop-on-failure guard
