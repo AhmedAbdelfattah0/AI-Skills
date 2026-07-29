@@ -90,6 +90,20 @@ summaries only** — each carries a header deferring to the specialist as source
 two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
 hub and specialists route to when a diff touches tests or docs.
 
+**The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
+writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
+and never calls a tracker API; creating the items is a separate explicit step;
+`ship-ticket` then implements one, reading it **from the tracker**. That middle hop
+is the load-bearing detail — `ship-ticket` never sees `tickets/*.md`, so whatever
+the creation step puts in the tracker description is all the implementer gets (MCP
+creation carries the full body, CSV import carries only the condensed row).
+`generate-ticket` also names two ship-ticket concepts on the ticket it writes —
+**Step 0.5** (read + SHA-pin the design source of truth) and **GATE 4** (parity
+diff against that pinned SHA). Both carry a one-sentence fallback gloss in
+`generate-ticket/SKILL.md`, per the cross-skill-reference convention above, so the
+skill still makes sense installed alone. If you rename a gate in `ship-ticket`,
+update those glosses too.
+
 ## Two script-delivery patterns
 
 Most skills are pure `SKILL.md`. Two ship scripts, in different ways — mirror the matching pattern when

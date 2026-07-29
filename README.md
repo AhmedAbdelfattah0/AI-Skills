@@ -29,6 +29,9 @@ npx github:AhmedAbdelfattah0/AI-Skills install
 npx github:AhmedAbdelfattah0/AI-Skills install security
 npx github:AhmedAbdelfattah0/AI-Skills install security researcher spec-driven
 
+# the ticket workflow — write the backlog, then implement it ticket by ticket
+npx github:AhmedAbdelfattah0/AI-Skills install generate-ticket ship-ticket
+
 # install for OTHER AI tools (default is Claude Code) — see "Use with other AI tools"
 npx github:AhmedAbdelfattah0/AI-Skills install --target codex     # OpenAI Codex
 npx github:AhmedAbdelfattah0/AI-Skills install --target gemini    # Gemini CLI
@@ -45,9 +48,10 @@ PowerShell or Command Prompt — `npx` is cross-platform.
 git clone https://github.com/AhmedAbdelfattah0/AI-Skills.git
 cd AI-Skills
 
-node scripts/cli.mjs list                       # list skills
+node scripts/cli.mjs list                        # list skills
 node scripts/cli.mjs install                     # install ALL (symlinked)
 node scripts/cli.mjs install security researcher # install only these
+node scripts/cli.mjs install generate-ticket ship-ticket   # the ticket workflow pair
 node scripts/cli.mjs install --copy              # install ALL as real files (no symlink)
 node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI dirs
 ```
@@ -66,6 +70,7 @@ Same behaviour as Option B, no Node required:
 ```bash
 ./scripts/install.sh                     # all skills, symlinked (Claude Code)
 ./scripts/install.sh security researcher # only these
+./scripts/install.sh generate-ticket ship-ticket   # the ticket workflow pair
 ./scripts/install.sh --copy              # all skills, real files
 ./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
 ./scripts/install.sh --target all        # Claude + Codex + Gemini at once
@@ -114,7 +119,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (17)
+## Skills (18)
 
 | Skill | Extras |
 |---|---|
@@ -124,6 +129,7 @@ Claude-only.
 | code-quality | `references/` (per-stack rule sets) |
 | cost-reducer | — |
 | design-prompts | — |
+| generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
 | researcher | — |
