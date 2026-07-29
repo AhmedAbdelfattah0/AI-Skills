@@ -1,7 +1,11 @@
 ---
 name: ship-ticket
 description: |
-  Implement a Jira or Azure DevOps ticket end-to-end: locked stack + SOLID,
+  Implement a Jira or Azure DevOps ticket end-to-end, on ANY stack — the stack
+  is detected from the repo, never prescribed by this skill, which acts as a
+  delegator: it owns the workflow and routes language/framework judgment to the
+  code-quality family. Angular, React, Vue, Express/Node, Django, Laravel, Go,
+  Rails, Cloudflare Workers, Postgres/Supabase — all supported. Adds SOLID,
   tiered model/cost routing, a mandatory design-source-of-truth read, a
   plan-mode gate (planned in Claude Code plan mode and user-approved before
   implementation; the approved plan is saved to .specs/plans/), a pinned +
@@ -72,7 +76,7 @@ A gate whose engine is missing **degrades loudly, never silently**:
 
 | Companion | Owns | If missing — degraded fallback |
 |---|---|---|
-| `angular-code-quality` / `backend-code-quality` | Design Contract (STEP 0B) + GATE 3a Verification Pass (`NG-*` / `BE-*`) | GATE 3a runs **degraded**: no rule-ID table exists, so instead review every written file against SOLID, the Step 0.5 mechanical rules, and this file's conventions, reporting findings in `file:line` + quoted code + fix shape. The Design Contract degrades to a plain file-list contract derived from the approved plan. **The skip-by-citation protocol collapses to "fix everything"** — with no rule IDs loaded there is nothing to cite, so no review finding may be skipped. |
+| `angular-code-quality` / `backend-code-quality` (whichever the detected stack routes to — see *Stack*) | Design Contract (STEP 0B) + GATE 3a Verification Pass (`NG-*` / `BE-*`) | **First fall back to the `code-quality` hub** if it is installed — it covers any language and still yields a rule-backed pass. Only if *no* family member is present does GATE 3a run **degraded**: no rule-ID table exists, so instead review every written file against SOLID, the Step 0.5 mechanical rules, and this file's conventions, reporting findings in `file:line` + quoted code + fix shape. The Design Contract degrades to a plain file-list contract derived from the approved plan. **The skip-by-citation protocol collapses to "fix everything"** — with no rule IDs loaded there is nothing to cite, so no review finding may be skipped. |
 | `code-quality` (hub) | MODE D guard sweep (GATE 3b) | Sweep the whole diff yourself for the LLM failure modes (mock-success returns, swallowed errors, speculative flags, stray catch-alls, dead code); note the sweep was unassisted. |
 | `test-quality` | TEST-\* guard on the test diff (step 1) | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
 | `docs-accuracy` | DOC-\* rule set (step 7) | The step-7 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
@@ -149,8 +153,9 @@ A parity check against a *moving* reference passes vacuously. So before building
   later, and a screen closed against an uncommitted reference is unverifiable.
   (This is the SCRUM-108 failure: the ticket closed 46 minutes *before* its own
   reference was committed. Nothing could have diffed it.)
-- **Record the pinned SHA.** Capture `git rev-parse HEAD -- templates/<app>` (or
-  the repo HEAD SHA if the reference isn't isolated to a path) as `design_ref`.
+- **Record the pinned SHA.** Capture `git rev-parse HEAD -- <path to the design
+  reference in this repo>` (or the repo HEAD SHA if the reference isn't isolated
+  to a path) as `design_ref`.
   Write it in **two** places: the session log (Step 8) and the `design_ref:` line
   of the GATE 4 artifact. GATE 4 diffs against **this SHA**, not "latest" — so the
   result is reproducible and a later reference edit becomes a *detectable* event
@@ -171,8 +176,10 @@ A parity check against a *moving* reference passes vacuously. So before building
   of style drift, column collisions, and clipped controls.
 - **Zero hardcoded color** outside the token file. All color / spacing / type /
   radius come from tokens. This is lint-enforceable — prefer to enforce it.
-- **Respect the documented conventions** — bilingual/RTL handling, and isolating
-  numbers, IDs, dates, prices, and store numbers LTR inside RTL text.
+- **Respect the documented conventions** — whatever the conventions doc actually
+  says. If the project is bilingual/RTL, that includes RTL mirroring and
+  isolating numbers, IDs, dates, and prices LTR inside RTL text; a single-locale
+  LTR project has no such rule and you should not invent one.
 - **Deficient-reference carve-out.** If a shared design component is itself
   defective (e.g. a paginator that renders every page number with no windowing),
   fixing the component at its source takes precedence over literal fidelity.
@@ -227,8 +234,8 @@ not for the builder.>
 ## 2. Build sequence
 | # | Step (plain words) | Files touched | Depends on |
 |---|---|---|---|
-| 1 | Add the state service for X | features/x/services/x-state.service.ts | — |
-| 2 | Build the X list screen | features/x/pages/x-list.page.ts (+html/scss) | 1 |
+| 1 | Add the state/data layer for X | <real path, in THIS repo's layout> | — |
+| 2 | Build the X list screen | <real path(s), incl. template/style files> | 1 |
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
@@ -255,7 +262,9 @@ Formatting rules that keep it readable:
   sections 1–3 alone, in under a minute. Everything below is for the builder.
 - **Plain words in the "Step" column** — "Build the login form", not
   "Instantiate the auth presentational component per NG-ARCH-03". Rule IDs and
-  MVVM roles belong in the Design Contract, not here.
+  architectural role names belong in the Design Contract, not here.
+- **Real paths from this repo** in the "Files touched" column — derived from the
+  detected stack's actual layout, not from an example in this file.
 - **Tables, not paragraphs**, for sequence and risks — they're scannable and
   they make an empty risks table impossible to fake ("None found" must name
   what was checked).
@@ -269,20 +278,54 @@ divergence (new files, changed approach, new risk) goes back through plan mode
 for re-approval and updates `.specs/plans/<TICKET>.md`; don't silently build
 past the plan the user approved.
 
-## Locked stack
+## Stack — detected, never prescribed
 
-- **Frontend tasks:** Angular + Signals, MVVM, standalone + OnPush,
-  component-scoped SCSS, EN/AR i18n. Follow the `angular-code-quality` skill —
-  it owns the `NG-*` rule set.
-- **Backend tasks:** Hono on Cloudflare Workers, Supabase + RLS, service-layer
-  logic (not in routes). Follow the `backend-code-quality` skill — it owns the
-  `BE-*` rule set.
-- **Full-stack tickets:** one skill, one Design Contract, one Verification Pass
-  covering both sides — never two uncoordinated halves.
-- Always follow `CLAUDE.md`.
-- The ticket itself decides whether it's FE, BE, or both — invoke
-  `angular-code-quality`, `backend-code-quality`, or both accordingly (the
-  "code-quality family"); each routes from its cached profile.
+**This skill is a delegator, not a stack.** It owns the *workflow* — read the
+ticket, pin the design, plan, gate, review, close out — and delegates every
+language- and framework-specific judgment to the code-quality family and to the
+repo itself. It works on Angular + Cloudflare Workers, React + Express, Vue +
+Django, a Go service, a Rails monolith, or anything else. **Do not assume a
+stack, and never rewrite code to match one this skill prefers.**
+
+**Detect before you plan** (cheap, and it decides the routing below):
+
+1. **`CLAUDE.md` first** — if the repo documents its stack, conventions, or
+   commands, that is authoritative and outranks anything inferred.
+2. **Manifests** — `package.json` (and which framework is in `dependencies`),
+   `composer.json`, `requirements.txt` / `pyproject.toml`, `go.mod`, `Cargo.toml`,
+   `*.csproj`, `Gemfile`, `pom.xml`.
+3. **The existing code** — how the current routes/components/services are
+   actually written. **The repo's established pattern wins over any convention
+   in this file or in a quality skill's defaults.** A ticket is not a licence to
+   introduce a second architecture alongside the one already there.
+4. **The commands** — read the real lint/build/test commands from the scripts
+   block, Makefile, or CI config. Never assume a runner (see step 1 of *When
+   implementation is complete*).
+
+If detection is genuinely ambiguous (two frameworks, no manifest, an unfamiliar
+setup), **ask the user once** rather than guessing — a wrong stack assumption
+surfaces as a broken build much later, after a plan was already approved.
+
+**Then route to the right quality specialist:**
+
+| The ticket touches | Invoke | Owns |
+|---|---|---|
+| **Angular** frontend | `angular-code-quality` | `NG-*` rules |
+| **Any other frontend** (React, Vue, Svelte, Next/Nuxt, plain TS…) | `code-quality` (hub) | universal core; its `references/` carry per-stack rule sets |
+| **Any backend**, any language/runtime | `backend-code-quality` | `BE-*` rules — it detects the stack itself |
+| **A stack with no reference file** (Go, Rust, Java, C#…) | `code-quality` (hub) | universal principles applied to that language |
+
+- **Full-stack tickets:** one Design Contract and one Verification Pass covering
+  both sides — never two uncoordinated halves. If that means invoking two
+  specialists, they still produce a single contract and a single GATE 3.
+- **Always follow `CLAUDE.md`** — it outranks this file on any conflict.
+- The ticket itself decides whether it's FE, BE, or both; each specialist routes
+  from its cached profile.
+
+**What stays constant across every stack** — these are the skill's actual
+contract, and none of them depend on a framework: read the ticket (Step 0), pin
+the design reference (Step 0.5), plan and get approval (Step 0.75), SOLID, the
+rule-ID citation protocol, GATE 3, GATE 4, two-pass review, and close-out.
 
 ### Rule IDs and tiers (used throughout this workflow)
 
@@ -306,8 +349,10 @@ Don't conflate the two: passing every `NG-*`/`BE-*` rule does not mean the scree
 the design.
 
 **Invoke the code-quality-family skill now — load it, don't just recall it.**
-Based on the ticket (FE / BE / full-stack), invoke `angular-code-quality`
-and/or `backend-code-quality`. The chosen skill governs this build end to end:
+Based on the ticket (FE / BE / full-stack) **and the detected stack**, invoke the
+member the routing table above selects — `angular-code-quality`,
+`backend-code-quality`, the `code-quality` hub, or a combination. The chosen
+skill governs this build end to end:
 its rules apply to every line, its **Design Contract (STEP 0B)** gates every
 file, and its **Verification Pass is GATE 3** below. Both specialists build on
 the `code-quality` hub's universal core (`ai-failure-modes`,
@@ -325,15 +370,21 @@ the "no file outside the contract" rule still holds.)
 
 ## Apply SOLID throughout
 
-- **Single responsibility:** one reason to change per class/service/component.
-  FE = smart container vs presentational split; BE = route → service → data
-  layer, no business logic in routes.
+These are language-neutral. Express them in whatever the detected stack's idiom
+is — the principle is fixed, the mechanism is the repo's.
+
+- **Single responsibility:** one reason to change per class/service/component/
+  module. FE = container vs presentational split; BE = handler → service → data
+  layer, no business logic in the route/controller. True of Express, Nest, Hono,
+  Django, Laravel, Rails, Go, or anything else.
 - **Open/closed:** extend via new strategies/implementations, not by editing
   working code (e.g. payment gateways, shipping carriers = strategy pattern).
 - **Liskov:** implementations of an interface are truly substitutable.
 - **Interface segregation:** small focused interfaces/inputs, not god objects.
-- **Dependency inversion:** depend on abstractions; inject dependencies
-  (Angular DI / injected services), don't hardcode concretions.
+- **Dependency inversion:** depend on abstractions; inject dependencies rather
+  than hardcoding concretions — via whatever the stack provides (a DI container,
+  constructor injection, a provider/context, a factory, or plain function
+  parameters). No mechanism is required; the *inversion* is.
 
 ## Model / cost routing (when spinning up subagents/workflows)
 
@@ -364,11 +415,18 @@ If the ticket touches auth, multi-tenancy, billing, payments, or any
 cross-tenant isolation, treat it as security-sensitive: do that reasoning on the
 strong model, and prefer a test-first repro (write the failing test that proves
 the correct/secure behavior, then implement). Any DB migration must be additive
-and committed to Git as a numbered file.
+and committed to Git, using **this project's migration tool and naming
+convention** (read the existing `migrations/` directory — Prisma, Drizzle,
+Alembic, Flyway, Rails, Laravel, plain numbered SQL, …). Don't introduce a
+second migration mechanism alongside the one already there.
 
 ## When implementation is complete
 
-1. Run lint, build, and Vitest — fix any failures. **Tests green ≠ tests good:**
+1. Run **the repo's own lint, build, and test commands** — read them from the
+   `package.json` scripts block, Makefile, `composer.json`, `pyproject.toml`,
+   `go.mod` tooling, or the CI config; never assume a runner (Vitest, Jest,
+   pytest, PHPUnit, `go test`, `dotnet test`, `rspec` — whatever this repo
+   actually uses). Fix any failures. **Tests green ≠ tests good:**
    run the `test-quality` guard pass on the test diff before GATE 3 (if
    installed — else the degraded fallback from the availability table) — a
    must-fix TEST violation (TEST-01/02/08: implementation-detail assertions,
@@ -398,9 +456,13 @@ and committed to Git as a numbered file.
    fix must-fix findings here, before review.
 
    For UI tickets the pass includes the mechanical Step 0.5 rules: the screen
-   composes the shared components (`NG-UI-01`), no hardcoded color outside the
-   token file (`NG-UI-02`), bilingual/RTL + numeric LTR-isolation per the
-   conventions doc (`NG-UI-03`). These prove the code follows the design **rules**.
+   **composes the shared components** rather than hand-rolling equivalents,
+   **no hardcoded color/spacing/type outside the token file**, and the
+   conventions doc's rules are honoured (bilingual/RTL handling and numeric
+   LTR-isolation *if the project is bilingual/RTL* — skip if it isn't). On
+   Angular these carry the IDs `NG-UI-01/02/03`; on other stacks cite the
+   equivalent ID from the specialist you invoked, or state the rule in prose if
+   the family isn't installed. These prove the code follows the design **rules**.
    **Structural/visual parity against the reference is NO LONGER self-attested
    here** — it is proven by GATE 4 below. Fix rule drift here; do not ship it to
    review.
@@ -424,7 +486,9 @@ and committed to Git as a numbered file.
    - **Structure** — node-by-node: presence/absence and composition of sections,
      states (empty/loading/error), and components.
    - **Style** — class/declaration: layout, spacing, tokens, color, type, shadow.
-   - **Behavior + i18n/RTL** — interactions, state, EN/AR + RTL correctness.
+   - **Behavior + i18n** — interactions, state, and correctness in **every locale
+     and text direction the project actually ships** (drop this layer entirely if
+     it's single-locale LTR).
 
    Grade each screen: **Faithful** (no Blocker/Major) · **Minor** (token/spacing
    drift only) · **Major** (structural/visual divergence) · **Not-built** (a
@@ -461,8 +525,11 @@ and committed to Git as a numbered file.
    (install it alongside the `nn-guard` CI job — same PR-side, deterministic slot)
    rejects a UI-scoped PR unless `.specs/design-parity/<TICKET>.md` exists, is
    independently signed, and is PASS. A PR is *UI-scoped* when its diff touches
-   `apps/**/*.html`, `*.scss`, or component `*.ts` templates — the same signal
-   Step 0.5 uses. Because the tracker's `Done` transition (step 10) follows the
+   **this repo's view layer** — write the glob from the actual layout, e.g.
+   `**/*.{html,scss,css}` plus component files (`*.component.ts`, `*.tsx`,
+   `*.vue`, `*.svelte`, `*.blade.php`, `templates/**/*.html`, …). Derive it from
+   where the UI really lives; the point is the signal, not a fixed pattern — the
+   same signal Step 0.5 uses. Because the tracker's `Done` transition (step 10) follows the
    green CI, this **hard-gates `Done`** without relying on the agent to
    self-enforce — closing
    the "same agent builds it and transitions it" hole.
@@ -498,8 +565,9 @@ and committed to Git as a numbered file.
    an `[NN]` rule disagree, the reviewer is almost certainly right and you have a
    real problem. **STOP and tell the user** — do not skip, do not "note why".
 
-   A skipped finding is a deviation. Record it in the invoked skill's deviations
-   ledger (`.claude/angular-code-quality/deviations.md` or the backend equivalent).
+   A skipped finding is a deviation. Record it in the deviations ledger of
+   **whichever family member you actually invoked** —
+   `.claude/<invoked-skill>/deviations.md`.
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
@@ -620,8 +688,11 @@ and an unfixed FAIL is not a shipped ticket.
 ## What this skill does not do
 
 - Define the code rules — it **orchestrates** the code-quality family
-  (`angular-code-quality` / `backend-code-quality`); GATE 3 is their Verification
-  Pass.
+  (`angular-code-quality`, `backend-code-quality`, or the `code-quality` hub);
+  GATE 3 is their Verification Pass.
+- **Choose or impose a stack.** The stack is the repo's, detected in *Stack —
+  detected, never prescribed*. This skill never migrates a project toward a
+  framework it prefers, and never assumes one the repo doesn't use.
 - Run the review engines — it invokes `/review`, `/coderabbit:code-review`,
   `test-quality`, and `docs-accuracy`, then reconciles their findings.
 - Invent scope — one ticket, one PR; unbuilt dependencies stop the workflow

@@ -90,6 +90,20 @@ summaries only** — each carries a header deferring to the specialist as source
 two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
 hub and specialists route to when a diff touches tests or docs.
 
+**`ship-ticket` is stack-agnostic by design — keep it that way.** It is a
+**delegator**: it owns the workflow (read ticket → pin design → plan → gate →
+review → close out) and routes every language/framework judgment to the
+code-quality family and to the repo's own conventions. Its *Stack — detected,
+never prescribed* section is the contract; the routing table there sends Angular
+frontends to `angular-code-quality`, any other frontend to the `code-quality`
+hub, and any backend in any language to `backend-code-quality`. When editing it,
+**never reintroduce a named stack as a requirement** — framework names may appear
+only as one example among several, or inside the routing table. Concretely: no
+hardcoded test runner (read the repo's command), no fixed file globs (derive from
+the repo's layout), no assumed i18n/RTL (only if the project ships it), no
+assumed migration tool. It has to work on Express+Postgres and Django and Go, not
+just the project it was first written for.
+
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
 and never calls a tracker API; creating the items is a separate explicit step;
