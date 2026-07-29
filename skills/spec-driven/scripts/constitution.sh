@@ -15,6 +15,14 @@
 # | RTL | [RTL] |
 # ## Principles I–VIII (see script body below)
 
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
+
 PROJECT_NAME="${1}"
 PROJECT_TYPE="${2}"   # ikea | personal
 UI_FRAMEWORK="${3}"   # skapa | tailwind
@@ -22,7 +30,7 @@ SELECTOR_PREFIX="${4}"
 MARKETS="${5}"
 RTL="${6}"            # yes | no
 
-SPEC_DIR=".spec"
+SPEC_DIR="${SPEC_ROOT}"
 OUT="$SPEC_DIR/constitution.md"
 DATE=$(date "+%Y-%m-%d")
 

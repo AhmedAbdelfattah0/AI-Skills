@@ -95,9 +95,11 @@ available, in this order, and only ask for what's genuinely missing:
    makes a good ticket has usually already been said.
 2. **Provided docs.** If the user pointed at a doc, spec, PRD, epic, or design
    file (path or pasted), read it fully before writing. If the project uses the
-   **spec-driven** skill, `.spec/tasks.md` (and `spec.md` / `plan.md` beside it)
-   is an already-decomposed task list — read it before decomposing anything
-   yourself, and reuse its boundaries rather than inventing a second split.
+   **spec-driven** skill, its `features/<name>/tasks.md` (and `spec.md` /
+   `plan.md` beside it) is an already-decomposed task list — read it before
+   decomposing anything yourself, and reuse its boundaries rather than inventing
+   a second split. It lives under the project's **spec root**: `.specs/` by
+   convention, or `.spec/` in projects created before that — check both.
 3. **The repo.** If a repo is available and the ticket is about code, verify the
    things that make tickets wrong when assumed: real file paths, whether a
    referenced component/table/endpoint actually exists, the design-token file

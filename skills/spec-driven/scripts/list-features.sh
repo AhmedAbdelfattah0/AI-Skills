@@ -3,7 +3,15 @@
 # Usage: list-features.sh
 # Prints available feature directories with their current status
 
-FEATURES_DIR=".spec/features"
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
+
+FEATURES_DIR="${SPEC_ROOT}/features"
 
 if [ ! -d "$FEATURES_DIR" ]; then
   echo "NO_FEATURES"

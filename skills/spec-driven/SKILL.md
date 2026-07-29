@@ -76,7 +76,20 @@ bash .claude/skills/spec-driven/scripts/constitution.sh \
 ```
 
 ✋ **STOP. Do not proceed to /spec.specify automatically.**
-Confirm to user: "✅ Constitution written to .spec/constitution.md — run /spec.specify when ready."
+Confirm to user: "✅ Constitution written to `<SPEC_ROOT>`/constitution.md — run /spec.specify when ready."
+(Report the path the script actually used — see *Spec root* below.)
+
+### Spec root — `.specs/`, with `.spec/` honoured
+
+Artifacts live under **`.specs/`**, the library-wide convention shared with
+`ship-ticket` (`.specs/plans/`, `.specs/design-parity/`) and `security-audit`
+(`.specs/security-audit/`). One home, not two directories a single character
+apart.
+
+The bundled scripts resolve it: **an existing `.spec/` wins**, so a project
+created before this convention keeps working untouched and is never silently
+split across both. New projects get `.specs/`. When you report a path to the
+user, report the one the script used — don't assume either.
 
 ---
 

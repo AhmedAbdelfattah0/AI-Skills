@@ -90,6 +90,15 @@ summaries only** — each carries a header deferring to the specialist as source
 two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
 hub and specialists route to when a diff touches tests or docs.
 
+**Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
+library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`),
+`security-audit` (`.specs/security-audit/`), and `spec-driven`
+(`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
+used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
+existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
+working while new ones converge. **Never introduce a third root**, and when
+adding a skill that writes artifacts, put them under `.specs/<skill-name>/`.
+
 **`ship-ticket` is stack-agnostic by design — keep it that way.** It is a
 **delegator**: it owns the workflow (read ticket → pin design → plan → gate →
 review → close out) and routes every language/framework judgment to the
