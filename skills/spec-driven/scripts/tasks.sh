@@ -20,6 +20,14 @@
 # TEMPLATE (fallback if script not found):
 # Write tasks.md directly using the format above
 
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
+
 FEATURE_DIR="${1}"
 VIOLATIONS="${2}"
 
@@ -41,7 +49,7 @@ if [ ! -f "$TMP" ]; then
 fi
 
 FEATURE_NAME=$(basename "$FEATURE_DIR")
-PROJECT_TYPE=$(grep "^\*\*Project Type\*\*" .spec/constitution.md 2>/dev/null | sed 's/.*| //')
+PROJECT_TYPE=$(grep "^\*\*Project Type\*\*" "${SPEC_ROOT}/constitution.md" 2>/dev/null | sed 's/.*| //')
 
 # Violation block
 if [ -z "$VIOLATIONS" ] || [ "$VIOLATIONS" = "none" ]; then

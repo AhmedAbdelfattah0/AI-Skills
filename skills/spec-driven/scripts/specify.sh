@@ -15,16 +15,24 @@
 # <open questions list>
 #
 # TEMPLATE (fallback if script not found):
-# Write .spec/features/NNN-name/spec.md directly using sections above
+# Write .specs/features/NNN-name/spec.md (or .spec/ if the project already uses it) directly using sections above
+
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
 
 FEATURE_NAME="${1}"
 DATE=$(date "+%Y-%m-%d")
-FEATURES_DIR=".spec/features"
+FEATURES_DIR="${SPEC_ROOT}/features"
 TMP=".claude/skills/spec-driven/scripts/.specify.tmp"
 
 # Guard: constitution must exist
-if [ ! -f ".spec/constitution.md" ]; then
-  echo "❌ .spec/constitution.md not found. Run /spec.constitution first."
+if [ ! -f "${SPEC_ROOT}/constitution.md" ]; then
+  echo "❌ ${SPEC_ROOT}/constitution.md not found. Run /spec.constitution first."
   exit 1
 fi
 

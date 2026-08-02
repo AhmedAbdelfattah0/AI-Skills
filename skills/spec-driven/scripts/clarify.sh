@@ -5,7 +5,15 @@
 #   --write "<FEATURE_DIR>" "<API>" "<UX>" "<STATE>" "<RTL>" "<PERF>"  → writes clarify.md
 #
 # TEMPLATE (fallback):
-# .spec/features/NNN-name/clarify.md with Q&A grouped by domain
+# .specs/features/NNN-name/clarify.md (or .spec/ if the project already uses it) with Q&A grouped by domain
+
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
 
 MODE="${1}"
 FEATURE_DIR="${2}"
@@ -19,7 +27,7 @@ if [ "$MODE" = "--read" ]; then
   echo "=== SPEC ==="
   cat "$FEATURE_DIR/spec.md"
   echo "=== CONSTITUTION ==="
-  cat ".spec/constitution.md"
+  cat "${SPEC_ROOT}/constitution.md"
   exit 0
 fi
 
@@ -34,7 +42,7 @@ if [ "$MODE" = "--write" ]; then
 
   # Check if RTL section needed
   RTL_SECTION=""
-  RTL=$(grep "^\*\*RTL\*\*" .spec/constitution.md 2>/dev/null | sed 's/.*| //')
+  RTL=$(grep "^\*\*RTL\*\*" "${SPEC_ROOT}/constitution.md" 2>/dev/null | sed 's/.*| //')
   if [ "$RTL" = "yes" ]; then
     RTL_SECTION="
 ## Domain: RTL & i18n

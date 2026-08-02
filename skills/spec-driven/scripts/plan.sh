@@ -28,6 +28,14 @@
 #
 # TEMPLATE (fallback): write plan.md directly using sections above
 
+# --- spec root -------------------------------------------------------------
+# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# use it). A project that already has the legacy `.spec/` keeps using it, so
+# existing repos are never orphaned by the rename.
+SPEC_ROOT=".specs"
+if [ -d ".spec" ]; then SPEC_ROOT=".spec"; fi   # safe under `set -e`
+# ---------------------------------------------------------------------------
+
 FEATURE_DIR="${1}"
 DATE=$(date "+%Y-%m-%d")
 OUT="$FEATURE_DIR/plan.md"
@@ -46,8 +54,8 @@ if [ ! -f "$TMP" ]; then
   exit 1
 fi
 
-PROJECT_TYPE=$(grep "^\*\*Project Type\*\*" .spec/constitution.md 2>/dev/null | sed 's/.*| //')
-UI_FRAMEWORK=$(grep "^\*\*UI Framework\*\*" .spec/constitution.md 2>/dev/null | sed 's/.*| //')
+PROJECT_TYPE=$(grep "^\*\*Project Type\*\*" "${SPEC_ROOT}/constitution.md" 2>/dev/null | sed 's/.*| //')
+UI_FRAMEWORK=$(grep "^\*\*UI Framework\*\*" "${SPEC_ROOT}/constitution.md" 2>/dev/null | sed 's/.*| //')
 
 # Parse sections
 parse_section() {
