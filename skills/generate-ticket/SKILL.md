@@ -45,7 +45,7 @@ it isn't on the ticket, the ticket is incomplete.
 | `references/csv-format.md` | Before writing the CSV — per-tracker columns and escaping. | Jira: `Summary,Issue Type,Priority,Labels…,Epic Link,Description` (one repeated `Labels` column per label). AZ: `ID,Work Item Type,Title,Priority,Tags,Description,Acceptance Criteria` (`ID` empty for new items). |
 | `references/example-tickets-import.csv` | Alongside `csv-format.md` — a real two-row Jira example with correct quoting. | Quote every field; `""` escapes a literal quote. |
 
-Two terms below come from the **ship-ticket** skill, which consumes this output.
+Three terms below come from the **ship-ticket** skill, which consumes this output.
 They are stated on the ticket so the implementer knows the gate exists; if
 ship-ticket is not installed they are still meaningful instructions:
 
@@ -54,6 +54,10 @@ ship-ticket is not installed they are still meaningful instructions:
   stalls there.
 - **GATE 4** — the return leg: the built screen is diffed against that pinned SHA
   by an independent reviewer before the ticket can close.
+- **GATE 5** — any change crossing a trust boundary (endpoint, auth path, query
+  taking external input, rendering sink, upload, client storage, security config)
+  is attacked at runtime on a local instance, and the abuse cases are committed
+  as tests before the ticket can close.
 
 ## What this skill produces (always)
 
@@ -216,13 +220,18 @@ in order:
 7. **Invariants & security** — single-writer rules, tenant-scoping/RLS,
    fail-closed secrets, server-side validation, idempotency, audit. Anything that,
    if violated, is a correctness or security bug. Flag security-sensitive tickets
-   so ship-ticket routes them to its strong model.
+   so ship-ticket routes them to its strong model **and runs GATE 5 strict**.
+   If the ticket crosses a trust boundary, name the **abuse cases** it must
+   survive in the implementer's own words — "user B must not read user A's
+   invoice", "`role` submitted in the body must be ignored" — so GATE 5 has
+   concrete targets instead of only its generic rule set.
 8. **Out of scope** — what this ticket deliberately does NOT do, with the ticket
    key that owns it. Prevents scope creep and phantom deferrals.
 9. **Acceptance criteria** — a checklist a *reviewer* can verify, not vibes. Each
    line is objectively checkable. Cover the happy path, the invariants, the edge
    cases, i18n/RTL if UI, and build/lint/test green. If UI: "GATE 4 parity passed
-   against pinned SHA per template/screen."
+   against pinned SHA per template/screen." If it crosses a trust boundary:
+   "GATE 5 passed — abuse tests committed for every named abuse case."
 10. **Recon required** — every `[TODO-VERIFY]` collected: the assumption + the
     command or file to check it against. Empty section is fine (and good) when
     everything was verified.

@@ -90,9 +90,29 @@ summaries only** — each carries a header deferring to the specialist as source
 two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
 hub and specialists route to when a diff touches tests or docs.
 
+**The four security skills, and the one line that separates them.** Three of them
+**read code**; only `vapt` **runs it**. Keep that boundary — it is the entire
+reason `vapt` exists as a separate skill rather than a section of one of the
+others:
+
+| Skill | When | Method |
+|---|---|---|
+| `security` | while writing | secure-by-default patterns, refuse-to-generate list |
+| `backend-code-quality` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, ship-ticket GATE 3 | static rule IDs — *the control exists in the file* |
+| `security-audit` (`.specs/security-audit/`) | whole codebase, on request | wave-based static reading, spec-tracked findings |
+| `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`) | after the code is written, ship-ticket GATE 5 | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
+
+`vapt` is scoped by **trust boundaries, not files** (a pure formatter has no
+adversary), its output is **committed tests rather than a report** (so CI, not an
+agent's summary, is what blocks the merge), and it runs in two modes: GATE (the
+diff) and AUDIT (backfill over already-shipped code in the base branch). Its
+`VAPT-*` rules deliberately mirror `BE-SEC-*` one-for-one — the static rule
+asserts, the runtime rule proves. **Never point it at production or shared
+staging**; that rule of engagement is load-bearing, not boilerplate.
+
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
-library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`),
-`security-audit` (`.specs/security-audit/`), and `spec-driven`
+library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
+(`.specs/vapt/`), `security-audit` (`.specs/security-audit/`), and `spec-driven`
 (`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects

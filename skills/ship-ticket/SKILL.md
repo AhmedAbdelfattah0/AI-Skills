@@ -9,11 +9,12 @@ description: |
   tiered model/cost routing, a mandatory design-source-of-truth read, a
   plan-mode gate (planned in Claude Code plan mode and user-approved before
   implementation; the approved plan is saved to .specs/plans/), a pinned +
-  independently-verified + CI-enforced design-parity gate, the two-pass review
-  flow, and full close-out (PR + ticket Done + session log + compact). Companion
-  gates (code-quality family, test-quality, docs-accuracy, CodeRabbit) degrade
-  loudly when not installed — declared, never silently skipped. Takes one
-  argument: the ticket key, work item ID, or URL.
+  independently-verified + CI-enforced design-parity gate, an adversarial VAPT
+  gate that commits abuse tests for every trust boundary the change introduces,
+  the two-pass review flow, and full close-out (PR + ticket Done + session log +
+  compact). Companion gates (code-quality family, test-quality, vapt,
+  docs-accuracy, CodeRabbit) degrade loudly when not installed — declared, never
+  silently skipped. Takes one argument: the ticket key, work item ID, or URL.
 
   Trigger when the user:
   - types /ship-ticket or /ship.ticket
@@ -78,11 +79,12 @@ A gate whose engine is missing **degrades loudly, never silently**:
 |---|---|---|
 | `angular-code-quality` / `backend-code-quality` (whichever the detected stack routes to — see *Stack*) | Design Contract (STEP 0B) + GATE 3a Verification Pass (`NG-*` / `BE-*`) | **First fall back to the `code-quality` hub** if it is installed — it covers any language and still yields a rule-backed pass. Only if *no* family member is present does GATE 3a run **degraded**: no rule-ID table exists, so instead review every written file against SOLID, the Step 5 mechanical rules, and this file's conventions, reporting findings in `file:line` + quoted code + fix shape. The Design Contract degrades to a plain file-list contract derived from the approved plan. **The skip-by-citation protocol collapses to "fix everything"** — with no rule IDs loaded there is nothing to cite, so no review finding may be skipped. |
 | `code-quality` (hub) | MODE D guard sweep (GATE 3b) | Sweep the whole diff yourself for the LLM failure modes (mock-success returns, swallowed errors, speculative flags, stray catch-alls, dead code); note the sweep was unassisted. |
-| `test-quality` | TEST-\* guard on the test diff (step 9) | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
-| `docs-accuracy` | DOC-\* rule set (step 15) | The step-15 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `/coderabbit:code-review` | Second review pass — CodeRabbit CLI on the local diff (step 13); the PR-side bot is never waited on | **Skip step 13 entirely.** The run becomes single-pass review; step 14's report says so explicitly instead of reporting a between-passes delta. |
-| `/review` | First review pass (step 12) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context** — GATE 4's independence requirement is about *who* reviews, not the command name, so this fallback still produces a valid signature. |
-| `/session-logger` | Step 16 close-out log (written before the single push) | Write the session-log entry yourself to `session-log.md` with the same required content. |
+| `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance: for each changed handler / auth path / rendering sink, commit at least a cross-principal authorization test (`VAPT-API-01`), an unauthenticated-access test (`VAPT-API-02`), and a response-leakage check (`VAPT-API-06`/`07`) in the repo's own runner. Declare that the wider rule set — mass assignment, injection, XSS, CORS, cookie flags, headers — went untested. |
+| `test-quality` | TEST-\* guard on the test diff (step 9) **and on the GATE 5 abuse tests (step 12)** | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
+| `docs-accuracy` | DOC-\* rule set (step 16) | The step-16 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
+| `/coderabbit:code-review` | Second review pass — CodeRabbit CLI on the local diff (step 14); the PR-side bot is never waited on | **Skip step 14 entirely.** The run becomes single-pass review; step 15's report says so explicitly instead of reporting a between-passes delta. |
+| `/review` | First review pass (step 13) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context** — GATE 4's independence requirement is about *who* reviews, not the command name, so this fallback still produces a valid signature. |
+| `/session-logger` | Step 17 close-out log (written before the single push) | Write the session-log entry yourself to `session-log.md` with the same required content. |
 
 What **never** degrades, because it doesn't depend on an installed skill:
 
@@ -93,13 +95,17 @@ What **never** degrades, because it doesn't depend on an installed skill:
 - **Step 6 plan-mode gate** — plan approval is a user action, not a skill.
 - **GATE 4** (UI tickets) — the pin, the committed artifact, the independent
   signature, and the human-approved deviation record are all workflow-native.
+- **GATE 5's existence** — the `vapt` skill owns the rule set, but "a change that
+  crosses a trust boundary gets attacked at runtime before it ships" is a
+  workflow rule. Without the skill the gate runs reduced (see the table), never
+  zero.
 - **Stop-on-failure** — a missing companion is a *degradation to declare*, not
   a stop; a degradation you did **not** declare is itself a stop-on-failure
   violation.
 
 **Declare the mode in three places:** once up front when detected ("running
 degraded: `backend-code-quality` and `/coderabbit:code-review` not installed"),
-in the step-14 report, and in the step-16 session log. A run that silently
+in the step-15 report, and in the step-17 session log. A run that silently
 skipped a gate is indistinguishable from a run that failed it.
 
 ## Step 3 — read the ticket first (hard gate)
@@ -194,7 +200,7 @@ A parity check against a *moving* reference passes vacuously. So before building
 - **Record the pinned SHA.** Capture `git rev-parse HEAD -- <path to the design
   reference in this repo>` (or the repo HEAD SHA if the reference isn't isolated
   to a path) as `design_ref`.
-  Write it in **two** places: the session log (step 16) and the `design_ref:` line
+  Write it in **two** places: the session log (step 17) and the `design_ref:` line
   of the GATE 4 artifact. GATE 4 diffs against **this SHA**, not "latest" — so the
   result is reproducible and a later reference edit becomes a *detectable* event
   rather than a silent invalidation of a closed screen.
@@ -412,7 +418,8 @@ surfaces as a broken build much later, after a plan was already approved.
 **What stays constant across every stack** — these are the skill's actual
 contract, and none of them depend on a framework: read the ticket (Step 3), pin
 the design reference (Step 5), plan and get approval (Step 6), SOLID, the
-rule-ID citation protocol, GATE 3, GATE 4, two-pass review, and close-out.
+rule-ID citation protocol, GATE 3, GATE 4, GATE 5, two-pass review, and
+close-out.
 
 ### Rule IDs and tiers (used throughout this workflow)
 
@@ -504,7 +511,8 @@ carries an explicit security-sensitive marker (`generate-ticket` writes one in i
 absence proves nothing — so also apply your own test: if the ticket touches auth,
 multi-tenancy, billing, payments, secrets, or any cross-tenant isolation, it is
 security-sensitive whether or not anyone labelled it. Record the determination in
-the plan's `security-sensitive:` field either way.
+the plan's `security-sensitive:` field either way — **that field is what sets
+GATE 5 to strict**, so getting it wrong silently downgrades the security gate.
 
 When it is: do that reasoning on the strong model, and prefer a test-first repro
 (write the failing test that proves the correct/secure behavior, then implement). Any DB migration must be additive
@@ -513,7 +521,7 @@ convention** (read the existing `migrations/` directory — Prisma, Drizzle,
 Alembic, Flyway, Rails, Laravel, plain numbered SQL, …). Don't introduce a
 second migration mechanism alongside the one already there.
 
-## Steps 9–19 — verify, gate, review, close out
+## Steps 9–20 — verify, gate, review, close out
 
 9. Run **the repo's own lint, build, and test commands** — read them from the
    `package.json` scripts block, Makefile, `composer.json`, `pyproject.toml`,
@@ -590,7 +598,7 @@ second migration mechanism alongside the one already there.
 
    **b. The builder's grade is a DRAFT — an INDEPENDENT reviewer signs it.** Spin
    up a parity-reviewer that has **no build context for this screen** — a fresh
-   subagent, or `/review` (step 12) extended to diff impl-vs-reference — to re-run /
+   subagent, or `/review` (step 13) extended to diff impl-vs-reference — to re-run /
    adversarially spot-check the diff against the **pinned** reference and **sign
    the grade in the artifact**. Only the independent signature counts. *The builder
    never signs their own parity grade* — a self-graded artifact just relocates the
@@ -622,14 +630,73 @@ second migration mechanism alongside the one already there.
    `**/*.{html,scss,css}` plus component files (`*.component.ts`, `*.tsx`,
    `*.vue`, `*.svelte`, `*.blade.php`, `templates/**/*.html`, …). Derive it from
    where the UI really lives; the point is the signal, not a fixed pattern — the
-   same signal Step 5 uses. Because the tracker's `Done` transition (step 18)
+   same signal Step 5 uses. Because the tracker's `Done` transition (step 19)
    follows the green CI, this **hard-gates `Done`** without relying on the agent
    to self-enforce — closing the "same agent builds it and transitions it" hole.
 
    If the reference wasn't pinnable at Step 5, you cannot run this gate — **STOP**
    (Step 5 must pin it first).
 
-12. Run `/review` (or, if unavailable, the fresh-reviewer-subagent fallback from
+12. **GATE 5 — Adversarial Security Testing (any diff touching a trust boundary;
+   hard gate, CI-enforced).** GATE 3 proved the security controls *exist in the
+   code*. This proves they *engage at runtime* — the two are not the same claim,
+   and only the second one survives a middleware registered in the wrong order or
+   a guard whose route matcher misses the new path. Invoke the `vapt` skill (or
+   the degraded fallback from the availability table).
+
+   **Scope — trust boundaries, not files.** It fires when the diff introduces or
+   changes a request handler, an auth/session path, a query taking external
+   input, a sink rendering values it didn't author, an upload or path handler,
+   client-side storage, an outbound call carrying credentials, a queue consumer,
+   or security config (CORS, headers, cookie options, secrets). Skip **only** when
+   the diff touches none of those — and name every changed file you excluded and
+   why. "Test every changed file" is unbounded and turns into rubber-stamping; an
+   unexplained exclusion is the hole this scoping rule closes.
+
+   **a. Attack a local, disposable instance — never production, never shared
+   staging**, no matter who owns it. If the only reachable environment is shared,
+   ✋ STOP and ask. If the app cannot be run locally at all, STOP — there is no
+   runtime evidence to be had, and the gate would be theater.
+
+   **b. The output is committed tests, not a report.** Each abuse case becomes a
+   test in **this repo's own runners** (detected the same way as step 9, never
+   assumed), named for the rule it defends (`VAPT-API-01: user B cannot read user
+   A's invoice`) and asserting the *refusal* rather than the guard's internals.
+   They ride the step-18 commit with everything else and keep running in CI long
+   after the ticket closes. Run the `test-quality` guard over them — abuse tests
+   are test code and get no exemption from `TEST-*`.
+
+   **c. Strict vs light.** **Strict** — the full `VAPT-API-*` / `VAPT-WEB-*` /
+   `VAPT-CFG-*` set plus an **independent signature** — when the plan's
+   `security-sensitive:` field is true. **Light** otherwise: the classes that ship
+   silently in ordinary CRUD work (cross-principal authz, unauthenticated access,
+   excessive data exposure, error leakage, XSS, client-stored credentials, cookie
+   flags).
+
+   **d. Fix in production code, then re-run.** An `[NN]` finding is fixed, never
+   cited away — only an explicit recorded user waiver clears one. A fix that
+   changes production code **re-runs step 9 and the GATE 3 rules for the files it
+   touched**. Loosening or deleting the test is not a fix.
+
+   **e. Missing principals degrade loudly.** Authorization classes need
+   anonymous + two cross-tenant users (+ roles, if the system has them). If the
+   project cannot produce those fixtures, `VAPT-API-01/02/03` and `VAPT-WEB-02`
+   are declared **DEGRADED by ID** — they do not silently pass.
+
+   **PASS** ⇔ every in-scope surface carries a green committed test for every
+   applicable rule · zero unfixed `[NN]` findings · every excluded changed file
+   and every degraded rule **named** in `.specs/vapt/<TICKET>.md` · plus the
+   independent signature in strict mode.
+   **FAIL** ⇔ otherwise — including a rule marked PASS with no test behind it.
+
+   **Enforcement is machine, not honor-system.** The abuse tests run in the
+   repo's existing test job; alongside them, a merge-blocking CI check (same
+   PR-side slot as `nn-guard` and the GATE 4 check) rejects a
+   trust-boundary-touching PR unless `.specs/vapt/<TICKET>.md` exists and is
+   PASS. Because the `Done` transition (step 19) follows the green CI, this
+   hard-gates `Done` without relying on the agent to self-enforce.
+
+13. Run `/review` (or, if unavailable, the fresh-reviewer-subagent fallback from
    the availability table) — for UI tickets this pass also carries the **GATE 4
    independent parity check** (impl-vs-reference against the pinned SHA) and
    produces the independent signature, unless a separate reviewer subagent
@@ -663,7 +730,7 @@ second migration mechanism alongside the one already there.
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
-13. Then run `/coderabbit:code-review` on the **local diff** — **if installed.**
+14. Then run `/coderabbit:code-review` on the **local diff** — **if installed.**
    This CLI pass is the **authoritative CodeRabbit gate**, and it runs here,
    before the PR exists. If not installed, skip this pass entirely (it was
    declared up front in the availability check); do not substitute a second
@@ -671,24 +738,27 @@ second migration mechanism alongside the one already there.
    findings under the same rule: cite an ID or fix it.
 
    **The PR-side CodeRabbit bot is NOT a second gate — never wait on it.** Once
-   the PR is open (step 17), CodeRabbit's GitHub app re-reviews the same diff. Do
+   the PR is open (step 18), CodeRabbit's GitHub app re-reviews the same diff. Do
    **not** poll or block the workflow on that report: it is a duplicate of the
    review you just ran, and polling it re-costs the wait loop on every push. Read
    it only if it has already posted; treat it as informational, not a gate.
 
-14. Report what changed between the two review passes (or state explicitly that
+15. Report what changed between the two review passes (or state explicitly that
    the run was **single-pass** because `/coderabbit:code-review` isn't
    installed), list every skipped finding with its rule ID, state each owned
-   screen's **final GATE 4 grade + who signed it**, and restate any **degraded
-   gates** from the availability check. A skip with no ID, a parity grade with
-   no independent signer, or an undeclared degradation is a bug in the report.
+   screen's **final GATE 4 grade + who signed it**, state **GATE 5's verdict —
+   the surfaces attacked, the abuse tests committed, and every rule declared
+   degraded by ID** — and restate any **degraded gates** from the availability
+   check. A skip with no ID, a parity grade with no independent signer, a VAPT
+   rule marked PASS with no test behind it, or an undeclared degradation is a bug
+   in the report.
 
-15. **Docs owe their change (DOC-06):** if the ticket renamed or changed any
+16. **Docs owe their change (DOC-06):** if the ticket renamed or changed any
    documented behavior (symbol, endpoint, flag, default), grep every docs
    surface (README, docs/, docstrings) for the old name and update it — the
    `docs-accuracy` skill owns the full rule set.
 
-16. **Write the session log BEFORE the push** — so it rides the single gated
+17. **Write the session log BEFORE the push** — so it rides the single gated
    commit, never a second one. Run `/session-logger` (or, if not installed,
    write the entry yourself to `session-log.md`); ensure it is on disk before the
    commit. Everything it records is already known here — none of it needs the PR
@@ -701,6 +771,9 @@ second migration mechanism alongside the one already there.
      built** — a silent divergence is the failure this records against
    - which design files were read in Step 5 **and the pinned `design_ref` SHA**
    - the **GATE 4 per-screen grade(s), the independent signer, and the artifact path**
+   - the **GATE 5 verdict**: the surfaces attacked, the target it ran against,
+     the abuse tests committed (by path), and every rule declared **degraded by
+     ID** — plus every changed file excluded from scope and why
    - every **human-approved design deviation** (decision + approver + date) and the
      coming-soon → follow-up-ticket map
    - every skipped review finding **with its rule ID**
@@ -709,33 +782,34 @@ second migration mechanism alongside the one already there.
    or "matches the design", is worthless the moment the context is gone. That is the
    failure this records against.
 
-17. **One commit, one push, one wait.** Commit **everything in a single commit** —
-   the code, `.specs/plans/<TICKET>.md`, `.specs/design-parity/<TICKET>.md`, the
-   step-15 doc updates, and `session-log.md` — and push it **once**. Open a PR **on
+18. **One commit, one push, one wait.** Commit **everything in a single commit** —
+   the code, `.specs/plans/<TICKET>.md`, `.specs/design-parity/<TICKET>.md`,
+   `.specs/vapt/<TICKET>.md` **and the abuse tests it produced**, the step-16 doc
+   updates, and `session-log.md` — and push it **once**. Open a PR **on
    the repo's actual host** (Azure Repos via the ADO repo tools, or GitHub via
    `gh` — per the tracker-resolution table's PR column), link the ticket to the PR
    the same way, and report the PR URL. Then wait **exactly once** for the CI
    checks — including the GATE 4 CI check — to report.
 
-   **Do not poll or block on the PR-side CodeRabbit bot** (step 13 already gated
+   **Do not poll or block on the PR-side CodeRabbit bot** (step 14 already gated
    the diff via the CLI pass; its PR re-review is informational). **Push nothing
    further unless a gate actually fails and needs a code fix.** A doc-only commit
    pushed after the gates go green — a stray session-log tweak, a README touch-up
    — re-triggers the entire CI + CodeRabbit cycle from scratch and makes the
    wait-for-gates poll run all over again for nothing. That re-trigger is the
-   waste this ordering (session log written in step 16, everything in this one
+   waste this ordering (session log written in step 17, everything in this one
    commit) exists to prevent — so the session log and every artifact go in *this*
    push, not after it.
 
-18. Transition the ticket to **Done** — **only after the GATE 4 CI check is
-    green** — using the tracker-resolution table's transition column (Jira: the
+19. Transition the ticket to **Done** — **only after the GATE 4 and GATE 5 CI
+    checks are green** — using the tracker-resolution table's transition column (Jira: the
     "Done" workflow transition; ADO: `wit_update_work_item` to the work item
     type's resolved completed-category state). Then tell the user the PR is open
     and ready to merge. (The user merges manually right after; the workflow has
     no "In Review" state. For UI tickets, the user is also the human approver of
     any accepted deviation in step 11c.)
 
-19. Then instruct the user to run `/compact` (this is a built-in CLI command you
+20. Then instruct the user to run `/compact` (this is a built-in CLI command you
     cannot invoke yourself — tell the user to run it).
 
 ## Stop-on-failure guard
@@ -765,7 +839,14 @@ a visual language, don't mark anything complete, don't push past a failure silen
   it as a **human-approved** accepted deviation — do not mark the ticket Done.
 - A GATE 4 artifact would ship **unsigned by an independent reviewer**, or you're
   about to sign your own build's parity grade.
-- Any PR / tracker / review step fails, or the GATE 4 CI check is not green.
+- **GATE 5 has no local instance to attack** — the app can't be run, or the only
+  reachable environment is production or shared staging. Never point abuse tests
+  at infrastructure this ticket doesn't own.
+- **A GATE 5 `[NN]` finding can't be fixed inside the ticket's scope** (it's
+  architectural), or a fix would require changing auth, tenancy, or billing
+  architecture — that's a decision, not a patch.
+- Any PR / tracker / review step fails, or the GATE 4 or GATE 5 CI check is not
+  green.
 - You can't resolve which tracker the argument belongs to, or the ADO
   completed-category state can't be determined for the work item type.
 - A review finding contradicts an `[NN]` rule.
@@ -787,12 +868,13 @@ need the state to decide.
 - **Do not revert, reset, stash, or delete the branch.** Whatever is written stays
   written. Destroying half-finished work to "leave things clean" throws away the
   expensive part and is not yours to decide.
-- **Commit nothing to close it out.** The single-gated-commit rule (step 17) still
+- **Commit nothing to close it out.** The single-gated-commit rule (step 18) still
   holds; a stopped run has not passed its gates. Leave the work in the tree or in
   WIP commits on the ticket branch — say which.
 - **Report the state precisely:** the branch name, which step you stopped at, what
   is written vs. still missing, which artifacts exist (`.specs/plans/<TICKET>.md`,
-  `.specs/design-parity/<TICKET>.md`), and the single concrete thing needed to
+  `.specs/design-parity/<TICKET>.md`, `.specs/vapt/<TICKET>.md`), and the single
+  concrete thing needed to
   continue. "It failed" is not a state report.
 - **Say what is NOT done**, explicitly — the ticket is not transitioned, the PR is
   not open, the gates did not pass. A stop that reads like a completion is worse
@@ -809,6 +891,9 @@ not blindly restart:
 - **A ticket branch exists** → use it (Step 7.4), rebased.
 - **`.specs/design-parity/<TICKET>.md` exists** → GATE 4 ran; check its grade and
   signature rather than regenerating it.
+- **`.specs/vapt/<TICKET>.md` exists** → GATE 5 ran; read its verdict and its
+  committed-test paths, and re-run those tests rather than re-deriving the whole
+  surface inventory. Only re-attack surfaces the resumed work actually changed.
 - **The pinned `design_ref`** is in the plan artifact and the session log — reuse
   that SHA, do not re-pin to a newer HEAD. Re-pinning silently changes what the
   screen is being verified against, which is the exact failure Step 5 exists to
@@ -835,7 +920,9 @@ not blindly restart:
   detected, never prescribed*. This skill never migrates a project toward a
   framework it prefers, and never assumes one the repo doesn't use.
 - Run the review engines — it invokes `/review`, `/coderabbit:code-review`,
-  `test-quality`, and `docs-accuracy`, then reconciles their findings.
+  `test-quality`, `vapt`, and `docs-accuracy`, then reconciles their findings.
+- **Define the attack classes** — `vapt` owns the `VAPT-*` rules, the trust-boundary
+  taxonomy, and the rules of engagement; GATE 5 is its gate run.
 - Invent scope — one ticket, one PR; unbuilt dependencies stop the workflow
   rather than getting stubbed.
 - Merge the PR or run `/compact` — both are the user's action; the skill opens
@@ -845,8 +932,9 @@ not blindly restart:
 
 Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`,
 a passing GATE 3 (full or **declared** degraded), an independently-signed GATE 4
-for every owned UI screen, the review pass(es) reconciled with every skip citing
-a rule ID, a green CI, the ticket in Done (Jira transition or ADO completed
-state), a PR linked to the ticket, and a written session log naming the run's
-availability mode — no self-attested gate and no silent degradation anywhere in
-the chain.
+for every owned UI screen, a passing GATE 5 with committed abuse tests for every
+trust boundary the change introduced, the review pass(es) reconciled with every
+skip citing a rule ID, a green CI, the ticket in Done (Jira transition or ADO
+completed state), a PR linked to the ticket, and a written session log naming the
+run's availability mode — no self-attested gate and no silent degradation
+anywhere in the chain.
