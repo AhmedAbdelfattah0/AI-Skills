@@ -11,10 +11,13 @@ description: |
   implementation; the approved plan is saved to .specs/plans/), a pinned +
   independently-verified + CI-enforced design-parity gate, an adversarial VAPT
   gate that commits abuse tests for every trust boundary the change introduces,
-  the two-pass review flow, and full close-out (PR + ticket Done + session log +
-  compact). Companion gates (code-quality family, test-quality, vapt,
-  docs-accuracy, CodeRabbit) degrade loudly when not installed — declared, never
-  silently skipped. Takes one argument: the ticket key, work item ID, or URL.
+  a two-pass review flow that is **cross-model** — the plan and the diff both go
+  to the OpenAI Codex CLI for an independent second opinion (`codex-delegate`
+  read-only for the plan, `codex review` for the diff) — and full close-out (PR
+  + ticket Done + session log + compact). Companion gates (code-quality family,
+  test-quality, vapt, docs-accuracy, Codex, CodeRabbit) degrade loudly when not
+  installed — declared, never silently skipped. Takes one argument: the ticket
+  key, work item ID, or URL.
 
   Trigger when the user:
   - types /ship-ticket or /ship.ticket
@@ -70,10 +73,21 @@ do not guess.
 
 This workflow orchestrates companion skills and review engines that may not be
 installed everywhere (standalone installs, other machines, other AI tools).
-**Check availability once, before Step 6** — a companion is available if it
-appears in the available-skills list (or as a sibling folder in
-`~/.claude/skills`) — and declare the run's mode before any code is written.
-A gate whose engine is missing **degrades loudly, never silently**:
+**Check availability once, before Step 6** — and declare the run's mode before
+any code is written. A gate whose engine is missing **degrades loudly, never
+silently**.
+
+**Two kinds of companion, two different checks** — do not use the skill test on
+an engine that is a binary:
+
+- **A companion skill** is available if it appears in the available-skills list
+  (or as a sibling folder in `~/.claude/skills` / `~/.agents/skills`).
+- **A companion CLI** is available only if the binary answers: `codex --version`
+  (Codex) and `gh --version` (GitHub PRs) actually succeed. A skill that wraps a
+  CLI needs **both** — `codex-delegate` present *and* `codex --version` green.
+  An installed-but-unauthenticated CLI fails at dispatch rather than at the
+  check; when that happens, treat it as the same degradation and declare it then
+  (the fix is `codex login`, which is the user's action, not yours).
 
 | Companion | Owns | If missing — degraded fallback |
 |---|---|---|
@@ -82,8 +96,9 @@ A gate whose engine is missing **degrades loudly, never silently**:
 | `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance: for each changed handler / auth path / rendering sink, commit at least a cross-principal authorization test (`VAPT-API-01`), an unauthenticated-access test (`VAPT-API-02`), and a response-leakage check (`VAPT-API-06`/`07`) in the repo's own runner. Declare that the wider rule set — mass assignment, injection, XSS, CORS, cookie flags, headers — went untested. |
 | `test-quality` | TEST-\* guard on the test diff (step 9) **and on the GATE 5 abuse tests (step 12)** | Skip the TEST pass; still reject obvious implementation-detail assertions and unjustified mocks on your own judgment; note it. |
 | `docs-accuracy` | DOC-\* rule set (step 16) | The step-16 grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `/coderabbit:code-review` | Second review pass — CodeRabbit CLI on the local diff (step 14); the PR-side bot is never waited on | **Skip step 14 entirely.** The run becomes single-pass review; step 15's report says so explicitly instead of reporting a between-passes delta. |
-| `/review` | First review pass (step 13) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context** — GATE 4's independence requirement is about *who* reviews, not the command name, so this fallback still produces a valid signature. |
+| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). The gate itself is unaffected: the user's approval was always the gate and Codex was only ever a contributor. |
+| the `codex` CLI (`codex review`) | **Second review pass** — Codex reviews the **local** diff (step 14), before the PR exists | **Fall back to `/coderabbit:code-review`** if it is installed — same slot, same skip-by-citation rules, different engine; step 15 names which engine actually ran. Only if **neither** exists does step 14 disappear and the run become single-pass, stated explicitly in step 15 instead of a between-passes delta. |
+| `/code-review` (Claude Code's built-in review — formerly `/review`) | First review pass (step 13) + one route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context**, or as a read-only `codex-delegate` dispatch — GATE 4's independence requirement is about *who* reviews, not the command name, so either fallback still produces a valid signature. |
 | `/session-logger` | Step 17 close-out log (written before the single push) | Write the session-log entry yourself to `session-log.md` with the same required content. |
 
 What **never** degrades, because it doesn't depend on an installed skill:
@@ -92,7 +107,9 @@ What **never** degrades, because it doesn't depend on an installed skill:
   reference.
 - **Steps 7 / 8** — branching and implementing; git and the approved plan, not a
   companion skill.
-- **Step 6 plan-mode gate** — plan approval is a user action, not a skill.
+- **Step 6 plan-mode gate** — plan approval is a user action, not a skill. The
+  Codex plan review *contributes to* the plan the user approves; it never
+  approves, and its absence degrades the review, never the gate.
 - **GATE 4** (UI tickets) — the pin, the committed artifact, the independent
   signature, and the human-approved deviation record are all workflow-native.
 - **GATE 5's existence** — the `vapt` skill owns the rule set, but "a change that
@@ -104,7 +121,8 @@ What **never** degrades, because it doesn't depend on an installed skill:
   violation.
 
 **Declare the mode in three places:** once up front when detected ("running
-degraded: `backend-code-quality` and `/coderabbit:code-review` not installed"),
+degraded: `backend-code-quality` not installed; `codex` CLI unavailable — step
+14 falls back to CodeRabbit and the plan gets no cross-model review"),
 in the step-15 report, and in the step-17 session log. A run that silently
 skipped a gate is indistinguishable from a run that failed it.
 
@@ -250,20 +268,28 @@ tiering real: STRONG plans, MEDIUM builds from the plan.
    mechanically, which is the point: the gate doesn't rely on your restraint.
 2. Draft the plan **using exactly the template below** — same headings, same
    order, so every plan reads the same way.
-3. **Present it through plan mode's approval flow** (`ExitPlanMode`). The user
-   approves, edits, or rejects in the native UI. **Implementation starts only on
-   approval** — an edited plan is the new plan; a rejection sends you back to
-   step 2, not into the code.
-4. **Immediately after approval, save the approved plan verbatim to
+3. **Send the draft to Codex for an independent critique — read-only, before
+   the user ever sees it** (see *Cross-model plan review* below). Reconcile its
+   findings into the draft. Skip only when the companion check said Codex is
+   unavailable — and then say so in the approval ask.
+4. **Present the reconciled plan through plan mode's approval flow**
+   (`ExitPlanMode`). The user approves, edits, or rejects in the native UI.
+   **Implementation starts only on approval** — an edited plan is the new plan;
+   a rejection sends you back to step 2, not into the code.
+5. **Immediately after approval, save the approved plan verbatim to
    `.specs/plans/<TICKET>.md`** (committed with the PR, like the GATE 4
-   artifact). Plan mode itself persists nothing — this file is the durable
-   record that the Design Contract derives from, the session log references,
-   and the PR carries.
+   artifact) — including its section 7 Codex-review disposition. Plan mode
+   itself persists nothing — this file is the durable record that the Design
+   Contract derives from, the session log references, and the PR carries.
 
 **Fallback — plan mode unavailable** (headless / workflow / subagent runs):
-write the plan artifact and **STOP**, surfacing sections 1–3 as the approval
-ask. Proceeding without an approval is a Stop-on-failure violation, not a
-judgment call — a plan approved only by its author is not approved.
+still run the Codex review (it needs no plan mode — it is a shell dispatch),
+then write the plan artifact and **STOP**, surfacing sections 1–3 and 7 as the
+approval ask. Proceeding without an approval is a Stop-on-failure violation, not
+a judgment call — a plan approved only by its author is not approved, and a plan
+approved only by its author *and Codex* is still not approved.
+
+### The plan template
 
 ```markdown
 # Plan — <TICKET>: <ticket title>
@@ -298,12 +324,24 @@ not for the builder.>
 
 ## 6. Rejected alternative
 <one line: the other approach considered, and why not>
+
+## 7. Codex plan review (cross-model second opinion)
+**Ran:** <yes — codex <version>, session <threadId>> / <no — reason>
+
+| Finding (severity) | Disposition | Reason / what changed |
+|---|---|---|
+| <blocker: step 2 imports X, which step 4 creates> | incorporated | resequenced — X now lands in step 1 |
+| <minor: extract a shared helper> | rejected | one call site today; YAGNI until there's a second |
+
+<or, when it didn't run: "Not run — `codex` CLI unavailable. This plan carries
+no cross-model review.">
 ```
 
 Formatting rules that keep it readable:
 
 - **Section 1 is the approval surface.** A reader should be able to approve from
-  sections 1–3 alone, in under a minute. Everything below is for the builder.
+  sections 1–3 — plus any *rejected blocker* row in section 7 — in under a
+  minute. Everything else is for the builder.
 - **Plain words in the "Step" column** — "Build the login form", not
   "Instantiate the auth presentational component per NG-ARCH-03". Rule IDs and
   architectural role names belong in the Design Contract, not here.
@@ -314,6 +352,64 @@ Formatting rules that keep it readable:
   what was checked).
 - **Short beats complete.** A plan nobody reads gates nothing. If the ticket is
   big, the build-sequence rows get more numerous — the prose does not get longer.
+
+### Cross-model plan review (step 6.3)
+
+A plan reviewed by the model that wrote it inherits that model's blind spots,
+and the expensive failures — a sequence that can't build in that order, a path
+that doesn't exist in this repo, a module that already does the thing — are all
+cheap to catch here and expensive to catch at step 8. So the draft goes to a
+**different model, in a different process, with the repo in front of it**.
+
+Invoke the **`codex-delegate` skill by name** (it supplies its own relay path —
+never hardcode one; it is not a sibling of this skill in every install) and use
+its read-only dispatch:
+
+- **Read-only, always.** `--read-only` puts Codex in a sandbox that *cannot*
+  write — which is what plan mode requires, enforced rather than trusted.
+- **Nothing lands in the repo.** Pipe the brief in on stdin (heredoc) and leave
+  the relay's `--out-dir` at its default temp dir, so plan mode's clean tree
+  survives the round trip.
+- **Dispatch in the background with a relay watchdog** — e.g. `--timeout 15m`.
+  A foreground shell call is capped at 10 minutes and would kill a live run
+  mid-review; background it and resume when the relay writes `result.json`.
+- **Read `finalMessage` from `result.json`** — that is Codex's report. Record
+  `threadId`; it identifies the session for a follow-up question, and it is the
+  audit trail for a signature if this same route signs GATE 4 later.
+
+**What the brief must carry** — Codex has no memory of this conversation and
+sees only your text plus the working tree:
+
+| Block | Contents |
+|---|---|
+| `<task>` | The ticket's spec + ACs, the **drafted plan verbatim**, the detected stack, and the repo's **real** lint/build/test commands. |
+| `<grounding_rules>` | Every claim cites a path or a line from this repo; label anything inferred as an inference. Read the files the plan names before judging them. |
+| `<structured_output_contract>` | Findings as a list: severity (blocker / major / minor) · the plan section it hits · evidence (`file:line`) · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
+
+**Ask it the questions only a repo-grounded second model can answer** — not "is
+this a good plan?":
+
+1. Do the plan's file paths exist / match this repo's actual layout?
+2. Does something in the repo **already do this** — a service, a util, a
+   component the plan is about to duplicate?
+3. Is the build sequence actually buildable in that order (does step *n* depend
+   on something step *n+2* creates)?
+4. What is missing from the plan that the ticket's ACs require?
+5. What in section 3 (risks) is wrong, and what risk is absent?
+
+**Then reconcile — this is your judgment, not Codex's.** Every finding is
+either **incorporated into the draft** or **rejected with a stated reason**, and
+both outcomes get a row in the plan's section 7. Plan findings carry no rule IDs,
+so *the stated reason is the citation* — the same standard as step 13, in the
+only form available here. A blocker-severity finding you reject needs a reason a
+reader can check, not "considered and dismissed".
+
+**Codex contributes; the user approves.** Never present Codex's agreement as
+approval, never skip `ExitPlanMode` because the critique came back clean, and
+never let a Codex objection alone kill a plan the ticket requires — surface the
+disagreement in section 7 and let the user decide. If the critique changes the
+approach materially, **redraft before presenting**: the user approves the
+reconciled plan, not the draft plus a list of things you'd change.
 
 **The plan constrains the contract.** The Design Contract (STEP 0B) emitted next
 draws its file list from the approved plan's build sequence. A file needed by
@@ -503,6 +599,15 @@ to the task — don't fan out more than the work needs.
 that independence is the whole point of it, so never let the building agent grade
 its own parity.
 
+**The Codex passes sit outside this tiering.** The plan review (step 6.3), the
+`codex review` pass (step 14), and an optional Codex parity signature (step 11b)
+run in a separate process on a separate account — they cost nothing from the
+budget above and gain nothing from routing a subagent at them. Two rules keep
+them cheap: **one dispatch per decision point** (a plan review, a diff review —
+not a running conversation), and **read-only unless it is implementing**, which
+in this workflow it never is. Ship-ticket delegates *judgment* to Codex, never
+the build: the code in the PR is written here, against a plan the user approved.
+
 ## Security-sensitive note
 
 **Read the flag off the ticket first, then judge for yourself.** If the ticket
@@ -597,12 +702,22 @@ second migration mechanism alongside the one already there.
    shape.
 
    **b. The builder's grade is a DRAFT — an INDEPENDENT reviewer signs it.** Spin
-   up a parity-reviewer that has **no build context for this screen** — a fresh
-   subagent, or `/review` (step 13) extended to diff impl-vs-reference — to re-run /
+   up a parity-reviewer that has **no build context for this screen** to re-run /
    adversarially spot-check the diff against the **pinned** reference and **sign
-   the grade in the artifact**. Only the independent signature counts. *The builder
-   never signs their own parity grade* — a self-graded artifact just relocates the
-   self-attestation this gate exists to remove.
+   the grade in the artifact**. Three routes qualify, and independence — not the
+   command name — is what makes one valid:
+   - a **fresh subagent** with no build context;
+   - **`/code-review`** (step 13) extended to diff impl-vs-reference;
+   - a **read-only `codex-delegate` dispatch** briefed to diff the implementation
+     against the reference at the pinned SHA. A separate process with no memory
+     of this conversation is the strongest form of the independence this gate
+     asks for. Record the signature as `codex <version>, session <threadId>`
+     (both come back in the relay's `result.json`) so the signer is auditable
+     rather than a name typed into a table.
+
+   Only the independent signature counts. *The builder never signs their own
+   parity grade* — a self-graded artifact just relocates the self-attestation
+   this gate exists to remove.
 
    **c. Residual Blocker/Major clears ONLY with human approval.** A residual
    Blocker/Major divergence (including the Step 5 deficient-reference carve-out)
@@ -696,11 +811,22 @@ second migration mechanism alongside the one already there.
    PASS. Because the `Done` transition (step 19) follows the green CI, this
    hard-gates `Done` without relying on the agent to self-enforce.
 
-13. Run `/review` (or, if unavailable, the fresh-reviewer-subagent fallback from
-   the availability table) — for UI tickets this pass also carries the **GATE 4
-   independent parity check** (impl-vs-reference against the pinned SHA) and
-   produces the independent signature, unless a separate reviewer subagent
-   already did.
+13. **First pass — `/code-review` on the local diff.** This is Claude Code's
+   built-in review command, **renamed from `/review`**; an older install that
+   still answers to `/review` is running the same pass under the old name. Run it
+   with **no PR argument** — the PR does not exist yet (step 18 opens it), so the
+   pass reviews the current branch's changes. If it's unavailable, use the
+   fresh-reviewer-subagent fallback from the availability table. For UI tickets
+   this pass also carries the **GATE 4 independent parity check**
+   (impl-vs-reference against the pinned SHA) and produces the independent
+   signature, unless a separate reviewer subagent already did.
+
+   **Two other things are also called "code review" — don't cross the wires.**
+   `/coderabbit:code-review` is step 14's *fallback* engine; running it here and
+   calling it pass 1 collapses the two passes into one. And `/code-review ultra`
+   (the multi-agent cloud review) is **user-triggered and billed** — never launch
+   it yourself, from this step or through a shell; if the diff warrants it, say
+   so and let the user decide.
    Fix every finding, **except** a finding that contradicts a specific `[D]` or
    `[ARCH]` rule you can **name by ID**. (Degraded GATE 3 = no rule IDs loaded =
    **no skips at all** — fix every finding.)
@@ -730,22 +856,60 @@ second migration mechanism alongside the one already there.
    (Design-parity deviations live in the GATE 4 artifact instead — they carry a human
    approver, not a rule ID.)
 
-14. Then run `/coderabbit:code-review` on the **local diff** — **if installed.**
-   This CLI pass is the **authoritative CodeRabbit gate**, and it runs here,
-   before the PR exists. If not installed, skip this pass entirely (it was
-   declared up front in the availability check); do not substitute a second
-   self-review and present it as the CodeRabbit pass. When it runs, fix remaining
-   findings under the same rule: cite an ID or fix it.
+14. **Second pass — `codex review` on the local diff, before the PR exists.**
+   Step 13 was reviewed by the model that wrote the code; this pass is a
+   *different model in a different process*, which is the entire reason it is a
+   second pass and not a second opinion from the same head. Run it from the repo
+   root, **in the background** (a review takes minutes and a foreground shell
+   call is capped at 10):
 
-   **The PR-side CodeRabbit bot is NOT a second gate — never wait on it.** Once
-   the PR is open (step 18), CodeRabbit's GitHub app re-reviews the same diff. Do
-   **not** poll or block the workflow on that report: it is a duplicate of the
-   review you just ran, and polling it re-costs the wait loop on every push. Read
-   it only if it has already posted; treat it as informational, not a gate.
+   ```bash
+   codex review --uncommitted "<review instructions — see below>"
+   # multi-line instructions:                      pass `-` and pipe them in on stdin
+   # branch carries WIP commits (the resume path): --base <default-branch>
+   # reviewing one commit:                         --commit <sha>
+   ```
 
-15. Report what changed between the two review passes (or state explicitly that
-   the run was **single-pass** because `/coderabbit:code-review` isn't
-   installed), list every skipped finding with its rule ID, state each owned
+   **Pick the flag so the reviewed diff equals the diff the PR will carry.**
+   On the normal path everything is still uncommitted (the single gated commit
+   happens at step 18), so `--uncommitted` is right. A resumed run with WIP
+   commits on the branch needs `--base <default-branch>`. **Verify rather than
+   assume:** compare the files Codex says it reviewed against
+   `git status --porcelain` + `git diff <default-branch>...HEAD --name-only`. A
+   pass that reviewed a narrower set than the PR will contain **gated nothing** —
+   run the other form too and treat the union as the pass.
+
+   **The instructions argument is what makes it a ticket review rather than a
+   generic one.** Give it: the ticket's acceptance criteria, the rule set the
+   invoked code-quality specialist owns (`NG-*` / `BE-*`) so its findings land in
+   the same vocabulary as step 13's, the approved plan's *Not in this ticket*
+   list so it can flag scope creep, and a demand for `file:line` + quoted code +
+   the fix shape (no prose-only findings).
+
+   **Fix remaining findings under the same rule as step 13: cite a `[D]`/`[ARCH]`
+   rule ID by name, or fix it.** An `[NN]` contradiction still stops the run.
+   Codex findings get no special deference *and* no discount for coming from
+   another vendor — they are review findings, judged like any other.
+
+   **If the `codex` CLI is unavailable**, fall back to `/coderabbit:code-review`
+   on the same local diff — same slot, same rules — and if neither exists, skip
+   step 14 entirely (declared up front in the availability check). Do **not**
+   substitute a second self-review and present it as a second pass; a model
+   reviewing itself twice is one pass.
+
+   **PR-side bots are NOT a second gate — never wait on one.** Once the PR is
+   open (step 18), CodeRabbit's GitHub app (and any Codex cloud review wired to
+   the repo) may re-review the same diff. Do **not** poll or block on those
+   reports: they duplicate the review you just ran, and polling re-costs the wait
+   loop on every push. Read them only if they have already posted; treat them as
+   informational, not as gates.
+
+15. Report what changed between the two review passes — **naming the engine that
+   ran pass 2** (`codex review`, or CodeRabbit as the declared fallback), or
+   stating explicitly that the run was **single-pass** because neither was
+   available — report the **Codex plan review's disposition** (findings
+   incorporated vs. rejected, or that it didn't run), list every skipped finding
+   with its rule ID, state each owned
    screen's **final GATE 4 grade + who signed it**, state **GATE 5's verdict —
    the surfaces attacked, the abuse tests committed, and every rule declared
    degraded by ID** — and restate any **degraded gates** from the availability
@@ -769,6 +933,10 @@ second migration mechanism alongside the one already there.
      **re-approval round-trips** (material divergences that went back through plan
      mode), and any **divergence between the approved plan and what was actually
      built** — a silent divergence is the failure this records against
+   - the **cross-model review record**: whether the Codex plan review ran (with
+     its session id) and how many of its findings were incorporated vs. rejected,
+     and **which engine ran review pass 2** (`codex review`, CodeRabbit fallback,
+     or none)
    - which design files were read in Step 5 **and the pinned `design_ref` SHA**
    - the **GATE 4 per-screen grade(s), the independent signer, and the artifact path**
    - the **GATE 5 verdict**: the surfaces attacked, the target it ran against,
@@ -791,11 +959,12 @@ second migration mechanism alongside the one already there.
    the same way, and report the PR URL. Then wait **exactly once** for the CI
    checks — including the GATE 4 CI check — to report.
 
-   **Do not poll or block on the PR-side CodeRabbit bot** (step 14 already gated
-   the diff via the CLI pass; its PR re-review is informational). **Push nothing
+   **Do not poll or block on the PR-side review bots** (step 14 already gated
+   the diff locally; a CodeRabbit or Codex re-review on the PR is
+   informational). **Push nothing
    further unless a gate actually fails and needs a code fix.** A doc-only commit
    pushed after the gates go green — a stray session-log tweak, a README touch-up
-   — re-triggers the entire CI + CodeRabbit cycle from scratch and makes the
+   — re-triggers the entire CI + PR-bot review cycle from scratch and makes the
    wait-for-gates poll run all over again for nothing. That re-trigger is the
    waste this ordering (session log written in step 17, everything in this one
    commit) exists to prevent — so the session log and every artifact go in *this*
@@ -887,7 +1056,10 @@ not blindly restart:
   with the user that it still stands, and re-enter at the step after the one that
   stopped. **Do not re-run plan mode for an already-approved plan** — unless the
   plan itself was what turned out to be wrong, in which case it is a material
-  divergence and *does* go back through plan mode.
+  divergence and *does* go back through plan mode. **The Codex plan review is
+  part of that plan, not part of the resume** — its disposition is in section 7;
+  re-dispatching it re-critiques a plan the user already approved. Only a
+  re-planned plan earns a fresh critique.
 - **A ticket branch exists** → use it (Step 7.4), rebased.
 - **`.specs/design-parity/<TICKET>.md` exists** → GATE 4 ran; check its grade and
   signature rather than regenerating it.
@@ -919,8 +1091,14 @@ not blindly restart:
 - **Choose or impose a stack.** The stack is the repo's, detected in *Stack —
   detected, never prescribed*. This skill never migrates a project toward a
   framework it prefers, and never assumes one the repo doesn't use.
-- Run the review engines — it invokes `/review`, `/coderabbit:code-review`,
-  `test-quality`, `vapt`, and `docs-accuracy`, then reconciles their findings.
+- Run the review engines — it invokes `/code-review`, `codex review` (or
+  `/coderabbit:code-review` as the fallback), `test-quality`, `vapt`, and
+  `docs-accuracy`, then reconciles their findings.
+- **Own the delegation mechanics.** `codex-delegate` owns the brief format, the
+  relay, the sandbox modes, and the `result.json` contract; this skill only
+  decides *when* Codex is asked and *what it is asked about*. If that skill isn't
+  installed, the plan review degrades per the availability table — do not
+  reimplement its relay here.
 - **Define the attack classes** — `vapt` owns the `VAPT-*` rules, the trust-boundary
   taxonomy, and the rules of engagement; GATE 5 is its gate run.
 - Invent scope — one ticket, one PR; unbuilt dependencies stop the workflow
@@ -930,7 +1108,8 @@ not blindly restart:
 
 ## Success criteria
 
-Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`,
+Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`
+carrying its section 7 cross-model review disposition,
 a passing GATE 3 (full or **declared** degraded), an independently-signed GATE 4
 for every owned UI screen, a passing GATE 5 with committed abuse tests for every
 trust boundary the change introduced, the review pass(es) reconciled with every

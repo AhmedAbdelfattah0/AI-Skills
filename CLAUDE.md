@@ -133,6 +133,23 @@ the repo's layout), no assumed i18n/RTL (only if the project ships it), no
 assumed migration tool. It has to work on Express+Postgres and Django and Go, not
 just the project it was first written for.
 
+**`ship-ticket`'s cross-model review depends on two things this repo does not ship.**
+Both of its Codex touchpoints — the **step 6.3 plan review** (the drafted plan goes to
+Codex read-only *before* the user approves it) and **step 14** (`codex review` on the
+local diff, the second review pass, with `/coderabbit:code-review` as the declared
+fallback) — need the external [`codex-delegate`](https://github.com/amElnagdy/delegate-skills)
+skill and the `codex` CLI on PATH. Two rules keep that dependency honest: **check the
+binary, not the skill list** (a CLI companion is available only if `codex --version`
+succeeds — the availability table's skill test cannot see it), and **never reference
+`codex-delegate` by relative path** — it installs to `~/.agents/skills`, not beside
+this repo's skills, so the `../<sibling>/` convention used inside the code-quality
+family does not resolve for it; invoke it **by name** and let it supply its own relay
+path. Codex is always a *contributor*: it critiques the plan and the diff, it never
+approves either, and its absence degrades the review loudly rather than stopping the
+run. It is also an accepted signer for GATE 4's independent parity signature (a
+separate process with no build context), recorded as `codex <version>, session
+<threadId>` from the relay's `result.json`.
+
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
 and never calls a tracker API; creating the items is a separate explicit step;
