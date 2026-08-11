@@ -119,7 +119,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (18)
+## Skills (20)
 
 | Skill | Extras |
 |---|---|
@@ -132,6 +132,7 @@ Claude-only.
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
+| pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
 | researcher | — |
 | security | — |
 | security-audit | — |
@@ -141,6 +142,7 @@ Claude-only.
 | ship-ticket | — |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
+| vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |
 
 Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.
 

@@ -164,6 +164,51 @@ diff against that pinned SHA). Both carry a one-sentence fallback gloss in
 skill still makes sense installed alone. If you rename a gate in `ship-ticket`,
 update those glosses too.
 
+**`pr-review` reviews a PR that already exists — the one review skill that is
+*not* about the local diff.** `ship-ticket`'s passes and the CodeRabbit
+`code-review` skill both judge a diff **before** a PR exists; `pr-review` takes a
+PR **URL or ID** (GitHub via `gh`, Azure DevOps via the `repo_pull_request*` MCP
+tools), which is usually someone *else's* PR. Three properties are load-bearing:
+
+- **It never touches the user's checkout.** The PR is fetched into a throwaway
+  `git worktree` from `refs/pull/<n>/head` (GitHub) or `/merge` (ADO, which often
+  publishes no `/head`) — discovered with `git ls-remote`, never assumed — and
+  reviewed at `merge-base...HEAD`, so commits merged into the base since the PR
+  opened are not blamed on its author. Cleanup runs on every exit path.
+- **Three passes, none seeing the others.** A fresh Claude reviewer subagent
+  (A), a `codex` process (B), and the stack's code-quality specialist running
+  its rule-by-rule **Verification Pass** (C) all read the same diff blind;
+  reconciliation is the orchestrator's judgment and attributes each finding
+  `[claude]`/`[codex]`/`[rules]`. A and B are free-form and find what they
+  notice; C exists because the worst defects are **absences** — its table has a
+  row per rule in force, so an unperformed check surfaces as an empty box
+  instead of as silence. C shares A's model, so it adds method diversity, not
+  model diversity — never report it as a third opinion. Since there is no
+  Design Contract here, C derives the rules in force from the diff (every
+  `[NN]` rule + every rule whose surface the diff touches + a mandatory `AI-FM`
+  row), and a FAIL is a finding rather than a gate. Dropping a finding requires
+  a contract failure or a **named rule ID** — a bare "style-only" retires
+  nothing.
+- **Report-first, post-on-approval.** Findings land in `.specs/pr-review/<host>-<id>.md`;
+  comments reach the PR only after the user approves them, and the skill never
+  approves, votes, or requests changes — that is a human act.
+
+**Do not rename it `code-review`** — that name is taken by the installed
+CodeRabbit plugin skill, and a collision shadows one of them.
+
+**Its `codex review` invocation is version-pinned knowledge, verified on
+`codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)
+**each conflict with a custom `[PROMPT]`**, including the `-` stdin form — the
+command exits during argument parsing. So a Codex pass is either *instructed*
+(bare prompt, scope stated in the prompt text) or *scoped* (`--base`, no
+instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
+line). Both routes print their final report **twice** and emit **absolute
+worktree paths**, so dedupe and strip the prefix before anything is posted.
+**`ship-ticket` step 14 carries the same constraint** — it used to document
+`codex review --uncommitted "<instructions>"`, which exits during argument
+parsing on 0.145.0, and now states the scope in the prompt instead. If you
+change how either skill invokes Codex, change both.
+
 ## Two script-delivery patterns
 
 Most skills are pure `SKILL.md`. Two ship scripts, in different ways — mirror the matching pattern when

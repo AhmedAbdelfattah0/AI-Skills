@@ -864,20 +864,39 @@ second migration mechanism alongside the one already there.
    call is capped at 10):
 
    ```bash
-   codex review --uncommitted "<review instructions — see below>"
-   # multi-line instructions:                      pass `-` and pipe them in on stdin
-   # branch carries WIP commits (the resume path): --base <default-branch>
-   # reviewing one commit:                         --commit <sha>
+   # Instructed (default) — NO scope flag: the scope goes in the prompt text.
+   codex review "<review instructions — scope + ticket context, see below>"
    ```
 
-   **Pick the flag so the reviewed diff equals the diff the PR will carry.**
-   On the normal path everything is still uncommitted (the single gated commit
-   happens at step 18), so `--uncommitted` is right. A resumed run with WIP
-   commits on the branch needs `--base <default-branch>`. **Verify rather than
-   assume:** compare the files Codex says it reviewed against
-   `git status --porcelain` + `git diff <default-branch>...HEAD --name-only`. A
-   pass that reviewed a narrower set than the PR will contain **gated nothing** —
-   run the other form too and treat the union as the pass.
+   **`codex review` accepts a scope flag OR a custom prompt, never both.**
+   Verified on `codex-cli 0.145.0`: `--uncommitted`, `--base`, and `--commit`
+   each conflict with `[PROMPT]` — the `-` stdin form included — and the command
+   exits during argument parsing without reviewing anything. Re-check
+   `codex review --help` if the installed version differs.
+
+   Step 14's instructions are what make this a *ticket* review rather than a
+   generic one, so **keep the instructions and state the scope in the prompt**:
+
+   - **Normal path** (everything is still uncommitted — the single gated commit
+     happens at step 18): tell it the scope is exactly `git status --porcelain`,
+     inspected via `git diff` and `git diff --cached`, plus any untracked file
+     read in full. Naming all three matters: staged changes are invisible to a
+     bare `git diff`.
+   - **Resumed run** with WIP commits on the branch: tell it to review exactly
+     `git diff <default-branch>...HEAD`.
+
+   The scoped forms (`codex review --uncommitted`, `--base <default-branch>`,
+   `--commit <sha>`) stay available when you are willing to give up the
+   instructions entirely. They run the CLI's own review harness, which cannot be
+   told the ticket's ACs and returns `[P1]`/`[P2]` prose with no quoted line —
+   which is why they are the fallback here, not the default.
+
+   **Verify rather than assume:** compare the files Codex says it reviewed
+   against `git status --porcelain` + `git diff <default-branch>...HEAD
+   --name-only`. A pass that reviewed a narrower set than the PR will contain
+   **gated nothing** — re-run it against the missing paths and treat the union
+   as the pass. Codex prints its **final report block twice**; deduplicate before
+   acting on it, and strip any absolute paths it emits.
 
    **The instructions argument is what makes it a ticket review rather than a
    generic one.** Give it: the ticket's acceptance criteria, the rule set the
