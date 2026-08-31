@@ -103,10 +103,10 @@ on an engine that is a binary, or either test on an orchestration capability:
 | `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance, using **GATE 5's per-family minimum table** (step 12) rather than a fixed set — an API minimum asserted over a config-only surface proves nothing. That table is reproduced inline in step 12 precisely so it survives `vapt`'s absence. Commit those tests in the repo's own runner and record **PASS-DEGRADED**. For the *unexercised* rules you cannot enumerate by ID without the skill, name the **families** that went untested (mass assignment, injection, XSS, CORS, cookie flags, headers) and state that the full ID list was unavailable — an honest family-level declaration, never a silent omission or an invented ID. |
 | `test-quality` | The single TEST-\* guard over the whole final test diff — ordinary + abuse tests together (step 12.4) — reused as GATE 3's `TEST` row | Skip the companion's **execution**, never the **row**: still reject obvious implementation-detail assertions and unjustified mocks on your own judgment, and emit `TEST \| DEGRADED \| test-quality unavailable; reduced manual check: <what you actually checked>`. A missing engine changes the evidence, not whether the row exists. |
 | `docs-accuracy` | DOC-\* rule set (step 12.5, before the freeze) | The pre-freeze grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.3's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
+| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.4's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
 | the `codex` CLI (`codex review`) | **Pass B** — Codex reviews the **local** diff concurrently with passes A and C (step 13c), before the PR exists | **Fall back to `/coderabbit:code-review`** if it is installed — same slot, same manifest, same skip-by-citation rules, different engine; step 16 names which engine actually ran. Only if **neither** exists does pass B disappear, leaving one free-form reviewer plus rule pass C — stated explicitly in step 16. A pass B that exceeds its declared time ceiling degrades the same way. |
 | `/code-review` (Claude Code's built-in review — formerly `/review`) | **Pass A** — the fresh no-build-context reviewer (step 13b) + the default route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context**, or as a read-only `codex-delegate` dispatch — GATE 4's independence requirement is about *who* reviews, not the command name, so either fallback still produces a valid signature. If **no** fresh-reviewer route exists at all: a **UI** ticket ✋ STOPs (GATE 4 cannot self-sign), and a **non-UI** ticket continues with pass A run by the building agent — declared explicitly as `pass A ran WITHOUT reviewer independence`, which is a named loss, not a silent one. |
-| the orchestrator's **concurrency capability** (workflow runner / fresh subagents) | Orchestration **only**: schema-validated, resumable, blind concurrent execution of the step-13 wave over one frozen manifest. It owns no quality rule and no gate verdict. | If a workflow runner is absent but plain subagent fan-out exists, launch the same read-only passes concurrently without schemas or resume. If only serial execution exists, run the same passes, in the same scope, one after another against the unchanged manifest — declare `orchestration degraded: serial`. **No pass and no gate is skipped in any mode.** If no fresh-reviewer route exists at all for a UI ticket, ✋ **STOP** — GATE 4 never degrades to self-signing. |
+| the orchestrator's **concurrency capability** (workflow runner / fresh subagents) | Orchestration **only**, for **both** waves: the **recon wave** (steps 4–6, read-only investigations) and the **step-13 review wave** over one frozen manifest — schema-validated and resumable where a workflow runner exists. It owns no quality rule and no gate verdict. | If a workflow runner is absent but plain subagent fan-out exists, launch the same read-only passes concurrently without schemas or resume. If only serial execution exists, run the same investigations and the same passes, in the same scope, one after another — declare `orchestration degraded: serial`, **naming which wave** (they can differ: a run may fan out its review and serialize its recon). **No pass and no gate is skipped in any mode.** If no fresh-reviewer route exists at all for a UI ticket, ✋ **STOP** — GATE 4 never degrades to self-signing. |
 | an **independent reviewer route** for the strict GATE 5 signature (fresh subagent, `/code-review`, or read-only `codex-delegate`) | Signing the strict-mode GATE 5 payload in step 15c | There is no fallback: `security-sensitive: true` mandates strict mode, and strict mode is defined by having an independent signer. If **no** route exists, ✋ **STOP** — a strict run that quietly signs itself, or quietly drops to light, is the exact self-attestation this gate removes. |
 | `/session-logger` | Step 18 close-out log (written before the single push) | Write the session-log entry yourself to `session-log.md` with the same required content. |
 
@@ -140,14 +140,105 @@ What **never** degrades, because it doesn't depend on an installed skill:
 degraded: `backend-code-quality` not installed; `codex` CLI unavailable — pass B
 falls back to CodeRabbit and the plan gets no cross-model review; orchestration
 serial"), in the step-16 report, and in the step-18 session log. The declaration
-covers which companions are missing and the **orchestration mode** up front,
+covers which companions are missing and the **intended orchestration mode of
+each wave** (recon and review — they can differ) up front,
 together with the **tentative** lane (the only one that exists that early — the
-provisional lane is declared at the end of Step 6, before the 6.3 decision); the **effective** lane does not exist
+provisional lane is declared at the end of Step 6, before the 6.4 decision); the **effective** lane does not exist
 until the freeze computes it, so it is declared in the step-16 report and the
 session log, never in the up-front line. A lane-based omission (the FAST lane's skipped
 Codex plan review) is a **recorded decision**, not a degradation — label the two
 differently so a missing engine never hides behind a lane. A run that silently
 skipped a gate is indistinguishable from a run that failed it.
+
+## Concurrent recon — how every read-only investigation runs
+
+Steps 3–6 are dominated by **reading**: the ticket and its links, the design
+system, the existing implementation, the contracts the plan will depend on, the
+precedents this repo already sets. Almost none of those reads depend on each
+other, and doing them one at a time — read, think, read, think — is the same
+serialization mistake the review wave had, in the phase that runs *before* any
+code exists. A ticket can spend an hour here without a line being written.
+
+**The rule: if two investigations do not need each other's answer, they run
+together.** Everything below applies to steps 4, 5 and 6.
+
+**Recon runs in waves, because the questions are not all known up front.**
+Discovering that a component already exists *creates* the next question. So:
+
+1. **Enumerate the questions the plan must answer**, then dispatch the
+   independent ones concurrently as read-only investigations.
+2. **Synthesize the answers yourself**, and let what they reveal raise the next
+   wave's questions.
+3. **Stop when a wave raises no new question that would change the plan.**
+
+**The stopping rule — this is what keeps recon from becoming research.** Stated
+naively ("know every file and every contract") it is circular, since the build
+sequence is what recon informs, and "every contract" invites unbounded transitive
+traversal. Bound it:
+
+- **Closure = the candidate touched-file set, plus for each of those files its
+  *direct* consumed and exposed interfaces, plus the known callers those
+  interfaces affect.** One hop, not the transitive graph. A dependency of a
+  dependency is out of scope unless the plan actually calls it.
+- **Cap the waves** — three is plenty. Each wave must either resolve a
+  plan-changing question or end the recon.
+- **At the cap, unresolved questions stop being recon and become output:** each
+  one is a row in the plan's *Risks & unknowns* table with what you would do about
+  it, or — if it genuinely blocks the plan — a ✋ STOP for a user decision. It
+  never becomes another wave.
+
+**Defer the *detail* of test knowledge, never the *paths*.** Recon must still
+establish the repo's real lint/build/test commands and the **exact test and
+fixture files the plan will create or touch** — those go in the build sequence,
+which is where the Design Contract comes from, and a test file outside the
+contract forces a step-8 divergence or quietly pressures you to skip the test.
+What defers to steps 9 and 12 is the *internal* detail: how an assertion is
+spelled, how a fixture is constructed, the abuse-suite's conventions. Note the
+*existence* of a constraint you trip over; don't go read it out.
+
+**What the investigators are, and are not:**
+
+- **Read-only, and *enforced* — not merely instructed.** Telling a subagent not
+  to write is a prompt, and plan mode's guarantee is supposed to be mechanical.
+  Dispatch investigators through a carrier that **restricts their tools** to reads
+  (a read-only sandbox, or a subagent type without edit tools). If your carrier
+  cannot enforce that, run the investigations **through the plan-mode agent
+  itself** rather than trusting a prompt. Either way, **snapshot `HEAD` and the
+  worktree state around each wave and abort if anything mutated** — that check is
+  what makes the guarantee real rather than assumed.
+- **They answer questions; they do not make the plan.** Each returns findings as
+  data — paths, signatures, quoted lines, a direct answer. Synthesis is yours.
+  A subagent that hands back a plan has skipped the step where you reconcile its
+  answer against every other answer.
+- **They get exploration-tier models** (see *Model / cost routing*) — this is
+  gathering, not architecture.
+- **Fan-out is proportional to the ticket.** Two questions do not need six
+  agents. Keep the width to the number of genuinely independent questions.
+- **Use the strongest carrier available**, in this order — the same three
+  *Orchestration modes* the review wave uses:
+  1. **workflow** — a schema-validated, resumable run. Preferred whenever the
+     orchestrator has one, and **this skill's instructions are the authorization
+     to use it**: a recon wave is exactly the deterministic fan-out it exists for.
+     Schema-validating the findings is worth real money here, because a recon
+     answer that comes back as prose instead of `path` + `signature` + `quoted
+     line` has to be re-asked.
+  2. **fan-out** — plain concurrent read-only subagents. Same questions, no schema
+     or resume.
+  3. **serial** — the same investigations one at a time. Same scope, worse wall
+     clock; declare it.
+  Whichever ran, name it in the step-16 report and the session log alongside the
+  review wave's mode — the two can differ, and a run that fanned out its review
+  but serialized an hour of recon should not read as fully concurrent.
+
+**Questions that are almost always independent, and therefore a good first wave:**
+
+| Investigation | Answers |
+|---|---|
+| **Does this already exist?** | a component/service/endpoint the ticket is about to duplicate — the single most expensive thing to learn late |
+| **What contracts does it depend on?** | the API shapes, service methods, types and permissions the plan will call |
+| **What precedent does the repo set?** | how this codebase already does this kind of thing, so the plan matches it |
+| **What consumes the surface being changed?** | who breaks, and which tests cover it |
+| **What does the design say?** (UI tickets) | Step 5's reads — token file, conventions doc, screen, shared components |
 
 ## Step 3 — read the ticket first (hard gate)
 
@@ -166,6 +257,12 @@ You have the spec; now check the ticket is **actually startable**. Each of these
 is cheap here and expensive later — a blocked ticket discovered after planning
 has already burned the plan, and a ticket someone else is mid-way through is a
 merge conflict you chose.
+
+**Run these lookups concurrently** (see *Concurrent recon*) — every blocker's
+state, the assignee, the ticket state, the branch/PR search, and the plan-artifact
+check are independent of one another. Several blockers means several fetches at
+once, not a queue. They are pure reads; the only thing that depends on them is
+your decision after they all return.
 
 1. **Blockers must be resolved.** If the ticket names blockers or "blocked by"
    links (`generate-ticket` writes these; trackers carry them as issue links),
@@ -224,15 +321,23 @@ the project's design was produced (see the `design-prompts` skill), it may be:
   `<section>` blocks), or
 - **component files** (`.jsx / .tsx / .vue / …`), or a mix.
 
-In **every** case there are three things you must open, in this order:
+In **every** case there are three things you must open — and they take **two
+waves**, because the first three tell you what the fourth is:
 
 1. **The token / theme file** (e.g. `tokens.css`, `theme.*`, design-tokens).
    This is the single source of color, spacing, type, radius, and elevation.
    It is almost always the *most* important file and the one most often skipped.
 2. **The conventions / Master-Orientation doc** if one exists (shared brand
    rules, RTL/bilingual rules, numeric-isolation rules, component inventory).
-3. **The specific referenced screen AND the shared components it composes**
-   (its table, form, drawer, pagination, banner, field-renderer, etc.).
+3. **The specific referenced screen** — its composition and imports.
+
+**Wave 1 is items 1–3 concurrently** (they genuinely do not need each other).
+**Then synthesize a component inventory** — the conventions doc names required
+shared components, and the screen's imports name the rest — and **wave 2 opens
+the union of those shared components concurrently** (table, form, drawer,
+pagination, banner, field-renderer, …). Opening the components in wave 1 would
+mean guessing which ones matter; that guess is the dependency this staging
+exists to respect.
 
 **Self-locate the design system — do not depend on the ticket naming it.**
 If the ticket doesn't point at the design files (or names them incompletely),
@@ -293,7 +398,7 @@ files you opened here.
 ## Step 5.5 — detect the stack (before planning)
 
 Detect the stack now, **before** drafting the plan — the plan's file paths come
-from the repo's real layout, and the step-6.3 Codex brief has to state the
+from the repo's real layout, and the step-6.4 Codex brief has to state the
 detected stack and the repo's real lint/build/test commands. Detection is
 read-only, so it may run as early as Step 4 alongside triage. The routing table
 lives in *Stack — detected, never prescribed*; **Step 6.5 confirms that routing,
@@ -313,19 +418,26 @@ tiering real: STRONG plans, MEDIUM builds from the plan.
 1. **Enter plan mode now** (the `EnterPlanMode` tool). From here until approval,
    you research and plan only — no file edits, no code. Plan mode enforces that
    mechanically, which is the point: the gate doesn't rely on your restraint.
-2. Draft the plan **using exactly the template below** — same headings, same
+2. **Run the recon wave first** (see *Concurrent recon*) — dispatch the
+   independent investigations the plan needs concurrently, synthesize what comes
+   back, and let it raise the next wave if it must. **This is where a slow run
+   loses its hour**: read-then-think-then-read over a couple of dozen questions is
+   an afternoon, and the same questions asked at once are minutes. Stop at the
+   stopping rule — you can name every file the build sequence touches and every
+   contract it depends on — not when curiosity is satisfied.
+3. Draft the plan **using exactly the template below** — same headings, same
    order, so every plan reads the same way.
-3. **Send the draft to Codex for an independent critique — read-only, before
+4. **Send the draft to Codex for an independent critique — read-only, before
    the user ever sees it** (see *Cross-model plan review* below). Reconcile its
    findings into the draft. Two things skip it, and they are recorded
    differently: the companion check said Codex is **unavailable** (a
    degradation), or the run is in the **FAST lane** (a recorded decision). Say
    which in the approval ask.
-4. **Present the reconciled plan through plan mode's approval flow**
+5. **Present the reconciled plan through plan mode's approval flow**
    (`ExitPlanMode`). The user approves, edits, or rejects in the native UI.
    **Implementation starts only on approval** — an edited plan is the new plan;
-   a rejection sends you back to item 2 above (redraft), not into the code.
-5. **Immediately after approval, save the approved plan to
+   a rejection sends you back to item 3 above (redraft), not into the code.
+6. **Immediately after approval, save the approved plan to
    `.specs/plans/<TICKET>.md`** — the plan **body** verbatim, beneath a single YAML
    front-matter header carrying `approval_status`, `design_ref`, `ui_required`, and
    `owned_screens`. The header is metadata *about* the plan, so adding it is not an
@@ -420,7 +532,7 @@ Formatting rules that keep it readable:
 - **Short beats complete.** A plan nobody reads gates nothing. If the ticket is
   big, the build-sequence rows get more numerous — the prose does not get longer.
 
-### Cross-model plan review (step 6.3)
+### Cross-model plan review (step 6.4)
 
 A plan reviewed by the model that wrote it inherits that model's blind spots,
 and the expensive failures — a sequence that can't build in that order, a path
@@ -777,7 +889,7 @@ its own parity. It signs only the snapshot and grade it actually reviewed: a
 signature binds to that gate's **scope digest** (see *Signature binding*), and a
 later fix inside that scope makes it stale rather than merely old.
 
-**The Codex passes sit outside this tiering.** The plan review (step 6.3), the
+**The Codex passes sit outside this tiering.** The plan review (step 6.4), the
 `codex review` pass (pass B, step 13c), and an optional Codex parity signature
 run in a separate process on a separate account — they cost nothing from the
 budget above and gain nothing from routing a subagent at them. Two rules keep
@@ -863,7 +975,7 @@ does not exist yet:
 | Moment | When | Inputs | Binds |
 |---|---|---|---|
 | **`tentative_lane`** | Step 4 triage | the ticket alone | **nothing** — it only shapes how much plan the ticket warrants |
-| **`provisional_lane`** | end of Step 6, **immediately before the 6.3 decision** | the *completed* plan's file list (`F`, `S`) | the plan-review decision, and nothing else |
+| **`provisional_lane`** | end of Step 6, **immediately before the 6.4 decision** | the *completed* plan's file list (`F`, `S`) | the plan-review decision, and nothing else |
 | **`actual_lane`** | the review freeze | the real working tree (`F`, `S`, `L`) | everything downstream |
 
 `S` counts distinct top-level modules of the repo's own layout; "generated" means
@@ -872,7 +984,7 @@ actually references and you cannot compute forces HEAVY.** (`L` before the freez
 is not such a value — no earlier predicate references it.)
 
 **The plan review keys off the PROVISIONAL lane, and that decision is historical.**
-A FAST provisional lane skips step 6.3; if the run later escalates to STANDARD or
+A FAST provisional lane skips step 6.4; if the run later escalates to STANDARD or
 HEAVY, that escalation **does not retroactively owe a pre-approval critique** — the
 plan was already approved and the moment has passed. What it does owe is honesty:
 the report and session log record `Not run — FAST at approval; escalated to
@@ -897,13 +1009,14 @@ decides.
 | | FAST | STANDARD | HEAVY |
 |---|---|---|---|
 | Plan-mode approval | required | required | required |
-| Codex **plan** review (6.3) | **not run** — recorded as a lane decision | required, `--effort medium` | required, `--effort high` |
+| Codex **plan** review (6.4) | **not run** — recorded as a lane decision | required, `--effort medium` | required, `--effort high` |
 | GATE 3 (all rows) | required | required | required |
 | GATE 4 | **iff `ui_required`** | iff `ui_required` | iff `ui_required` |
 | GATE 5 | **iff `tb_touched`** | iff `tb_touched`, light | iff `tb_touched`; strict when `security_sensitive` |
 | Diff review passes A **and** B | both | both | both |
 | Pass B reasoning effort | `medium` | `medium`/`high` | `high`/`xhigh` |
-| Wave orchestration | serial is fine | concurrent | concurrent |
+| Review-wave orchestration | serial is fine | concurrent | concurrent |
+| Recon-wave orchestration | concurrent where independent | concurrent | concurrent |
 
 **No lane suppresses pass B.** If pass B is absent it is because the *engine* was
 unavailable or timed out — a declared degradation, reported as "one free-form
@@ -1041,8 +1154,18 @@ resuming an artifact that already carried a signature.
 The wave is an orchestration convenience, never a source of verdicts. Three modes,
 declared like any other degradation:
 
-- **workflow** — a schema-validated, resumable, blind concurrent run. Every pass
-  returns the same shape, whatever the mode: `manifest_id` · `reviewed_paths` ·
+> **Carrier modes are shared; result schemas are not.** The three modes below
+> (workflow / fan-out / serial) apply to **both** waves. The schema each wave's
+> agents return does **not**: recon returns `question` · `answer` · `paths` ·
+> `signatures` · `quoted lines` · `confidence`, with no manifest and no verdict,
+> because recon is answering questions about code that does not exist yet. The
+> review-pass schema below is review-only — do not require `manifest_id` or a gate
+> verdict from a recon investigator.
+
+- **workflow** — a schema-validated, resumable, blind concurrent run, and the
+  preferred carrier whenever the orchestrator has one; **this skill's instructions
+  authorize it** for both waves. Every **review** pass returns the same shape,
+  whatever the mode: `manifest_id` · `reviewed_paths` ·
   `excluded_paths` (each with a reason) · `findings` (severity, `file:line`,
   quoted line, fix) · **`gate_verdicts[]`** — a list, because one run can owe both a
   GATE 4 and a strict GATE 5 verdict, each carrying `gate`, `scope_digest`, the
@@ -1547,7 +1670,9 @@ the review freeze, and the concurrent wave* above for the shared mechanics.
      came from — plus, if they differ, why it escalated, and whether the plan
      review's FAST-lane omission predates that escalation
    - the **manifest ID** and each pass's verified coverage
-   - the **orchestration mode** (workflow / fan-out / serial)
+   - the **orchestration mode** for **each wave** — recon and review — as
+     workflow / fan-out / serial; they can differ, and a run that fanned out its
+     review while serializing an hour of recon must not report as concurrent
    - **which engine ran pass B** (`codex review`, `codex exec`, CodeRabbit
      fallback, or none → one free-form reviewer plus rule pass C), **the reasoning
      effort it ran at**, and whether it timed out
@@ -1576,8 +1701,9 @@ the review freeze, and the concurrent wave* above for the shared mechanics.
 18. **Write the session log BEFORE the push** — so it rides the single gated
    commit, never a second one. Run `/session-logger` (or write the entry yourself
    to `session-log.md`); ensure it is on disk before the commit. Record:
-   - the run's **availability mode** and **orchestration mode**, and which gates
-     ran degraded (or "full mode — all companions installed")
+   - the run's **availability mode**, and the **orchestration mode of each wave**
+     (recon and review), and which gates ran degraded (or "full mode — all
+     companions installed")
    - the **provisional and effective lane**, the raw classifier numbers, and any
      escalation
    - **every manifest ID** — `F0` and each promoted `Fn` — and which one is the
@@ -1819,7 +1945,7 @@ finding set — or pass B's engine unavailability, or a non-UI run's named loss 
 reviewer independence, **declared by name** — with every skip citing a rule ID; a clean delta pass if fixes triggered one; every post-freeze change on
 the allowlist; a green CI; the ticket in Done (Jira transition or ADO completed
 state); a PR linked to the ticket; and a written session log naming the run's
-availability mode **and orchestration mode** — no self-attested gate, no stale
+availability mode **and each wave's orchestration mode** — no self-attested gate, no stale
 signature, and no silent degradation anywhere in the chain.
 
 Wall-clock is a **target, not a guarantee**: ticket scope, runtime attacks, human
