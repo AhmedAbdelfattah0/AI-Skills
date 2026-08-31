@@ -103,7 +103,7 @@ on an engine that is a binary, or either test on an orchestration capability:
 | `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance, using **GATE 5's per-family minimum table** (step 12) rather than a fixed set — an API minimum asserted over a config-only surface proves nothing. That table is reproduced inline in step 12 precisely so it survives `vapt`'s absence. Commit those tests in the repo's own runner and record **PASS-DEGRADED**. For the *unexercised* rules you cannot enumerate by ID without the skill, name the **families** that went untested (mass assignment, injection, XSS, CORS, cookie flags, headers) and state that the full ID list was unavailable — an honest family-level declaration, never a silent omission or an invented ID. |
 | `test-quality` | The single TEST-\* guard over the whole final test diff — ordinary + abuse tests together (step 12.4) — reused as GATE 3's `TEST` row | Skip the companion's **execution**, never the **row**: still reject obvious implementation-detail assertions and unjustified mocks on your own judgment, and emit `TEST \| DEGRADED \| test-quality unavailable; reduced manual check: <what you actually checked>`. A missing engine changes the evidence, not whether the row exists. |
 | `docs-accuracy` | DOC-\* rule set (step 12.5, before the freeze) | The pre-freeze grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
+| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.3's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
 | the `codex` CLI (`codex review`) | **Pass B** — Codex reviews the **local** diff concurrently with passes A and C (step 13c), before the PR exists | **Fall back to `/coderabbit:code-review`** if it is installed — same slot, same manifest, same skip-by-citation rules, different engine; step 16 names which engine actually ran. Only if **neither** exists does pass B disappear, leaving one free-form reviewer plus rule pass C — stated explicitly in step 16. A pass B that exceeds its declared time ceiling degrades the same way. |
 | `/code-review` (Claude Code's built-in review — formerly `/review`) | **Pass A** — the fresh no-build-context reviewer (step 13b) + the default route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context**, or as a read-only `codex-delegate` dispatch — GATE 4's independence requirement is about *who* reviews, not the command name, so either fallback still produces a valid signature. If **no** fresh-reviewer route exists at all: a **UI** ticket ✋ STOPs (GATE 4 cannot self-sign), and a **non-UI** ticket continues with pass A run by the building agent — declared explicitly as `pass A ran WITHOUT reviewer independence`, which is a named loss, not a silent one. |
 | the orchestrator's **concurrency capability** (workflow runner / fresh subagents) | Orchestration **only**: schema-validated, resumable, blind concurrent execution of the step-13 wave over one frozen manifest. It owns no quality rule and no gate verdict. | If a workflow runner is absent but plain subagent fan-out exists, launch the same read-only passes concurrently without schemas or resume. If only serial execution exists, run the same passes, in the same scope, one after another against the unchanged manifest — declare `orchestration degraded: serial`. **No pass and no gate is skipped in any mode.** If no fresh-reviewer route exists at all for a UI ticket, ✋ **STOP** — GATE 4 never degrades to self-signing. |
@@ -454,12 +454,54 @@ its read-only dispatch:
 - **Nothing lands in the repo.** Pipe the brief in on stdin (heredoc) and leave
   the relay's `--out-dir` at its default temp dir, so plan mode's clean tree
   survives the round trip.
-- **Dispatch in the background with a relay watchdog** — e.g. `--timeout 15m`.
-  A foreground shell call is capped at 10 minutes and would kill a live run
-  mid-review; background it and resume when the relay writes `result.json`.
+- **Set the reasoning effort explicitly — do not inherit the account default.**
+  Same lever, same reason as pass B (step 13c): many accounts set
+  `model_reasoning_effort = "xhigh"` globally, and a plan critique at xhigh across
+  a large tree is how this dispatch blows its own watchdog. Pass
+  `--effort medium` for STANDARD and `high` for HEAVY; reserve `xhigh` for a
+  critique you have a specific reason to want deeper. (FAST does not reach this
+  step at all — it records `Not run — FAST lane` — so it has no effort to set.)
+- **Size the watchdog to the read, not to a fixed number.** `--timeout 15m` suits
+  **one** repo of ordinary size. What actually drives the duration is the volume
+  Codex must read and reason over — scoped files and bytes, the tool calls that
+  takes, and the effort setting — so repository *count* is only a coarse proxy for
+  it. Treat **+10m per additional repository as a conservative floor**, then raise
+  it for a large tree or a higher effort. A watchdog shorter than the read
+  guarantees a timeout and buys nothing.
+- **Multi-repo tickets: `--cd` must be a git repository.** A container directory
+  that merely *holds* two repos is not one, and Codex refuses in under a second.
+  Root the dispatch **inside one repo** (the one the plan changes most) and give
+  the other's **absolute path** in the brief, with a line telling Codex it may
+  read there. Say which repo is the root so its findings' relative paths are
+  unambiguous. **The read-only sandbox does not confine reads to the `--cd`
+  subtree** — verified on `codex-cli 0.145.0`: a run rooted in one repo read a
+  sibling repo by absolute path — so this works, and `--cd` is about giving git a
+  valid repository, not about scoping what may be read.
+- **A watchdog expiry is not a total loss — recover before you re-dispatch.**
+  When the relay times out it writes `result.json` with no `finalMessage`, but the
+  watchdog killed the live **process**, not the persisted **session** — so what
+  Codex already read is still reachable. **Resume it** with a short delta brief
+  asking for its findings **from what it has already read**, bounded and
+  severity-ordered.
+
+  Three conditions make that recovery safe rather than a second failure:
+  - **A non-empty `threadId` must exist** in the timed-out `result.json`. No
+    thread id, no recovery — go straight to the degradation.
+  - **Reuse the original dispatch's `--cd`, `--read-only`, and explicit
+    `--effort`.** A resume that re-derives them can repeat the not-a-git-repo
+    failure, silently inherit a write-capable sandbox, or fall back to the
+    account's global effort — which is what caused the timeout in the first place.
+  - **Bound the recovery itself** with its own short `--timeout`. An unbounded
+    "just finish up" resume is the same failure with a longer fuse.
+
+  Re-dispatching from zero instead pays the whole read again and will likely hit
+  the same ceiling. **If there is no `threadId`, the resume is rejected or exits
+  non-zero, or the bounded recovery itself times out**, the review is unavailable
+  — declare the degradation.
 - **Read `finalMessage` from `result.json`** — that is Codex's report. Record
-  `threadId`; it identifies the session for a follow-up question, and it is the
-  audit trail for a signature if this same route signs GATE 4 later.
+  `threadId`; it identifies the session for a follow-up question, it is what the
+  timeout recovery above resumes, and it is the audit trail for a signature if
+  this same route signs GATE 4 later.
 
 **What the brief must carry** — Codex has no memory of this conversation and
 sees only your text plus the working tree:
@@ -855,7 +897,7 @@ decides.
 | | FAST | STANDARD | HEAVY |
 |---|---|---|---|
 | Plan-mode approval | required | required | required |
-| Codex **plan** review (6.3) | **not run** — recorded as a lane decision | required | required |
+| Codex **plan** review (6.3) | **not run** — recorded as a lane decision | required, `--effort medium` | required, `--effort high` |
 | GATE 3 (all rows) | required | required | required |
 | GATE 4 | **iff `ui_required`** | iff `ui_required` | iff `ui_required` |
 | GATE 5 | **iff `tb_touched`** | iff `tb_touched`, light | iff `tb_touched`; strict when `security_sensitive` |
