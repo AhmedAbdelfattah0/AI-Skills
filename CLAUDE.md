@@ -87,7 +87,12 @@ Angular work to `angular-code-quality` (`NG-*`) and backend work to `backend-cod
 auto-trigger and back `ship-ticket`'s GATE 3 + rule-ID skip protocol), not merged into the hub.
 `code-quality`'s per-stack `references/angular.md` and `nodejs.md` are **constitution-level
 summaries only** — each carries a header deferring to the specialist as source of truth, so the
-two never drift. `test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
+two never drift. **`ship-ticket` no longer runs MODE D as a separate second pass:** it preserves
+the hub's universal coverage as a whole-diff **`UNIVERSAL` row** (universal-principles + the
+project constitution) sitting beside the specialists' unchanged **`AI-FM` row** in one GATE 3
+table. Folding the hub's guard into `AI-FM` alone would drop SOLID, DRY, KISS, CQS, the
+complexity ceilings and the YAGNI list — so if you touch either row, keep both.
+`test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
 hub and specialists route to when a diff touches tests or docs.
 
 **The four security skills, and the one line that separates them.** Three of them
@@ -131,14 +136,23 @@ only as one example among several, or inside the routing table. Concretely: no
 hardcoded test runner (read the repo's command), no fixed file globs (derive from
 the repo's layout), no assumed i18n/RTL (only if the project ships it), no
 assumed migration tool. It has to work on Express+Postgres and Django and Go, not
-just the project it was first written for.
+just the project it was first written for. The same rule binds its newer
+machinery: the **run-lane classifier**, the trust-boundary and view-layer
+detectors, the command selection, and any wave partitioning all derive from the
+repository — they must never harden into fixed globs or an assumed runner.
 
-**`ship-ticket`'s cross-model review depends on two things this repo does not ship.**
-Both of its Codex touchpoints — the **step 6.3 plan review** (the drafted plan goes to
-Codex read-only *before* the user approves it) and **step 14** (`codex review` on the
-local diff, the second review pass, with `/coderabbit:code-review` as the declared
-fallback) — need the external [`codex-delegate`](https://github.com/amElnagdy/delegate-skills)
-skill and the `codex` CLI on PATH. Two rules keep that dependency honest: **check the
+**`ship-ticket`'s cross-model review depends on things this repo does not ship —
+and its two Codex touchpoints do not depend on the same ones.**
+Those touchpoints are the **step 6.3 plan review** (the drafted plan goes to
+Codex read-only *before* the user approves it, and is a **recorded lane decision rather
+than a degradation** when the run is in the FAST lane) and **pass B in step 13c**
+(`codex review` on the local diff, run **concurrently** with the fresh-Claude pass A and
+the rule pass C over one frozen manifest, with `/coderabbit:code-review` as the declared
+fallback). The **plan review needs both** the external
+[`codex-delegate`](https://github.com/amElnagdy/delegate-skills) skill *and* the
+`codex` CLI on PATH, because it dispatches through the relay; **pass B needs only
+the `codex` binary.** A missing `codex-delegate` therefore costs the plan critique
+and leaves the diff review intact — never disable both because one is absent. Two rules keep that dependency honest: **check the
 binary, not the skill list** (a CLI companion is available only if `codex --version`
 succeeds — the availability table's skill test cannot see it), and **never reference
 `codex-delegate` by relative path** — it installs to `~/.agents/skills`, not beside
@@ -149,6 +163,23 @@ approves either, and its absence degrades the review loudly rather than stopping
 run. It is also an accepted signer for GATE 4's independent parity signature (a
 separate process with no build context), recorded as `codex <version>, session
 <threadId>` from the relay's `result.json`.
+
+**`ship-ticket` borrows `pr-review`'s blind concurrent A/B/C structure** for its diff
+review, while keeping its own gate semantics and its local-uncommitted scope. Two
+things make that safe and they are load-bearing: the passes are **report-only** (a
+reviewer that fixes code invalidates its peers' conclusions) and every pass is bound to
+a **frozen manifest** — `merge-base…HEAD committed delta + index/worktree status +
+untracked files, with per-path digests, modes, rename origins, deletion tombstones
+and symlink targets` (the committed layer matters: a resumed branch may carry WIP
+commits that `git status` cannot see) — computed
+**once** and handed to all of them, because a bare `git diff` hides staged changes and a
+pass that reviewed a narrower set has gated nothing. The manifest is an integrity check
+over the live tree, **not a commit**: step 19 is the only commit the workflow
+*creates*, followed by the step-20 tracker transition — pre-existing WIP commits on
+a resumed branch may survive it, but only by an explicit human decision.
+Concurrency itself is a **third kind of companion** — an orchestration capability, not a
+skill or a binary — and its absence degrades the wave to serial execution over the same
+manifest, declared like any other degradation. It never removes a pass.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
@@ -204,9 +235,21 @@ command exits during argument parsing. So a Codex pass is either *instructed*
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
 worktree paths**, so dedupe and strip the prefix before anything is posted.
-**`ship-ticket` step 14 carries the same constraint** — it used to document
-`codex review --uncommitted "<instructions>"`, which exits during argument
-parsing on 0.145.0, and now states the scope in the prompt instead. If you
+**`ship-ticket`'s pass B (step 13c) carries the same constraint** — it used to
+document `codex review --uncommitted "<instructions>"`, which exits during
+argument parsing on 0.145.0, and now states the scope in the prompt instead.
+**Pass B also always sets `-c model_reasoning_effort=` explicitly rather than
+inheriting the account's global default** — measured on this repo, same diff and
+prompt, `xhigh` took 384s against `medium`'s 177s (2.2x) — and asks for
+severity-ordered findings rather than unbounded enumeration.
+
+**What the two skills must keep in sync, and what they need not.** The *CLI
+contract* is shared and must match in both: the scope-flag-vs-prompt conflict, the
+duplicated final report, and the absolute paths. The *cost policy* — explicit
+per-lane `model_reasoning_effort` and the bounded ask — is `ship-ticket`'s, because
+it has run lanes to key it to; `pr-review` reviews one PR with no lane and may keep
+a bare invocation. If you change how either skill talks to the CLI, change both; if
+you change only the effort policy, you need not. If you
 change how either skill invokes Codex, change both.
 
 ## Two script-delivery patterns
