@@ -187,7 +187,7 @@ command exits during argument parsing. So a Codex pass is either *instructed*
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
 worktree paths**, so dedupe and strip the prefix before anything is posted.
-**`ship-ticket` step 14 carries the same constraint** — it used to document
+**`ship-ticket`'s pass B (step 13c) carries the same constraint** — it used to document
 `codex review --uncommitted "<instructions>"`, which exits during argument
 parsing on 0.145.0, and now states the scope in the prompt instead. If you
 change how either skill invokes Codex, change both.
