@@ -56,12 +56,38 @@ Conflicts are resolved here, before implementation — never mid-file.
 
 1. `[NN]` invariants
 2. `CLAUDE.md` project conventions
-3. This skill's `[ARCH]` rules
-4. This skill's `[D]` defaults
-5. Existing repo convention (match it) — only where 1–4 are silent
-6. Convenience, speed, "simpler for now", "we'll refactor later" — **never a tiebreaker**
+3. **The `code-quality` hub's core** — `universal-principles.md` and
+   `ai-failure-modes.md`. This skill *builds on* that foundation; it does not
+   outrank it.
+4. This skill's `[ARCH]` rules
+5. This skill's `[D]` defaults
+6. Existing repo convention (match it) — only where 1–5 are silent
+7. Convenience, speed, "simpler for now", "we'll refactor later" — **never a tiebreaker**
 
 If 1 and 2 collide, stop and say so. Do not pick one silently.
+
+**The rule that stops this skill fighting the repo.** An `[ARCH]` rule here
+prescribes *a* structure; the hub's core says **never introduce a second pattern
+for something the repo already does one way** (Clean Code "match the neighbors"),
+and YAGNI's list flags pass-through adapters, one-implementation interfaces, and
+layering ceremony on sight. So:
+
+> **If following an `[ARCH]` rule literally would create a second pattern for a
+> concern this repo already handles uniformly, the rule does not fire.** Level 3
+> beats level 4. Match the repo, cite the hub's principle, and move on.
+
+This is not a waiver and needs no ledger entry — there is no violation to waive.
+It is the precedence list working. **Uniformly** is the load-bearing word: two
+screens doing it one way is a coincidence; every shipped screen doing it one way
+is the project's architecture, and this skill's default lost to it.
+
+**`[NN]` rules are exempt from all of this.** Security and correctness
+invariants never lose to a repo pattern — a project that uniformly sanitises
+nothing is uniformly wrong. This carve-out is for structure, never for safety.
+
+What this does **not** license: skipping an `[ARCH]` rule because one file finds
+it inconvenient, or because the repo is merely *inconsistent* here. If the repo
+has no settled pattern, levels 4 and 5 apply normally.
 
 ---
 
