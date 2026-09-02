@@ -88,12 +88,17 @@ auto-trigger and back `ship-ticket`'s GATE 3 + rule-ID skip protocol), not merge
 `code-quality`'s per-stack `references/angular.md` and `nodejs.md` are **constitution-level
 summaries only** — each carries a header deferring to the specialist as source of truth, so the
 two never drift. **But the specialists do not outrank the hub's core.** Their STEP 0
-precedence lists place `universal-principles.md` + `ai-failure-modes.md` *above* their own
-`[ARCH]` rules, and state that an `[ARCH]` rule does not fire when following it literally
-would introduce a second pattern for a concern the repo already handles uniformly — that is
-Clean Code's "match the neighbors" and YAGNI's list winning, not a waiver. The specialists
-beat the hub's per-stack *summaries*; they never beat its foundation. `[NN]` rules are exempt:
-security never loses to a repo pattern.
+precedence lists apply `universal-principles.md` + `ai-failure-modes.md` **jointly** with
+their own `[ARCH]` rules — ranked above would be wrong, since the core forbids
+one-implementation interfaces while `NG-SOLID-05`/`BE-SOLID-05` mandate abstractions. Where
+the two genuinely collide (the rule says build an abstraction; the core says don't add a
+second pattern), a **four-condition test** resolves it: enumerated repo-wide evidence ·
+ratified as the project's architecture, not merely observed · the rule protects structure,
+never validation/authz/tenancy/idempotency/output-safety/data-integrity *regardless of tier
+letter* · the alternative really would be a second pattern. All four → the rule does not
+fire, recorded as an `N/A — replaced by established project architecture` row with its
+evidence, outside the waiver ledger. Fewer than four → it stands. The specialists beat the
+hub's per-stack *summaries*; they never beat its foundation.
 
 **`ship-ticket` no longer runs MODE D as a separate second pass:** it preserves
 the hub's universal coverage as a whole-diff **`UNIVERSAL` row** (universal-principles + the

@@ -550,7 +550,8 @@ of A B C D is a real answer.
 **Full-stack tickets: the frontend does not wait for the backend.** What the
 frontend actually depends on is the **API contract — the request and response
 shape — not the backend's implementation of it.** So pin the contract as its own
-first step, then frontend and backend are separate parallel groups:
+first step, then frontend and backend become separate steps **in the same
+parallel group**:
 
 | # | Step | Files touched | Depends on | Par |
 |---|---|---|---|---|
@@ -926,7 +927,7 @@ and one tier:
 | Tier | Meaning | Override |
 |---|---|---|
 | `[NN]` | Non-negotiable security/correctness invariant | Never, per-file. Only an explicit recorded user waiver. |
-| `[ARCH]` | Architectural shape | `CLAUDE.md`, project-wide only |
+| `[ARCH]` | Architectural shape | `CLAUDE.md`, project-wide only — **or** an established project architecture that passes the invoked specialist's four-condition test (enumerated repo-wide evidence · ratified, not merely observed · protects structure not safety · the alternative really would be a second pattern). That outcome is an `N/A — replaced by established project architecture` row carrying the evidence, **not** a skip and **not** a ledger waiver. |
 | `[D]` | Default convention | `CLAUDE.md` or established repo convention |
 
 This workflow depends on those IDs in three places: the Design Contract before
@@ -1344,11 +1345,23 @@ each other:
 | **12a–c** — GATE 5's surface inventory and abuse-case *design*, fanned out per surface | enumerating and designing are reads |
 | **12.5** — the docs scan | greps docs surfaces |
 
-**Only two things in this block are serial, and only because they write:**
-GATE 5's **live attacks** (shared port, shared datastore, destructive state — see
-12c) and the **fixes** any of the above produce. Collect every finding from the
-wave, then apply fixes once, then run 12.4's single `test-quality` pass over the
-resulting test diff.
+**This is a wave with barriers, not one flat run.** A static-security fix can
+change routes, middleware, config or rendering sinks — which is exactly what
+GATE 5's inventory and abuse design were derived *from*. So the block runs in
+four ordered phases:
+
+1. **Concurrent reads** — steps 10, 11, 12a–c and 12.5 together, as above.
+2. **Barrier → apply fixes once**, then **re-derive every product those fixes
+   invalidated**: an inventory or abuse-case set whose surface moved, and a parity
+   draft whose screen changed. A surface enumerated before the fix that created it
+   was never enumerated.
+3. **Live attacks, serially**, against the re-derived inventory — never before
+   phase 2 has settled, or you are attacking a map of the old code.
+4. **Barrier → apply attack fixes**, re-run whatever they touched (step 9's
+   commands, step 10's rows, the affected abuse tests), then run 12.4's single
+   `test-quality` pass over the resulting test diff and proceed to the freeze.
+
+Phases 2 and 4 are the only serial parts, and only because they write.
 
 A UI ticket with four owned screens is four concurrent parity diffs, not one
 agent walking four screens in sequence — that alone is the difference between
