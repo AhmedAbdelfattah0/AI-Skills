@@ -87,7 +87,15 @@ Angular work to `angular-code-quality` (`NG-*`) and backend work to `backend-cod
 auto-trigger and back `ship-ticket`'s GATE 3 + rule-ID skip protocol), not merged into the hub.
 `code-quality`'s per-stack `references/angular.md` and `nodejs.md` are **constitution-level
 summaries only** — each carries a header deferring to the specialist as source of truth, so the
-two never drift. **`ship-ticket` no longer runs MODE D as a separate second pass:** it preserves
+two never drift. **But the specialists do not outrank the hub's core.** Their STEP 0
+precedence lists place `universal-principles.md` + `ai-failure-modes.md` *above* their own
+`[ARCH]` rules, and state that an `[ARCH]` rule does not fire when following it literally
+would introduce a second pattern for a concern the repo already handles uniformly — that is
+Clean Code's "match the neighbors" and YAGNI's list winning, not a waiver. The specialists
+beat the hub's per-stack *summaries*; they never beat its foundation. `[NN]` rules are exempt:
+security never loses to a repo pattern.
+
+**`ship-ticket` no longer runs MODE D as a separate second pass:** it preserves
 the hub's universal coverage as a whole-diff **`UNIVERSAL` row** (universal-principles + the
 project constitution) sitting beside the specialists' unchanged **`AI-FM` row** in one GATE 3
 table. Folding the hub's guard into `AI-FM` alone would drop SOLID, DRY, KISS, CQS, the
