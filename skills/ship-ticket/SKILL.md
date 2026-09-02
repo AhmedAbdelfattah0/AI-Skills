@@ -479,10 +479,20 @@ chosen approach in one line. No jargon — write it for the person approving,
 not for the builder.>
 
 ## 2. Build sequence
-| # | Step (plain words) | Files touched | Depends on |
-|---|---|---|---|
-| 1 | Add the state/data layer for X | <real path, in THIS repo's layout> | — |
-| 2 | Build the X list screen | <real path(s), incl. template/style files> | 1 |
+| # | Step (plain words) | Files touched | Depends on | Par |
+|---|---|---|---|---|
+| 1 | Add the state/data layer for X | <real path, in THIS repo's layout> | — | A |
+| 2 | Add the Y lookup service | <real path> | — | A |
+| 3 | Build the X list screen | <real path(s), incl. template/style files> | 1 | B |
+
+**`Par` is the parallel group** — steps sharing a letter have no dependency on
+each other and **touch no file in common**, so they can be built concurrently.
+Steps with no peer just get their own letter. Two rules make the column honest:
+a step may only share a group with steps it does **not** list in *Depends on*,
+and **two steps that touch the same file are never in the same group** — that is
+a write conflict, not parallelism. If everything is sequential, say so; a column
+of A B C D is a real answer.
+
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
@@ -514,6 +524,18 @@ lane; deterministic path/command/dependency/duplicate checks passed`> / <no —
 
 <or, when it didn't run: "Not run — `codex` CLI unavailable. This plan carries
 no cross-model review.">
+
+## 8. Gate fan-out (filled in at plan time, executed at gate time)
+State what will run concurrently later, so it is a decision made once here rather
+than improvised under time pressure at step 11:
+
+| Stage | Fans out by | Count for this ticket |
+|---|---|---|
+| GATE 4 parity draft | owned screen | <N screens → N investigators, or "n/a — no UI"> |
+| GATE 5 inventory + abuse design | trust boundary | <N surfaces, or "n/a — no trust boundary"> |
+| GATE 3 rule pass (pass C) | rule family | <the families the diff puts in force> |
+
+GATE 5's **live attacks stay serial** regardless — shared port and datastore.
 ```
 
 Formatting rules that keep it readable:
@@ -721,9 +743,13 @@ implementation is strictly worse.
 Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
-- **Follow the approved plan's build sequence, in order.** The sequence encodes
-  the dependencies; jumping ahead is how you end up writing a screen against a
-  service that doesn't exist yet.
+- **Follow the approved plan's build sequence — in dependency order, but build a
+  parallel group together.** The plan's `Par` column already did this analysis:
+  steps sharing a letter have no dependency on each other and touch no file in
+  common, so build them concurrently. Steps in different groups stay ordered;
+  jumping a dependency is still how you write a screen against a service that
+  doesn't exist yet. Building a four-step `A` group one at a time is throwing away
+  work the plan already did.
 - **Write only files in the Design Contract.** A file you need that isn't in the
   contract means the plan was wrong — that is a **material divergence**, and it
   goes back through plan mode for re-approval (see *The plan constrains the
@@ -1211,6 +1237,28 @@ the review freeze, and the concurrent wave* above for the shared mechanics.
    abuse tests, so a single pass covers ordinary and abuse tests together (step
    12.4). Running it now would only have to run again.
 
+**Steps 10–12.5 are a WAVE, not a queue.** This is the second place a run loses
+half an hour. Almost all of this block is **reading**, and the reads do not need
+each other:
+
+| Runs concurrently, from step 9's green tree | Why it is independent |
+|---|---|
+| **10** — the static security rows | reads the changed surfaces |
+| **11** — the GATE 4 parity draft, **fanned out one agent per owned screen** | each screen diffs against the pinned reference alone |
+| **12a–c** — GATE 5's surface inventory and abuse-case *design*, fanned out per surface | enumerating and designing are reads |
+| **12.5** — the docs scan | greps docs surfaces |
+
+**Only two things in this block are serial, and only because they write:**
+GATE 5's **live attacks** (shared port, shared datastore, destructive state — see
+12c) and the **fixes** any of the above produce. Collect every finding from the
+wave, then apply fixes once, then run 12.4's single `test-quality` pass over the
+resulting test diff.
+
+A UI ticket with four owned screens is four concurrent parity diffs, not one
+agent walking four screens in sequence — that alone is the difference between
+thirty minutes and eight. Fan-out width stays proportional (see *Concurrent
+recon*), and the orchestration mode is declared per wave.
+
 10. **Pre-VAPT static security proof.** Before GATE 5 attacks anything, run the
    invoked specialist's **security rows only** (`BE-SEC-*` / `BE-AUTH-*` /
    `BE-TEN-*`, or the stack's equivalents) over the changed surfaces. This is what
@@ -1232,6 +1280,13 @@ the review freeze, and the concurrent wave* above for the shared mechanics.
 11. **GATE 4 draft — Design-Parity artifact.** Runs **iff `ui_required`** — the
    same test the lane table and the CI check use, never a looser "is this a UI
    ticket?" judgment. Produce `.specs/design-parity/<TICKET>.md`.
+
+   **Fan out one investigator per owned screen — the count is in the approved
+   plan's section 8.** Each screen's three-layer diff
+   against the pinned reference is independent of every other screen's — nothing
+   is shared but the reference SHA. They return unsigned per-screen verdicts as
+   data; you assemble the artifact. Serializing them is the single most expensive
+   avoidable cost in this block.
 
    **Scope — per OWNED screen, not per consumer.** GATE 4 fires for the screen(s)
    this ticket exists to build. It does **not** force a node-by-node diff of every
@@ -1293,7 +1348,8 @@ the review freeze, and the concurrent wave* above for the shared mechanics.
    named for the rule it defends (`VAPT-API-01: user B cannot read user A's
    invoice`) and asserting the *refusal* rather than the guard's internals.
 
-   **c. Inventory and test design may fan out by surface; live attacks may NOT.**
+   **c. Inventory and test design fan out by surface — the count is in the
+   approved plan's section 8; live attacks do NOT fan out.**
    Enumerating surfaces and designing abuse cases are read-only and parallelize
    cleanly. **Running** the attacks does not: concurrent workers share the port,
    the disposable datastore, the principal fixtures, and each other's destructive
