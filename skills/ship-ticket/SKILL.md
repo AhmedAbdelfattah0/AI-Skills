@@ -42,6 +42,60 @@ that ticket. Reusable across projects/instances — do **not** hardcode any
 cloudId, site, org, or project; use whatever tracker connection is available
 and resolve the key/URL the user gave.
 
+## Speak plainly — the codes are for the audit trail, not the reader
+
+The user is following their own ticket, not reading this file. **Lead with a
+plain sentence; put the code in brackets afterwards** for traceability. Never the
+other way round, and never the code alone.
+
+```
+✅  Security check on the new endpoint: passed [BE-SEC-03]
+❌  BE-SEC-03 | PASS
+❌  BE-SEC-03 — backend security rule | PASS
+```
+
+**Test for whether a name is plain: could someone who has never opened this file
+act on it?** If the name needs its own glossary — "LLM failure modes",
+"universal principles", "verification pass" — it is not a name, it is another
+code. Say what actually happened instead.
+
+| You are about to write | Say this instead |
+|---|---|
+| GATE 3 | **Checking the code against the project's rules** |
+| GATE 4 | **Checking the screen matches the design** |
+| GATE 5 | **Trying to break the new code on purpose** |
+| Pass A | **A second reviewer who didn't write the code** |
+| Pass B | **A different AI reviewing it independently** |
+| Pass C | **Going through the rule checklist one by one** |
+| Recon wave | **Reading the code to work out what to build** |
+| Review wave | **Three reviewers checking the change at once** |
+| `AI-FM` | **Common AI coding mistakes** (fake success, swallowed errors, dead code) |
+| `UNIVERSAL` | **General code health** — is it simple, not repetitive, not over-built |
+| `TEST-*` | **Whether the tests actually test anything** |
+| `DOC-*` | **Whether the docs still tell the truth** |
+| `VAPT-*` | **Attack tests** — proving a stranger can't get in |
+| `NG-*` / `BE-*` | **The Angular rules** / **the backend rules** |
+| `[NN]` | **Must fix** — a security or correctness rule, no exceptions |
+| `[ARCH]` | **Structural rule** — changeable, but project-wide only |
+| `[D]` | **A convention** — follow it unless the repo already does otherwise |
+| FAST / STANDARD / HEAVY | **How much checking this ticket gets** (small / normal / thorough) |
+
+**There is no GATE 1 or GATE 2.** The numbering is historical and means nothing —
+another reason to lead with what the thing does.
+
+**When something stops or fails, say what it means for the user**, not which
+gate fired:
+
+```
+✅  Stopped: I can't run the app locally, so I can't test whether the new
+    endpoint is actually protected. I need a way to run it. [GATE 5]
+❌  STOP: GATE 5 has no local instance.
+```
+
+**Rule IDs stay in findings and skip citations** — the ID *is* the citation, and
+the audit trail needs it — but always with a clause saying what the rule
+requires, so the reader never has to look it up.
+
 ## Step 1 — Tracker resolution
 
 The argument names the tracker — resolve it **first**. Everything below is
@@ -642,20 +696,31 @@ sees only your text plus the working tree:
 
 | Block | Contents |
 |---|---|
-| `<task>` | The ticket's spec + ACs, the **drafted plan verbatim**, the detected stack, and the repo's **real** lint/build/test commands. |
+| `<task>` | The ticket's spec + ACs, the **drafted plan verbatim**, the detected stack, the repo's **real** lint/build/test commands, and the **deterministic pre-check results as given** (paths present/absent, commands real, sequence acyclic, no duplicate implementation) with an instruction not to re-verify them. |
 | `<grounding_rules>` | Every claim cites a path or a line from this repo; label anything inferred as an inference. Read the files the plan names before judging them. |
-| `<structured_output_contract>` | Findings as a list: severity (blocker / major / minor) · the plan section it hits · evidence (`file:line`) · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
+| `<structured_output_contract>` | Findings **severity-ordered, blockers first, minors truncatable**, capped: severity · the plan section it hits · evidence (`file:line`) · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
 
 **Ask it the questions only a repo-grounded second model can answer** — not "is
-this a good plan?":
+this a good plan?". **Two of the five are already answered before you dispatch**:
+the deterministic pre-checks above cover path existence and duplicate
+implementation mechanically, for free. Send their *results* and tell Codex not to
+re-derive them — re-reading the tree to confirm what `test -e` already proved is
+the single biggest avoidable cost here.
 
-1. Do the plan's file paths exist / match this repo's actual layout?
-2. Does something in the repo **already do this** — a service, a util, a
-   component the plan is about to duplicate?
-3. Is the build sequence actually buildable in that order (does step *n* depend
+So the brief carries the pre-check results as **given**, and asks only the three
+that need judgment:
+
+1. Is the build sequence actually buildable in that order (does step *n* depend
    on something step *n+2* creates)?
-4. What is missing from the plan that the ticket's ACs require?
-5. What in section 3 (risks) is wrong, and what risk is absent?
+2. What is missing from the plan that the ticket's ACs require?
+3. What in section 3 (risks) is wrong, and what risk is absent?
+
+**Bound the ask, exactly as pass B does.** An unbounded "tell me everything" over
+a large tree at high effort is what turns this dispatch into the run's longest
+block — and unlike pass B it sits directly in front of a human waiting to
+approve. Demand findings **severity-ordered, blockers first**, say minors may be
+truncated, and cap the total. A critique that spends its budget on nits has spent
+it in the wrong place. (Same lever, measured on pass B: 384s to 177s.)
 
 **Then reconcile — this is your judgment, not Codex's.** Every finding is
 either **incorporated into the draft** or **rejected with a stated reason**, and
@@ -1720,7 +1785,10 @@ recon*), and the orchestration mode is declared per wave.
    where the UI really lives. Because the tracker's `Done` transition (step 20)
    follows green CI, this **hard-gates `Done`**.
 
-16. **Report — one reconciled account of the wave.** Not "what changed between
+16. **Report — one reconciled account of the wave.** **Written for the person who asked for the
+   ticket, not for this file** (see *Speak plainly*): every line leads with what
+   happened in plain words, with any code in brackets after. A report a reader has
+   to decode is a report they will not read. Not "what changed between
    passes": there is one wave and one reconciliation. State:
    - the **effective lane** (with the raw numbers) and the **provisional** one it
      came from — plus, if they differ, why it escalated, and whether the plan
@@ -1781,6 +1849,10 @@ recon*), and the orchestration mode is declared per wave.
      coming-soon → follow-up-ticket map
    - every skipped review finding **with its rule ID**
 
+   **Same in the log.** It is read months later by someone without this file
+   open: "Tried to break the new endpoint — all attacks refused [GATE 5]" is
+   recoverable; "GATE 5: PASS" is not.
+
    An entry that says "skipped some findings that conflicted with our conventions",
    or "matches the design", is worthless the moment the context is gone.
 
@@ -1816,6 +1888,9 @@ recon*), and the orchestration mode is declared per wave.
 
 **STOP and tell the user** if any of these happen. Don't guess the spec, don't invent
 a visual language, don't mark anything complete, don't push past a failure silently.
+**Say what it means for the user and what you need from them** — "I can't run
+the app locally, so I can't test whether the new endpoint is actually protected"
+is actionable; "GATE 5 failed" sends the reader hunting.
 
 - You can't fetch the ticket.
 - **A blocker on the ticket is not in a completed state** (Step 4.1) — name it and
