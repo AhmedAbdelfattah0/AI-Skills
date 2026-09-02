@@ -56,38 +56,74 @@ Conflicts are resolved here, before implementation — never mid-file.
 
 1. `[NN]` invariants
 2. `CLAUDE.md` project conventions
-3. **The `code-quality` hub's core** — `universal-principles.md` and
-   `ai-failure-modes.md`. This skill *builds on* that foundation; it does not
-   outrank it.
-4. This skill's `[ARCH]` rules
-5. This skill's `[D]` defaults
-6. Existing repo convention (match it) — only where 1–5 are silent
-7. Convenience, speed, "simpler for now", "we'll refactor later" — **never a tiebreaker**
+3. This skill's `[ARCH]` rules **and** the `code-quality` hub's core
+   (`universal-principles.md`, `ai-failure-modes.md`) — applied **jointly**, not
+   ranked. This skill builds on that core; where both speak, both apply.
+4. This skill's `[D]` defaults
+5. Existing repo convention (match it) — only where 1–4 are silent
+6. Convenience, speed, "simpler for now", "we'll refactor later" — **never a tiebreaker**
 
 If 1 and 2 collide, stop and say so. Do not pick one silently.
 
-**The rule that stops this skill fighting the repo.** An `[ARCH]` rule here
-prescribes *a* structure; the hub's core says **never introduce a second pattern
-for something the repo already does one way** (Clean Code "match the neighbors"),
-and YAGNI's list flags pass-through adapters, one-implementation interfaces, and
-layering ceremony on sight. So:
+**When an `[ARCH]` rule and the core genuinely collide.** They usually don't —
+`[ARCH]` prescribes a structure, the core asks whether the structure earns its
+keep. But one collision is real and recurring: the rule says *build this
+abstraction*, while the core says **never introduce a second pattern for
+something the repo already does one way** (Clean Code "match the neighbors") and
+flags one-implementation interfaces and pass-through adapters on sight (YAGNI).
 
-> **If following an `[ARCH]` rule literally would create a second pattern for a
-> concern this repo already handles uniformly, the rule does not fire.** Level 3
-> beats level 4. Match the repo, cite the hub's principle, and move on.
+Resolving it is a **four-condition test, and all four must hold**:
 
-This is not a waiver and needs no ledger entry — there is no violation to waive.
-It is the precedence list working. **Uniformly** is the load-bearing word: two
-screens doing it one way is a coincidence; every shipped screen doing it one way
-is the project's architecture, and this skill's default lost to it.
+1. **Evidence covering the rule's full applicability — not "the concern".**
+   "Concern" is whatever you decide it is, which is exactly the loophole. Derive
+   the search universe from **the cited rule's own text**: `NG-ARCH-04` governs
+   *every* `HttpClient` injection, so the evidence set is every injection site in
+   the repo, not every list screen. Record the **search method** and **every
+   exclusion with its reason**. A subset silently narrowed to the sites that agree
+   is not evidence.
+2. **Ratified at project level, or by the user.** Uniformity proves prevalence,
+   not correctness — a uniformly bad legacy system is uniformly bad. Accept only:
+   a **project-level architecture source that predates this ticket** (`CLAUDE.md`,
+   an ADR, an architecture doc), **or explicit ratification by the user** for this
+   ticket. **A code comment is not ratification** — a docblock asserting the choice
+   is deliberate can be written, or cited, by whoever wants the rule switched off.
+   It may *support* a project-level source; it can never stand alone.
+3. **The rule protects structure, not safety — judged by effect, not by list.**
+   This resolution is **forbidden wherever the rule directly enforces or isolates
+   any security, privacy, availability, or integrity control**, *regardless of its
+   tier letter*. Non-exhaustive examples: authentication, authorization, tenancy,
+   validation, idempotency and replay protection, secrets and credential handling,
+   cryptographic or signature verification, output safety, auditability, rate
+   limiting, data integrity. **The list is illustrative — the test is the effect.**
+   If switching the rule off would remove or weaken a control, it is a safety rule
+   whatever its label says, and this resolution does not apply. `[NN]` rules are
+   always excluded.
+4. **The alternative would genuinely be a second pattern** — building it here
+   adds a competing way to do something the repo already settles, rather than
+   filling a gap.
 
-**`[NN]` rules are exempt from all of this.** Security and correctness
-invariants never lose to a repo pattern — a project that uniformly sanitises
-nothing is uniformly wrong. This carve-out is for structure, never for safety.
+All four hold → **the rule does not fire.** Fewer than four → it stands, and the
+normal Deviation Protocol applies.
+
+**Record it, even though it is not a waiver.** There is no violation to waive, so
+it does not enter the deviation ledger — but it must not vanish either, or
+nothing shows the four conditions were ever checked. Emit a Verification Pass row:
+
+```
+NG-ARCH-04 | N/A — replaced by established project architecture
+           | evidence: grep -rn "inject(HttpClient)" src/ -> 11/11 sites are feature
+           | services; 0 in components; 0 exclusions
+           | ratified: CLAUDE.md "Data access" section (predates ticket)
+           | effect test: transport wiring; enforces no security/privacy/
+           | availability/integrity control
+```
+
+Same shape for `BE-*`. The row carries the rule ID, the enumerated evidence, and
+the resolved pattern.
 
 What this does **not** license: skipping an `[ARCH]` rule because one file finds
 it inconvenient, or because the repo is merely *inconsistent* here. If the repo
-has no settled pattern, levels 4 and 5 apply normally.
+has no settled pattern, levels 3 and 4 apply normally.
 
 ---
 

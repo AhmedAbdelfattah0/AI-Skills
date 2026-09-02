@@ -547,6 +547,32 @@ and **two steps that touch the same file are never in the same group** — that 
 a write conflict, not parallelism. If everything is sequential, say so; a column
 of A B C D is a real answer.
 
+**Full-stack tickets: the frontend does not wait for the backend.** What the
+frontend actually depends on is the **API contract — the request and response
+shape — not the backend's implementation of it.** So pin the contract as its own
+first step, then frontend and backend become separate steps **in the same
+parallel group**:
+
+| # | Step | Files touched | Depends on | Par |
+|---|---|---|---|---|
+| 1 | Agree the endpoint's request/response shape | <the type/schema/DTO file, or the plan itself if the repo has no shared one> | — | A |
+| 2 | Build the endpoint: handler, service, data access | <backend paths> | 1 | **B** |
+| 3 | Build the screen against the agreed shape | <frontend paths> | 1 | **B** |
+| 4 | Wire the screen to the live endpoint and verify end to end | <both> | 2, 3 | C |
+
+Once step 1 is settled, the frontend can build its types, components, templates,
+styles, state and **unit tests against a mocked response** while the backend is
+still being written. Waiting for a working endpoint before starting the screen
+serialises two halves of the ticket for no reason — it is the single largest
+avoidable cost on a full-stack ticket.
+
+What genuinely cannot overlap, and belongs in a later group: **verifying against
+the real endpoint** (step 4), and any attack testing of it, which needs it
+running. And if the shape is *not* settled — the ticket is vague, or it depends
+on a decision nobody has made — that is not a parallelism problem, it is a
+*Risks & unknowns* row or a ✋ STOP. Guessing the shape and building both halves
+against different guesses is worse than serialising.
+
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
@@ -809,7 +835,10 @@ Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
 - **Follow the approved plan's build sequence — in dependency order, but build a
-  parallel group together.** The plan's `Par` column already did this analysis:
+  parallel group together.** On a full-stack ticket that means the backend and
+  the frontend groups run at the same time once the API shape is pinned; the
+  frontend builds against the agreed shape with mocked responses and meets the
+  real endpoint at the wiring step. The plan's `Par` column already did this analysis:
   steps sharing a letter have no dependency on each other and touch no file in
   common, so build them concurrently. Steps in different groups stay ordered;
   jumping a dependency is still how you write a screen against a service that
@@ -871,7 +900,10 @@ surfaces as a broken build much later, after a plan was already approved.
 | **A stack with no reference file** (Go, Rust, Java, C#…) | `code-quality` (hub) | universal principles applied to that language |
 
 - **Full-stack tickets:** one Design Contract and one Verification Pass covering
-  both sides — never two uncoordinated halves. If that means invoking two
+  both sides — never two uncoordinated halves. **But one contract does not mean
+  one sequence:** pin the API's request/response shape first, then build the two
+  sides concurrently (see the plan template's `Par` guidance). The frontend waits
+  on the *shape*, not on the backend's implementation of it. If that means invoking two
   specialists, they still produce a single contract and a single GATE 3.
 - **Sharding is presentation, not partition.** When the wave fans GATE 3 out by
   rule family, every shard still aggregates into **one** Verification table and
@@ -895,7 +927,7 @@ and one tier:
 | Tier | Meaning | Override |
 |---|---|---|
 | `[NN]` | Non-negotiable security/correctness invariant | Never, per-file. Only an explicit recorded user waiver. |
-| `[ARCH]` | Architectural shape | `CLAUDE.md`, project-wide only |
+| `[ARCH]` | Architectural shape | `CLAUDE.md`, project-wide only — **or** an established project architecture that passes the invoked specialist's four-condition test (enumerated repo-wide evidence · ratified, not merely observed · protects structure not safety · the alternative really would be a second pattern). That outcome is an `N/A — replaced by established project architecture` row carrying the evidence, **not** a skip and **not** a ledger waiver. |
 | `[D]` | Default convention | `CLAUDE.md` or established repo convention |
 
 This workflow depends on those IDs in three places: the Design Contract before
@@ -1313,11 +1345,32 @@ each other:
 | **12a–c** — GATE 5's surface inventory and abuse-case *design*, fanned out per surface | enumerating and designing are reads |
 | **12.5** — the docs scan | greps docs surfaces |
 
-**Only two things in this block are serial, and only because they write:**
-GATE 5's **live attacks** (shared port, shared datastore, destructive state — see
-12c) and the **fixes** any of the above produce. Collect every finding from the
-wave, then apply fixes once, then run 12.4's single `test-quality` pass over the
-resulting test diff.
+**This is a wave with barriers, not one flat run.** A static-security fix can
+change routes, middleware, config or rendering sinks — which is exactly what
+GATE 5's inventory and abuse design were derived *from*. So the block runs in
+four ordered phases:
+
+1. **Concurrent reads** — steps 10, 11, 12a–c and 12.5 together, as above.
+2. **Barrier → apply fixes once, then re-derive to a fixed point.** Do not judge
+   by feel which products "look" invalidated. Compare the changed file set against
+   each phase-one product's **inputs and derived scope**, and re-run every product
+   whose inputs moved — step 9's commands, step 10's static rows, the parity
+   drafts, the surface inventory and abuse-case design, and step 12.5's docs scan.
+   Repeat until a pass changes nothing. A surface enumerated before the fix that
+   created it was never enumerated.
+3. **Live attacks, serially**, against the re-derived inventory — never before
+   phase 2 reaches its fixed point, or you are attacking a map of the old code.
+4. **Barrier → apply attack fixes, then loop back to phase 2.** An attack fix is
+   production code: it can add or move a route, a middleware, a config boundary, a
+   rendering sink, or an outbound credential path — which changes the very
+   inventory the attacks ran against. So it **recomputes the trust-boundary trigger
+   and the complete inventory from the changed tree**, regenerates affected abuse
+   cases and parity drafts, and re-runs the attacks. **Loop until a round of fixes
+   changes no inventoried surface.** Only then run 12.4's single `test-quality`
+   pass over the resulting test diff and proceed to the freeze.
+
+Phases 2–4 are **ordered**: 2 and 4 are write barriers, 3 is serial execution.
+Only phase 1 is concurrent.
 
 A UI ticket with four owned screens is four concurrent parity diffs, not one
 agent walking four screens in sequence — that alone is the difference between
