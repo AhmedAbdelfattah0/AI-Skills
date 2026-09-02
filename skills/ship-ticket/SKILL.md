@@ -547,6 +547,31 @@ and **two steps that touch the same file are never in the same group** — that 
 a write conflict, not parallelism. If everything is sequential, say so; a column
 of A B C D is a real answer.
 
+**Full-stack tickets: the frontend does not wait for the backend.** What the
+frontend actually depends on is the **API contract — the request and response
+shape — not the backend's implementation of it.** So pin the contract as its own
+first step, then frontend and backend are separate parallel groups:
+
+| # | Step | Files touched | Depends on | Par |
+|---|---|---|---|---|
+| 1 | Agree the endpoint's request/response shape | <the type/schema/DTO file, or the plan itself if the repo has no shared one> | — | A |
+| 2 | Build the endpoint: handler, service, data access | <backend paths> | 1 | **B** |
+| 3 | Build the screen against the agreed shape | <frontend paths> | 1 | **B** |
+| 4 | Wire the screen to the live endpoint and verify end to end | <both> | 2, 3 | C |
+
+Once step 1 is settled, the frontend can build its types, components, templates,
+styles, state and **unit tests against a mocked response** while the backend is
+still being written. Waiting for a working endpoint before starting the screen
+serialises two halves of the ticket for no reason — it is the single largest
+avoidable cost on a full-stack ticket.
+
+What genuinely cannot overlap, and belongs in a later group: **verifying against
+the real endpoint** (step 4), and any attack testing of it, which needs it
+running. And if the shape is *not* settled — the ticket is vague, or it depends
+on a decision nobody has made — that is not a parallelism problem, it is a
+*Risks & unknowns* row or a ✋ STOP. Guessing the shape and building both halves
+against different guesses is worse than serialising.
+
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
@@ -809,7 +834,10 @@ Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
 - **Follow the approved plan's build sequence — in dependency order, but build a
-  parallel group together.** The plan's `Par` column already did this analysis:
+  parallel group together.** On a full-stack ticket that means the backend and
+  the frontend groups run at the same time once the API shape is pinned; the
+  frontend builds against the agreed shape with mocked responses and meets the
+  real endpoint at the wiring step. The plan's `Par` column already did this analysis:
   steps sharing a letter have no dependency on each other and touch no file in
   common, so build them concurrently. Steps in different groups stay ordered;
   jumping a dependency is still how you write a screen against a service that
@@ -871,7 +899,10 @@ surfaces as a broken build much later, after a plan was already approved.
 | **A stack with no reference file** (Go, Rust, Java, C#…) | `code-quality` (hub) | universal principles applied to that language |
 
 - **Full-stack tickets:** one Design Contract and one Verification Pass covering
-  both sides — never two uncoordinated halves. If that means invoking two
+  both sides — never two uncoordinated halves. **But one contract does not mean
+  one sequence:** pin the API's request/response shape first, then build the two
+  sides concurrently (see the plan template's `Par` guidance). The frontend waits
+  on the *shape*, not on the backend's implementation of it. If that means invoking two
   specialists, they still produce a single contract and a single GATE 3.
 - **Sharding is presentation, not partition.** When the wave fans GATE 3 out by
   rule family, every shard still aggregates into **one** Verification table and
