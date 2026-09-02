@@ -642,20 +642,31 @@ sees only your text plus the working tree:
 
 | Block | Contents |
 |---|---|
-| `<task>` | The ticket's spec + ACs, the **drafted plan verbatim**, the detected stack, and the repo's **real** lint/build/test commands. |
+| `<task>` | The ticket's spec + ACs, the **drafted plan verbatim**, the detected stack, the repo's **real** lint/build/test commands, and the **deterministic pre-check results as given** (paths present/absent, commands real, sequence acyclic, no duplicate implementation) with an instruction not to re-verify them. |
 | `<grounding_rules>` | Every claim cites a path or a line from this repo; label anything inferred as an inference. Read the files the plan names before judging them. |
-| `<structured_output_contract>` | Findings as a list: severity (blocker / major / minor) · the plan section it hits · evidence (`file:line`) · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
+| `<structured_output_contract>` | Findings **severity-ordered, blockers first, minors truncatable**, capped: severity · the plan section it hits · evidence (`file:line`) · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
 
 **Ask it the questions only a repo-grounded second model can answer** — not "is
-this a good plan?":
+this a good plan?". **Two of the five are already answered before you dispatch**:
+the deterministic pre-checks above cover path existence and duplicate
+implementation mechanically, for free. Send their *results* and tell Codex not to
+re-derive them — re-reading the tree to confirm what `test -e` already proved is
+the single biggest avoidable cost here.
 
-1. Do the plan's file paths exist / match this repo's actual layout?
-2. Does something in the repo **already do this** — a service, a util, a
-   component the plan is about to duplicate?
-3. Is the build sequence actually buildable in that order (does step *n* depend
+So the brief carries the pre-check results as **given**, and asks only the three
+that need judgment:
+
+1. Is the build sequence actually buildable in that order (does step *n* depend
    on something step *n+2* creates)?
-4. What is missing from the plan that the ticket's ACs require?
-5. What in section 3 (risks) is wrong, and what risk is absent?
+2. What is missing from the plan that the ticket's ACs require?
+3. What in section 3 (risks) is wrong, and what risk is absent?
+
+**Bound the ask, exactly as pass B does.** An unbounded "tell me everything" over
+a large tree at high effort is what turns this dispatch into the run's longest
+block — and unlike pass B it sits directly in front of a human waiting to
+approve. Demand findings **severity-ordered, blockers first**, say minors may be
+truncated, and cap the total. A critique that spends its budget on nits has spent
+it in the wrong place. (Same lever, measured on pass B: 384s to 177s.)
 
 **Then reconcile — this is your judgment, not Codex's.** Every finding is
 either **incorporated into the draft** or **rejected with a stated reason**, and
