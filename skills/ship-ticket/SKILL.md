@@ -1351,17 +1351,26 @@ GATE 5's inventory and abuse design were derived *from*. So the block runs in
 four ordered phases:
 
 1. **Concurrent reads** — steps 10, 11, 12a–c and 12.5 together, as above.
-2. **Barrier → apply fixes once**, then **re-derive every product those fixes
-   invalidated**: an inventory or abuse-case set whose surface moved, and a parity
-   draft whose screen changed. A surface enumerated before the fix that created it
-   was never enumerated.
+2. **Barrier → apply fixes once, then re-derive to a fixed point.** Do not judge
+   by feel which products "look" invalidated. Compare the changed file set against
+   each phase-one product's **inputs and derived scope**, and re-run every product
+   whose inputs moved — step 9's commands, step 10's static rows, the parity
+   drafts, the surface inventory and abuse-case design, and step 12.5's docs scan.
+   Repeat until a pass changes nothing. A surface enumerated before the fix that
+   created it was never enumerated.
 3. **Live attacks, serially**, against the re-derived inventory — never before
-   phase 2 has settled, or you are attacking a map of the old code.
-4. **Barrier → apply attack fixes**, re-run whatever they touched (step 9's
-   commands, step 10's rows, the affected abuse tests), then run 12.4's single
-   `test-quality` pass over the resulting test diff and proceed to the freeze.
+   phase 2 reaches its fixed point, or you are attacking a map of the old code.
+4. **Barrier → apply attack fixes, then loop back to phase 2.** An attack fix is
+   production code: it can add or move a route, a middleware, a config boundary, a
+   rendering sink, or an outbound credential path — which changes the very
+   inventory the attacks ran against. So it **recomputes the trust-boundary trigger
+   and the complete inventory from the changed tree**, regenerates affected abuse
+   cases and parity drafts, and re-runs the attacks. **Loop until a round of fixes
+   changes no inventoried surface.** Only then run 12.4's single `test-quality`
+   pass over the resulting test diff and proceed to the freeze.
 
-Phases 2 and 4 are the only serial parts, and only because they write.
+Phases 2–4 are **ordered**: 2 and 4 are write barriers, 3 is serial execution.
+Only phase 1 is concurrent.
 
 A UI ticket with four owned screens is four concurrent parity diffs, not one
 agent walking four screens in sequence — that alone is the difference between

@@ -92,10 +92,13 @@ precedence lists apply `universal-principles.md` + `ai-failure-modes.md` **joint
 their own `[ARCH]` rules — ranked above would be wrong, since the core forbids
 one-implementation interfaces while `NG-SOLID-05`/`BE-SOLID-05` mandate abstractions. Where
 the two genuinely collide (the rule says build an abstraction; the core says don't add a
-second pattern), a **four-condition test** resolves it: enumerated repo-wide evidence ·
-ratified as the project's architecture, not merely observed · the rule protects structure,
-never validation/authz/tenancy/idempotency/output-safety/data-integrity *regardless of tier
-letter* · the alternative really would be a second pattern. All four → the rule does not
+second pattern), a **four-condition test** resolves it: evidence covering the **cited rule's full
+applicability** (derived from the rule's own text, with search method and every exclusion
+recorded — not a self-chosen "concern") · ratified by a **project-level source predating the
+ticket or by the user** (a code comment is never ratification) · the rule protects structure —
+**forbidden wherever it enforces or isolates any security, privacy, availability or integrity
+control, judged by effect not by a list**, regardless of tier letter · the alternative really
+would be a second pattern. All four → the rule does not
 fire, recorded as an `N/A — replaced by established project architecture` row with its
 evidence, outside the waiver ledger. Fewer than four → it stands. The specialists beat the
 hub's per-stack *summaries*; they never beat its foundation.

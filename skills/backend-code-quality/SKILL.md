@@ -84,19 +84,30 @@ flags one-implementation interfaces and pass-through adapters on sight (YAGNI).
 
 Resolving it is a **four-condition test, and all four must hold**:
 
-1. **Enumerated repo-wide evidence.** List *every* site of that concern in the
-   repo — not a convenient subset — and show they agree. "Six of the six shipped
-   list screens" is evidence; "the two I looked at" is not.
-2. **Ratified, not merely observed.** Uniformity proves prevalence, not
-   correctness — a uniformly bad legacy system is uniformly bad. So the pattern
-   must be **documented as the project's architecture** (`CLAUDE.md`, an ADR, a
-   docblock stating the choice is deliberate) **or** explicitly ratified by the
-   user for this ticket.
-3. **The rule protects structure, not safety.** This resolution is **forbidden**
-   whenever the rule guards **validation, authorization, tenancy, idempotency,
-   output safety, or data integrity** — *regardless of its tier letter*. Tier is
-   a label and labels drift; the protected concern is what matters. `[NN]` rules
-   are always excluded, and so is any `[ARCH]` rule doing one of those jobs.
+1. **Evidence covering the rule's full applicability — not "the concern".**
+   "Concern" is whatever you decide it is, which is exactly the loophole. Derive
+   the search universe from **the cited rule's own text**: `NG-ARCH-04` governs
+   *every* `HttpClient` injection, so the evidence set is every injection site in
+   the repo, not every list screen. Record the **search method** and **every
+   exclusion with its reason**. A subset silently narrowed to the sites that agree
+   is not evidence.
+2. **Ratified at project level, or by the user.** Uniformity proves prevalence,
+   not correctness — a uniformly bad legacy system is uniformly bad. Accept only:
+   a **project-level architecture source that predates this ticket** (`CLAUDE.md`,
+   an ADR, an architecture doc), **or explicit ratification by the user** for this
+   ticket. **A code comment is not ratification** — a docblock asserting the choice
+   is deliberate can be written, or cited, by whoever wants the rule switched off.
+   It may *support* a project-level source; it can never stand alone.
+3. **The rule protects structure, not safety — judged by effect, not by list.**
+   This resolution is **forbidden wherever the rule directly enforces or isolates
+   any security, privacy, availability, or integrity control**, *regardless of its
+   tier letter*. Non-exhaustive examples: authentication, authorization, tenancy,
+   validation, idempotency and replay protection, secrets and credential handling,
+   cryptographic or signature verification, output safety, auditability, rate
+   limiting, data integrity. **The list is illustrative — the test is the effect.**
+   If switching the rule off would remove or weaken a control, it is a safety rule
+   whatever its label says, and this resolution does not apply. `[NN]` rules are
+   always excluded.
 4. **The alternative would genuinely be a second pattern** — building it here
    adds a competing way to do something the repo already settles, rather than
    filling a gap.
@@ -110,9 +121,11 @@ nothing shows the four conditions were ever checked. Emit a Verification Pass ro
 
 ```
 NG-ARCH-04 | N/A — replaced by established project architecture
-           | evidence: 6/6 list screens inject HttpClient in the feature service
-           | (users, entities, cycles, locations, grades, roles); ratified in
-           | user.service.ts docblock; concern = transport wiring, not safety
+           | evidence: grep -rn "inject(HttpClient)" src/ -> 11/11 sites are feature
+           | services; 0 in components; 0 exclusions
+           | ratified: CLAUDE.md "Data access" section (predates ticket)
+           | effect test: transport wiring; enforces no security/privacy/
+           | availability/integrity control
 ```
 
 Same shape for `BE-*`. The row carries the rule ID, the enumerated evidence, and
