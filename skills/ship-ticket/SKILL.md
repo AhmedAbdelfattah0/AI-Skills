@@ -42,48 +42,59 @@ that ticket. Reusable across projects/instances — do **not** hardcode any
 cloudId, site, org, or project; use whatever tracker connection is available
 and resolve the key/URL the user gave.
 
-## Say what things are, not what they are numbered
+## Speak plainly — the codes are for the audit trail, not the reader
 
-**Every gate, step, rule ID and lane the user sees carries its name.** A bare
-`GATE 4` or `BE-SEC-03` tells the reader nothing — they should not have to hold
-this file in their head to follow their own ticket. This applies to every
-progress line, the step-16 report, the session log, the plan artifact, and
-anything you say out loud mid-run.
+The user is following their own ticket, not reading this file. **Lead with a
+plain sentence; put the code in brackets afterwards** for traceability. Never the
+other way round, and never the code alone.
 
-**The form is `<code> — <name>`**, e.g. `GATE 4 — design parity`. Use it the
-first time each appears in a message; bare after that within the same message is
-fine.
+```
+✅  Security check on the new endpoint: passed [BE-SEC-03]
+❌  BE-SEC-03 | PASS
+❌  BE-SEC-03 — backend security rule | PASS
+```
 
-| Code | Name — what it actually does |
+**Test for whether a name is plain: could someone who has never opened this file
+act on it?** If the name needs its own glossary — "LLM failure modes",
+"universal principles", "verification pass" — it is not a name, it is another
+code. Say what actually happened instead.
+
+| You are about to write | Say this instead |
 |---|---|
-| **GATE 3** | **Code-quality audit** — the rule-by-rule verification of what you built |
-| **GATE 4** | **Design parity** — proves the built screen *is* the pinned reference |
-| **GATE 5** | **Adversarial security testing** — attacks the change at runtime, commits the abuse tests |
-| Pass A | **Fresh-reviewer pass** — a Claude reviewer with no build context |
-| Pass B | **Cross-model pass** — the Codex CLI, a different model in a different process |
-| Pass C | **Rule pass** — GATE 3's table, rule by rule |
-| Recon wave | **Read-only investigation** of the code before planning |
-| Review wave | **The three blind passes** over one frozen manifest |
-| FAST / STANDARD / HEAVY | **Run lanes** — how much orchestration this ticket gets |
-| `[NN]` | **Non-negotiable** — a security/correctness invariant, never overridden per-file |
-| `[ARCH]` | **Architectural** — shape rule, overridable only project-wide in `CLAUDE.md` |
-| `[D]` | **Default** — a convention, overridable by an established repo pattern |
-| `NG-*` / `BE-*` | Angular / backend rule IDs from the code-quality specialists |
-| `AI-FM` | **LLM failure modes** — the 15 modes + The Floor, walked over the whole diff |
-| `UNIVERSAL` | **Engineering principles** — SOLID, DRY, KISS, CQS, complexity ceilings, YAGNI |
-| `TEST-*` | Test-quality rules | 
-| `DOC-*` | Documentation-accuracy rules |
-| `VAPT-*` | Runtime attack classes (`API` / `WEB` / `CFG`) |
+| GATE 3 | **Checking the code against the project's rules** |
+| GATE 4 | **Checking the screen matches the design** |
+| GATE 5 | **Trying to break the new code on purpose** |
+| Pass A | **A second reviewer who didn't write the code** |
+| Pass B | **A different AI reviewing it independently** |
+| Pass C | **Going through the rule checklist one by one** |
+| Recon wave | **Reading the code to work out what to build** |
+| Review wave | **Three reviewers checking the change at once** |
+| `AI-FM` | **Common AI coding mistakes** (fake success, swallowed errors, dead code) |
+| `UNIVERSAL` | **General code health** — is it simple, not repetitive, not over-built |
+| `TEST-*` | **Whether the tests actually test anything** |
+| `DOC-*` | **Whether the docs still tell the truth** |
+| `VAPT-*` | **Attack tests** — proving a stranger can't get in |
+| `NG-*` / `BE-*` | **The Angular rules** / **the backend rules** |
+| `[NN]` | **Must fix** — a security or correctness rule, no exceptions |
+| `[ARCH]` | **Structural rule** — changeable, but project-wide only |
+| `[D]` | **A convention** — follow it unless the repo already does otherwise |
+| FAST / STANDARD / HEAVY | **How much checking this ticket gets** (small / normal / thorough) |
 
-**There is no GATE 1 or GATE 2** — the numbering is historical, which is exactly
-why the names matter more than the numbers. When you announce one, lead with the
-name: *"GATE 4 — design parity: 3 screens, 2 Faithful, 1 Minor"* beats
-*"GATE 4: PASS"*.
+**There is no GATE 1 or GATE 2.** The numbering is historical and means nothing —
+another reason to lead with what the thing does.
 
-**Say what a step is doing, not its number.** `Step 12.4` means nothing to a
-reader; *"step 12.4 — test-quality over the final test diff"* means something.
-Where a rule ID appears in a finding or a skip citation, keep the ID (it is the
-citation) and add what it says in a clause.
+**When something stops or fails, say what it means for the user**, not which
+gate fired:
+
+```
+✅  Stopped: I can't run the app locally, so I can't test whether the new
+    endpoint is actually protected. I need a way to run it. [GATE 5]
+❌  STOP: GATE 5 has no local instance.
+```
+
+**Rule IDs stay in findings and skip citations** — the ID *is* the citation, and
+the audit trail needs it — but always with a clause saying what the rule
+requires, so the reader never has to look it up.
 
 ## Step 1 — Tracker resolution
 
@@ -1774,10 +1785,10 @@ recon*), and the orchestration mode is declared per wave.
    where the UI really lives. Because the tracker's `Done` transition (step 20)
    follows green CI, this **hard-gates `Done`**.
 
-16. **Report — one reconciled account of the wave.** **Name every code you cite**
-   (see *Say what things are*): `GATE 4 — design parity`, `pass B — cross-model`,
-   `BE-SEC-03 — <what the rule says>`. A report a reader has to decode is a report
-   they will not read. Not "what changed between
+16. **Report — one reconciled account of the wave.** **Written for the person who asked for the
+   ticket, not for this file** (see *Speak plainly*): every line leads with what
+   happened in plain words, with any code in brackets after. A report a reader has
+   to decode is a report they will not read. Not "what changed between
    passes": there is one wave and one reconciliation. State:
    - the **effective lane** (with the raw numbers) and the **provisional** one it
      came from — plus, if they differ, why it escalated, and whether the plan
@@ -1838,9 +1849,9 @@ recon*), and the orchestration mode is declared per wave.
      coming-soon → follow-up-ticket map
    - every skipped review finding **with its rule ID**
 
-   **Name every code in the log too.** It is read months later, by someone
-   without this file open — `GATE 5 — adversarial security testing: PASS` is
-   recoverable, `GATE 5: PASS` is not.
+   **Same in the log.** It is read months later by someone without this file
+   open: "Tried to break the new endpoint — all attacks refused [GATE 5]" is
+   recoverable; "GATE 5: PASS" is not.
 
    An entry that says "skipped some findings that conflicted with our conventions",
    or "matches the design", is worthless the moment the context is gone.
@@ -1877,9 +1888,9 @@ recon*), and the orchestration mode is declared per wave.
 
 **STOP and tell the user** if any of these happen. Don't guess the spec, don't invent
 a visual language, don't mark anything complete, don't push past a failure silently.
-**Say which gate stopped you and what it does** — "GATE 5 — adversarial security
-testing has no local instance to attack" is actionable; "GATE 5 failed" sends the
-reader hunting.
+**Say what it means for the user and what you need from them** — "I can't run
+the app locally, so I can't test whether the new endpoint is actually protected"
+is actionable; "GATE 5 failed" sends the reader hunting.
 
 - You can't fetch the ticket.
 - **A blocker on the ticket is not in a completed state** (Step 4.1) — name it and
