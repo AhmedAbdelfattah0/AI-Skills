@@ -875,12 +875,25 @@ constraints on it are what the previous seven steps were for.
   step 16's report and step 18's session log. **A missing record, or a serialized
   group with no stated reason, is a ✋ STOP** — self-reporting that an executor can
   silently skip is exactly how the `Par` column was ignored in the first place, and
-  an unrecorded serialization is indistinguishable from one that never happened. The plan's `Par` column already did this analysis:
-  steps sharing a letter have no dependency on each other and touch no file in
-  common, so build them concurrently. Steps in different groups stay ordered;
-  jumping a dependency is still how you write a screen against a service that
-  doesn't exist yet. Building a four-step `A` group one at a time is throwing away
-  work the plan already did.
+  an unrecorded serialization is indistinguishable from one that never happened.
+- **Apply the rules WHILE writing, not after.** The specialist was invoked at
+  Step 6.5, so its rule set is in force **now** — before a reviewer discovers a
+  violation. As each file is written, check it against the rules that govern its
+  role (`NG-*`/`BE-*` for its layer, plus the always-on ones), and against the
+  pinned reference if it renders a screen. **This is the single biggest lever on
+  how long the gates take.** Every violation caught here is one that never becomes
+  a GATE 3 finding, never becomes a fix, and never invalidates a scope digest —
+  and the invalidation is what turns one review round into twelve.
+- **Check each screen against the reference as you finish it**, while the design
+  files are still in context from Step 5 — not once at the end across every screen.
+  Structure, then tokens/spacing/type, then states and locales. A screen that
+  matches when you finish it does not produce a parity finding later.
+- **The gates verify a claim you already made — they are not where the checking
+  starts.** If GATE 3 or GATE 4 returns a long list, that is not the gate working
+  well; it is a signal that this step didn't apply the rules it already had. Say so
+  in the step-16 report: **how many findings the gates raised that these in-flight
+  checks should have caught.** A gate that consistently finds nothing is the goal,
+  not a sign it is redundant — its independence is what makes "nothing" credible.
 - **Write only files in the Design Contract.** A file you need that isn't in the
   contract means the plan was wrong — that is a **material divergence**, and it
   goes back through plan mode for re-approval (see *The plan constrains the
@@ -1656,6 +1669,13 @@ recon*), and the orchestration mode is declared per wave.
    of the following **together**, each bound to the manifest ID, each **blind to
    the others**, each **report-only**:
 
+   > **These passes verify; they do not discover.** Step 8 already applied this
+   > rule set as it wrote each file and already checked each screen against the
+   > pinned reference. What runs here is the **independent** confirmation of that
+   > — which is why it is worth running even when it finds nothing, and why a long
+   > finding list means step 8 skipped its own checks rather than that the gate
+   > earned its keep.
+
    **a. Pass C — GATE 3, the Code-Quality Audit.** The invoked specialist's
    Verification Pass over the contracted files, plus whole-diff rows. Emit one
    table: `rule → PASS/FAIL/N-A → evidence`. Evidence is a file path, a line, or a
@@ -1919,6 +1939,11 @@ recon*), and the orchestration mode is declared per wave.
    - the **orchestration mode** for **each wave** — recon and review — as
      workflow / fan-out / serial; they can differ, and a run that fanned out its
      review while serializing an hour of recon must not report as concurrent
+   - **how many gate findings step 8's in-flight checks should have caught** —
+     violations of rules that were already in force while the file was written, or
+     parity drift in a screen checked against the reference at build time. A high
+     count here is the number to drive down: it is what turns one review round
+     into several, and it is a step-8 problem, not a gate problem.
    - **which build groups actually ran concurrently**, and for any `Par` group
      built serially, which and why — the plan's parallelism is worthless if
      execution quietly ignores it and nothing surfaces that
