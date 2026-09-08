@@ -856,6 +856,11 @@ implementation is strictly worse.
 Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
+**Build to done; report at the end.** Progress notes are fine, but a message that
+stops mid-step to ask whether to continue with something the plan already approved
+turns an approved plan back into a conversation. The plan is the approval — work
+through it, and come back with it built.
+
 - **Follow the approved plan's build sequence — in dependency order, but build a
   parallel group together.** On a full-stack ticket that means backend and
   frontend steps in the same group run at the same time; the frontend builds
@@ -1272,9 +1277,12 @@ include-untracked form here and untracked files are explicitly in scope.
 
 ### Report-only, one barrier, one fix batch
 
-- **Every pass in the wave is report-only.** No pass edits code while its peers
-  are reading; a fix invalidates every concurrent conclusion about the file it
-  touched. Findings come back as data; the orchestrator decides and applies.
+- **Every pass in the wave is report-only — the ORCHESTRATOR is not.** No pass
+  edits code while its peers are reading; a fix invalidates every concurrent
+  conclusion about the file it touched. Findings come back as data, and then **you
+  apply them**. "Report-only" scopes the reviewers during the wave; it is not a
+  licence to hand the user a finding list and wait. Collecting findings and
+  stopping is the failure this rule is most often misread into.
 - **Independence forbids sharing findings — it does not forbid running at the
   same time.** No pass sees another's output, before or during.
 - **One reconciliation barrier.** Collect every pass, verify each one's coverage
@@ -1839,6 +1847,15 @@ recon*), and the orchestration mode is declared per wave.
    contract is a material divergence and goes back through plan mode — review
    findings are not a side door around the gate that governs implementation.
 
+   **Do the work; don't narrate it.** After the barrier you have the findings and
+   the authority to act on them — apply the fixes and *then* report what you did.
+   A message that lists findings and asks how to proceed has converted a workflow
+   step into a question the user now has to answer, and the ticket sits idle until
+   they do. Two things, and only these two, go to the user before you act: a ✋ STOP
+   condition from the guard below, and a genuine product decision the ticket does
+   not settle. **Everything else you fix.** If you catch yourself writing "here are
+   the findings, shall I…", the answer is yes — you already had it.
+
    **Fixing is the default; skipping requires a citation.** Fix every finding
    **except** one that contradicts a specific `[D]` or `[ARCH]` rule you can
    **name by ID**:
@@ -2039,6 +2056,14 @@ recon*), and the orchestration mode is declared per wave.
 
 **STOP and tell the user** if any of these happen. Don't guess the spec, don't invent
 a visual language, don't mark anything complete, don't push past a failure silently.
+
+**A STOP is for a DECISION you cannot make, never for work you can do.** This list
+is long, and a long list invites treating every difficulty as a reason to hand the
+ticket back. It is not: each entry below is a point where proceeding would require
+inventing a fact, overriding the user, or shipping something unverified. A finding
+you can fix, a test you can write, a rule you can follow — none of those are on
+this list, and none of them stop the run. **When you do stop, say exactly what you
+need from the user**, so the answer is one message and not a negotiation.
 **Say what it means for the user and what you need from them** — "I can't run
 the app locally, so I can't test whether the new endpoint is actually protected"
 is actionable; "GATE 5 failed" sends the reader hunting.
