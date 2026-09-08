@@ -856,10 +856,13 @@ implementation is strictly worse.
 Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
-**Build to done; report at the end.** Progress notes are fine, but a message that
-stops mid-step to ask whether to continue with something the plan already approved
-turns an approved plan back into a conversation. The plan is the approval — work
-through it, and come back with it built.
+**Build to done; report at the end** — *unless* you hit a stop-on-failure
+condition, a material divergence from the Design Contract, or a product decision
+the ticket does not settle. Those three always interrupt, and interrupting for them
+is correct. Short of them, a message that stops mid-step to ask whether to continue
+with something the plan already approved turns an approved plan back into a
+conversation. The plan is the approval — work through it, and come back with it
+built.
 
 - **Follow the approved plan's build sequence — in dependency order, but build a
   parallel group together.** On a full-stack ticket that means backend and
@@ -1677,12 +1680,15 @@ recon*), and the orchestration mode is declared per wave.
    of the following **together**, each bound to the manifest ID, each **blind to
    the others**, each **report-only**:
 
-   > **These passes verify; they do not discover.** Step 8 already applied this
-   > rule set as it wrote each file and already checked each screen against the
-   > pinned reference. What runs here is the **independent** confirmation of that
-   > — which is why it is worth running even when it finds nothing, and why a long
-   > finding list means step 8 skipped its own checks rather than that the gate
-   > earned its keep.
+   > **These passes independently re-perform every required check.** Step 8
+   > already applied this rule set as it wrote each file and checked each screen
+   > against the pinned reference — so these passes are *expected* to confirm that
+   > work. But they **must still discover and report every violation they
+   > encounter**, at full severity, exactly as if no build-time check had run.
+   > "Expected to confirm" describes the likely result, never a lighter search: the
+   > mandatory rule inventory and the no-build-context requirement are unchanged.
+   > A long finding list means step 8 skipped its own checks — it does not mean
+   > this pass should have looked less hard.
 
    **a. Pass C — GATE 3, the Code-Quality Audit.** The invoked specialist's
    Verification Pass over the contracted files, plus whole-diff rows. Emit one
@@ -1956,11 +1962,15 @@ recon*), and the orchestration mode is declared per wave.
    - the **orchestration mode** for **each wave** — recon and review — as
      workflow / fan-out / serial; they can differ, and a run that fanned out its
      review while serializing an hour of recon must not report as concurrent
-   - **how many gate findings step 8's in-flight checks should have caught** —
-     violations of rules that were already in force while the file was written, or
-     parity drift in a screen checked against the reference at build time. A high
-     count here is the number to drive down: it is what turns one review round
-     into several, and it is a step-8 problem, not a gate problem.
+   - **the complete gate finding count first, at full severity** — every finding,
+     however it arose. **Then**, as a separate classification, how many of them
+     step 8's in-flight checks should have caught (rules already in force when the
+     file was written; parity drift in a screen checked at build time). **This
+     classification must never affect whether a finding is reported, its severity,
+     or a gate's verdict** — it is a measure of step 8, and a metric that suppressed
+     findings to look better would defeat the gates it is measuring. A high
+     preventable count is a step-8 problem to drive down, not a reason to report
+     fewer findings.
    - **which build groups actually ran concurrently**, and for any `Par` group
      built serially, which and why — the plan's parallelism is worthless if
      execution quietly ignores it and nothing surfaces that
@@ -2057,13 +2067,16 @@ recon*), and the orchestration mode is declared per wave.
 **STOP and tell the user** if any of these happen. Don't guess the spec, don't invent
 a visual language, don't mark anything complete, don't push past a failure silently.
 
-**A STOP is for a DECISION you cannot make, never for work you can do.** This list
-is long, and a long list invites treating every difficulty as a reason to hand the
-ticket back. It is not: each entry below is a point where proceeding would require
-inventing a fact, overriding the user, or shipping something unverified. A finding
-you can fix, a test you can write, a rule you can follow — none of those are on
-this list, and none of them stop the run. **When you do stop, say exactly what you
-need from the user**, so the answer is one message and not a negotiation.
+**Every condition listed below is an unconditional STOP.** None of them is
+negotiable, and none may be reclassified as "work I can do" — an unpinnable
+reference is not an invitation to commit one yourself, and a missing independent
+signer is not an invitation to sign it. The list is authoritative.
+
+**What the list is *not* is a licence to stop elsewhere.** A difficulty that is not
+on it — a finding you can fix, a test you can write, a rule you can follow — is
+work, and work does not stop the run. That distinction is the point: the listed
+conditions always stop; everything else you do. **When you do stop, say exactly
+what you need from the user**, so the answer is one message and not a negotiation.
 **Say what it means for the user and what you need from them** — "I can't run
 the app locally, so I can't test whether the new endpoint is actually protected"
 is actionable; "GATE 5 failed" sends the reader hunting.
