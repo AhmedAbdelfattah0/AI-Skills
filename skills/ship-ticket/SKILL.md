@@ -1275,6 +1275,29 @@ include-untracked form here and untracked files are explicitly in scope.
   re-attack only the GATE 5 surfaces the fix touched. Append-only derived output
   on the allowlist needs no re-review.
 
+### Loops terminate — three rounds, then a human
+
+Three mechanisms here re-derive after a fix: the gate wave's phases 2 and 4, and
+the signature cycle (a fix inside a gate's scope invalidates its scope digest,
+which forces re-derivation and re-signing). Each is written as "repeat until
+nothing changes". **That is a fixed point only if the fixes converge — and when
+they don't, it is an unbounded loop that burns hours and tokens producing
+"round 11", "round 12".**
+
+**Every one of them stops at three rounds.** On reaching the cap without
+convergence, ✋ **STOP and surface it**, with:
+
+- what is still changing on each round, and which gate's scope it keeps invalidating;
+- the findings from the last round, unfixed;
+- your read on why it isn't converging — commonly a fix that reintroduces the
+  condition it fixed, two gates demanding incompatible things, or a scope digest
+  drawn so wide that unrelated work keeps invalidating it.
+
+**Non-convergence is a finding, not a retry.** A third round that changes
+something is telling you the loop cannot close itself; a fourth will not either,
+and spawning extra agents to break the deadlock adds cost without adding
+information. Escalate — this is a decision, not a patch.
+
 ### Signature binding
 
 A signature is an **assertion returned as data**, which is why a report-only
@@ -1311,6 +1334,11 @@ A signature whose scope digest is not the final one is **stale, not valid**. On
 the normal path nothing is signed until step 15c, so an accepted fix inside that
 gate's scope requires **verdict re-derivation**; "re-signing" applies only when
 resuming an artifact that already carried a signature.
+
+**That re-derivation is capped at three rounds** like every other loop here (see
+*Loops terminate*). A verdict that will not stay valid across three rounds means
+the scope keeps moving underneath it — that is a STOP and a decision, not a
+fourth round.
 
 ### Orchestration modes
 
@@ -1396,7 +1424,7 @@ four ordered phases:
    each phase-one product's **inputs and derived scope**, and re-run every product
    whose inputs moved — step 9's commands, step 10's static rows, the parity
    drafts, the surface inventory and abuse-case design, and step 12.5's docs scan.
-   Repeat until a pass changes nothing. A surface enumerated before the fix that
+   Repeat until a pass changes nothing — **or until the third round, whichever comes first** (see *Loops terminate*). A surface enumerated before the fix that
    created it was never enumerated.
 3. **Live attacks, serially**, against the re-derived inventory — never before
    phase 2 reaches its fixed point, or you are attacking a map of the old code.
@@ -1406,7 +1434,8 @@ four ordered phases:
    inventory the attacks ran against. So it **recomputes the trust-boundary trigger
    and the complete inventory from the changed tree**, regenerates affected abuse
    cases and parity drafts, and re-runs the attacks. **Loop until a round of fixes
-   changes no inventoried surface.** Only then run 12.4's single `test-quality`
+   changes no inventoried surface, to a maximum of three rounds** (see *Loops
+   terminate* below). Only then run 12.4's single `test-quality`
    pass over the resulting test diff and proceed to the freeze.
 
 Phases 2–4 are **ordered**: 2 and 4 are write barriers, 3 is serial execution.
@@ -2030,6 +2059,9 @@ is actionable; "GATE 5 failed" sends the reader hunting.
   without the required finding shape, and cannot be re-run.
 - **Content outside the post-freeze allowlist changed** after the freeze — code,
   tests, or docs went into the commit unreviewed.
+- **A re-derivation or signing loop reached its third round without converging**
+  — the gate wave's phases 2/4, or the sign → invalidate → re-sign cycle. Round
+  four is not a retry, it is the same non-convergence costing more.
 - **A `Par` group was serialized with no stated reason, or the build-group
   execution record is missing.** The plan already decided what could run together;
   dropping that silently is not a judgment call.
