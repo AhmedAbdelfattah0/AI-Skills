@@ -555,14 +555,33 @@ parallel group**:
 
 | # | Step | Files touched | Depends on | Par |
 |---|---|---|---|---|
-| 1 | Agree the endpoint's request/response shape | <the type/schema/DTO file, or the plan itself if the repo has no shared one> | — | A |
+| 1 | Produce the artifact the frontend compiles against | <the concrete file — see below> | — | A |
 | 2 | Build the endpoint: handler, service, data access | <backend paths> | 1 | **B** |
 | 3 | Build the screen against the agreed shape | <frontend paths> | 1 | **B** |
 | 4 | Wire the screen to the live endpoint and verify end to end | <both> | 2, 3 | C |
 
-Once step 1 is settled, the frontend can build its types, components, templates,
-styles, state and **unit tests against a mocked response** while the backend is
-still being written. Waiting for a working endpoint before starting the screen
+**Step 1 must name the artifact, not an agreement.** "We agreed the shape" is not
+something a compiler accepts. Find what the frontend actually builds against and
+make *that* step 1:
+
+- the repo **generates its client** from a committed schema (`openapi.json`,
+  `.proto`, a GraphQL SDL) → step 1 is *generate and commit that schema*, and the
+  frontend cannot start its typed API layer until it exists;
+- there is a **shared types package or DTO file** both sides import → step 1 is
+  that file;
+- neither → step 1 is the shape written into the plan, and the frontend
+  hand-writes a temporary interface it deletes at the wiring step.
+
+Check for a generator before assuming the third case — a repo that generates and
+also forbids hand-written shapes (a conformance test, a lint rule) will reject the
+temporary interface, and the frontend's typed layer genuinely blocks on step 1.
+
+**Even then, most frontend work does not.** Components, templates, styles, state,
+routing, i18n keys, and unit tests against a mocked response are all buildable
+while the backend is still being written — they depend on the *screen*, not on the
+endpoint. Blocking the whole frontend on a generated client blocks far more than
+the generator actually gates. Split it: the typed API layer waits, the rest does
+not. Waiting for a working endpoint before starting the screen
 serialises two halves of the ticket for no reason — it is the single largest
 avoidable cost on a full-stack ticket.
 
@@ -835,10 +854,19 @@ Now build. This step is short to describe and is most of the actual work; the
 constraints on it are what the previous seven steps were for.
 
 - **Follow the approved plan's build sequence — in dependency order, but build a
-  parallel group together.** On a full-stack ticket that means the backend and
-  the frontend groups run at the same time once the API shape is pinned; the
-  frontend builds against the agreed shape with mocked responses and meets the
-  real endpoint at the wiring step. The plan's `Par` column already did this analysis:
+  parallel group together.** On a full-stack ticket that means backend and
+  frontend steps in the same group run at the same time; the frontend builds
+  against step 1's artifact with mocked responses and meets the real endpoint at
+  the wiring step.
+- **State the groups before you start, and report what actually ran together.**
+  The `Par` column is a decision the plan already made — reading it and then
+  building serially anyway is the most common way this is lost, and it is
+  invisible unless you say so. Before building: name each group and what is in it.
+  After: report which groups actually ran concurrently. **If you serialized a
+  group, say which and why** — a real blocker (a generator that must exist first,
+  a file collision the plan missed) is worth recording; "it was easier
+  sequentially" is the answer this rule exists to catch. Step 16's report carries
+  the same line. The plan's `Par` column already did this analysis:
   steps sharing a letter have no dependency on each other and touch no file in
   common, so build them concurrently. Steps in different groups stay ordered;
   jumping a dependency is still how you write a screen against a service that
@@ -1850,6 +1878,9 @@ recon*), and the orchestration mode is declared per wave.
    - the **orchestration mode** for **each wave** — recon and review — as
      workflow / fan-out / serial; they can differ, and a run that fanned out its
      review while serializing an hour of recon must not report as concurrent
+   - **which build groups actually ran concurrently**, and for any `Par` group
+     built serially, which and why — the plan's parallelism is worthless if
+     execution quietly ignores it and nothing surfaces that
    - **which engine ran pass B** (`codex review`, `codex exec`, CodeRabbit
      fallback, or none → one free-form reviewer plus rule pass C), **the reasoning
      effort it ran at**, and whether it timed out
