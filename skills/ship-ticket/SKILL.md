@@ -576,12 +576,15 @@ Check for a generator before assuming the third case — a repo that generates a
 also forbids hand-written shapes (a conformance test, a lint rule) will reject the
 temporary interface, and the frontend's typed layer genuinely blocks on step 1.
 
-**Even then, most frontend work does not.** Components, templates, styles, state,
-routing, i18n keys, and unit tests against a mocked response are all buildable
-while the backend is still being written — they depend on the *screen*, not on the
-endpoint. Blocking the whole frontend on a generated client blocks far more than
-the generator actually gates. Split it: the typed API layer waits, the rest does
-not. Waiting for a working endpoint before starting the screen
+**Even then, usually only part of the frontend does — and which part is a
+question about this repo, not a category.** Blocking the whole frontend on a
+generated client blocks more than the generator gates; assuming components and
+tests are independent blocks less, because in many codebases they import the
+generated DTOs directly. So **derive the split from the imports**: trace what
+actually consumes the generated types (or the shared package), and put only those
+files in the group that waits. Everything provably clear of them can start
+immediately. If a file's dependency is unclear, it waits — guessing wrong here
+costs a rebuild. Waiting for a working endpoint before starting the screen
 serialises two halves of the ticket for no reason — it is the single largest
 avoidable cost on a full-stack ticket.
 
@@ -865,8 +868,14 @@ constraints on it are what the previous seven steps were for.
   After: report which groups actually ran concurrently. **If you serialized a
   group, say which and why** — a real blocker (a generator that must exist first,
   a file collision the plan missed) is worth recording; "it was easier
-  sequentially" is the answer this rule exists to catch. Step 16's report carries
-  the same line. The plan's `Par` column already did this analysis:
+  sequentially" is the answer this rule exists to catch.
+
+  **This is recorded, not just said.** Write the expected groups and the actual
+  execution into `.specs/plans/<TICKET>.md` alongside the plan, and carry both into
+  step 16's report and step 18's session log. **A missing record, or a serialized
+  group with no stated reason, is a ✋ STOP** — self-reporting that an executor can
+  silently skip is exactly how the `Par` column was ignored in the first place, and
+  an unrecorded serialization is indistinguishable from one that never happened. The plan's `Par` column already did this analysis:
   steps sharing a letter have no dependency on each other and touch no file in
   common, so build them concurrently. Steps in different groups stay ordered;
   jumping a dependency is still how you write a screen against a service that
@@ -929,9 +938,12 @@ surfaces as a broken build much later, after a plan was already approved.
 
 - **Full-stack tickets:** one Design Contract and one Verification Pass covering
   both sides — never two uncoordinated halves. **But one contract does not mean
-  one sequence:** pin the API's request/response shape first, then build the two
-  sides concurrently (see the plan template's `Par` guidance). The frontend waits
-  on the *shape*, not on the backend's implementation of it. If that means invoking two
+  one sequence:** produce the artifact the frontend compiles against first (a
+  committed schema, a shared types package, or the plan's written shape — see the
+  plan template's `Par` guidance), then build both sides concurrently. Only the
+  frontend files that actually **consume that artifact** wait for it; screen work
+  proven clear of it starts immediately. Nothing waits on the backend's
+  *implementation*. If that means invoking two
   specialists, they still produce a single contract and a single GATE 3.
 - **Sharding is presentation, not partition.** When the wave fans GATE 3 out by
   rule family, every shard still aggregates into **one** Verification table and
@@ -1898,8 +1910,9 @@ recon*), and the orchestration mode is declared per wave.
    - every **degraded gate** from the availability check
 
    A skip with no ID, a parity grade with no independent signer, a VAPT rule marked
-   PASS with no test behind it, a signature whose scope digest is stale, or an
-   undeclared degradation is a bug in the report.
+   PASS with no test behind it, a signature whose scope digest is stale, a `Par`
+   group serialized with no stated reason or missing from the execution record, or
+   an undeclared degradation is a bug in the report.
 
 17. **Confirm the docs scan is represented** — step 12.5 already made the doc
    changes and GATE 3's `DOC` row already carries its evidence. This is the
@@ -2017,6 +2030,9 @@ is actionable; "GATE 5 failed" sends the reader hunting.
   without the required finding shape, and cannot be re-run.
 - **Content outside the post-freeze allowlist changed** after the freeze — code,
   tests, or docs went into the commit unreviewed.
+- **A `Par` group was serialized with no stated reason, or the build-group
+  execution record is missing.** The plan already decided what could run together;
+  dropping that silently is not a judgment call.
 - **The run lane was downgraded** after plan approval without an explicit recorded
   human decision. Escalation is automatic and fine; a downgrade is not yours.
 - **A GATE 4 or strict GATE 5 signature is stale** — its scope digest is not the
@@ -2157,8 +2173,9 @@ tests for every trust boundary the change introduced, and a green final
 `test-quality` pass over ordinary and abuse tests together — **or its declared
 `TEST | DEGRADED` row**; passes A and B **both reconciled** into one attributed
 finding set — or pass B's engine unavailability, or a non-UI run's named loss of
-reviewer independence, **declared by name** — with every skip citing a rule ID; a clean delta pass if fixes triggered one; every post-freeze change on
-the allowlist; a green CI; the ticket in Done (Jira transition or ADO completed
+reviewer independence, **declared by name** — with every skip citing a rule ID; a clean delta pass if fixes triggered one; a **build-group execution record**
+showing which `Par` groups ran concurrently and a stated reason for any that did
+not; every post-freeze change on the allowlist; a green CI; the ticket in Done (Jira transition or ADO completed
 state); a PR linked to the ticket; and a written session log naming the run's
 availability mode **and each wave's orchestration mode** — no self-attested gate, no stale
 signature, and no silent degradation anywhere in the chain.
