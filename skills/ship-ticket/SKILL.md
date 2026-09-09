@@ -15,9 +15,9 @@ description: |
   reviewer, the OpenAI Codex CLI (`codex review`), and a rule pass, each blind to
   the others over one frozen manifest, run concurrently where the orchestrator
   supports it and serially where it does not; the plan also goes to Codex
-  read-only (`codex-delegate`) except in the FAST run lane — and full close-out
-  (PR + ticket Done + session log + compact). Run lanes size the orchestration,
-  never the gates. Companion gates (code-quality family,
+  read-only (`codex-delegate`) — and full close-out (PR + ticket Done + session
+  log + compact). Every gate and every review pass runs on every ticket at constant
+  reasoning effort; only concurrency varies. Companion gates (code-quality family,
   test-quality, vapt, docs-accuracy, Codex, CodeRabbit) degrade loudly when not
   installed — declared, never silently skipped. Takes one argument: the ticket
   key, work item ID, or URL.
@@ -78,7 +78,7 @@ code. Say what actually happened instead.
 | `[NN]` | **Must fix** — a security or correctness rule, no exceptions |
 | `[ARCH]` | **Structural rule** — changeable, but project-wide only |
 | `[D]` | **A convention** — follow it unless the repo already does otherwise |
-| FAST / STANDARD / HEAVY | **How much checking this ticket gets** (small / normal / thorough) |
+| `security-sensitive` | **Whether a stranger could abuse this** — if yes, the attack tests get an independent signer |
 
 **There is no GATE 1 or GATE 2.** The numbering is historical and means nothing —
 another reason to lead with what the thing does.
@@ -157,7 +157,7 @@ on an engine that is a binary, or either test on an orchestration capability:
 | `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance, using **GATE 5's per-family minimum table** (step 12) rather than a fixed set — an API minimum asserted over a config-only surface proves nothing. That table is reproduced inline in step 12 precisely so it survives `vapt`'s absence. Commit those tests in the repo's own runner and record **`DEGRADED`**. For the *unexercised* rules you cannot enumerate by ID without the skill, name the **families** that went untested (mass assignment, injection, XSS, CORS, cookie flags, headers) and state that the full ID list was unavailable — an honest family-level declaration, never a silent omission or an invented ID. |
 | `test-quality` | The single TEST-\* guard over the whole final test diff — ordinary + abuse tests together (step 12.4) — reused as GATE 3's `TEST` row | Skip the companion's **execution**, never the **row**: still reject obvious implementation-detail assertions and unjustified mocks on your own judgment, and emit `TEST \| DEGRADED \| test-quality unavailable; reduced manual check: <what you actually checked>`. A missing engine changes the evidence, not whether the row exists. |
 | `docs-accuracy` | DOC-\* rule set (step 12.5, before the freeze) | The pre-freeze grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
-| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.4's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
+| `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.4's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. The gate itself is unaffected: the user's approval was always the gate and Codex was only ever a contributor. |
 | the `codex` CLI (`codex review`) | **Pass B** — Codex reviews the **local** diff concurrently with passes A and C (step 13c), before the PR exists | **Fall back to `/coderabbit:code-review`** if it is installed — same slot, same manifest, same skip-by-citation rules, different engine; step 16 names which engine actually ran. Only if **neither** exists does pass B disappear, leaving one free-form reviewer plus rule pass C — stated explicitly in step 16. A pass B that exceeds its declared time ceiling degrades the same way. |
 | `/code-review` (Claude Code's built-in review — formerly `/review`) | **Pass A** — the fresh no-build-context reviewer (step 13b) + the default route to the GATE 4 independent signature | Run the review as a **fresh reviewer subagent with no build context**, or as a read-only `codex-delegate` dispatch — GATE 4's independence requirement is about *who* reviews, not the command name, so either fallback still produces a valid signature. If **no** fresh-reviewer route exists at all: a **UI** ticket ✋ STOPs (GATE 4 cannot self-sign), and a **non-UI** ticket continues with pass A run by the building agent — declared explicitly as `pass A ran WITHOUT reviewer independence`, which is a named loss, not a silent one. |
 | the orchestrator's **concurrency capability** (workflow runner / fresh subagents) | Orchestration **only**, for **both** waves: the **recon wave** (steps 4–6, read-only investigations) and the **step-13 review wave** over one frozen manifest — schema-validated and resumable where a workflow runner exists. It owns no quality rule and no gate verdict. | If a workflow runner is absent but plain subagent fan-out exists, launch the same read-only passes concurrently without schemas or resume. If only serial execution exists, run the same investigations and the same passes, in the same scope, one after another — declare `orchestration degraded: serial`, **naming which wave** (they can differ: a run may fan out its review and serialize its recon). **No pass and no gate is skipped in any mode.** If no fresh-reviewer route exists at all for a UI ticket, ✋ **STOP** — GATE 4 never degrades to self-signing. |
@@ -170,8 +170,8 @@ What **never** degrades, because it doesn't depend on an installed skill:
   reference.
 - **Steps 7 / 8** — branching and implementing; git and the approved plan, not a
   companion skill.
-- **The run lane** — it is computed from the repo, so it is always available; and
-  it never removes a gate whose trigger fired.
+- **Gate coverage** — every applicable rule, screen and surface is checked on
+  every ticket. Nothing about the run reduces it.
 - **The review freeze and the reconciliation barrier** — the manifest is `git`
   plus hashing. Concurrency can be absent; the freeze cannot.
 - **Step 6 plan-mode gate** — plan approval is a user action, not a skill. The
@@ -196,12 +196,7 @@ falls back to CodeRabbit and the plan gets no cross-model review; orchestration
 serial"), in the step-16 report, and in the step-18 session log. The declaration
 covers which companions are missing and the **intended orchestration mode of
 each wave** (recon and review — they can differ) up front,
-together with the **tentative** lane (the only one that exists that early — the
-provisional lane is declared at the end of Step 6, before the 6.4 decision); the **effective** lane does not exist
-until the freeze computes it, so it is declared in the step-16 report and the
-session log, never in the up-front line. A lane-based omission (the FAST lane's skipped
-Codex plan review) is a **recorded decision**, not a degradation — label the two
-differently so a missing engine never hides behind a lane. A run that silently
+and the **orchestration mode of each wave**. A run that silently
 skipped a gate is indistinguishable from a run that failed it.
 
 ## Concurrent recon — how every read-only investigation runs
@@ -342,11 +337,9 @@ your decision after they all return.
    *Stopping and resuming*. Re-asking for approval of a plan the user already
    approved is waste, and re-planning risks a *different* plan than the one the
    half-finished code on disk was built against.
-5. **Form the `tentative_lane`** (see *Run lanes*) from the ticket and the scope
-   you expect. It is **tentative on purpose and binds nothing** — it only shapes
-   how much plan the ticket warrants. The `provisional_lane` is finalized from the
-   completed plan at the end of Step 6, and the `actual_lane` at the review freeze.
-   Record the tentative value in the plan's *Size* line.
+5. **Size the ticket** for the plan's *Size* line — files, subsystems, whether it
+   is security-sensitive. This shapes how much plan the ticket warrants and how wide
+   the waves fan out. It does **not** reduce any gate: coverage is constant.
 6. **A STOP here cancels concurrent work.** Steps 4 and 5 may run alongside each
    other; if triage stops the ticket, stop the design read too rather than letting
    it finish into a run that will not happen.
@@ -485,8 +478,9 @@ tiering real: STRONG plans, MEDIUM builds from the plan.
    the user ever sees it** (see *Cross-model plan review* below). Reconcile its
    findings into the draft. Two things skip it, and they are recorded
    differently: the companion check said Codex is **unavailable** (a
-   degradation), or the run is in the **FAST lane** (a recorded decision). Say
-   which in the approval ask.
+   degradation). Say so in the approval ask. **The plan review runs on every
+   ticket** — it is an independent semantic review, and skipping it on "small"
+   tickets is coverage loss, not thrift.
 5. **Present the reconciled plan through plan mode's approval flow**
    (`ExitPlanMode`). The user approves, edits, or rejects in the native UI.
    **Implementation starts only on approval** — an edited plan is the new plan;
@@ -502,8 +496,8 @@ tiering real: STRONG plans, MEDIUM builds from the plan.
    Contract derives from, the session log references, and the PR carries.
 
 **Fallback — plan mode unavailable** (headless / workflow / subagent runs):
-still run the Codex review — unless the finalized provisional lane is FAST, or
-Codex is unavailable — since it needs no plan mode, being a shell dispatch;
+still run the Codex review — unless Codex is unavailable — since it needs no plan
+mode, being a shell dispatch;
 then write the plan artifact **with `approval_status: pending`** and **STOP**,
 surfacing sections 1–3 and 7 as the approval ask. **The status field is
 load-bearing:** resume treats an approved plan as settled, so a pending artifact
@@ -527,9 +521,8 @@ approved only by its author *and Codex* is still not approved.
          # when reference is null, also: reference_search{at_sha,locations,method,result},
          #   carve_out_approved_by (a named human), carve_out_date -->
 **Size:** <N> files · <FE / BE / full-stack> · security-sensitive: <yes/no>
-**Provisional lane:** <FAST / STANDARD / HEAVY> — <the numbers it came from>
-<security-sensitive: yes forces HEAVY. The binding lane is recomputed from the
-actual diff at the review freeze and may only escalate.>
+<security-sensitive: yes selects strict GATE 5 — an added independent signature,
+not a reduction anywhere.>
 
 ## 1. What & why (read this first)
 <2–4 plain sentences: what the user gets when this ticket is done, and the
@@ -619,9 +612,8 @@ against different guesses is worse than serialising.
 <one line: the other approach considered, and why not>
 
 ## 7. Codex plan review (cross-model second opinion)
-**Ran:** <yes — codex <version>, session <threadId>> / <no — `Not run — FAST
-lane; deterministic path/command/dependency/duplicate checks passed`> / <no —
-`codex` CLI unavailable>
+**Ran:** <yes — codex <version>, session <threadId>> / <no — `codex` CLI
+unavailable; this plan carries no cross-model review>
 
 | Finding (severity) | Disposition | Reason / what changed |
 |---|---|---|
@@ -674,8 +666,8 @@ mechanically: every path the plan names exists or is explicitly new; every
 command it cites exists in the repo's own config; the build sequence is acyclic
 and each step's dependencies land before it; and a repo search finds no existing
 implementation of what the plan is about to build. Findings here go straight into
-the draft. In the **FAST lane** these checks are the whole of section 7 — record
-`Not run — FAST lane` with their results and move to approval.
+the draft. They do not replace the review — they remove questions it would
+otherwise spend its budget re-deriving.
 
 **Dispatch only a semantically complete plan.** Codex receives the drafted plan
 *verbatim* and the user approves the *reconciled* plan, so sending an unfinished
@@ -698,9 +690,11 @@ its read-only dispatch:
   Same lever, same reason as pass B (step 13c): many accounts set
   `model_reasoning_effort = "xhigh"` globally, and a plan critique at xhigh across
   a large tree is how this dispatch blows its own watchdog. Pass
-  `--effort medium` for STANDARD and `high` for HEAVY; reserve `xhigh` for a
-  critique you have a specific reason to want deeper. (FAST does not reach this
-  step at all — it records `Not run — FAST lane` — so it has no effort to set.)
+  set it **explicitly and constantly** — `high` is the default here. Do not vary it
+  by ticket size: with a probabilistic reviewer a lower effort on the same prompt is
+  a lower detection rate, not merely a shorter one. Inheriting the account's global
+  default (often `xhigh`) is what blew this dispatch's watchdog; pinning it is the
+  fix, not lowering it per ticket.
 - **Size the watchdog to the read, not to a fixed number.** `--timeout 15m` suits
   **one** repo of ordinary size. What actually drives the duration is the volume
   Codex must read and reason over — scoped files and bytes, the tool calls that
@@ -1094,12 +1088,11 @@ Match the model to the difficulty: exploration on small, routine build on
 medium, planning/design/security on strong. Keep parallel subagents proportional
 to the task — don't fan out more than the work needs.
 
-**Model tiers are not run lanes.** SMALL/MEDIUM/STRONG above pick *which model
-answers a question*. FAST/STANDARD/HEAVY (see *Run lanes*) pick *how much
-orchestration the run gets*. They are independent: a FAST-lane ticket with one
-genuinely hard decision still routes that decision to a strong model, and a HEAVY
-lane still does its routine wiring on a medium one. Never let one stand in for the
-other.
+**Model tiers pick *which model answers a question*** — they are not a coverage
+dial. A small ticket with one genuinely hard decision still routes that decision to
+a strong model; a large one still does its routine wiring on a medium one. Review
+passes are excluded from this tiering: they run at a constant effort (see
+*Coverage is constant*).
 
 **The GATE 4 parity-reviewer is a separate agent from the builder** (see below) —
 that independence is the whole point of it, so never let the building agent grade
@@ -1112,7 +1105,7 @@ later fix inside that scope makes it stale rather than merely old.
 run in a separate process on a separate account — they cost nothing from the
 budget above and gain nothing from routing a subagent at them. Two rules keep
 them cheap: **one full-snapshot dispatch per decision point** — a plan review
-(skipped in the FAST lane), a diff review — plus **one delta dispatch** only if the
+a diff review — plus **one delta dispatch** only if the
 accepted fixes changed reviewed content — and **read-only unless it is
 implementing**, which in this workflow it never is. Ship-ticket delegates *judgment* to Codex, never
 the build: the code in the PR is written here, against a plan the user approved.
@@ -1141,162 +1134,57 @@ second migration mechanism alongside the one already there.
 Three mechanics are shared by everything from Step 4 onward. They are defined
 once here so the steps below can just refer to them.
 
-### Run lanes — computed, never judged
+### Coverage is constant; only scheduling varies
 
-The same twenty steps applied to a two-file fix and a forty-file feature is how a
-small ticket costs an afternoon. The lane sizes the *orchestration*; it never
-decides whether a gate applies.
+Earlier versions sized a FAST/STANDARD/HEAVY "run lane" and let it reduce what was
+checked, then claimed the reductions were duplication rather than coverage. That
+claim does not hold — see *Detectors and triggers* below — so **the lane is gone**.
 
-Let, computed from the repo — never estimated:
+Every ticket gets the same coverage: every applicable `[NN]`, `[ARCH]` and `[D]`
+rule; separate whole-diff `AI-FM` and `UNIVERSAL` rows; GATE 4's full three-layer
+comparison for every reference-backed screen; GATE 5's applicable classes executed
+**per route**; the step-6.4 plan review; and all three diff-review passes A, B and
+C — at a **constant reasoning effort**.
 
-- **F** = changed non-generated files, **including untracked**, **excluding this
-  workflow's own mandatory artifacts** (`.specs/plans/<TICKET>.md`,
-  `.specs/design-parity/<TICKET>.md`, `.specs/vapt/<TICKET>.md`, `session-log.md`).
-  Every run writes those, so counting them would put a two-file change at `F ≥ 3`
-  and make the FAST lane unreachable by construction. Implementation, test, and
-  documentation changes all still count.
-- **L** = added + deleted non-generated lines, with the same artifact exclusion
-- **S** = distinct Design Contract subsystems
-- **security_sensitive** = the plan's `security-sensitive:` field
-- **ui_required** = the ticket, its ACs, or the approved Design Contract **owns a
-  screen** — OR the diff touches this repo's view layer. **Both halves matter:** a
-  diff-only trigger would let a ticket that was supposed to build a screen, and
-  didn't, skip the very gate whose `Not-built` grade exists to catch exactly that.
-- **tb_touched** = the GATE 5 trust-boundary detector, unchanged
+**What still varies, and is chosen from the work rather than from a ticket class:**
 
-**FAST** — two predicates, because `L` cannot exist before the code does:
-- *provisional* (end of Step 6): `F ≤ 2`, `S = 1`; `security_sensitive` false and
-  `tb_touched` false; no schema/migration, dependency, CI/runtime-config, public
-  contract, or cross-subsystem shared-component change; and **every file the plan's
-  build sequence names is one the plan introduces or already owns** — a property
-  computable from the plan alone. It deliberately does **not** reference the
-  approved Design Contract: that is emitted at Step 6.5, *after* this decision, so
-  depending on it would be circular. **`L` is not referenced either** — it is
-  unmeasurable here, and treating an unmeasurable input as "uncomputable → HEAVY"
-  would make the FAST lane unreachable by construction.
-- *actual* (freeze): the same, **plus** `L ≤ 80`, now checked against the contract.
+- **Concurrency width** — how many investigators or passes run at once, taken from
+  the number of genuinely independent items (screens, surfaces, rule families).
+- **`security-sensitive: true`** — selects **strict** GATE 5, which *adds* an
+  independent signature. It reduces nothing.
 
-**STANDARD** iff not FAST and *all*: `F ≤ 12`, `S ≤ 2`, and (at the freeze)
-`L ≤ 500`; `security_sensitive` false; no unresolved architecture/scope uncertainty.
+**Detectors still decide whether a gate APPLIES — that is not a reduction.**
+`ui_required` (the ticket, ACs or approved contract owns a screen, **or** the diff
+touches the view layer) gates GATE 4; `tb_touched` gates GATE 5. A gate whose
+trigger does not fire emits `NOT_TRIGGERED` **with the manifest ID, the detector's
+name and version, the complete changed-file classification, and a digest of that
+output**, so CI can recompute the trigger rather than trust prose. Uncertain
+applicability escalates to running the gate, never to skipping it.
 
-**HEAVY** otherwise — and **mandatory** whenever `security_sensitive` is true,
-when any threshold cannot be computed, or when the classification is uncertain.
-
-> These names are deliberately **not** SMALL/MEDIUM/STRONG. Those are the *model*
-> tiers in *Model / cost routing*, a different axis entirely: a FAST lane can
-> still route a hard question to a strong model.
-
-**Three moments, three names.** Different inputs, different jobs — keep them
-distinct, because conflating them is how a lane decision gets made on data that
-does not exist yet:
-
-| Moment | When | Inputs | Binds |
-|---|---|---|---|
-| **`tentative_lane`** | Step 4 triage | the ticket alone | **nothing** — it only shapes how much plan the ticket warrants |
-| **`provisional_lane`** | end of Step 6, **immediately before the 6.4 decision** | the *completed* plan's file list (`F`, `S`) | the plan-review decision, and nothing else |
-| **`actual_lane`** | the review freeze | the real working tree (`F`, `S`, `L`) | everything downstream |
-
-`S` counts distinct top-level modules of the repo's own layout; "generated" means
-whatever the repo's own ignore/generated config says. **Any value a predicate
-actually references and you cannot compute forces HEAVY.** (`L` before the freeze
-is not such a value — no earlier predicate references it.)
-
-**The plan review keys off the PROVISIONAL lane, and that decision is historical.**
-A FAST provisional lane skips step 6.4; if the run later escalates to STANDARD or
-HEAVY, that escalation **does not retroactively owe a pre-approval critique** — the
-plan was already approved and the moment has passed. What it does owe is honesty:
-the report and session log record `Not run — FAST at approval; escalated to
-<lane> at freeze`. If you want the critique after an escalation, the plan changed
-materially and goes back through plan mode, which is a re-plan, not a patch.
-
-**The anti-gaming rule.** The freeze recomputation is what binds; print the raw
-numbers.
+**Every gate and row declares one canonical outcome.** These are the only valid
+values, and CI, the step-16 report and the session log all use them:
 
 ```
-effective_lane = max(provisional_lane, actual_lane)
-```
-
-The lane may **escalate automatically**; it may **never downgrade** after plan
-approval without an explicit human decision recorded in the plan and the session
-log. Unknown means HEAVY. Because F, L and the detectors are read off the tree
-rather than asserted, you cannot argue your way into a cheaper lane — the diff
-decides.
-
-**What the lane changes — and what it never changes:**
-
-| | FAST | STANDARD | HEAVY |
-|---|---|---|---|
-| Plan-mode approval | required | required | required |
-| Codex **plan** review (6.4) | **not run** — recorded as a lane decision | required, `--effort medium` | required, `--effort high` |
-| GATE 3 (all rows) | required | required | required |
-| GATE 4 | **iff `ui_required`** | iff `ui_required` | iff `ui_required` |
-| GATE 5 | **iff `tb_touched`** | iff `tb_touched`, light | iff `tb_touched`; strict when `security_sensitive` |
-| Diff review passes A, B **and** C | all three | all three | all three — **never lane-scoped** |
-| Pass B reasoning effort | `medium` | `medium`/`high` | `high`/`xhigh` |
-| Gate coverage | **identical in all three lanes** — the lane removes duplication, not checks | | |
-| Review-wave orchestration | serial is fine | concurrent | concurrent |
-| Recon-wave orchestration | concurrent where independent | concurrent | concurrent |
-
-**No lane suppresses pass B.** If pass B is absent it is because the *engine* was
-unavailable or timed out — a declared degradation, reported as "one free-form
-reviewer plus rule pass C", never a lane decision. **And passes A and B are never
-partitioned:** each receives the whole manifest, because a free-form reviewer
-split across files cannot see cross-file behavior. Only pass C's rule families and
-GATE 4's owned screens may shard, and both re-aggregate into one table.
-
-**The lane sizes DUPLICATION, never COVERAGE.** Sizing only "how many agents"
-made a two-file change cost what a forty-file feature costs. But the fix is not a
-cheaper review — **what gets checked is the same in every lane**, because a review
-that misses things is worth less than the time it saves. What the lane removes is
-work that produces no new information:
-
-| Removed by lane | Why it is not coverage loss |
-|---|---|
-| **Re-reading evidence that already exists** — GATE 3 reuses step 10's security rows against a matching security-scope digest; `TEST`/`DOC` rows reference steps 12.4/12.5's bound results | The check ran. Running it again against identical inputs yields the same answer and an extra audit row. |
-| **A second parity investigator** — pass A is the sole one; step 11 assembles and classifies | Step 8 self-checked, pass A verifies independently. A third comparison of the same two artifacts adds a comparison, not a check. |
-| **Re-proving identical control paths** — GATE 5 groups routes with identical control-path fingerprints, plus a per-route positive control and auth rejection | Eight routes behind one middleware are one control path. Differing or uncomputable fingerprints stay separate classes. |
-| **Per-rule `N/A` rows for families the diff cannot reach** — one family sentinel, enumerating the IDs it covers and the detector inputs and result | The rules are still accounted for; only the row count changes. Non-mechanical applicability expands to individual rows. |
-| **Concurrency width** — how many agents run at once | Wall clock only. |
-
-**What the lane never changes:**
-
-- **Every applicable `[NN]` rule, every contract-named `[ARCH]` and `[D]` rule, and
-  separate whole-diff `AI-FM` and `UNIVERSAL` rows — in all three lanes.** A `[D]`
-  rule is a convention, not a nit; downgrading it to advisory in a cheaper lane is
-  coverage loss wearing a lane label.
-- **All three review passes — A, B and C — in all three lanes.** Pass B is the only
-  cross-model look in the workflow; A and C share a model, so dropping B does not
-  make the review cheaper, it makes it *narrower*. The smallest ticket is exactly
-  where an unnoticed defect ships unnoticed.
-- **GATE 4's full three-layer comparison** for every reference-backed screen.
-- **GATE 5's applicable classes** for every distinct control path.
-
-The lane still sets **pass B's reasoning effort** and the **bounded ask** — those
-change how long a pass thinks, not what it is asked to cover — and it still sets
-orchestration width.
-
-**Every reduction is declared, by name.** A row or gate that ran narrower emits
-exactly one of:
-
-```
-PASS_FULL                          the full catalogue ran
-PASS_TARGETED                      duplication removed — say what was reused and against which digest
-NOT_TRIGGERED                      + the manifest ID, the detector's name and version,
-                                   the complete changed-file classification, and a
-                                   digest of that output, so CI can recompute it
-NOT_APPLICABLE_NO_SCREEN_REFERENCE + the approver, date and reference-search evidence
+PASS_FULL                          the check ran in full
+PASS_REUSED                        deterministic output reused — name it and the
+                                   digest it bound to (never a semantic judgment)
+PASS_GROUPED                       shared test definitions — name them, and confirm
+                                   every route was executed against them
+NOT_TRIGGERED                      + detector name and version, the complete
+                                   changed-file classification, and a digest of that
+                                   output, so CI can recompute it
+NOT_APPLICABLE_NO_SCREEN_REFERENCE + approver, date and reference-search evidence
 DEGRADED                           + the classes that could not run, by ID
 ```
 
-**A blank table, an omitted row, or a bare "N/A" is a FAIL.** Uncertain
-applicability escalates, never collapses.
+**A blank table, an omitted row, or a bare "N/A" is a FAIL.** Coverage is constant,
+so a gate that examined less than it should is a bug — there is no lane to blame.
 
-**A lane never turns off a gate whose trigger fired.** `ui_required` and
-`tb_touched` are computed from the ticket and the diff, so GATE 4 and GATE 5 are
-outside the lane's reach entirely. **Both diff-review engines run in every lane** — the
-cross-model two-pass guarantee is not a lane-scoped luxury. The only thing FAST
-actually drops is the Codex *plan* critique, and that is recorded as
-`Not run — FAST lane` rather than omitted silently.
+**Presentation may aggregate; evaluation may not.** Rows whose applicability was
+**already computed per rule** may be reported as one sentinel — enumerating the IDs
+it covers and the identical detector, content digest, inputs and result behind
+them. A family-level detector standing in for per-rule evaluation is coverage loss,
+because a rule's trigger can be narrower than its family's.
 
 ### The review freeze — a manifest, not a commit
 
@@ -1596,7 +1484,11 @@ recon*), and the orchestration mode is declared per wave.
    implementing and get a reference committed** — inventing one during the gate is
    the self-attestation this whole gate exists to remove.
 
-   **No separate draft investigator.** Step 8 already checked each screen against
+   **One post-build parity investigator, and this is an accepted trade — not
+   duplication.** A second independent comparison could find drift both step 8 and
+   pass A missed; dropping it is correlated redundancy removed at a small, named
+   cost in accuracy. It is kept out because its findings fed the fix → invalidate →
+   re-sign loop that produced twelve signing rounds. Step 8 already checked each screen against
    its reference as it was finished, and pass A (step 13b) independently re-derives
    the verdict with no build context. A third pass here re-comparing the same two
    things adds a comparison, not a check — and its findings feed the same fix →
@@ -1653,8 +1545,14 @@ recon*), and the orchestration mode is declared per wave.
    **c. Test by control-equivalence class, not endpoint × rule.** Eight endpoints
    behind one auth middleware, one serializer and one error mapper are **one**
    control path — proving the same middleware assertion eight times is duplication,
-   not coverage. **Equivalence must be shown, not asserted.** Record a **control-path
-   fingerprint** per route — registration, middleware order and arguments,
+   not coverage. **Share the test DEFINITION; execute against every route.** Identical static
+   fingerprints do not prove identical runtime behaviour — shared middleware
+   branches on method, path, route metadata, parameters, resource type and
+   datastore state. So write each abuse case **once, table-driven**, and **run every
+   applicable assertion against every in-scope route**. What grouping saves is
+   authoring, not execution.
+
+   Record a **control-path fingerprint** per route — registration, middleware order and arguments,
    binding/schema, ownership and policy resolution, serialization, error mapping,
    and the relevant configuration — and group only routes whose fingerprints are
    **identical**. Differing fingerprints, or any resolved dynamically such that you
@@ -1694,9 +1592,11 @@ recon*), and the orchestration mode is declared per wave.
    `security-sensitive` *mandates* strict mode, losing every independent-reviewer
    route here is a ✋ **STOP**, never an implicit downgrade to light.
 
-   **e. Strict vs light.** **Strict** — the full `VAPT-API-*` / `VAPT-WEB-*` /
-   `VAPT-CFG-*` set plus an **independent signature** — when the plan's
-   `security-sensitive:` field is true (which also forces the HEAVY lane).
+   **e. Strictness changes signing, not coverage.** The rule set is
+   **applicability-driven in every run**: every `VAPT-*` class whose surface the
+   diff touches is in force, and any class not run is declared inapplicable *with
+   evidence*. **Strict** adds an **independent signature** — when the plan's
+   `security-sensitive:` field is true.
    **Light** otherwise — name the IDs rather than paraphrasing the set, and read
    them from `vapt` itself so the two never drift: `VAPT-API-01/02/03/06/07`,
    `VAPT-WEB-01/02/03`, and `VAPT-CFG-03/04`.
@@ -1755,7 +1655,7 @@ recon*), and the orchestration mode is declared per wave.
    existing test job; alongside them, a merge-blocking CI check (same PR-side slot
    as `nn-guard` and the GATE 4 check) rejects a trust-boundary-touching PR unless
    `.specs/vapt/<TICKET>.md` exists and reads one of the canonical outcomes —
-   **`PASS_FULL`, `PASS_TARGETED` or `DEGRADED`** (the taxonomy above; the older
+   **`PASS_FULL`, `PASS_GROUPED` or `DEGRADED`** (the taxonomy above; the older
    `PASS`/`PASS-DEGRADED` spellings map to `PASS_FULL`/`DEGRADED` and should not be
    emitted). For
    `DEGRADED` the check does more, not less: it verifies each in-scope surface
@@ -1821,8 +1721,9 @@ recon*), and the orchestration mode is declared per wave.
      table · CQS · DRY-as-knowledge + Rule of Three · the complexity/nesting ceilings
      + KISS · the ranked YAGNI list) + the project constitution's Always/Never lists
      and Self-Check, when one exists
-   + TEST row — when the diff includes test files: **reference** step 12.4's
-     result by its binding — the test paths and their content digests, plus the
+   + TEST row — when the diff includes test files: pass C **verifies the TEST
+     semantics itself**; it may reference step 12.4's deterministic runner output
+     by its binding — the test paths and their content digests, plus the
      runner command or rule-set version. Do not re-perform the guard; **do** refresh
      it when a delta changes any bound input.
    + DOC  row — when the diff touches docs surfaces: **reference** step 12.5's
@@ -1837,7 +1738,15 @@ recon*), and the orchestration mode is declared per wave.
    > the engineering ones. Both are whole-diff. A `UNIVERSAL` row that walked only
    > the failure modes is a degradation to declare, not a fold.
 
-   **Security rows reuse step 10 only against a COMPUTED digest.** Step 10 must
+   **Pass C derives the security scope independently — it does not inherit step
+   10's.** Digest equality proves the recorded *inputs* are unchanged; it cannot
+   prove step 10 enumerated every surface and transitive owner, or read them
+   correctly. An omitted owner yields the same digest twice, because both
+   computations start from the same incomplete inventory. So pass C re-derives the
+   scope and reviews the controls itself. **Reuse is limited to deterministic tool
+   output** — a grep result, a lint run, a test result — never a semantic judgment.
+
+   **Where deterministic output is reused, bind it properly.** Step 10 must
    emit a **security-scope digest** — over the in-scope surfaces, every transitive
    control owner it traced (including unchanged files), those files' contents, and
    the rule-inventory version — using the same canonical serialization as the
@@ -1881,7 +1790,7 @@ recon*), and the orchestration mode is declared per wave.
    For each **reference-backed** owned screen it diffs the implementation against
    the **pinned** reference (the `design_ref` SHA from Step 5), one row per
    divergence with exact `ref file:line ↔ impl file:line` and a severity, at the
-   depth the lane's gate-depth table sets:
+   full three layers, for every reference-backed screen:
    - **Structure** — node-by-node: presence/absence and composition of sections,
      states (empty/loading/error), and components.
    - **Style** — class/declaration: layout, spacing, tokens, color, type, shadow.
@@ -1930,11 +1839,11 @@ recon*), and the orchestration mode is declared per wave.
    `~/.codex/config.toml`, which is right for an architectural critique and
    wasteful for a routine diff.
 
-   | Lane | Effort |
-   |---|---|
-   | FAST | `medium` |
-   | STANDARD | `medium`, or `high` if the diff is broad |
-   | HEAVY, or `security-sensitive: true` | `high` / `xhigh` — buy the depth here |
+   **Set it explicitly and hold it constant: `high`.** Do not scale it by ticket
+   size — with a probabilistic reviewer, a lower effort on the same prompt is a
+   lower detection rate, not merely a shorter wait. The problem this fixes is
+   *inheriting* the account default (often `xhigh`), which blew a dispatch's
+   watchdog; the fix is pinning the value, not lowering it per ticket.
 
    **Bound what you ask for, not just how long you wait.** An unbounded
    "report everything" over a large diff at high effort is the combination that
@@ -2118,17 +2027,19 @@ recon*), and the orchestration mode is declared per wave.
    passes": there is one wave and one reconciliation. State:
    - the **effective lane** (with the raw numbers) and the **provisional** one it
      came from — plus, if they differ, why it escalated, and whether the plan
-     review's FAST-lane omission predates that escalation
+     review's disposition
    - the **manifest ID** and each pass's verified coverage
    - the **orchestration mode** for **each wave** — recon and review — as
      workflow / fan-out / serial; they can differ, and a run that fanned out its
      review while serializing an hour of recon must not report as concurrent
-   - **each gate's depth and its declared outcome** — `PASS_FULL`,
-     `PASS_TARGETED` (with what was in scope), `NOT_TRIGGERED` (with the detector
-     evidence), `NOT_APPLICABLE_NO_SCREEN_REFERENCE` (with approver and date), or
-     `DEGRADED` (with the classes that could not run, by ID). A gate that ran
-     narrower because of the lane is a **declared decision**; one that ran narrower
-     without saying so is a silent skip and a bug in the report.
+   - **each gate's coverage and declared outcome** — `PASS_FULL`; `PASS_REUSED`
+     (naming the deterministic output reused and the digest it bound to);
+     `PASS_GROUPED` (naming the shared test definitions and confirming every route
+     was executed against them); `NOT_TRIGGERED` (with the detector name, version,
+     changed-file classification and output digest); `NOT_APPLICABLE_NO_SCREEN_REFERENCE`
+     (with approver, date and reference-search evidence); or `DEGRADED` (with the
+     classes that could not run, by ID). **Coverage is constant, so a gate that
+     examined less is a bug, not a lane decision.**
    - **the complete gate finding count first, at full severity** — every finding,
      however it arose. **Then**, as a separate classification, how many of them
      step 8's in-flight checks should have caught (rules already in force when the
@@ -2145,7 +2056,7 @@ recon*), and the orchestration mode is declared per wave.
      fallback, or none → one free-form reviewer plus rule pass C), **the reasoning
      effort it ran at**, and whether it timed out
    - the **Codex plan review's disposition** — incorporated vs. rejected, or
-     `Not run — FAST lane`, or unavailable
+     or unavailable
    - every **skipped finding with its rule ID**
    - for each **reference-backed** owned screen: its **final GATE 4 grade, who
      signed it, and the scope digest the signature binds to**; for each
@@ -2183,7 +2094,7 @@ recon*), and the orchestration mode is declared per wave.
      **re-approval round-trips**, and any **divergence between the approved plan
      and what was actually built**
    - the **cross-model review record**: whether the Codex plan review ran (session
-     id) or was a FAST-lane decision, how many findings were incorporated vs.
+     id), how many findings were incorporated vs.
      rejected, **which engine ran pass B**, and each pass's run ID
    - which design files were read in Step 5 **and the pinned `design_ref` SHA**
    - the **GATE 4 grade(s), the independent signer, and the scope digest the
@@ -2424,8 +2335,7 @@ not blindly restart:
 
 Working when a ticket closes with: a plan-mode-approved `.specs/plans/<TICKET>.md`
 carrying its section 7 cross-model review disposition (a real critique, or a
-recorded `Not run — FAST lane`); a **declared effective run lane** with the raw
-numbers behind it; a **frozen manifest whose coverage every pass verifiably
+declared engine unavailability); a **frozen manifest whose coverage every pass verifiably
 reviewed**, with every exclusion named; a passing GATE 3 whose table carries the
 specialist rows, every `[NN]` row, and the whole-diff `AI-FM` and `UNIVERSAL` rows
 (full or **declared** degraded); an **independently-signed GATE 4 whose signature
@@ -2435,8 +2345,8 @@ family minimum green and every unexercised rule listed by ID — or, with `vapt`
 absent, `untested_families` + `rule_inventory: unavailable`) with committed abuse
 tests for every trust boundary the change introduced, and a green final
 `test-quality` pass over ordinary and abuse tests together — **or its declared
-`TEST | DEGRADED` row**; passes A and B **both reconciled** into one attributed
-finding set — or pass B's engine unavailability, or a non-UI run's named loss of
+`TEST | DEGRADED` row**; passes A, B **and C** all reconciled into one attributed
+finding set — or an engine's unavailability, or a non-UI run's named loss of
 reviewer independence, **declared by name** — with every skip citing a rule ID; a clean delta pass if fixes triggered one; a **build-group execution record**
 showing which `Par` groups ran concurrently and a stated reason for any that did
 not; every post-freeze change on the allowlist; a green CI; the ticket in Done (Jira transition or ADO completed
