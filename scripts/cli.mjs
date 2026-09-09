@@ -19,7 +19,7 @@ import {
   symlinkSync, cpSync, mkdirSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { join, dirname, resolve, basename } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +253,49 @@ function cmdValidate() {
       err = fail = true;
     }
 
+    // 4. Every relative markdown link in the SKILL.md or its references/ resolves.
+    //    A skill split across references/ is only as good as its links: a dangling
+    //    one silently drops the procedure it was pointing at.
+    const docs = [md];
+    const refDir = join(SKILLS_DIR, name, 'references');
+    if (existsSync(refDir)) walk(refDir, (f) => { if (f.endsWith('.md')) docs.push(f); });
+    for (const doc of docs) {
+      const body = readFileSync(doc, 'utf8');
+      for (const lm of body.matchAll(/\]\((?!https?:|mailto:)([^)#\s]+)(?:#[^)]*)?\)/g)) {
+        const target = resolve(dirname(doc), lm[1]);
+        if (existsSync(target)) continue;
+        console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)} links to '${lm[1]}', which does not exist.`);
+        err = fail = true;
+      }
+    }
+
+    // 5. No orphan references. A file under references/ that nothing links to is
+    //    dead weight the reader will never be told to load.
+    if (existsSync(refDir)) {
+      const linked = docs.map((d) => readFileSync(d, 'utf8')).join('\n');
+      walk(refDir, (f) => {
+        if (!f.endsWith('.md')) return;
+        if (linked.includes(basename(f))) return;
+        console.log(`❌ ${name}: references/${basename(f)} is never linked from the skill — orphaned.`);
+        err = fail = true;
+      });
+    }
+
+    // 6. Retired vocabulary stays retired. A concept deleted from a skill but left
+    //    referenced elsewhere is the failure mode that put a dozen dead references
+    //    to a removed classifier into ship-ticket. Each entry: /regex/ + why.
+    for (const [re, why] of RETIRED_VOCABULARY) {
+      for (const doc of docs) {
+        const body = readFileSync(doc, 'utf8');
+        re.lastIndex = 0;
+        const hit = re.exec(body);
+        if (!hit) continue;
+        const line = body.slice(0, hit.index).split('\n').length;
+        console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)}:${line} uses retired '${hit[0]}' — ${why}`);
+        err = fail = true;
+      }
+    }
+
     if (!err) console.log(`✅ ${name}`);
   }
 
@@ -260,6 +303,17 @@ function cmdValidate() {
   if (fail) { console.log('❌ validation failed'); process.exit(1); }
   console.log('✅ all skills valid');
 }
+
+// Concepts that were deliberately removed. Listing them here is what stops a
+// deletion from leaving live instructions pointing at something that no longer
+// exists — the defect class this check was added for.
+const RETIRED_VOCABULARY = [
+  [/\brun lanes?\b/gi,            'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant'],
+  [/\b(?:effective|provisional) lane\b/gi, 'the run lane was deleted; nothing computes a lane'],
+  [/\blane (?:effort|depth|table)\b/gi,    'the run lane was deleted; reasoning effort is pinned, not scaled'],
+  [/\bGATE [12]\b/g,              'there was never a GATE 1 or GATE 2'],
+  [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route'],
+];
 
 function cmdHelp() {
   console.log(`ai-skills — install & manage this repo's Claude Code skills

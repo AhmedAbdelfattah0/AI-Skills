@@ -257,10 +257,17 @@ signature from an agent that did not build the code.
 **FAIL** ⇔ anything else. An unfixed `[NN]`, an unexplained exclusion, a
 "probably fine", or a rule marked PASS with no test behind it.
 
-**Strict mode** is required when the ticket is flagged security-sensitive (auth,
-tenancy, billing, payments, secrets). Otherwise the gate runs light: `VAPT-API-01
-/02/03/06/07`, `VAPT-WEB-01/02/03`, `VAPT-CFG-03/04` — the classes that ship
-silently in ordinary CRUD work.
+**Strict mode is about signing, not coverage.** Every GATE run executes every
+STEP 4 rule applicable to every in-scope surface — applicability alone decides
+which rules are in force, and any rule not run is declared inapplicable with
+evidence. `security-sensitive` (auth, tenancy, billing, payments, secrets)
+selects **strict**, which adds the independent signature the PASS contract
+requires. It does not change rule selection.
+
+A non-sensitive run is **unsigned, never reduced**. There is no lighter rule set
+for ordinary work: an unlabelled ticket is exactly where a mass-assignment,
+injection or CORS defect ships silently, so the label cannot be what decides
+whether those classes run.
 
 ## STEP 8 — CI enforcement (this is what makes it real)
 

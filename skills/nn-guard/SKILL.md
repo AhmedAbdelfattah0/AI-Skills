@@ -134,7 +134,7 @@ else
   [ -n "$FP" ] && check_file "$FP"
 fi
 
-[ "$BLOCKED" = "1" ] && { echo "nn-guard: fix the BLOCK findings above (rule IDs are from the code-quality skill; a genuine exception goes through GATE 2, not past this hook)." >&2; exit 2; }
+[ "$BLOCKED" = "1" ] && { echo "nn-guard: fix the BLOCK findings above (rule IDs are from the code-quality skill; a genuine exception needs an explicit recorded user waiver, not a way past this hook)." >&2; exit 2; }
 [ "$WARNED" = "1" ] && echo "nn-guard: warnings above — must be clean before PR (CI runs STRICT=1)." >&2
 exit 0
 GUARD
@@ -279,7 +279,7 @@ grep -q "nn-guard" .claude/settings.json 2>/dev/null && echo "settings.json: wir
 ## Rules for Claude
 
 - **The hook outranks the conversation.** If the hook blocks an edit, the fix is to
-  satisfy the rule or run the `code-quality` GATE 2 deviation flow — never to edit the
+  satisfy the rule or record a deviation in `code-quality`'s ledger — never to edit the
   guard script, the exclude list, or `settings.json` to make the finding disappear.
   Weakening the guard is an `[NN]`-tier change: propose, never apply (self-healing valve).
 - **Exclude list changes are deviations.** Adding a glob suppresses findings forever —
