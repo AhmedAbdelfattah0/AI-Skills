@@ -205,6 +205,8 @@ function cmdInstall(args) {
 }
 
 // Port of scripts/validate.sh — same three invariants, cross-platform.
+const ROOT = join(SKILLS_DIR, '..');
+
 function cmdValidate() {
   // All subdirectories — including any missing a SKILL.md, so we can flag them.
   const names = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -297,6 +299,29 @@ function cmdValidate() {
     }
 
     if (!err) console.log(`✅ ${name}`);
+  }
+
+  // The repo's own guidance files are held to the retired-vocabulary rule too.
+  // ship-ticket defers to AGENTS.md on any conflict, so guidance that still names
+  // a deleted concept can resurrect it — which is exactly how the two copies of
+  // this file drifted 76 lines apart while one of them described a classifier
+  // that no longer existed.
+  for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
+    const gp = join(ROOT, guide);
+    if (!existsSync(gp)) continue;
+    const body = readFileSync(gp, 'utf8');
+    for (const [re, why] of RETIRED_VOCABULARY) {
+      re.lastIndex = 0;
+      let hit;
+      while ((hit = re.exec(body)) !== null) {
+        // A line may cite retired vocabulary while explaining that it is retired.
+        const line = body.slice(0, hit.index).split('\n').length;
+        const src = body.split('\n')[line - 1];
+        if (/\b(retired|deleted|removed|no longer|never existed|does not exist)\b/i.test(src)) continue;
+        console.log(`❌ ${guide}:${line} uses retired '${hit[0]}' — ${why}`);
+        fail = true;
+      }
+    }
   }
 
   console.log('');
