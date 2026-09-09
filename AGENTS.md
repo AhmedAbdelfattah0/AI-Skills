@@ -343,3 +343,27 @@ extending them:
 3. `node scripts/cli.mjs validate` → should print `✅ <name>` for it and `✅ all skills valid`.
 4. `git add -A && git commit` — CI re-runs the validator, so a skill that breaks the invariants can't
    reach `main`.
+
+**Editing safely, because edits here are live the moment they are written.** A
+half-finished `SKILL.md` in this repo is a half-finished skill in the agent that
+loads it, and a large edit spans several files that only make sense together.
+Three rules, each of which exists because it was broken:
+
+- **Never whole-file-revert to undo one edit.** `git checkout -- <file>`,
+  `git restore`, `git stash` and an overwriting `Write` all discard everything
+  uncommitted in that file, not just the change you meant to reverse. Check
+  `git diff --stat <file>` first and delete the specific text instead. Planting a
+  deliberate violation to prove a check fires is good practice — remove it the way
+  you added it.
+- **Write each edit as you make it, not at the end of a batch.** A script that
+  accumulates several replacements and writes once will silently discard all of
+  them if a later assertion fails. Assert per replacement, and write per file.
+- **Verify a claim against the file before making it.** After a multi-edit script,
+  `grep` for a distinctive phrase from each edit. Before saying a check or rule
+  exists, confirm it is in a tracked path rather than a scratch script. A commit
+  message and its diff must agree — describing what you intended to add rather than
+  what the diff contains is how an unverified claim reaches `main`.
+
+**Draft a large rewrite outside the repo and swap it in once**, for the same
+reason: the intermediate states of a multi-file rewrite are live skills that nobody
+wrote on purpose.
