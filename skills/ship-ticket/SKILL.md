@@ -1231,9 +1231,9 @@ decides.
 | GATE 3 (all rows) | required | required | required |
 | GATE 4 | **iff `ui_required`** | iff `ui_required` | iff `ui_required` |
 | GATE 5 | **iff `tb_touched`** | iff `tb_touched`, light | iff `tb_touched`; strict when `security_sensitive` |
-| Diff review passes A **and** B | both | both | both |
+| Diff review passes A, B **and** C | all three | all three | all three — **never lane-scoped** |
 | Pass B reasoning effort | `medium` | `medium`/`high` | `high`/`xhigh` |
-| Gate depth | see the gate-depth table above | | |
+| Gate coverage | **identical in all three lanes** — the lane removes duplication, not checks | | |
 | Review-wave orchestration | serial is fine | concurrent | concurrent |
 | Recon-wave orchestration | concurrent where independent | concurrent | concurrent |
 
@@ -1244,56 +1244,52 @@ partitioned:** each receives the whole manifest, because a free-form reviewer
 split across files cannot see cross-file behavior. Only pass C's rule families and
 GATE 4's owned screens may shard, and both re-aggregate into one table.
 
-**The lane sizes gate DEPTH as well as orchestration.** Sizing only "how many
-agents" while every gate runs its full catalogue in every lane is the
-proportionality defect that makes a two-file change cost what a forty-file feature
-costs. What the lane never does is turn a *triggered* gate off — it changes how
-deep that gate goes:
+**The lane sizes DUPLICATION, never COVERAGE.** Sizing only "how many agents"
+made a two-file change cost what a forty-file feature costs. But the fix is not a
+cheaper review — **what gets checked is the same in every lane**, because a review
+that misses things is worth less than the time it saves. What the lane removes is
+work that produces no new information:
 
-| | FAST | STANDARD | HEAVY |
-|---|---|---|---|
-| **GATE 3** | directly applicable `[NN]`; contract-named `[ARCH]` only if structure changed; **one combined `AI-FM`+`UNIVERSAL` risk sweep**; non-safety `[D]` advisory, not blocking | all applicable `[NN]`; every contract-named `[ARCH]`; safety-relevant `[D]`; one combined risk sweep | full catalogue: every `[NN]`, all contract `[ARCH]`/`[D]`, **separate** `AI-FM` and `UNIVERSAL` rows |
-| **GATE 4** | reference-backed screens only; acceptance-critical structure, states, behaviour, token use | every reference-backed screen; full structure/states/behaviour, style focused on changed regions | full three-layer parity, every reference-backed screen |
-| **GATE 5** | `NOT_TRIGGERED` — FAST requires `tb_touched` false; **if the detector fires, the lane escalates** | applicable classes grouped by **distinct control path** + per-route auth-reachability smoke test | every applicable `VAPT-API-*`/`WEB-*`/`CFG-*` class |
+| Removed by lane | Why it is not coverage loss |
+|---|---|
+| **Re-reading evidence that already exists** — GATE 3 reuses step 10's security rows against a matching security-scope digest; `TEST`/`DOC` rows reference steps 12.4/12.5's bound results | The check ran. Running it again against identical inputs yields the same answer and an extra audit row. |
+| **A second parity investigator** — pass A is the sole one; step 11 assembles and classifies | Step 8 self-checked, pass A verifies independently. A third comparison of the same two artifacts adds a comparison, not a check. |
+| **Re-proving identical control paths** — GATE 5 groups routes with identical control-path fingerprints, plus a per-route positive control and auth rejection | Eight routes behind one middleware are one control path. Differing or uncomputable fingerprints stay separate classes. |
+| **Per-rule `N/A` rows for families the diff cannot reach** — one family sentinel, enumerating the IDs it covers and the detector inputs and result | The rules are still accounted for; only the row count changes. Non-mechanical applicability expands to individual rows. |
+| **Concurrency width** — how many agents run at once | Wall clock only. |
 
-**Two rules keep the cheaper lanes honest.**
+**What the lane never changes:**
 
-**Reuse evidence, don't re-read it.** `TEST` and `DOC` rows reference step 12.4's
-and 12.5's already-bound results rather than re-performing those guards; GATE 3
-reuses step 10's security evidence when its scope digest is unchanged. Re-running a
-check to fill a row is audit-trail completeness, not assurance — and the fixes it
-generates feed the re-derivation loop.
+- **Every applicable `[NN]` rule, every contract-named `[ARCH]` and `[D]` rule, and
+  separate whole-diff `AI-FM` and `UNIVERSAL` rows — in all three lanes.** A `[D]`
+  rule is a convention, not a nit; downgrading it to advisory in a cheaper lane is
+  coverage loss wearing a lane label.
+- **All three review passes — A, B and C — in all three lanes.** Pass B is the only
+  cross-model look in the workflow; A and C share a model, so dropping B does not
+  make the review cheaper, it makes it *narrower*. The smallest ticket is exactly
+  where an unnoticed defect ships unnoticed.
+- **GATE 4's full three-layer comparison** for every reference-backed screen.
+- **GATE 5's applicable classes** for every distinct control path.
+
+The lane still sets **pass B's reasoning effort** and the **bounded ask** — those
+change how long a pass thinks, not what it is asked to cover — and it still sets
+orchestration width.
 
 **Every reduction is declared, by name.** A row or gate that ran narrower emits
 exactly one of:
 
 ```
 PASS_FULL                          the full catalogue ran
-PASS_TARGETED                      ran at this lane's depth — say what was in scope
-NOT_TRIGGERED                      + the manifest ID, the detector's name and
-                                   version, the complete changed-file
-                                   classification, and a digest of that output —
-                                   so CI can recompute the trigger rather than
-                                   trust prose
-NOT_APPLICABLE_NO_SCREEN_REFERENCE + the approver and date
+PASS_TARGETED                      duplication removed — say what was reused and against which digest
+NOT_TRIGGERED                      + the manifest ID, the detector's name and version,
+                                   the complete changed-file classification, and a
+                                   digest of that output, so CI can recompute it
+NOT_APPLICABLE_NO_SCREEN_REFERENCE + the approver, date and reference-search evidence
 DEGRADED                           + the classes that could not run, by ID
 ```
 
-**A blank table, an omitted row, or a bare "N/A" is a FAIL.** In FAST and STANDARD,
-untouched rule families collapse into one family sentinel rather than dozens of
-individual N/A rows — but the sentinel **enumerates the rule IDs it stands for and
-the detector inputs and result** that made the family inapplicable, or it hides
-exactly what it claims to summarise:
-
-```
-BE-WHK | NOT_TRIGGERED | covers BE-WHK-01..06
-       | detector: webhook-surface, v1 — inputs: 14 changed files (manifest F0)
-       | result: 0 matches for inbound-webhook handler registration
-```
-
-HEAVY keeps the exhaustive per-rule enumeration. **A family whose applicability was
-not computed mechanically expands to individual rows**, and uncertain applicability
-escalates, never collapses.
+**A blank table, an omitted row, or a bare "N/A" is a FAIL.** Uncertain
+applicability escalates, never collapses.
 
 **A lane never turns off a gate whose trigger fired.** `ui_required` and
 `tb_touched` are computed from the ticket and the diff, so GATE 4 and GATE 5 are
@@ -1853,10 +1849,12 @@ recon*), and the orchestration mode is declared per wave.
    static read of identical code buys an audit row, not assurance. Re-read only the
    controls whose scope actually changed.
 
-   **A row may not be omitted, but its DEPTH follows the lane** (see the gate-depth
-   table). Every `[NN]` rule **in the successfully loaded inventory** is in force at
-   its lane's depth and always appears — as a row or, in FAST/STANDARD, inside a
-   loud family sentinel with the detector evidence behind it. The `RULES | DEGRADED`
+   **A row may not be omitted, and its coverage does not follow the lane.** Every
+   `[NN]` rule in the successfully loaded inventory, every contract-named `[ARCH]`
+   and `[D]` rule, and separate whole-diff `AI-FM` and `UNIVERSAL` rows are in force
+   in **every** lane. What the lane changes is only whether an already-computed
+   result is **reused** (against a matching digest) and whether families the diff
+   cannot reach appear as one enumerated sentinel instead of many `N/A` rows. The `RULES | DEGRADED`
    sentinel applies only where **no inventory could be loaded at all**, and it
    replaces **only the inventory-derived rows** — the specialist `[ARCH]`/`[D]`
    rows and the `[NN]` rows. It never replaces `AI-FM`, `UNIVERSAL`, `TEST`, or
