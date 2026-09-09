@@ -17,6 +17,8 @@ optional:
   Agile and CMMI use `Closed`; custom processes use whatever they define. Resolve
   the work item type's actual completed-category state with
   `wit_get_work_item_type` and set that. Never assume the literal string exists.
+  **If it cannot be resolved, ✋ STOP** — do not guess a state name and do not
+  close the ticket by approximation.
 - **The PR host and the tracker are independent.** An ADO work item's code may
   live in Azure Repos (open the PR with the ADO repo tools and link it) or on
   GitHub (open it with `gh` and put `AB#<id>` in the description so the ADO↔GitHub
@@ -132,8 +134,11 @@ A parity check against a *moving* reference passes vacuously.
 
 ## Detecting the stack
 
-1. **`CLAUDE.md` first.** If the repo documents its stack, conventions or
-   commands, that is authoritative and outranks anything inferred.
+1. **The repo's own instruction file first — check for BOTH `AGENTS.md` and
+   `CLAUDE.md`.** Repositories carry one, the other, both, or neither; reading
+   only the name you expect silently ignores instructions written for you. If the
+   repo documents its stack, conventions or commands there, that is authoritative
+   and outranks anything inferred.
 2. **Manifests** — `package.json` and which framework is in `dependencies`,
    `composer.json`, `requirements.txt` / `pyproject.toml`, `go.mod`, `Cargo.toml`,
    `*.csproj`, `Gemfile`, `pom.xml`.

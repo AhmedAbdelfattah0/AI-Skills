@@ -106,36 +106,14 @@ payload stops changing. Only then does the independent reviewer sign. A signatur
 written earlier and appended to afterwards binds to something that no longer
 exists.
 
-**What a signature carries:**
+**The fields, the scope digest, the payload digest, the same-reviewer rule and
+the staleness rule are all in the spine's *Signatures* section** — one contract
+covering both parity and the attack testing, so a non-UI security run is not left
+undefined. Do not restate it here.
 
-```
-scope digest · reviewer identity + run/session ID · verdict · manifest ID (provenance only)
-```
-
-**The scope digest — not the global manifest ID — is what validity binds to.** It
-digests only the paths *that check actually depends on*. Binding to the global ID
-would make an unrelated backend fix invalidate a UI signature, which trains
-everyone to re-sign mechanically. Binding to the check's own scope means a
-signature goes stale exactly when it should.
-
-**The parity payload:** `design_ref` · the owned-screen list · the per-screen grade
-· a digest of the screens' implementation and reference files.
-
-A signature whose scope digest is not the final one is **stale, not valid**. An
-accepted fix inside that scope requires the verdict to be **re-derived**;
-"re-signing" applies only when resuming an artifact that already carried a
-signature. That re-derivation is bounded by the mutation budget like every other
-loop — a verdict that will not stay valid across three rounds means the scope
-keeps moving underneath it, and that is a decision, not a fourth round.
-
-**A resumable signer route is required.** Signing hands the final payload back to
-the **same** reviewer that produced the unsigned verdict, so the route chosen must
-be one you can reach twice. A one-shot subagent that cannot be resumed is not a
-valid signer route — choose a resumable one at dispatch time, or treat it as no
-route at all.
-
-**The builder never signs their own parity grade.** No independent signer
-obtainable, in any orchestration mode → ✋ STOP.
+Parity's specifics: its **scope digest** covers every owned screen's
+implementation and reference files at `design_ref`; its **payload** is
+`design_ref` · the owned-screen list · the per-screen grade.
 
 ## The verdict
 

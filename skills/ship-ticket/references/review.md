@@ -63,9 +63,11 @@ need a genuine snapshot, materialize one that carries untracked, symlink and
 submodule state — **`git stash create` alone does not**, because it has no
 include-untracked form here and untracked files are explicitly in scope.
 
-**Recompute `ui_required` at the freeze** and update the plan header: the value is
-`contract-owns-a-screen OR diff-touches-the-view-layer`, and only now does the
-diff exist.
+**Recompute `ui_required` BEFORE computing `F0`**, and update the plan header
+then. The value is `contract-owns-a-screen OR diff-touches-the-view-layer`, and
+only now does the diff exist — but the header is a file, so writing it after the
+freeze makes the manifest stale the instant it is created. Order: recompute,
+write the header, *then* freeze.
 
 ## Orchestration modes
 
@@ -87,9 +89,11 @@ concurrent.
 `file:line`, quoted line, fix) · **`verdicts[]`** — a list, because one run can owe
 both a parity and a security verdict, each carrying its name, `scope_digest`, the
 verdict and the reviewer's identity. **The wave returns verdicts, not
-signatures.** Malformed output is re-requested or the pass re-run — never silently
-accepted, because a pass that returned nothing readable has gated nothing. Bound
-that retry by the mutation budget like everything else.
+signatures.** Malformed output is re-requested or the pass re-run — never silently accepted,
+because a pass that returned nothing readable has gated nothing. **Bound it at
+two retries per pass.** This is deliberately *not* the mutation budget: a re-run
+mutates nothing, so it would never increment that counter and would loop forever.
+Two failures to return a readable result and the pass has not gated anything → ✋ STOP.
 
 **Fan-out shape:** shard the rule pass by rule family, and the attack inventory
 and test design by surface. Parity shards per reference-backed screen **inside**

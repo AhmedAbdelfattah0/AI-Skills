@@ -12,8 +12,10 @@ description: |
   PROVE it works and is not exploitable, REVIEW it with three independent
   reviewers over one frozen manifest, then SHIP it. Adds a mandatory
   design-source-of-truth read with a pinned SHA, a plan-mode approval gate, a
-  CI-enforced design-parity check, adversarial abuse tests committed for every
-  trust boundary the change introduces, and a cross-model review — a fresh Claude
+  design-parity check against that pin — machine-enforced where the repo has the
+  merge-blocking check installed, and a declared degradation where it does not —
+  adversarial abuse tests committed for every trust boundary the change
+  introduces, and a cross-model review — a fresh Claude
   reviewer, the OpenAI Codex CLI, and a rule pass, each blind to the others.
 
   Every applicable rule, screen, surface and attack class runs on every ticket, at
@@ -106,12 +108,12 @@ Load the phase's reference when you enter it, not before:
 | Entering | Load |
 |---|---|
 | UNDERSTAND | [references/understand.md](references/understand.md) |
-| PLAN | [references/plan.md](references/plan.md) |
+| PLAN | [references/plan.md](references/plan.md) + [references/codex-cli.md](references/codex-cli.md) |
 | BUILD | — the spine is enough |
 | PROVE | [references/prove.md](references/prove.md) |
 | PROVE, if `ui_required` | [references/design-parity.md](references/design-parity.md) |
 | REVIEW | [references/review.md](references/review.md) |
-| REVIEW, for the Codex pass | [references/codex-cli.md](references/codex-cli.md) |
+| REVIEW, for pass B | [references/codex-cli.md](references/codex-cli.md) — already loaded at PLAN |
 | SHIP | [references/ship.md](references/ship.md) |
 
 ## The invariants
@@ -154,8 +156,8 @@ The code-quality family assigns every rule a stable ID (`NG-ARCH-03`,
 | Tier | Meaning | What can override it |
 |---|---|---|
 | `[NN]` | non-negotiable security or correctness invariant | **Never, per-file. Only an explicit recorded user waiver.** |
-| `[ARCH]` | architectural shape | `CLAUDE.md`, project-wide only — **or** an established project architecture that passes the invoked specialist's **four-condition test**. That outcome is an `N/A — replaced by established project architecture` row carrying its evidence: not a skip, and not a ledger waiver |
-| `[D]` | default convention | `CLAUDE.md`, or an established repo convention |
+| `[ARCH]` | architectural shape | the repo's own instruction file, project-wide only — **or** an established project architecture that passes the invoked specialist's **four-condition test**. That outcome is an `N/A — replaced by established project architecture` row carrying its evidence: not a skip, and not a ledger waiver |
+| `[D]` | default convention | the repo's own instruction file, or an established repo convention |
 
 The four-condition test lives in the specialist that owns the rule — invoke it
 rather than reasoning about the collision here. Its shape: enumerated repo-wide
@@ -231,8 +233,10 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `docs-accuracy` | the wider DOC rule set | the rename grep still runs |
 | `codex-delegate` **+** `codex` CLI | the plan critique | present the plan for approval saying "no cross-model plan review — skill or CLI unavailable". The user's approval was always the gate |
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
-| a fresh-reviewer route | pass A and the independent signature | a fresh reviewer subagent, or a read-only `codex-delegate` dispatch. Independence is about *who reviews*, not the command name |
+| a fresh-reviewer route | pass A and the independent signature | a fresh reviewer subagent, or a read-only `codex-delegate` dispatch. Independence is about *who reviews*, not the command name. **If no fresh route exists at all: a non-UI, non-security ticket continues with pass A run by the building agent, declared as `pass A ran WITHOUT reviewer independence`** — a named loss, not a silent one. A UI or `security-sensitive` ticket ✋ STOPs |
+| a **resumable** signer route | signing, which happens after close-out edits | no fallback, and **checked up front, not at signing time**. Signing hands the final payload back to the *same* reviewer that produced the unsigned verdict, so the route must be reachable twice. A one-shot subagent is not a signer route. Discovering this after BUILD wastes the whole build — so a UI or `security-sensitive` ticket with no resumable route ✋ STOPs **before planning** |
 | concurrency | wall clock only | run the identical passes serially over the identical manifest and declare `orchestration: serial`, naming which wave |
+| the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |
 
 **Two losses are STOPs, not degradations** — both are about signers. A UI ticket
 with no independent reviewer route cannot sign its own parity. A
@@ -274,7 +278,7 @@ Four things must be true before you leave:
    the conventions doc and the screen — do not skim the ticket's description of
    them. Then record `design_ref`: the reference must already be committed, or
    there is no SHA to diff against and parity is unverifiable. Not committed → ✋ STOP.
-4. **The stack is detected** — `CLAUDE.md` first, then manifests, then how the
+4. **The stack is detected** — the repo's instruction file first, then manifests, then how the
    existing code is actually written, then the real lint/build/test commands.
    The repo's established pattern outranks anything this file or a quality skill
    prefers. Genuinely ambiguous → ask once.
@@ -316,8 +320,10 @@ branch exists.** Plan mode enforces that mechanically; that is why it is the gat
    list from the approved build sequence.
 
 **Plan mode unavailable** (headless, workflow, subagent): still run the Codex
-critique — it is a shell dispatch and needs no plan mode — then write the artifact
-with `approval_status: pending` and ✋ **STOP**, surfacing it as the approval ask.
+critique — it is a shell dispatch and needs no plan mode — then **branch** (the
+artifact is a repository write like any other, and invariant 3 has no exception
+for it), write the artifact with `approval_status: pending`, and ✋ **STOP**,
+surfacing it as the approval ask.
 
 The metadata header carries `approval_status`, `design_ref`, `ui_required`,
 `owned_screens`, and `mutation_round: 0`. Every owned screen is classified
@@ -387,22 +393,16 @@ Then four ordered stages. **Only the first is concurrent:**
 4. **Barrier → fix → back to stage 2.** An attack fix is production code: it can
    move a route, a middleware, a rendering sink. Bounded by the mutation budget.
 
-**What must be true to leave:**
-
-- **The security controls exist in the code** — traced through their whole static
-  path, including unchanged middleware, config and base classes. Where no static
-  mapping exists, that half is *declared degraded*, not proven.
-- **They engage at runtime.** Every applicable attack class runs against every
-  in-scope route. **Applicability alone decides which classes run** —
-  `security-sensitive` adds an independent signature and changes no coverage.
-- **The output is committed tests** in the repo's own runner, asserting the
-  refusal. Not a report: CI blocks, not a summary.
-- **`test-quality` has run once** over the whole final test diff, ordinary and
-  abuse tests together.
-- **The docs are true**, fixed now — a doc edit after the review is unreviewed
-  content in the commit.
-- **For UI: the parity artifact is assembled**, each screen classified, no grade
-  produced, and **nothing from BUILD reaches the reviewer.**
+**What must be true to leave**, each detailed in
+[prove.md](references/prove.md): the security controls **exist** in the code,
+traced through their whole static path including the parts this diff did not
+touch, with any unmappable half *declared degraded* rather than assumed · they
+**engage at runtime**, every applicable attack class against every in-scope route,
+**applicability alone deciding which classes run** · the output is **committed
+tests** in the repo's own runner, not a report · `test-quality` has run **once**
+over the whole final test diff · the docs are true, **fixed now** · and for UI the
+parity artifact is assembled with each screen classified, no grade produced, and
+**nothing from BUILD reaching the reviewer**.
 
 An `[NN]` finding is fixed, never cited away. Loosening or deleting the test is
 not a fix. No local instance, or the only reachable one is shared → ✋ STOP.
@@ -431,11 +431,10 @@ report every violation at full severity, exactly as if no build-time check had
 run. A long list means BUILD skipped its checks; it never means a pass should have
 looked less hard.
 
-**Then one barrier, one batch:** verify each pass's coverage against the manifest
-and re-run any that reviewed less; re-run any pass the manifest outran; reconcile
-into one attributed set and apply **one batched fix set**; re-run the affected
-commands; revalidate only the delta. Each round increments the mutation budget,
-and the budget bounds the sequence.
+**Then one barrier, one batch:** verify coverage, reconcile into one attributed
+set, apply **one batched fix set**, re-run the affected commands, revalidate the
+delta. Each round increments the mutation budget, and the budget bounds the
+sequence. [review.md](references/review.md) has the steps.
 
 **Do the work; don't narrate it.** After the barrier you have the findings and the
 authority. Two things go to the user first: a STOP condition, and a genuine
@@ -462,77 +461,85 @@ binds to a payload that no longer exists.
 
 Load [references/ship.md](references/ship.md).
 
-1. **Write the run record and the session log before the commit**, so they ride it.
-2. **Verify every change since the last accepted manifest is on the allowlist.**
-   Code, tests or docs outside it are unreviewed content — re-run the wave for them.
-3. **One commit** — code, plan artifact, parity artifact, vapt artifact and its
-   abuse tests, doc updates, session log — and **one push**.
-4. **Open the PR on the repo's actual host**, link the ticket, report the URL.
-5. **Wait once** for CI. Do not poll the PR-side bots; they are informational.
-   **Push nothing further unless a gate actually fails** — a doc-only commit after
-   green re-triggers the whole cycle.
-6. **Transition the ticket to Done** only after the checks are green, then tell
-   the user the PR is ready and ask them to run `/compact`.
+**Write the run record and session log first**, so they ride the commit rather
+than a second one. **Then verify every change since the accepted manifest is on
+the post-freeze allowlist** — code, tests or docs outside it are unreviewed
+content, and that is a ✋ STOP. **Then one commit and one push**, carrying the code
+and every artifact this ticket actually produced. Open the PR on the repo's real
+host, link the ticket, and **wait exactly once** for CI. Push nothing further
+unless a gate fails: a doc-only commit after green re-triggers the whole cycle.
+**Transition the ticket only after the checks are green**, then tell the user the
+PR is ready and ask them to run `/compact`.
 
----
+## Signatures
+
+Two things get independently signed: the **parity verdict** on a UI ticket, and
+the **attack testing** on a `security-sensitive` one. They share one contract — it
+lives here, not in either phase's reference, because a non-UI security run needs
+it just as much as a UI run does.
+
+**A signature is an assertion returned as data**, which is why a report-only
+reviewer can still sign: the reviewer asserts, the orchestrator writes.
+
+**Every signature carries the same fields:**
+
+```
+scope_digest      what this signature actually binds to (see below)
+payload_digest    a digest of the signed payload, under ship-ticket-manifest-v1
+verdict           the reviewer's conclusion
+signer            reviewer identity + run/session ID
+manifest_id       provenance only — never what validity binds to
+```
+
+**The scope digest, not the manifest ID, is what validity binds to.** It digests
+only the paths *that check actually depends on*. Binding to the global manifest
+would make an unrelated backend fix invalidate a UI signature, training everyone
+to re-sign mechanically. Binding to the check's own scope means a signature goes
+stale exactly when it should.
+
+| Signed thing | Scope digest covers | Payload |
+|---|---|---|
+| **parity** | every owned screen's implementation and reference files, at `design_ref` | `design_ref` · the owned-screen list · the per-screen grade |
+| **attack testing** (`security-sensitive` only) | every in-scope surface, every route tested, the abuse-test files, and the production files they defend | the surface inventory · the rule→test map · the per-class result |
+
+**Sign the final payload, not an intermediate one.** Nothing is signed during the
+review wave: each reviewer returns an **unsigned** verdict stamped with the scope
+digest it actually reviewed. At close-out, once the human-approved deviations and
+the stub → follow-up-ticket links are in place, the payload stops changing — only
+then is it handed back to sign. A signature written earlier and appended to
+afterwards binds to something that no longer exists.
+
+**It goes back to the *same* reviewer**, which is why the route must be resumable
+and why that is checked before planning.
+
+**A signature whose scope digest is not the final one is stale, not valid.** An
+accepted fix inside that scope requires the verdict to be **re-derived**;
+"re-signing" applies only when resuming an artifact that already carried one. That
+re-derivation is bounded by the mutation budget like every other loop.
+
+**The builder never signs their own work.** No independent signer → ✋ STOP.
+
 
 ## The run record
 
-**One schema, three consumers.** The user's report, the session log, and the
+**One schema, three consumers.** The user's report, the session log and the
 success criteria are the same facts — write them once. The user's version leads
-with plain sentences; the log and artifacts carry the identifiers.
+with plain sentences; the log and artifacts carry the identifiers. **The full
+schema is in [ship.md](references/ship.md).**
 
-Every gate and row declares exactly one outcome:
+**Two things must be done from the first phase, not reconstructed at the end:**
 
-```
-PASS_FULL                          ran in full
-PASS_REUSED                        deterministic output reused — name it and the digest
-                                   it bound to. Never a semantic judgment
-PASS_GROUPED                       shared test definitions — name them, and confirm every
-                                   route was executed against them
-FAIL                               did not pass. Blocks acceptance and close-out
-NOT_TRIGGERED                      + detector name and version, the complete changed-file
-                                   classification, and a digest of that output
-NOT_APPLICABLE_NO_SCREEN_REFERENCE + approver, date, and reference-search evidence
-DEGRADED                           + the classes that could not run, by ID
-```
+- **Capture phase timings as you go** — start and end per phase, agent time kept
+  separate from human-approval and CI wait, and the overlap window of every
+  intended parallel group. Reconstructed timings cannot show whether things
+  actually ran concurrently, which is the one thing they exist to prove.
+- **Record each review pass's verified coverage** — the paths it reported
+  reviewing, checked against the manifest, and any it was re-run for. The barrier
+  verifies this transiently; recording it is what lets anyone later prove the diff
+  was covered rather than take the barrier's word for it.
+- **Declare the companion mode when you detect it**, not only at the end. A run
+  that silently skipped a check is indistinguishable from one that failed it.
 
-**A blank table, an omitted row, or a bare "N/A" is a FAIL.** Coverage is
-constant, so a check that examined less than it should is a bug. Presentation may
-aggregate rows already computed per rule — naming the IDs and the identical
-detector, inputs, digest and result behind them. Evaluation may not: a
-family-level detector standing in for per-rule evaluation is coverage loss.
-
-Record, in the artifacts:
-
-- the **companion mode** and every degraded check, by name
-- the **orchestration mode of each wave** — recon and review; they can differ,
-  and a run that fanned out its review while serializing an hour of recon is not
-  a concurrent run
-- **every manifest ID** and which is the accepted one
-- **each check's outcome**, from the list above
-- **the complete finding count first, at full severity** — then, separately, how
-  many BUILD should have caught. **That classification never changes whether a
-  finding is reported, its severity, or a verdict.** A high count is a BUILD
-  problem to drive down, never a reason to report less
-- **which `Par` groups actually ran concurrently**, and the reason for any that
-  did not
-- **which engine ran pass B**, at what effort, and whether it timed out
-- the **plan critique's disposition**, and the **final `mutation_round`**
-- per reference-backed screen: its grade, its signer, and the scope digest;
-  per unreferenced one: its approver, date and search evidence
-- the attack surfaces, the committed abuse tests, every class **degraded by ID**,
-  and every changed file excluded and why
-- every **skipped finding with its rule ID**, and every human-approved deviation
-  with its approver and date
-- the design files read and the pinned `design_ref`
-- **phase timings** — start and end per phase, agent time kept separate from
-  human-approval and CI wait, plus the overlap window of each intended parallel
-  group
-
-**Written so it survives the context.** "Tried to break the new endpoint — all
-attacks refused" is recoverable months later; "GATE 5: PASS" is not. "Skipped some
-findings that conflicted with our conventions" is worthless.
 
 ## Stop conditions
 
@@ -547,6 +554,8 @@ so the answer is one message and not a negotiation.
 
 *Getting started*
 - You can't fetch the ticket, or can't tell which tracker it belongs to.
+- **The tracker's completed state can't be resolved** for this work item type —
+  don't guess a state name and don't close by approximation.
 - A blocker is not in a completed state — name it and its state.
 - The ticket has no acceptance criteria and none you proposed were approved.
 - Someone else is already on it — assignee, In Progress, or an existing branch/PR.
@@ -564,6 +573,9 @@ so the answer is one message and not a negotiation.
   human-approved deviation.
 - No independent signer can be obtained for a UI ticket, in any mode. Parity never
   self-signs.
+- **No *resumable* signer route exists** for a UI or `security-sensitive` ticket.
+  This stops **before planning**, not at signing — discovering it later throws away
+  the whole build.
 
 *Security*
 - No local instance to attack, or the only reachable environment is production or
@@ -653,4 +665,10 @@ provide the concurrency; a serial orchestrator runs identical passes over an
 identical manifest and says so. Concurrency changes the wall clock, never a
 verdict. It does not merge the PR or run `/compact` — both are the user's.
 
-**Always follow `CLAUDE.md`** — it outranks this file on any conflict.
+**Always follow the repository's own instruction file** — it outranks this file
+on any conflict. **Read both `AGENTS.md` and `CLAUDE.md` if both exist**, and do
+not assume either is present: repositories carry one, the other, both, or neither,
+and reading only the name you expect silently ignores the instructions actually
+written for you. Where both exist and disagree, the more specific statement wins;
+where one is plainly a pointer to the other, follow the pointer. Neither present →
+fall back to the repo's own code and config, per *Detecting the stack*.

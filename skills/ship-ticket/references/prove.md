@@ -15,15 +15,22 @@ is ordered, because a fix changes what the later stages were derived *from*.
 
 | Stage | What | Concurrent? |
 |---|---|---|
-| 1 | static security rows · the parity artifact and its classifications · the attack surface inventory and abuse-case *design* · the docs scan | **yes** |
-| 2 | **barrier** → one batch of fixes → re-derive to a fixed point | no — write barrier |
+| 1 | static security rows · the parity screen list and classifications · the attack surface inventory and abuse-case *design* · the docs scan | **yes** |
+| 2 | **barrier** → write stage 1's artifacts → one batch of fixes → re-derive | no — write barrier |
 | 3 | live attacks | no — serial by nature |
 | 4 | **barrier** → attack fixes → back to stage 2 | no — write barrier |
 
-**Stage 1 is read-only. Every fix it identifies waits for stage 2.** A
-static-security fix can change routes, middleware, config or rendering sinks —
-which is exactly what the inventory and the abuse design were derived from. Fixing
-mid-stage invalidates the products still being read.
+**Stage 1 is read-only — it writes nothing at all, artifacts included.** Its
+products are held in memory and written at the stage-2 barrier. A static-security
+fix can change routes, middleware, config or rendering sinks — exactly what the
+inventory and the abuse design were derived from — so fixing mid-stage invalidates
+the products still being read, and writing mid-stage does the same to any reader
+that picks the file up.
+
+**The barrier runs even when stage 1 found nothing to fix.** It is where stage 1's
+artifacts land, not only where fixes are applied. A clean stage 1 still passes
+through it; it simply does not increment the mutation budget, because no mutation
+happened.
 
 **Stage 2 does not judge by feel which products "look" invalidated.** Compare the
 changed file set against each product's inputs and derived scope, and re-run every
@@ -69,15 +76,11 @@ engagement.** Do not restate its rules here.
 
 ### When it fires
 
-The diff introduces or changes: a request handler · an auth or session path · a
-query taking external input · a sink rendering values it did not author · an
-upload or path handler · client-side storage · an outbound call carrying
-credentials · a queue consumer · security config (CORS, headers, cookie options,
-secrets).
-
-Skip **only** when the diff touches none of those — and name every changed file
-you excluded, and why. Uncertain applicability escalates to running the gate,
-never to skipping it.
+**`vapt` owns the trust-boundary taxonomy — read it there rather than from a copy
+that can drift.** What this skill owns is the trigger's *strictness*: skip **only**
+when the diff touches none of `vapt`'s boundaries, name every changed file you
+excluded and why, and treat uncertain applicability as a reason to run the gate,
+never to skip it.
 
 ### Coverage is applicability-driven, always
 
@@ -102,30 +105,16 @@ it defends (`VAPT-API-01: user B cannot read user A's invoice`) and asserting th
 **refusal** rather than the guard's internals. Not a report — this is why CI
 blocks the merge rather than an agent's summary.
 
-### Test by control-equivalence class — share the definition, execute per route
+### Share the test definition; execute it per route
 
-Eight endpoints behind one auth middleware, one serializer and one error mapper
-are one control *path*. **What grouping saves is authoring, not execution.**
-Identical static fingerprints do not prove identical runtime behaviour: shared
-middleware branches on method, path, route metadata, parameters, resource type and
-datastore state.
-
-So write each abuse case **once, table-driven**, and **run every applicable
-assertion against every in-scope route**.
-
-Record a **control-path fingerprint** per route — registration, middleware order
-and arguments, binding and schema, ownership and policy resolution, serialization,
-error mapping, and the relevant configuration — and group only routes whose
-fingerprints are **identical**. Differing fingerprints, or any resolved
-dynamically such that you cannot compute one, are **separate classes**.
-
-**Every route needs a positive control.** Auth-reachability alone accepts an
-unregistered route, because a `404` reads as a refusal. So each route carries
-**both**: an authenticated request proving the route actually resolves, **and** a
-semantic rejection proving the control denies the wrong principal. Route-specific
-coverage is also required for every applicable non-auth dimension the class cannot
-speak for — tenancy, authorization parameters, mass assignment, injection, output
-leakage, rendering.
+`vapt` owns how equivalence classes and control-path fingerprints are computed.
+**The one rule this skill adds, because it is an orchestration rule and gets lost
+otherwise: grouping saves *authoring*, never *execution*.** Write each abuse case
+once, table-driven, and run every applicable assertion against **every** in-scope
+route. Identical static fingerprints do not prove identical runtime behaviour —
+shared middleware branches on method, path, route metadata, parameters, resource
+type and datastore state — so a route whose equivalence to its class is unproven
+carries its own full tests.
 
 ### Inventory and design fan out; attacks do not
 
@@ -186,12 +175,19 @@ actually committed and green, and every unexercised rule listed by ID (or the
 degradation that was not declared.
 
 **When `security-sensitive`, the signer is dispatched, not assumed.** Spin up an
-independent reviewer with no build context, brief it on the surface inventory, the
-rule→test map and the abuse tests, and have it return an **unsigned** verdict
-stamped with the scope digest it reviewed. It is signed at close-out, alongside
-parity, once the payload is final. **A run with no dispatched signer is not
-strict** — losing every independent-reviewer route is a ✋ STOP, never an implicit
-downgrade.
+independent reviewer with no build context — through a **resumable** route, checked
+before planning — brief it on the surface inventory, the rule→test map and the
+abuse tests, and have it return an **unsigned** verdict stamped with the scope
+digest it reviewed.
+
+**The signature contract is the spine's *Signatures* section**, shared with parity.
+This check's **scope digest** covers every in-scope surface, every route tested,
+the abuse-test files and the production files they defend; its **payload** is the
+surface inventory · the rule→test map · the per-class result. Signing happens at
+close-out, once the payload is final.
+
+**A run with no dispatched signer is not `security-sensitive`-complete** — losing
+every independent-reviewer route is a ✋ STOP, never an implicit downgrade.
 
 ### Enforcement is machine, not honour-system
 

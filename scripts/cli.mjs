@@ -271,14 +271,36 @@ function cmdValidate() {
       }
     }
 
-    // 5. No orphan references. A file under references/ that nothing links to is
-    //    dead weight the reader will never be told to load.
+    // 5. No orphan references — by REACHABILITY from SKILL.md, not by mention.
+    //    Searching for a filename as text lets a self-mention, or a cycle of
+    //    references that link only to each other, pass while being unreachable.
     if (existsSync(refDir)) {
-      const linked = docs.map((d) => readFileSync(d, 'utf8')).join('\n');
+      // Reachability, not mention: walk out from SKILL.md. A reference counts as
+      // cited by a markdown link OR by a bare path — most skills in this library
+      // name their references as `references/x.md` in prose or a table rather
+      // than as a link, and that is a legitimate convention.
+      const refFiles = [];
+      walk(refDir, (f) => { if (f.endsWith('.md')) refFiles.push(resolve(f)); });
+      const reachable = new Set([resolve(md)]);
+      const queue = [resolve(md)];
+      while (queue.length) {
+        const cur = queue.shift();
+        if (!existsSync(cur)) continue;
+        const body = readFileSync(cur, 'utf8');
+        for (const lm of body.matchAll(/\]\((?!https?:|mailto:)([^)#\s]+)(?:#[^)]*)?\)/g)) {
+          const next = resolve(dirname(cur), lm[1]);
+          if (reachable.has(next) || !next.endsWith('.md')) continue;
+          reachable.add(next); queue.push(next);
+        }
+        for (const cand of refFiles) {
+          if (reachable.has(cand)) continue;
+          if (!body.includes(basename(cand))) continue;
+          reachable.add(cand); queue.push(cand);
+        }
+      }
       walk(refDir, (f) => {
-        if (!f.endsWith('.md')) return;
-        if (linked.includes(basename(f))) return;
-        console.log(`❌ ${name}: references/${basename(f)} is never linked from the skill — orphaned.`);
+        if (!f.endsWith('.md') || reachable.has(resolve(f))) return;
+        console.log(`❌ ${name}: references/${basename(f)} is not reachable by any link from SKILL.md — orphaned.`);
         err = fail = true;
       });
     }
@@ -286,7 +308,8 @@ function cmdValidate() {
     // 6. Retired vocabulary stays retired. A concept deleted from a skill but left
     //    referenced elsewhere is the failure mode that put a dozen dead references
     //    to a removed classifier into ship-ticket. Each entry: /regex/ + why.
-    for (const [re, why] of RETIRED_VOCABULARY) {
+    for (const [re, why, scope] of RETIRED_VOCABULARY) {
+      if (scope && !scope.includes(name)) continue;
       for (const doc of docs) {
         const body = readFileSync(doc, 'utf8');
         re.lastIndex = 0;
@@ -296,6 +319,22 @@ function cmdValidate() {
         console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)}:${line} uses retired '${hit[0]}' — ${why}`);
         err = fail = true;
       }
+    }
+
+    // 7. Where a skill defines a canonical outcome vocabulary, it must be defined
+    //    exactly once and must be able to express failure. A vocabulary that
+    //    declares itself exhaustive and omits FAIL makes a failure unrecordable.
+    const enumOwners = docs.filter((d) => /^PASS_FULL\s/m.test(readFileSync(d, 'utf8')));
+    if (enumOwners.length > 1) {
+      console.log(`❌ ${name}: the outcome vocabulary is defined in ${enumOwners.length} files — it must have exactly one owner.`);
+      err = fail = true;
+    } else if (enumOwners.length === 1) {
+      const body = readFileSync(enumOwners[0], 'utf8');
+      for (const v of ['PASS_FULL', 'FAIL', 'NOT_TRIGGERED', 'DEGRADED'])
+        if (!new RegExp(`^${v}\\s`, 'm').test(body)) {
+          console.log(`❌ ${name}: the outcome vocabulary omits ${v}.`);
+          err = fail = true;
+        }
     }
 
     if (!err) console.log(`✅ ${name}`);
@@ -310,7 +349,7 @@ function cmdValidate() {
     const gp = join(ROOT, guide);
     if (!existsSync(gp)) continue;
     const body = readFileSync(gp, 'utf8');
-    for (const [re, why] of RETIRED_VOCABULARY) {
+    for (const [re, why] of RETIRED_VOCABULARY) {   // guidance files: all terms apply
       re.lastIndex = 0;
       let hit;
       while ((hit = re.exec(body)) !== null) {
@@ -332,12 +371,14 @@ function cmdValidate() {
 // Concepts that were deliberately removed. Listing them here is what stops a
 // deletion from leaving live instructions pointing at something that no longer
 // exists — the defect class this check was added for.
+// `scope` limits each term to the skills that can legitimately be talking about
+// it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
-  [/\brun lanes?\b/gi,            'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant'],
-  [/\b(?:effective|provisional) lane\b/gi, 'the run lane was deleted; nothing computes a lane'],
-  [/\blane (?:effort|depth|table)\b/gi,    'the run lane was deleted; reasoning effort is pinned, not scaled'],
-  [/\bGATE [12]\b/g,              'there was never a GATE 1 or GATE 2'],
-  [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route'],
+  [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket', 'pr-review']],
+  [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
+  [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
+  [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
+  [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
 ];
 
 function cmdHelp() {
