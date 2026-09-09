@@ -154,7 +154,7 @@ on an engine that is a binary, or either test on an orchestration capability:
 |---|---|---|
 | `angular-code-quality` / `backend-code-quality` (whichever the detected stack routes to — see *Stack*) | Design Contract (STEP 0B) + the specialist rule rows of GATE 3 (pass C, step 13a) and the pre-VAPT security rows (step 10) — `NG-*` / `BE-*` | **First fall back to the `code-quality` hub** if it is installed — it covers any language and still yields a rule-backed pass. Only if *no* family member is present do those rows run **degraded**: no rule-ID table exists, so instead review every written file against SOLID, the Step 5 mechanical rules, and this file's conventions, reporting findings in `file:line` + quoted code + fix shape. The Design Contract degrades to a plain file-list contract derived from the approved plan. **The skip-by-citation protocol collapses to "fix everything"** — with no rule IDs loaded there is nothing to cite, so no review finding may be skipped. **The table still has rows:** emit a single `RULES | DEGRADED | no rule inventory available — reviewed against SOLID, the Step 5 mechanical rules, and this file's conventions` sentinel row rather than an empty table, so "no rows" can never be mistaken for "nothing applied". |
 | `code-quality` (hub) | The whole-diff `UNIVERSAL` row in GATE 3 (step 13a) — `universal-principles` + the project constitution — **and**, for any stack with no specialist, the `AI-FM` row and the rule vocabulary too (it is the router as well as the hub) | Walk the universal layer yourself over the entire diff: Clean Code, the SOLID smell table, command/query separation, DRY-as-knowledge + the Rule of Three, the complexity/nesting ceilings + KISS, and the ranked YAGNI list — plus the project's own `.code-quality.md` Always/Never lists if one exists. Note the row ran unassisted. When a specialist **is** installed it owns `AI-FM`; when neither hub nor specialist is present, **both** rows run from this file's descriptions and are marked `DEGRADED` by name — they are never dropped. |
-| `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance, using **GATE 5's per-family minimum table** (step 12) rather than a fixed set — an API minimum asserted over a config-only surface proves nothing. That table is reproduced inline in step 12 precisely so it survives `vapt`'s absence. Commit those tests in the repo's own runner and record **PASS-DEGRADED**. For the *unexercised* rules you cannot enumerate by ID without the skill, name the **families** that went untested (mass assignment, injection, XSS, CORS, cookie flags, headers) and state that the full ID list was unavailable — an honest family-level declaration, never a silent omission or an invented ID. |
+| `vapt` | GATE 5 — adversarial abuse tests against every trust boundary the diff introduces (step 12) | **The gate does not disappear with the skill.** Run the reduced form yourself against a local instance, using **GATE 5's per-family minimum table** (step 12) rather than a fixed set — an API minimum asserted over a config-only surface proves nothing. That table is reproduced inline in step 12 precisely so it survives `vapt`'s absence. Commit those tests in the repo's own runner and record **`DEGRADED`**. For the *unexercised* rules you cannot enumerate by ID without the skill, name the **families** that went untested (mass assignment, injection, XSS, CORS, cookie flags, headers) and state that the full ID list was unavailable — an honest family-level declaration, never a silent omission or an invented ID. |
 | `test-quality` | The single TEST-\* guard over the whole final test diff — ordinary + abuse tests together (step 12.4) — reused as GATE 3's `TEST` row | Skip the companion's **execution**, never the **row**: still reject obvious implementation-detail assertions and unjustified mocks on your own judgment, and emit `TEST \| DEGRADED \| test-quality unavailable; reduced manual check: <what you actually checked>`. A missing engine changes the evidence, not whether the row exists. |
 | `docs-accuracy` | DOC-\* rule set (step 12.5, before the freeze) | The pre-freeze grep for renamed/changed documented behavior is described inline and **still runs** — only the wider DOC rule set is skipped. |
 | `codex-delegate` **+** the `codex` CLI | **Step 6 plan review** — the drafted plan goes to Codex read-only for an independent critique *before* it reaches the user's approval | Present the plan for approval **without** the cross-model pass, and say so in the approval ask ("no Codex plan review — skill or CLI unavailable"). **A plan review that timed out counts as unavailable once step 6.4's session-resume recovery is exhausted** — that means the recovery came back empty, OR there was no `threadId` to resume, OR the resume was rejected / exited non-zero, OR the bounded recovery itself timed out. Any of those four is a valid route to the degradation; a watchdog expiry *alone*, with a resumable session, is not — it is a recoverable event, not a missing companion. Do not confuse this with the FAST lane's `Not run — FAST lane`: one is a degradation, the other a recorded decision. The gate itself is unaffected either way: the user's approval was always the gate and Codex was only ever a contributor. |
@@ -521,7 +521,11 @@ approved only by its author *and Codex* is still not approved.
      approval_status: pending|approved   (a human approval flips this, and only this)
      design_ref: <SHA>                   (Step 5's pin)
      ui_required: <bool>                 (Step 6.5)
-     owned_screens: [<paths>]            (Step 6.5) -->
+     owned_screens:                      (Step 6.5) — one entry per screen:
+       - impl: <path>
+         reference: <path or null>
+         # when reference is null, also: reference_search{at_sha,locations,method,result},
+         #   carve_out_approved_by (a named human), carve_out_date -->
 **Size:** <N> files · <FE / BE / full-stack> · security-sensitive: <yes/no>
 **Provisional lane:** <FAST / STANDARD / HEAVY> — <the numbers it came from>
 <security-sensitive: yes forces HEAVY. The binding lane is recomputed from the
@@ -633,7 +637,7 @@ than improvised under time pressure at step 11:
 
 | Stage | Fans out by | Count for this ticket |
 |---|---|---|
-| GATE 4 parity draft | owned screen | <N screens → N investigators, or "n/a — no UI"> |
+| GATE 4 parity | **reference-backed** owned screen | <N reference-backed → N pass-A screens; plus M unreferenced → M carve-outs, or "n/a — no UI"> |
 | GATE 5 inventory + abuse design | trust boundary | <N surfaces, or "n/a — no trust boundary"> |
 | GATE 3 rule pass (pass C) | rule family | <the families the diff puts in force> |
 
@@ -817,9 +821,35 @@ after writing is not a gate. Do these in order, before Step 7:
 
    ```yaml
    ui_required: true            # bool — contract owns a screen OR diff touches the view layer
-   owned_screens:               # list of repo-relative paths; [] iff ui_required is false
-     - src/app/invoices/invoice-list.component.ts
+   owned_screens:               # [] iff ui_required is false
+     - impl: src/app/invoices/invoice-list.component.ts
+       reference: design/screens/invoice-list.dc.html   # reference-backed
+     - impl: src/app/invoices/invoice-empty.component.ts
+       reference: null                                   # UNREFERENCED — see below
+       reference_search:                                 # REQUIRED when reference is null
+         at_sha: <design_ref SHA>                        #   searched at the pinned SHA
+         locations: [design/screens/, design/components/]#   where you looked
+         method: "ls design/screens/ | grep -i invoice"  #   how, so it is reproducible
+         result: "no match"
+       carve_out_approved_by: <human name>               # a person, named, not "the agent"
+       carve_out_date: <YYYY-MM-DD>
    ```
+
+   **`reference: null` is a human decision made at plan time, never a gate-time
+   convenience.** It requires the `reference_search` block showing where you looked
+   at the pinned SHA and how — so the claim "no reference exists" is reproducible
+   rather than asserted — and a **named human approver**, recorded in the plan the
+   user approved. **CI validates the approver, the date, and the presence of search
+   evidence**, and fails closed without them. A carve-out added after plan approval,
+   or approved by the agent, is a self-attested parity dodge and is exactly what
+   this gate exists to prevent.
+
+   **Every owned screen is classified `reference-backed` or `unreferenced`, at plan
+   time.** A screen the ticket *invents* has no comparator, so a parity diff against
+   it cannot honestly return Faithful, Minor, Major **or** Not-built — it can only
+   generate work. Recording the classification in the schema is what stops "5 owned
+   screens" being read as "5 parity investigations" when two have nothing to compare
+   against.
 
    **Missing, unparseable, or internally inconsistent metadata fails closed** —
    CI treats it as `ui_required: true` with no artifact, which is a FAIL.
@@ -892,8 +922,12 @@ built.
   how long the gates take.** Every violation caught here is one that never becomes
   a GATE 3 finding, never becomes a fix, and never invalidates a scope digest —
   and the invalidation is what turns one review round into twelve.
-- **Check each screen against the reference as you finish it**, while the design
-  files are still in context from Step 5 — not once at the end across every screen.
+- **Check each screen as you finish it**, while the design files are still in
+  context from Step 5 — not once at the end across every screen. **A
+  reference-backed screen is checked against its reference**; an **unreferenced**
+  one has nothing to diff, so it is checked against the **design system** instead —
+  tokens, shared components, conventions, states. Both are checks; only one is
+  parity.
   Structure, then tokens/spacing/type, then states and locales. A screen that
   matches when you finish it does not produce a parity finding later.
 - **The gates verify a claim you already made — they are not where the checking
@@ -1199,6 +1233,7 @@ decides.
 | GATE 5 | **iff `tb_touched`** | iff `tb_touched`, light | iff `tb_touched`; strict when `security_sensitive` |
 | Diff review passes A **and** B | both | both | both |
 | Pass B reasoning effort | `medium` | `medium`/`high` | `high`/`xhigh` |
+| Gate depth | see the gate-depth table above | | |
 | Review-wave orchestration | serial is fine | concurrent | concurrent |
 | Recon-wave orchestration | concurrent where independent | concurrent | concurrent |
 
@@ -1208,6 +1243,57 @@ reviewer plus rule pass C", never a lane decision. **And passes A and B are neve
 partitioned:** each receives the whole manifest, because a free-form reviewer
 split across files cannot see cross-file behavior. Only pass C's rule families and
 GATE 4's owned screens may shard, and both re-aggregate into one table.
+
+**The lane sizes gate DEPTH as well as orchestration.** Sizing only "how many
+agents" while every gate runs its full catalogue in every lane is the
+proportionality defect that makes a two-file change cost what a forty-file feature
+costs. What the lane never does is turn a *triggered* gate off — it changes how
+deep that gate goes:
+
+| | FAST | STANDARD | HEAVY |
+|---|---|---|---|
+| **GATE 3** | directly applicable `[NN]`; contract-named `[ARCH]` only if structure changed; **one combined `AI-FM`+`UNIVERSAL` risk sweep**; non-safety `[D]` advisory, not blocking | all applicable `[NN]`; every contract-named `[ARCH]`; safety-relevant `[D]`; one combined risk sweep | full catalogue: every `[NN]`, all contract `[ARCH]`/`[D]`, **separate** `AI-FM` and `UNIVERSAL` rows |
+| **GATE 4** | reference-backed screens only; acceptance-critical structure, states, behaviour, token use | every reference-backed screen; full structure/states/behaviour, style focused on changed regions | full three-layer parity, every reference-backed screen |
+| **GATE 5** | `NOT_TRIGGERED` — FAST requires `tb_touched` false; **if the detector fires, the lane escalates** | applicable classes grouped by **distinct control path** + per-route auth-reachability smoke test | every applicable `VAPT-API-*`/`WEB-*`/`CFG-*` class |
+
+**Two rules keep the cheaper lanes honest.**
+
+**Reuse evidence, don't re-read it.** `TEST` and `DOC` rows reference step 12.4's
+and 12.5's already-bound results rather than re-performing those guards; GATE 3
+reuses step 10's security evidence when its scope digest is unchanged. Re-running a
+check to fill a row is audit-trail completeness, not assurance — and the fixes it
+generates feed the re-derivation loop.
+
+**Every reduction is declared, by name.** A row or gate that ran narrower emits
+exactly one of:
+
+```
+PASS_FULL                          the full catalogue ran
+PASS_TARGETED                      ran at this lane's depth — say what was in scope
+NOT_TRIGGERED                      + the manifest ID, the detector's name and
+                                   version, the complete changed-file
+                                   classification, and a digest of that output —
+                                   so CI can recompute the trigger rather than
+                                   trust prose
+NOT_APPLICABLE_NO_SCREEN_REFERENCE + the approver and date
+DEGRADED                           + the classes that could not run, by ID
+```
+
+**A blank table, an omitted row, or a bare "N/A" is a FAIL.** In FAST and STANDARD,
+untouched rule families collapse into one family sentinel rather than dozens of
+individual N/A rows — but the sentinel **enumerates the rule IDs it stands for and
+the detector inputs and result** that made the family inapplicable, or it hides
+exactly what it claims to summarise:
+
+```
+BE-WHK | NOT_TRIGGERED | covers BE-WHK-01..06
+       | detector: webhook-surface, v1 — inputs: 14 changed files (manifest F0)
+       | result: 0 matches for inbound-webhook handler registration
+```
+
+HEAVY keeps the exhaustive per-rule enumeration. **A family whose applicability was
+not computed mechanically expands to individual rows**, and uncertain applicability
+escalates, never collapses.
 
 **A lane never turns off a gate whose trigger fired.** `ui_required` and
 `tb_touched` are computed from the ticket and the diff, so GATE 4 and GATE 5 are
@@ -1394,8 +1480,10 @@ declared like any other degradation:
 - **serial** — the same passes, in the same scope, one after another against the
   unchanged manifest.
 
-Fan-out shape, when concurrency exists: shard **GATE 3 by rule family**, **GATE 4
-by owned screen**, and GATE 5's **inventory and test design** by surface — but
+Fan-out shape, when concurrency exists: shard **GATE 3 by rule family** and GATE 5's
+**inventory and test design** by surface. **GATE 4 is not sharded here** — pass A
+returns per-screen verdicts from its single whole-manifest pass; that is the one
+model, and there is no separate per-screen investigator — but
 **never** its live attacks (see GATE 5). Every shard aggregates into **one**
 Verification table and **one** contract. Keep fan-out proportional to the work.
 
@@ -1433,7 +1521,7 @@ each other:
 | Runs concurrently, from step 9's green tree | Why it is independent |
 |---|---|
 | **10** — the static security rows | reads the changed surfaces |
-| **11** — the GATE 4 parity draft, **fanned out one agent per owned screen** | each screen diffs against the pinned reference alone |
+| **11** — assembling the GATE 4 artifact and its classifications | reads the plan header and step 8's per-screen checks; no investigator (pass A supplies the verdict) |
 | **12a–c** — GATE 5's surface inventory and abuse-case *design*, fanned out per surface | enumerating and designing are reads |
 | **12.5** — the docs scan | greps docs surfaces |
 
@@ -1457,7 +1545,7 @@ four ordered phases:
    rendering sink, or an outbound credential path — which changes the very
    inventory the attacks ran against. So it **recomputes the trust-boundary trigger
    and the complete inventory from the changed tree**, regenerates affected abuse
-   cases and parity drafts, and re-runs the attacks. **Loop until a round of fixes
+   cases and the GATE 4 artifact's screen classifications, and re-runs the attacks. **Loop until a round of fixes
    changes no inventoried surface, to a maximum of three rounds** (see *Loops
    terminate* below). Only then run 12.4's single `test-quality`
    pass over the resulting test diff and proceed to the freeze.
@@ -1475,8 +1563,10 @@ recon*), and the orchestration mode is declared per wave.
    `BE-TEN-*`, or the stack's equivalents) over the changed surfaces. This is what
    makes GATE 5's claim meaningful: *the control exists in the code* has to be
    established before *the control engages at runtime* is worth testing. Fix
-   failures here. The **full** GATE 3 table runs later in the wave (step 13a);
-   these rows are re-asserted there against the frozen manifest.
+   failures here. GATE 3 runs later in the wave (step 13a) **at the lane's
+   depth**, and **reuses these rows against a matching security-scope digest** —
+   re-reading only the controls whose scope actually changed. Emit that digest with
+   the evidence; without it, reuse is not available.
 
    **Trace the control, don't assume the diff contains it.** A surface's control
    often lives in **unchanged** middleware, config, or a base class. Follow each
@@ -1488,45 +1578,50 @@ recon*), and the orchestration mode is declared per wave.
    **A fix here re-runs step 9** for the files it touched; a static-security change
    is production code like any other.
 
-11. **GATE 4 draft — Design-Parity artifact.** Runs **iff `ui_required`** — the
+11. **GATE 4 artifact — assemble and classify.** Runs **iff `ui_required`** — the
    same test the lane table and the CI check use, never a looser "is this a UI
    ticket?" judgment. Produce `.specs/design-parity/<TICKET>.md`.
 
-   **Fan out one investigator per owned screen — the count is in the approved
-   plan's section 8.** Each screen's three-layer diff
-   against the pinned reference is independent of every other screen's — nothing
-   is shared but the reference SHA. They return unsigned per-screen verdicts as
-   data; you assemble the artifact. Serializing them is the single most expensive
-   avoidable cost in this block.
+   **Only `reference-backed` screens reach this gate.** An `unreferenced` screen
+   (`reference: null` in the plan's header) gets a **declared carve-out**, not an
+   investigation:
+
+   ```
+   src/app/invoices/invoice-empty.component.ts
+     | NOT_APPLICABLE_NO_SCREEN_REFERENCE
+     | approved by <name>, <date>  (from the plan header)
+     | built to the pinned design system: tokens, shared components, conventions
+   ```
+
+   It is **not** exempt from the design system — Step 5's tokens, shared components
+   and conventions still bind, and Step 8 still checks them. What it is exempt from
+   is a parity verdict, because there is nothing to be faithful *to*. **If the
+   ticket actually requires literal parity for that screen, STOP before
+   implementing and get a reference committed** — inventing one during the gate is
+   the self-attestation this whole gate exists to remove.
+
+   **No separate draft investigator.** Step 8 already checked each screen against
+   its reference as it was finished, and pass A (step 13b) independently re-derives
+   the verdict with no build context. A third pass here re-comparing the same two
+   things adds a comparison, not a check — and its findings feed the same fix →
+   invalidate → re-sign loop. **Pass A is the sole post-build parity investigator.**
+   What remains at this step is assembling the artifact and recording the
+   classification.
 
    **Scope — per OWNED screen, not per consumer.** GATE 4 fires for the screen(s)
    this ticket exists to build. It does **not** force a node-by-node diff of every
    screen that merely consumes a shared component you touched. A shared-component
    change opens a **separate, flagged parity-sweep task** across its consumers.
 
-   For each owned screen, DIFF the implementation against the **pinned** reference
-   (the `design_ref` SHA from Step 5) at three layers, one row per divergence with
-   exact `ref file:line ↔ impl file:line` and a severity:
-   - **Structure** — node-by-node: presence/absence and composition of sections,
-     states (empty/loading/error), and components.
-   - **Style** — class/declaration: layout, spacing, tokens, color, type, shadow.
-   - **Behavior + i18n** — interactions, state, and correctness in **every locale
-     and text direction the project actually ships** (drop this layer entirely if
-     it's single-locale LTR).
-
-   Grade each screen: **Faithful** (no Blocker/Major) · **Minor** (token/spacing
-   drift only) · **Major** (structural/visual divergence) · **Not-built** (a
-   reference screen/section with no implementation).
-
-   Where the repo already ships render/snapshot/DOM/component tooling, use it to
-   generate the structural, token, state, and direction differences mechanically —
-   it is faster and reproducible. It does **not** replace the independent read:
-   a harness cannot see visual hierarchy, interaction feel, or rendering defects
-   outside its own scope.
-
-   **This grade is a DRAFT.** Pass A (step 13b) independently **reviews and
-   grades** the same screens against the pinned reference and returns an
-   **unsigned** verdict; signing happens later, in step 15c. *The builder never signs their own parity grade.*
+   **No grade is produced here, and nothing here reaches pass A.** This step
+   assembles the artifact skeleton: the screen list and each screen's
+   classification. **Step 8's build-time check results stay out of pass A's
+   input** — handing a blind reviewer the builder's conclusions anchors it and
+   destroys the independence that is the whole point. Pass A receives only the
+   pinned reference, the implementation, the acceptance criteria and the required
+   comparison depth; **its verdict is merged with step 8's results afterward**, by
+   you, when both exist. Pass A (step 13b) produces the verdict and returns it
+   unsigned; signing happens in step 15c. *The builder never signs their own parity grade.*
 
    **Regenerate the draft if a later step changes UI production code** — a GATE 5
    fix, for instance. A draft describing the pre-fix screen would send pass A to
@@ -1559,8 +1654,29 @@ recon*), and the orchestration mode is declared per wave.
    named for the rule it defends (`VAPT-API-01: user B cannot read user A's
    invoice`) and asserting the *refusal* rather than the guard's internals.
 
-   **c. Inventory and test design fan out by surface — the count is in the
-   approved plan's section 8; live attacks do NOT fan out.**
+   **c. Test by control-equivalence class, not endpoint × rule.** Eight endpoints
+   behind one auth middleware, one serializer and one error mapper are **one**
+   control path — proving the same middleware assertion eight times is duplication,
+   not coverage. **Equivalence must be shown, not asserted.** Record a **control-path
+   fingerprint** per route — registration, middleware order and arguments,
+   binding/schema, ownership and policy resolution, serialization, error mapping,
+   and the relevant configuration — and group only routes whose fingerprints are
+   **identical**. Differing fingerprints, or any resolved dynamically such that you
+   cannot compute one, are **separate classes**. Test each class once.
+
+   **The per-route smoke test needs a positive control.** Auth-reachability alone
+   accepts an unregistered route, because a `404` reads as refusal. Each route
+   therefore needs **both**: an authenticated request proving the route actually
+   resolves, **and** a semantic rejection proving the control denies the wrong
+   principal. Route-specific coverage is also required for every applicable
+   non-auth dimension the class cannot speak for — tenancy, authorization
+   parameters, mass assignment, injection, output leakage, rendering. Test
+   an individual endpoint separately only where its binding, ownership, policy or
+   serialization genuinely differs. HEAVY still runs every applicable class; what
+   changes is that identical plumbing is not re-proved per route.
+
+   **Inventory and test design fan out by surface — the count is in the approved
+   plan's section 8; live attacks do NOT fan out.**
    Enumerating surfaces and designing abuse cases are read-only and parallelize
    cleanly. **Running** the attacks does not: concurrent workers share the port,
    the disposable datastore, the principal fixtures, and each other's destructive
@@ -1599,13 +1715,15 @@ recon*), and the orchestration mode is declared per wave.
    cannot produce those fixtures, `VAPT-API-01/02/03` and `VAPT-WEB-02` are
    declared **DEGRADED by ID** — they do not silently pass.
 
-   **PASS** ⇔ every in-scope surface carries a green committed test for every
-   applicable rule · zero unfixed `[NN]` findings · a green step-12.4
+   **PASS** ⇔ a canonical **class → routes → controls → tests** map, in which every
+   applicable rule is green for every equivalence class, **every route carries its
+   own reachability positive control and auth rejection**, and any route whose
+   equivalence to its class is unproven carries its own full tests · zero unfixed `[NN]` findings · a green step-12.4
    `test-quality` pass, **or its declared `TEST | DEGRADED` row** when that engine
    is unavailable · every excluded changed file **named** in
    `.specs/vapt/<TICKET>.md` · plus, in strict mode, an independent signature bound to
    GATE 5's final **scope digest** (the manifest ID is provenance only).
-   **PASS-DEGRADED** ⇔ all of the above **except** that named rules could not be
+   **DEGRADED** ⇔ all of the above **except** that named rules could not be
    exercised — the `vapt` skill is absent, or principals could not be built. It
    requires the reduced set actually committed and green, **chosen by each
    surface's family rather than defaulting to the API set** — read the IDs from
@@ -1626,7 +1744,7 @@ recon*), and the orchestration mode is declared per wave.
    rule is named **by ID**. When `vapt` itself is unavailable you do not have the
    ID inventory to name — so the degraded disclosure becomes
    `untested_families: [...]` **plus** `rule_inventory: unavailable`, and that form
-   satisfies every consumer below (PASS-DEGRADED, FAIL, the CI check, the step-16
+   satisfies every consumer below (`DEGRADED`, FAIL, the CI check, the step-16
    report, the session log, and success criteria). It is accepted **only** when
    `vapt` is absent; with the skill installed, families instead of IDs is an
    under-declaration and therefore a FAIL. Never invent an ID to fill the gap.
@@ -1640,8 +1758,11 @@ recon*), and the orchestration mode is declared per wave.
    **Enforcement is machine, not honor-system.** The abuse tests run in the repo's
    existing test job; alongside them, a merge-blocking CI check (same PR-side slot
    as `nn-guard` and the GATE 4 check) rejects a trust-boundary-touching PR unless
-   `.specs/vapt/<TICKET>.md` exists and reads **PASS or PASS-DEGRADED**. For
-   `PASS-DEGRADED` the check does more, not less: it verifies each in-scope surface
+   `.specs/vapt/<TICKET>.md` exists and reads one of the canonical outcomes —
+   **`PASS_FULL`, `PASS_TARGETED` or `DEGRADED`** (the taxonomy above; the older
+   `PASS`/`PASS-DEGRADED` spellings map to `PASS_FULL`/`DEGRADED` and should not be
+   emitted). For
+   `DEGRADED` the check does more, not less: it verifies each in-scope surface
    carries its family's reduced set, green, and that every unexercised rule is
    listed by ID — accepting the `untested_families` + `rule_inventory: unavailable`
    form when the artifact records that `vapt` was absent. **In strict mode CI also validates the signature** — signer
@@ -1680,7 +1801,8 @@ recon*), and the orchestration mode is declared per wave.
    of the following **together**, each bound to the manifest ID, each **blind to
    the others**, each **report-only**:
 
-   > **These passes independently re-perform every required check.** Step 8
+   > **These passes independently verify required coverage — re-performing each
+   > check, or validating bound evidence where this file says to reuse it.** Step 8
    > already applied this rule set as it wrote each file and checked each screen
    > against the pinned reference — so these passes are *expected* to confirm that
    > work. But they **must still discover and report every violation they
@@ -1703,8 +1825,13 @@ recon*), and the orchestration mode is declared per wave.
      table · CQS · DRY-as-knowledge + Rule of Three · the complexity/nesting ceilings
      + KISS · the ranked YAGNI list) + the project constitution's Always/Never lists
      and Self-Check, when one exists
-   + TEST row — when the diff includes test files (reuse step 12.4's result)
-   + DOC  row — when the diff touches docs surfaces (reuse step 12.5's scan)
+   + TEST row — when the diff includes test files: **reference** step 12.4's
+     result by its binding — the test paths and their content digests, plus the
+     runner command or rule-set version. Do not re-perform the guard; **do** refresh
+     it when a delta changes any bound input.
+   + DOC  row — when the diff touches docs surfaces: **reference** step 12.5's
+     result by the same kind of binding (docs paths + digests + rule-set version),
+     with the same refresh-on-delta rule.
    ```
 
    > **The `UNIVERSAL` row is why there is no separate MODE D sweep any more.**
@@ -1714,8 +1841,22 @@ recon*), and the orchestration mode is declared per wave.
    > the engineering ones. Both are whole-diff. A `UNIVERSAL` row that walked only
    > the failure modes is a degradation to declare, not a fold.
 
-   **A row may not be omitted.** Every `[NN]` rule **in the successfully loaded
-   inventory** is always in force and always appears. The `RULES | DEGRADED`
+   **Security rows reuse step 10 only against a COMPUTED digest.** Step 10 must
+   emit a **security-scope digest** — over the in-scope surfaces, every transitive
+   control owner it traced (including unchanged files), those files' contents, and
+   the rule-inventory version — using the same canonical serialization as the
+   manifest. Recompute it at `F0` and reuse the evidence **only on exact
+   equality**. "Nothing moved" asserted rather than computed is precisely how a
+   security row gets skipped for controls that did move; without both digests
+   present and equal, re-read. Where equality holds, **reference that evidence**
+   rather than independently re-reading the same controls — GATE 5 supplies the runtime proof, and a second
+   static read of identical code buys an audit row, not assurance. Re-read only the
+   controls whose scope actually changed.
+
+   **A row may not be omitted, but its DEPTH follows the lane** (see the gate-depth
+   table). Every `[NN]` rule **in the successfully loaded inventory** is in force at
+   its lane's depth and always appears — as a row or, in FAST/STANDARD, inside a
+   loud family sentinel with the detector evidence behind it. The `RULES | DEGRADED`
    sentinel applies only where **no inventory could be loaded at all**, and it
    replaces **only the inventory-derived rows** — the specialist `[ARCH]`/`[D]`
    rows and the `[NN]` rows. It never replaces `AI-FM`, `UNIVERSAL`, `TEST`, or
@@ -1736,8 +1877,29 @@ recon*), and the orchestration mode is declared per wave.
    creep — the systematic rule catalogue is pass C's job, not a thing to repeat.
 
    **For UI tickets pass A also carries the GATE 4 independent parity check** — it
-   re-derives the parity verdict against the pinned reference and returns it as
-   **unsigned data stamped with the scope digest it reviewed**. It does not sign
+   is the **sole** post-build parity investigator, and returns per-screen verdicts
+   as **unsigned data stamped with the scope digest it reviewed**.
+
+   For each **reference-backed** owned screen it diffs the implementation against
+   the **pinned** reference (the `design_ref` SHA from Step 5), one row per
+   divergence with exact `ref file:line ↔ impl file:line` and a severity, at the
+   depth the lane's gate-depth table sets:
+   - **Structure** — node-by-node: presence/absence and composition of sections,
+     states (empty/loading/error), and components.
+   - **Style** — class/declaration: layout, spacing, tokens, color, type, shadow.
+   - **Behavior + i18n** — interactions, state, and correctness in **every locale
+     and text direction the project actually ships** (drop this layer entirely if
+     it's single-locale LTR).
+
+   Grade each screen: **Faithful** (no Blocker/Major) · **Minor** (token/spacing
+   drift only) · **Major** (structural/visual divergence) · **Not-built** (a
+   reference screen/section with no implementation). Unreferenced screens are not
+   graded — they carry step 11's carve-out.
+
+   Where the repo ships render/snapshot/DOM/component tooling, use it to generate
+   the structural, token, state and direction differences mechanically — faster and
+   reproducible. It does **not** replace the independent read: a harness cannot see
+   visual hierarchy, interaction feel, or rendering defects outside its own scope. It does not sign
    *here*: step 15 has not yet added the
    human-approved deviations and stub mappings the signed payload must cover, so a
    signature written now would bind to a payload that no longer exists at
@@ -1924,7 +2086,8 @@ recon*), and the orchestration mode is declared per wave.
    before this point is the bug this ordering exists to prevent: a signature over
    a payload that close-out then edits binds to nothing.
 
-   **PASS (per owned screen)** ⇔ grades **Faithful or Minor** after fixes, **or**
+   **PASS (per reference-backed screen; unreferenced screens carry their
+   carve-out instead)** ⇔ grades **Faithful or Minor** after fixes, **or**
    every residual Blocker/Major carries a **human-approved** accepted deviation —
    **and** the artifact carries an **independent signature bound to the gate's
    final scope digest** — **and** every introduced stub links a follow-up ticket.
@@ -1962,6 +2125,12 @@ recon*), and the orchestration mode is declared per wave.
    - the **orchestration mode** for **each wave** — recon and review — as
      workflow / fan-out / serial; they can differ, and a run that fanned out its
      review while serializing an hour of recon must not report as concurrent
+   - **each gate's depth and its declared outcome** — `PASS_FULL`,
+     `PASS_TARGETED` (with what was in scope), `NOT_TRIGGERED` (with the detector
+     evidence), `NOT_APPLICABLE_NO_SCREEN_REFERENCE` (with approver and date), or
+     `DEGRADED` (with the classes that could not run, by ID). A gate that ran
+     narrower because of the lane is a **declared decision**; one that ran narrower
+     without saying so is a silent skip and a bug in the report.
    - **the complete gate finding count first, at full severity** — every finding,
      however it arose. **Then**, as a separate classification, how many of them
      step 8's in-flight checks should have caught (rules already in force when the
@@ -1980,8 +2149,10 @@ recon*), and the orchestration mode is declared per wave.
    - the **Codex plan review's disposition** — incorporated vs. rejected, or
      `Not run — FAST lane`, or unavailable
    - every **skipped finding with its rule ID**
-   - each owned screen's **final GATE 4 grade + who signed it + the scope digest
-     the signature binds to**
+   - for each **reference-backed** owned screen: its **final GATE 4 grade, who
+     signed it, and the scope digest the signature binds to**; for each
+     **unreferenced** one: its validated carve-out record (approver, date, and the
+     reference-search evidence) — a screen with neither is a bug in the report
    - **GATE 5's verdict** — surfaces attacked, abuse tests committed, every rule
      declared degraded **by ID** (or the `untested_families` +
      `rule_inventory: unavailable` form when `vapt` was absent), every changed file
@@ -2261,7 +2432,7 @@ reviewed**, with every exclusion named; a passing GATE 3 whose table carries the
 specialist rows, every `[NN]` row, and the whole-diff `AI-FM` and `UNIVERSAL` rows
 (full or **declared** degraded); an **independently-signed GATE 4 whose signature
 binds to that gate's final scope digest** for every owned UI screen; a passing GATE 5
-(or a declared **PASS-DEGRADED**, with each surface's
+(or a declared **`DEGRADED`**, with each surface's
 family minimum green and every unexercised rule listed by ID — or, with `vapt`
 absent, `untested_families` + `rule_inventory: unavailable`) with committed abuse
 tests for every trust boundary the change introduced, and a green final
