@@ -5,11 +5,12 @@
 # SKILL.md is an open standard, so the same skills install into any compliant
 # tool — only the destination directory differs. Pick it with --target:
 #
-#   claude   ~/.claude/skills    Claude Code (default)
-#   codex    ~/.agents/skills    OpenAI Codex
-#   gemini   ~/.gemini/skills    Gemini CLI (also reads ~/.agents/skills)
-#   agents   ~/.agents/skills    any standard-compliant tool
-#   all      claude + agents + gemini
+#   claude       ~/.claude/skills              Claude Code (default)
+#   codex        ~/.agents/skills              OpenAI Codex
+#   gemini       ~/.gemini/skills              Gemini CLI (also reads ~/.agents/skills)
+#   agents       ~/.agents/skills              any standard-compliant tool
+#   antigravity  ~/.gemini/antigravity/skills  Google Antigravity (global skills)
+#   all          claude + agents + gemini + antigravity
 #
 #   ./scripts/install.sh                          # all skills → Claude Code, symlinked
 #   ./scripts/install.sh security researcher      # only the named skills
@@ -50,6 +51,7 @@ target_dir() {
     claude) echo "$HOME/.claude/skills" ;;
     codex|agents) echo "$HOME/.agents/skills" ;;
     gemini) echo "$HOME/.gemini/skills" ;;
+    antigravity) echo "$HOME/.gemini/antigravity/skills" ;;
     *) echo "" ;;
   esac
 }
@@ -66,14 +68,14 @@ if [ -n "$DEST_OVERRIDE" ]; then
   add_dest "custom" "$DEST_OVERRIDE"
 else
   [ -z "$TARGET_SPEC" ] && TARGET_SPEC="claude"
-  [ "$TARGET_SPEC" = "all" ] && TARGET_SPEC="claude,agents,gemini"
+  [ "$TARGET_SPEC" = "all" ] && TARGET_SPEC="claude,agents,gemini,antigravity"
   IFS=',' read -r -a KEYS <<< "$TARGET_SPEC"
   for key in "${KEYS[@]}"; do
     key="$(echo "$key" | tr -d '[:space:]')"
     [ -z "$key" ] && continue
     dir="$(target_dir "$key")"
     if [ -z "$dir" ]; then
-      echo "❌ unknown target: $key (valid: claude, codex, gemini, agents, all — or use --dest <path>)" >&2
+      echo "❌ unknown target: $key (valid: claude, codex, gemini, agents, antigravity, all — or use --dest <path>)" >&2
       exit 1
     fi
     add_dest "$key" "$dir"

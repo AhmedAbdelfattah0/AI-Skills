@@ -35,6 +35,9 @@ const TARGETS = {
   agents: join(homedir(), '.agents', 'skills'),   // cross-tool: Codex, Gemini CLI, …
   codex:  join(homedir(), '.agents', 'skills'),   // OpenAI Codex (alias of agents)
   gemini: join(homedir(), '.gemini', 'skills'),   // Gemini CLI native dir
+  // Google Antigravity reads ONE global dir (its workspace dir is .agents/skills,
+  // which is only reachable per-repo, not from here).
+  antigravity: join(homedir(), '.gemini', 'antigravity', 'skills'),
 };
 const DEFAULT_TARGET = 'claude';
 
@@ -140,7 +143,7 @@ function cmdInstall(args) {
     destDirs = [{ label: 'custom', dir: resolve(destOverride) }];
   } else {
     const keys = !targetSpec ? [DEFAULT_TARGET]
-      : targetSpec === 'all' ? ['claude', 'agents', 'gemini']
+      : targetSpec === 'all' ? ['claude', 'agents', 'gemini', 'antigravity']
       : targetSpec.split(',').map((s) => s.trim()).filter(Boolean);
     const unknown = keys.filter((k) => !TARGETS[k]);
     if (unknown.length) {
@@ -273,11 +276,12 @@ Install flags:
   --link, -l            force symlink even from an ephemeral source
   --target, -t <t,...>  which tool(s) to install for — SKILL.md is an open
                         standard, so the same skills work everywhere:
-                          claude  ~/.claude/skills   (Claude Code — default)
-                          codex   ~/.agents/skills   (OpenAI Codex)
-                          gemini  ~/.gemini/skills   (Gemini CLI)
-                          agents  ~/.agents/skills   (any standard-compliant tool)
-                          all     claude + agents + gemini
+                          claude       ~/.claude/skills              (Claude Code — default)
+                          codex        ~/.agents/skills              (OpenAI Codex)
+                          gemini       ~/.gemini/skills              (Gemini CLI)
+                          agents       ~/.agents/skills              (any standard-compliant tool)
+                          antigravity  ~/.gemini/antigravity/skills  (Google Antigravity)
+                          all          claude + agents + gemini + antigravity
   --dest <path>         install into a custom directory instead
 
 Examples:

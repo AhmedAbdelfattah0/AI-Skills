@@ -3,8 +3,8 @@
 A shareable library of AI agent skills in the open
 [`SKILL.md` standard](https://agentskills.io) — built for
 [Claude Code](https://claude.com/claude-code), and equally installable into **OpenAI Codex,
-Gemini CLI, and any other standard-compliant tool** (see
-[Use with other AI tools](#use-with-other-ai-tools-codex-gemini-cli-glm-)). Each skill lives in
+Gemini CLI, Google Antigravity, and any other standard-compliant tool** (see
+[Use with other AI tools](#use-with-other-ai-tools-codex-gemini-cli-antigravity-glm-)). Each skill lives in
 `skills/<name>/` with a `SKILL.md` (plus optional `references/` or `scripts/`).
 
 There's a **cross-platform installer** (`ai-skills`, a dependency-free Node CLI) that runs on
@@ -33,9 +33,10 @@ npx github:AhmedAbdelfattah0/AI-Skills install security researcher spec-driven
 npx github:AhmedAbdelfattah0/AI-Skills install generate-ticket ship-ticket
 
 # install for OTHER AI tools (default is Claude Code) — see "Use with other AI tools"
-npx github:AhmedAbdelfattah0/AI-Skills install --target codex     # OpenAI Codex
-npx github:AhmedAbdelfattah0/AI-Skills install --target gemini    # Gemini CLI
-npx github:AhmedAbdelfattah0/AI-Skills install --target all       # Claude + Codex + Gemini
+npx github:AhmedAbdelfattah0/AI-Skills install --target codex        # OpenAI Codex
+npx github:AhmedAbdelfattah0/AI-Skills install --target gemini       # Gemini CLI
+npx github:AhmedAbdelfattah0/AI-Skills install --target antigravity  # Google Antigravity
+npx github:AhmedAbdelfattah0/AI-Skills install --target all          # all four at once
 ```
 
 When run this way the source is a throwaway `npx` cache, so skills are **copied** into
@@ -53,7 +54,7 @@ node scripts/cli.mjs install                     # install ALL (symlinked)
 node scripts/cli.mjs install security researcher # install only these
 node scripts/cli.mjs install generate-ticket ship-ticket   # the ticket workflow pair
 node scripts/cli.mjs install --copy              # install ALL as real files (no symlink)
-node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI dirs
+node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI + Antigravity dirs
 ```
 
 From a clone, skills are **symlinked** by default, so `git pull` (or editing a `SKILL.md`) updates what
@@ -73,7 +74,7 @@ Same behaviour as Option B, no Node required:
 ./scripts/install.sh generate-ticket ship-ticket   # the ticket workflow pair
 ./scripts/install.sh --copy              # all skills, real files
 ./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
-./scripts/install.sh --target all        # Claude + Codex + Gemini at once
+./scripts/install.sh --target all        # Claude + Codex + Gemini + Antigravity at once
 ./scripts/install.sh --dest <path>       # any other tool's skills dir
 ```
 
@@ -81,18 +82,19 @@ Same behaviour as Option B, no Node required:
 
 After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
 
-## Use with other AI tools (Codex, Gemini CLI, GLM, …)
+## Use with other AI tools (Codex, Gemini CLI, Antigravity, GLM, …)
 
 `SKILL.md` is no longer Claude-only — it's an **open standard**
 ([agentskills.io](https://agentskills.io), governed by the Linux Foundation's Agentic AI
 Foundation since Dec 2025) supported by 16+ tools including **OpenAI Codex**, **Gemini CLI**,
-GitHub Copilot, Cursor, OpenCode, and Amp. The same skill folders work as-is; only the
+**Google Antigravity**, GitHub Copilot, Cursor, OpenCode, and Amp. The same skill folders work as-is; only the
 directory each tool scans differs. Use `--target`:
 
 ```bash
 node scripts/cli.mjs install --target codex               # OpenAI Codex   → ~/.agents/skills
 node scripts/cli.mjs install --target gemini              # Gemini CLI     → ~/.gemini/skills
-node scripts/cli.mjs install --target all                 # Claude + Codex + Gemini at once
+node scripts/cli.mjs install --target antigravity         # Antigravity    → ~/.gemini/antigravity/skills
+node scripts/cli.mjs install --target all                 # Claude + Codex + Gemini + Antigravity at once
 node scripts/cli.mjs install security --target claude,codex   # one skill, two tools
 node scripts/cli.mjs install --dest /path/to/dir          # any other tool's skills dir
 ```
@@ -108,10 +110,16 @@ Per-tool notes:
   Codex's old "custom prompts" are deprecated in favor of skills.
 - **Gemini CLI** — reads `~/.gemini/skills` and also the interoperable `~/.agents/skills`, so
   `--target codex` (or `agents`) covers Gemini too. Manage with `/skills enable <name>`.
+- **Google Antigravity** — global skills live in `~/.gemini/antigravity/skills` (a *different*
+  directory from Gemini CLI's `~/.gemini/skills`, so `--target gemini` does **not** cover it);
+  per-project skills go in `<repo>/.agents/skills` (the older `.agent/skills` still works).
+  `description` is the only required frontmatter field, so every skill here qualifies. If
+  Antigravity doesn't pick up symlinked skills on your machine, re-run with `--copy`.
 - **GLM (Zhipu)** — GLM Coding Plan runs *through* Claude Code or Claude-compatible tools
   (OpenCode, Cline, …), so a normal `install` already covers it. Nothing extra needed.
 - **Repo-level sharing** — to ship skills with a project instead of a user's machine, use
-  `--dest <repo>/.agents/skills` and commit; Codex and Gemini CLI both scan that path.
+  `--dest <repo>/.agents/skills` and commit; Codex, Gemini CLI, and Antigravity all scan that
+  path.
 
 **Portability caveat:** every skill loads in every standard-compliant tool, but a few contain
 instructions that only make sense in Claude Code — `nn-guard` installs a Claude Code hook (its
