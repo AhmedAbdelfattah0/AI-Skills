@@ -19,7 +19,7 @@ import {
   symlinkSync, cpSync, mkdirSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { join, dirname, resolve, basename } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -205,6 +205,8 @@ function cmdInstall(args) {
 }
 
 // Port of scripts/validate.sh — same three invariants, cross-platform.
+const ROOT = join(SKILLS_DIR, '..');
+
 function cmdValidate() {
   // All subdirectories — including any missing a SKILL.md, so we can flag them.
   const names = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -253,13 +255,131 @@ function cmdValidate() {
       err = fail = true;
     }
 
+    // 4. Every relative markdown link in the SKILL.md or its references/ resolves.
+    //    A skill split across references/ is only as good as its links: a dangling
+    //    one silently drops the procedure it was pointing at.
+    const docs = [md];
+    const refDir = join(SKILLS_DIR, name, 'references');
+    if (existsSync(refDir)) walk(refDir, (f) => { if (f.endsWith('.md')) docs.push(f); });
+    for (const doc of docs) {
+      const body = readFileSync(doc, 'utf8');
+      for (const lm of body.matchAll(/\]\((?!https?:|mailto:)([^)#\s]+)(?:#[^)]*)?\)/g)) {
+        const target = resolve(dirname(doc), lm[1]);
+        if (existsSync(target)) continue;
+        console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)} links to '${lm[1]}', which does not exist.`);
+        err = fail = true;
+      }
+    }
+
+    // 5. No orphan references — by REACHABILITY from SKILL.md, not by mention.
+    //    Searching for a filename as text lets a self-mention, or a cycle of
+    //    references that link only to each other, pass while being unreachable.
+    if (existsSync(refDir)) {
+      // Reachability, not mention: walk out from SKILL.md. A reference counts as
+      // cited by a markdown link OR by a bare path — most skills in this library
+      // name their references as `references/x.md` in prose or a table rather
+      // than as a link, and that is a legitimate convention.
+      const refFiles = [];
+      walk(refDir, (f) => { if (f.endsWith('.md')) refFiles.push(resolve(f)); });
+      const reachable = new Set([resolve(md)]);
+      const queue = [resolve(md)];
+      while (queue.length) {
+        const cur = queue.shift();
+        if (!existsSync(cur)) continue;
+        const body = readFileSync(cur, 'utf8');
+        for (const lm of body.matchAll(/\]\((?!https?:|mailto:)([^)#\s]+)(?:#[^)]*)?\)/g)) {
+          const next = resolve(dirname(cur), lm[1]);
+          if (reachable.has(next) || !next.endsWith('.md')) continue;
+          reachable.add(next); queue.push(next);
+        }
+        for (const cand of refFiles) {
+          if (reachable.has(cand)) continue;
+          if (!body.includes(basename(cand))) continue;
+          reachable.add(cand); queue.push(cand);
+        }
+      }
+      walk(refDir, (f) => {
+        if (!f.endsWith('.md') || reachable.has(resolve(f))) return;
+        console.log(`❌ ${name}: references/${basename(f)} is not reachable by any link from SKILL.md — orphaned.`);
+        err = fail = true;
+      });
+    }
+
+    // 6. Retired vocabulary stays retired. A concept deleted from a skill but left
+    //    referenced elsewhere is the failure mode that put a dozen dead references
+    //    to a removed classifier into ship-ticket. Each entry: /regex/ + why.
+    for (const [re, why, scope] of RETIRED_VOCABULARY) {
+      if (scope && !scope.includes(name)) continue;
+      for (const doc of docs) {
+        const body = readFileSync(doc, 'utf8');
+        re.lastIndex = 0;
+        const hit = re.exec(body);
+        if (!hit) continue;
+        const line = body.slice(0, hit.index).split('\n').length;
+        console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)}:${line} uses retired '${hit[0]}' — ${why}`);
+        err = fail = true;
+      }
+    }
+
+    // 7. Where a skill defines a canonical outcome vocabulary, it must be defined
+    //    exactly once and must be able to express failure. A vocabulary that
+    //    declares itself exhaustive and omits FAIL makes a failure unrecordable.
+    const enumOwners = docs.filter((d) => /^PASS_FULL\s/m.test(readFileSync(d, 'utf8')));
+    if (enumOwners.length > 1) {
+      console.log(`❌ ${name}: the outcome vocabulary is defined in ${enumOwners.length} files — it must have exactly one owner.`);
+      err = fail = true;
+    } else if (enumOwners.length === 1) {
+      const body = readFileSync(enumOwners[0], 'utf8');
+      for (const v of ['PASS_FULL', 'FAIL', 'NOT_TRIGGERED', 'DEGRADED'])
+        if (!new RegExp(`^${v}\\s`, 'm').test(body)) {
+          console.log(`❌ ${name}: the outcome vocabulary omits ${v}.`);
+          err = fail = true;
+        }
+    }
+
     if (!err) console.log(`✅ ${name}`);
+  }
+
+  // The repo's own guidance files are held to the retired-vocabulary rule too.
+  // ship-ticket defers to AGENTS.md on any conflict, so guidance that still names
+  // a deleted concept can resurrect it — which is exactly how the two copies of
+  // this file drifted 76 lines apart while one of them described a classifier
+  // that no longer existed.
+  for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
+    const gp = join(ROOT, guide);
+    if (!existsSync(gp)) continue;
+    const body = readFileSync(gp, 'utf8');
+    for (const [re, why] of RETIRED_VOCABULARY) {   // guidance files: all terms apply
+      re.lastIndex = 0;
+      let hit;
+      while ((hit = re.exec(body)) !== null) {
+        // A line may cite retired vocabulary while explaining that it is retired.
+        const line = body.slice(0, hit.index).split('\n').length;
+        const src = body.split('\n')[line - 1];
+        if (/\b(retired|deleted|removed|no longer|never existed|does not exist)\b/i.test(src)) continue;
+        console.log(`❌ ${guide}:${line} uses retired '${hit[0]}' — ${why}`);
+        fail = true;
+      }
+    }
   }
 
   console.log('');
   if (fail) { console.log('❌ validation failed'); process.exit(1); }
   console.log('✅ all skills valid');
 }
+
+// Concepts that were deliberately removed. Listing them here is what stops a
+// deletion from leaving live instructions pointing at something that no longer
+// exists — the defect class this check was added for.
+// `scope` limits each term to the skills that can legitimately be talking about
+// it, plus the repo guidance files. A term with no scope applies everywhere.
+const RETIRED_VOCABULARY = [
+  [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket', 'pr-review']],
+  [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
+  [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
+  [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
+  [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
+];
 
 function cmdHelp() {
   console.log(`ai-skills — install & manage this repo's Claude Code skills

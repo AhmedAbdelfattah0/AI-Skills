@@ -49,15 +49,15 @@ Three terms below come from the **ship-ticket** skill, which consumes this outpu
 They are stated on the ticket so the implementer knows the gate exists; if
 ship-ticket is not installed they are still meaningful instructions:
 
-- **Step 0.5** — ship-ticket refuses to write UI code until it has read and
+- **The design pin** — ship-ticket refuses to write UI code until it has read and
   git-SHA-pinned the design reference. A UI ticket with no design source of truth
   stalls there.
-- **GATE 4** — the return leg: the built screen is diffed against that pinned SHA
-  by an independent reviewer before the ticket can close.
-- **GATE 5** — any change crossing a trust boundary (endpoint, auth path, query
-  taking external input, rendering sink, upload, client storage, security config)
-  is attacked at runtime on a local instance, and the abuse cases are committed
-  as tests before the ticket can close.
+- **The parity check** — the return leg: the built screen is diffed against that
+  pinned SHA by an independent reviewer before the ticket can close.
+- **The attack testing** — any change crossing a trust boundary (endpoint, auth
+  path, query taking external input, rendering sink, upload, client storage,
+  security config) is attacked at runtime on a local instance, and the abuse cases
+  are committed as tests before the ticket can close.
 
 ## What this skill produces (always)
 
@@ -206,13 +206,14 @@ in order:
 4. **Blockers & dependencies** — real ticket keys (or `[TODO-VERIFY]`), each with
    *what* it provides and *why* it blocks. Include same-file contention notes.
 5. **Design source of truth** (UI tickets) — the reference file(s) to build
-   against, the token file, the conventions doc. State GATE 4 applies.
-   **Try hardest to resolve this one.** ship-ticket's Step 0.5 *refuses to build*
-   a UI ticket without it, so an unresolved design reference doesn't just add a
+   against, the token file, the conventions doc. State that the parity check
+   applies.
+   **Try hardest to resolve this one.** ship-ticket *refuses to build* a UI ticket
+   without a pinned design reference, so an unresolved one doesn't just add a
    recon item — it stops the ticket dead. If a repo is available, locate the real
    file now (and confirm it is committed, so it can be SHA-pinned). Only when you
    genuinely cannot, write `[TODO-VERIFY]` + a Recon line, and flag that ticket in
-   the hand-off as "will stall at Step 0.5 until resolved".
+   the hand-off as "will stall at the design pin until resolved".
 6. **Scope / what to build** — the detailed, sectioned body: API endpoints with
    methods and fields, DB tables with columns and constraints, UI structure and
    states, the exact behavior. This is the bulk. Concrete beats vague every time —
@@ -220,18 +221,20 @@ in order:
 7. **Invariants & security** — single-writer rules, tenant-scoping/RLS,
    fail-closed secrets, server-side validation, idempotency, audit. Anything that,
    if violated, is a correctness or security bug. Flag security-sensitive tickets
-   so ship-ticket routes them to its strong model **and runs GATE 5 strict**.
+   so ship-ticket routes them to its strong model **and requires an independent
+   signature on the attack testing** — the flag adds that signature; it never
+   changes which attack classes run.
    If the ticket crosses a trust boundary, name the **abuse cases** it must
    survive in the implementer's own words — "user B must not read user A's
-   invoice", "`role` submitted in the body must be ignored" — so GATE 5 has
-   concrete targets instead of only its generic rule set.
+   invoice", "`role` submitted in the body must be ignored" — so the attack
+   testing has concrete targets instead of only its generic rule set.
 8. **Out of scope** — what this ticket deliberately does NOT do, with the ticket
    key that owns it. Prevents scope creep and phantom deferrals.
 9. **Acceptance criteria** — a checklist a *reviewer* can verify, not vibes. Each
    line is objectively checkable. Cover the happy path, the invariants, the edge
-   cases, i18n/RTL if UI, and build/lint/test green. If UI: "GATE 4 parity passed
-   against pinned SHA per template/screen." If it crosses a trust boundary:
-   "GATE 5 passed — abuse tests committed for every named abuse case."
+   cases, i18n/RTL if UI, and build/lint/test green. If UI: "parity passed against
+   the pinned SHA per template/screen." If it crosses a trust boundary: "attack
+   testing passed — abuse tests committed for every named abuse case."
 10. **Recon required** — every `[TODO-VERIFY]` collected: the assumption + the
     command or file to check it against. Empty section is fine (and good) when
     everything was verified.
