@@ -9,14 +9,15 @@ description: |
   Cloudflare Workers, Postgres/Supabase — all supported.
 
   Six phases: UNDERSTAND the ticket, PLAN it with human approval, BUILD it,
-  PROVE it works and is not exploitable, REVIEW it with three independent
-  reviewers over one frozen manifest, then SHIP it. Adds a mandatory
+  PROVE it works and is not exploitable, REVIEW it in two rounds over one frozen
+  manifest — find, fix, then verify the fixes — then SHIP it. Adds a mandatory
   design-source-of-truth read with a pinned SHA, a plan-mode approval gate, a
   design-parity check against that pin — machine-enforced where the repo has the
   merge-blocking check installed, and a declared degradation where it does not —
   adversarial abuse tests committed for every trust boundary the change
-  introduces, and a cross-model review — a fresh Claude
-  reviewer, the OpenAI Codex CLI, and a rule pass, each blind to the others.
+  introduces, and a two-round cross-model review — the OpenAI Codex CLI and a rule
+  pass find, then a fresh Claude reviewer and a separate fix reviewer verify the
+  result including the fixes. No pass ever sees another's findings.
 
   Every applicable rule, screen, surface and attack class runs on every ticket, at
   constant reasoning effort. Nothing about a ticket's size or labels reduces what
@@ -96,7 +97,7 @@ it is not a question.
 | **PLAN** | draft, get an independent critique, get **human approval** | `.specs/plans/<TICKET>.md` only | an approved plan + the Design Contract |
 | **BUILD** | branch, then implement in the plan's sequence inside the contract | contracted files | the feature, rules applied as it was written |
 | **PROVE** | run the repo's commands; prove the security controls exist, then that they engage | production + test code | green commands, committed abuse tests |
-| **REVIEW** | freeze a manifest; three blind reviewers; reconcile; fix; sign | fixes at barriers only | a signed, reconciled change |
+| **REVIEW** | freeze a manifest; find, fix, then verify the fixes; sign | fixes at barriers only | a signed, reconciled change |
 | **SHIP** | one commit, one push, one PR, one CI wait, ticket to Done | the single gated commit | a linked PR and a closed ticket |
 
 **Phases are ordered. Work inside a phase runs concurrently wherever two things do
@@ -234,6 +235,7 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `codex-delegate` **+** `codex` CLI | the plan critique | present the plan for approval saying "no cross-model plan review — skill or CLI unavailable". The user's approval was always the gate |
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
 | a fresh-reviewer route | pass A and the independent signature | a fresh reviewer subagent, or a read-only `codex-delegate` dispatch. Independence is about *who reviews*, not the command name. **If no fresh route exists at all: a non-UI, non-security ticket continues with pass A run by the building agent, declared as `pass A ran WITHOUT reviewer independence`** — a named loss, not a silent one. A UI or `security-sensitive` ticket ✋ STOPs |
+| a fresh-reviewer route for the **fix review** | the check on your own triage — whether each round-1 finding was real, whether the fix addressed it, and whether it broke anything | perform the three questions yourself and record `fix review ran WITHOUT independence`. A named loss rather than a stop: the finding list and the fix diff still exist and can still be checked — but the pass whose purpose is auditing your triage was then performed by whoever did the triage |
 | a **resumable** signer route | signing, which happens after close-out edits | no fallback, and **checked up front, not at signing time**. Signing hands the final payload back to the *same* reviewer that produced the unsigned verdict, so the route must be reachable twice. A one-shot subagent is not a signer route. Discovering this after BUILD wastes the whole build — so a UI or `security-sensitive` ticket with no resumable route ✋ STOPs **before planning** |
 | concurrency | wall clock only | run the identical passes serially over the identical manifest and declare `orchestration: serial`, naming which wave |
 | the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |
@@ -409,7 +411,8 @@ not a fix. No local instance, or the only reachable one is shared → ✋ STOP.
 
 ## REVIEW
 
-> "Three reviewers checking the change at once, then I fix what they find."
+> "A different AI reviews it, I fix what it finds, then a fresh reviewer checks
+> the result — including my fixes."
 
 Load [references/review.md](references/review.md) and, for pass B,
 [references/codex-cli.md](references/codex-cli.md).
@@ -418,23 +421,40 @@ Everything that writes is now done. **Freeze the manifest** — a shared, stable
 description of what is being reviewed, computed **once** and handed identically to
 every pass. It is an integrity check over the live tree, not a commit and not a
 stash. Its safety rests on the passes being read-only and on you writing nothing
-during the wave.
+during a round.
 
-**Dispatch all three together**, each bound to the manifest, each blind to the
-others, each report-only: **pass A** a fresh reviewer with no build context (and,
-for UI, the sole parity investigation), **pass B** `codex` — a different model in
-a different process, started **first** because it is routinely the longest — and
-**pass C** the rule checklist, one row per rule in force.
+**Review runs in two rounds, because a fix is not self-evidently correct.** The
+reviewer that finds a problem cannot also tell you whether your fix for it works,
+and a finding that was never a problem produces a change that looks exactly like
+any other. So the second round exists to read the first round's consequences.
 
-They are expected to confirm what BUILD already did — and they must still find and
-report every violation at full severity, exactly as if no build-time check had
-run. A long list means BUILD skipped its checks; it never means a pass should have
-looked less hard.
+**Round 1 — find.** Dispatch **together**, blind to each other, report-only:
 
-**Then one barrier, one batch:** verify coverage, reconcile into one attributed
-set, apply **one batched fix set**, re-run the affected commands, revalidate the
-delta. Each round increments the mutation budget, and the budget bounds the
-sequence. [review.md](references/review.md) has the steps.
+- **pass B** — `codex`, a different model in a different process. This is what
+  makes the review genuinely cross-model; a model reviewing itself twice is one
+  pass.
+- **pass C** — the rule checklist, one row per rule in force.
+
+**Barrier — triage, then fix.** Every finding gets exactly one disposition, and
+**"it was wrong" is a real disposition** requiring a cited fact, not a feeling.
+Apply one batched fix set. This increments the mutation budget once.
+
+**Round 2 — verify.** Dispatch **together**, over the *fixed* tree:
+
+- **pass A** — a fresh reviewer with no build context, and for UI the sole parity
+  investigation. It reads what actually ships, fixes included. **It is never shown
+  round 1's findings** — that is what keeps it independent.
+- **the fix review** — a *different* fresh reviewer that **is** shown them, paired
+  with what changed: for every round-1 finding it asks **was it real · does the fix
+  address it · did the fix break anything**, and it reviews the ones you
+  **rejected** too, to catch a real problem talked away.
+
+**Barrier — fix round 2's findings**, bounded by the mutation budget like every
+other loop. [review.md](references/review.md) has the steps.
+
+**The cost is honest: the review is now round 1 plus round 2, not one wave.** Pass
+B is routinely the longest pass and no longer overlaps pass A. That is bought
+deliberately — an unreviewed fix is the one change in the ticket nobody looked at.
 
 **Do the work; don't narrate it.** After the barrier you have the findings and the
 authority. Two things go to the user first: a STOP condition, and a genuine

@@ -50,6 +50,10 @@ Record, in the artifacts:
   a concurrent run
 - **every manifest ID** and which is the accepted one
 - **each check's outcome**, from the list above
+- **the fix review's verdict per round-1 finding** — real or not, addressed or
+  not, broke anything or not — plus anything it found that you had **rejected**.
+  A finding confirmed as not real is recorded, not hidden: it is the measure of
+  how much of the review was churn
 - **each review pass's verified coverage** — the paths it reported reviewing,
   checked against the manifest, and any it was re-run for. The barrier verifies
   this transiently; recording it is what lets anyone later prove the diff was
