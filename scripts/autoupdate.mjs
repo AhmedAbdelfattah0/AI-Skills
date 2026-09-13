@@ -11,7 +11,10 @@
 // hour, never overwrites a skill you edited, and prints nothing unless something
 // actually changed. Everything installed here is removable with --remove.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync,
+  readFileSync, renameSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -20,15 +23,18 @@ const LAUNCHD_LABEL = 'com.ai-skills.update';
 const SYSTEMD_UNIT = 'ai-skills-update';
 const SCHTASKS_NAME = 'AI Skills Update';
 
-// How we recognise our own hook later: install must be idempotent, and remove
-// must never take somebody else's SessionStart hook with it. Two independent
-// substrings, NOT one phrase — the interpreter and script paths are quoted, so
-// the command reads `cli.mjs" update --auto` and any single phrase spanning
-// that quote silently never matches. It did: install stacked up duplicates and
-// remove was a no-op.
-const HOOK_MARKS = ['cli.mjs', 'update --auto'];
-const isOurHook = (h) =>
-  h?.type === 'command' && typeof h.command === 'string' && HOOK_MARKS.every((m) => h.command.includes(m));
+// How we recognise our own hook: install must be idempotent, and remove must
+// never take somebody else's SessionStart hook with it. The identity is the
+// ABSOLUTE PATH OF THIS CLI — unique to this install. Matching loose substrings
+// like "cli.mjs" + "update --auto" would also claim another checkout's updater,
+// or any unrelated `/opt/tool/cli.mjs update --auto`.
+const isOurHook = (h, cliPath) => {
+  if (h?.type !== 'command') return false;
+  // Current shape: exec form, no shell — cliPath is its own argv entry.
+  if (Array.isArray(h.args) && h.args.includes(cliPath)) return true;
+  // Legacy shape: one shell string. Still ours only if it names THIS cli path.
+  return typeof h.command === 'string' && h.command.includes(cliPath) && h.command.includes('update');
+};
 
 const isWin = platform() === 'win32';
 const settingsFile = () => join(homedir(), '.claude', 'settings.json');
@@ -51,7 +57,11 @@ function jobEnv() {
   return { nodeBin, path };
 }
 
-function plistXml(cliPath, log) {
+// No StandardOutPath/StandardErrorPath on purpose: launchd opens those BEFORE it
+// starts the process, so a log under a state directory that has since been
+// deleted makes the job fail before node can recreate it — silently, every day,
+// forever. `update --auto` opens its own log, after creating the directory.
+function plistXml(cliPath) {
   const { nodeBin, path } = jobEnv();
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,14 +79,19 @@ function plistXml(cliPath, log) {
   <dict><key>PATH</key><string>${path}</string></dict>
   <key>StartInterval</key><integer>86400</integer>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>${log}</string>
-  <key>StandardErrorPath</key><string>${log}</string>
 </dict>
 </plist>
 `;
 }
 
-function systemdUnits(cliPath, log) {
+// systemd splits ExecStart on whitespace, so an unquoted path containing a space
+// — AI_SKILLS_HOME="/home/me/AI Skills" is entirely legal — installs a timer that
+// can never run the CLI. Double-quote every dynamic value, and escape the `%`
+// that systemd would otherwise read as a specifier. StandardOutput is omitted
+// for the same reason as launchd's: it is opened before the process starts.
+const sdQuote = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+
+function systemdUnits(cliPath) {
   const { nodeBin, path } = jobEnv();
   return {
     service: `[Unit]
@@ -84,10 +99,8 @@ Description=Update the AI-Skills library
 
 [Service]
 Type=oneshot
-Environment=PATH=${path}
-ExecStart=${nodeBin} ${cliPath} update --auto
-StandardOutput=append:${log}
-StandardError=append:${log}
+Environment=${sdQuote(`PATH=${path}`)}
+ExecStart=${sdQuote(nodeBin)} ${sdQuote(cliPath)} update --auto
 `,
     timer: `[Unit]
 Description=Daily AI-Skills update
@@ -102,17 +115,21 @@ WantedBy=timers.target
   };
 }
 
-// async:true keeps session startup instant. The redirect matters for a different
-// reason: SessionStart stdout is injected into the session as context, and an
-// updater that narrates itself into every conversation is a tax on every prompt.
-function hookEntry(cliPath, log) {
+// EXEC form — `command` plus `args`, which Claude Code spawns directly with no
+// shell. The previous shell string was three latent bugs: `&&` and `||` are
+// syntax errors in Windows PowerShell 5.1, so SessionStart never reached node
+// there at all; a repo or home path containing a quote, `$(...)` or a backtick
+// broke the quoting or executed a substitution; and the `>>` redirect meant an
+// absent log directory killed the hook before node could recreate it. There is
+// no redirect now because `update --auto` writes its own log and prints nothing
+// to stdout — which also keeps it out of the session's context.
+// async:true keeps session startup instant.
+function hookEntry(cliPath) {
   const { nodeBin } = jobEnv();
-  // The mkdir is not belt-and-braces: if the log's directory ever goes missing,
-  // the redirect fails before node is reached, `|| true` hides it, and the hook
-  // is silently dead forever. Recreate the directory first, every time.
   return {
     type: 'command',
-    command: `mkdir -p "${dirname(log)}" && "${nodeBin}" "${cliPath}" update --auto >> "${log}" 2>&1 || true`,
+    command: nodeBin,
+    args: [cliPath, 'update', '--auto'],
     async: true,
     timeout: 120,
   };
@@ -125,7 +142,7 @@ function readJson(p) {
 // Add or remove our SessionStart hook, disturbing nothing else in the file.
 // A malformed settings.json silently disables EVERY setting in it, so an
 // unparseable file is refused rather than overwritten.
-function editHook(install, cliPath, log) {
+function editHook(install, cliPath) {
   const file = settingsFile();
   let settings = {};
   if (existsSync(file)) {
@@ -140,31 +157,49 @@ function editHook(install, cliPath, log) {
   const groups = Array.isArray(settings.hooks.SessionStart) ? settings.hooks.SessionStart : [];
 
   const kept = groups
-    .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !isOurHook(h)) }))
+    .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !isOurHook(h, cliPath)) }))
     .filter((g) => (g.hooks || []).length > 0);
 
-  if (install) kept.push({ hooks: [hookEntry(cliPath, log)] });
+  if (install) kept.push({ hooks: [hookEntry(cliPath)] });
 
   if (kept.length) settings.hooks.SessionStart = kept;
   else delete settings.hooks.SessionStart;
   if (!Object.keys(settings.hooks).length) delete settings.hooks;
 
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
+  // Atomically. Truncating settings.json in place means a full disk, a short
+  // write or an interrupt leaves partial JSON — which disables EVERY Claude Code
+  // setting in the file, the very outcome the malformed-input check above exists
+  // to avoid. Write a sibling, flush it to disk, then rename over the original;
+  // rename within a directory is atomic, so a reader sees old or new, never half.
+  const tmp = join(dirname(file), `.settings.json.ai-skills-${process.pid}`);
+  try {
+    const fd = openSync(tmp, 'w');
+    try {
+      writeFileSync(fd, JSON.stringify(settings, null, 2) + '\n');
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    if (existsSync(file)) { try { chmodSync(tmp, statSync(file).mode); } catch { /* keep the default */ } }
+    renameSync(tmp, file);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    console.error(`❌ could not write ${file}: ${err.message}`);
+    return false;
+  }
   return true;
 }
 
-function hookInstalled() {
+function hookInstalled(cliPath) {
   const groups = readJson(settingsFile())?.hooks?.SessionStart;
-  return Array.isArray(groups) && groups.some((g) => (g.hooks || []).some(isOurHook));
+  return Array.isArray(groups) && groups.some((g) => (g.hooks || []).some((h) => isOurHook(h, cliPath)));
 }
 
-function installJob(cliPath, log) {
+function installJob(cliPath) {
   const { nodeBin } = jobEnv();
   if (platform() === 'darwin') {
     const p = plistPath();
     mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, plistXml(cliPath, log));
+    writeFileSync(p, plistXml(cliPath));
     const uid = process.getuid?.() ?? 0;
     exec('launchctl', ['bootout', `gui/${uid}/${LAUNCHD_LABEL}`]);   // replace cleanly on re-install
     if (exec('launchctl', ['bootstrap', `gui/${uid}`, p]) === null) {
@@ -179,12 +214,12 @@ function installJob(cliPath, log) {
     if (exec('systemctl', ['--user', '--version']) === null) {
       console.error('⚠️  systemctl --user is unavailable here, so no timer was installed.');
       console.error('   Add this crontab line instead (crontab -e):');
-      console.error(`     0 9 * * * "${nodeBin}" "${cliPath}" update --auto >> "${log}" 2>&1`);
+      console.error(`     0 9 * * * "${nodeBin}" "${cliPath}" update --auto`);
       return;
     }
     const dir = systemdDir();
     mkdirSync(dir, { recursive: true });
-    const u = systemdUnits(cliPath, log);
+    const u = systemdUnits(cliPath);
     writeFileSync(join(dir, `${SYSTEMD_UNIT}.service`), u.service);
     writeFileSync(join(dir, `${SYSTEMD_UNIT}.timer`), u.timer);
     exec('systemctl', ['--user', 'daemon-reload']);
@@ -274,13 +309,13 @@ export function autoupdate(args, ctx) {
 
   if (remove) {
     if (!hookOnly) removeJob();
-    if (!jobOnly && editHook(false, ctx.cliPath, log)) console.log('🗑  Claude Code SessionStart hook removed');
+    if (!jobOnly && editHook(false, ctx.cliPath)) console.log('🗑  Claude Code SessionStart hook removed');
     console.log('\n✅ automatic updates are off. `update` still works whenever you run it.');
     return;
   }
 
-  if (!hookOnly) installJob(ctx.cliPath, log);
-  if (!jobOnly && editHook(true, ctx.cliPath, log)) {
+  if (!hookOnly) installJob(ctx.cliPath);
+  if (!jobOnly && editHook(true, ctx.cliPath)) {
     console.log('🪝 Claude Code SessionStart hook installed (~/.claude/settings.json)');
     console.log('   It runs in the background, so it neither delays startup nor speaks');
     console.log('   into your session — output goes to the log only.');
@@ -295,7 +330,7 @@ function report(ctx, log) {
   console.log(`log:           ${log}`);
   const job = jobStatus();
   console.log(`daily job:     ${job}`);
-  console.log(`SessionStart:  ${hookInstalled() ? 'installed (~/.claude/settings.json)' : 'not installed'}`);
+  console.log(`SessionStart:  ${hookInstalled(ctx.cliPath) ? 'installed (~/.claude/settings.json)' : 'not installed'}`);
   const at = ctx.lastRun;
   if (at) {
     const mins = Math.round((Date.now() - at) / 60000);
@@ -303,7 +338,7 @@ function report(ctx, log) {
   } else {
     console.log('last auto run: never');
   }
-  if (job === 'not installed' && !hookInstalled()) {
+  if (job === 'not installed' && !hookInstalled(ctx.cliPath)) {
     console.log('\n   `autoupdate --install` turns automatic updates on.');
   }
 }

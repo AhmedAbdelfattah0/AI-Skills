@@ -21,7 +21,7 @@
 
 import {
   readdirSync, readFileSync, existsSync, lstatSync, rmSync,
-  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync,
+  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -109,8 +109,19 @@ function removeExisting(p) {
 // a \\?\ prefix), so a hardcoded '/' test would call every Windows install
 // foreign and refuse to update it.
 function isUnder(root, p) {
-  const rel = relative(root, p);
+  const rel = relative(normalizeTarget(root), normalizeTarget(p));
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+// A Windows junction's readlink comes back in the `\\?\C:\...` namespaced form.
+// Left alone, path.relative() returns an ABSOLUTE path for it, so isUnder() calls
+// a perfectly good junction foreign and refuses to ever update it — the exact
+// opposite of the bug the relative() rewrite was meant to fix.
+function normalizeTarget(p) {
+  if (!p) return p;
+  let out = String(p).replace(/^\\\\\?\\(UNC\\)?/, (_, unc) => (unc ? '\\\\' : ''));
+  if (isWin) out = out.replace(/\//g, '\\');
+  return resolve(out);
 }
 
 // cpSync filter: keep the litter out of the copy, matching what hashSkill ignores.
@@ -157,17 +168,23 @@ const isNoise = (name) => IGNORED.has(name);
 // Content hash of a skill folder: every file's relative path AND bytes, in a
 // stable order. Path-insensitive hashing would call a renamed file unchanged.
 function hashSkill(dir) {
-  const files = [];
-  try { walk(dir, (f) => { if (!isNoise(basename(f))) files.push(f); }); } catch { return null; }
-  files.sort();
-  const h = createHash('sha256');
-  for (const f of files) {
-    h.update(relative(dir, f).replace(/\\/g, '/'));
-    h.update('\0');
-    h.update(readFileSync(f));
-    h.update('\0');
-  }
-  return h.digest('hex');
+  // Returns null when the tree cannot be read in full. The read is inside the
+  // try for a reason: one unreadable file used to escape as an uncaught EACCES
+  // and kill the entire update, rather than making this one skill undecidable —
+  // which is what a null is, and callers already treat it as "do not touch".
+  try {
+    const files = [];
+    walk(dir, (f) => { if (!isNoise(basename(f))) files.push(f); });
+    files.sort();
+    const h = createHash('sha256');
+    for (const f of files) {
+      h.update(relative(dir, f).replace(/\\/g, '/'));
+      h.update('\0');
+      h.update(readFileSync(f));
+      h.update('\0');
+    }
+    return h.digest('hex');
+  } catch { return null; }
 }
 
 // ---- unattended-run state --------------------------------------------------
@@ -189,26 +206,53 @@ function stateDir() {
   return join(base, 'ai-skills', key);
 }
 
-const LOCK_STALE_MS = 10 * 60 * 1000;      // a run that outlives this crashed
+// An age alone is not evidence a runner died: a pull over a slow link can exceed
+// any threshold you pick, and stealing its lock re-enables the very concurrent
+// copy this exists to prevent. Liveness is the test — age only bounds the case
+// where a PID has been recycled by an unrelated process.
+const LOCK_MAX_MS = 6 * 60 * 60 * 1000;    // beyond this, assume PID reuse, not a 6h pull
 const THROTTLE_MS = 60 * 60 * 1000;        // three sessions in a row = one fetch
 
+const lockPath = () => join(stateDir(), 'update.lock');
+
+function holderIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Signal 0 tests for existence without delivering anything. EPERM means the
+  // process exists and is simply owned by somebody else — still alive.
+  try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
+}
+
 // Returns a release() on success, or null if another run holds the lock.
+// The token is what makes release safe: a runner whose lock was taken over must
+// not delete the new owner's file on its way out.
 function acquireLock() {
   const dir = stateDir();
   mkdirSync(dir, { recursive: true });
-  const lock = join(dir, 'update.lock');
-  const release = () => { try { rmSync(lock, { force: true }); } catch { /* gone already */ } };
-  try {
-    writeFileSync(lock, `${process.pid} ${Date.now()}\n`, { flag: 'wx' });
-    return release;
-  } catch {
-    // Held. Steal it only if the holder is older than any real run could be.
+  const lock = lockPath();
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const mine = JSON.stringify({ pid: process.pid, token, at: Date.now() });
+
+  const claim = (flag) => { writeFileSync(lock, mine + '\n', { flag }); return releaser(token); };
+  try { return claim('wx'); } catch { /* held — fall through and judge the holder */ }
+
+  let held;
+  try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch { held = null; }
+  if (held && holderIsAlive(held.pid) && Date.now() - (held.at || 0) < LOCK_MAX_MS) return null;
+
+  // The holder is gone (or the entry is unreadable/ancient). Drop it and re-claim
+  // with 'wx' so that if two runners reach this line together, exactly one wins.
+  try { rmSync(lock, { force: true }); } catch { /* someone else got there first */ }
+  try { return claim('wx'); } catch { return null; }
+}
+
+// Delete the lock only while it is still ours.
+function releaser(token) {
+  return () => {
     try {
-      const age = Date.now() - Number(readFileSync(lock, 'utf8').trim().split(/\s+/)[1] || 0);
-      if (age > LOCK_STALE_MS) { rmSync(lock, { force: true }); writeFileSync(lock, `${process.pid} ${Date.now()}\n`); return release; }
-    } catch { /* unreadable — treat as held */ }
-    return null;
-  }
+      if (JSON.parse(readFileSync(lockPath(), 'utf8')).token !== token) return;
+      rmSync(lockPath(), { force: true });
+    } catch { /* already gone, or not parseable — leave it for the liveness check */ }
+  };
 }
 
 // True when the last unattended run was recent enough to skip this one.
@@ -217,6 +261,20 @@ function throttled() {
     const at = Number(readFileSync(join(stateDir(), 'last-run'), 'utf8').trim());
     return Number.isFinite(at) && Date.now() - at < THROTTLE_MS;
   } catch { return false; }
+}
+
+// An unattended run writes its own log, and writes NOTHING to stdout. Two
+// reasons this belongs here rather than in a shell redirect: a SessionStart
+// hook's stdout is injected into the session as context, and a redirect set up
+// by launchd or systemd is opened BEFORE node starts, so it cannot recreate a
+// state directory that has been deleted — the job just dies, silently, forever.
+function appendLog(lines) {
+  if (!lines.length) return;
+  try {
+    mkdirSync(stateDir(), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(join(stateDir(), 'update.log'), `${stamp}\n${lines.join('\n')}\n\n`, { flag: 'a' });
+  } catch { /* a log we cannot write is not a reason to fail the update */ }
 }
 
 function stampRun() {
@@ -236,6 +294,36 @@ function git(args, cwd = REPO_ROOT) {
 
 // True only when REPO_ROOT is itself the top of a work tree. A vendored copy
 // sitting inside someone else's repo would otherwise make `update` pull THEIR repo.
+// Which LIBRARY this is, as opposed to which checkout. The remote survives a
+// clone being moved or re-cloned elsewhere, which a path does not; and it differs
+// for a fork, which is exactly the case a path cannot tell apart.
+function originUrl() {
+  const raw = git(['remote', 'get-url', 'origin']);
+  if (!raw) return null;
+  // Normalise the spellings of one remote: scp-form vs https, optional .git.
+  return raw.trim()
+    .replace(/^git\+/, '')
+    .replace(/^git@([^:]+):/, 'https://$1/')
+    .replace(/^ssh:\/\/git@/, 'https://')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+// Was this destination populated by THIS library? A manifest written by a fork,
+// or by an unrelated repo that happens to ship a skill of the same name, must not
+// have its hashes trusted — that is what lets one checkout silently overwrite
+// another's content.
+function sameLibrary(manifest) {
+  // A recorded origin is authoritative: it was written by whoever installed, and
+  // a mismatch is proof of a different library. Absent one — a manifest predating
+  // this field — the source path is weaker evidence but is still evidence, and
+  // refusing it outright would strand every install made before the field existed.
+  if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
+  if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
+  return true;                                          // nothing to contradict
+}
+
 const isGitClone = () => {
   const top = git(['rev-parse', '--show-toplevel']);
   return !!top && resolve(top) === resolve(REPO_ROOT);
@@ -354,6 +442,7 @@ function cmdInstall(args) {
     const manifest = readManifest(dir) || { version: 1, skills: {} };
     manifest.version = 1;
     manifest.source = REPO_ROOT;
+    manifest.origin = originUrl();
     manifest.commit = commit;
     manifest.updatedAt = new Date().toISOString();
     manifest.skills ||= {};
@@ -368,22 +457,13 @@ function cmdInstall(args) {
     for (const name of targets) {
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
-      removeExisting(dst);
-      try {
-        if (mode === 'link') {
-          symlinkSync(src, dst, isWin ? 'junction' : 'dir');
-          console.log(`🔗 linked  ${name}  → ${label}`);
-        } else {
-          cpSync(src, dst, { recursive: true, filter: copyFilter });
-          console.log(`📄 copied  ${name}  → ${label}`);
-        }
-        // The hash is the baseline `update` compares against later; a symlink
-        // needs none, because the link itself proves where the content comes from.
-        manifest.skills[name] = { mode, hash: mode === 'copy' ? hashSkill(dst) : null };
+      // Same build-then-swap as update: a re-install over a working skill must
+      // not be able to leave a hole where that skill was.
+      if (applySkill(src, dst, mode, manifest, name)) {
+        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}`);
         ok++;
-      } catch (err) {
-        console.error(`❌ ${name}: ${err.message}`);
-        if (mode === 'link') console.error('   symlink failed — retry with --copy');
+      } else if (mode === 'link') {
+        console.error('   symlink failed — retry with --copy');
       }
     }
     if (ok) writeManifest(dir, manifest);
@@ -415,7 +495,12 @@ function cmdUpdate(args) {
   // Unattended runs are deliberately timid: they never overwrite an edit and
   // never delete anything. A scheduler that could do either would eventually do
   // it at 3am to something the user cared about.
+  // --force overrides an edit to a skill THIS library installed. It does not
+  // claim content nobody recorded installing — a directory that merely shares a
+  // name with one of our skills may be somebody else's entirely. Taking that over
+  // is a separate, explicit act.
   const force = !auto && (flags.has('--force') || flags.has('-f'));
+  const adopt = !auto && flags.has('--adopt');
   const prune = !auto && flags.has('--prune');
   const noPull = flags.has('--no-pull');
 
@@ -433,7 +518,29 @@ function cmdUpdate(args) {
   // chatters every time is a hook people turn off.
   const out = [];
   const say = (line) => (auto ? out.push(line) : console.log(line));
-  const flush = (worth) => { if (worth) for (const l of out) console.log(l); out.length = 0; };
+  // Auto runs go to the log only — never to stdout, which a SessionStart hook
+  // would inject into the session.
+  const flush = (worth) => { if (worth) appendLog(out); out.length = 0; };
+  // Declared up here because finish() closes over them and is callable from the
+  // early returns below — which is the whole point of it.
+  let anyChange = false;
+  let anySkipped = false;
+  const allHints = new Set();
+  // Every exit from an unattended run stamps the throttle and drops the lock —
+  // including the early ones. A path that returns before stamping means the next
+  // session pulls again, and the one after that, which is how a quiet updater
+  // turns into a machine hammering GitHub on every session start.
+  let finished = false;
+  const finish = () => {
+    if (!auto || finished) return;
+    finished = true;
+    // Worth waking a human for: something changed, something was declined, the
+    // source refresh did not go to plan, or a run failed. "Already fine" is not news.
+    const sourceTrouble = ['dirty', 'pull-failed', 'fetch-failed'].includes(pull.status);
+    flush(anyChange || anySkipped || sourceTrouble || process.exitCode === 1);
+    stampRun();
+    release();
+  };
 
   // 1. Refresh the source. Unlike install, update's default scope is every known
   //    target directory that exists — you install per-tool, but you update "my
@@ -485,16 +592,20 @@ function cmdUpdate(args) {
 
   if (!destDirs.length) {
     say('\nNothing to update — no skills directory found. Run "install" first.');
+    finish();
     return;
   }
 
-  let anyChange = false;
-  let anySkipped = false;
-  const allHints = new Set();
 
   for (const { label, dir } of destDirs) {
     const manifest = readManifest(dir) || { version: 1, skills: {} };
     manifest.skills ||= {};
+    // A manifest from a different library is evidence about somebody else's
+    // install, not ours. Read nothing from its hashes.
+    const trusted = sameLibrary(manifest);
+    if (!trusted) {
+      say(`   ⚠️  installed by a different library (${manifest.origin || manifest.source || 'unknown source'}) — its records are not ours to act on`);
+    }
     const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, foreign: 0, failed: 0 };
     const hints = new Set();
     say(`\n[${label}] ${dir}`);
@@ -513,7 +624,7 @@ function cmdUpdate(args) {
       if (names.length && !names.includes(name)) continue;
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
-      const record = manifest.skills[name];
+      const record = trusted ? manifest.skills[name] : undefined;
 
       let st = null;
       try { st = lstatSync(dst); } catch { /* not installed */ }
@@ -539,7 +650,16 @@ function cmdUpdate(args) {
       if (st.isSymbolicLink()) {
         let target = null;
         try { target = resolve(dirname(dst), readlinkSync(dst)); } catch { /* unreadable */ }
-        if (target && isUnder(SKILLS_DIR, target)) {
+        // Containment is not identity. `security -> <repo>/skills/vapt` lives under
+        // SKILLS_DIR but is an alias the user made, not our install of `security`;
+        // reporting it live forever, and pruning it on a dangling target, are both
+        // wrong. Only the exact expected target is ours.
+        if (target && isUnder(SKILLS_DIR, target) && normalizeTarget(target) !== normalizeTarget(src)) {
+          say(`   ~ ${name}  aliases ${relative(SKILLS_DIR, normalizeTarget(target))} in this library — left alone`);
+          tally.skipped++;
+          continue;
+        }
+        if (target && normalizeTarget(target) === normalizeTarget(src)) {
           if (!existsSync(target)) {
             // The skill was deleted upstream; the link now dangles.
             if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
@@ -579,7 +699,7 @@ function cmdUpdate(args) {
           tally.skipped++; hints.add('--prune'); continue;
         }
         const stillOurs = record?.hash && record.hash === hashSkill(dst);
-        if (!stillOurs && !force) {
+        if (!stillOurs && !force && !adopt) {
           say(`   ! ${name}  removed upstream but edited locally — --force to remove anyway`);
           tally.skipped++; hints.add('--force'); continue;
         }
@@ -599,16 +719,23 @@ function cmdUpdate(args) {
         continue;
       }
 
-      // It differs from the source. Stale, or edited? Only the manifest knows.
-      const untouchedSinceInstall = record?.hash && record.hash === dstHash;
-      if (!untouchedSinceInstall && !force) {
-        say(`   ! ${name}  ${record?.hash ? 'edited after install' : 'installed before provenance tracking'} — left alone (--force to overwrite)`);
-        tally.skipped++; hints.add('--force');
+      // It differs from the source. Three cases, and they need different flags:
+      //   we installed it, unchanged since   -> stale, refresh it, no flag
+      //   we installed it, changed since     -> the user edited it,     --force
+      //   nobody recorded installing it      -> not ours to replace,    --adopt
+      const ours = !!record?.hash;
+      const untouchedSinceInstall = ours && record.hash === dstHash;
+      const allowed = untouchedSinceInstall || (ours ? force : adopt);
+      if (!allowed) {
+        if (ours) { say(`   ! ${name}  edited after install — left alone (--force to overwrite)`); hints.add('--force'); }
+        else { say(`   ! ${name}  present but not installed by us — left alone (--adopt to take it over)`); hints.add('--adopt'); }
+        tally.skipped++;
         continue;
       }
-      if (check) { say(`   ↑ ${name}  (would update${untouchedSinceInstall ? '' : ' — FORCED over local edits'})`); tally.updated++; anyChange = true; continue; }
+      const how = untouchedSinceInstall ? '' : ours ? ' (over your edits)' : ' (adopted)';
+      if (check) { say(`   ↑ ${name}  (would update${how})`); tally.updated++; anyChange = true; continue; }
       if (applySkill(src, dst, 'copy', manifest, name)) {
-        say(`   ↑ ${name}  updated${untouchedSinceInstall ? '' : ' (forced over local edits)'}`);
+        say(`   ↑ ${name}  updated${how}`);
         tally.updated++; anyChange = true;
       } else tally.failed++;
     }
@@ -616,6 +743,7 @@ function cmdUpdate(args) {
     if (!check && (tally.updated || tally.added || tally.removed)) {
       manifest.version = 1;
       manifest.source = REPO_ROOT;
+      manifest.origin = originUrl();
       manifest.commit = sourceCommit();
       manifest.updatedAt = new Date().toISOString();
       writeManifest(dir, manifest);
@@ -630,19 +758,14 @@ function cmdUpdate(args) {
     if (tally.skipped) parts.push(`${tally.skipped} skipped`);
     if (tally.foreign) parts.push(`${tally.foreign} from another collection, untouched`);
     if (tally.failed) parts.push(`${tally.failed} failed`);
-    say(`   ${check ? '🔎' : '✅'} ${parts.length ? parts.join(', ') : 'nothing installed here'}`);
+    // A ✅ printed next to "1 failed" is a lie the eye believes.
+    const glyph = tally.failed ? '❌' : check ? '🔎' : '✅';
+    say(`   ${glyph} ${parts.length ? parts.join(', ') : 'nothing installed here'}`);
     if (tally.skipped) { anySkipped = true; for (const h of hints) allHints.add(h); }
     if (tally.failed) process.exitCode = 1;
   }
 
-  if (auto) {
-    // Worth waking a human for: something changed, something was declined, or a
-    // run failed. "Everything was already fine" is not news.
-    flush(anyChange || anySkipped || process.exitCode === 1);
-    stampRun();
-    release();
-    return;
-  }
+  if (auto) { finish(); return; }
 
   if (check && anyChange) {
     say('\n🔎 dry run — nothing was written. Re-run without --check to apply.');
@@ -660,17 +783,55 @@ function cmdUpdate(args) {
 }
 
 // Install or refresh one skill, keeping the manifest in step with what landed.
+//
+// Build first, swap last. Deleting the working skill before its replacement
+// exists means a full disk, an unreadable source or an interrupt leaves nothing
+// there — and the catch cannot put it back, because the only copy was the one
+// just deleted. So: stage a complete copy, move the old one aside, promote the
+// staged one, and only then drop the backup. Every failure rolls back.
+//
+// Staging lives in a DOT-directory. A sibling named `security.new` would hold a
+// SKILL.md and be scanned as a skill in its own right for as long as it exists;
+// scanners skip dotfiles, and so does this CLI's own enumeration.
 function applySkill(src, dst, mode, manifest, name) {
+  const tmpRoot = join(dirname(dst), '.ai-skills-tmp');
+  const staged = join(tmpRoot, `${name}.new`);
+  const backup = join(tmpRoot, `${name}.old`);
+  let movedAside = false;
   try {
-    removeExisting(dst);
-    if (mode === 'link') symlinkSync(src, dst, isWin ? 'junction' : 'dir');
-    else cpSync(src, dst, { recursive: true, filter: copyFilter });
+    mkdirSync(tmpRoot, { recursive: true });
+    removeExisting(staged);
+    removeExisting(backup);
+
+    // 1. Build the replacement in full, off to one side.
+    if (mode === 'link') symlinkSync(src, staged, isWin ? 'junction' : 'dir');
+    else cpSync(src, staged, { recursive: true, filter: copyFilter });
+
+    // 2. Swap. Both renames are within one directory tree, so each is atomic.
+    if (existsSync(dst) || isLink(dst)) { renameSync(dst, backup); movedAside = true; }
+    renameSync(staged, dst);
+
+    // 3. Only now is the old copy expendable.
+    removeExisting(backup);
     manifest.skills[name] = { mode, hash: mode === 'copy' ? hashSkill(dst) : null };
     return true;
   } catch (err) {
+    // Put the original back if we got as far as moving it.
+    if (movedAside && !existsSync(dst) && !isLink(dst)) {
+      try { renameSync(backup, dst); } catch { /* nothing further we can do */ }
+    }
+    try { removeExisting(staged); } catch { /* best effort */ }
     console.error(`   ❌ ${name}: ${err.message}`);
     return false;
+  } finally {
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* leave it */ }
   }
+}
+
+// existsSync follows symlinks, so a dangling link reads as absent — which would
+// make the rollback overwrite rather than restore. This asks about the link itself.
+function isLink(p) {
+  try { return lstatSync(p).isSymbolicLink(); } catch { return false; }
 }
 
 // Say what happened to the source in one line, including the cases where the
@@ -925,16 +1086,19 @@ Install flags:
 
 Update flags (--target / --dest work here too):
   --check, -n           report what would change; write nothing
-  --force, -f           overwrite copies that were edited after install
+  --force, -f           overwrite a copy WE installed that you edited since
+  --adopt               take over a directory nobody recorded installing
   --prune               also remove skills that no longer exist upstream
   --no-pull             do not fast-forward the source clone first
 
   update refreshes the source (git pull --ff-only, from a clean clone; the
   npx path is already fetched fresh from GitHub), then re-syncs every skill it
   installed. Symlinked skills are already live, so the pull IS their update.
-  Copies are refreshed — unless you edited one in place, which is reported and
-  left alone until you pass --force. By default it updates every skills
-  directory that exists, not just Claude Code's.
+  Copies are refreshed — unless you edited one in place (--force) or nobody
+  recorded installing it (--adopt). Those are separate flags on purpose: a
+  directory that merely shares a name with one of our skills may be somebody
+  else's, and overwriting it is not what "force an update" should mean. By
+  default it updates every skills directory that exists, not just Claude Code's.
 
 Autoupdate flags:
   --install / --remove  turn automatic updates on or off
@@ -945,8 +1109,9 @@ Autoupdate flags:
   which the library could notice it is stale by itself. Automatic updates
   therefore install two things that DO run: a daily job (launchd / systemd /
   schtasks) and a SessionStart hook, both calling "update --auto". That run is
-  locked against itself, throttled to once an hour, never prunes, never
-  overwrites a skill you edited, and prints nothing unless something changed.
+  locked against itself, throttled to once an hour, never prunes, never adopts,
+  never overwrites a skill you edited, and writes only to its own log — never to
+  stdout, which a SessionStart hook would inject into your session.
 
 Examples:
   npx github:AhmedAbdelfattah0/AI-Skills install security researcher

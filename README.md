@@ -116,10 +116,17 @@ the default one, and handles each install shape on its own terms:
 | a symlink somewhere else | reports it, never touches it |
 | a copy that matches what was installed | refreshes it from the new source |
 | a copy you edited yourself | **leaves it alone** and tells you, until you pass `--force` |
+| a directory nobody recorded installing | **leaves it alone** — it may be someone else's; `--adopt` takes it over |
 
-That last row is the reason `install` writes a small `.ai-skills-manifest.json` beside your skills: a
+Those last two rows are why `install` writes a small `.ai-skills-manifest.json` beside your skills: a
 stale skill and a skill you customised look identical on disk, and only a recorded baseline tells them
-apart. Your edits are never overwritten silently.
+apart. It also records which library installed them (the git remote), so a second clone or a fork can't
+read the first one's records and quietly overwrite its content. Your edits are never overwritten
+silently, and `update` never claims a directory it has no record of installing.
+
+Nothing is ever deleted before its replacement exists: a new copy is staged alongside, swapped in by
+rename, and only then is the old one dropped — so a full disk or an interrupted run leaves the working
+skill exactly where it was.
 
 The source refresh is a `git pull --ff-only`, and only from a clean tree with an upstream. If your
 checkout is dirty, has no upstream, or has diverged, `update` says so and re-syncs from the checkout as
@@ -144,10 +151,10 @@ updates therefore install two things that *do* run, both of which poll:
 | **SessionStart hook** | `~/.claude/settings.json` | when a Claude Code session starts, so it never opens on stale skills |
 
 Both call `update --auto`, which is deliberately more cautious than the command you'd type: it takes a
-lock, runs at most once an hour, prints nothing unless something actually changed, and **ignores
-`--force` and `--prune` even if passed** — a scheduler that could overwrite or delete would eventually
-do it at 3am to something you cared about. The hook runs in the background and writes only to a log, so
-it neither delays startup nor talks into your session.
+lock, runs at most once an hour, and **ignores `--force`, `--adopt` and `--prune` even if passed** — a
+scheduler that could overwrite, claim or delete would eventually do it at 3am to something you cared
+about. It writes only to its own log and never to stdout, so it neither delays startup nor talks into
+your session.
 
 **If your skills are symlinked into a clone, none of this is needed to see an edit** — saving a
 `SKILL.md` is live instantly, and the scheduler exists only to run the `git pull` for you.

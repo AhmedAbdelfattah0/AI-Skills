@@ -37,7 +37,8 @@ node scripts/cli.mjs install --target codex|gemini|agents|antigravity|all   # ot
 node scripts/cli.mjs update               # refresh the source, then re-sync what it installed
 node scripts/cli.mjs update --check       # report what would change; write nothing
 node scripts/cli.mjs update --prune       # also drop skills that no longer exist upstream
-node scripts/cli.mjs update --force       # overwrite copies you edited after installing them
+node scripts/cli.mjs update --force       # overwrite a copy WE installed that you edited since
+node scripts/cli.mjs update --adopt       # take over a directory nobody recorded installing
 node scripts/cli.mjs update --auto        # the unattended run: locked, throttled, silent, timid
 node scripts/cli.mjs autoupdate           # is automatic updating on? what ran last?
 node scripts/cli.mjs autoupdate --install # daily job + Claude Code SessionStart hook
@@ -63,6 +64,25 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
   then re-syncs from the checkout as it stands. An `update` has no business stashing, rebasing, or
   discarding your work. Via `npx github:…` there is nothing to pull — npm re-resolves the GitHub spec
   to `origin/HEAD` on every run, so that path is always already fresh.
+- **Three outcomes, three flags — and they are deliberately not one.** A copy we
+  installed and you have not touched is refreshed with no flag. A copy we installed
+  that you have since edited needs `--force`. A directory that merely shares a name
+  with one of our skills, which no manifest records us installing, needs `--adopt`.
+  Collapsing the last two into `--force` meant "force an update" silently claimed
+  arbitrary same-named content belonging to somebody else.
+- **A manifest is only trusted when it came from THIS library.** Install records the
+  normalised `git remote origin` alongside the path; `sameLibrary()` compares it, and
+  a mismatch makes every record in that directory foreign. Without it, checkout B
+  reads checkout A's hashes, concludes "unchanged", and overwrites A's content with
+  no flag at all — a fork or a stale branch quietly wins. A manifest predating the
+  field falls back to the recorded source path.
+- **Install and update both build-then-swap, never destroy-then-write.** `applySkill`
+  stages a complete copy under `<dest>/.ai-skills-tmp/`, renames the old aside,
+  promotes the staged one, and only then drops the backup; any failure rolls back.
+  Deleting first meant a full disk or an interrupt left no skill at all, and the
+  catch had nothing to restore from. The staging directory is a DOT-directory
+  because a sibling named `security.new` holds a `SKILL.md` and would be scanned as
+  a skill of its own while it exists.
 - **Provenance lives in `<skills-dir>/.ai-skills-manifest.json`,** written by `install` and updated by
   `update`: source path, commit, mode, and a content hash per copied skill. That hash is the only thing
   that can tell a **stale** skill from one you **edited in place** — byte-level twins with opposite
@@ -88,13 +108,23 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
   could overwrite or delete would eventually do it at 3am to something that mattered), and buffers its
   output so a no-op run prints nothing at all. It speaks only when something changed, was declined, or
   failed.
-- **The hook uses `async: true` and redirects to the log.** Both matter: async keeps session startup
-  instant, and the redirect is load-bearing because `SessionStart` **stdout is injected into the session
-  as context** — an updater that narrates itself into every conversation is a tax on every prompt.
-  The hook is identified for install/remove by two independent substrings of its command, never one
-  phrase: the paths are quoted, so the command reads `cli.mjs" update --auto`, and a single phrase
-  spanning that quote silently matches nothing. It did — install stacked duplicates and remove was a
-  no-op until this was fixed.
+- **The hook is EXEC form — `command` plus `args`, no shell — and nothing redirects.** A shell string
+  was three latent bugs at once: `&&`/`||` are syntax errors in Windows PowerShell 5.1, so SessionStart
+  never reached node there; a home or repo path containing a quote or `$(...)` broke the quoting or
+  executed a substitution; and a `>>` redirect is opened *before* node starts, so an absent state
+  directory killed the hook before it could recreate it. `update --auto` now opens its own log after
+  creating the directory, and writes **nothing** to stdout — which is what keeps it out of the session's
+  context, `SessionStart` stdout being injected there. For the same open-before-start reason, launchd
+  gets no `StandardOutPath` and systemd no `StandardOutput`.
+- **systemd values are quoted and `%`-escaped.** `ExecStart` splits on whitespace, so an unquoted
+  `AI_SKILLS_HOME="/home/me/AI Skills"` installs a timer that can never run the CLI.
+- **The hook's identity is the absolute path of THIS `cli.mjs`.** Matching loose substrings (`cli.mjs`
+  plus `update --auto`) also claims another checkout's updater, or any unrelated
+  `/opt/tool/cli.mjs update --auto`. Both the exec-form `args` and the legacy shell string are
+  recognised, so `--remove` can still clean up hooks written by earlier versions.
+- **`settings.json` is written atomically** — temp sibling, `fsync`, rename — because truncating it in
+  place means an interrupt or a full disk leaves partial JSON, and partial JSON disables **every**
+  setting in the file.
 - **`autoupdate` lives in `scripts/autoupdate.mjs`,** not in `cli.mjs`. `cli.mjs` keeps ownership of the
   paths and state and passes them in, so neither file defines them twice. Scheduler installation is
   refused outright from an `npx` cache — that directory is deleted between runs, so a job pointing at
