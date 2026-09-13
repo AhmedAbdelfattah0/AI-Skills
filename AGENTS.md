@@ -358,6 +358,11 @@ Three rules, each of which exists because it was broken:
 - **Write each edit as you make it, not at the end of a batch.** A script that
   accumulates several replacements and writes once will silently discard all of
   them if a later assertion fails. Assert per replacement, and write per file.
+- **Never put a line break inside a match anchor you typed from memory.** Exact-match
+  replacement fails on the two things reconstruction always gets wrong: line wrapping
+  and leading indentation — a wrapped list item, or a YAML block scalar whose
+  continuation lines each carry two spaces. Anchor on one short distinctive phrase
+  from a single line, or read the line range and use the bytes it returns.
 - **Verify a claim against the file before making it.** After a multi-edit script,
   `grep` for a distinctive phrase from each edit. Before saying a check or rule
   exists, confirm it is in a tracked path rather than a scratch script. A commit
