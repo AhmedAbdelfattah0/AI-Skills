@@ -83,13 +83,27 @@ if [ -d "$HOME_DIR/.git" ]; then
     exit 1
   fi
   echo "📦 updating $HOME_DIR"
-  git -C "$HOME_DIR" fetch --quiet origin "$REF" || { echo "❌ fetch failed." >&2; exit 1; }
-  git -C "$HOME_DIR" checkout --quiet "$REF"     || { echo "❌ checkout of $REF failed." >&2; exit 1; }
-  git -C "$HOME_DIR" merge --ff-only --quiet "origin/$REF" || {
-    echo "❌ $HOME_DIR has diverged from origin/$REF and cannot fast-forward." >&2
+  # Fetch the ref and pin the exact commit it resolved to. FETCH_HEAD works for a
+  # TAG as well as a branch — `origin/<tag>` does not exist, so merging against it
+  # rejected the documented AI_SKILLS_REF=v1.0.0 path outright.
+  git -C "$HOME_DIR" fetch --quiet origin "$REF" || { echo "❌ fetch of $REF failed." >&2; exit 1; }
+  WANT="$(git -C "$HOME_DIR" rev-parse FETCH_HEAD)" || { echo "❌ could not resolve $REF." >&2; exit 1; }
+  git -C "$HOME_DIR" checkout --quiet "$REF" || { echo "❌ checkout of $REF failed." >&2; exit 1; }
+  git -C "$HOME_DIR" merge --ff-only --quiet "$WANT" 2>/dev/null || true
+
+  # HEAD must BE the fetched commit. "Clean" and "ff-only succeeded" do not
+  # establish that: a local branch carrying arbitrary commits on top of origin
+  # fast-forwards as "already up to date", and this script then executes that
+  # tree's scripts/cli.mjs.
+  HAVE="$(git -C "$HOME_DIR" rev-parse HEAD)"
+  if [ "$HAVE" != "$WANT" ]; then
+    echo "❌ $HOME_DIR is not at the fetched $REF." >&2
+    echo "   at:       $HAVE" >&2
+    echo "   expected: $WANT" >&2
     echo "   Refusing to run code from a tree that is not this project's $REF." >&2
+    echo "   (Local commits on top of $REF look 'clean' but are not this code.)" >&2
     exit 1
-  }
+  fi
 elif [ -e "$HOME_DIR" ]; then
   echo "❌ $HOME_DIR exists but is not a git repository. Refusing to touch it." >&2
   echo "   Move it aside, or set AI_SKILLS_HOME=<another dir> and re-run." >&2

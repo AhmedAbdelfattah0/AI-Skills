@@ -21,7 +21,7 @@
 
 import {
   readdirSync, readFileSync, existsSync, lstatSync, rmSync,
-  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync,
+  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync, rmdirSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -239,16 +239,40 @@ function acquireLock() {
   try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch { held = null; }
   if (held && holderIsAlive(held.pid) && !expired(held.at)) return null;
 
-  // Taking over a stale lock must not be read-check-unlink: two contenders both
-  // see the stale file, one unlinks and claims, and the other then unlinks THAT
-  // fresh lock and claims it too — both proceed, which is the concurrency this
-  // whole mechanism exists to prevent. rename() is the atomic primitive: for a
-  // given source path exactly one process can succeed, so the loser is told so
-  // by the OS rather than by a comparison it made a moment too early.
-  const claimed = `${lock}.taking.${token}`;
-  try { renameSync(lock, claimed); } catch { return null; }   // someone else got it
-  try { rmSync(claimed, { force: true }); } catch { /* best effort */ }
-  try { return claim(); } catch { return null; }              // a third party beat us to the fresh claim
+  // Breaking a stale lock needs its own exclusion, and rename alone does not
+  // provide it. Rename is atomic per source path, but the path can be RECREATED:
+  // A and B both see stale lock S; B renames S away, drops it, and claims a
+  // fresh lock; A then renames B's *new* lock away and claims the path too.
+  // Both run. That is an ABA, not a compare-and-swap.
+  //
+  // So: take a second, single-holder "breaker" lock, and only under it re-read
+  // the lock and confirm it is still the same dead holder before displacing it.
+  // Whoever loses the breaker simply stands down.
+  const breaker = `${lock}.breaker`;
+  try { writeFileSync(breaker, `${process.pid} ${Date.now()}\n`, { flag: 'wx' }); }
+  catch {
+    // A breaker older than any real takeover is itself debris from a crash.
+    try {
+      const at = Number(readFileSync(breaker, 'utf8').trim().split(/\s+/)[1]);
+      if (!expired(at)) return null;
+      rmSync(breaker, { force: true });
+      writeFileSync(breaker, `${process.pid} ${Date.now()}\n`, { flag: 'wx' });
+    } catch { return null; }
+  }
+  try {
+    // Re-read under the breaker. If it changed since we judged it, somebody
+    // already took over and this is now a live lock — leave it alone.
+    let still;
+    try { still = JSON.parse(readFileSync(lock, 'utf8')); } catch { still = null; }
+    if (still) {
+      if (still.token !== held?.token) return null;            // not the one we condemned
+      if (holderIsAlive(still.pid) && !expired(still.at)) return null;
+      rmSync(lock, { force: true });
+    }
+    try { return claim(); } catch { return null; }
+  } finally {
+    try { rmSync(breaker, { force: true }); } catch { /* next run's expiry check clears it */ }
+  }
 }
 
 // A timestamp we cannot trust is not evidence of a live run. A far-future `at`
@@ -395,6 +419,10 @@ function refreshSource({ check }) {
   return { status: before === after ? 'already' : 'pulled', before, after, branch, upstream };
 }
 
+// A user-facing error: reported as a message, not a stack trace, and — unlike
+// process.exit() — it unwinds through every `finally` on the way out.
+class CliError extends Error {}
+
 // ---- shared flag parsing ----------------------------------------------------
 
 // Resolve --target/--dest to destination dirs. Shared by install and update so
@@ -406,9 +434,11 @@ function resolveDests({ targetSpec, destOverride, fallback }) {
     : targetSpec.split(',').map((s) => s.trim()).filter(Boolean);
   const unknown = keys.filter((k) => !TARGETS[k]);
   if (unknown.length) {
-    console.error(`❌ unknown target(s): ${unknown.join(', ')}`);
-    console.error(`   valid: ${Object.keys(TARGETS).join(', ')}, all — or use --dest <path>`);
-    process.exit(1);
+    // Throw, never process.exit(): exit does not unwind `finally`, so an auto
+    // run dying here released its lock but never stamped the throttle, and every
+    // following session repeated the network fetch.
+    throw new CliError(`unknown target(s): ${unknown.join(', ')}\n`
+      + `   valid: ${Object.keys(TARGETS).join(', ')}, all — or use --dest <path>`);
   }
   const seen = new Map();
   for (const k of keys) if (!seen.has(TARGETS[k])) seen.set(TARGETS[k], k);
@@ -545,6 +575,11 @@ function cmdInstall(args) {
 // pulled again.
 function cmdUpdate(args) {
   try { runUpdate(args); }
+  catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    console.error(`❌ ${err.message}`);
+    process.exitCode = 1;
+  }
   finally { if (typeof pendingFinish === 'function') pendingFinish(); }
 }
 
@@ -671,14 +706,18 @@ function runUpdate(args) {
       say(`   ♻️  ${n}  restored from an interrupted update`);
       anyChange = true;
     }
-    const manifest = readManifest(dir) || { version: 1, skills: {} };
-    manifest.skills ||= {};
     // A manifest from a different library is evidence about somebody else's
-    // install, not ours. Read nothing from its hashes.
-    const trusted = sameLibrary(manifest);
+    // install. Suppressing its per-skill lookups was not enough: the object was
+    // still carried, so its `all` and `mode` stayed live, and the first write
+    // stamped OUR origin onto it — after which every retained foreign hash was
+    // trusted on the next run. Drop it entirely and start our own.
+    const foundManifest = readManifest(dir);
+    const trusted = !foundManifest || sameLibrary(foundManifest);
     if (!trusted) {
-      say(`   ⚠️  installed by a different library (${manifest.origin || manifest.source || 'unknown source'}) — its records are not ours to act on`);
+      say(`   ⚠️  installed by a different library (${foundManifest.origin || foundManifest.source || 'unknown source'}) — its records are not ours to act on`);
     }
+    const manifest = trusted ? (foundManifest || { version: 1, skills: {} }) : { version: 1, skills: {} };
+    manifest.skills ||= {};
     const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, foreign: 0, failed: 0 };
     const hints = new Set();
     say(`\n[${label}] ${dir}`);
@@ -697,7 +736,7 @@ function runUpdate(args) {
       if (names.length && !names.includes(name)) continue;
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
-      const record = trusted ? manifest.skills[name] : undefined;
+      const record = manifest.skills[name];
 
       let st = null;
       try { st = lstatSync(dst); } catch { /* not installed */ }
@@ -771,8 +810,14 @@ function runUpdate(args) {
           say(`   ! ${name}  no longer in the library — --prune to remove`);
           tally.skipped++; hints.add('--prune'); continue;
         }
+        // --adopt claims things we never installed. It must NOT double as
+        // permission to delete a skill we DID install and you have since edited
+        // — that is --force's job, and conflating them means adopting one
+        // unrelated directory silently authorises losing edits in every skill
+        // that happens to have been removed upstream.
         const stillOurs = record?.hash && record.hash === hashSkill(dst);
-        if (!stillOurs && !force && !adopt) {
+        const mayRemove = stillOurs || (record ? force : adopt);
+        if (!mayRemove) {
           say(`   ! ${name}  removed upstream but edited locally — --force to remove anyway`);
           tally.skipped++; hints.add('--force'); continue;
         }
@@ -861,15 +906,26 @@ function runUpdate(args) {
 // exists means a full disk, an unreadable source or an interrupt leaves nothing
 // there — and the catch cannot put it back, because the only copy was the one
 // just deleted. So: stage a complete copy, move the old one aside, promote the
-// staged one, and only then drop the backup. Every failure rolls back.
+// staged one, and only then drop the backup.
+//
+// The guarantee this provides is RECOVERABILITY, not "the destination is never
+// absent". Two renames are each atomic but the pair is not, so a kill between
+// them leaves the destination missing — with the content intact in the backup,
+// which recoverInterrupted() restores on the next run. If even the rollback
+// fails, the backup is kept and its path printed rather than cleaned up.
 //
 // Staging lives in a DOT-directory. A sibling named `security.new` would hold a
 // SKILL.md and be scanned as a skill in its own right for as long as it exists;
 // scanners skip dotfiles, and so does this CLI's own enumeration.
 function applySkill(src, dst, mode, manifest, name) {
+  // Staging paths are unique PER ATTEMPT. Shared `${name}.new` / `${name}.old`
+  // meant two processes touching the same skill would delete each other's
+  // staging tree, or promote one while the other was still copying it — which
+  // is precisely the half-written destination the staging exists to prevent.
   const tmpRoot = join(dirname(dst), '.ai-skills-tmp');
-  const staged = join(tmpRoot, `${name}.new`);
-  const backup = join(tmpRoot, `${name}.old`);
+  const attempt = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const staged = join(tmpRoot, `${name}.new.${attempt}`);
+  const backup = join(tmpRoot, `${name}.old.${attempt}`);
   let movedAside = false;
   let keepTmp = false;
   try {
@@ -905,7 +961,11 @@ function applySkill(src, dst, mode, manifest, name) {
     }
     return false;
   } finally {
-    if (!keepTmp) { try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* leave it */ } }
+    // Only this attempt's artifacts — another process may be mid-copy in here.
+    if (!keepTmp) {
+      for (const p of [staged, backup]) { try { rmSync(p, { recursive: true, force: true }); } catch { /* leave it */ } }
+      try { rmdirSync(tmpRoot); } catch { /* not empty, or gone — either is fine */ }
+    }
   }
 }
 
@@ -922,8 +982,10 @@ function recoverInterrupted(dir) {
   let entries = [];
   try { entries = readdirSync(tmpRoot); } catch { return restored; }
   for (const e of entries) {
-    if (!e.endsWith('.old')) continue;
-    const name = e.slice(0, -'.old'.length);
+    // `<name>.old.<attempt>` — the attempt suffix keeps concurrent runs apart.
+    const m = e.match(/^(.+)\.old\.[^.]+$/);
+    if (!m) continue;
+    const name = m[1];
     const dst = join(dir, name);
     if (existsSync(dst) || isLink(dst)) continue;          // the swap completed after all
     try { renameSync(join(tmpRoot, e), dst); restored.push(name); } catch { /* leave it in place */ }
@@ -1230,10 +1292,21 @@ Examples:
 
 // ---- dispatch --------------------------------------------------------------
 
+// Turn a CliError into a message + exit code; let anything else surface as the
+// bug it is.
+function runCommand(fn) {
+  try { fn(); }
+  catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    console.error(`❌ ${err.message}`);
+    process.exitCode = 1;
+  }
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
   case 'list': cmdList(); break;
-  case 'install': case 'add': cmdInstall(rest); break;
+  case 'install': case 'add': runCommand(() => cmdInstall(rest)); break;
   case 'update': case 'upgrade': cmdUpdate(rest); break;
   case 'autoupdate': case 'auto': cmdAutoupdate(rest); break;
   case 'validate': case 'lint': cmdValidate(); break;

@@ -44,8 +44,14 @@ const isOurHook = (h, cliPath) => {
   if (typeof h.command !== 'string') return false;
   const at = h.command.indexOf(cliPath);
   if (at === -1) return false;
+  // Bounded on BOTH sides. Without a leading boundary, our own
+  // /home/u/repo/scripts/cli.mjs matches inside a DIFFERENT installation at
+  // /backup/home/u/repo/scripts/cli.mjs — and install or remove then deletes
+  // that stranger's hook.
+  const before = h.command.slice(0, at);
   const after = h.command.slice(at + cliPath.length);
-  return /^["']?\s/.test(after) && /(^|\s)update(\s|$)/.test(after) && after.includes('--auto');
+  if (before !== '' && !/[\s"']$/.test(before)) return false;
+  return /^["']?(\s|$)/.test(after) && /(^|\s)update(\s|$)/.test(after) && /(^|\s)--auto(\s|$)/.test(after);
 };
 
 const isWin = platform() === 'win32';
@@ -188,7 +194,20 @@ function editHook(install, cliPath) {
   // read and every future dotfiles update silently stops applying. Write beside
   // the real file instead, and leave the link alone.
   let target = file;
-  try { if (lstatSync(file).isSymbolicLink()) target = realpathSync(file); } catch { /* not a link, or absent */ }
+  let link = null;
+  try { link = lstatSync(file).isSymbolicLink(); } catch { link = null; }   // null = absent
+  if (link) {
+    try {
+      target = realpathSync(file);
+    } catch {
+      // A symlink whose target cannot be resolved is not the same thing as no
+      // file at all. Writing here would replace the link with a regular file and
+      // quietly detach it from whatever it was meant to point at.
+      console.error(`❌ ${file} is a symlink that does not resolve.`);
+      console.error('   Fix or remove the link first — replacing it would detach your settings.');
+      return false;
+    }
+  }
 
   mkdirSync(dirname(target), { recursive: true });
   // Atomically. Truncating settings.json in place means a full disk, a short
