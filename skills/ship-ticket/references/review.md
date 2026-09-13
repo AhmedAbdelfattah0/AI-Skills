@@ -390,6 +390,31 @@ or the artifact changed; only the attack surfaces the fix touched. Append-only
 allowlisted output needs no re-review.
 
 
+### Weigh the round before you call it non-convergence. Count is not severity.
+
+The mutation budget stops a diff that **cannot converge** — not a round that
+produced a large number. Before surfacing a stop, sort the round's findings into
+**behaviour** and **record**: a shipped-behaviour defect (authorization, a
+clearance, a contract that forbids a value the service returns, a wrong figure)
+against prose (comments, docblocks, counts, artifact wording) and assertions that
+cannot fail. **State both numbers.**
+
+A round of thirty where twenty-nine are stale comments and one is a real leak is
+**a fix list, not a non-convergence signal** — and presenting it as one argues for
+amputating working scope on evidence that does not support it. Prose churn is
+expected in a repository whose comments are the design record; it says nothing
+about whether the code is settling.
+
+**And a finding is itself a record entry, so it drifts like one.** Before a finding
+becomes an argument to stop, re-verify it — especially one that says *another
+record is false*, which is the shape most likely to be wrong, because it is derived
+rather than observed. **A correct general mechanism does not refute a claim about a
+specific case: instantiate the case.** Reading the function and reasoning from its
+rule is not the same as running the fixture's own inputs through it — the inputs
+are what the claim depends on. Where a stop would rest on such findings, get an
+independent ruling on them first; a stop argued from findings that do not survive
+review costs more than the round it was avoiding.
+
 ### Dispositions — every finding gets exactly one
 
 | | When | Requires |
