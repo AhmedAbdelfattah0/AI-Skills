@@ -187,5 +187,10 @@ Never let an unbounded external wait silently become the run's critical path.
 ## PR-side bots are not a gate
 
 Once the PR is open, CodeRabbit's GitHub app and any Codex cloud review wired to
-the repo may re-review the same diff. Read them only if they have already posted.
-Never wait on one.
+the repo may re-review the same diff. **Never wait on one, and never feed one back
+into a concluded run.** The terminal verdict ended that run; a bot finding arriving
+afterwards is input to a *new* approved run, exactly like a finding reported next
+week. Treating it as one more thing to fix and re-review is how a bounded phase
+becomes unbounded again through a door nobody guarded.
+
+Read them if they have already posted, and record anything real as a follow-up.

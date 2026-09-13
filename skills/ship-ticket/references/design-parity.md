@@ -67,17 +67,28 @@ against `design_ref` at all three layers:
 
 Run this complete comparison once, over `F0`.
 
-**Use the repository's parity harness first whenever one exists.** Run its render,
-snapshot, DOM or component comparisons across every owned screen, required state,
-shipped locale and text direction, bind the output to `F0`, and hand those
-mechanical differences to pass A as deterministic evidence. On a bilingual RTL
-project this is the difference between reading every node twice by hand and
-reading only what a harness cannot see.
+**Use the repository's parity harness first where it compares against the pin.**
+Run its render, snapshot, DOM or component comparisons across the owned screens,
+required states, shipped locales and directions it covers, bind the output to
+`F0`, and hand those mechanical differences to pass A as deterministic evidence.
+On a bilingual RTL project this is the difference between reading every node twice
+by hand and reading only what a harness cannot see.
 
-**Do not manually repeat what the harness already compared** — nodes,
-declarations, states or directions. Reserve the model's own read for visual
-hierarchy, interaction feel, and rendering defects outside the harness's
-demonstrated scope.
+**A harness substitutes for a dimension only if it demonstrably compares the `F0`
+implementation against the pinned `design_ref` for that dimension, state and
+locale.** This is the whole test, and most harnesses fail it: a snapshot suite
+compares the implementation to *its own committed snapshot*, which moves when the
+implementation moves. Such a suite proves the screen did not change unintentionally
+— it says nothing about whether the screen matches the design, and accepting it as
+parity evidence would let design drift through unseen while the run reported the
+dimension covered.
+
+So, per dimension: **compared against the pin** → the model does not repeat it;
+**anything else** → supplementary evidence only, and the independent node and
+declaration read still runs. Record which dimensions the harness actually covered.
+
+Whatever the harness covered, the model's own read always keeps visual hierarchy,
+interaction feel, and rendering defects outside the harness's demonstrated scope.
 
 If no suitable harness exists, declare `PARITY | MANUAL — no repository harness`.
 The complete manual comparison still runs; the ~20-minute REVIEW target is not

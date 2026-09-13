@@ -34,9 +34,30 @@ Prefer stable symbols, selectors, rule IDs, test names, route names and manifest
 IDs. Replace hand counts with lists or derived presentation values.
 
 Apply record repairs as one batch before `F0`. Then hash each reviewed prefix and
-make it immutable. The only later repository writes allowed are exact,
-schema-defined slots for reviewer identities, manifest IDs, outcomes, timings
-and finding dispositions. They are filled once from reviewer output.
+make it immutable.
+
+**What the hashed prefix covers, and what it deliberately does not.** The prefix is
+the *narrative*: every claim, count, citation and conclusion a reader would check.
+It stops above a delimited **run-state block** that is outside the digest by
+construction. That block is the only place later writes land, and it holds exactly:
+
+```
+mutation_round        incremented at the barrier, derived from the batches below
+batches[]             one entry per post-BUILD repair batch: phase, what changed
+reviewer_identity     round-1 pass identities, then the terminal reviewer
+manifest_ids          F0, and the F1 candidate if a repair happened
+outcomes              the terminal verdict and its sub-outcomes
+timings               phase start/end, agent time apart from human and CI waits
+dispositions          one per finding
+```
+
+Nothing narrative may enter that block, and nothing in it may be rewritten once
+written — `batches[]` and `dispositions` append, the rest fill exactly once.
+
+**`mutation_round` is derived, never edited in place.** It is `batches[].length`.
+A barrier that writes a batch entry increments it as a consequence; there is no
+separate scalar to update inside the frozen narrative, which is what made the
+counter and the freeze contradict each other.
 
 A post-`F0` record mismatch, narrative edit or correction request ends the current
 run. Historical finding locators stay bound to their source manifest; they are
@@ -119,8 +140,20 @@ In order:
 7. For each UI change, add its dependency-closed parity impact slice:
    changed nodes, selectors, declarations, tokens, states, translation keys and
    affected owned-screen consumers.
-8. Run only the affected deterministic commands.
-9. Snapshot the candidate as `F1` and balance the packet.
+8. **Re-derive the trust boundaries of `F1`, and compare against PROVE's frozen
+   inventory.** A repair can add or move a route, a middleware, a rendering sink
+   or a control path *after* the attacks ran — and a brand-new surface has no
+   abuse test, no inventory entry, and nothing in CI can invent one. Existing
+   tests only catch regressions on surfaces somebody already enumerated.
+   - **No new boundary** → say so in the packet and continue.
+   - **A boundary moved, on an already-enumerated surface** → re-run that
+     surface's committed abuse tests. Green, recorded, continue.
+   - **A boundary is genuinely new** → this repair needs coverage that does not
+     exist. **End the run unshipped** and name the surface. Writing the abuse
+     test here would be a second repair batch, which is the loop this phase was
+     rebuilt to remove.
+9. Run only the affected deterministic commands.
+10. Snapshot the candidate as `F1` and balance the packet.
 
 Every change between `F0` and `F1` must belong to an attributed change unit.
 Record text, comments, docblocks and artifact prefixes remain unchanged. An
@@ -138,8 +171,11 @@ Run one sighted reviewer independent of the builder when any of these applies:
 - attacks ran;
 - the ticket is security-sensitive.
 
-An ordinary non-UI ticket with no attacks and no round-1 findings may accept its
-clean `F0` result without another dispatch.
+**Every run gets exactly one terminal verdict — there is no clean-`F0` shortcut.**
+A run that skipped it would carry no `reviewer_identity` and no signature, which is
+the one thing this phase exists to produce. Where `F1 == F0` the dispatch is cheap:
+the reviewer is handed the unchanged manifest and confirms the round-1 result, and
+that confirmation *is* the verdict.
 
 Give the terminal reviewer:
 
@@ -171,7 +207,9 @@ For each repaired or rejected finding it decides whether the finding was real,
 whether the disposition was correct, whether the repair addressed it and whether
 the repair caused a regression.
 
-It does not repeat pass A, pass B, pass C or the attacks. For parity it consumes
+It does not repeat pass A, pass B, pass C or the attacks — barrier 1 step 8 is
+what guarantees the repair introduced no surface the frozen attack evidence never
+covered. For parity it consumes
 the complete `F0` comparison and checks only the recorded impact slice against
 the pinned reference. For security it reviews the runtime evidence that PROVE
 already generated.

@@ -194,17 +194,23 @@ repro: the failing test that proves the secure behaviour, then the implementatio
 
 ## The mutation budget
 
-PROVE may need repair cycles; REVIEW may not. `mutation_round` starts at `0` in
-the approved plan and counts every post-BUILD repository write batch before the
-terminal verdict:
+PROVE may need repair cycles; REVIEW may not. `mutation_round` counts every
+post-BUILD repository write batch before the terminal verdict:
 
 - a PROVE repair batch;
 - the one pre-`F0` record-sweep repair batch, if it changes anything;
 - barrier 1's code-and-test repair batch.
 
-Read the value from the plan immediately before each batch. Increment it in the
-same batch whenever code, tests, comments, docs or artifacts changed. A read-only
-validation spends nothing.
+**It is derived, not stored.** `mutation_round` is the length of `batches[]` in the
+plan's run-state block — the delimited region that sits outside the frozen
+narrative digest. A batch appends its entry and the count follows. There is no
+scalar to read-then-edit inside the frozen prefix, which is what previously made
+the counter and the record freeze contradict each other: every real repair would
+have had to either break the count or trip the mismatch that ends the run.
+
+Appending a batch entry is a write to the run-state block, never to the narrative,
+so it is not a record mismatch. A read-only validation appends nothing and
+therefore spends nothing.
 
 Always validate mutation 3. If validation requires another write, end the current
 run before making it. Owner approval cannot extend the counter inside that run;
@@ -637,7 +643,8 @@ completion is worse than a loud failure.
 
 | On disk | Means | Do |
 |---|---|---|
-| `.specs/plans/<TICKET>.md`, `approval_status: approved` | the plan is settled | confirm it still stands, re-enter after the phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
+| `.specs/plans/<TICKET>.md`, `approval_status: approved`, **and no terminal verdict recorded** | the plan is settled and the run stopped before REVIEW concluded | confirm it still stands, re-enter after the phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
+| a recorded **terminal verdict of anything but PASS** | this run already concluded | ✋ STOP. **This row overrides the one above.** A terminal verdict is the end of that run, not a phase to re-enter — resuming past it is the recursion this phase was rebuilt to remove. Continuation needs a new approved plan and a new run record |
 | `.specs/plans/<TICKET>.md`, `pending` or absent | a previous run stopped *at* the approval ask | take it back through approval. Do not build on it |
 | `mutation_round` > 0 | rounds were already spent | read it, carry it forward. **Never auto-reset** |
 | a ticket branch | work exists | use it, rebased. WIP commits → ✋ STOP for the preserve-or-squash decision |
