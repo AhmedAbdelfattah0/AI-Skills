@@ -95,6 +95,20 @@ if [ -d "$HOME_DIR/.git" ]; then
   # establish that: a local branch carrying arbitrary commits on top of origin
   # fast-forwards as "already up to date", and this script then executes that
   # tree's scripts/cli.mjs.
+  # git's own index flags can hide a modified file from `status --porcelain` and
+  # from checkout, so a clean-looking tree at the right commit can still carry a
+  # rewritten scripts/cli.mjs — which this script then executes. Refuse when any
+  # path is flagged (lowercase letters and S in ls-files -v mean
+  # assume-unchanged / skip-worktree).
+  FLAGGED="$(git -C "$HOME_DIR" ls-files -v | grep -c '^[a-zS]' || true)"
+  if [ "$FLAGGED" -ne 0 ]; then
+    echo "❌ $HOME_DIR has files marked assume-unchanged or skip-worktree." >&2
+    echo "   Those hide local modifications from git, and this script runs code" >&2
+    echo "   from that tree. Clear them (git update-index --no-skip-worktree …)" >&2
+    echo "   or re-clone into a different AI_SKILLS_HOME." >&2
+    exit 1
+  fi
+
   HAVE="$(git -C "$HOME_DIR" rev-parse HEAD)"
   if [ "$HAVE" != "$WANT" ]; then
     echo "❌ $HOME_DIR is not at the fetched $REF." >&2

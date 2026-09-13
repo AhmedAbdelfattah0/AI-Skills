@@ -88,6 +88,16 @@ function frontmatter(md) {
   return { fm, name: nameM ? nameM[1] : null, description };
 }
 
+// Like walk(), but yields directories and symlinks as entries in their own right
+// — hashing needs to see an empty directory and must not follow a link.
+function walkAll(dir, onEntry) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, e.name);
+    onEntry(full);
+    if (e.isDirectory()) walkAll(full, onEntry);               // isDirectory() is false for a symlink
+  }
+}
+
 function walk(dir, onFile) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, e.name);
@@ -173,14 +183,21 @@ function hashSkill(dir) {
   // and kill the entire update, rather than making this one skill undecidable —
   // which is what a null is, and callers already treat it as "do not touch".
   try {
-    const files = [];
-    walk(dir, (f) => { if (!isNoise(basename(f))) files.push(f); });
-    files.sort();
+    const entries = [];
+    walkAll(dir, (p) => { if (!isNoise(basename(p))) entries.push(p); });
+    entries.sort();
     const h = createHash('sha256');
-    for (const f of files) {
-      h.update(relative(dir, f).replace(/\\/g, '/'));
+    for (const p of entries) {
+      const st = lstatSync(p);
+      h.update(relative(dir, p).replace(/\\/g, '/'));
       h.update('\0');
-      h.update(readFileSync(f));
+      // Type and the executable bit are part of what a skill IS: swapping a file
+      // for a symlink to identical bytes, or flipping +x on a bundled script,
+      // left the old content-only hash unchanged — so an edited copy read as
+      // untouched and was overwritten with no --force.
+      if (st.isSymbolicLink()) { h.update('L\0'); h.update(readlinkSync(p)); }
+      else if (st.isDirectory()) { h.update('D\0'); }          // empty dirs count too
+      else { h.update(`F${st.mode & 0o111 ? 'x' : '-'}\0`); h.update(readFileSync(p)); }
       h.update('\0');
     }
     return h.digest('hex');
@@ -233,51 +250,44 @@ function acquireLock() {
   const mine = JSON.stringify({ pid: process.pid, token, at: Date.now() });
 
   const claim = () => { writeFileSync(lock, mine + '\n', { flag: 'wx' }); return releaser(token); };
-  try { return claim(); } catch { /* held — fall through and judge the holder */ }
+  try { return claim(); } catch { /* held — judge the holder below */ }
 
-  let held;
-  try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch { held = null; }
-  if (held && holderIsAlive(held.pid) && !expired(held.at)) return null;
+  let held = null;
+  let readable = true;
+  try { held = JSON.parse(readFileSync(lock, 'utf8')); }
+  catch (err) { if (err.code === 'ENOENT') { try { return claim(); } catch { return null; } } readable = false; }
 
-  // Breaking a stale lock needs its own exclusion, and rename alone does not
-  // provide it. Rename is atomic per source path, but the path can be RECREATED:
-  // A and B both see stale lock S; B renames S away, drops it, and claims a
-  // fresh lock; A then renames B's *new* lock away and claims the path too.
-  // Both run. That is an ABA, not a compare-and-swap.
-  //
-  // So: take a second, single-holder "breaker" lock, and only under it re-read
-  // the lock and confirm it is still the same dead holder before displacing it.
-  // Whoever loses the breaker simply stands down.
-  const breaker = `${lock}.breaker`;
-  try { writeFileSync(breaker, `${process.pid} ${Date.now()}\n`, { flag: 'wx' }); }
-  catch {
-    // A breaker older than any real takeover is itself debris from a crash.
-    try {
-      const at = Number(readFileSync(breaker, 'utf8').trim().split(/\s+/)[1]);
-      if (!expired(at)) return null;
-      rmSync(breaker, { force: true });
-      writeFileSync(breaker, `${process.pid} ${Date.now()}\n`, { flag: 'wx' });
-    } catch { return null; }
+  // A lock we cannot parse is debris, not a running process. Leaving it in place
+  // meant an empty or truncated file — a crash mid-write, a full disk — disabled
+  // automatic updates permanently and silently, because claim() then failed
+  // forever against a file nothing would ever remove.
+  if (readable && held && holderIsAlive(held.pid) && !expired(held.at)) return null;
+
+  // Displace it with rename-verify-restore, and NO second "breaker" lock: rename
+  // is atomic per path, but the path can be recreated, so the loser of a race can
+  // end up renaming the WINNER's fresh lock away (an ABA, not a compare-and-swap).
+  // Verifying what we actually moved — and putting it back when it is not the
+  // thing we condemned — is what closes that, and it needs no extra file whose
+  // own takeover would have the same problem one level down.
+  const condemned = readable ? held?.token : null;
+  const aside = `${lock}.stale.${token}`;
+  try { renameSync(lock, aside); } catch { return null; }        // someone else got there first
+  let moved = null;
+  try { moved = JSON.parse(readFileSync(aside, 'utf8')); } catch { moved = null; }
+  const sameThing = (moved?.token ?? null) === condemned;
+  if (!sameThing) {
+    // We moved a lock that appeared after we judged the old one. Put it back.
+    try { renameSync(aside, lock); } catch { /* nothing better available */ }
+    return null;
   }
-  try {
-    // Re-read under the breaker. If it changed since we judged it, somebody
-    // already took over and this is now a live lock — leave it alone.
-    let still;
-    try { still = JSON.parse(readFileSync(lock, 'utf8')); } catch { still = null; }
-    if (still) {
-      if (still.token !== held?.token) return null;            // not the one we condemned
-      if (holderIsAlive(still.pid) && !expired(still.at)) return null;
-      rmSync(lock, { force: true });
-    }
-    try { return claim(); } catch { return null; }
-  } finally {
-    try { rmSync(breaker, { force: true }); } catch { /* next run's expiry check clears it */ }
-  }
+  try { rmSync(aside, { force: true }); } catch { /* best effort */ }
+  try { return claim(); } catch { return null; }                 // a third party beat us to the fresh claim
 }
 
 // A timestamp we cannot trust is not evidence of a live run. A far-future `at`
 // makes `now - at` negative for as long as the clock says so, which would starve
-// every future update permanently.
+// every future update permanently. (There is no longer a separate breaker lock:
+// its own takeover had the same ABA the lock's did, one level down.)
 function expired(at) {
   if (!Number.isFinite(at)) return true;
   const age = Date.now() - at;
@@ -347,11 +357,13 @@ function git(args, cwd = REPO_ROOT) {
 // clone being moved or re-cloned elsewhere, which a path does not; and it differs
 // for a fork, which is exactly the case a path cannot tell apart.
 function originUrl() {
-  // package.json ships with the tree, so this identity survives what a git
-  // remote and a checkout path do not: an npx install, whose source is a cache
-  // directory that is neither a git repo nor at the same path twice. Without it
-  // every npx update distrusted its own previous install.
-  const raw = git(['remote', 'get-url', 'origin']) || packageRepoUrl();
+  // The git remote ONLY. package.json was tried here and is not provenance: it
+  // is content inside the candidate tree, and a fork keeps the upstream
+  // `repository` field as a matter of course. Run such a fork through npx — no
+  // .git, so the field is all there is — and it would present itself as the
+  // canonical library and overwrite canonical installs with fork content, with
+  // no flag. A self-asserted identity cannot answer "who installed this".
+  const raw = git(['remote', 'get-url', 'origin']);
   if (!raw) return null;
   // Normalise the spellings of one remote: scp-form vs https, optional .git.
   return raw.trim()
@@ -363,23 +375,21 @@ function originUrl() {
     .toLowerCase();
 }
 
-function packageRepoUrl() {
-  try {
-    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
-    const r = pkg.repository;
-    return (typeof r === 'string' ? r : r?.url) || null;
-  } catch { return null; }
-}
-
 // Was this destination populated by THIS library? A manifest written by a fork,
 // or by an unrelated repo that happens to ship a skill of the same name, must not
 // have its hashes trusted — that is what lets one checkout silently overwrite
 // another's content.
 function sameLibrary(manifest) {
-  // A recorded origin is authoritative: it was written by whoever installed, and
-  // a mismatch is proof of a different library. Absent one — a manifest predating
-  // this field — the source path is weaker evidence but is still evidence, and
-  // refusing it outright would strand every install made before the field existed.
+  // A recorded origin is authoritative: it came from a git remote, which is
+  // configuration about where the tree CAME FROM rather than content inside it.
+  // Absent one — a manifest predating the field — the source path is weaker
+  // evidence but is still evidence, and refusing it outright would strand every
+  // install made before the field existed.
+  //
+  // A source with no git remote at all (an npx cache) is INDETERMINATE, not
+  // trusted: it can offer nothing about its own provenance that a fork could not
+  // offer identically. Such installs need --adopt once, which is the honest
+  // price of not being able to tell them apart.
   if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
   if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
   // No identity evidence at all. Absence of a contradiction is not proof of
@@ -609,7 +619,18 @@ function runUpdate(args) {
     const got = acquireLock();
     if (!got) return;               // another run is already doing this
     release = got;
-    process.on('exit', release);    // last-ditch, for a signal that skips finally
+    // `finally` does not run when a signal kills the process, and Node's 'exit'
+    // event fires only for a normal end or process.exit() — so a SIGTERM during
+    // a fetch left the throttle unstamped and every later session refetched.
+    // Handle the catchable signals, finalize, then exit with the conventional
+    // code. SIGKILL and power loss remain uncoverable, by definition.
+    process.on('exit', release);
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      // pendingFinish, not finish: this runs before finish is declared, and a
+      // signal landing in that window would hit the temporal dead zone. The
+      // module-level binding is null until there is something to run.
+      process.on(sig, () => { try { pendingFinish?.(); } finally { process.exit(sig === 'SIGINT' ? 130 : 143); } });
+    }
   }
   // Buffered so a no-op run prints nothing at all — a SessionStart hook that
   // chatters every time is a hook people turn off.
@@ -773,8 +794,14 @@ function runUpdate(args) {
         }
         if (target && normalizeTarget(target) === normalizeTarget(src)) {
           if (!existsSync(target)) {
-            // The skill was deleted upstream; the link now dangles.
-            if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
+            // The skill was deleted upstream; the link now dangles. Pointing at
+            // our skills dir proves where a link POINTS, not who made it — a
+            // hand-made link has the same target as an installed one, so without
+            // a record this is not ours to delete.
+            if (!record && !adopt) {
+              say(`   ! ${name}  dangling link we have no record of installing — --adopt to remove it too`);
+              tally.skipped++; hints.add('--adopt');
+            } else if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
             else if (check) { say(`   - ${name}  (dangling — would remove)`); tally.removed++; anyChange = true; }
             else { removeExisting(dst); delete manifest.skills[name]; say(`   - ${name}  (dangling — removed)`); tally.removed++; anyChange = true; }
             continue;
@@ -927,6 +954,7 @@ function applySkill(src, dst, mode, manifest, name) {
   const staged = join(tmpRoot, `${name}.new.${attempt}`);
   const backup = join(tmpRoot, `${name}.old.${attempt}`);
   let movedAside = false;
+  let promoted = false;
   let keepTmp = false;
   try {
     mkdirSync(tmpRoot, { recursive: true });
@@ -940,12 +968,23 @@ function applySkill(src, dst, mode, manifest, name) {
     // 2. Swap. Both renames are within one directory tree, so each is atomic.
     if (existsSync(dst) || isLink(dst)) { renameSync(dst, backup); movedAside = true; }
     renameSync(staged, dst);
+    promoted = true;                 // <- the commit point; everything after is cleanup
 
-    // 3. Only now is the old copy expendable.
-    removeExisting(backup);
+    // 3. Record what landed BEFORE touching the backup. A failure while deleting
+    //    the backup used to return false with the new content already installed
+    //    and no hash recorded — leaving a stale baseline that made the fresh copy
+    //    look edited on the next run.
     manifest.skills[name] = { mode, hash: mode === 'copy' ? hashSkill(dst) : null };
+    try { removeExisting(backup); }
+    catch { console.error(`   ⚠️  ${name}: installed, but its backup could not be removed — see ${backup}`); keepTmp = true; }
     return true;
   } catch (err) {
+    // Past the commit point the new content is installed; do not roll back over it.
+    if (promoted) {
+      console.error(`   ⚠️  ${name}: installed, but cleanup failed: ${err.message}`);
+      keepTmp = true;
+      return true;
+    }
     // Put the original back if we got as far as moving it.
     let rolledBack = true;
     if (movedAside && !existsSync(dst) && !isLink(dst)) {
