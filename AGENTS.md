@@ -38,8 +38,13 @@ node scripts/cli.mjs update               # refresh the source, then re-sync wha
 node scripts/cli.mjs update --check       # report what would change; write nothing
 node scripts/cli.mjs update --prune       # also drop skills that no longer exist upstream
 node scripts/cli.mjs update --force       # overwrite copies you edited after installing them
+node scripts/cli.mjs update --auto        # the unattended run: locked, throttled, silent, timid
+node scripts/cli.mjs autoupdate           # is automatic updating on? what ran last?
+node scripts/cli.mjs autoupdate --install # daily job + Claude Code SessionStart hook
+node scripts/cli.mjs autoupdate --remove  # take both back out
 
 # Bash alternatives (macOS/Linux/Git Bash/WSL):
+./install.sh                              # root-level curl bootstrap (clone + install + autoupdate)
 ./scripts/install.sh [--copy] [--target <t,..>|--dest <path>] [names...]  # full mirror of cli install
 ./scripts/validate.sh                     # thin bash wrapper around the Node validator
 ./scripts/package.sh [<name>]             # build dist/<name>.skill zips (needs python3)
@@ -69,6 +74,34 @@ node scripts/cli.mjs update --force       # overwrite copies you edited after in
   `install <a> <b>` tracks only those two. `--prune` (opt-in) removes skills deleted upstream.
 - **`.DS_Store`, `Thumbs.db`, `desktop.ini` and `.git` are excluded** from both the content hash and
   the copy. Hashing a stray `.DS_Store` made `update` want to "refresh" a skill identical to its source.
+- **Automatic updates: the honest framing.** A skill is a passive file. Nothing in this library ever
+  executes, so — unlike `claude update`, which works because `claude` is a program that runs and can
+  check for itself — there is no moment at which the library could notice it is stale. "Automatic"
+  necessarily means installing something that DOES run. `autoupdate --install` installs two such
+  things: a **daily scheduled job** (launchd on macOS, a systemd user timer on Linux, schtasks on
+  Windows) and a **Claude Code `SessionStart` hook**, so a session never opens on stale skills. Both
+  invoke `update --auto`. Neither can push: GitHub cannot reach a laptop, so both poll.
+- **`update --auto` is the unattended contract,** and is deliberately more timid than the interactive
+  command: it takes a lock in the state dir (a launchd tick and a SessionStart can fire in the same
+  second, and two `cpSync`s racing on one destination leave a half-written skill), skips entirely if it
+  ran within the hour, **ignores `--force` and `--prune` even when they are passed** (a scheduler that
+  could overwrite or delete would eventually do it at 3am to something that mattered), and buffers its
+  output so a no-op run prints nothing at all. It speaks only when something changed, was declined, or
+  failed.
+- **The hook uses `async: true` and redirects to the log.** Both matter: async keeps session startup
+  instant, and the redirect is load-bearing because `SessionStart` **stdout is injected into the session
+  as context** — an updater that narrates itself into every conversation is a tax on every prompt.
+  The hook is identified for install/remove by two independent substrings of its command, never one
+  phrase: the paths are quoted, so the command reads `cli.mjs" update --auto`, and a single phrase
+  spanning that quote silently matches nothing. It did — install stacked duplicates and remove was a
+  no-op until this was fixed.
+- **`autoupdate` lives in `scripts/autoupdate.mjs`,** not in `cli.mjs`. `cli.mjs` keeps ownership of the
+  paths and state and passes them in, so neither file defines them twice. Scheduler installation is
+  refused outright from an `npx` cache — that directory is deleted between runs, so a job pointing at
+  it would break.
+- **For the author of this repo, none of the above is needed to see an edit.** Symlinked skills are live
+  the moment a file changes; the scheduler exists only to run the `git pull`. That is also why the curl
+  bootstrap clones to a stable `~/.ai-skills` and symlinks from there.
 - **Install mode is auto-chosen:** from a clone the CLI **symlinks** (edits/`git pull` go live with no
   re-install); from an ephemeral `npx` cache it **copies** (a symlink into a temp cache would dangle).
   `--copy`/`--link` override. On Windows the CLI uses directory **junctions** (no admin needed).

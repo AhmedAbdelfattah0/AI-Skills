@@ -28,6 +28,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { autoupdate } from './autoupdate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -167,6 +168,54 @@ function hashSkill(dir) {
     h.update('\0');
   }
   return h.digest('hex');
+}
+
+// ---- unattended-run state --------------------------------------------------
+//
+// A scheduled job and a session hook can fire at the same second. Two cpSync
+// calls racing on one destination leave a half-written skill, and git's own
+// index lock only covers the pull — so the whole run takes a lock. State is
+// keyed by source path: two clones on one machine must not share a lock.
+function stateDir() {
+  const base = process.env.XDG_CACHE_HOME
+    || (isWin ? (process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')) : join(homedir(), '.cache'));
+  const key = createHash('sha256').update(REPO_ROOT).digest('hex').slice(0, 12);
+  return join(base, 'ai-skills', key);
+}
+
+const LOCK_STALE_MS = 10 * 60 * 1000;      // a run that outlives this crashed
+const THROTTLE_MS = 60 * 60 * 1000;        // three sessions in a row = one fetch
+
+// Returns a release() on success, or null if another run holds the lock.
+function acquireLock() {
+  const dir = stateDir();
+  mkdirSync(dir, { recursive: true });
+  const lock = join(dir, 'update.lock');
+  const release = () => { try { rmSync(lock, { force: true }); } catch { /* gone already */ } };
+  try {
+    writeFileSync(lock, `${process.pid} ${Date.now()}\n`, { flag: 'wx' });
+    return release;
+  } catch {
+    // Held. Steal it only if the holder is older than any real run could be.
+    try {
+      const age = Date.now() - Number(readFileSync(lock, 'utf8').trim().split(/\s+/)[1] || 0);
+      if (age > LOCK_STALE_MS) { rmSync(lock, { force: true }); writeFileSync(lock, `${process.pid} ${Date.now()}\n`); return release; }
+    } catch { /* unreadable — treat as held */ }
+    return null;
+  }
+}
+
+// True when the last unattended run was recent enough to skip this one.
+function throttled() {
+  try {
+    const at = Number(readFileSync(join(stateDir(), 'last-run'), 'utf8').trim());
+    return Number.isFinite(at) && Date.now() - at < THROTTLE_MS;
+  } catch { return false; }
+}
+
+function stampRun() {
+  try { mkdirSync(stateDir(), { recursive: true }); writeFileSync(join(stateDir(), 'last-run'), String(Date.now())); }
+  catch { /* a missing stamp only costs an extra run */ }
 }
 
 // ---- provenance: the source ------------------------------------------------
@@ -356,9 +405,29 @@ function cmdInstall(args) {
 function cmdUpdate(args) {
   const { names, flags, targetSpec, destOverride } = parseFlags(args);
   const check = flags.has('--check') || flags.has('-n') || flags.has('--dry-run');
-  const force = flags.has('--force') || flags.has('-f');
-  const prune = flags.has('--prune');
+  const auto = flags.has('--auto');
+  // Unattended runs are deliberately timid: they never overwrite an edit and
+  // never delete anything. A scheduler that could do either would eventually do
+  // it at 3am to something the user cared about.
+  const force = !auto && (flags.has('--force') || flags.has('-f'));
+  const prune = !auto && flags.has('--prune');
   const noPull = flags.has('--no-pull');
+
+  // --auto: one runner at a time, not more than once an hour, silent unless
+  // there is something a human would want to know.
+  let release = () => {};
+  if (auto) {
+    if (throttled()) return;
+    const got = acquireLock();
+    if (!got) return;               // another run is already doing this
+    release = got;
+    process.on('exit', release);
+  }
+  // Buffered so a no-op run prints nothing at all — a SessionStart hook that
+  // chatters every time is a hook people turn off.
+  const out = [];
+  const say = (line) => (auto ? out.push(line) : console.log(line));
+  const flush = (worth) => { if (worth) for (const l of out) console.log(l); out.length = 0; };
 
   // 1. Refresh the source. Unlike install, update's default scope is every known
   //    target directory that exists — you install per-tool, but you update "my
@@ -369,7 +438,7 @@ function cmdUpdate(args) {
   const pull = (noPull && !check)
     ? { status: sourceIsEphemeral() ? 'ephemeral' : 'no-pull', branch: git(['rev-parse', '--abbrev-ref', 'HEAD']) }
     : refreshSource({ check });
-  reportSource(pull);
+  reportSource(pull, say);
 
   // Read the library only AFTER the refresh: a skill that arrives with the pull
   // has to be visible to the run that pulled it, or it is adopted one run late.
@@ -404,12 +473,12 @@ function cmdUpdate(args) {
     fallback: existingTargets.length ? existingTargets : [DEFAULT_TARGET],
   }).filter(({ label, dir }) => {
     if (existsSync(dir)) return true;
-    if (targetSpec || destOverride) console.log(`—  [${label}] ${dir} does not exist — nothing installed there`);
+    if (targetSpec || destOverride) say(`—  [${label}] ${dir} does not exist — nothing installed there`);
     return false;
   });
 
   if (!destDirs.length) {
-    console.log('\nNothing to update — no skills directory found. Run "install" first.');
+    say('\nNothing to update — no skills directory found. Run "install" first.');
     return;
   }
 
@@ -422,7 +491,7 @@ function cmdUpdate(args) {
     manifest.skills ||= {};
     const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, foreign: 0, failed: 0 };
     const hints = new Set();
-    console.log(`\n[${label}] ${dir}`);
+    say(`\n[${label}] ${dir}`);
 
     // Entries we own or might own: everything installed here, plus anything the
     // manifest says belongs to us but has since vanished from disk.
@@ -448,13 +517,13 @@ function cmdUpdate(args) {
       if (!st) {
         if (!available.includes(name)) continue;
         if (!manifest.all && !names.includes(name)) continue;
-        if (check) { console.log(`   + ${name}  (new upstream — would install)`); tally.added++; anyChange = true; continue; }
+        if (check) { say(`   + ${name}  (new upstream — would install)`); tally.added++; anyChange = true; continue; }
         // Ephemeral beats the recorded mode, exactly as in install: a clone-mode
         // manifest + an `npx … update` would otherwise symlink the new skill
         // into the npx cache, and dangle the moment that cache is cleaned.
         const mode = sourceIsEphemeral() ? 'copy' : (record?.mode || manifest.mode || 'link');
         if (applySkill(src, dst, mode, manifest, name)) {
-          console.log(`   + ${name}  (new upstream — installed)`);
+          say(`   + ${name}  (new upstream — installed)`);
           tally.added++; anyChange = true;
         } else tally.failed++;
         continue;
@@ -467,9 +536,9 @@ function cmdUpdate(args) {
         if (target && isUnder(SKILLS_DIR, target)) {
           if (!existsSync(target)) {
             // The skill was deleted upstream; the link now dangles.
-            if (!prune) { console.log(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
-            else if (check) { console.log(`   - ${name}  (dangling — would remove)`); tally.removed++; anyChange = true; }
-            else { removeExisting(dst); delete manifest.skills[name]; console.log(`   - ${name}  (dangling — removed)`); tally.removed++; anyChange = true; }
+            if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
+            else if (check) { say(`   - ${name}  (dangling — would remove)`); tally.removed++; anyChange = true; }
+            else { removeExisting(dst); delete manifest.skills[name]; say(`   - ${name}  (dangling — removed)`); tally.removed++; anyChange = true; }
             continue;
           }
           tally.live++;   // live via symlink: the source refresh already updated it
@@ -481,14 +550,14 @@ function cmdUpdate(args) {
         // must not be counted as a skip.
         if (manifest.source && target && isUnder(join(manifest.source, 'skills'), target)) {
           if (existsSync(target)) { tally.live++; continue; }
-          console.log(`   ! ${name}  link into ${manifest.source} is dangling — re-run update from that clone, or install here`);
+          say(`   ! ${name}  link into ${manifest.source} is dangling — re-run update from that clone, or install here`);
           tally.skipped++; continue;
         }
         // Only worth a line if it is a name this library actually ships, or one
         // we installed. A skills dir commonly holds symlinks to a completely
         // different collection; reporting each of those is pure noise.
         if (available.includes(name) || record) {
-          console.log(`   ~ ${name}  symlink to ${target || 'an unreadable path'} — not ours, left alone`);
+          say(`   ~ ${name}  symlink to ${target || 'an unreadable path'} — not ours, left alone`);
           tally.skipped++;
         } else tally.foreign++;
         continue;
@@ -500,17 +569,17 @@ function cmdUpdate(args) {
         // elsewhere — and plain files — and neither is our business to report on.
         if (!record) continue;
         if (!prune) {
-          console.log(`   ! ${name}  no longer in the library — --prune to remove`);
+          say(`   ! ${name}  no longer in the library — --prune to remove`);
           tally.skipped++; hints.add('--prune'); continue;
         }
         const stillOurs = record?.hash && record.hash === hashSkill(dst);
         if (!stillOurs && !force) {
-          console.log(`   ! ${name}  removed upstream but edited locally — --force to remove anyway`);
+          say(`   ! ${name}  removed upstream but edited locally — --force to remove anyway`);
           tally.skipped++; hints.add('--force'); continue;
         }
-        if (check) { console.log(`   - ${name}  (removed upstream — would remove)`); tally.removed++; anyChange = true; continue; }
+        if (check) { say(`   - ${name}  (removed upstream — would remove)`); tally.removed++; anyChange = true; continue; }
         removeExisting(dst); delete manifest.skills[name];
-        console.log(`   - ${name}  (removed upstream — removed)`);
+        say(`   - ${name}  (removed upstream — removed)`);
         tally.removed++; anyChange = true;
         continue;
       }
@@ -518,7 +587,7 @@ function cmdUpdate(args) {
       const dstHash = hashSkill(dst);
       if (dstHash === hashSkill(src)) {
         if (incoming.has(name)) {
-          console.log(`   ↑ ${name}  (would update — the fast-forward changes it)`);
+          say(`   ↑ ${name}  (would update — the fast-forward changes it)`);
           tally.updated++; anyChange = true;
         } else tally.current++;
         continue;
@@ -527,13 +596,13 @@ function cmdUpdate(args) {
       // It differs from the source. Stale, or edited? Only the manifest knows.
       const untouchedSinceInstall = record?.hash && record.hash === dstHash;
       if (!untouchedSinceInstall && !force) {
-        console.log(`   ! ${name}  ${record?.hash ? 'edited after install' : 'installed before provenance tracking'} — left alone (--force to overwrite)`);
+        say(`   ! ${name}  ${record?.hash ? 'edited after install' : 'installed before provenance tracking'} — left alone (--force to overwrite)`);
         tally.skipped++; hints.add('--force');
         continue;
       }
-      if (check) { console.log(`   ↑ ${name}  (would update${untouchedSinceInstall ? '' : ' — FORCED over local edits'})`); tally.updated++; anyChange = true; continue; }
+      if (check) { say(`   ↑ ${name}  (would update${untouchedSinceInstall ? '' : ' — FORCED over local edits'})`); tally.updated++; anyChange = true; continue; }
       if (applySkill(src, dst, 'copy', manifest, name)) {
-        console.log(`   ↑ ${name}  updated${untouchedSinceInstall ? '' : ' (forced over local edits)'}`);
+        say(`   ↑ ${name}  updated${untouchedSinceInstall ? '' : ' (forced over local edits)'}`);
         tally.updated++; anyChange = true;
       } else tally.failed++;
     }
@@ -555,23 +624,32 @@ function cmdUpdate(args) {
     if (tally.skipped) parts.push(`${tally.skipped} skipped`);
     if (tally.foreign) parts.push(`${tally.foreign} from another collection, untouched`);
     if (tally.failed) parts.push(`${tally.failed} failed`);
-    console.log(`   ${check ? '🔎' : '✅'} ${parts.length ? parts.join(', ') : 'nothing installed here'}`);
+    say(`   ${check ? '🔎' : '✅'} ${parts.length ? parts.join(', ') : 'nothing installed here'}`);
     if (tally.skipped) { anySkipped = true; for (const h of hints) allHints.add(h); }
     if (tally.failed) process.exitCode = 1;
   }
 
+  if (auto) {
+    // Worth waking a human for: something changed, something was declined, or a
+    // run failed. "Everything was already fine" is not news.
+    flush(anyChange || anySkipped || process.exitCode === 1);
+    stampRun();
+    release();
+    return;
+  }
+
   if (check && anyChange) {
-    console.log('\n🔎 dry run — nothing was written. Re-run without --check to apply.');
+    say('\n🔎 dry run — nothing was written. Re-run without --check to apply.');
   } else if (anySkipped) {
     // Never report success over declined work: a skipped skill is the one case
     // the user has to decide about, and burying it under "up to date" is how it
     // stays stale forever.
     const how = [...allHints].join(' / ') || '--force';
-    console.log(`\n⚠️  up to date except for the skipped skill(s) above — re-run with ${how} to act on them.`);
+    say(`\n⚠️  up to date except for the skipped skill(s) above — re-run with ${how} to act on them.`);
   } else if (check) {
-    console.log('\n✅ everything is up to date.');
+    say('\n✅ everything is up to date.');
   } else if (before && before !== sourceCommit()) {
-    console.log(`\n   source moved ${before.slice(0, 7)} → ${sourceCommit().slice(0, 7)}`);
+    say(`\n   source moved ${before.slice(0, 7)} → ${sourceCommit().slice(0, 7)}`);
   }
 }
 
@@ -591,33 +669,47 @@ function applySkill(src, dst, mode, manifest, name) {
 
 // Say what happened to the source in one line, including the cases where the
 // refresh was deliberately declined — a silent skip would read as "up to date".
-function reportSource(r) {
+function reportSource(r, say = console.log) {
   const at = r.branch ? ` (${r.branch})` : '';
   switch (r.status) {
     case 'no-pull':
-      console.log(`📦 source: --no-pull — re-syncing from ${REPO_ROOT}${at} as it stands.`); break;
+      say(`📦 source: --no-pull — re-syncing from ${REPO_ROOT}${at} as it stands.`); break;
     case 'ephemeral':
-      console.log('📦 source: npx cache — already fetched fresh from GitHub for this run.'); break;
+      say('📦 source: npx cache — already fetched fresh from GitHub for this run.'); break;
     case 'not-a-clone':
-      console.log(`📦 source: ${REPO_ROOT} is not a git clone — re-syncing from it as-is.`); break;
+      say(`📦 source: ${REPO_ROOT} is not a git clone — re-syncing from it as-is.`); break;
     case 'no-upstream':
-      console.log(`📦 source: branch${at} has no upstream — re-syncing from the local checkout.`); break;
+      say(`📦 source: branch${at} has no upstream — re-syncing from the local checkout.`); break;
     case 'dirty':
-      console.log(`📦 source: working tree${at} has uncommitted changes — not pulling; re-syncing from it as-is.`); break;
+      say(`📦 source: working tree${at} has uncommitted changes — not pulling; re-syncing from it as-is.`); break;
     case 'pull-failed':
-      console.log(`📦 source: git pull --ff-only${at} failed (diverged from ${r.upstream}?) — re-syncing from the local checkout.`); break;
+      say(`📦 source: git pull --ff-only${at} failed (diverged from ${r.upstream}?) — re-syncing from the local checkout.`); break;
     case 'fetch-failed':
-      console.log(`📦 source: git fetch${at} failed — comparing against the local checkout only.`); break;
+      say(`📦 source: git fetch${at} failed — comparing against the local checkout only.`); break;
     case 'already':
-      console.log(`📦 source: already at ${r.after?.slice(0, 7)}${at}.`); break;
+      say(`📦 source: already at ${r.after?.slice(0, 7)}${at}.`); break;
     case 'pulled':
-      console.log(`📦 source: pulled ${r.before?.slice(0, 7)} → ${r.after?.slice(0, 7)}${at}.`); break;
+      say(`📦 source: pulled ${r.before?.slice(0, 7)} → ${r.after?.slice(0, 7)}${at}.`); break;
     case 'check':
-      console.log(r.behind
+      say(r.behind
         ? `📦 source: ${r.behind} commit(s) behind ${r.upstream}${at} — a real run would fast-forward.`
         : `📦 source: up to date with ${r.upstream}${at}.`);
       break;
   }
+}
+
+// Automatic updates live in ./autoupdate.mjs; this hands it the paths and state
+// that cli.mjs already owns, so there is one definition of each, not two.
+function cmdAutoupdate(args) {
+  let lastRun = null;
+  try { lastRun = Number(readFileSync(join(stateDir(), 'last-run'), 'utf8').trim()) || null; } catch { /* never run */ }
+  autoupdate(args, {
+    repoRoot: REPO_ROOT,
+    cliPath: fileURLToPath(import.meta.url),
+    stateDir: stateDir(),
+    ephemeral: sourceIsEphemeral(),
+    lastRun,
+  });
 }
 
 // Port of scripts/validate.sh — same three invariants, cross-platform.
@@ -806,6 +898,9 @@ Usage:
   ai-skills install <name> [name...]  install only the named skill(s)
   ai-skills update                    bring already-installed skills up to date
   ai-skills update <name> [name...]   update only the named skill(s)
+  ai-skills autoupdate                show whether automatic updates are on
+  ai-skills autoupdate --install      turn them on (daily job + Claude Code hook)
+  ai-skills autoupdate --remove       turn them off again
   ai-skills validate                  lint every skill (same checks as CI)
   ai-skills help                      show this message
 
@@ -835,6 +930,18 @@ Update flags (--target / --dest work here too):
   left alone until you pass --force. By default it updates every skills
   directory that exists, not just Claude Code's.
 
+Autoupdate flags:
+  --install / --remove  turn automatic updates on or off
+  --job-only            only the daily scheduled job
+  --hook-only           only the Claude Code SessionStart hook
+
+  Skills are passive files — nothing of ours ever runs, so there is no moment at
+  which the library could notice it is stale by itself. Automatic updates
+  therefore install two things that DO run: a daily job (launchd / systemd /
+  schtasks) and a SessionStart hook, both calling "update --auto". That run is
+  locked against itself, throttled to once an hour, never prunes, never
+  overwrites a skill you edited, and prints nothing unless something changed.
+
 Examples:
   npx github:AhmedAbdelfattah0/AI-Skills install security researcher
   npx github:AhmedAbdelfattah0/AI-Skills install --target codex
@@ -843,7 +950,8 @@ Examples:
   node scripts/cli.mjs list
   node scripts/cli.mjs update --check
   node scripts/cli.mjs update --prune
-  npx github:AhmedAbdelfattah0/AI-Skills update`);
+  npx github:AhmedAbdelfattah0/AI-Skills update
+  node scripts/cli.mjs autoupdate --install`);
 }
 
 // ---- dispatch --------------------------------------------------------------
@@ -853,6 +961,7 @@ switch (cmd) {
   case 'list': cmdList(); break;
   case 'install': case 'add': cmdInstall(rest); break;
   case 'update': case 'upgrade': cmdUpdate(rest); break;
+  case 'autoupdate': case 'auto': cmdAutoupdate(rest); break;
   case 'validate': case 'lint': cmdValidate(); break;
   case undefined: case 'help': case '--help': case '-h': cmdHelp(); break;
   default:

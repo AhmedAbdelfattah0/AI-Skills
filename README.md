@@ -13,7 +13,17 @@ required. A bash equivalent is kept for people who prefer a shell script on Unix
 
 ## Install
 
-### Option A — `npx` (no clone needed, works everywhere)
+### Option A — one line, with automatic updates
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AhmedAbdelfattah0/AI-Skills/main/install.sh | bash
+```
+
+Clones into `~/.ai-skills`, symlinks every skill into `~/.claude/skills`, and turns on automatic
+updates. Needs `git` and Node 18+. Overrides: `AI_SKILLS_TARGET=all` for every tool,
+`AI_SKILLS_HOME=<dir>` to keep the clone elsewhere, `AI_SKILLS_NO_AUTOUPDATE=1` to skip scheduling.
+
+### Option B — `npx` (no clone needed, works everywhere)
 
 Requires [Node.js](https://nodejs.org) ≥ 18 (ships with `npx`). This runs the installer straight from
 GitHub:
@@ -49,7 +59,7 @@ npx github:AhmedAbdelfattah0/AI-Skills update
 
 On Windows, run the same lines in PowerShell or Command Prompt — `npx` is cross-platform.
 
-### Option B — clone, then install (best if you'll edit or update skills)
+### Option C — clone, then install (best if you'll edit or update skills)
 
 ```bash
 git clone https://github.com/AhmedAbdelfattah0/AI-Skills.git
@@ -66,6 +76,24 @@ node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI 
 From a clone, skills are **symlinked** by default, so `git pull` (or editing a `SKILL.md`) updates what
 Claude Code sees with no re-install. Use `--copy` if you'd rather have real files. On **Windows** the
 CLI creates directory *junctions* (no admin rights needed); if a symlink is ever refused, add `--copy`.
+
+### Option D — bash installer (macOS / Linux / Git Bash / WSL)
+
+Same behaviour as Option C, no Node required:
+
+```bash
+./scripts/install.sh                     # all skills, symlinked (Claude Code)
+./scripts/install.sh security researcher # only these
+./scripts/install.sh generate-ticket ship-ticket   # the ticket workflow pair
+./scripts/install.sh --copy              # all skills, real files
+./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
+./scripts/install.sh --target all        # Claude + Codex + Gemini + Antigravity at once
+./scripts/install.sh --dest <path>       # any other tool's skills dir
+```
+
+### Verify
+
+After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
 
 ## Staying up to date
 
@@ -97,26 +125,35 @@ The source refresh is a `git pull --ff-only`, and only from a clean tree with an
 checkout is dirty, has no upstream, or has diverged, `update` says so and re-syncs from the checkout as
 it stands — it will not stash, rebase, or discard anything.
 
-> **Optional:** run `npm link` in the clone to get an `ai-skills` command on your PATH, then use
-> `ai-skills install …` anywhere instead of `node scripts/cli.mjs …`.
-
-### Option C — bash installer (macOS / Linux / Git Bash / WSL)
-
-Same behaviour as Option B, no Node required:
+### Never running it yourself
 
 ```bash
-./scripts/install.sh                     # all skills, symlinked (Claude Code)
-./scripts/install.sh security researcher # only these
-./scripts/install.sh generate-ticket ship-ticket   # the ticket workflow pair
-./scripts/install.sh --copy              # all skills, real files
-./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
-./scripts/install.sh --target all        # Claude + Codex + Gemini + Antigravity at once
-./scripts/install.sh --dest <path>       # any other tool's skills dir
+node scripts/cli.mjs autoupdate --install   # turn it on
+node scripts/cli.mjs autoupdate             # what's on, and when it last ran
+node scripts/cli.mjs autoupdate --remove    # turn it all off
 ```
 
-### Verify
+Worth being straight about why this takes machinery at all: `claude update` works because `claude` is
+a **program that runs** and can check for itself on startup. Skills are just files. Nothing here ever
+executes, so nothing can notice it's out of date — and GitHub can't push to your laptop. Automatic
+updates therefore install two things that *do* run, both of which poll:
 
-After installing, run `/skills` (or restart) in Claude Code and confirm the skills appear.
+| | what it is | when it fires |
+| --- | --- | --- |
+| **Daily job** | launchd (macOS), systemd user timer (Linux), schtasks (Windows) | once a day, whether or not you're working |
+| **SessionStart hook** | `~/.claude/settings.json` | when a Claude Code session starts, so it never opens on stale skills |
+
+Both call `update --auto`, which is deliberately more cautious than the command you'd type: it takes a
+lock, runs at most once an hour, prints nothing unless something actually changed, and **ignores
+`--force` and `--prune` even if passed** — a scheduler that could overwrite or delete would eventually
+do it at 3am to something you cared about. The hook runs in the background and writes only to a log, so
+it neither delays startup nor talks into your session.
+
+**If your skills are symlinked into a clone, none of this is needed to see an edit** — saving a
+`SKILL.md` is live instantly, and the scheduler exists only to run the `git pull` for you.
+
+> **Optional:** run `npm link` in the clone to get an `ai-skills` command on your PATH, then use
+> `ai-skills install …` anywhere instead of `node scripts/cli.mjs …`.
 
 ## Use with other AI tools (Codex, Gemini CLI, Antigravity, GLM, …)
 
@@ -196,11 +233,13 @@ Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line descripti
 AI-Skills/
 ├── skills/<name>/SKILL.md         # + optional references/ and scripts/
 ├── scripts/
-│   ├── cli.mjs                    # cross-platform CLI: list / install / validate
+│   ├── cli.mjs                    # the CLI: list / install / update / autoupdate / validate
+│   ├── autoupdate.mjs             # scheduled job + SessionStart hook, install and removal
 │   ├── install.sh                 # bash installer (Unix) — all or named skills, --copy
 │   ├── import.sh                  # optional: pull other installed skills into the repo
-│   ├── validate.sh               # bash mirror of the validator (Unix; needs bash ≥ 4)
+│   ├── validate.sh                # thin wrapper — execs the Node validator, not a second copy
 │   └── package.sh                 # build dist/<name>.skill zips for backup/sharing
+├── install.sh                     # curl|bash bootstrap: clone → install → autoupdate
 ├── package.json                   # exposes the `ai-skills` bin for npx / npm link
 ├── .github/workflows/validate.yml # CI runs `node scripts/cli.mjs validate` on push/PR
 └── README.md

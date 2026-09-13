@@ -12,6 +12,8 @@
   "files": [
     "skills",
     "scripts/cli.mjs",
+    "scripts/autoupdate.mjs",
+    "install.sh",
     "README.md",
     "CLAUDE.md"
   ],
@@ -19,7 +21,8 @@
     "list": "node scripts/cli.mjs list",
     "install:skills": "node scripts/cli.mjs install",
     "validate": "node scripts/cli.mjs validate",
-    "update:skills": "node scripts/cli.mjs update"
+    "update:skills": "node scripts/cli.mjs update",
+    "autoupdate": "node scripts/cli.mjs autoupdate"
   },
   "repository": {
     "type": "git",
