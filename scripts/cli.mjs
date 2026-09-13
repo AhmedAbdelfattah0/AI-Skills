@@ -406,7 +406,7 @@ function cmdUpdate(args) {
   for (const { label, dir } of destDirs) {
     const manifest = readManifest(dir) || { version: 1, skills: {} };
     manifest.skills ||= {};
-    const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, failed: 0 };
+    const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, foreign: 0, failed: 0 };
     const hints = new Set();
     console.log(`\n[${label}] ${dir}`);
 
@@ -458,8 +458,13 @@ function cmdUpdate(args) {
           tally.live++;   // live via symlink: the source refresh already updated it
           continue;
         }
-        console.log(`   ~ ${name}  symlink to ${target || 'an unreadable path'} — not ours, left alone`);
-        tally.skipped++;
+        // Only worth a line if it is a name this library actually ships, or one
+        // we installed. A skills dir commonly holds symlinks to a completely
+        // different collection; reporting each of those is pure noise.
+        if (available.includes(name) || record) {
+          console.log(`   ~ ${name}  symlink to ${target || 'an unreadable path'} — not ours, left alone`);
+          tally.skipped++;
+        } else tally.foreign++;
         continue;
       }
 
@@ -496,7 +501,7 @@ function cmdUpdate(args) {
       // It differs from the source. Stale, or edited? Only the manifest knows.
       const untouchedSinceInstall = record?.hash && record.hash === dstHash;
       if (!untouchedSinceInstall && !force) {
-        console.log(`   ! ${name}  ${record?.hash ? 'edited after install' : 'unknown provenance'} — left alone (--force to overwrite)`);
+        console.log(`   ! ${name}  ${record?.hash ? 'edited after install' : 'installed before provenance tracking'} — left alone (--force to overwrite)`);
         tally.skipped++; hints.add('--force');
         continue;
       }
@@ -522,6 +527,7 @@ function cmdUpdate(args) {
     if (tally.live) parts.push(`${tally.live} live via symlink`);
     if (tally.current) parts.push(`${tally.current} already current`);
     if (tally.skipped) parts.push(`${tally.skipped} skipped`);
+    if (tally.foreign) parts.push(`${tally.foreign} from another collection, untouched`);
     if (tally.failed) parts.push(`${tally.failed} failed`);
     console.log(`   ${check ? '🔎' : '✅'} ${parts.length ? parts.join(', ') : 'nothing installed here'}`);
     if (tally.skipped) { anySkipped = true; for (const h of hints) allHints.add(h); }
