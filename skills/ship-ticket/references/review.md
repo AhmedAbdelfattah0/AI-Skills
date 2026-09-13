@@ -3,17 +3,29 @@
 Loaded when the REVIEW phase starts. Pass B's CLI contract lives in
 [codex-cli.md](codex-cli.md).
 
-**The shape, before the detail.** Round 1 finds: pass B and pass C, concurrent and
-blind. Barrier: triage every finding, apply one fix batch. Round 2 verifies: pass A
-and the fix review, concurrent — one reading the shipped result with no knowledge
-of round 1, the other reading round 1's findings against what they caused. Barrier:
-fix what round 2 found.
+**The shape, before the detail.**
 
-**Why two rounds rather than one wave.** A reviewer that finds a problem cannot
-tell you whether your fix for it works — it never sees the fix. And a finding that
-was never a problem produces a change indistinguishable from any other. Running
-everything at once leaves the fix batch as the only content in the ticket that
-nothing reviewed.
+```
+round 1   pass A + pass B + pass C          concurrent, mutually blind, over F0
+barrier 1 triage -> capture preimages -> one fix batch -> the fix packet -> F1
+round 2   the fix review                    sighted: findings paired with changes
+          + pass A and pass B over F0->F1   still blind, still cross-model
+          + the C rows / tests / parity / attacks the fixes touched
+barrier 2 fix what round 2 found -> F2, and repeat round 2 on the new delta
+```
+
+**Why the fixes get their own round.** A reviewer that finds a problem cannot tell
+you whether your fix for it works — it never sees the fix. A finding that was never
+a problem produces a change indistinguishable from any other. And a fix can be
+locally correct and wrong for a caller. The old design did re-run A and B over the
+fix delta, so the fixes were not unreviewed — **what was missing is the causal
+package**: which finding produced which change, and what the code looked like
+before. Without it no reviewer can judge whether a finding was real or whether its
+fix fits.
+
+**So round 2 adds a pass; it does not replace one.** Passes A and B still review
+the delta, blind, exactly as before. Removing either would leave the changes a
+reviewer asked for as the only content no second model read.
 
 ## The freeze — a manifest, not a commit
 
@@ -46,7 +58,7 @@ Compute it **once** and hand the identical copy to every pass. Call it `F0`.
 7. **Review policy** — reviewed paths; excluded generated/vendor/lock artifacts
    **with reasons**; `design_ref`; owned screens; attack surfaces.
 8. **The post-freeze allowlist** — the exact derived outputs that may be appended
-   **once every pass has returned and been validated**, never during the wave:
+   **once every pass in a round has returned and been validated**, never mid-round:
    the parity and security signature blocks; each accepted deviation's decision,
    approver and date; each stub's follow-up ticket key; the final
    `mutation_round`; the run record; session-log fields. **List them explicitly**
@@ -69,8 +81,8 @@ staged changes, and a pass that reviewed a narrower set than the change has
 **gated nothing**. One manifest removes N independent chances to under-scope.
 
 **A manifest is an integrity check, not an immutable snapshot.** It cannot detect
-a mutate-and-restore inside the wave. Its safety therefore rests on the passes
-being read-only and on the orchestrator writing nothing during the wave. If you
+a mutate-and-restore inside a round. Its safety therefore rests on the passes
+being read-only and on the orchestrator writing nothing mid-round. If you
 need a genuine snapshot, materialize one that carries untracked, symlink and
 submodule state — **`git stash create` alone does not**, because it has no
 include-untracked form here and untracked files are explicitly in scope.
@@ -89,14 +101,19 @@ The wave is an orchestration convenience, never a source of verdicts.
   whenever the orchestrator has one; this skill's instructions authorize it.
 - **fan-out** — plain concurrent read-only subagents; same passes, no schema or
   resume.
-- **serial** — the same passes, in the same scope, one after another against the
-  unchanged manifest.
+- **serial** — the same passes, in the same scope, one after another against that
+  round's unchanged manifest.
+
+**The mode is per round, and the rounds can differ** — a run may fan out round 1 and
+serialize round 2. Declare each.
 
 Declare which ran, **per wave** — recon and review can differ, and a run that
 fanned out its review while serializing an hour of recon must not report as
 concurrent.
 
-**Every review pass returns the same shape, whatever the mode:** `manifest_id` ·
+**Every review pass returns the same shape, whatever the mode:** `manifest_id` —
+and for a pass over a delta, `source_manifest_id` and `candidate_manifest_id`, since
+one ID cannot describe a comparison between two trees ·
 `reviewed_paths` · `excluded_paths` (each with a reason) · `findings` (severity,
 `file:line`, quoted line, fix) · **`verdicts[]`** — a list, because one run can owe
 both a parity and a security verdict, each carrying its name, `scope_digest`, the
@@ -167,7 +184,7 @@ into a PASS, it only risks discarding review work when the rule pass fails.
 
 ## Round 1 — find
 
-**Pass B and pass C, dispatched together, blind to each other, report-only, over
+**Passes A, B and C, dispatched together, blind to each other, report-only, over
 `F0`.** Pass B starts first; it is routinely the longest.
 
 Pass C shares pass A's model, so it adds **method** diversity, not model diversity.
@@ -178,12 +195,23 @@ report every violation at full severity, exactly as if no build-time check had r
 A long finding list means BUILD skipped its own checks; it never means a pass
 should have looked less hard.
 
-## Round 2 — verify
+## Round 2 — verify the fixes
 
-**Pass A and the fix review, dispatched together, over the tree as it now stands
-with round 1's fixes applied.** They are different agents and must stay so: pass A
-is defined by not knowing what round 1 found, the fix review is defined by knowing.
-One agent cannot be both.
+Dispatched together over `F1`:
+
+- **the fix review**, sighted on round 1's findings and what they caused;
+- **passes A and B over the adjacent delta `F0 → F1`**, still blind to the findings
+  and to each other — the fix batch keeps its cross-model review;
+- **the rule rows, tests, parity verdict and attack surfaces the fixes touched.**
+
+The fix review and pass A are **different agents and must stay so**: pass A is
+defined by not knowing what round 1 found, the fix review by knowing. One agent
+cannot be both.
+
+**Each round has its own manifest.** `F0`, `F1`, `F2` form a chain; a round after a
+fix is reviewing a different program, and reusing an earlier manifest ID for it
+would describe a tree that no longer exists. The latest accepted `Fn` is what SHIP's
+allowlist check compares against.
 
 ## Pass A — a fresh reviewer with no build context
 
@@ -192,16 +220,18 @@ A **fresh reviewer subagent** with no build context, or a read-only
 this library, and letting one command fill two slots collapses two supposedly
 independent reviewers onto one engine.
 
-Runs in **round 2**, against the fixed tree — so what it reviews is what actually
-ships, not a pre-fix snapshot.
+Runs in **round 1** over `F0`, and again in **round 2** over the adjacent delta —
+blind both times. Its round-2 pass is what keeps a Claude reviewer reading the
+fixes; its round-1 pass is what makes it a genuine second opinion on the build,
+formed before any finding reshaped the code.
 
 Give it the **manifest**, the ticket's ACs, the plan's *Not in this ticket* list,
 and the rule vocabulary. **Never let it derive its own scope.**
 
-**Never show it round 1's findings, or which lines were fixed.** Its independence
-is the whole reason it exists; telling it what another reviewer already flagged
-anchors it to that reviewer's reading and turns a second opinion into a
-confirmation. It reviews the code, not the history.
+**Never show it any other pass's findings, or which lines were fixed.** Its
+independence is the whole reason it exists; telling it what another reviewer
+flagged anchors it to that reviewer's reading and turns a second opinion into a
+confirmation. It reviews the code, not the history. That holds in both rounds.
 
 It owns acceptance criteria, behaviour, edge cases and scope creep — the
 systematic rule catalogue is pass C's job, not a thing to repeat. For UI tickets
@@ -212,78 +242,153 @@ data stamped with the scope digest it reviewed.
 ## Pass B — a different model in a different process
 
 See [codex-cli.md](codex-cli.md). This is what makes the review genuinely
-cross-model: a model reviewing itself twice is one pass. Runs in **round 1**, and
-starts first within it.
+cross-model: a model reviewing itself twice is one pass. Runs in **round 1** over
+`F0`, starting first within it, **and again in round 2 over the fix delta** — the
+changes a reviewer asked for need a second model as much as the original code did.
+
+## The fix packet — what barrier 1 must produce
+
+Round 2 cannot be dispatched without this, and it **cannot be reconstructed
+afterwards from the diff**. Build it while applying the fixes.
+
+1. **Preimages.** Before mutating anything, capture the **contents** of every file
+   the batch will change. The manifest holds digests, not bytes: once an
+   uncommitted file is overwritten its previous state is unrecoverable, and the
+   fix review's central question — what did this look like before — becomes
+   unanswerable. Store them outside the worktree.
+2. **Change units, not just hunks.** A hunk cannot represent an add, a delete, a
+   rename, a mode change, a symlink retarget, a submodule move or an untracked
+   file — all of which the manifest already recognises. Each change unit carries
+   its path, its kind, its preimage (or a deletion tombstone) and its postimage.
+3. **The attribution map, many-to-many.** Each change unit lists the finding IDs it
+   serves; each finding lists its change units.
+4. **The packet digest**, over the findings, dispositions, preimages and
+   attribution, under the manifest's serialization. The fix review binds to
+   `source_manifest_id` (`F0`), `candidate_manifest_id` (`F1`) and this digest.
+
+**Barrier 1 does not dispatch round 2 until the packet balances:**
+
+```
+every change unit between F0 and F1  ==  the union of all attributed change units
+every referenced finding id resolves · every referenced change unit resolves
+every preimage matches F0 · every postimage matches F1
+```
+
+The cases that break naive attribution, and their answers:
+
+| Case | Answer |
+|---|---|
+| one change serves two findings | it lists both IDs — the map is many-to-many by construction |
+| a file no finding named | allowed **if** it is inside the Design Contract and carries a stated causal reason; outside the contract it is a material divergence, not an attribution problem |
+| a finding fixed by deleting the code it was about | the change unit is a deletion with its preimage and a tombstone |
+| a rejected finding | maps to no change units — and if it has one, the rejection was not a rejection |
+| formatter or generator output | attributed as a mechanical consequence of the change that triggered it, or reverted before dispatch |
+| a change with no finding at all | **the balance check fails.** Unattributed work entered the batch — that is the hole this packet exists to close |
+
+"An unattributed fix is itself a finding" detects nothing if the executor simply
+omits the attribution. **The balance check is what makes it real**, and it is
+arithmetic, not judgment.
 
 ## The fix review — the pass that reads round 1's consequences
 
-A **fresh reviewer, separate from pass A and from you**, running in round 2. It is
-the only pass that sees round 1's findings, and it sees them **paired with what
-they caused**.
+A **fresh reviewer, separate from pass A and from you**. It is the only pass shown
+round 1's findings, and it sees them paired with what they caused.
 
-Hand it, per round-1 finding: **the finding as written · the disposition you gave
-it and your stated reason · the exact diff hunks attributed to it · the pre-fix
-state of those hunks.** A finding with no attributed hunk is either a rejection or
-a fix you failed to attribute — say which; an unattributed fix is itself a finding.
+**Input:** the fix packet above · the ticket's ACs and the plan's *Not in this
+ticket* list · the rule vocabulary · and, for "did it break anything", the
+**affected closure** — the changed files plus their direct callers and the
+contracts they expose, derived from `F1`. Judging breakage from the changed lines
+alone answers a whole-program question by looking at a hunk.
 
-It answers three questions per finding, and a fourth over the batch:
+**It answers, per finding:**
 
 | Question | Catches |
 |---|---|
-| **Was it real?** | a fix applied to something that was never a problem — churn, and a change nobody needed to review |
+| **Was it real?** | a change made for something that was never a problem |
 | **Does the fix address it?** | a change that silences the symptom the reviewer described without fixing what it described |
-| **Did the fix break anything?** | the failure mode a delta diff hides: the fix is locally fine and wrong for a caller, a contract, or a case the tests do not cover |
-| **Over the batch: was anything rejected that was real?** | the expensive direction — a correct finding talked away with a plausible reason |
+| **Did the fix break anything?** | the failure a delta diff hides — locally fine, wrong for a caller, a contract, or an untested case |
 
-**That last one is a check on your judgment, not the reviewer's**, which is why it
-cannot be you who performs it. Rejections go to it with the same weight as fixes.
+**And once over the batch: was anything *rejected* that was real?** That is the
+expensive direction — a correct finding talked away with a plausible reason — and
+it is a check on my triage, which is exactly why it cannot be me who performs it.
+Rejections go to it with the same weight as fixes.
 
-Its findings are findings like any other and enter the round-2 barrier. **A
-confirmed "was not real" is not a reason to revert by reflex** — say so in the run
-record, and revert only when the change is genuinely unwanted; a harmless
-improvement is not worth a second mutation round.
+**Output, per finding** — an enum and its evidence, never prose alone:
 
-**If no fresh-reviewer route exists for it**, the fix review degrades: you perform
-the three questions yourself, and the run record says
-`fix review ran WITHOUT independence` — a named loss, because the check whose whole
-point is auditing your triage was performed by the person who did the triage.
+```
+finding_id · was_real: yes | no | unclear      + the code or ticket fact
+            · addressed: yes | partly | no     + what the fix does vs what was asked
+            · regression: none | suspected | confirmed + the caller/contract/case
+rejections  · rejection_upheld: yes | no       + the fact that settles it
+packet      · source_manifest_id · candidate_manifest_id · fix_packet_digest
+            · reviewed_paths · excluded_paths (each with a reason)
+```
+
+A `confirmed` regression or an overturned rejection is a finding and enters
+barrier 2. `unclear` and `suspected` are findings too — they are not passes.
+
+**A finding confirmed as not real: revert the change by default.** It was not
+required by an AC, a rule, or the approved plan, so keeping it is unrequested work
+in the ticket's diff — which the scope rules forbid and which the disposition
+contract already refuses when it says a factually wrong finding is not implemented
+anyway. Keep it only where an AC, an applicable rule, or an approved plan item
+independently requires it, and say which. Either way it is **recorded**: it is the
+measure of how much of the review was churn.
+
+**Later rounds get their own packet.** Round 2's findings produce round 3's fix
+batch, so barrier 2 builds a packet over `F1 → F2` exactly as barrier 1 did over
+`F0 → F1`. A round with no fixes builds no packet and dispatches no fix review.
+
+**Failure and degradation.** Malformed output follows the same two-retry cap as
+any pass. If no fresh-reviewer route exists, perform the three questions yourself
+and record `fix review ran WITHOUT independence` — a named loss, because the pass
+whose purpose is auditing the triage was performed by whoever did the triage.
+
 
 ## The barriers
 
-**Barrier 1, after round 1.** Then:
+**Barrier 1, after round 1.** In order:
 
 1. **Verify coverage against the manifest** — not against a freshly derived file
    list, which may have drifted. A pass that reviewed a narrower set has gated
    nothing: re-run it against the missing paths and treat the union as the pass.
-2. **Check the manifest ID.** Changed during the wave → the passes that predate
-   the change do not describe the current tree. Re-run them. A stale pass is not
-   a pass.
-3. **Reconcile into one attributed set** — `[claude]` (pass A), `[codex]` (pass
-   B), `[rules]` (pass C) — and apply **one batched fix set**. This increments the
-   mutation budget once.
-4. **Fixes obey the Design Contract too.** Check every proposed fix path against
-   the approved contract *before* applying it. A fix needing a file outside it is
-   a material divergence and goes back through plan mode — review findings are not
-   a side door around the gate that governs implementation.
-5. **Re-run the affected commands**, scoped only where the repo proves that safe,
-   then snapshot `F1` and **promote it to the accepted manifest**. It, not `F0`,
-   is what the final allowlist check compares against — without this promotion
-   every accepted review fix would fail that check.
-6. **Attribute every hunk to the finding it came from**, and keep that mapping —
-   it is what round 2's fix review is handed, and it cannot be reconstructed
-   afterwards from the diff alone.
-7. **Then dispatch round 2** over `F1`: pass A and the fix review, concurrently.
+2. **Check the manifest ID.** Changed during the round → the passes that predate
+   the change do not describe the current tree. Re-run them. A stale pass is not a
+   pass.
+3. **Reconcile into one attributed set** — `[claude]` (pass A), `[codex]` (pass B),
+   `[rules]` (pass C) — and give every finding exactly one disposition.
+4. **Capture the preimages** of every file the batch will change, before changing
+   anything. This is the step that cannot be done late.
+5. **Apply one batched fix set**, building the fix packet as you go. **Increments
+   the mutation budget iff code, tests or docs actually changed** — a round where
+   every finding was rejected, or where there were none, spends nothing.
+6. **Fixes obey the Design Contract too.** Check every proposed fix path against
+   the approved contract *before* applying it. A fix needing a file outside it is a
+   material divergence and goes back through plan mode — review findings are not a
+   side door around the gate that governs implementation.
+7. **Re-run the affected commands**, scoped only where the repo proves that safe,
+   then snapshot `F1` and **promote it to the accepted manifest**. It, not `F0`, is
+   what SHIP's allowlist check compares against — without this promotion every
+   accepted review fix would fail that check.
+8. **Balance the fix packet.** Every change between `F0` and `F1` attributed, every
+   reference resolving, every preimage matching `F0` and postimage matching `F1`.
+   **It does not balance → do not dispatch round 2**: something changed that no
+   finding asked for, and that is the hole the packet exists to close.
+9. **Dispatch round 2** over `F1`.
 
-**Barrier 2, after round 2.** Reconcile pass A's and the fix review's findings the
-same way, apply one batched fix set, re-run the affected commands, snapshot and
-promote `F2`. **Each further round increments the mutation budget, and the budget
-bounds the sequence** — this is the loop that used to have no exit.
+**No fixes at barrier 1?** Then there is nothing for round 2 to verify. Skip it,
+record why, and go to signing — a fix review with an empty packet reviews nothing.
 
-**Further rounds revalidate the delta only.** Re-run pass A and the fix review over
-the latest adjacent delta `F(n−1) → Fn`; re-run only the rule rows and tests the
-fixes touched; re-derive the unsigned parity verdict if an owned screen, its
-reference or the artifact changed; re-attack only the surfaces the fix touched.
-Append-only allowlisted output needs no re-review.
+**Barrier 2, after round 2.** The same steps over round 2's findings, producing
+`F2` and its own packet. **Each further round increments the mutation budget, and
+the budget bounds the sequence** — this is the loop that used to have no exit.
+
+**Further rounds are round 2 again, on the newest delta.** The fix review over the
+new packet; passes A and B blind over `F(n−1) → Fn`; only the rule rows and tests
+the fixes touched; the parity verdict re-derived if an owned screen, its reference
+or the artifact changed; only the attack surfaces the fix touched. Append-only
+allowlisted output needs no re-review.
+
 
 ### Dispositions — every finding gets exactly one
 

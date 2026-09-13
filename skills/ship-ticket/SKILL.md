@@ -9,15 +9,16 @@ description: |
   Cloudflare Workers, Postgres/Supabase — all supported.
 
   Six phases: UNDERSTAND the ticket, PLAN it with human approval, BUILD it,
-  PROVE it works and is not exploitable, REVIEW it in two rounds over one frozen
-  manifest — find, fix, then verify the fixes — then SHIP it. Adds a mandatory
+  PROVE it works and is not exploitable, REVIEW it in two rounds over a chain of
+  frozen manifests — find, fix, then verify the fixes — then SHIP it. Adds a mandatory
   design-source-of-truth read with a pinned SHA, a plan-mode approval gate, a
   design-parity check against that pin — machine-enforced where the repo has the
   merge-blocking check installed, and a declared degradation where it does not —
   adversarial abuse tests committed for every trust boundary the change
-  introduces, and a two-round cross-model review — the OpenAI Codex CLI and a rule
-  pass find, then a fresh Claude reviewer and a separate fix reviewer verify the
-  result including the fixes. No pass ever sees another's findings.
+  introduces, and a two-round cross-model review — a fresh Claude reviewer, the
+  OpenAI Codex CLI and a rule pass find, mutually blind; then the fixes themselves
+  are reviewed, by those same two models over the delta plus one reviewer shown
+  which finding caused which change.
 
   Every applicable rule, screen, surface and attack class runs on every ticket, at
   constant reasoning effort. Nothing about a ticket's size or labels reduces what
@@ -135,9 +136,9 @@ These bind in every phase. Everything else is procedure.
    signature; it removes nothing.
 6. **Apply the rules while writing.** The gates verify a claim you already made.
    A gate returning a long list means this was skipped.
-7. **Reviewers are report-only and blind to each other. You are not.** A reviewer
+7. **Reviewers are report-only. You are not.** Passes A, B and C are additionally **blind to each other** — no pass sees another's findings, before or during. (The fix review is the deliberate exception: it is shown round 1's findings because reading them against their consequences is its entire purpose.) A reviewer
    that edits code invalidates its peers. You collect findings and *you fix them*.
-8. **Nothing writes to the repository during the review wave** — that is the whole
+8. **Nothing writes to the repository during a review round** — that is the whole
    basis of the manifest's integrity. Fixes happen at barriers.
 9. **Attacks run against a local, disposable instance. Never production, never
    shared staging**, whoever owns it.
@@ -196,7 +197,9 @@ reviewers. Left uncapped these produce a twelfth round.
 artifact's metadata and starts at `0`.
 
 - **Every batched mutation made in response to a gate, an attack, a review
-  finding, or a scope change that invalidates a signature increments it once.**
+  finding, or a scope change that invalidates a signature increments it once** —
+  and only if code, tests or docs actually changed. A barrier where every finding
+  was rejected, or where there were none, spends nothing.
 - **Revalidation that changes nothing does not increment it.**
 - **Always validate the third mutation.** If validation still requires a fourth,
   ✋ **STOP** and surface it: what is still changing each round, which check it
@@ -411,55 +414,60 @@ not a fix. No local instance, or the only reachable one is shared → ✋ STOP.
 
 ## REVIEW
 
-> "A different AI reviews it, I fix what it finds, then a fresh reviewer checks
-> the result — including my fixes."
+> "Three reviewers check the change at once, I fix what they find, then the fixes
+> get checked too."
 
 Load [references/review.md](references/review.md) and, for pass B,
 [references/codex-cli.md](references/codex-cli.md).
 
-Everything that writes is now done. **Freeze the manifest** — a shared, stable
-description of what is being reviewed, computed **once** and handed identically to
-every pass. It is an integrity check over the live tree, not a commit and not a
-stash. Its safety rests on the passes being read-only and on you writing nothing
-during a round.
+Everything that writes is now done. **Freeze the manifest as `F0`** — a stable
+description of what is being reviewed, computed once and handed identically to
+every pass in the round. Each later round gets its own version: `F0`, `F1`, `F2` —
+**a chain, not one manifest reused**, because a round after a fix is reviewing a
+different program.
 
-**Review runs in two rounds, because a fix is not self-evidently correct.** The
-reviewer that finds a problem cannot also tell you whether your fix for it works,
-and a finding that was never a problem produces a change that looks exactly like
-any other. So the second round exists to read the first round's consequences.
+**Round 1 — find.** Dispatch **together**, blind to each other, report-only, over
+`F0`: **pass A** a fresh reviewer with no build context (and, for UI, the sole
+parity investigation), **pass B** `codex` — a different model in a different
+process, started first because it is routinely the longest — and **pass C** the
+rule checklist, one row per rule in force.
 
-**Round 1 — find.** Dispatch **together**, blind to each other, report-only:
+They are expected to confirm what BUILD already did — and they must still find and
+report every violation at full severity, exactly as if no build-time check had run.
+A long list means BUILD skipped its checks; it never means a pass should have
+looked less hard.
 
-- **pass B** — `codex`, a different model in a different process. This is what
-  makes the review genuinely cross-model; a model reviewing itself twice is one
-  pass.
-- **pass C** — the rule checklist, one row per rule in force.
-
-**Barrier — triage, then fix.** Every finding gets exactly one disposition, and
+**Barrier 1 — triage, then fix.** Every finding gets exactly one disposition, and
 **"it was wrong" is a real disposition** requiring a cited fact, not a feeling.
-Apply one batched fix set. This increments the mutation budget once.
+Before mutating anything, **capture the pre-fix contents of every file about to
+change** — the manifest holds digests, not bytes, and once an uncommitted file is
+overwritten its previous state is gone. Apply one batched fix set, and **record
+which finding each change came from**. Increments the mutation budget **iff code,
+tests or docs actually changed**.
 
-**Round 2 — verify.** Dispatch **together**, over the *fixed* tree:
+**Round 2 — verify the fixes.** Dispatch **together**, over `F1`:
 
-- **pass A** — a fresh reviewer with no build context, and for UI the sole parity
-  investigation. It reads what actually ships, fixes included. **It is never shown
-  round 1's findings** — that is what keeps it independent.
-- **the fix review** — a *different* fresh reviewer that **is** shown them, paired
-  with what changed: for every round-1 finding it asks **was it real · does the fix
-  address it · did the fix break anything**, and it reviews the ones you
-  **rejected** too, to catch a real problem talked away.
+- **the fix review** — a reviewer that **is** shown round 1's findings, paired with
+  what they caused. Per finding: **was it real · does the fix address it · did the
+  fix break anything**. And over the batch: **was anything I rejected actually
+  real** — the check on my triage, which is why it cannot be me who performs it.
+- **passes A and B again, over the delta `F0 → F1`, still blind.** The fix batch
+  keeps its cross-model review; dropping pass B here would mean the changes the
+  reviewer asked for are the only ones no second model ever read.
+- **the rule rows, tests, parity and attacks the fixes actually touched.**
 
-**Barrier — fix round 2's findings**, bounded by the mutation budget like every
-other loop. [review.md](references/review.md) has the steps.
+**Barrier 2 — fix what round 2 found**, bounded by the mutation budget. Further
+rounds repeat round 2 over the latest adjacent delta.
 
-**The cost is honest: the review is now round 1 plus round 2, not one wave.** Pass
-B is routinely the longest pass and no longer overlaps pass A. That is bought
-deliberately — an unreviewed fix is the one change in the ticket nobody looked at.
+**Blindness is a property of A, B and C — not of every pass.** They never see each
+other's findings, before or during. **The fix review is deliberately sighted**: it
+exists to read round 1's findings against their consequences, and cannot do that
+blind.
 
-**Do the work; don't narrate it.** After the barrier you have the findings and the
-authority. Two things go to the user first: a STOP condition, and a genuine
-product decision. **Everything else you fix.** If you are writing "here are the
-findings, shall I…", the answer is yes — you already had it.
+**Do the work; don't narrate it.** After a barrier you have the findings and the
+authority. Two things go to the user first: a STOP condition, and a genuine product
+decision. **Everything else you fix.** If you are writing "here are the findings,
+shall I…", the answer is yes — you already had it.
 
 **Fixing is the default; skipping requires a citation** — a `[D]` or `[ARCH]` rule
 named by ID. "It conflicts with our conventions" can be written about any finding,
@@ -467,13 +475,14 @@ which is exactly why it is not accepted. If you reach for the ID and the rule do
 not say what you need, the reviewer was right. A finding contradicting an `[NN]`
 rule is never skipped → ✋ STOP.
 
-**A finding can also simply be wrong.** Reject it with the code or ticket fact
-that disproves it — not with intuition, and not by implementing it anyway.
+**A finding can also simply be wrong.** Reject it with the code or ticket fact that
+disproves it — not with intuition, and not by implementing it anyway.
 
-**Then sign, once the payload is final.** Residual Blocker/Major clears only with
-a named human approver and date. Every stub links its follow-up ticket. Only then
-does the independent reviewer sign — a signature written before close-out edits
-binds to a payload that no longer exists.
+**Then sign, once the payload is final.** Residual Blocker/Major clears only with a
+named human approver and date. Every stub links its follow-up ticket. Only then does
+the independent reviewer sign — a signature written before close-out edits binds to
+a payload that no longer exists.
+
 
 ## SHIP
 
@@ -523,7 +532,7 @@ stale exactly when it should.
 | **attack testing** (`security-sensitive` only) | every in-scope surface, every route tested, the abuse-test files, and the production files they defend | the surface inventory · the rule→test map · the per-class result |
 
 **Sign the final payload, not an intermediate one.** Nothing is signed during the
-review wave: each reviewer returns an **unsigned** verdict stamped with the scope
+review rounds: each reviewer returns an **unsigned** verdict stamped with the scope
 digest it actually reviewed. At close-out, once the human-approved deviations and
 the stub → follow-up-ticket links are in place, the payload stops changing — only
 then is it handed back to sign. A signature written earlier and appended to
@@ -608,7 +617,7 @@ so the answer is one message and not a negotiation.
 *Review*
 - A finding contradicts an `[NN]` rule.
 - The rule pass reports a FAIL you cannot fix.
-- The manifest changed during the wave and you cannot re-run the passes it
+- The manifest changed during a review round and you cannot re-run the passes it
   invalidated.
 - A pass returned without verifiable coverage, or without the required finding
   shape, and cannot be re-run.
@@ -677,7 +686,7 @@ file short enough to follow.
 | the review engines themselves | `/coderabbit:code-review`, `codex`, the reviewer subagent |
 
 This skill owns *when* each is asked, *what it is asked about*, and the
-orchestration around them: the contract, the manifest, the wave, the barriers, the
+orchestration around them: the contract, the manifest chain, the rounds, the barriers, the
 mutation budget and the delta routing.
 
 It does **not** choose or impose a stack — the stack is the repo's. It does not
