@@ -213,6 +213,34 @@ fix is reviewing a different program, and reusing an earlier manifest ID for it
 would describe a tree that no longer exists. The latest accepted `Fn` is what SHIP's
 allowlist check compares against.
 
+### Before dispatching round 2: audit each repair for the defect it repaired
+
+A fix that introduces a **new mechanism** — a lock, a staging directory, a
+temp-file swap, a provenance field — has new surface, and that surface is prone to
+the very class of defect the fix was written for. The fixer must check this
+*before* round 2, not learn it from round 2. For every finding fixed, answer:
+
+- **Did this fix add a mechanism?** A file, a directory, a field, an ordering, a
+  new code path. If not, skip the rest.
+- **Does the new mechanism have the same failure the finding described?** Ask it in
+  the finding's own words. A race fixed with a second lock — can the second lock
+  race? A truncation fixed by writing a sibling and renaming — what if the target
+  is a symlink, or the rename's source is what crashes? An identity check fixed by
+  recording a field — can the wrong party assert that field?
+- **Does the fix hold for the state the finding was ABOUT?** A recovery path for a
+  missing file must be reachable when the file is missing — if it lives inside the
+  function that only runs for files that exist, it is never reached in the one case
+  it was written for.
+- **What did the fix make worse elsewhere?** Narrowing a permission can strand a
+  legitimate caller; widening a check can claim somebody else's data.
+
+Measured on this library's own `update` work: four consecutive fix rounds each
+shipped a repair carrying its predecessor's defect class — a breaker lock with the
+ABA it was added to prevent, shared staging names in the staging that fixed a
+concurrent overwrite, an atomic rename that destroyed a symlink, and a provenance
+field a fork could assert. Every one was found by the *next* round. This checklist
+is what turns those into the same round.
+
 ## Pass A — a fresh reviewer with no build context
 
 A **fresh reviewer subagent** with no build context, or a read-only
