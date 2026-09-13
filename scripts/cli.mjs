@@ -24,7 +24,7 @@ import {
   symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -103,6 +103,15 @@ function removeExisting(p) {
   else rmSync(p, { recursive: true, force: true });
 }
 
+// Is `p` inside `root`? Via path.relative, not a string prefix: install creates
+// Windows *junctions*, whose readlink comes back with backslashes (and sometimes
+// a \\?\ prefix), so a hardcoded '/' test would call every Windows install
+// foreign and refuse to update it.
+function isUnder(root, p) {
+  const rel = relative(root, p);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
 // cpSync filter: keep the litter out of the copy, matching what hashSkill ignores.
 const copyFilter = (src) => !isNoise(basename(src));
 
@@ -170,7 +179,12 @@ function git(args, cwd = REPO_ROOT) {
   } catch { return null; }
 }
 
-const isGitClone = () => git(['rev-parse', '--is-inside-work-tree']) === 'true';
+// True only when REPO_ROOT is itself the top of a work tree. A vendored copy
+// sitting inside someone else's repo would otherwise make `update` pull THEIR repo.
+const isGitClone = () => {
+  const top = git(['rev-parse', '--show-toplevel']);
+  return !!top && resolve(top) === resolve(REPO_ROOT);
+};
 const sourceCommit = () => git(['rev-parse', 'HEAD']);
 
 // Refresh the source itself, so `update` is one command rather than
@@ -435,7 +449,10 @@ function cmdUpdate(args) {
         if (!available.includes(name)) continue;
         if (!manifest.all && !names.includes(name)) continue;
         if (check) { console.log(`   + ${name}  (new upstream — would install)`); tally.added++; anyChange = true; continue; }
-        const mode = record?.mode || manifest.mode || (sourceIsEphemeral() ? 'copy' : 'link');
+        // Ephemeral beats the recorded mode, exactly as in install: a clone-mode
+        // manifest + an `npx … update` would otherwise symlink the new skill
+        // into the npx cache, and dangle the moment that cache is cleaned.
+        const mode = sourceIsEphemeral() ? 'copy' : (record?.mode || manifest.mode || 'link');
         if (applySkill(src, dst, mode, manifest, name)) {
           console.log(`   + ${name}  (new upstream — installed)`);
           tally.added++; anyChange = true;
@@ -447,7 +464,7 @@ function cmdUpdate(args) {
       if (st.isSymbolicLink()) {
         let target = null;
         try { target = resolve(dirname(dst), readlinkSync(dst)); } catch { /* unreadable */ }
-        if (target && (target === src || target.startsWith(SKILLS_DIR + '/') || target === SKILLS_DIR)) {
+        if (target && isUnder(SKILLS_DIR, target)) {
           if (!existsSync(target)) {
             // The skill was deleted upstream; the link now dangles.
             if (!prune) { console.log(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
@@ -457,6 +474,15 @@ function cmdUpdate(args) {
           }
           tally.live++;   // live via symlink: the source refresh already updated it
           continue;
+        }
+        // A symlink into the checkout that installed it — reached here because
+        // this run's source is somewhere else, e.g. `npx … update` over a
+        // clone install. Still ours, still live; --force would not help, so it
+        // must not be counted as a skip.
+        if (manifest.source && target && isUnder(join(manifest.source, 'skills'), target)) {
+          if (existsSync(target)) { tally.live++; continue; }
+          console.log(`   ! ${name}  link into ${manifest.source} is dangling — re-run update from that clone, or install here`);
+          tally.skipped++; continue;
         }
         // Only worth a line if it is a name this library actually ships, or one
         // we installed. A skills dir commonly holds symlinks to a completely
