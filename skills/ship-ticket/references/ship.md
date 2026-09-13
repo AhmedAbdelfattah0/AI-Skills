@@ -44,41 +44,20 @@ family-level detector standing in for per-rule evaluation is coverage loss.
 
 Record, in the artifacts:
 
-- the **companion mode** and every degraded check, by name
-- the **orchestration mode of each wave and each review round** — they can differ,
-  and a run that fanned out its review while serializing an hour of recon is not
-  a concurrent run
-- **every manifest ID** and which is the accepted one
-- **each check's outcome**, from the list above
-- **every round's manifest ID and fix-packet digest**, and confirmation that each
-  packet balanced — an unbalanced packet means work entered the diff that no finding
-  asked for
-- **the fix review's verdict per finding** — real or not, addressed or
-  not, broke anything or not — plus anything it found that you had **rejected**.
-  A finding confirmed as not real is recorded, not hidden: it is the measure of
-  how much of the review was churn
-- **each review pass's verified coverage** — the paths it reported reviewing,
-  checked against the manifest, and any it was re-run for. The barrier verifies
-  this transiently; recording it is what lets anyone later prove the diff was
-  actually covered rather than take the barrier's word for it
-- **the complete finding count first, at full severity** — then, separately, how
-  many BUILD should have caught. **That classification never changes whether a
-  finding is reported, its severity, or a verdict.** A high count is a BUILD
-  problem to drive down, never a reason to report less
-- **which `Par` groups actually ran concurrently**, and the reason for any that
-  did not
-- **which engine ran pass B**, at what effort, and whether it timed out
-- the **plan critique's disposition**, and the **final `mutation_round`**
-- per reference-backed screen: its grade, its signer, and the scope digest;
-  per unreferenced one: its approver, date and search evidence
-- the attack surfaces, the committed abuse tests, every class **degraded by ID**,
-  and every changed file excluded and why
-- every **skipped finding with its rule ID**, and every human-approved deviation
-  with its approver and date
-- the design files read and the pinned `design_ref`
-- **phase timings** — start and end per phase, agent time kept separate from
-  human-approval and CI wait, plus the overlap window of each intended parallel
-  group
+- companion degradations and orchestration mode;
+- `F0`, the final candidate manifest and the frozen-record digest;
+- round-1 reviewer identities and verified paths;
+- finding IDs, dispositions and fix-packet digest;
+- terminal reviewer identity and every terminal sub-outcome;
+- per reference-backed screen: round-1 grade, stable divergences, barrier-1
+  impact slice and terminal parity outcome;
+- per unreferenced screen: approver, date and search evidence;
+- attack surfaces, named abuse tests, excluded files and degraded rule IDs;
+- plan-critique dispositions and final `mutation_round`;
+- phase timings and concurrency windows.
+
+Persist lists, not hand-maintained totals. Derive counts when presenting the
+record.
 
 **Written so it survives the context.** "Tried to break the new endpoint — all
 attacks refused" is recoverable months later; "GATE 5: PASS" is not. "Skipped some
@@ -90,10 +69,10 @@ findings that conflicted with our conventions" is worthless.
 commit rather than a second one. Run `/session-logger`, or write the entry
 yourself to `session-log.md`; either way it must be on disk before the commit.
 
-**Then recompute the manifest and verify the allowlist.** Every change since the
-**accepted manifest** — the latest promoted `Fn`, or `F0` if no fixes were needed
-— must be on the post-freeze allowlist. If code, tests or docs moved outside it,
-that content is unreviewed and review must be re-run for it. ✋ STOP otherwise.
+**Then verify the frozen record and exact append slots.** The reviewed prefixes
+must still match their digests. Every later byte must belong to the terminal
+verdict, timing or session-log fields defined before `F0`. Any code, test,
+comment, doc or narrative artifact change ends the run as unreviewed.
 
 ## The commit
 
@@ -119,12 +98,11 @@ Open it **on the repo's actual host** — Azure Repos via the ADO repo tools, or
 GitHub via `gh`, per the tracker table in [understand.md](understand.md). Link the
 ticket to the PR and report the URL.
 
-Then wait **exactly once** for the CI checks to report.
+Then wait exactly once for CI. Do not wait for PR-side review bots.
 
-**Do not poll or block on the PR-side review bots.** **Push nothing further unless
-a gate actually fails and needs a code fix.** A doc-only commit pushed after the
-checks go green re-triggers the entire CI and bot cycle from scratch — that
-re-trigger is the waste this ordering exists to prevent.
+A CI failure leaves the run unshipped. A retry that changes no repository bytes
+may rerun CI only. Any repository fix requires a new human-approved run; do not
+push a repair and reopen REVIEW inside the completed run.
 
 ## Closing the ticket
 

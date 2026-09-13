@@ -234,7 +234,7 @@ Write `.specs/vapt/<TICKET>.md` (GATE) or `.specs/vapt/findings.md` (AUDIT):
 
 ```
 target:      http://localhost:3000 · disposable seed DB (docker compose)
-mode:        GATE · strict          # strict when the ticket is security-sensitive
+mode:        GATE          # strict when the ticket is security-sensitive
 surfaces:    POST /api/orders · GET /api/orders/:id · OrderList component
 excluded:    src/utils/format-date.ts (no trust boundary, reason 0)
 principals:  anon · userA(tenantA) · userB(tenantB) · admin
@@ -242,32 +242,21 @@ degraded:    VAPT-WEB-01 — no browser runner in this repo; proved at request l
 
 | Rule | Surface | Verdict | Evidence |
 |---|---|---|---|
-| VAPT-API-01 | GET /api/orders/:id | PASS | test/abuse/orders.spec.ts:24 — B→A's id returns 404 |
-| VAPT-API-04 | POST /api/orders | FIXED | accepted `tenant_id` from body; now derived from token (services/order.ts:31) |
-| VAPT-API-08 | POST /api/orders | N/A  | [D], no rate limiter in this project — documented in CLAUDE.md |
-
-signed-off: <independent reviewer>        # strict mode only
+| VAPT-API-01 | GET /api/orders/:id | PASS | `user B cannot read user A's order` in `test/abuse/orders.spec.ts` |
+| VAPT-API-04 | POST /api/orders | FIXED | `OrderService.create` derives tenant from the authenticated principal |
+| VAPT-API-08 | POST /api/orders | N/A | [D], no rate limiter in this project — documented in CLAUDE.md |
 ```
 
-**PASS** ⇔ every in-scope surface has a committed test for every applicable
-rule · all those tests are green · zero unfixed `[NN]` findings · every excluded
-file and every degraded rule named · and, in strict mode, an **independent**
-signature from an agent that did not build the code.
+**PASS** ⇔ every in-scope surface has a committed test for every applicable rule;
+all tests are green; there are zero unfixed `[NN]` findings; and every exclusion
+and degradation is named.
 
-**FAIL** ⇔ anything else. An unfixed `[NN]`, an unexplained exclusion, a
-"probably fine", or a rule marked PASS with no test behind it.
+**FAIL** ⇔ anything else.
 
-**Strict mode is about signing, not coverage.** Every GATE run executes every
-STEP 4 rule applicable to every in-scope surface — applicability alone decides
-which rules are in force, and any rule not run is declared inapplicable with
-evidence. `security-sensitive` (auth, tenancy, billing, payments, secrets)
-selects **strict**, which adds the independent signature the PASS contract
-requires. It does not change rule selection.
-
-A non-sensitive run is **unsigned, never reduced**. There is no lighter rule set
-for ordinary work: an unlabelled ticket is exactly where a mass-assignment,
-injection or CORS defect ships silently, so the label cannot be what decides
-whether those classes run.
+Security sensitivity never changes VAPT coverage. VAPT runs attacks and produces
+runtime evidence; it does not dispatch a reviewer or attest to its own result.
+When ship-ticket invokes it, that skill's terminal reviewer judges the frozen
+evidence together with the repaired candidate.
 
 ## STEP 8 — CI enforcement (this is what makes it real)
 

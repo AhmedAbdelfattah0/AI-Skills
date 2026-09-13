@@ -42,9 +42,9 @@ enumerated before the fix that created it was never enumerated.
 the changed tree** — an attack fix is production code and can add or move a route,
 a middleware, a config boundary, a rendering sink or an outbound credential path.
 
-Both loops increment the **mutation budget** once per batch, and both are bounded
-by it. Fan-out width stays proportional to the work; four owned screens is four
-concurrent parity diffs, not one agent walking four screens in sequence.
+Both loops increment the mutation budget once per changed batch and are bounded
+by it. PROVE prepares screen classifications and pinned inputs; the complete
+screen comparisons happen once, inside round-1 pass A.
 
 ## The static proof
 
@@ -60,10 +60,10 @@ ticket did not touch.
 control with no readable owner — say so. That half is **declared degraded**, not
 proven, so the runtime test is checked against a claim you actually made.
 
-**Emit a security-scope digest** over the in-scope surfaces, every transitive
-control owner traced (including unchanged files), those files' contents, and the
-rule-inventory version, using the manifest's canonical serialization. The rule
-pass may reference deterministic output bound to it — never a semantic judgment.
+**Emit a stable security-evidence map** listing each in-scope surface, every
+transitive control owner, the applicable rule-inventory version and the named
+tests. Bind the artifact to the reviewed file contents through the review
+manifest; do not maintain a second scope-binding ceremony.
 
 A fix here is production code: it re-runs the repo's commands for the files it
 touched.
@@ -87,10 +87,10 @@ never to skip it.
 **Every `VAPT-*` class whose surface the diff touches is in force, in every run.**
 Any class not run is declared inapplicable *with evidence*.
 
-**`security-sensitive` adds an independent signature. It changes no coverage.** A
-non-sensitive run is unsigned, never reduced. There is no reduced set selected by
-a ticket's label — the only reduced set in this workflow is the missing-engine
-fallback below, which is a declared degradation with a named cause.
+**`security-sensitive` requires an explicit security outcome in terminal review
+and changes no attack coverage.** There is no label-selected reduced set; only a
+missing-engine fallback may reduce execution, and that reduction is declared by
+name.
 
 ### Local only
 
@@ -98,7 +98,9 @@ Attack a **local, disposable instance**. Never production, never shared staging,
 no matter who owns it. Only a shared environment reachable → ✋ STOP and ask. App
 cannot be run locally at all → ✋ STOP.
 
-### The output is committed tests
+The artifact records stable rule IDs, route names, test names, control symbols
+and outcomes. Do not maintain hand counts or use mutable line numbers as the
+identity of evidence. This replaces later citation and count repairs.
 
 Each abuse case becomes a test in **this repo's own runners**, named for the rule
 it defends (`VAPT-API-01: user B cannot read user A's invoice`) and asserting the
@@ -156,38 +158,23 @@ rules you cannot enumerate by ID without the skill, declare
 an ID.** With the skill installed, families instead of IDs is an under-declaration
 and therefore a FAIL.
 
-### The verdict
+### Runtime outcome and review handoff
 
-**PASS** ⇔ a canonical **class → routes → controls → tests** map in which every
-applicable rule is green for every equivalence class · every route carries its own
-reachability positive control and auth rejection · any route whose equivalence to
-its class is unproven carries its own full tests · zero unfixed `[NN]` findings ·
-a green `test-quality` pass, or its declared `TEST | DEGRADED` row · every excluded
-changed file named in the artifact · plus, when `security-sensitive`, an
-independent signature bound to the gate's final scope digest.
+**PASS** ⇔ the canonical class → routes → controls → tests map is complete; every
+applicable rule is green for every route; each route has its positive control and
+refusal assertion; there are zero unfixed `[NN]` findings; test-quality passed or
+its degradation is declared; and every excluded changed file is named.
 
-**DEGRADED** ⇔ all of that except that named rules could not be exercised — the
-skill is absent, or principals could not be built. Requires the reduced set
-actually committed and green, and every unexercised rule listed by ID (or the
-`untested_families` form).
+**DEGRADED** ⇔ the executed reduced set is committed and green, while every
+unexercised rule or family is named with its cause.
 
-**FAIL** ⇔ otherwise — including a rule marked PASS with no test behind it, or a
-degradation that was not declared.
+**FAIL** ⇔ otherwise.
 
-**When `security-sensitive`, the signer is dispatched, not assumed.** Spin up an
-independent reviewer with no build context — through a **resumable** route, checked
-before planning — brief it on the surface inventory, the rule→test map and the
-abuse tests, and have it return an **unsigned** verdict stamped with the scope
-digest it reviewed.
-
-**The signature contract is the spine's *Signatures* section**, shared with parity.
-This check's **scope digest** covers every in-scope surface, every route tested,
-the abuse-test files and the production files they defend; its **payload** is the
-surface inventory · the rule→test map · the per-class result. Signing happens at
-close-out, once the payload is final.
-
-**A run with no dispatched signer is not `security-sensitive`-complete** — losing
-every independent-reviewer route is a ✋ STOP, never an implicit downgrade.
+PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
+Hand the frozen surface map, rule-to-test map, test outcomes and production
+control paths to REVIEW's single terminal reviewer. That reviewer returns
+`attack_review_outcome`, and `security_outcome` when required, without running
+the attacks again.
 
 ### Enforcement is machine, not honour-system
 

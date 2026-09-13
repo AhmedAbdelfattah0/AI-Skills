@@ -1253,6 +1253,22 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\b(?:barrier 2|round 3|further rounds?)\b/gi, 'ship-ticket review has one repair barrier and one terminal verdict', ['ship-ticket']],
+  [/\b(?:F2|Fn|F\(n[−-]1\))\b/g, 'ship-ticket review has only F0 and an optional F1 candidate', ['ship-ticket']],
+  [/\bscope[_ -]digests?\b/gi, 'terminal review binds to manifests and the frozen-record digest; the separate scope digest was deleted', ['ship-ticket']],
+  [/\bpayload[_ -]digests?\b/gi, 'the separate signing payload and its digest were deleted', ['ship-ticket']],
+  [/\bunsigned verdicts?\b/gi, 'review outputs now feed one terminal verdict directly', ['ship-ticket']],
+  [/\bindependent signatures?\b/gi, 'independence now belongs to the terminal reviewer, with no separate signing dispatch', ['ship-ticket', 'generate-ticket', 'vapt']],
+  [/\bsignature blocks?\b/gi, 'separate parity and security signature blocks were folded into the terminal verdict', ['ship-ticket']],
+  [/\bsigners?\b/gi, 'ship-ticket and vapt use reviewers and outcomes, not a separate signer role', ['ship-ticket', 'vapt']],
+  [/\bresumable signer route\b/gi, 'the terminal reviewer is a one-shot route', ['ship-ticket']],
+  [/\bre[- ]?sign(?:ing|atures?)\b/gi, 'terminal outcomes are never reopened inside the same run', ['ship-ticket']],
+  [/\bsame[- ]reviewer rule\b/gi, 'the signing resumption ceremony was deleted', ['ship-ticket']],
+  [/\bstaleness rule\b/gi, 'record immutability and manifest binding replace signature staleness', ['ship-ticket']],
+  [/\bparity verdict (?:is )?re-derived\b/gi, 'the complete parity comparison runs once in round 1', ['ship-ticket']],
+  [/\bregenerate the parity draft\b/gi, 'post-F0 UI changes receive a targeted impact check instead', ['ship-ticket']],
+  [/\bstrict mode\b/gi, 'vapt no longer owns a separate review or signing mode', ['vapt']],
+  [/\bsigned-off:/gi, 'vapt produces runtime evidence; ship-ticket terminal review owns review attestation', ['vapt']],
   [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket', 'pr-review']],
   [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
   [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],

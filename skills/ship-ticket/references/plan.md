@@ -28,8 +28,9 @@ Use it exactly — same headings, same order, so every plan reads the same way.
          #   carve_out_approved_by: <a named human>
          #   carve_out_date: <YYYY-MM-DD>  -->
 
-**Size:** <N> files · <FE / BE / full-stack> · security-sensitive: <yes/no>
-<security-sensitive: yes adds an independent signature. It reduces nothing.>
+**Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no>
+<security-sensitive: yes requires an explicit terminal security outcome. It
+changes neither attack coverage nor reviewer count.>
 
 ## 1. What & why (read this first)
 <2–4 plain sentences: what the user gets when this is done, and the approach in
@@ -69,13 +70,15 @@ plan carries no cross-model review>
 | <minor: extract a shared helper> | rejected | one call site today; YAGNI until there's a second |
 
 ## 8. What runs concurrently later
-| Stage | Fans out by | Count for this ticket |
+| Stage | Fans out by | Scope for this ticket |
 |---|---|---|
-| parity | **reference-backed** owned screen | <N reference-backed; plus M unreferenced carve-outs, or "n/a — no UI"> |
-| attack inventory + design | trust boundary | <N surfaces, or "n/a"> |
-| the rule pass | rule family | <the families the diff puts in force> |
+| round-1 parity | reference-backed owned screen | <list the screen paths, or "n/a — no UI"> |
+| attack inventory + design | trust boundary | <list the surfaces, or "n/a"> |
+| the rule pass | rule family | <list the families the diff puts in force> |
 
-Live attacks stay serial regardless — shared port and datastore.
+Live attacks stay serial regardless — shared port and datastore. The screen list
+drives one complete parity comparison; later UI checking is limited to the
+barrier-1 impact slice.
 ```
 
 ## The `Par` column
