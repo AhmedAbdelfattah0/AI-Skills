@@ -66,16 +66,30 @@ if [ -d "$HOME_DIR/.git" ]; then
     echo "   AI_SKILLS_HOME=<another dir> and re-run." >&2
     exit 1
   fi
-  echo "📦 updating $HOME_DIR"
-  # Never fast-forward over uncommitted work; say so and use the tree as it is.
+  # From here on this script EXECUTES $HOME_DIR/scripts/cli.mjs. So every step
+  # that decides what that file contains is fatal on failure — "carry on with
+  # the tree as it stands" would mean running whatever is there, which for a
+  # locally modified or half-updated checkout is not this project's code.
+  #
+  # Note what the origin check above is and is not: it establishes intent, not
+  # authenticity. A remote URL is mutable metadata inside the candidate repo.
+  # It stops an unrelated clone being fetched and run by accident; it is not a
+  # defence against someone who can already write to your home directory.
   if [ -n "$(git -C "$HOME_DIR" status --porcelain)" ]; then
-    echo "   (uncommitted changes there — not pulling; using it as it stands)"
-  else
-    git -C "$HOME_DIR" fetch --quiet origin "$REF"
-    git -C "$HOME_DIR" checkout --quiet "$REF"
-    git -C "$HOME_DIR" merge --ff-only --quiet "origin/$REF" 2>/dev/null \
-      || echo "   (could not fast-forward — leaving $HOME_DIR as it stands)"
+    echo "❌ $HOME_DIR has uncommitted changes." >&2
+    echo "   This installer runs code from there, so it will not use a modified" >&2
+    echo "   tree. Commit, stash or discard them — or install from that clone" >&2
+    echo "   directly: node $HOME_DIR/scripts/cli.mjs install" >&2
+    exit 1
   fi
+  echo "📦 updating $HOME_DIR"
+  git -C "$HOME_DIR" fetch --quiet origin "$REF" || { echo "❌ fetch failed." >&2; exit 1; }
+  git -C "$HOME_DIR" checkout --quiet "$REF"     || { echo "❌ checkout of $REF failed." >&2; exit 1; }
+  git -C "$HOME_DIR" merge --ff-only --quiet "origin/$REF" || {
+    echo "❌ $HOME_DIR has diverged from origin/$REF and cannot fast-forward." >&2
+    echo "   Refusing to run code from a tree that is not this project's $REF." >&2
+    exit 1
+  }
 elif [ -e "$HOME_DIR" ]; then
   echo "❌ $HOME_DIR exists but is not a git repository. Refusing to touch it." >&2
   echo "   Move it aside, or set AI_SKILLS_HOME=<another dir> and re-run." >&2

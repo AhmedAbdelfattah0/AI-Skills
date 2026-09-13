@@ -13,7 +13,7 @@
 
 import {
   chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync,
-  readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  lstatSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -28,12 +28,24 @@ const SCHTASKS_NAME = 'AI Skills Update';
 // ABSOLUTE PATH OF THIS CLI — unique to this install. Matching loose substrings
 // like "cli.mjs" + "update --auto" would also claim another checkout's updater,
 // or any unrelated `/opt/tool/cli.mjs update --auto`.
+const HOOK_ARGV = (cliPath) => [cliPath, 'update', '--auto'];
+
 const isOurHook = (h, cliPath) => {
   if (h?.type !== 'command') return false;
-  // Current shape: exec form, no shell — cliPath is its own argv entry.
-  if (Array.isArray(h.args) && h.args.includes(cliPath)) return true;
-  // Legacy shape: one shell string. Still ours only if it names THIS cli path.
-  return typeof h.command === 'string' && h.command.includes(cliPath) && h.command.includes('update');
+  // Exec form: the EXACT argument vector we write. "args mentions this path"
+  // would also claim a hook of ours running `validate`, which is not this hook.
+  const want = HOOK_ARGV(cliPath);
+  if (Array.isArray(h.args)) {
+    return h.args.length === want.length && want.every((a, i) => h.args[i] === a);
+  }
+  // Legacy shell shape, so --remove can still clean up what older versions wrote.
+  // The path must be followed by a boundary: a bare `includes` also matches
+  // `/…/cli.mjs.backup`, i.e. a DIFFERENT installation.
+  if (typeof h.command !== 'string') return false;
+  const at = h.command.indexOf(cliPath);
+  if (at === -1) return false;
+  const after = h.command.slice(at + cliPath.length);
+  return /^["']?\s/.test(after) && /(^|\s)update(\s|$)/.test(after) && after.includes('--auto');
 };
 
 const isWin = platform() === 'win32';
@@ -61,6 +73,11 @@ function jobEnv() {
 // starts the process, so a log under a state directory that has since been
 // deleted makes the job fail before node can recreate it — silently, every day,
 // forever. `update --auto` opens its own log, after creating the directory.
+// A perfectly legal install path containing & or < produces malformed XML, and
+// launchctl then refuses the job — so the daily update simply never runs, with
+// no error anyone sees.
+const xml = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 function plistXml(cliPath) {
   const { nodeBin, path } = jobEnv();
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -70,13 +87,13 @@ function plistXml(cliPath) {
   <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${nodeBin}</string>
-    <string>${cliPath}</string>
+    <string>${xml(nodeBin)}</string>
+    <string>${xml(cliPath)}</string>
     <string>update</string>
     <string>--auto</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${path}</string></dict>
+  <dict><key>PATH</key><string>${xml(path)}</string></dict>
   <key>StartInterval</key><integer>86400</integer>
   <key>RunAtLoad</key><true/>
 </dict>
@@ -129,7 +146,7 @@ function hookEntry(cliPath) {
   return {
     type: 'command',
     command: nodeBin,
-    args: [cliPath, 'update', '--auto'],
+    args: HOOK_ARGV(cliPath),
     async: true,
     timeout: 120,
   };
@@ -166,24 +183,31 @@ function editHook(install, cliPath) {
   else delete settings.hooks.SessionStart;
   if (!Object.keys(settings.hooks).length) delete settings.hooks;
 
-  mkdirSync(dirname(file), { recursive: true });
+  // If settings.json is a symlink into a dotfiles repo, renaming a sibling over
+  // it REPLACES THE LINK with a regular file: the managed target stops being
+  // read and every future dotfiles update silently stops applying. Write beside
+  // the real file instead, and leave the link alone.
+  let target = file;
+  try { if (lstatSync(file).isSymbolicLink()) target = realpathSync(file); } catch { /* not a link, or absent */ }
+
+  mkdirSync(dirname(target), { recursive: true });
   // Atomically. Truncating settings.json in place means a full disk, a short
   // write or an interrupt leaves partial JSON — which disables EVERY Claude Code
   // setting in the file, the very outcome the malformed-input check above exists
   // to avoid. Write a sibling, flush it to disk, then rename over the original;
   // rename within a directory is atomic, so a reader sees old or new, never half.
-  const tmp = join(dirname(file), `.settings.json.ai-skills-${process.pid}`);
+  const tmp = join(dirname(target), `.settings.json.ai-skills-${process.pid}`);
   try {
     const fd = openSync(tmp, 'w');
     try {
       writeFileSync(fd, JSON.stringify(settings, null, 2) + '\n');
       fsyncSync(fd);
     } finally { closeSync(fd); }
-    if (existsSync(file)) { try { chmodSync(tmp, statSync(file).mode); } catch { /* keep the default */ } }
-    renameSync(tmp, file);
+    if (existsSync(target)) { try { chmodSync(tmp, statSync(target).mode); } catch { /* keep the default */ } }
+    renameSync(tmp, target);
   } catch (err) {
     try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-    console.error(`❌ could not write ${file}: ${err.message}`);
+    console.error(`❌ could not write ${target}: ${err.message}`);
     return false;
   }
   return true;

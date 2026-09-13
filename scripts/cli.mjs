@@ -232,26 +232,51 @@ function acquireLock() {
   const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const mine = JSON.stringify({ pid: process.pid, token, at: Date.now() });
 
-  const claim = (flag) => { writeFileSync(lock, mine + '\n', { flag }); return releaser(token); };
-  try { return claim('wx'); } catch { /* held — fall through and judge the holder */ }
+  const claim = () => { writeFileSync(lock, mine + '\n', { flag: 'wx' }); return releaser(token); };
+  try { return claim(); } catch { /* held — fall through and judge the holder */ }
 
   let held;
   try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch { held = null; }
-  if (held && holderIsAlive(held.pid) && Date.now() - (held.at || 0) < LOCK_MAX_MS) return null;
+  if (held && holderIsAlive(held.pid) && !expired(held.at)) return null;
 
-  // The holder is gone (or the entry is unreadable/ancient). Drop it and re-claim
-  // with 'wx' so that if two runners reach this line together, exactly one wins.
-  try { rmSync(lock, { force: true }); } catch { /* someone else got there first */ }
-  try { return claim('wx'); } catch { return null; }
+  // Taking over a stale lock must not be read-check-unlink: two contenders both
+  // see the stale file, one unlinks and claims, and the other then unlinks THAT
+  // fresh lock and claims it too — both proceed, which is the concurrency this
+  // whole mechanism exists to prevent. rename() is the atomic primitive: for a
+  // given source path exactly one process can succeed, so the loser is told so
+  // by the OS rather than by a comparison it made a moment too early.
+  const claimed = `${lock}.taking.${token}`;
+  try { renameSync(lock, claimed); } catch { return null; }   // someone else got it
+  try { rmSync(claimed, { force: true }); } catch { /* best effort */ }
+  try { return claim(); } catch { return null; }              // a third party beat us to the fresh claim
 }
 
-// Delete the lock only while it is still ours.
+// A timestamp we cannot trust is not evidence of a live run. A far-future `at`
+// makes `now - at` negative for as long as the clock says so, which would starve
+// every future update permanently.
+function expired(at) {
+  if (!Number.isFinite(at)) return true;
+  const age = Date.now() - at;
+  return age < 0 || age >= LOCK_MAX_MS;
+}
+
+// Release only while the lock is still ours — and prove it by renaming rather
+// than by reading and then deleting, which leaves a window in which a new owner's
+// lock is the thing being deleted.
 function releaser(token) {
   return () => {
+    const lock = lockPath();
+    const leaving = `${lock}.leaving.${token}`;
     try {
-      if (JSON.parse(readFileSync(lockPath(), 'utf8')).token !== token) return;
-      rmSync(lockPath(), { force: true });
-    } catch { /* already gone, or not parseable — leave it for the liveness check */ }
+      if (JSON.parse(readFileSync(lock, 'utf8')).token !== token) return;
+      renameSync(lock, leaving);
+    } catch { return; }                       // already gone, unreadable, or no longer ours
+    try {
+      // Re-read after the rename: if the content is not ours, we moved somebody
+      // else's lock and must put it back rather than delete it.
+      if (JSON.parse(readFileSync(leaving, 'utf8')).token !== token) { renameSync(leaving, lock); return; }
+    } catch { /* unreadable — fall through and drop it */ }
+    try { rmSync(leaving, { force: true }); } catch { /* leave it for the liveness check */ }
   };
 }
 
@@ -298,7 +323,11 @@ function git(args, cwd = REPO_ROOT) {
 // clone being moved or re-cloned elsewhere, which a path does not; and it differs
 // for a fork, which is exactly the case a path cannot tell apart.
 function originUrl() {
-  const raw = git(['remote', 'get-url', 'origin']);
+  // package.json ships with the tree, so this identity survives what a git
+  // remote and a checkout path do not: an npx install, whose source is a cache
+  // directory that is neither a git repo nor at the same path twice. Without it
+  // every npx update distrusted its own previous install.
+  const raw = git(['remote', 'get-url', 'origin']) || packageRepoUrl();
   if (!raw) return null;
   // Normalise the spellings of one remote: scp-form vs https, optional .git.
   return raw.trim()
@@ -308,6 +337,14 @@ function originUrl() {
     .replace(/\.git$/, '')
     .replace(/\/+$/, '')
     .toLowerCase();
+}
+
+function packageRepoUrl() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
+    const r = pkg.repository;
+    return (typeof r === 'string' ? r : r?.url) || null;
+  } catch { return null; }
 }
 
 // Was this destination populated by THIS library? A manifest written by a fork,
@@ -321,7 +358,11 @@ function sameLibrary(manifest) {
   // refusing it outright would strand every install made before the field existed.
   if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
   if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
-  return true;                                          // nothing to contradict
+  // No identity evidence at all. Absence of a contradiction is not proof of
+  // ownership: a manifest carrying hashes but naming no library is exactly what
+  // a hand-edited or truncated file looks like, and trusting it lets unchanged
+  // foreign content be overwritten with no flag. --adopt exists for this.
+  return false;
 }
 
 const isGitClone = () => {
@@ -438,8 +479,18 @@ function cmdInstall(args) {
   for (const { label, dir } of destDirs) {
     mkdirSync(dir, { recursive: true });
     // Merge into any existing manifest: installing two skills today must not
-    // erase the record of the twelve installed last week.
-    const manifest = readManifest(dir) || { version: 1, skills: {} };
+    // erase the record of the twelve installed last week. But only if it is
+    // OURS — merging into a foreign manifest and then stamping our own origin on
+    // it launders that library's records into ours, after which a later update
+    // overwrites its untouched skills with no flag at all.
+    for (const n of recoverInterrupted(dir)) {
+      console.log(`   ♻️  ${n}  restored from an interrupted update`);
+    }
+    const found = readManifest(dir);
+    const manifest = found && sameLibrary(found) ? found : { version: 1, skills: {} };
+    if (found && manifest !== found) {
+      console.log(`   ℹ️  ${dir} has a manifest from another library — starting our own record set`);
+    }
     manifest.version = 1;
     manifest.source = REPO_ROOT;
     manifest.origin = originUrl();
@@ -488,7 +539,18 @@ function cmdInstall(args) {
 // skill somebody edited in place is unrecoverable — there is no other copy —
 // and the manifest exists precisely so that case is detectable rather than a
 // coin flip.
+// The unattended contract needs ONE finalizer that every exit reaches — a return,
+// an early error, or a throw. process.exit() inside the body skipped stampRun(),
+// which meant a failing run left the throttle unset and every following session
+// pulled again.
 function cmdUpdate(args) {
+  try { runUpdate(args); }
+  finally { if (typeof pendingFinish === 'function') pendingFinish(); }
+}
+
+let pendingFinish = null;
+
+function runUpdate(args) {
   const { names, flags, targetSpec, destOverride } = parseFlags(args);
   const check = flags.has('--check') || flags.has('-n') || flags.has('--dry-run');
   const auto = flags.has('--auto');
@@ -512,7 +574,7 @@ function cmdUpdate(args) {
     const got = acquireLock();
     if (!got) return;               // another run is already doing this
     release = got;
-    process.on('exit', release);
+    process.on('exit', release);    // last-ditch, for a signal that skips finally
   }
   // Buffered so a no-op run prints nothing at all — a SessionStart hook that
   // chatters every time is a hook people turn off.
@@ -531,9 +593,11 @@ function cmdUpdate(args) {
   // session pulls again, and the one after that, which is how a quiet updater
   // turns into a machine hammering GitHub on every session start.
   let finished = false;
+  // eslint-disable-next-line prefer-const
   const finish = () => {
     if (!auto || finished) return;
     finished = true;
+    pendingFinish = null;
     // Worth waking a human for: something changed, something was declined, the
     // source refresh did not go to plan, or a run failed. "Already fine" is not news.
     const sourceTrouble = ['dirty', 'pull-failed', 'fetch-failed'].includes(pull.status);
@@ -541,6 +605,7 @@ function cmdUpdate(args) {
     stampRun();
     release();
   };
+  pendingFinish = finish;   // so the try/finally wrapper reaches it on a throw
 
   // 1. Refresh the source. Unlike install, update's default scope is every known
   //    target directory that exists — you install per-tool, but you update "my
@@ -558,13 +623,17 @@ function cmdUpdate(args) {
   const available = skillDirs();
   if (!available.length) {
     console.error(`❌ no skills found in ${SKILLS_DIR}`);
-    process.exit(1);
+    process.exitCode = 1;
+    finish();
+    return;
   }
   const unknown = names.filter((n) => !available.includes(n));
   if (unknown.length) {
     console.error(`❌ unknown skill(s): ${unknown.join(', ')}`);
     console.error(`   run "list" to see the ${available.length} available skills.`);
-    process.exit(1);
+    process.exitCode = 1;
+    finish();
+    return;
   }
 
   // A dry run must answer "what will change", not "what differs right now". When
@@ -598,6 +667,10 @@ function cmdUpdate(args) {
 
 
   for (const { label, dir } of destDirs) {
+    for (const n of recoverInterrupted(dir)) {
+      say(`   ♻️  ${n}  restored from an interrupted update`);
+      anyChange = true;
+    }
     const manifest = readManifest(dir) || { version: 1, skills: {} };
     manifest.skills ||= {};
     // A manifest from a different library is evidence about somebody else's
@@ -798,6 +871,7 @@ function applySkill(src, dst, mode, manifest, name) {
   const staged = join(tmpRoot, `${name}.new`);
   const backup = join(tmpRoot, `${name}.old`);
   let movedAside = false;
+  let keepTmp = false;
   try {
     mkdirSync(tmpRoot, { recursive: true });
     removeExisting(staged);
@@ -817,15 +891,44 @@ function applySkill(src, dst, mode, manifest, name) {
     return true;
   } catch (err) {
     // Put the original back if we got as far as moving it.
+    let rolledBack = true;
     if (movedAside && !existsSync(dst) && !isLink(dst)) {
-      try { renameSync(backup, dst); } catch { /* nothing further we can do */ }
+      try { renameSync(backup, dst); } catch { rolledBack = false; }
     }
     try { removeExisting(staged); } catch { /* best effort */ }
     console.error(`   ❌ ${name}: ${err.message}`);
+    if (!rolledBack) {
+      // The only copy of this skill is the backup. Say where it is and KEEP it —
+      // the finally below would otherwise delete the thing we failed to restore.
+      console.error(`   ⚠️  ${name}: could not restore it — your copy is at ${backup}`);
+      keepTmp = true;
+    }
     return false;
   } finally {
-    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* leave it */ }
+    if (!keepTmp) { try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* leave it */ } }
   }
+}
+
+// Recover from a run that was killed between "move the old aside" and "promote
+// the new one" — which leaves the destination missing and the only copy of that
+// skill sitting in the staging directory. This has to be a sweep, not a check
+// inside applySkill: a skill that is MISSING never enters the per-skill loop, so
+// nothing would ever look at its backup, and the next run's cleanup would delete
+// it. Runs before anything else touches the directory.
+function recoverInterrupted(dir) {
+  const tmpRoot = join(dir, '.ai-skills-tmp');
+  if (!existsSync(tmpRoot)) return [];
+  const restored = [];
+  let entries = [];
+  try { entries = readdirSync(tmpRoot); } catch { return restored; }
+  for (const e of entries) {
+    if (!e.endsWith('.old')) continue;
+    const name = e.slice(0, -'.old'.length);
+    const dst = join(dir, name);
+    if (existsSync(dst) || isLink(dst)) continue;          // the swap completed after all
+    try { renameSync(join(tmpRoot, e), dst); restored.push(name); } catch { /* leave it in place */ }
+  }
+  return restored;
 }
 
 // existsSync follows symlinks, so a dangling link reads as absent — which would
