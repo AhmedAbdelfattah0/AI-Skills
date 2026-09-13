@@ -205,11 +205,42 @@ artifact's metadata and starts at `0`.
   ✋ **STOP** and surface it: what is still changing each round, which check it
   keeps invalidating, the last round's unfixed findings, and your read on why it
   is not converging.
+
+**This is a gate you walk through, not a number you remember.** A counter nobody
+reads does not cap anything — a run once reached five review rounds under a cap of
+three, because the value sat in a file that no step told anyone to open.
+
+So, **before dispatching any round after the first, and before any fix batch:**
+
+1. **Read `mutation_round` out of `.specs/plans/<TICKET>.md`.** Do not recall it.
+   Hours have passed and your memory of it is not evidence.
+2. **If it is already 3 → ✋ STOP now**, before spending the round.
+3. After the batch lands, **write the incremented value back to the artifact** in
+   the same barrier. A value held only in your head is lost to a compaction, and
+   a resumed run reads the file, not the conversation.
+
+**State the number in the round's opening line** — "round 3 of at most 3" — so a
+run that is burning its budget is visible to the user while there is still time to
+intervene, rather than at the stop.
 - **Only a human-approved re-plan resets it.**
 
 **Increment it only at a write barrier**, as part of the batch whose result becomes
 the next manifest. Touching it mid-wave mutates frozen state and invalidates every
 running pass.
+
+**Count is not severity — weigh the round before calling it non-convergence.**
+The budget stops a diff that *cannot converge*, not a round that produced a big
+number. Sort a round's findings into **behaviour** (authorization, a clearance, a
+contract violated, a wrong figure) and **record** (comments, docblocks, counts,
+artifact wording), and **state both numbers**. Thirty findings of which
+twenty-nine are stale comments is a fix list, not a non-convergence signal — and
+presenting it as one argues for deleting working scope on evidence that does not
+support it.
+
+**Re-verify a finding before it becomes an argument to stop**, especially one
+claiming that some other record is false: that shape is derived rather than
+observed and is the most likely to be wrong. A correct general mechanism does not
+refute a claim about a specific case — instantiate the case.
 
 Non-convergence is a finding, not a retry. A fourth round costs more and learns
 nothing; spawning agents to break the deadlock adds cost, not information.
@@ -345,11 +376,24 @@ parity check exists to remove.
    base, name it after the ticket. An existing ticket branch is reused, not
    duplicated — and if it carries WIP commits, ✋ STOP for the preserve-or-squash
    decision *before* rebasing. Someone else's uncommitted work in the tree → ✋ STOP.
-2. **Build in the plan's sequence — and build a `Par` group together.** Name the
-   groups before you start; report which actually ran concurrently. **A group you
-   serialized needs a stated reason, and the record is written to the plan
-   artifact** — an unrecorded serialization is indistinguishable from one that
-   never happened, and it is a ✋ STOP.
+2. **Build in the plan's sequence — and build a `Par` group together.**
+
+   **Open `.specs/plans/<TICKET>.md` and read the `Par` column before writing any
+   code.** Not from memory of having drafted it — the plan may be hours old, and a
+   column you recall is not a column you read. Then **say the groups out loud
+   before you start**: "group B is the endpoint and the screen, together." A group
+   named aloud is one you notice serializing; a group left in the file is not.
+
+   On a full-stack ticket this is the whole game. The frontend waits for the **API
+   contract** — step 1's artifact — **never for the backend's implementation of
+   it.** If you find yourself finishing the endpoint before opening a frontend
+   file, the group was serialized: stop and say so. Waiting for a working endpoint
+   before starting the screen is the single largest avoidable cost on a full-stack
+   ticket, and it has happened on a real run that took six hours.
+
+   Report which groups actually ran concurrently. **A group you serialized needs a
+   stated reason written to the plan artifact** — an unrecorded serialization is
+   indistinguishable from one that never happened, and it is a ✋ STOP.
 3. **Apply the rules as you write each file**, against the rules that govern its
    role. **This is the single biggest lever on how long the rest takes.** Every
    violation caught here never becomes a finding, never becomes a fix, and never
