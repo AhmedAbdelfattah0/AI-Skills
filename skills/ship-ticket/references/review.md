@@ -376,8 +376,14 @@ whose purpose is auditing the triage was performed by whoever did the triage.
    finding asked for, and that is the hole the packet exists to close.
 9. **Dispatch round 2** over `F1`.
 
-**No fixes at barrier 1?** Then there is nothing for round 2 to verify. Skip it,
-record why, and go to signing — a fix review with an empty packet reviews nothing.
+**No fixes at barrier 1?** Round 2 still runs if anything was **rejected** — the
+packet then carries the rejections, their stated reasons and no change units, and
+the fix review answers only its batch question: *was anything rejected that was
+real?* That is the audit rejections exist to receive, and skipping it would let a
+round that rejects everything escape review entirely — the cheapest way to dodge
+the check.
+
+Only a barrier with **no findings at all** skips round 2. Record that it did.
 
 **Barrier 2, after round 2.** The same steps over round 2's findings, producing
 `F2` and its own packet. **Each further round increments the mutation budget, and

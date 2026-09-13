@@ -214,12 +214,18 @@ So, **before dispatching any round after the first, and before any fix batch:**
 
 1. **Read `mutation_round` out of `.specs/plans/<TICKET>.md`.** Do not recall it.
    Hours have passed and your memory of it is not evidence.
-2. **If it is already 3 → ✋ STOP now**, before spending the round.
+2. **If it is already 3, do not mutate — but still run the read-only
+   validation.** The invariant is *always validate the third mutation*, and
+   stopping at three without validating it leaves the last batch unchecked. Run
+   the validation; if it comes back asking for another write batch, ✋ **STOP**
+   before mutation four. If it comes back clean, the ticket proceeds.
 3. After the batch lands, **write the incremented value back to the artifact** in
    the same barrier. A value held only in your head is lost to a compaction, and
    a resumed run reads the file, not the conversation.
 
-**State the number in the round's opening line** — "round 3 of at most 3" — so a
+**State the number in the round's opening line** — "validating mutation 3 of 3",
+not "round 3": validation rounds that change nothing do not increment it, so
+counting rounds overstates the spend. Say it so a
 run that is burning its budget is visible to the user while there is still time to
 intervene, rather than at the stop.
 - **Only a human-approved re-plan resets it.**
@@ -639,7 +645,11 @@ accepted fix inside that scope requires the verdict to be **re-derived**;
 "re-signing" applies only when resuming an artifact that already carried one. That
 re-derivation is bounded by the mutation budget like every other loop.
 
-**The builder never signs their own work.** No independent signer → ✋ STOP.
+**The builder never signs their own work.** Where a signature is owed — a UI
+ticket's parity, or a `security-sensitive` run's attack testing — no independent
+signer means ✋ STOP. **A ticket that owes neither signs nothing**, and its absence
+is not a failure: an ordinary non-UI, non-security ticket closes on its reviews,
+its green commands and its run record.
 
 
 ## The run record
