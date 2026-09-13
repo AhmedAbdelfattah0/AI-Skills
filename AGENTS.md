@@ -421,7 +421,7 @@ extending them:
 **Editing safely, because edits here are live the moment they are written.** A
 half-finished `SKILL.md` in this repo is a half-finished skill in the agent that
 loads it, and a large edit spans several files that only make sense together.
-Four rules, each of which exists because it was broken:
+Six rules, each of which exists because it was broken:
 
 - **Never whole-file-revert to undo one edit.** `git checkout -- <file>`,
   `git restore`, `git stash` and an overwriting `Write` all discard everything
@@ -442,6 +442,16 @@ Four rules, each of which exists because it was broken:
   exists, confirm it is in a tracked path rather than a scratch script. A commit
   message and its diff must agree — describing what you intended to add rather than
   what the diff contains is how an unverified claim reaches `main`.
+
+- **Read one git blob per Bash call — never in a shell loop.** Verified here: the
+  same historical file measured three ways gave 674 lines directly, 841 via
+  `git show` inside a `for` loop, and 88 via `git cat-file -p` inside one, including
+  when written to a temp file first. Comparing N versions means N invocations, or a
+  Python runtime — not a loop. A per-commit table built in a shell loop is fiction.
+- **An impossible number means the tool is broken, not the subject.** Before using a
+  measurement, ask what it should roughly be; a large discrepancy against something
+  you just read, or values in one run that disagree wildly with each other, means
+  re-derive it another way rather than falling back on what you already believed.
 
 **Draft a large rewrite outside the repo and swap it in once**, for the same
 reason: the intermediate states of a multi-file rewrite are live skills that nobody

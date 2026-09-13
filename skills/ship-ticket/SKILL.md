@@ -242,6 +242,38 @@ claiming that some other record is false: that shape is derived rather than
 observed and is the most likely to be wrong. A correct general mechanism does not
 refute a claim about a specific case — instantiate the case.
 
+## Verification has a stopping condition, and it is not "nothing left to check"
+
+There is always one more pass available. The signal to stop is not running out of
+ideas — it is **the conditions being met**:
+
+> an independent signature against a scope digest · the enumerated CI gate green ·
+> the record swept once at the freeze.
+
+**When those three hold, the next verification layer is not diligence. It is
+re-litigating settled work, on the user's clock.** Ship, and put what is left on
+the follow-up list.
+
+Two things specifically are **never** yours to re-verify:
+
+- **Code that is already merged to main.** Somebody reviewed it and it passed
+  their gate. Your branch's only obligation to main is that it rebases cleanly
+  and the gate is green afterwards.
+- **A finding a signer already ruled on.** Its disposition is recorded. Re-opening
+  it needs new evidence, not a fresh reading.
+
+The failure this prevents is quiet, because every individual pass looks
+responsible. On one ticket it ran to five review rounds and six hours, where
+rounds 4 and 5 were mostly finding stale comments the previous round had written
+— and after the signature was granted and the gate was green, a four-dimension
+re-audit was launched anyway, one dimension of which re-reviewed pull requests
+that had already merged. The user stopped it, twice, and was right both times:
+*"why are we reviewing something already reviewed and merged."*
+
+**If a check genuinely has not run yet, run that check** — do not wrap it in a
+review wave. The one legitimate item in that audit was five CI steps that had
+never executed on the branch. Run directly, they took two minutes.
+
 Non-convergence is a finding, not a retry. A fourth round costs more and learns
 nothing; spawning agents to break the deadlock adds cost, not information.
 
@@ -318,6 +350,23 @@ Four things must be true before you leave:
    existing code is actually written, then the real lint/build/test commands.
    The repo's established pattern outranks anything this file or a quality skill
    prefers. Genuinely ambiguous → ask once.
+5. **The gate is enumerated from the CI config, not from memory, and written into
+   the plan.** Open the pipeline file — `azure-pipelines.yml`, `.github/workflows/`,
+   `.gitlab-ci.yml`, `Jenkinsfile` — and list **every** step it runs. That list is
+   the gate. Running a habitual subset and calling it green is how a branch
+   reaches the pull request with checks that have never executed on it once.
+
+   On one ticket this cost six hours of the user's day to discover at SHIP:
+   `build`, `migrate:verify`, `check:suppressions`, `npm audit` and
+   `openapi:check` were all in the pipeline, none had ever been run on the
+   branch, and "the gate is green" had been reported many times meaning lint,
+   typecheck and the two test suites. They all passed — which is the point. The
+   cost was not a failure; it was not **knowing**, and finding out at the moment
+   the branch was about to be pushed.
+
+   **Every gate run runs the whole list.** A step you cannot run locally (a
+   binary that is missing, something needing network or a secret) is
+   `NOT-RUN`, declared in the run record, never counted as passing.
 
 **Resuming?** If `.specs/plans/<TICKET>.md` exists, read `approval_status` and
 route through *Resuming* below rather than re-planning.
