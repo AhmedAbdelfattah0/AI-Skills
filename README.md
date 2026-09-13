@@ -40,8 +40,14 @@ npx github:AhmedAbdelfattah0/AI-Skills install --target all          # all four 
 ```
 
 When run this way the source is a throwaway `npx` cache, so skills are **copied** into
-`~/.claude/skills/`. To pick up new skills later, re-run the command. On Windows, run the same lines in
-PowerShell or Command Prompt — `npx` is cross-platform.
+`~/.claude/skills/`. To pick them up later, run `update` — npm re-resolves the GitHub spec on every
+`npx` run, so it always fetches the current `main`:
+
+```bash
+npx github:AhmedAbdelfattah0/AI-Skills update
+```
+
+On Windows, run the same lines in PowerShell or Command Prompt — `npx` is cross-platform.
 
 ### Option B — clone, then install (best if you'll edit or update skills)
 
@@ -60,6 +66,36 @@ node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI 
 From a clone, skills are **symlinked** by default, so `git pull` (or editing a `SKILL.md`) updates what
 Claude Code sees with no re-install. Use `--copy` if you'd rather have real files. On **Windows** the
 CLI creates directory *junctions* (no admin rights needed); if a symlink is ever refused, add `--copy`.
+
+## Staying up to date
+
+`update` is to your skills what `claude update` is to Claude Code: one command that fetches and
+re-syncs.
+
+```bash
+node scripts/cli.mjs update           # pull the source, then re-sync every skill it installed
+node scripts/cli.mjs update --check   # say what would change; write nothing
+node scripts/cli.mjs update --prune   # also remove skills that no longer exist upstream
+node scripts/cli.mjs update security  # just this one
+```
+
+It updates **every** skills directory it finds — Claude Code, Codex, Gemini, Antigravity — not only
+the default one, and handles each install shape on its own terms:
+
+| what you installed | what `update` does |
+| --- | --- |
+| a symlink into your clone | nothing to copy — the `git pull` *was* the update |
+| a symlink somewhere else | reports it, never touches it |
+| a copy that matches what was installed | refreshes it from the new source |
+| a copy you edited yourself | **leaves it alone** and tells you, until you pass `--force` |
+
+That last row is the reason `install` writes a small `.ai-skills-manifest.json` beside your skills: a
+stale skill and a skill you customised look identical on disk, and only a recorded baseline tells them
+apart. Your edits are never overwritten silently.
+
+The source refresh is a `git pull --ff-only`, and only from a clean tree with an upstream. If your
+checkout is dirty, has no upstream, or has diverged, `update` says so and re-syncs from the checkout as
+it stands — it will not stash, rebase, or discard anything.
 
 > **Optional:** run `npm link` in the clone to get an `ai-skills` command on your PATH, then use
 > `ai-skills install …` anywhere instead of `node scripts/cli.mjs …`.

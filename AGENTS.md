@@ -34,6 +34,10 @@ node scripts/cli.mjs install --target codex|gemini|agents|antigravity|all   # ot
                                           # ~/.agents/skills, gemini → ~/.gemini/skills,
                                           # antigravity → ~/.gemini/antigravity/skills);
                                           # --dest <path> for custom dirs
+node scripts/cli.mjs update               # refresh the source, then re-sync what it installed
+node scripts/cli.mjs update --check       # report what would change; write nothing
+node scripts/cli.mjs update --prune       # also drop skills that no longer exist upstream
+node scripts/cli.mjs update --force       # overwrite copies you edited after installing them
 
 # Bash alternatives (macOS/Linux/Git Bash/WSL):
 ./scripts/install.sh [--copy] [--target <t,..>|--dest <path>] [names...]  # full mirror of cli install
@@ -42,6 +46,29 @@ node scripts/cli.mjs install --target codex|gemini|agents|antigravity|all   # ot
 ./scripts/import.sh [--force]             # fold an externally-installed skill back into the repo
 ```
 
+- **`update` is the equivalent of `claude update` / `codex --upgrade`, for skills.** It refreshes the
+  source, then re-syncs every skill it installed — and the three install shapes get three different
+  answers, classified from the filesystem rather than assumed:
+  - a **symlink into this repo** is already live, so the source refresh *was* its update;
+  - a **symlink elsewhere** belongs to another checkout and is reported, never touched;
+  - a **copy** is refreshed — unless it differs from what was installed, which means you edited it,
+    and it is left alone until you pass `--force`.
+  The source refresh is deliberately narrow: `git pull --ff-only`, only from a clean tree with an
+  upstream, and every other case (dirty, no upstream, diverged, not a clone) reports why it stopped and
+  then re-syncs from the checkout as it stands. An `update` has no business stashing, rebasing, or
+  discarding your work. Via `npx github:…` there is nothing to pull — npm re-resolves the GitHub spec
+  to `origin/HEAD` on every run, so that path is always already fresh.
+- **Provenance lives in `<skills-dir>/.ai-skills-manifest.json`,** written by `install` and updated by
+  `update`: source path, commit, mode, and a content hash per copied skill. That hash is the only thing
+  that can tell a **stale** skill from one you **edited in place** — byte-level twins with opposite
+  correct answers. It is a dotfile, not a directory, so no skill scanner (they look for
+  `<dir>/SKILL.md`) ever sees it. `install.sh` does **not** write one; a copy install made through the
+  bash script therefore reads as "unknown provenance" on first `update` and needs `--force` once. Use
+  the Node CLI if you care about that.
+- **A bare `install` records `all: true`** and a later `update` then adopts skills added upstream;
+  `install <a> <b>` tracks only those two. `--prune` (opt-in) removes skills deleted upstream.
+- **`.DS_Store`, `Thumbs.db`, `desktop.ini` and `.git` are excluded** from both the content hash and
+  the copy. Hashing a stray `.DS_Store` made `update` want to "refresh" a skill identical to its source.
 - **Install mode is auto-chosen:** from a clone the CLI **symlinks** (edits/`git pull` go live with no
   re-install); from an ephemeral `npx` cache it **copies** (a symlink into a temp cache would dangle).
   `--copy`/`--link` override. On Windows the CLI uses directory **junctions** (no admin needed).

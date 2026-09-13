@@ -18,7 +18,8 @@
   "scripts": {
     "list": "node scripts/cli.mjs list",
     "install:skills": "node scripts/cli.mjs install",
-    "validate": "node scripts/cli.mjs validate"
+    "validate": "node scripts/cli.mjs validate",
+    "update:skills": "node scripts/cli.mjs update"
   },
   "repository": {
     "type": "git",
