@@ -107,9 +107,12 @@ WantedBy=timers.target
 // updater that narrates itself into every conversation is a tax on every prompt.
 function hookEntry(cliPath, log) {
   const { nodeBin } = jobEnv();
+  // The mkdir is not belt-and-braces: if the log's directory ever goes missing,
+  // the redirect fails before node is reached, `|| true` hides it, and the hook
+  // is silently dead forever. Recreate the directory first, every time.
   return {
     type: 'command',
-    command: `"${nodeBin}" "${cliPath}" update --auto >> "${log}" 2>&1 || true`,
+    command: `mkdir -p "${dirname(log)}" && "${nodeBin}" "${cliPath}" update --auto >> "${log}" 2>&1 || true`,
     async: true,
     timeout: 120,
   };

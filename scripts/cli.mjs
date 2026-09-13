@@ -177,8 +177,14 @@ function hashSkill(dir) {
 // index lock only covers the pull — so the whole run takes a lock. State is
 // keyed by source path: two clones on one machine must not share a lock.
 function stateDir() {
-  const base = process.env.XDG_CACHE_HOME
-    || (isWin ? (process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')) : join(homedir(), '.cache'));
+  // STATE, not cache. The lock, the last-run stamp and the log are none of them
+  // regenerable, and ~/.cache is what `brew cleanup`, macOS storage tools and
+  // every `rm -rf ~/.cache` are entitled to delete. Losing this directory does
+  // not merely lose history: the hook's `>> "$log"` redirect fails before node
+  // is even reached, `|| true` swallows the error, and automatic updates are
+  // dead with nothing to show for it. Nothing purges ~/.local/state.
+  const base = process.env.XDG_STATE_HOME
+    || (isWin ? (process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')) : join(homedir(), '.local', 'state'));
   const key = createHash('sha256').update(REPO_ROOT).digest('hex').slice(0, 12);
   return join(base, 'ai-skills', key);
 }
