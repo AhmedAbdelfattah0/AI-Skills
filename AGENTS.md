@@ -215,8 +215,9 @@ Those touchpoints are the **PLAN-phase critique** (the drafted plan goes to
 Codex read-only *before* the user approves it — it runs on every ticket, and its
 absence is a declared degradation) and **pass B in the REVIEW phase**
 (`codex review` on the local diff, run **concurrently** with the fresh-Claude pass A and
-the rule pass C over one frozen manifest, with `/coderabbit:code-review` as the declared
-fallback). The **plan review needs both** the external
+the rule pass C over that round's frozen manifest — and **again in round 2 over the fix
+delta**, because the changes a reviewer asked for need a second model as much as the
+original code did — with `/coderabbit:code-review` as the declared fallback). The **plan review needs both** the external
 [`codex-delegate`](https://github.com/amElnagdy/delegate-skills) skill *and* the
 `codex` CLI on PATH, because it dispatches through the relay; **pass B needs only
 the `codex` binary.** A missing `codex-delegate` therefore costs the plan critique
@@ -233,10 +234,23 @@ separate process with no build context), recorded as `codex <version>, session
 <threadId>` from the relay's `result.json`.
 
 **`ship-ticket` borrows `pr-review`'s blind concurrent A/B/C structure** for its diff
-review, while keeping its own gate semantics and its local-uncommitted scope. Two
-things make that safe and they are load-bearing: the passes are **report-only** (a
-reviewer that fixes code invalidates its peers' conclusions) and every pass is bound to
-a **frozen manifest** — `merge-base…HEAD committed delta + index/worktree status +
+review — **then reviews the fixes those reviewers caused.** Round 1 runs A, B and C
+concurrently and mutually blind. Round 2 runs the **fix review** — a reviewer shown
+each finding paired with the change it produced, asking whether the finding was real,
+whether the fix addresses it, and whether it broke anything — alongside A and B again
+over the fix delta, still blind. The old design re-reviewed that delta but never told
+anyone *which finding caused which change*, so nobody could judge a fix's fit or catch
+one made for a finding that was never real.
+
+Three things are load-bearing. The passes are **report-only** (a reviewer that fixes
+code invalidates its peers' conclusions). **Blindness binds A, B and C, not every
+pass** — the fix review is deliberately sighted, which is its entire purpose; do not
+"restore" a global blindness rule over it. And barrier 1 must build a **fix packet**
+— preimages captured before mutating, change units, a many-to-many finding↔change map,
+and a balance check that every change between the two manifests is attributed — because
+none of it can be reconstructed from the diff afterwards. Each round gets its own
+manifest: **`F0`, `F1`, `F2` are a chain, not one manifest reused.** Every pass in a
+round is bound to that round's **frozen manifest** — `merge-base…HEAD committed delta + index/worktree status +
 untracked files, with per-path digests, modes, rename origins, deletion tombstones
 and symlink targets` (the committed layer matters: a resumed branch may carry WIP
 commits that `git status` cannot see) — computed
@@ -347,7 +361,7 @@ extending them:
 **Editing safely, because edits here are live the moment they are written.** A
 half-finished `SKILL.md` in this repo is a half-finished skill in the agent that
 loads it, and a large edit spans several files that only make sense together.
-Three rules, each of which exists because it was broken:
+Four rules, each of which exists because it was broken:
 
 - **Never whole-file-revert to undo one edit.** `git checkout -- <file>`,
   `git restore`, `git stash` and an overwriting `Write` all discard everything
@@ -358,6 +372,11 @@ Three rules, each of which exists because it was broken:
 - **Write each edit as you make it, not at the end of a batch.** A script that
   accumulates several replacements and writes once will silently discard all of
   them if a later assertion fails. Assert per replacement, and write per file.
+- **Never put a line break inside a match anchor you typed from memory.** Exact-match
+  replacement fails on the two things reconstruction always gets wrong: line wrapping
+  and leading indentation — a wrapped list item, or a YAML block scalar whose
+  continuation lines each carry two spaces. Anchor on one short distinctive phrase
+  from a single line, or read the line range and use the bytes it returns.
 - **Verify a claim against the file before making it.** After a multi-edit script,
   `grep` for a distinctive phrase from each edit. Before saying a check or rule
   exists, confirm it is in a tracked path rather than a scratch script. A commit

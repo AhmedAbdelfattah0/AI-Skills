@@ -45,11 +45,18 @@ family-level detector standing in for per-rule evaluation is coverage loss.
 Record, in the artifacts:
 
 - the **companion mode** and every degraded check, by name
-- the **orchestration mode of each wave** — recon and review; they can differ,
+- the **orchestration mode of each wave and each review round** — they can differ,
   and a run that fanned out its review while serializing an hour of recon is not
   a concurrent run
 - **every manifest ID** and which is the accepted one
 - **each check's outcome**, from the list above
+- **every round's manifest ID and fix-packet digest**, and confirmation that each
+  packet balanced — an unbalanced packet means work entered the diff that no finding
+  asked for
+- **the fix review's verdict per finding** — real or not, addressed or
+  not, broke anything or not — plus anything it found that you had **rejected**.
+  A finding confirmed as not real is recorded, not hidden: it is the measure of
+  how much of the review was churn
 - **each review pass's verified coverage** — the paths it reported reviewing,
   checked against the manifest, and any it was re-run for. The barrier verifies
   this transiently; recording it is what lets anyone later prove the diff was
@@ -86,7 +93,7 @@ yourself to `session-log.md`; either way it must be on disk before the commit.
 **Then recompute the manifest and verify the allowlist.** Every change since the
 **accepted manifest** — the latest promoted `Fn`, or `F0` if no fixes were needed
 — must be on the post-freeze allowlist. If code, tests or docs moved outside it,
-that content is unreviewed and the wave must be re-run for it. ✋ STOP otherwise.
+that content is unreviewed and review must be re-run for it. ✋ STOP otherwise.
 
 ## The commit
 

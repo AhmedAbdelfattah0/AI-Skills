@@ -97,7 +97,7 @@ across its consumers.
 
 ## Signing
 
-Nothing is signed during the review wave. Pass A returns an **unsigned** verdict
+Nothing is signed during a review round. Pass A returns an **unsigned** verdict
 stamped with the scope digest it actually reviewed.
 
 **Sign the final payload, not an intermediate one.** At close-out, once the
