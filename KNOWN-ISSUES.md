@@ -40,21 +40,7 @@ partition touches every one of them, and getting it wrong reintroduces the
 "two definitions of the same field" failure this branch spent four commits
 removing.
 
-### 2. Barrier 1's deterministic commands have no red branch · major
-
-Barrier 1 step 10 runs "only the affected deterministic commands" and never says
-what happens when one fails. The one-barrier invariant implies a terminal FAIL,
-but the skill's general "a finding you can fix is work" language can invite a
-second repair — which is exactly the loop this rewrite removed, reachable through
-an unstated branch.
-
-*Shape of the fix:* one sentence making a red command a terminal FAIL, not a
-repair trigger.
-
-*Why it is open:* it is a genuine one-line fix and should probably just be done;
-it is listed here because it was found late and has not been reviewed.
-
-### 3. The fix packet has no stated carrier · minor
+### 2. The fix packet has no stated carrier · minor
 
 Preimages are now required to live outside the worktree, but where the packet
 itself is stored — and how it survives between barrier 1 and the terminal
@@ -131,3 +117,4 @@ closed first.
 | a UI ticket with no fresh-reviewer route degraded instead of stopping, leaving nothing to produce the parity comparison | the stop is back, as it was at `f40171f` |
 | formatters ran before the budget was read | the budget is read before anything that writes; everything pre-freeze is one batch |
 | "no record mutation after `F0`" forbade the run's own required records | the ban names candidate files and frozen prefixes; append-only slots are the exception |
+| a red deterministic command after barrier 1's repair had no branch, so "a finding you can fix is work" could invite a second repair | a red command there ends the run — the barrier has already spent its one repair |

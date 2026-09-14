@@ -622,6 +622,7 @@ so the answer is one message and not a negotiation.
 - Barrier 1 requires a repository path outside the approved contract.
 - `mutation_round` is already 3 and the record sweep or barrier 1 requires a write.
 - The fix packet does not balance.
+- An affected deterministic command is red after barrier 1's repair.
 - The independent terminal reviewer is unavailable.
 - The terminal reviewer returns any finding, uncertainty, coverage failure,
   record mismatch or non-PASS outcome.

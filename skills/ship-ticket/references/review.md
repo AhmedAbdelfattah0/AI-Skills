@@ -253,7 +253,11 @@ In order:
    is needed. A non-authorization boundary has an empty authorization-test list by
    PROVE's schema.
 10. Run only the affected deterministic commands, append the boundary comparison
-    and rerun evidence to the fix packet, then balance it.
+    and rerun evidence to the fix packet, then balance it. **A red command here
+    ends the run unshipped.** It is not a finding to repair: the barrier has
+    already spent its one repair, and fixing what the repair broke is the second
+    repair this phase does not have. "A finding you can fix is work" governs
+    BUILD, not a closed barrier.
 
 **To balance is to satisfy all four of these, arithmetically and without
 judgment.** The spine makes an unbalanced packet a stop; this is what it means:
