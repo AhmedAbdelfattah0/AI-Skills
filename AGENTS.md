@@ -34,14 +34,104 @@ node scripts/cli.mjs install --target codex|gemini|agents|antigravity|all   # ot
                                           # ~/.agents/skills, gemini → ~/.gemini/skills,
                                           # antigravity → ~/.gemini/antigravity/skills);
                                           # --dest <path> for custom dirs
+node scripts/cli.mjs update               # refresh the source, then re-sync what it installed
+node scripts/cli.mjs update --check       # report what would change; write nothing
+node scripts/cli.mjs update --prune       # also drop skills that no longer exist upstream
+node scripts/cli.mjs update --force       # overwrite a copy WE installed that you edited since
+node scripts/cli.mjs update --adopt       # take over a directory nobody recorded installing
+node scripts/cli.mjs update --auto        # the unattended run: locked, throttled, silent, timid
+node scripts/cli.mjs autoupdate           # is automatic updating on? what ran last?
+node scripts/cli.mjs autoupdate --install # daily job + Claude Code SessionStart hook
+node scripts/cli.mjs autoupdate --remove  # take both back out
 
 # Bash alternatives (macOS/Linux/Git Bash/WSL):
+./install.sh                              # root-level curl bootstrap (clone + install + autoupdate)
 ./scripts/install.sh [--copy] [--target <t,..>|--dest <path>] [names...]  # full mirror of cli install
 ./scripts/validate.sh                     # thin bash wrapper around the Node validator
 ./scripts/package.sh [<name>]             # build dist/<name>.skill zips (needs python3)
 ./scripts/import.sh [--force]             # fold an externally-installed skill back into the repo
 ```
 
+- **`update` is the equivalent of `claude update` / `codex --upgrade`, for skills.** It refreshes the
+  source, then re-syncs every skill it installed — and the three install shapes get three different
+  answers, classified from the filesystem rather than assumed:
+  - a **symlink into this repo** is already live, so the source refresh *was* its update;
+  - a **symlink elsewhere** belongs to another checkout and is reported, never touched;
+  - a **copy** is refreshed — unless it differs from what was installed, which means you edited it,
+    and it is left alone until you pass `--force`.
+  The source refresh is deliberately narrow: `git pull --ff-only`, only from a clean tree with an
+  upstream, and every other case (dirty, no upstream, diverged, not a clone) reports why it stopped and
+  then re-syncs from the checkout as it stands. An `update` has no business stashing, rebasing, or
+  discarding your work. Via `npx github:…` there is nothing to pull — npm re-resolves the GitHub spec
+  to `origin/HEAD` on every run, so that path is always already fresh.
+- **Three outcomes, three flags — and they are deliberately not one.** A copy we
+  installed and you have not touched is refreshed with no flag. A copy we installed
+  that you have since edited needs `--force`. A directory that merely shares a name
+  with one of our skills, which no manifest records us installing, needs `--adopt`.
+  Collapsing the last two into `--force` meant "force an update" silently claimed
+  arbitrary same-named content belonging to somebody else.
+- **A manifest is only trusted when it came from THIS library.** Install records the
+  normalised `git remote origin` alongside the path; `sameLibrary()` compares it, and
+  a mismatch makes every record in that directory foreign. Without it, checkout B
+  reads checkout A's hashes, concludes "unchanged", and overwrites A's content with
+  no flag at all — a fork or a stale branch quietly wins. A manifest predating the
+  field falls back to the recorded source path.
+- **Install and update both build-then-swap, never destroy-then-write.** `applySkill`
+  stages a complete copy under `<dest>/.ai-skills-tmp/`, renames the old aside,
+  promotes the staged one, and only then drops the backup; any failure rolls back.
+  Deleting first meant a full disk or an interrupt left no skill at all, and the
+  catch had nothing to restore from. The staging directory is a DOT-directory
+  because a sibling named `security.new` holds a `SKILL.md` and would be scanned as
+  a skill of its own while it exists.
+- **Provenance lives in `<skills-dir>/.ai-skills-manifest.json`,** written by `install` and updated by
+  `update`: source path, commit, mode, and a content hash per copied skill. That hash is the only thing
+  that can tell a **stale** skill from one you **edited in place** — byte-level twins with opposite
+  correct answers. It is a dotfile, not a directory, so no skill scanner (they look for
+  `<dir>/SKILL.md`) ever sees it. `install.sh` does **not** write one; a copy install made through the
+  bash script therefore reads as "unknown provenance" on first `update` and needs `--force` once. Use
+  the Node CLI if you care about that.
+- **A bare `install` records `all: true`** and a later `update` then adopts skills added upstream;
+  `install <a> <b>` tracks only those two. `--prune` (opt-in) removes skills deleted upstream.
+- **`.DS_Store`, `Thumbs.db`, `desktop.ini` and `.git` are excluded** from both the content hash and
+  the copy. Hashing a stray `.DS_Store` made `update` want to "refresh" a skill identical to its source.
+- **Automatic updates: the honest framing.** A skill is a passive file. Nothing in this library ever
+  executes, so — unlike `claude update`, which works because `claude` is a program that runs and can
+  check for itself — there is no moment at which the library could notice it is stale. "Automatic"
+  necessarily means installing something that DOES run. `autoupdate --install` installs two such
+  things: a **daily scheduled job** (launchd on macOS, a systemd user timer on Linux, schtasks on
+  Windows) and a **Claude Code `SessionStart` hook**, so a session never opens on stale skills. Both
+  invoke `update --auto`. Neither can push: GitHub cannot reach a laptop, so both poll.
+- **`update --auto` is the unattended contract,** and is deliberately more timid than the interactive
+  command: it takes a lock in the state dir (a launchd tick and a SessionStart can fire in the same
+  second, and two `cpSync`s racing on one destination leave a half-written skill), skips entirely if it
+  ran within the hour, **ignores `--force` and `--prune` even when they are passed** (a scheduler that
+  could overwrite or delete would eventually do it at 3am to something that mattered), and buffers its
+  output so a no-op run prints nothing at all. It speaks only when something changed, was declined, or
+  failed.
+- **The hook is EXEC form — `command` plus `args`, no shell — and nothing redirects.** A shell string
+  was three latent bugs at once: `&&`/`||` are syntax errors in Windows PowerShell 5.1, so SessionStart
+  never reached node there; a home or repo path containing a quote or `$(...)` broke the quoting or
+  executed a substitution; and a `>>` redirect is opened *before* node starts, so an absent state
+  directory killed the hook before it could recreate it. `update --auto` now opens its own log after
+  creating the directory, and writes **nothing** to stdout — which is what keeps it out of the session's
+  context, `SessionStart` stdout being injected there. For the same open-before-start reason, launchd
+  gets no `StandardOutPath` and systemd no `StandardOutput`.
+- **systemd values are quoted and `%`-escaped.** `ExecStart` splits on whitespace, so an unquoted
+  `AI_SKILLS_HOME="/home/me/AI Skills"` installs a timer that can never run the CLI.
+- **The hook's identity is the absolute path of THIS `cli.mjs`.** Matching loose substrings (`cli.mjs`
+  plus `update --auto`) also claims another checkout's updater, or any unrelated
+  `/opt/tool/cli.mjs update --auto`. Both the exec-form `args` and the legacy shell string are
+  recognised, so `--remove` can still clean up hooks written by earlier versions.
+- **`settings.json` is written atomically** — temp sibling, `fsync`, rename — because truncating it in
+  place means an interrupt or a full disk leaves partial JSON, and partial JSON disables **every**
+  setting in the file.
+- **`autoupdate` lives in `scripts/autoupdate.mjs`,** not in `cli.mjs`. `cli.mjs` keeps ownership of the
+  paths and state and passes them in, so neither file defines them twice. Scheduler installation is
+  refused outright from an `npx` cache — that directory is deleted between runs, so a job pointing at
+  it would break.
+- **For the author of this repo, none of the above is needed to see an edit.** Symlinked skills are live
+  the moment a file changes; the scheduler exists only to run the `git pull`. That is also why the curl
+  bootstrap clones to a stable `~/.ai-skills` and symlinks from there.
 - **Install mode is auto-chosen:** from a clone the CLI **symlinks** (edits/`git pull` go live with no
   re-install); from an ephemeral `npx` cache it **copies** (a symlink into a temp cache would dangle).
   `--copy`/`--link` override. On Windows the CLI uses directory **junctions** (no admin needed).
@@ -361,7 +451,7 @@ extending them:
 **Editing safely, because edits here are live the moment they are written.** A
 half-finished `SKILL.md` in this repo is a half-finished skill in the agent that
 loads it, and a large edit spans several files that only make sense together.
-Four rules, each of which exists because it was broken:
+Six rules, each of which exists because it was broken:
 
 - **Never whole-file-revert to undo one edit.** `git checkout -- <file>`,
   `git restore`, `git stash` and an overwriting `Write` all discard everything
@@ -382,6 +472,16 @@ Four rules, each of which exists because it was broken:
   exists, confirm it is in a tracked path rather than a scratch script. A commit
   message and its diff must agree — describing what you intended to add rather than
   what the diff contains is how an unverified claim reaches `main`.
+
+- **Read one git blob per Bash call — never in a shell loop.** Verified here: the
+  same historical file measured three ways gave 674 lines directly, 841 via
+  `git show` inside a `for` loop, and 88 via `git cat-file -p` inside one, including
+  when written to a temp file first. Comparing N versions means N invocations, or a
+  Python runtime — not a loop. A per-commit table built in a shell loop is fiction.
+- **An impossible number means the tool is broken, not the subject.** Before using a
+  measurement, ask what it should roughly be; a large discrepancy against something
+  you just read, or values in one run that disagree wildly with each other, means
+  re-derive it another way rather than falling back on what you already believed.
 
 **Draft a large rewrite outside the repo and swap it in once**, for the same
 reason: the intermediate states of a multi-file rewrite are live skills that nobody

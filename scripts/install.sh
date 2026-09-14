@@ -22,6 +22,14 @@
 # Symlink mode is best on your primary machine: one `git pull` / edit and every
 # linked tool sees the change with no re-install. Copy mode is for machines
 # where the repo path may differ or symlinks aren't wanted.
+#
+# To UPDATE later, use the Node CLI: `node scripts/cli.mjs update`. It pulls the
+# source and re-syncs what it installed. Note that this script does not write the
+# `.ai-skills-manifest.json` the updater uses to tell a stale copy from one you
+# edited yourself — deliberately, so there is only one implementation of that
+# hashing rather than two that can drift. A copy install made here therefore
+# reads as "unknown provenance" on its first update and needs `--force` once;
+# symlink installs (the default) are unaffected, since the link is its own proof.
 
 set -euo pipefail
 
