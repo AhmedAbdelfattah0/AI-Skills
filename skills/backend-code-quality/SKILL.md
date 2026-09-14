@@ -39,7 +39,7 @@ reference implementation to adapt — never as the only way.
 
 Design principles here are **enforced, not suggested**. Every rule has a stable ID. Nothing gets
 written until it has been assigned a layer and a security tier (STEP 0B), and nothing is called
-done until every in-force rule reports PASS or N/A with evidence (STEP 11).
+done until every in-force rule reports PASS or NOT_APPLICABLE with evidence (STEP 11).
 
 Deviation is never silent. If a rule cannot be followed, you **stop and surface it** — you do not
 implement the deviation and explain afterwards.
@@ -120,7 +120,7 @@ it does not enter the deviation ledger — but it must not vanish either, or
 nothing shows the four conditions were ever checked. Emit a Verification Pass row:
 
 ```
-NG-ARCH-04 | N/A — replaced by established project architecture
+NG-ARCH-04 | NOT_APPLICABLE — replaced by established project architecture
            | evidence: grep -rn "inject(HttpClient)" src/ -> 11/11 sites are feature
            | services; 0 in components; 0 exclusions
            | ratified: CLAUDE.md "Data access" section (predates ticket)
@@ -502,19 +502,19 @@ not the word "yes".**
 
 ```
 VERIFICATION
-| Rule | Status | Evidence |
+| Subject ID | Outcome | Evidence |
 |---|---|---|
 | BE-SEC-01 | PASS | orders route uses request-scoped client, not service_role |
 | BE-SEC-09 | PASS | services/order.ts:41 checks owner_id against principal |
 | BE-TEN-02 | PASS | tenant read from JWT claim, never from body |
 | BE-WHK-04 | PASS | UNIQUE(provider, event_id); dup-key caught as 200 |
 | BE-AUD-01 | PASS | migration 0007 REVOKEs UPDATE,DELETE + blocking trigger |
-| BE-HDR-05 | N/A  | no infra changed this task |
+| BE-HDR-05 | NOT_APPLICABLE | no infra changed this task |
 ```
 
 Rules:
 - **Any FAIL blocks done.** Fix it, or run the Deviation Protocol. Do not report and ship.
-- **N/A requires a reason.** "Not applicable" without a clause is a skipped check.
+- **NOT_APPLICABLE requires a reason.** The token without a clause is a skipped check.
 - Every `[NN]` rule is **always in force** and always appears in the table. `[ARCH]` and `[D]`
   rules appear when the Design Contract named them.
 - A `[NN]` FAIL is stated to the user in plain language, not buried in a table row.

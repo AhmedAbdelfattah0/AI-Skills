@@ -418,20 +418,20 @@ line, or a clause, never the word "yes":
 
 ```
 VERIFICATION
-| Rule | Status | Evidence |
+| Subject ID | Outcome | Evidence |
 |---|---|---|
 | BE-SEC-09 | FAIL | routes/invoices.ts:22 — no owner check before returning the row |
 | BE-TEN-02 | PASS | tenant read from JWT claim at middleware/auth.ts:31 |
-| BE-HDR-05 | N/A  | no infra changed in this PR |
+| BE-HDR-05 | NOT_APPLICABLE | no infra changed in this PR |
 | AI-FM     | PASS | no catch-alls, no mock returns, imports verified |
 ```
 
 **Two rules from the specialists survive; one does not.**
 
-- **N/A requires a reason.** "Not applicable" with no clause is a skipped check
+- **NOT_APPLICABLE requires a reason.** The token with no clause is a skipped check
   wearing a status — the exact failure this pass exists to prevent.
 - **A row may not be omitted.** If a rule is in force it appears, even to say
-  `N/A`. An absent row is the empty box going unnoticed again.
+  `NOT_APPLICABLE`. An absent row is the empty box going unnoticed again.
 - **"Any FAIL blocks done" does not apply here** — this skill ships nothing.
   A FAIL is not a gate, it becomes a **finding**: rule ID, `path:line`, quoted
   line, fix shape, carried into step 8 attributed `[rules]`. An `[NN]` FAIL is
@@ -454,7 +454,7 @@ the report — "Codex: 4/4 files; Claude: 4/4 files" — because a pass with
 unstated partial coverage reads exactly like a clean pass.
 
 **Pass C's coverage is measured in rules, not just files.** Check that every
-rule you derived as in force has a row, and that no row says `N/A` without a
+rule you derived as in force has a row, and that no row says `NOT_APPLICABLE` without a
 reason. A short table is the same failure as a short file list: it looks like a
 clean result and is actually an unrun check.
 
@@ -534,14 +534,14 @@ header, the blockers, and the counts; the file gets everything.
 - **Intent checked against:** <PR description | linked work item | NONE — review ran without stated intent>
 
 ## Verification (pass C)
-| Rule | Status | Evidence |
+| Subject ID | Outcome | Evidence |
 |---|---|---|
 | BE-SEC-09 | FAIL | routes/invoices.ts:22 — no owner check before returning the row |
 | BE-TEN-02 | PASS | tenant read from JWT claim at middleware/auth.ts:31 |
-| BE-HDR-05 | N/A  | no infra changed in this PR |
+| BE-HDR-05 | NOT_APPLICABLE | no infra changed in this PR |
 | AI-FM     | PASS | no catch-alls, no mock returns, imports verified |
 
-<every rule in force appears; N/A carries a reason; each FAIL also appears below as a finding>
+<every rule in force appears; NOT_APPLICABLE carries a reason; each FAIL also appears below as a finding>
 
 ## Blockers
 ### 1. <one-line defect> `[claude+codex]`
@@ -622,7 +622,7 @@ For Azure DevOps use `repo_pull_request_thread_write`, `action: "create"`, with
 - **Treating agreement as correctness.** `[claude+codex]` raises confidence; it
   does not discharge the check.
 - **A short verification table.** Dropping rules that felt irrelevant, or
-  writing `N/A` with no reason, converts pass C back into the free-form review
+  writing `NOT_APPLICABLE` with no reason, converts pass C back into the free-form review
   it exists to complement — and does it invisibly, since a short clean table
   looks exactly like a thorough one.
 - **Dropping a finding on a category.** "Style-only" and "pre-existing" can be

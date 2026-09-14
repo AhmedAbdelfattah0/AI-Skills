@@ -64,13 +64,14 @@ implementation_inputs[] path + content digest for the surface implementation
 control_inputs[]         path + content digest for every transitive control owner
 ```
 
-Each test ID pairs the stable committed test name with the SHA-256 digest of the
-test's **body** — its own source text from its declaration through its closing
-delimiter, never the whole file's. Both halves are load-bearing, and REVIEW
-compares the pair. The name alone cannot see a test that keeps its name and loses
-its assertions, which is precisely how a repair can appear to fix a finding while
-deleting the proof of it. A whole-file digest would swing the other way and stop
-the run for an unrelated edit elsewhere in the same file.
+Each test ID pairs the committed test name with the SHA-256 digest of the test's
+**body** — its own source text from its declaration through its closing delimiter,
+never the whole file's. The digest is the coverage identity; the name is its
+human locator. REVIEW compares the digest multiset first within each boundary and
+polarity list, then uses names to report unchanged or renamed tests. A body edit
+therefore changes coverage even when the name stays fixed, while a name-only edit
+is recorded as a rename and keeps coverage. A whole-file digest would swing the
+other way and stop the run for an unrelated edit elsewhere in the same file.
 
 Use the route method plus path template, middleware export, sink symbol,
 configuration key, outbound client operation, job/listener name or equivalent
@@ -84,9 +85,10 @@ versus `role:admin` changes neither field. If its implementation changed, REVIEW
 re-runs the same mapped tests and records their evidence instead of making a
 semantic-equivalence judgment.
 
-Both loops increment the mutation budget once per changed batch and are bounded
-by it. PROVE prepares screen classifications and pinned inputs; the complete
-screen comparisons happen once, inside round-1 pass A.
+Both loops append one `batch` entry carrying the active `run_id` per changed batch
+and are bounded by that run's mutation budget. PROVE prepares screen
+classifications and pinned inputs; the complete screen comparisons happen once,
+inside round-1 pass A.
 
 ## The static proof
 
@@ -202,19 +204,18 @@ and therefore a FAIL.
 
 ### Runtime outcome and review handoff
 
-**PASS_FULL** ⇔ the canonical class → routes → controls → tests map is complete;
-every applicable rule is green for every route; each route has its positive
-control and refusal assertion; there are zero unfixed `[NN]` findings;
+Use the canonical outcome vocabulary in [ship.md](ship.md). `outcome: PASS` with
+`execution_mode: FULL` means the canonical class → routes → controls → tests map
+is complete; every applicable rule is green for every route; each route has its
+positive control and refusal assertion; there are zero unfixed `[NN]` findings;
 test-quality passed or its degradation is declared; every excluded changed file
 is named; and there is no coverage degradation.
 
-**PASS_GROUPED** ⇔ the same conditions hold, shared test definitions were used,
-and every route was still executed against them.
-
-**DEGRADED** ⇔ the executed reduced set is committed and green, while every
-unexercised rule or family is named with its cause.
-
-**FAIL** ⇔ otherwise.
+Use `outcome: PASS` with `execution_mode: GROUPED` when the same conditions hold,
+shared test definitions were used, and every route was still executed against
+them. Use `outcome: DEGRADED` with `execution_mode: REDUCED` when the executed
+reduced set is committed and green and every unexercised rule or family is named
+with its cause. Otherwise use `outcome: FAIL`.
 
 PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
 Hand the frozen surface map, rule-to-test map, test outcomes and production
@@ -231,16 +232,19 @@ always exists.
 
 A merge-blocking CI check that validates the artifact — same PR-side slot as
 `nn-guard` — is stronger, and **its presence is checked with the other companions,
-up front**. If the repo has it, the run waits for it. **If the repo does not, say
-so in the run record as a declared degradation and do not wait for a check that
-does not exist.** Installing it is a repo-setup task, not something this ticket
-adds after the freeze — post-freeze CI code would be unreviewed content in the
-commit, which is exactly what the allowlist forbids.
+up front**. This GATE invocation is detect-only: if the repo has it, validate its
+trigger and wait for it; if not, record `enforcement_outcome: DEGRADED` with the
+policy/config locations checked and do not invent a check. Installation belongs
+only to explicit setup work whose approved Design Contract names the CI paths and
+whose edit occurs before its own freeze.
 
-Where the check does exist it accepts `PASS_FULL`, `PASS_GROUPED` or `DEGRADED`;
-for `DEGRADED` it verifies each in-scope surface carries its family's reduced set,
-green, and that every unexercised rule is listed by ID. A verdict it cannot parse
-is a FAIL.
+Where the check does exist it accepts `outcome: PASS` with `execution_mode: FULL |
+GROUPED`, or `outcome: DEGRADED` with `execution_mode: REDUCED`. For `DEGRADED`
+it verifies each in-scope surface carries its family's reduced set, green. When
+the VAPT inventory exists, every unexercised rule is listed by ID. When the skill
+itself was unavailable, the record instead carries every untested family plus
+`rule_inventory: unavailable`; consumers must accept that declared fallback and
+must not require invented IDs. A verdict it cannot parse is a FAIL.
 
 ## Tests and docs
 

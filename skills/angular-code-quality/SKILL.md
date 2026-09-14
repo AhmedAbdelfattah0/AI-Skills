@@ -28,7 +28,7 @@ gate, and an evidence-backed Verification Pass — nothing ships unproven.
 
 Design principles here are **enforced, not suggested**. Every rule has a stable ID. Nothing
 gets written until it has been assigned a layer and a rule set (STEP 0B), and nothing is
-called done until every in-force rule reports PASS or N/A with evidence (STEP 8).
+called done until every in-force rule reports PASS or NOT_APPLICABLE with evidence (STEP 8).
 
 Deviation is never silent. If a rule cannot be followed, you **stop and surface it** — you
 do not implement the deviation and explain afterwards.
@@ -110,7 +110,7 @@ it does not enter the deviation ledger — but it must not vanish either, or
 nothing shows the four conditions were ever checked. Emit a Verification Pass row:
 
 ```
-NG-ARCH-04 | N/A — replaced by established project architecture
+NG-ARCH-04 | NOT_APPLICABLE — replaced by established project architecture
            | evidence: grep -rn "inject(HttpClient)" src/ -> 11/11 sites are feature
            | services; 0 in components; 0 exclusions
            | ratified: CLAUDE.md "Data access" section (predates ticket)
@@ -389,18 +389,18 @@ not the word "yes".**
 
 ```
 VERIFICATION
-| Rule | Status | Evidence |
+| Subject ID | Outcome | Evidence |
 |---|---|---|
 | NG-ARCH-03 | PASS | no computed/getters in step-one.component.ts |
 | NG-ARCH-04 | PASS | HttpClient only in core/services/api.service.ts:14 |
 | NG-UI-02   | PASS | all colors via var(--…); grep found 0 hex literals |
-| NG-CORE-02 | N/A  | no subscriptions introduced |
+| NG-CORE-02 | NOT_APPLICABLE | no subscriptions introduced |
 | NG-STD-06  | PASS | reactive — form has cross-field validation |
 ```
 
 Rules:
 - **Any FAIL blocks done.** Fix it, or run the Deviation Protocol. Do not report and ship.
-- **N/A requires a reason.** "Not applicable" without a clause is a skipped check.
+- **NOT_APPLICABLE requires a reason.** The token without a clause is a skipped check.
 - Only list rules **in force** for this task — the ones named in the Design Contract, plus every
   `[NN]` rule, which is always in force.
 - **One `AI-FM` row is always in force**: walk the 15 LLM failure modes + The Floor

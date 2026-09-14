@@ -41,7 +41,8 @@ updated to follow later edits. Persist lists and derive counts.
 An unreferenced screen receives:
 
 ```text
-NOT_APPLICABLE_NO_SCREEN_REFERENCE
+outcome: NOT_APPLICABLE
+reason_code: NO_SCREEN_REFERENCE
 approved_by
 approval_date
 reference_search

@@ -1100,6 +1100,7 @@ function cmdValidate() {
 
   console.log(`Validating skills in ${SKILLS_DIR}\n`);
   let fail = false;
+  const outcomeVocabularyOwners = [];
 
   for (const name of names) {
     const md = join(SKILLS_DIR, name, 'SKILL.md');
@@ -1203,13 +1204,14 @@ function cmdValidate() {
     // 7. Where a skill defines a canonical outcome vocabulary, it must be defined
     //    exactly once and must be able to express failure. A vocabulary that
     //    declares itself exhaustive and omits FAIL makes a failure unrecordable.
-    const enumOwners = docs.filter((d) => /^PASS_FULL\s/m.test(readFileSync(d, 'utf8')));
+    const enumOwners = docs.filter((d) => /^OUTCOME_VOCABULARY$/m.test(readFileSync(d, 'utf8')));
+    outcomeVocabularyOwners.push(...enumOwners);
     if (enumOwners.length > 1) {
       console.log(`❌ ${name}: the outcome vocabulary is defined in ${enumOwners.length} files — it must have exactly one owner.`);
       err = fail = true;
     } else if (enumOwners.length === 1) {
       const body = readFileSync(enumOwners[0], 'utf8');
-      for (const v of ['PASS_FULL', 'FAIL', 'NOT_TRIGGERED', 'DEGRADED'])
+      for (const v of ['PASS', 'FAIL', 'NOT_TRIGGERED', 'NOT_APPLICABLE', 'DEGRADED'])
         if (!new RegExp(`^${v}\\s`, 'm').test(body)) {
           console.log(`❌ ${name}: the outcome vocabulary omits ${v}.`);
           err = fail = true;
@@ -1217,6 +1219,11 @@ function cmdValidate() {
     }
 
     if (!err) console.log(`✅ ${name}`);
+  }
+
+  if (outcomeVocabularyOwners.length !== 1) {
+    console.log(`❌ canonical outcome vocabulary has ${outcomeVocabularyOwners.length} owners — expected exactly one.`);
+    fail = true;
   }
 
   // The repo's own guidance files are held to the retired-vocabulary rule too.
@@ -1256,6 +1263,33 @@ const RETIRED_VOCABULARY = [
   [/\bGATE [345]\b/g, 'ship-ticket uses named phases and checks, not numbered gates', ['ship-ticket', 'vapt', 'generate-ticket', 'code-quality']],
   [/\bfinal\s+`?mutation_round`?/gi, 'mutation_round is derived and is never a stored final field', ['ship-ticket']],
   [/\bmutation_round:\s*\d+\b/gi, 'mutation_round is derived and is never a stored scalar', ['ship-ticket']],
+  [/mutation_round`?\s+is the length of `?batches\[\]`?/gi, 'mutation_round is partitioned by active run_id, not counted across ticket history', ['ship-ticket']],
+  [/\bnew (?:approved plan and a )?run record\b/gi, 'a new execution appends a run partition to the existing record', ['ship-ticket']],
+  [/\bOne schema, three consumers\b/g, 'the run record has a truthful precommit projection and a separate external postcommit projection', ['ship-ticket']],
+  [/\bany stop (?:after it )?ends the current run\b/gi, 'REVIEW stops conclude; resumable external SHIP failures pause without reopening review', ['ship-ticket']],
+  [/\bAny PR, tracker or CI check fails\b/g, 'SHIP distinguishes resumable service failures from deterministic red checks and content changes', ['ship-ticket']],
+  [/\bresume SHIP only if the final candidate manifest\b/gi, 'SHIP resumes by representation-independent reviewed_content_id, not a manifest changed by commit', ['ship-ticket']],
+  [/\bA retry that changes no repository bytes may rerun CI only\b/gi, 'SHIP resumes missing idempotent external operations under reviewed_content_id', ['ship-ticket']],
+  [/\b(?:one CI wait|wait exactly once for CI)\b/gi, 'SHIP has one enumerated CI gate; infrastructure retries do not reopen REVIEW', ['ship-ticket']],
+  [/\bwait once for CI\b/gi, 'SHIP waits for the enumerated gate and may resume an infrastructure-interrupted wait', ['ship-ticket']],
+  [/\bpost-verdict session-log entry\b/gi, 'the session log stops at the precommit SHIP_READY cutoff', ['ship-ticket']],
+  [/\bremaining SHIP timing\/result entries\b/gi, 'only knowable SHIP_READY facts enter the committed projection', ['ship-ticket']],
+  [/\bSHIP result slots may be appended\b/gi, 'repository result writes end at the precommit SHIP_READY cutoff', ['ship-ticket']],
+  [/\bso they ride the single gated commit\b/gi, 'postcommit outcomes stay external because they do not exist at the commit cutoff', ['ship-ticket']],
+  [/\bAdd one merge-blocking check\b/g, 'VAPT GATE detects enforcement; only explicit setup work may install it', ['vapt']],
+  [/\bInstalling (?:the|it) check is repo setup, never something (?:a|this) ticket adds after the freeze\b/gi, 'CI enforcement is caller-aware: detect in GATE, install only in explicit pre-freeze setup work', ['ship-ticket', 'vapt']],
+  [/\band a merge-blocking CI check[\s\S]{0,120}is what actually stops a regression\b/gi, 'VAPT accepts declared enforcement degradation in GATE mode while committed tests still run in CI', ['vapt']],
+  [/\bTwo vocabularies, at two levels\b/g, 'rule rows and whole checks share one canonical outcome vocabulary', ['ship-ticket']],
+  [/\bPASS_(?:FULL|GROUPED|REUSED)\b/g, 'execution detail belongs in execution_mode; PASS is the canonical outcome', ['ship-ticket', 'vapt']],
+  [/\bNOT_APPLICABLE_NO_SCREEN_REFERENCE\b/g, 'NOT_APPLICABLE is the outcome and NO_SCREEN_REFERENCE is a reason_code', ['ship-ticket']],
+  [/\bPASS\s*\/\s*FAIL\s*\/\s*N-A\b/g, 'rule rows use the canonical outcome vocabulary', ['ship-ticket', 'code-quality']],
+  [/\bN-A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'code-quality']],
+  [/\bN\/A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'vapt', 'angular-code-quality', 'backend-code-quality', 'code-quality', 'pr-review']],
+  [/\bFIXED\b/g, 'a fixed finding has outcome PASS and records fixed as disposition evidence', ['vapt']],
+  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality', 'pr-review']],
+  [/\| Rule \| Surface \| Verdict \| Evidence \|/g, 'VAPT rows use the canonical Subject ID | Outcome | Evidence shape', ['vapt']],
+  [/\bBoth halves are load-bearing, and REVIEW compares the pair\b/g, 'test coverage matches body digests first so a name-only rename remains equivalent', ['ship-ticket']],
+  [/\beach test ID being PROVE's name-plus-body-digest pair\b/g, 'coverage vectors use body-digest multisets; test names are locators and rename evidence', ['ship-ticket']],
   [/\b(?:terminal verdict when one is required|when terminal review is required)\b/gi, 'every ship-ticket run gets an unconditional terminal reviewer', ['ship-ticket']],
   [/\bno terminal verdict recorded\b/gi, 'ship-ticket resumption keys on whether REVIEW started, not whether a verdict exists', ['ship-ticket']],
   [/\bauthz (?:predicate|component)\b/gi, 'boundary identity excludes prose authorization labels; executable test IDs carry authorization coverage', ['ship-ticket']],

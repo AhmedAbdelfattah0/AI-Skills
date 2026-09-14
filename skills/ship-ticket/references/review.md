@@ -65,16 +65,19 @@ and never edited, and a value that "changes" is a new entry — which is what ma
 a later write provably not a rewrite of something already reviewed:
 
 Physically, append one UTF-8 JSON object per line immediately before
-`RUN-STATE:END`. Every object carries `type`, whose value is the singular list name
-below (`batch`, `reviewer`, `manifest`, `finding`, `disposition`, `outcome`,
-`timing`, `degradation`); each conceptual array is the ordered projection of its
-type. Never replace or reorder an existing line.
+`RUN-STATE:END`. Every object carries `type` and `run_id`; `type` is the singular
+list name below (`run`, `batch`, `reviewer`, `manifest`, `finding`, `disposition`,
+`outcome`, `timing`, `degradation`). Each conceptual array is the ordered
+projection of its type. Never replace or reorder an existing line.
 
 ```text
+runs[]           one START per human-approved execution: run ID, approved-plan
+                 digest, approval identity and timestamp; later REVIEW_CONCLUDED
+                 or SHIP_READY events carry the same run ID and their reason/state
 batches[]        one per candidate-changing repair: phase, purpose, changed_paths[],
                  validation[]; a REVIEW_BARRIER_1 entry additionally carries
                  source_manifest_id, candidate_manifest_id and fix_packet_digest
-reviewers[]      one per round-1 dispatch: pass, identity, run ID
+reviewers[]      one per round-1 dispatch: pass, identity, dispatch ID
 manifests[]      one per snapshot: label (F0 | F1), manifest ID
 findings[]       one per round-1 finding: stable ID, source pass and source locator
 dispositions[]   one per finding: finding ID, disposition, concise reason and
@@ -100,9 +103,10 @@ including rejected findings that produce no repair packet. A fix packet adds the
 causal mapping from accepted findings to changed bytes; it is not the sole home of
 disposition reasoning.
 
-The spine's mutation-budget section is the sole definition of `mutation_round`.
-No artifact carries it as a field; this schema stores only the underlying batch
-entries.
+The final appended `run` `START` selects the active run. The spine's
+mutation-budget section is the sole definition of `mutation_round`: count only
+that active `run_id`'s batch entries. No artifact carries the count as a field;
+this schema stores only the partition key and underlying entries.
 
 A post-`F0` record mismatch, narrative edit or correction request ends the current
 run. Historical finding locators stay bound to their source manifest; they are
@@ -138,6 +142,18 @@ whole-file hashing for the plan path only.
 bytewise-sorted `path NUL prefix-digest` pairs for the plan, parity and VAPT
 artifacts that exist. This is the single binding the terminal reviewer returns;
 the per-path digests remain its inspectable inputs.
+
+`reviewed_content_id` is the `ship-ticket-reviewed-content-v1` SHA-256 digest of
+the final candidate's bytewise-sorted `path NUL kind NUL mode NUL final-image`
+entries, with deletes represented by tombstones and submodules by gitlink OID,
+plus `frozen_record_digest`. Renames are normalized to their deleted and added
+paths. It deliberately excludes repository path, branch, `HEAD`, target base,
+merge base, committed/staged/unstaged buckets, rename metadata, the plan's
+append-only run-state block and the permitted SHIP session-log projection. Those
+are repository representation or result fields, not reviewed content. The same
+bytes therefore keep the same identity when SHIP turns a working tree into its
+single commit. The terminal reviewer returns this ID; SHIP recomputes it before
+the commit and every resume.
 
 Recompute `ui_required` and write it before the record sweep and `F0`. Round-1
 reviewers receive the identical manifest. Nothing writes while they run. Any
@@ -184,7 +200,8 @@ Dispatch together over `F0`:
 - **Pass B:** the independent Codex process or declared fallback. It runs once.
 - **Pass C:** the complete rule checklist.
 
-Pass C emits one `rule → PASS/FAIL/N-A → evidence` table containing every routed
+Pass C emits one `rule → outcome → evidence` table using the canonical vocabulary
+from [ship.md](ship.md), containing every routed
 specialist row, every `[NN]` row, separate `AI-FM` and `UNIVERSAL` rows, plus
 `TEST` and `DOC` when applicable. A missing inventory may degrade only its
 inventory-derived rows; it never removes the whole-diff rows.
@@ -200,15 +217,21 @@ In order:
 2. If any finding concerns the frozen record, end the current run before writing.
 3. Derive `mutation_round` by the spine's sole definition. If it is already 3 and
    a write is required, end the run.
-4. Capture preimages — the **contents**, not the digests — of every file the
-   repair will change, before mutating anything, and store them outside the
-   worktree. The manifest holds digests: once an uncommitted file is overwritten
-   its previous state is unrecoverable, and the question the packet exists to
-   answer — what did this look like before — becomes unanswerable.
+4. Create a per-run private temporary directory outside the worktree, accessible
+   only to the current user. Its `packet.json` is the fix packet carrier and its
+   opaque change-unit subpaths hold preimage contents. Failure to create or read
+   that carrier ends the run before mutation. Capture the **contents**, not the
+   digests, of every file the repair will change into it before mutating anything.
+   The manifest holds digests: once an uncommitted file is overwritten its
+   previous state is unrecoverable, and the question the packet exists to answer
+   — what did this look like before — becomes unanswerable.
 5. Apply at most one code-and-test repair batch inside the approved Design
    Contract.
-6. Build the fix packet while changing the files; it cannot be reconstructed
-   afterwards from the diff. It holds each finding, its disposition, and its
+6. Build `packet.json` in that carrier while changing the files; it cannot be
+   reconstructed afterwards from the diff. Pass its absolute path and expected
+   digest read-only to the terminal reviewer, then remove the private directory
+   after the verdict is appended or the run stops. It holds each finding, its
+   disposition, and its
    **change units — not hunks**. A hunk cannot represent an add, a delete, a
    rename, a mode change, a symlink retarget, a submodule move or an untracked
    file, every one of which the `F0` manifest already records. Each change unit
@@ -235,22 +258,26 @@ In order:
      it adds no attack coverage requirement. Any paired replacement also appears
      in the added-ID branch and therefore stops.
    - **ID present in both, coverage vector changed** → new attack coverage is
-     required. End the run and name the exact rule and test IDs added, removed,
-     or changed in body.
+     required. End the run and name the exact rule IDs and test-body digests
+     added or removed. An unchanged name with a changed body lands here.
    - **ID present in both, coverage vector identical, but an implementation or
      control-input digest changed** → re-run that boundary's already-mapped abuse
      tests. Green with recorded evidence continues; red or missing ends the run.
    - **ID, coverage vector and digests identical** → record it unchanged.
 
-   The coverage vector is the bytewise-sorted rule IDs and positive, refusal and
-   authorization test IDs, each test ID being PROVE's name-plus-body-digest pair.
-   A test whose body changed under an unchanged name therefore lands in the
-   coverage-changed branch and ends the run, exactly as deleting it would —
-   because it is the same act. The frozen attack evidence was produced against
-   the old body and no longer corresponds to the committed test. Re-running would
-   prove nothing here: a weakened test passes *because* it was weakened. This is
-   deliberate rather than a false stop, and it is the one branch that catches a
-   repair which fixes the proof instead of the code.
+   The coverage vector is the bytewise-sorted rule IDs plus the multisets of body
+   digests in the positive, refusal and authorization lists. For each list,
+   bucket the frozen and repaired IDs by body digest, cancel identical names
+   inside each bucket, then pair any remaining old/new names bytewise. Equal
+   multiplicity with different names is a rename: append the pairs to
+   `renamed_test_ids[]` in the boundary-comparison evidence and continue. A count
+   change adds or removes coverage and stops. A test whose body changed under an
+   unchanged name changes the digest multiset and therefore lands in the
+   coverage-changed branch, exactly as deleting it would. The frozen attack
+   evidence was produced against the old body and no longer corresponds to the
+   committed test. Re-running would prove nothing here: a weakened test passes
+   *because* it was weakened. Digest-first matching closes the name-only false
+   stop without requiring consuming repositories to declare another stable ID.
 
    Human predicate labels are not compared: `admin` and
    `role:admin` cannot create a false stop, and no semantic-equivalence judgment
@@ -303,7 +330,8 @@ manifest and confirms the round-1 result, and that confirmation *is* the verdict
 Give the terminal reviewer:
 
 - the ticket, acceptance criteria and approved scope;
-- `F0`, the final candidate manifest and frozen-record digest;
+- `F0`, the final candidate manifest, reviewed-content identity and
+  frozen-record digest;
 - all round-1 findings and dispositions;
 - the balanced fix packet and affected caller/contract closure when barrier 1
   changed the candidate; otherwise `none` and `[]`;
@@ -316,6 +344,7 @@ The reviewer answers:
 reviewer_identity
 source_manifest_id
 candidate_manifest_id
+reviewed_content_id
 fix_packet_digest | none
 frozen_record_digest
 frozen_record_status: UNCHANGED | MISMATCH

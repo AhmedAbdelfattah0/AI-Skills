@@ -212,7 +212,7 @@ ticket or by the user** (a code comment is never ratification) · the rule prote
 **forbidden wherever it enforces or isolates any security, privacy, availability or integrity
 control, judged by effect not by a list**, regardless of tier letter · the alternative really
 would be a second pattern. All four → the rule does not
-fire, recorded as an `N/A — replaced by established project architecture` row with its
+fire, recorded as a `NOT_APPLICABLE — replaced by established project architecture` row with its
 evidence, outside the waiver ledger. Fewer than four → it stands. The specialists beat the
 hub's per-stack *summaries*; they never beat its foundation.
 
@@ -279,11 +279,13 @@ count.
 *Review terminates*: the plan, parity and VAPT narrative prefixes are swept once
 before `F0` and then immutable. Later findings, dispositions and outcomes live in
 the plan's delimited append-only run-state block. The REVIEW-start `timings[]`
-entry is the phase's first action and the point of no return: any stop after it
-ends the current run unshipped, whether or not a terminal verdict exists. Round 1
-runs A, B and C once. Barrier 1 permits one code-and-test repair batch. Round 2 is
-one unconditional sighted terminal reviewer. There is no in-run exception to any
-REVIEW stop.
+entry is the phase's first action and the point of no return: any REVIEW-phase
+stop after it ends the current run unshipped, whether or not a terminal verdict
+exists. A terminal PASS enters SHIP; external SHIP transport failures pause that
+run and resume only under a representation-independent `reviewed_content_id`,
+never by re-entering REVIEW. Round 1 runs A, B and C once. Barrier 1 permits one
+code-and-test repair batch. Round 2 is one unconditional sighted terminal
+reviewer. There is no in-run exception to any REVIEW stop.
 
 *Parity depth runs once*: pass A performs the complete comparison for each
 reference-backed owned screen — structure, style, behaviour and i18n, in every
@@ -292,9 +294,12 @@ checks only the dependency-closed nodes and properties the fix could affect. If
 that slice cannot be bounded, the terminal verdict is FAIL.
 
 `mutation_round` still bounds PROVE and every pre-terminal candidate-repair batch,
-using the sole derivation in the ship-ticket spine and no stored scalar. The third
-mutation is validated; a required additional write ends the current run. Human
-approval starts a new run; it does not extend the current one.
+using the sole derivation in the ship-ticket spine and no stored scalar. Run-state
+entries carry an opaque `run_id`; the count uses only batches for the final
+appended run `START`, so append-only history cannot spend a later run's budget.
+The third mutation is validated; a required additional write ends the current
+run. Human approval appends a new run partition; it does not extend the current
+one.
 
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own
@@ -346,8 +351,10 @@ outcome ends the current run unshipped.
 `F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
 round-1 pass is bound to `F0`; the terminal verdict is bound to the final
 candidate. There is one candidate write barrier. After the verdict, only its
-predeclared run-state and SHIP result slots may be appended; code, tests and
-frozen narrative never change.
+predeclared precommit run-state and session-log projection may be appended; code,
+tests and frozen narrative never change. The commit is the repository cutoff:
+commit, push, PR, CI, tracker and completion results are reported externally and
+never cause a second repository write.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

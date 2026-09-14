@@ -84,8 +84,16 @@ barrier-1 impact slice.
 <!-- Append JSON-lines entries here according to review.md; never edit an
      existing entry. This block is outside the frozen narrative digest and
      replaces implicit run-state placement. -->
+<!-- After approval, the first entry for each execution is a run START with a
+     new opaque run_id and approved_plan_digest. Every later entry carries it. -->
 <!-- RUN-STATE:END -->
 ```
+
+When the human approves an execution, append its `run` `START` entry before any
+post-approval phase writes another run-state object. A later execution of the
+same ticket gets a new `run_id`; it never edits or clears a prior run's entries.
+The active run is the final appended `START` entry. Approval of prose without the
+matching start entry is not an executable run.
 
 ## The `Par` column
 

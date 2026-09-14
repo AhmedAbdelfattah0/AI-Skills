@@ -239,29 +239,35 @@ Write `.specs/vapt/<TICKET>.md` (GATE) or `.specs/vapt/findings.md` (AUDIT):
 ```
 target:      http://localhost:3000 · disposable seed DB (docker compose)
 mode:        GATE
-outcome:     PASS_FULL
+outcome:     PASS
+execution_mode: FULL
 surfaces:    POST /api/orders · GET /api/orders/:id · OrderList component
 excluded:    src/utils/format-date.ts (no trust boundary, reason 0)
 principals:  anon · userA(tenantA) · userB(tenantB) · admin
 degraded:    VAPT-WEB-01 — no browser runner in this repo; proved at request layer
 
-| Rule | Surface | Verdict | Evidence |
-|---|---|---|---|
-| VAPT-API-01 | GET /api/orders/:id | PASS | `user B cannot read user A's order` in `test/abuse/orders.spec.ts` |
-| VAPT-API-04 | POST /api/orders | FIXED | `OrderService.create` derives tenant from the authenticated principal |
-| VAPT-API-08 | POST /api/orders | N/A | [D], no rate limiter in this project — documented in CLAUDE.md |
+| Subject ID | Outcome | Evidence |
+|---|---|---|
+| VAPT-API-01 @ GET /api/orders/:id | PASS | `user B cannot read user A's order` in `test/abuse/orders.spec.ts` |
+| VAPT-API-04 @ POST /api/orders | PASS | fixed: `OrderService.create` derives tenant from the authenticated principal |
+| VAPT-API-08 @ POST /api/orders | NOT_APPLICABLE | [D], no rate limiter in this project — documented in CLAUDE.md |
 ```
 
-**PASS_FULL** ⇔ every in-scope surface has a committed test for every applicable
-rule; all tests are green; there are zero unfixed `[NN]` findings; and every
-exclusion is named, with no coverage degradation. Use **PASS_GROUPED** instead
-when shared test definitions were used and every route was still executed against
-them.
+Use [ship-ticket's canonical outcome vocabulary](../ship-ticket/references/ship.md)
+when it is installed. Standalone fallback: the only outcome tokens are `PASS`,
+`FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE` and `DEGRADED`; execution detail belongs
+in `execution_mode`, not in a new verdict token.
 
-**DEGRADED** requires the executed reduced set to be green and every unexercised
+`outcome: PASS` with `execution_mode: FULL` means every in-scope surface has a
+committed test for every applicable rule; all tests are green; there are zero
+unfixed `[NN]` findings; and every exclusion is named, with no coverage
+degradation. Use `execution_mode: GROUPED` when shared test definitions were used
+and every route was still executed against them.
+
+`outcome: DEGRADED` with `execution_mode: REDUCED` requires the executed reduced set to be green and every unexercised
 rule or family to be named with its cause.
 
-**FAIL** ⇔ anything else.
+Use `outcome: FAIL` for anything else.
 
 Security sensitivity never changes VAPT coverage. VAPT runs attacks and produces
 runtime evidence; it does not dispatch a reviewer or attest to its own result.
@@ -273,13 +279,21 @@ evidence together with the repaired candidate.
 The abuse tests run in the repo's existing test job for free — that half is
 already machine-enforced.
 
-Add one merge-blocking check in the **same slot as `nn-guard`'s CI job and
-ship-ticket's design-parity artifact check**: if the PR's diff touches a trust
-boundary (derive the glob from where this repo's handlers, components, and config
-actually live — the point is the signal, not a fixed pattern), then
-`.specs/vapt/<TICKET>.md` must carry **PASS_FULL**, **PASS_GROUPED** or a fully
-enumerated **DEGRADED** outcome. Without this, the gate is honor-system, which is
-the failure mode it was built to remove.
+**First classify the caller.** In GATE mode, including when `ship-ticket` invokes
+VAPT, detect the repository's existing required checks and CI configuration but
+do not add or edit CI. If an artifact-validation check exists, verify that it
+triggers when the derived trust-boundary paths change and accepts the canonical
+outcome record. If it is absent, record `enforcement_outcome: DEGRADED` with the
+checked policy/config locations and keep the committed abuse tests in the repo's
+existing test job. The calling ticket neither widens its Design Contract nor
+creates post-freeze CI content.
+
+Install or change an artifact-validation check only in explicit setup work: the
+user asked for that setup, or an approved plan names the exact CI paths in its
+Design Contract, and the change occurs before its freeze. Derive the trigger from
+the repository's handlers, components and security configuration rather than a
+fixed glob. That check uses the same merge-blocking slot as `nn-guard` and
+ship-ticket's design-parity artifact check.
 
 ---
 
@@ -352,6 +366,8 @@ failure, not a shortcut.
 
 Working when: every trust boundary a change introduces has a committed,
 rule-named abuse test that failed before the fix and passes after; every excluded
-file and degraded rule is named in the artifact; no `[NN]` finding ships
-unfixed or unwaived; and a merge-blocking CI check — not an agent's summary —
-is what actually stops a regression.
+file and degraded rule is named in the artifact; no `[NN]` finding ships unfixed
+or unwaived; the abuse tests run in existing CI; and artifact enforcement is
+either verified present or explicitly `DEGRADED`. Installing missing artifact
+enforcement is complete only in explicit setup work, never as an implicit GATE
+side effect.
