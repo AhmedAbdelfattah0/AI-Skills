@@ -66,15 +66,57 @@ if [ -d "$HOME_DIR/.git" ]; then
     echo "   AI_SKILLS_HOME=<another dir> and re-run." >&2
     exit 1
   fi
-  echo "📦 updating $HOME_DIR"
-  # Never fast-forward over uncommitted work; say so and use the tree as it is.
+  # From here on this script EXECUTES $HOME_DIR/scripts/cli.mjs. So every step
+  # that decides what that file contains is fatal on failure — "carry on with
+  # the tree as it stands" would mean running whatever is there, which for a
+  # locally modified or half-updated checkout is not this project's code.
+  #
+  # Note what the origin check above is and is not: it establishes intent, not
+  # authenticity. A remote URL is mutable metadata inside the candidate repo.
+  # It stops an unrelated clone being fetched and run by accident; it is not a
+  # defence against someone who can already write to your home directory.
   if [ -n "$(git -C "$HOME_DIR" status --porcelain)" ]; then
-    echo "   (uncommitted changes there — not pulling; using it as it stands)"
-  else
-    git -C "$HOME_DIR" fetch --quiet origin "$REF"
-    git -C "$HOME_DIR" checkout --quiet "$REF"
-    git -C "$HOME_DIR" merge --ff-only --quiet "origin/$REF" 2>/dev/null \
-      || echo "   (could not fast-forward — leaving $HOME_DIR as it stands)"
+    echo "❌ $HOME_DIR has uncommitted changes." >&2
+    echo "   This installer runs code from there, so it will not use a modified" >&2
+    echo "   tree. Commit, stash or discard them — or install from that clone" >&2
+    echo "   directly: node $HOME_DIR/scripts/cli.mjs install" >&2
+    exit 1
+  fi
+  echo "📦 updating $HOME_DIR"
+  # Fetch the ref and pin the exact commit it resolved to. FETCH_HEAD works for a
+  # TAG as well as a branch — `origin/<tag>` does not exist, so merging against it
+  # rejected the documented AI_SKILLS_REF=v1.0.0 path outright.
+  git -C "$HOME_DIR" fetch --quiet origin "$REF" || { echo "❌ fetch of $REF failed." >&2; exit 1; }
+  WANT="$(git -C "$HOME_DIR" rev-parse FETCH_HEAD)" || { echo "❌ could not resolve $REF." >&2; exit 1; }
+  git -C "$HOME_DIR" checkout --quiet "$REF" || { echo "❌ checkout of $REF failed." >&2; exit 1; }
+  git -C "$HOME_DIR" merge --ff-only --quiet "$WANT" 2>/dev/null || true
+
+  # HEAD must BE the fetched commit. "Clean" and "ff-only succeeded" do not
+  # establish that: a local branch carrying arbitrary commits on top of origin
+  # fast-forwards as "already up to date", and this script then executes that
+  # tree's scripts/cli.mjs.
+  # git's own index flags can hide a modified file from `status --porcelain` and
+  # from checkout, so a clean-looking tree at the right commit can still carry a
+  # rewritten scripts/cli.mjs — which this script then executes. Refuse when any
+  # path is flagged (lowercase letters and S in ls-files -v mean
+  # assume-unchanged / skip-worktree).
+  FLAGGED="$(git -C "$HOME_DIR" ls-files -v | grep -c '^[a-zS]' || true)"
+  if [ "$FLAGGED" -ne 0 ]; then
+    echo "❌ $HOME_DIR has files marked assume-unchanged or skip-worktree." >&2
+    echo "   Those hide local modifications from git, and this script runs code" >&2
+    echo "   from that tree. Clear them (git update-index --no-skip-worktree …)" >&2
+    echo "   or re-clone into a different AI_SKILLS_HOME." >&2
+    exit 1
+  fi
+
+  HAVE="$(git -C "$HOME_DIR" rev-parse HEAD)"
+  if [ "$HAVE" != "$WANT" ]; then
+    echo "❌ $HOME_DIR is not at the fetched $REF." >&2
+    echo "   at:       $HAVE" >&2
+    echo "   expected: $WANT" >&2
+    echo "   Refusing to run code from a tree that is not this project's $REF." >&2
+    echo "   (Local commits on top of $REF look 'clean' but are not this code.)" >&2
+    exit 1
   fi
 elif [ -e "$HOME_DIR" ]; then
   echo "❌ $HOME_DIR exists but is not a git repository. Refusing to touch it." >&2

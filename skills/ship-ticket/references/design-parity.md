@@ -1,152 +1,157 @@
-# Design parity — the artifact, the grades, and the signature
+# Design parity — one complete comparison and one terminal impact slice
 
 Loaded during PROVE when `ui_required`. The reference pin happens earlier, in
 [understand.md](understand.md).
 
-**Rule IDs govern code. Parity does not map to any rule ID** — its citation is a
-named design decision plus a human approver. Passing every `NG-*` / `BE-*` rule
-does not mean the screen is the design.
+**Rule IDs govern code. Parity does not map to a rule ID.** Its citation is the
+pinned design decision plus any named human-approved deviation.
 
-## Who checks what, and why there are exactly two checks
+## Scope — owned screens only
 
-1. **BUILD checked each screen as it was finished**, with the design files still
-   in context — reference-backed against its reference, unreferenced against the
-   design system.
-2. **Pass A re-derives the verdict blind**, with no build context.
+Parity fires for the screens this ticket exists to build. It does not compare
+every screen that merely consumes a shared component changed by the ticket.
 
-**Pass A is the sole post-build parity investigator.** A third comparison of the
-same two things could find drift both missed — that is correlated redundancy, not
-information-free duplication, and dropping it is a real if small cost in accuracy.
-It is dropped deliberately: its findings fed the fix → invalidate → re-sign loop
-that produced twelve signing rounds. **This is a named trade, not a claim that the
-work was worthless.**
+A shared-component change creates one separate ticket whose owned-screen list is
+the enumerated affected consumers. That ticket performs one complete comparison
+over that list and cannot create another consumer sweep for the same component
+change.
 
-## What this step produces
+## What PROVE produces before `F0`
 
-`.specs/design-parity/<TICKET>.md`: the screen list and each screen's
-classification. **No grade is produced here.**
+Create `.specs/design-parity/<TICKET>.md` with:
 
-**Nothing from BUILD reaches pass A.** Handing a blind reviewer the builder's
-conclusions anchors it and destroys the independence that is the entire point.
-Pass A receives only the pinned reference, the implementation, the acceptance
-criteria and the required comparison depth. Its verdict is merged with BUILD's
-results **afterwards, by you**, once both exist.
+- `design_ref`;
+- each owned screen and its implementation path;
+- its pinned reference path, or its approved unreferenced classification;
+- accepted deviations already approved by a named human.
 
-**Regenerate the draft if a later step changes UI production code** — an attack
-fix, for instance. A draft describing the pre-fix screen would send pass A to
-review the wrong thing.
+Formatters and generators run before the record sweep and inside the same
+pre-`F0` batch, after the mutation budget has been read. The artifact's reviewed
+prefix is the whole file and is frozen with the rest of the record before `F0`.
+Pass A's result and the terminal verdict are appended to the plan's run-state
+block; they reference this artifact and its digest instead of rewriting it. This
+replaces the distributed empty result slots.
 
-## Only reference-backed screens are graded
+Use stable component, selector, token, state and translation-key anchors. A line
+number may be retained only as a historical locator bound to `F0`; it is never
+updated to follow later edits. Persist lists and derive counts.
 
-An **unreferenced** screen (`reference: null` in the plan header) gets a declared
-carve-out, not an investigation:
+## Unreferenced screens
 
+An unreferenced screen receives:
+
+```text
+outcome: NOT_APPLICABLE
+reason_code: NO_SCREEN_REFERENCE
+approved_by
+approval_date
+reference_search
+design_system_sources
 ```
-src/app/invoices/invoice-empty.component.ts
-  | NOT_APPLICABLE_NO_SCREEN_REFERENCE
-  | approved by <name>, <date>   (from the plan header)
-  | built to the pinned design system: tokens, shared components, conventions
+
+It remains bound by the pinned design system, tokens, shared components and
+conventions. If literal parity is required, stop before implementation and obtain
+a committed reference.
+
+## Round 1 — the sole complete comparison
+
+Pass A receives the pinned reference, implementation, acceptance criteria and
+comparison depth, with no BUILD conclusions.
+
+For each reference-backed owned screen, compare the complete implementation
+against `design_ref` at all three layers:
+
+- **Structure — node by node:** sections, composition, empty/loading/error states
+  and components.
+- **Style — class and declaration:** layout, spacing, tokens, colour, typography
+  and shadow.
+- **Behaviour + i18n:** interactions, state and every locale and text direction
+  the project ships. Omit only dimensions the project genuinely does not ship.
+
+Run this complete comparison once, over `F0`.
+
+**Use the repository's parity harness first where it compares against the pin.**
+Run its render, snapshot, DOM or component comparisons across the owned screens,
+required states, shipped locales and directions it covers, bind the output to
+`F0`, and hand those mechanical differences to pass A as deterministic evidence.
+On a bilingual RTL project this is the difference between reading every node twice
+by hand and reading only what a harness cannot see.
+
+**A harness substitutes for a dimension only if it demonstrably compares the `F0`
+implementation against the pinned `design_ref` for that dimension, state and
+locale.** This is the whole test, and most harnesses fail it: a snapshot suite
+compares the implementation to *its own committed snapshot*, which moves when the
+implementation moves. Such a suite proves the screen did not change unintentionally
+— it says nothing about whether the screen matches the design, and accepting it as
+parity evidence would let design drift through unseen while the run reported the
+dimension covered.
+
+So, per dimension: **compared against the pin** → the model does not repeat it;
+**anything else** → supplementary evidence only, and the independent node and
+declaration read still runs. Record which dimensions the harness actually covered.
+
+Whatever the harness covered, the model's own read always keeps visual hierarchy,
+interaction feel, and rendering defects outside the harness's demonstrated scope.
+
+If no suitable harness exists, declare `PARITY | MANUAL — no repository harness`.
+The complete manual comparison still runs; the ~20-minute REVIEW target is not
+assured.
+
+Pass A returns, per screen:
+
+```text
+screen
+source_manifest_id
+reviewer_identity
+grade
+divergences[]: id · layer · severity · stable reference anchor · stable implementation anchor
 ```
 
-It is **not** exempt from the design system — tokens, shared components and
-conventions still bind, and BUILD still checked them. What it is exempt from is a
-parity *verdict*, because there is nothing to be faithful to. A screen the ticket
-invents cannot honestly return Faithful, Minor, Major **or** Not-built; it can
-only generate work.
+Grades are **Faithful**, **Minor**, **Major** or **Not-built**. Faithful and Minor
+may pass. Every residual Major or Not-built result requires a human-approved
+deviation already present before `F0`.
 
-**If the ticket actually requires literal parity for that screen, STOP before
-implementing and get a reference committed.** Inventing one during the check is
-the self-attestation this whole gate exists to remove.
+## Barrier 1 — derive the impact slice while repairing
 
-## The comparison pass A runs
+Never repeat the complete screen comparison after round 1. For each UI change,
+the fix packet records the narrowest dependency-closed slice that may have moved:
 
-For each **reference-backed** owned screen, diff the implementation against the
-**pinned** reference — the `design_ref` SHA, never "latest" — one row per
-divergence with exact `ref file:line ↔ impl file:line` and a severity, at three
-layers:
+- template or DOM change — the changed subtree and its direct composition/layout
+  contracts;
+- selector, declaration or token change — the changed properties and every
+  owned-screen node consuming them;
+- behaviour, state or translation change — the changed state/key and every
+  rendered occurrence in each shipped locale and direction;
+- shared component change — every occurrence of that component inside the owned
+  screens of this ticket.
 
-- **Structure** — node by node: presence, absence and composition of sections,
-  states (empty, loading, error), and components.
-- **Style** — class and declaration: layout, spacing, tokens, colour, type, shadow.
-- **Behaviour + i18n** — interactions, state, and correctness in **every locale and
-  text direction the project actually ships.** Drop this layer entirely if the
-  project is single-locale LTR.
+This slice replaces the later complete comparison. If its boundary cannot be
+proved, terminal parity is FAIL.
 
-**Grades:** **Faithful** (no Blocker or Major) · **Minor** (token or spacing drift
-only) · **Major** (structural or visual divergence) · **Not-built** (a reference
-screen or section with no implementation).
+## Round 2 — terminal parity outcome
 
-**Screens shard, the pass does not.** Pass A is one reviewer with one whole-diff
-scope; its parity work fans out per reference-backed screen and unions back into
-one pass-A result. Four screens is four concurrent comparisons **inside** one
-pass — not four separate reviewers, and not one agent walking four screens in
-sequence.
+The terminal reviewer consumes pass A's complete `F0` result. When barrier 1 did
+not change parity inputs, that result directly covers the final candidate.
 
-**Use the repo's own tooling where it ships any** — render, snapshot, DOM or
-component harnesses generate the structural, token, state and direction
-differences mechanically, faster and reproducibly. It does **not** replace the
-independent read: a harness cannot see visual hierarchy, interaction feel, or
-rendering defects outside its own scope.
+When parity inputs changed, compare only the recorded impact slice against the
+pinned reference, at the affected layers and in every applicable locale and
+direction. Resolve each round-1 divergence touched by the repair and report any
+regression inside the slice.
 
-## Scope — per owned screen, not per consumer
-
-Parity fires for the screens **this ticket exists to build**. It does not force a
-node-by-node diff of every screen that merely consumes a shared component you
-touched. A shared-component change opens a **separate, flagged parity-sweep task**
-across its consumers.
-
-## Signing
-
-Nothing is signed during a review round. Pass A returns an **unsigned** verdict
-stamped with the scope digest it actually reviewed.
-
-**Sign the final payload, not an intermediate one.** At close-out, once the
-human-approved deviations and the stub → follow-up-ticket links are in place, the
-payload stops changing. Only then does the independent reviewer sign. A signature
-written earlier and appended to afterwards binds to something that no longer
-exists.
-
-**The fields, the scope digest, the payload digest, the same-reviewer rule and
-the staleness rule are all in the spine's *Signatures* section** — one contract
-covering both parity and the attack testing, so a non-UI security run is not left
-undefined. Do not restate it here.
-
-Parity's specifics: its **scope digest** covers every owned screen's
-implementation and reference files at `design_ref`; its **payload** is
-`design_ref` · the owned-screen list · the per-screen grade.
-
-## The verdict
-
-**PASS**, per reference-backed screen ⇔ **Faithful or Minor** after fixes, **or**
-every residual Blocker/Major carries a **human-approved** accepted deviation —
-**and** the artifact carries an independent signature bound to the final scope
-digest — **and** every introduced stub links a follow-up ticket.
-
-**FAIL** ⇔ otherwise, including a signature whose scope digest is stale.
-
-**No self-written waiver clears a Blocker or Major.** Visual drift has no rule ID;
-the record — decision, approver, date — *is* the citation.
+The final per-screen grade is derived from the round-1 result plus those targeted
+resolutions. The terminal reviewer returns `parity_outcome: PASS | FAIL |
+NOT_TRIGGERED` as part of the overall terminal verdict. There is no later parity
+dispatch.
 
 ## CI
 
-Where the repo has the merge-blocking check installed (checked with the other
-companions, up front), it rejects a UI-scoped PR unless the artifact exists, is
-independently signed and is PASS — validating the signature's **binding fields**
-(scope digest, payload digest, signer identity), not merely that a signer string
-is present.
+Where a merge-blocking artifact check exists, it validates:
 
-**It evaluates `persisted ui_required` OR its own view-layer diff detector, never
-the persisted value alone.** The plan writes the ticket/AC/contract half before
-implementation and therefore cannot know what the eventual diff touches; the
-freeze recomputes it and updates the header. ORing the two means neither half can
-suppress the other: a stale `ui_required: false` cannot hide a diff that touched
-the view layer, and a diff that touched nothing cannot hide a ticket that owed a
-screen and never built one — the case `Not-built` exists to catch. Missing or
-unparseable metadata fails closed to `true`.
+- `persisted ui_required OR the repository's view-layer detector`;
+- the artifact and its immutable-prefix digest;
+- a complete round-1 result in the plan's run-state block, bound to `F0`;
+- the recorded terminal impact slice there when UI changed;
+- `parity_outcome: PASS` there, bound to the final candidate manifest.
 
-Derive the glob from where the UI really lives — `**/*.{html,scss,css}` plus the
-repo's component files (`*.component.ts`, `*.tsx`, `*.vue`, `*.svelte`,
-`*.blade.php`, `templates/**/*.html`).
-
-**If the check is not installed**, declare that in the run record and do not wait
-for it. Adding CI code after the freeze is unreviewed content in the commit.
+Missing or unparseable metadata fails closed. If the check is absent, declare
+that once and do not wait for it.

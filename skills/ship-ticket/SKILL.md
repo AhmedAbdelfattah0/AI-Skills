@@ -9,21 +9,17 @@ description: |
   Cloudflare Workers, Postgres/Supabase — all supported.
 
   Six phases: UNDERSTAND the ticket, PLAN it with human approval, BUILD it,
-  PROVE it works and is not exploitable, REVIEW it in two rounds over a chain of
-  frozen manifests — find, fix, then verify the fixes — then SHIP it. Adds a mandatory
-  design-source-of-truth read with a pinned SHA, a plan-mode approval gate, a
-  design-parity check against that pin — machine-enforced where the repo has the
-  merge-blocking check installed, and a declared degradation where it does not —
-  adversarial abuse tests committed for every trust boundary the change
-  introduces, and a two-round cross-model review — a fresh Claude reviewer, the
-  OpenAI Codex CLI and a rule pass find, mutually blind; then the fixes themselves
-  are reviewed, by those same two models over the delta plus one reviewer shown
-  which finding caused which change.
+  PROVE it works and is not exploitable, REVIEW it with one discovery wave, one
+  repair barrier and one terminal verdict, then SHIP it. UI work pins its design
+  source and receives one complete parity comparison in round 1; the terminal
+  reviewer checks only the dependency-closed UI slice changed by the repair.
+  Runtime attacks remain in PROVE. Their evidence, parity evidence and the repair
+  packet are reviewed together by the terminal reviewer, whose verdict is the
+  signature.
 
-  Every applicable rule, screen, surface and attack class runs on every ticket, at
-  constant reasoning effort. Nothing about a ticket's size or labels reduces what
-  is checked; only how much runs concurrently varies. Companion skills degrade
-  loudly when absent — declared, never silently skipped.
+  Every applicable rule, owned screen, trust boundary and attack class is covered
+  at constant reasoning effort. Coverage may be degraded only when a companion is
+  genuinely unavailable, and that loss is declared.
 
   Takes one argument: the ticket key, work item ID, or URL.
 
@@ -60,9 +56,9 @@ its own glossary, it is not a name — say what happened instead.
 
 | Instead of | Say |
 |---|---|
-| GATE 3 / the rule pass | **Checking the code against the project's rules** |
-| GATE 4 / parity | **Checking the screen matches the design** |
-| GATE 5 / VAPT | **Trying to break the new code on purpose** |
+| the rule pass | **Checking the code against the project's rules** |
+| parity | **Checking the screen matches the design** |
+| VAPT | **Trying to break the new code on purpose** |
 | pass A | **A second reviewer who didn't write the code** |
 | pass B | **A different AI reviewing it independently** |
 | pass C | **Going through the rule checklist one by one** |
@@ -76,15 +72,17 @@ its own glossary, it is not a name — say what happened instead.
 ```
 ✅  Stopped: I can't run the app locally, so I can't test whether the new endpoint
     is actually protected. I need a way to run it.
-❌  STOP: GATE 5 has no local instance.
+❌  STOP: attack testing has no local instance.
 ```
 
 Rule IDs stay in findings, skips and artifacts — the ID *is* the citation — but
 always with a clause saying what the rule requires.
 
 **Two channels, and do not mix them.** The user gets phase names, consequences,
-decisions and the outcome. The artifacts and session log get the rule IDs,
-manifest digests, scope digests, signer identities and coverage evidence.
+decisions and the outcome. Artifacts carry rule IDs, `F0`/`F1` manifest IDs, the
+frozen-record digest, reviewer identities, finding IDs and verified coverage.
+Persist lists and stable anchors; derive presentation counts instead of maintaining
+them by hand.
 
 **Announce each phase as it starts, in one line, and do not wait for a reply.**
 Six lines over a whole ticket. This is the only progress reporting required, and
@@ -98,12 +96,19 @@ it is not a question.
 | **PLAN** | draft, get an independent critique, get **human approval** | `.specs/plans/<TICKET>.md` only | an approved plan + the Design Contract |
 | **BUILD** | branch, then implement in the plan's sequence inside the contract | contracted files | the feature, rules applied as it was written |
 | **PROVE** | run the repo's commands; prove the security controls exist, then that they engage | production + test code | green commands, committed abuse tests |
-| **REVIEW** | freeze a manifest; find, fix, then verify the fixes; sign | fixes at barriers only | a signed, reconciled change |
-| **SHIP** | one commit, one push, one PR, one CI wait, ticket to Done | the single gated commit | a linked PR and a closed ticket |
+| **REVIEW** | sweep and freeze the record; run A/B/C once; repair once; obtain one terminal verdict | predeclared run-state entries; one record-sweep batch before `F0`; one code-and-test repair batch | terminal PASS, or the current run ends unshipped |
+| **SHIP** | one commit, one push, one PR, the enumerated CI gate, ticket to Done | the precommit projection and single gated commit; postcommit results stay external | a linked PR and a closed ticket |
 
-**Phases are ordered. Work inside a phase runs concurrently wherever two things do
-not need each other's answer** — that is where the time is won, and it is the only
-place it is won. Never buy speed by checking less.
+**Phases are ordered. Independent work inside a phase runs concurrently** — that is
+where the time is won, and it is the only place it is won. Never buy speed by
+checking less.
+
+**In REVIEW round 1 this is a requirement, not an optimisation.** Passes A, B and C
+start together, B first because it is usually the longest, so the round costs the
+longest pass rather than their sum. Running them one at a time is not a slower
+mode of this phase, it is a stop: an orchestrator that cannot dispatch the three
+concurrently ends the run rather than paying their summed wall clock for
+identical coverage.
 
 Load the phase's reference when you enter it, not before:
 
@@ -130,16 +135,23 @@ These bind in every phase. Everything else is procedure.
 4. **One contract governs which files may be written.** A file you need that is
    not in it means the plan was wrong: that is a material divergence and it goes
    back through plan mode. Do not widen the contract yourself.
-5. **Coverage is constant.** Every applicable rule, screen, surface and attack
-   class runs on every ticket, at constant reasoning effort. No ticket property —
-   size, label, urgency — reduces it. `security-sensitive` *adds* an independent
-   signature; it removes nothing.
-6. **Apply the rules while writing.** The gates verify a claim you already made.
-   A gate returning a long list means this was skipped.
-7. **Reviewers are report-only. You are not.** Passes A, B and C are additionally **blind to each other** — no pass sees another's findings, before or during. (The fix review is the deliberate exception: it is shown round 1's findings because reading them against their consequences is its entire purpose.) A reviewer
-   that edits code invalidates its peers. You collect findings and *you fix them*.
-8. **Nothing writes to the repository during a review round** — that is the whole
-   basis of the manifest's integrity. Fixes happen at barriers.
+5. **Coverage is applicability-driven and does not shrink with ticket size.**
+   Every applicable rule and attack class runs. Every reference-backed owned
+   screen receives one complete parity comparison in round 1; after a repair,
+   only its dependency-closed impact slice is checked.
+6. **Apply the rules while writing.** The review verifies a claim already made.
+   A long finding list means the build-time checks were skipped.
+7. **Round-1 reviewers are report-only and mutually blind.** The terminal reviewer
+   is deliberately sighted on their findings and consequences, and is independent
+   of the builder.
+8. **REVIEW has one write barrier.** Sweep and freeze the ticket-owned record
+   before `F0`; barrier 1 may then change code and tests once. After `F0` no
+   candidate file and no frozen prefix may change; after the terminal verdict no
+   candidate file may change at all. Before the commit, the append-only run-state
+   slots and predeclared session-log projection are the exception; they record
+   findings, dispositions, outcomes and timings without rewriting a reviewed
+   prefix. The commit is the repository cutoff: SHIP outcomes that arise later
+   are reported externally and never create another repository write.
 9. **Attacks run against a local, disposable instance. Never production, never
    shared staging**, whoever owns it.
 10. **Three mutations, then a human.** See *The mutation budget*.
@@ -158,7 +170,7 @@ The code-quality family assigns every rule a stable ID (`NG-ARCH-03`,
 | Tier | Meaning | What can override it |
 |---|---|---|
 | `[NN]` | non-negotiable security or correctness invariant | **Never, per-file. Only an explicit recorded user waiver.** |
-| `[ARCH]` | architectural shape | the repo's own instruction file, project-wide only — **or** an established project architecture that passes the invoked specialist's **four-condition test**. That outcome is an `N/A — replaced by established project architecture` row carrying its evidence: not a skip, and not a ledger waiver |
+| `[ARCH]` | architectural shape | the repo's own instruction file, project-wide only — **or** an established project architecture that passes the invoked specialist's **four-condition test**. That outcome is a `NOT_APPLICABLE — replaced by established project architecture` row carrying its evidence: not a skip, and not a ledger waiver |
 | `[D]` | default convention | the repo's own instruction file, or an established repo convention |
 
 The four-condition test lives in the specialist that owns the rule — invoke it
@@ -181,101 +193,52 @@ label), honour it. **Its absence proves nothing** — so apply your own test: a
 ticket touching auth, multi-tenancy, billing, payments, secrets, or any
 cross-tenant isolation **is** security-sensitive whether or not anyone labelled it.
 
-Record the determination in the plan either way. That field adds the independent
-signature on the attack testing — **it changes no coverage**, so getting it wrong
-costs the signature, never the attacks. Do the reasoning on the strong model, and
-prefer a test-first repro: the failing test that proves the secure behaviour, then
-the implementation.
+Record the determination in the plan either way. The field requires an explicit
+`security_outcome` in the terminal verdict; it adds no reviewer and removes no
+attack coverage. Do the reasoning on the strong model, and prefer a test-first
+repro: the failing test that proves the secure behaviour, then the implementation.
 
 ## The mutation budget
 
-Everything after BUILD can loop: a gate fix changes what the gate measured, an
-attack fix moves the surface that was attacked, a review fix invalidates the
-reviewers. Left uncapped these produce a twelfth round.
+PROVE may need repair cycles; REVIEW may not. `mutation_round` counts every
+post-BUILD candidate-changing repair batch before the terminal verdict:
 
-**One counter governs all of them.** `mutation_round` lives in the plan
-artifact's metadata and starts at `0`.
+- a PROVE repair batch;
+- the one pre-`F0` batch, if it changes anything — formatter output, generator
+  output and the record-sweep repair are that single batch, counted once;
+- barrier 1's code-and-test repair batch.
 
-- **Every batched mutation made in response to a gate, an attack, a review
-  finding, or a scope change that invalidates a signature increments it once** —
-  and only if code, tests or docs actually changed. A barrier where every finding
-  was rejected, or where there were none, spends nothing.
-- **Revalidation that changes nothing does not increment it.**
-- **Always validate the third mutation.** If validation still requires a fourth,
-  ✋ **STOP** and surface it: what is still changing each round, which check it
-  keeps invalidating, the last round's unfixed findings, and your read on why it
-  is not converging.
+**It is derived, not stored, and partitioned by run.** Human approval appends one
+`run` `START` entry with a new opaque `run_id`; every later run-state entry carries
+that ID. The active run is the final appended `START`, and `mutation_round` is the
+count of `batch` entries whose `run_id` equals that active ID. Historical batches
+remain append-only evidence but spend none of a later run's budget. There is no
+scalar to read-then-edit inside the frozen prefix, which is what previously made
+the counter and the record freeze contradict each other: every real repair would
+have had to either break the count or trip the mismatch that ends the run.
 
-**This is a gate you walk through, not a number you remember.** A counter nobody
-reads does not cap anything — a run once reached five review rounds under a cap of
-three, because the value sat in a file that no step told anyone to open.
+Run-state events and result-slot writes are not candidate repairs and do not enter
+`batches[]`. A read-only validation appends no batch and therefore spends nothing.
 
-So, **before dispatching any round after the first, and before any fix batch:**
+Always validate mutation 3. If validation requires another write, end the current
+run before making it. Owner approval cannot extend the counter inside that run;
+continuation requires a newly approved execution and a new `run_id`, appended
+without removing or rewriting the concluded run.
 
-1. **Read `mutation_round` out of `.specs/plans/<TICKET>.md`.** Do not recall it.
-   Hours have passed and your memory of it is not evidence.
-2. **If it is already 3 → ✋ STOP now**, before spending the round.
-3. After the batch lands, **write the incremented value back to the artifact** in
-   the same barrier. A value held only in your head is lost to a compaction, and
-   a resumed run reads the file, not the conversation.
+Round 2 has no candidate write path and therefore cannot negotiate with this
+budget. Any terminal finding is the outcome, not another mutation request.
 
-**State the number in the round's opening line** — "round 3 of at most 3" — so a
-run that is burning its budget is visible to the user while there is still time to
-intervene, rather than at the stop.
-- **Only a human-approved re-plan resets it.**
+## Verification has a stopping condition
 
-**Increment it only at a write barrier**, as part of the batch whose result becomes
-the next manifest. Touching it mid-wave mutates frozen state and invalidates every
-running pass.
+The run ships only when:
 
-**Count is not severity — weigh the round before calling it non-convergence.**
-The budget stops a diff that *cannot converge*, not a round that produced a big
-number. Sort a round's findings into **behaviour** (authorization, a clearance, a
-contract violated, a wrong figure) and **record** (comments, docblocks, counts,
-artifact wording), and **state both numbers**. Thirty findings of which
-twenty-nine are stale comments is a fix list, not a non-convergence signal — and
-presenting it as one argues for deleting working scope on evidence that does not
-support it.
+> the terminal verdict is PASS · the enumerated CI gate is green · the frozen
+> record prefixes are unchanged.
 
-**Re-verify a finding before it becomes an argument to stop**, especially one
-claiming that some other record is false: that shape is derived rather than
-observed and is the most likely to be wrong. A correct general mechanism does not
-refute a claim about a specific case — instantiate the case.
-
-## Verification has a stopping condition, and it is not "nothing left to check"
-
-There is always one more pass available. The signal to stop is not running out of
-ideas — it is **the conditions being met**:
-
-> an independent signature against a scope digest · the enumerated CI gate green ·
-> the record swept once at the freeze.
-
-**When those three hold, the next verification layer is not diligence. It is
-re-litigating settled work, on the user's clock.** Ship, and put what is left on
-the follow-up list.
-
-Two things specifically are **never** yours to re-verify:
-
-- **Code that is already merged to main.** Somebody reviewed it and it passed
-  their gate. Your branch's only obligation to main is that it rebases cleanly
-  and the gate is green afterwards.
-- **A finding a signer already ruled on.** Its disposition is recorded. Re-opening
-  it needs new evidence, not a fresh reading.
-
-The failure this prevents is quiet, because every individual pass looks
-responsible. On one ticket it ran to five review rounds and six hours, where
-rounds 4 and 5 were mostly finding stale comments the previous round had written
-— and after the signature was granted and the gate was green, a four-dimension
-re-audit was launched anyway, one dimension of which re-reviewed pull requests
-that had already merged. The user stopped it, twice, and was right both times:
-*"why are we reviewing something already reviewed and merged."*
-
-**If a check genuinely has not run yet, run that check** — do not wrap it in a
-review wave. The one legitimate item in that audit was five CI steps that had
-never executed on the branch. Run directly, they took two minutes.
-
-Non-convergence is a finding, not a retry. A fourth round costs more and learns
-nothing; spawning agents to break the deadlock adds cost, not information.
+A terminal FAIL is not revalidated inside the same run. Preserve the branch,
+report the evidence and end unshipped. If a required mechanical check never ran,
+run that check directly before terminal review; do not wrap it in another review
+wave.
 
 ## Companions, and what happens without them
 
@@ -300,15 +263,18 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `docs-accuracy` | the wider DOC rule set | the rename grep still runs |
 | `codex-delegate` **+** `codex` CLI | the plan critique | present the plan for approval saying "no cross-model plan review — skill or CLI unavailable". The user's approval was always the gate |
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
-| a fresh-reviewer route | pass A and the independent signature | a fresh reviewer subagent, or a read-only `codex-delegate` dispatch. Independence is about *who reviews*, not the command name. **If no fresh route exists at all: a non-UI, non-security ticket continues with pass A run by the building agent, declared as `pass A ran WITHOUT reviewer independence`** — a named loss, not a silent one. A UI or `security-sensitive` ticket ✋ STOPs |
-| a fresh-reviewer route for the **fix review** | the check on your own triage — whether each round-1 finding was real, whether the fix addressed it, and whether it broke anything | perform the three questions yourself and record `fix review ran WITHOUT independence`. A named loss rather than a stop: the finding list and the fix diff still exist and can still be checked — but the pass whose purpose is auditing your triage was then performed by whoever did the triage |
-| a **resumable** signer route | signing, which happens after close-out edits | no fallback, and **checked up front, not at signing time**. Signing hands the final payload back to the *same* reviewer that produced the unsigned verdict, so the route must be reachable twice. A one-shot subagent is not a signer route. Discovering this after BUILD wastes the whole build — so a UI or `security-sensitive` ticket with no resumable route ✋ STOPs **before planning** |
-| concurrency | wall clock only | run the identical passes serially over the identical manifest and declare `orchestration: serial`, naming which wave |
-| the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |
+| a fresh-reviewer route | pass A | **a UI or `security-sensitive` ticket STOPs** — pass A is the sole producer of the complete parity comparison that round 2 and CI both consume, and the terminal reviewer is forbidden from repeating it, so there would be nothing to degrade to. Otherwise declare pass A unavailable rather than presenting a builder self-review as independent; pass B and pass C still run |
+| a one-shot independent reviewer route | every run's terminal verdict | a fresh reviewer subagent or read-only delegated review. No fallback to the builder. Check immediately after appending the REVIEW-start timing entry; absence ends the run there |
+| round-1 concurrency | **nothing — this one is a STOP** | serial A, B and C costs their summed wall clock for identical coverage, which is the six-hour REVIEW this phase exists to end. There is no serial mode: end the run unshipped, recording "⛔ REVIEW stopped: this agent cannot dispatch A, B and C concurrently." Re-run REVIEW on an orchestrator that can fan out |
+| the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **GATE is detect-only**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Present → validate the trigger and wait for it. Absent → record `enforcement_outcome: DEGRADED` with the locations checked and **do not wait for a check that does not exist**. Abuse tests still run in the existing test job. Install artifact enforcement only as explicit setup work with its CI paths in an approved Design Contract before that work's freeze |
 
-**Two losses are STOPs, not degradations** — both are about signers. A UI ticket
-with no independent reviewer route cannot sign its own parity. A
-`security-sensitive` run is *defined* by that signature. Neither downgrades.
+**Two losses are STOPs, and they are the two the phase is built on.** The terminal
+reviewer must be independent of the builder on every run — a one-shot route is
+sufficient, and pass A's absence is a declared round-1 degradation while terminal
+self-review is not. Round 1 must be dispatched concurrently; every other row above
+trades coverage or evidence for availability, but serial execution trades only
+time, and buying nothing with three times the wall clock is the failure this
+rebuild was for.
 
 **`/code-review` is CodeRabbit's**, not Claude's — the repo reserves that name.
 Pass A is a **fresh reviewer subagent with no build context**; `/coderabbit:code-review`
@@ -410,8 +376,9 @@ artifact is a repository write like any other, and invariant 3 has no exception
 for it), write the artifact with `approval_status: pending`, and ✋ **STOP**,
 surfacing it as the approval ask.
 
-The metadata header carries `approval_status`, `design_ref`, `ui_required`,
-`owned_screens`, and `mutation_round: 0`. Every owned screen is classified
+The metadata header carries `approval_status`, `design_ref`, `ui_required` and
+`owned_screens`. **It does not carry `mutation_round`; the mutation-budget
+definition above is its sole definition.** Every owned screen is classified
 **reference-backed** or **unreferenced** *now*, at plan time. An unreferenced
 screen needs search evidence and a **named human approver** — a screen the ticket
 invents has no comparator, and inventing one later is the self-attestation the
@@ -507,74 +474,53 @@ not a fix. No local instance, or the only reachable one is shared → ✋ STOP.
 
 ## REVIEW
 
-> "Three reviewers check the change at once, I fix what they find, then the fixes
-> get checked too."
+> "Three blind checks find problems once; one independent reviewer decides the
+> repaired candidate once."
 
 Load [references/review.md](references/review.md) and, for pass B,
 [references/codex-cli.md](references/codex-cli.md).
 
-Everything that writes is now done. **Freeze the manifest as `F0`** — a stable
-description of what is being reviewed, computed once and handed identically to
-every pass in the round. Each later round gets its own version: `F0`, `F1`, `F2` —
-**a chain, not one manifest reused**, because a round after a fix is reviewing a
-different program.
+Append the REVIEW-start entry to `timings[]` as this phase's first action, before
+checking the terminal-reviewer route, sweeping the record or dispatching a pass.
+It is the durable point of no return for this run. Once it exists, **every
+REVIEW-phase stop concludes the run unshipped**, whether or not the terminal
+reviewer returned a verdict. This replaces the old verdict-only resume condition.
 
-**Round 1 — find.** Dispatch **together**, blind to each other, report-only, over
-`F0`: **pass A** a fresh reviewer with no build context (and, for UI, the sole
-parity investigation), **pass B** `codex` — a different model in a different
-process, started first because it is routinely the longest — and **pass C** the
-rule checklist, one row per rule in force.
+First sweep the ticket-owned record once: the plan, parity and VAPT artifact
+prefixes, changed comments and docblocks, ticket-produced docs, hand-maintained
+counts and citations. Apply the mutation budget **before** running anything that
+writes, formatters and generators included — they are writes, and a run already at
+three must not spend a fourth while tidying up. Everything written before the
+freeze is one batch. Then freeze the reviewed prefixes and compute `F0`. After `F0`, a record
+mismatch ends the current run; it is never repaired inside REVIEW.
 
-They are expected to confirm what BUILD already did — and they must still find and
-report every violation at full severity, exactly as if no build-time check had run.
-A long list means BUILD skipped its checks; it never means a pass should have
-looked less hard.
+**Round 1 — find.** Dispatch A, B and C together, mutually blind and report-only,
+over `F0`. Pass A is the fresh reviewer and performs the sole complete parity
+comparison for every reference-backed owned screen. Pass B is Codex or its
+declared fallback. Pass C walks every applicable rule row.
 
-**Barrier 1 — triage, then fix.** Every finding gets exactly one disposition, and
-**"it was wrong" is a real disposition** requiring a cited fact, not a feeling.
-Before mutating anything, **capture the pre-fix contents of every file about to
-change** — the manifest holds digests, not bytes, and once an uncommitted file is
-overwritten its previous state is gone. Apply one batched fix set, and **record
-which finding each change came from**. Increments the mutation budget **iff code,
-tests or docs actually changed**.
+**Barrier 1 — reconcile and repair once.** A record finding ends the current run.
+Give every code-or-test finding one disposition, capture preimages and apply at
+most one batched repair. Build the fix packet while changing the files. For every
+UI repair, include the dependency-closed nodes and properties it can affect.
+If the repair changed code or tests, snapshot the candidate as `F1`; otherwise
+the final candidate remains `F0` and no `F1` exists.
 
-**Round 2 — verify the fixes.** Dispatch **together**, over `F1`:
+**Round 2 — terminal verdict.** One sighted reviewer independent of the builder
+reads the round-1 findings, dispositions, frozen record, round-1 parity result and
+runtime attack evidence, plus the fix packet and affected closure when barrier 1
+changed the candidate. It does not rerun pass A, pass B, pass C or the attacks.
 
-- **the fix review** — a reviewer that **is** shown round 1's findings, paired with
-  what they caused. Per finding: **was it real · does the fix address it · did the
-  fix break anything**. And over the batch: **was anything I rejected actually
-  real** — the check on my triage, which is why it cannot be me who performs it.
-- **passes A and B again, over the delta `F0 → F1`, still blind.** The fix batch
-  keeps its cross-model review; dropping pass B here would mean the changes the
-  reviewer asked for are the only ones no second model ever read.
-- **the rule rows, tests, parity and attacks the fixes actually touched.**
+For parity, the reviewer consumes pass A's complete `F0` result. If barrier 1
+changed UI, it compares only the affected nodes, selectors, tokens, states,
+translations and their owned-screen consumers, in every applicable locale and
+direction. If that impact cannot be bounded, parity is FAIL.
 
-**Barrier 2 — fix what round 2 found**, bounded by the mutation budget. Further
-rounds repeat round 2 over the latest adjacent delta.
-
-**Blindness is a property of A, B and C — not of every pass.** They never see each
-other's findings, before or during. **The fix review is deliberately sighted**: it
-exists to read round 1's findings against their consequences, and cannot do that
-blind.
-
-**Do the work; don't narrate it.** After a barrier you have the findings and the
-authority. Two things go to the user first: a STOP condition, and a genuine product
-decision. **Everything else you fix.** If you are writing "here are the findings,
-shall I…", the answer is yes — you already had it.
-
-**Fixing is the default; skipping requires a citation** — a `[D]` or `[ARCH]` rule
-named by ID. "It conflicts with our conventions" can be written about any finding,
-which is exactly why it is not accepted. If you reach for the ID and the rule does
-not say what you need, the reviewer was right. A finding contradicting an `[NN]`
-rule is never skipped → ✋ STOP.
-
-**A finding can also simply be wrong.** Reject it with the code or ticket fact that
-disproves it — not with intuition, and not by implementing it anyway.
-
-**Then sign, once the payload is final.** Residual Blocker/Major clears only with a
-named human approver and date. Every stub links its follow-up ticket. Only then does
-the independent reviewer sign — a signature written before close-out edits binds to
-a payload that no longer exists.
+The terminal verdict is the signature. PASS proceeds to SHIP. Any finding,
+uncertainty, overturned rejection, suspected regression, coverage failure,
+record mismatch or non-PASS sub-outcome ends the current run unshipped. There is
+no later candidate or frozen-narrative write; only predeclared run-state fields
+through the precommit `SHIP_READY` cutoff may be appended.
 
 
 ## SHIP
@@ -583,91 +529,66 @@ a payload that no longer exists.
 
 Load [references/ship.md](references/ship.md).
 
-**Write the run record and session log first**, so they ride the commit rather
-than a second one. **Then verify every change since the accepted manifest is on
-the post-freeze allowlist** — code, tests or docs outside it are unreviewed
-content, and that is a ✋ STOP. **Then one commit and one push**, carrying the code
-and every artifact this ticket actually produced. Open the PR on the repo's real
-host, link the ticket, and **wait exactly once** for CI. Push nothing further
-unless a gate fails: a doc-only commit after green re-triggers the whole cycle.
+With the terminal verdict already appended, **write only the schema-defined
+precommit SHIP fields and `SHIP_READY` session-log projection**, so facts that
+already exist ride the commit. Recompute the terminal reviewer's
+`reviewed_content_id`; verify the reviewed prefixes and prior append-only entries.
+Any other code, test, comment, doc or artifact change ends the run as unreviewed.
+Then make one commit and one push, open the PR, link the ticket and wait for the
+enumerated CI gate.
 **Transition the ticket only after the checks are green**, then tell the user the
-PR is ready and ask them to run `/compact`.
+PR is ready and ask them to run `/compact`. Commit, push, PR, CI, tracker and
+completion facts are the external postcommit projection; never edit the committed
+record or session log to add them.
 
-## Signatures
+## The terminal verdict is the signature
 
-Two things get independently signed: the **parity verdict** on a UI ticket, and
-the **attack testing** on a `security-sensitive` one. They share one contract — it
-lives here, not in either phase's reference, because a non-UI security run needs
-it just as much as a UI run does.
+There is no separate signing phase. The terminal reviewer returns the one
+canonical verdict shape defined in [review.md](references/review.md), including
+the reviewer, manifest and reviewed-content identities, the frozen-record digest and status,
+findings, every triggered sub-outcome and `overall_outcome`.
 
-**A signature is an assertion returned as data**, which is why a report-only
-reviewer can still sign: the reviewer asserts, the orchestrator writes.
+`parity_outcome` combines pass A's complete comparison bound to `F0` with the
+terminal reviewer's targeted impact check bound to the final candidate.
+`attack_review_outcome` judges the frozen runtime evidence; it never substitutes
+for running the attacks in PROVE. `security_outcome` is mandatory when the plan
+is security-sensitive.
 
-**Every signature carries the same fields:**
-
-```
-scope_digest      what this signature actually binds to (see below)
-payload_digest    a digest of the signed payload, under ship-ticket-manifest-v1
-verdict           the reviewer's conclusion
-signer            reviewer identity + run/session ID
-manifest_id       provenance only — never what validity binds to
-```
-
-**The scope digest, not the manifest ID, is what validity binds to.** It digests
-only the paths *that check actually depends on*. Binding to the global manifest
-would make an unrelated backend fix invalidate a UI signature, training everyone
-to re-sign mechanically. Binding to the check's own scope means a signature goes
-stale exactly when it should.
-
-| Signed thing | Scope digest covers | Payload |
-|---|---|---|
-| **parity** | every owned screen's implementation and reference files, at `design_ref` | `design_ref` · the owned-screen list · the per-screen grade |
-| **attack testing** (`security-sensitive` only) | every in-scope surface, every route tested, the abuse-test files, and the production files they defend | the surface inventory · the rule→test map · the per-class result |
-
-**Sign the final payload, not an intermediate one.** Nothing is signed during the
-review rounds: each reviewer returns an **unsigned** verdict stamped with the scope
-digest it actually reviewed. At close-out, once the human-approved deviations and
-the stub → follow-up-ticket links are in place, the payload stops changing — only
-then is it handed back to sign. A signature written earlier and appended to
-afterwards binds to something that no longer exists.
-
-**It goes back to the *same* reviewer**, which is why the route must be resumable
-and why that is checked before planning.
-
-**A signature whose scope digest is not the final one is stale, not valid.** An
-accepted fix inside that scope requires the verdict to be **re-derived**;
-"re-signing" applies only when resuming an artifact that already carried one. That
-re-derivation is bounded by the mutation budget like every other loop.
-
-**The builder never signs their own work.** No independent signer → ✋ STOP.
+The reviewer is report-only. The orchestrator appends that verdict once to the
+plan's run-state block.
+`overall_outcome: PASS` is the only result that proceeds. No second digest,
+return dispatch, record repair or repeated attestation follows it.
 
 
 ## The run record
 
-**One schema, three consumers.** The user's report, the session log and the
-success criteria are the same facts — write them once. The user's version leads
-with plain sentences; the log and artifacts carry the identifiers. **The full
-schema is in [ship.md](references/ship.md).**
+**One logical record, split at the commit.** The committed projection contains
+only facts knowable before the commit; commit, push, PR, CI and tracker outcomes
+form the postcommit projection reported to the user and tracker without another
+repository write. **The full schema and cutoff are in
+[ship.md](references/ship.md).**
 
 **Two things must be done from the first phase, not reconstructed at the end:**
 
 - **Capture phase timings as you go** — start and end per phase, agent time kept
-  separate from human-approval and CI wait, and the overlap window of every
-  intended parallel group. Reconstructed timings cannot show whether things
-  actually ran concurrently, which is the one thing they exist to prove.
-- **Record each review pass's verified coverage** — the paths it reported
-  reviewing, checked against the manifest, and any it was re-run for. The barrier
-  verifies this transiently; recording it is what lets anyone later prove the diff
-  was covered rather than take the barrier's word for it.
+  separate from human approval and external CI wait, and the overlap window of
+  every intended parallel group. The committed projection ends at `SHIP_READY`;
+  later wait/completion timing belongs to the external projection. Reconstructed
+  timings cannot show whether things actually ran concurrently, which is the one
+  thing they exist to prove.
+- **Record verified coverage once** — round 1's reviewed paths and the terminal
+  reviewer's affected closure, each bound to its manifest. A coverage mismatch
+  ends the run; it does not trigger redispatch. Persist finding IDs and
+  dispositions, and derive counts when rendering the report.
 - **Declare the companion mode when you detect it**, not only at the end. A run
   that silently skipped a check is indistinguishable from one that failed it.
 
 
 ## Stop conditions
 
-**STOP and tell the user.** Every one of these is unconditional — none may be
-reclassified as work. An unpinnable reference is not an invitation to commit one;
-a missing signer is not an invitation to sign it.
+**STOP and tell the user.** Every condition below is unconditional. An unpinnable
+reference is not an invitation to create one, and a terminal failure is not an
+invitation to reopen review.
 
 **What this list is not is a licence to stop elsewhere.** A difficulty not on it —
 a finding you can fix, a test you can write — is work, and work does not stop the
@@ -693,39 +614,40 @@ so the answer is one message and not a negotiation.
 - A UI ticket's reference screen is not committed — it cannot be pinned.
 - A screen grades Major or Not-built and you can neither fix it nor clear it as a
   human-approved deviation.
-- No independent signer can be obtained for a UI ticket, in any mode. Parity never
-  self-signs.
-- **No *resumable* signer route exists** for a UI or `security-sensitive` ticket.
-  This stops **before planning**, not at signing — discovering it later throws away
-  the whole build.
+- A barrier-1 UI change has effects that cannot be bounded to nodes, properties
+  and owned-screen consumers for terminal parity review.
 
 *Security*
 - No local instance to attack, or the only reachable environment is production or
   shared staging.
 - An `[NN]` finding can't be fixed inside the ticket's scope, or the fix would
   require changing auth, tenancy or billing architecture — that is a decision.
-- No independent signer for a `security-sensitive` run. It is *defined* by that
-  signature; losing it is a stop, not a downgrade.
+- A security-sensitive run reaches terminal review without a reviewable runtime
+  attack artifact or without an explicit terminal security outcome.
 
-*Review*
-- A finding contradicts an `[NN]` rule.
-- The rule pass reports a FAIL you cannot fix.
-- The manifest changed during a review round and you cannot re-run the passes it
-  invalidated.
-- A pass returned without verifiable coverage, or without the required finding
-  shape, and cannot be re-run.
-- Content outside the post-freeze allowlist changed.
-- **The mutation budget reached its third round and validation still requires a
-  fourth.**
-- A signature is stale — its scope digest is not the final one — and no fresh
-  independent signature can be obtained.
+*Review — every item below concludes the current run, even before a verdict exists*
+- A round-1 pass cannot return verifiable coverage after one schema-only
+  correction request.
+- The manifest changes while round 1 is running.
+- A frozen record prefix changes after `F0`, or a reviewer finds it false.
+- Barrier 1 requires a repository path outside the approved contract.
+- `mutation_round` is already 3 and the record sweep or barrier 1 requires a write.
+- The fix packet does not balance.
+- An affected deterministic command is red after barrier 1's repair.
+- A submodule is dirty at `F0` and is not manifested recursively.
+- The independent terminal reviewer is unavailable.
+- The terminal reviewer returns any finding, uncertainty, coverage failure,
+  record mismatch or non-PASS outcome.
 
 *Everywhere*
 - A `Par` group was serialized with no stated reason, or the execution record is
   missing.
 - You want to skip a finding and cannot name the rule ID, or claim a deviation and
   cannot name the human approver.
-- Any PR, tracker or CI check fails.
+- SHIP recomputes a different `reviewed_content_id`, finds a changed frozen
+  prefix/append-only entry, or needs a repository-byte fix.
+- CI returns a deterministic red result rather than a host, network or explicitly
+  rerunnable infrastructure failure.
 
 An uncited skip is a fix you owe; a self-signed parity grade is not a verified
 screen; an unpinned reference has nothing to verify against; an unfixed FAIL is
@@ -733,23 +655,31 @@ not a shipped ticket.
 
 ## Stopping and resuming
 
-A stop is a pause. Leave the work recoverable: **do not revert, reset, stash or
-delete the branch**, and **commit nothing to close it out** — this skill never
-creates WIP commits. Report the branch, the phase you stopped in, what exists
-versus what is missing, which artifacts are on disk, and the single concrete thing
-needed to continue. Say explicitly what is **not** done. A stop that reads like a
-completion is worse than a loud failure.
+Most stops before REVIEW are pauses. Once the REVIEW-start timing entry exists,
+every **REVIEW-phase** stop concludes the current run. A terminal PASS instead
+transitions that run into SHIP. A host, network, PR-service, tracker-service or
+explicitly rerunnable CI infrastructure failure pauses SHIP without reopening
+REVIEW; resume only after recomputing the same `reviewed_content_id` and verifying
+the frozen prefixes and append-only entries. A deterministic red check or any
+required repository-byte change concludes the run and requires a new approved
+execution. In every case leave the work recoverable:
+**do not revert, reset, stash or delete the branch**, and **commit nothing to close
+it out** — this skill never creates WIP commits. Report the branch, the phase that
+stopped, what exists versus what is missing, which artifacts are on disk, and the
+single concrete thing needed to continue. Say explicitly what is **not** done. A
+stop that reads like a completion is worse than a loud failure.
 
 | On disk | Means | Do |
 |---|---|---|
-| `.specs/plans/<TICKET>.md`, `approval_status: approved` | the plan is settled | confirm it still stands, re-enter after the phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
+| `.specs/plans/<TICKET>.md`, `approval_status: approved`, and no REVIEW-start entry in `timings[]` | the plan is settled and the run stopped before REVIEW | confirm it still stands, then resume after the pre-REVIEW phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
+| a REVIEW-start entry exists and `overall_outcome: PASS` does not | this run concluded unshipped, with or without a terminal verdict | ✋ STOP. Never re-enter REVIEW. Continuation needs renewed human approval and a new appended run partition |
+| `overall_outcome: PASS` and no postcommit completion | REVIEW passed; SHIP is pending or paused | recompute `reviewed_content_id`, verify frozen prefixes and append-only entries, then continue only the missing idempotent SHIP operation; never rerun REVIEW |
 | `.specs/plans/<TICKET>.md`, `pending` or absent | a previous run stopped *at* the approval ask | take it back through approval. Do not build on it |
-| `mutation_round` > 0 | rounds were already spent | read it, carry it forward. **Never auto-reset** |
+| the run-state block holds `batches[]` | repair batches were already spent | keep every entry; count only those carrying the active `run_id` — **never truncate history to reset it** |
 | a ticket branch | work exists | use it, rebased. WIP commits → ✋ STOP for the preserve-or-squash decision |
-| the parity artifact | parity ran | check whether its signature still binds to the current scope digest. A superseded signature needs re-signing, not re-drafting |
+| the parity artifact | round-1 parity evidence exists | reuse it only when its `F0` manifest and immutable prefix still match. Otherwise start a new approved run; never rewrite historical locators to fit the current tree
 | the vapt artifact | attacks ran | re-run its committed tests; only re-attack surfaces the resumed work changed |
 | `design_ref` | the reference is pinned | **reuse that SHA.** Re-pinning silently changes what the screen is verified against |
-| a recorded wave | passes ran | resume only if the manifest ID still equals the current state |
 
 **Re-check triage anyway** — blockers, assignees and open PRs all move.
 
@@ -760,8 +690,10 @@ completion is worse than a loud failure.
   run rather than getting stubbed.
 - Unrelated problems you notice go to the user as a note or a new ticket, not into
   this diff.
-- Parity covers the screens this ticket **owns**, not every consumer of a shared
-  component you touched — that spawns a separate, flagged sweep.
+- Parity covers the screens this ticket owns. A shared-component change creates
+  one separate ticket enumerating the affected consumers as that ticket's owned
+  screens. The current run does not execute that sweep, and the sweep ticket
+  cannot create another sweep for the same component change.
 - The **manifest is the scope of record** for the review, and it names every
   exclusion with a reason. An unexplained exclusion is the hole it exists to close.
 
@@ -779,13 +711,14 @@ file short enough to follow.
 | the review engines themselves | `/coderabbit:code-review`, `codex`, the reviewer subagent |
 
 This skill owns *when* each is asked, *what it is asked about*, and the
-orchestration around them: the contract, the manifest chain, the rounds, the barriers, the
-mutation budget and the delta routing.
+orchestration around them: the contract, the `F0`/optional-`F1` manifests, the
+discovery wave, the repair barrier, the terminal verdict and the mutation budget.
 
 It does **not** choose or impose a stack — the stack is the repo's. It does not
-provide the concurrency; a serial orchestrator runs identical passes over an
-identical manifest and says so. Concurrency changes the wall clock, never a
-verdict. It does not merge the PR or run `/compact` — both are the user's.
+provide the concurrency either: it requires it, and REVIEW stops on an
+orchestrator that cannot fan out round 1. Concurrency changes the wall clock,
+never a verdict — which is exactly why paying three times over for the same
+verdict is not a trade this skill offers. It does not merge the PR or run `/compact` — both are the user's.
 
 **Always follow the repository's own instruction file** — it outranks this file
 on any conflict. **Read both `AGENTS.md` and `CLAUDE.md` if both exist**, and do

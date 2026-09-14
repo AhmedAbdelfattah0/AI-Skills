@@ -93,6 +93,36 @@ Content adapted from an external source names it and its license at the
 bottom of the file (e.g. "*Adapted from `amElnagdy/guard-skills` (MIT)*") and
 lists primary sources in `references/sources.md`.
 
+## Changing a rule: prove the old one is gone
+
+**A rule you changed is not changed until the version it replaced is deleted.**
+Writing the new rule beside the old one leaves a document that says two things,
+and a reader — or an agent executing it — will find whichever comes first.
+
+Before editing, write down the **exact distinctive phrase** of the rule you are
+replacing. After editing, `grep` that phrase across the **whole skill directory**,
+not the file you edited, and require **zero hits**. Re-reading your own edit cannot
+find this: it shows what you added, and the defect is what you failed to remove.
+
+**Expect more than one copy.** A load-bearing rule is normally stated in several
+places — the spine, its reference file, a YAML template, a resume or recovery
+table, a companion skill. Removing it from the file you were looking at is the
+partial fix that feels complete.
+
+Measured on this library's own `ship-ticket` rewrite, where three consecutive
+independent reviews each refused the change for this one reason:
+
+| The rule | Deleted in | Survived in |
+|---|---|---|
+| `mutation_round` is derived, never stored | `review.md` | `SKILL.md`'s plan header — then, after that was fixed, `plan.md`'s YAML template |
+| the terminal reviewer is unconditional | the sentence added below it | the condition list directly above it, in the same section |
+| tooling never replaces the independent read | — | nothing; the load-bearing sentence was deleted and nothing replaced it |
+
+The third row is the mirror image and costs the same: **deleting a constraint
+while keeping the instruction it constrained.** So the check runs both ways — grep
+for the old rule to prove it is gone, and re-read the new rule to confirm it still
+carries every condition the old one enforced.
+
 ## After creating or editing
 
 1. `node scripts/cli.mjs validate` → must print `✅ all skills valid`.

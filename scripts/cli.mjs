@@ -21,7 +21,7 @@
 
 import {
   readdirSync, readFileSync, existsSync, lstatSync, rmSync,
-  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync,
+  symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync, rmdirSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -86,6 +86,16 @@ function frontmatter(md) {
     }
   }
   return { fm, name: nameM ? nameM[1] : null, description };
+}
+
+// Like walk(), but yields directories and symlinks as entries in their own right
+// — hashing needs to see an empty directory and must not follow a link.
+function walkAll(dir, onEntry) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, e.name);
+    onEntry(full);
+    if (e.isDirectory()) walkAll(full, onEntry);               // isDirectory() is false for a symlink
+  }
 }
 
 function walk(dir, onFile) {
@@ -173,14 +183,21 @@ function hashSkill(dir) {
   // and kill the entire update, rather than making this one skill undecidable —
   // which is what a null is, and callers already treat it as "do not touch".
   try {
-    const files = [];
-    walk(dir, (f) => { if (!isNoise(basename(f))) files.push(f); });
-    files.sort();
+    const entries = [];
+    walkAll(dir, (p) => { if (!isNoise(basename(p))) entries.push(p); });
+    entries.sort();
     const h = createHash('sha256');
-    for (const f of files) {
-      h.update(relative(dir, f).replace(/\\/g, '/'));
+    for (const p of entries) {
+      const st = lstatSync(p);
+      h.update(relative(dir, p).replace(/\\/g, '/'));
       h.update('\0');
-      h.update(readFileSync(f));
+      // Type and the executable bit are part of what a skill IS: swapping a file
+      // for a symlink to identical bytes, or flipping +x on a bundled script,
+      // left the old content-only hash unchanged — so an edited copy read as
+      // untouched and was overwritten with no --force.
+      if (st.isSymbolicLink()) { h.update('L\0'); h.update(readlinkSync(p)); }
+      else if (st.isDirectory()) { h.update('D\0'); }          // empty dirs count too
+      else { h.update(`F${st.mode & 0o111 ? 'x' : '-'}\0`); h.update(readFileSync(p)); }
       h.update('\0');
     }
     return h.digest('hex');
@@ -232,26 +249,68 @@ function acquireLock() {
   const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const mine = JSON.stringify({ pid: process.pid, token, at: Date.now() });
 
-  const claim = (flag) => { writeFileSync(lock, mine + '\n', { flag }); return releaser(token); };
-  try { return claim('wx'); } catch { /* held — fall through and judge the holder */ }
+  const claim = () => { writeFileSync(lock, mine + '\n', { flag: 'wx' }); return releaser(token); };
+  try { return claim(); } catch { /* held — judge the holder below */ }
 
-  let held;
-  try { held = JSON.parse(readFileSync(lock, 'utf8')); } catch { held = null; }
-  if (held && holderIsAlive(held.pid) && Date.now() - (held.at || 0) < LOCK_MAX_MS) return null;
+  let held = null;
+  let readable = true;
+  try { held = JSON.parse(readFileSync(lock, 'utf8')); }
+  catch (err) { if (err.code === 'ENOENT') { try { return claim(); } catch { return null; } } readable = false; }
 
-  // The holder is gone (or the entry is unreadable/ancient). Drop it and re-claim
-  // with 'wx' so that if two runners reach this line together, exactly one wins.
-  try { rmSync(lock, { force: true }); } catch { /* someone else got there first */ }
-  try { return claim('wx'); } catch { return null; }
+  // A lock we cannot parse is debris, not a running process. Leaving it in place
+  // meant an empty or truncated file — a crash mid-write, a full disk — disabled
+  // automatic updates permanently and silently, because claim() then failed
+  // forever against a file nothing would ever remove.
+  if (readable && held && holderIsAlive(held.pid) && !expired(held.at)) return null;
+
+  // Displace it with rename-verify-restore, and NO second "breaker" lock: rename
+  // is atomic per path, but the path can be recreated, so the loser of a race can
+  // end up renaming the WINNER's fresh lock away (an ABA, not a compare-and-swap).
+  // Verifying what we actually moved — and putting it back when it is not the
+  // thing we condemned — is what closes that, and it needs no extra file whose
+  // own takeover would have the same problem one level down.
+  const condemned = readable ? held?.token : null;
+  const aside = `${lock}.stale.${token}`;
+  try { renameSync(lock, aside); } catch { return null; }        // someone else got there first
+  let moved = null;
+  try { moved = JSON.parse(readFileSync(aside, 'utf8')); } catch { moved = null; }
+  const sameThing = (moved?.token ?? null) === condemned;
+  if (!sameThing) {
+    // We moved a lock that appeared after we judged the old one. Put it back.
+    try { renameSync(aside, lock); } catch { /* nothing better available */ }
+    return null;
+  }
+  try { rmSync(aside, { force: true }); } catch { /* best effort */ }
+  try { return claim(); } catch { return null; }                 // a third party beat us to the fresh claim
 }
 
-// Delete the lock only while it is still ours.
+// A timestamp we cannot trust is not evidence of a live run. A far-future `at`
+// makes `now - at` negative for as long as the clock says so, which would starve
+// every future update permanently. (There is no longer a separate breaker lock:
+// its own takeover had the same ABA the lock's did, one level down.)
+function expired(at) {
+  if (!Number.isFinite(at)) return true;
+  const age = Date.now() - at;
+  return age < 0 || age >= LOCK_MAX_MS;
+}
+
+// Release only while the lock is still ours — and prove it by renaming rather
+// than by reading and then deleting, which leaves a window in which a new owner's
+// lock is the thing being deleted.
 function releaser(token) {
   return () => {
+    const lock = lockPath();
+    const leaving = `${lock}.leaving.${token}`;
     try {
-      if (JSON.parse(readFileSync(lockPath(), 'utf8')).token !== token) return;
-      rmSync(lockPath(), { force: true });
-    } catch { /* already gone, or not parseable — leave it for the liveness check */ }
+      if (JSON.parse(readFileSync(lock, 'utf8')).token !== token) return;
+      renameSync(lock, leaving);
+    } catch { return; }                       // already gone, unreadable, or no longer ours
+    try {
+      // Re-read after the rename: if the content is not ours, we moved somebody
+      // else's lock and must put it back rather than delete it.
+      if (JSON.parse(readFileSync(leaving, 'utf8')).token !== token) { renameSync(leaving, lock); return; }
+    } catch { /* unreadable — fall through and drop it */ }
+    try { rmSync(leaving, { force: true }); } catch { /* leave it for the liveness check */ }
   };
 }
 
@@ -298,6 +357,12 @@ function git(args, cwd = REPO_ROOT) {
 // clone being moved or re-cloned elsewhere, which a path does not; and it differs
 // for a fork, which is exactly the case a path cannot tell apart.
 function originUrl() {
+  // The git remote ONLY. package.json was tried here and is not provenance: it
+  // is content inside the candidate tree, and a fork keeps the upstream
+  // `repository` field as a matter of course. Run such a fork through npx — no
+  // .git, so the field is all there is — and it would present itself as the
+  // canonical library and overwrite canonical installs with fork content, with
+  // no flag. A self-asserted identity cannot answer "who installed this".
   const raw = git(['remote', 'get-url', 'origin']);
   if (!raw) return null;
   // Normalise the spellings of one remote: scp-form vs https, optional .git.
@@ -315,13 +380,23 @@ function originUrl() {
 // have its hashes trusted — that is what lets one checkout silently overwrite
 // another's content.
 function sameLibrary(manifest) {
-  // A recorded origin is authoritative: it was written by whoever installed, and
-  // a mismatch is proof of a different library. Absent one — a manifest predating
-  // this field — the source path is weaker evidence but is still evidence, and
-  // refusing it outright would strand every install made before the field existed.
+  // A recorded origin is authoritative: it came from a git remote, which is
+  // configuration about where the tree CAME FROM rather than content inside it.
+  // Absent one — a manifest predating the field — the source path is weaker
+  // evidence but is still evidence, and refusing it outright would strand every
+  // install made before the field existed.
+  //
+  // A source with no git remote at all (an npx cache) is INDETERMINATE, not
+  // trusted: it can offer nothing about its own provenance that a fork could not
+  // offer identically. Such installs need --adopt once, which is the honest
+  // price of not being able to tell them apart.
   if (manifest.origin) { const mine = originUrl(); return !!mine && manifest.origin === mine; }
   if (manifest.source) return resolve(manifest.source) === resolve(REPO_ROOT);
-  return true;                                          // nothing to contradict
+  // No identity evidence at all. Absence of a contradiction is not proof of
+  // ownership: a manifest carrying hashes but naming no library is exactly what
+  // a hand-edited or truncated file looks like, and trusting it lets unchanged
+  // foreign content be overwritten with no flag. --adopt exists for this.
+  return false;
 }
 
 const isGitClone = () => {
@@ -354,6 +429,10 @@ function refreshSource({ check }) {
   return { status: before === after ? 'already' : 'pulled', before, after, branch, upstream };
 }
 
+// A user-facing error: reported as a message, not a stack trace, and — unlike
+// process.exit() — it unwinds through every `finally` on the way out.
+class CliError extends Error {}
+
 // ---- shared flag parsing ----------------------------------------------------
 
 // Resolve --target/--dest to destination dirs. Shared by install and update so
@@ -365,9 +444,11 @@ function resolveDests({ targetSpec, destOverride, fallback }) {
     : targetSpec.split(',').map((s) => s.trim()).filter(Boolean);
   const unknown = keys.filter((k) => !TARGETS[k]);
   if (unknown.length) {
-    console.error(`❌ unknown target(s): ${unknown.join(', ')}`);
-    console.error(`   valid: ${Object.keys(TARGETS).join(', ')}, all — or use --dest <path>`);
-    process.exit(1);
+    // Throw, never process.exit(): exit does not unwind `finally`, so an auto
+    // run dying here released its lock but never stamped the throttle, and every
+    // following session repeated the network fetch.
+    throw new CliError(`unknown target(s): ${unknown.join(', ')}\n`
+      + `   valid: ${Object.keys(TARGETS).join(', ')}, all — or use --dest <path>`);
   }
   const seen = new Map();
   for (const k of keys) if (!seen.has(TARGETS[k])) seen.set(TARGETS[k], k);
@@ -438,8 +519,18 @@ function cmdInstall(args) {
   for (const { label, dir } of destDirs) {
     mkdirSync(dir, { recursive: true });
     // Merge into any existing manifest: installing two skills today must not
-    // erase the record of the twelve installed last week.
-    const manifest = readManifest(dir) || { version: 1, skills: {} };
+    // erase the record of the twelve installed last week. But only if it is
+    // OURS — merging into a foreign manifest and then stamping our own origin on
+    // it launders that library's records into ours, after which a later update
+    // overwrites its untouched skills with no flag at all.
+    for (const n of recoverInterrupted(dir)) {
+      console.log(`   ♻️  ${n}  restored from an interrupted update`);
+    }
+    const found = readManifest(dir);
+    const manifest = found && sameLibrary(found) ? found : { version: 1, skills: {} };
+    if (found && manifest !== found) {
+      console.log(`   ℹ️  ${dir} has a manifest from another library — starting our own record set`);
+    }
     manifest.version = 1;
     manifest.source = REPO_ROOT;
     manifest.origin = originUrl();
@@ -488,7 +579,23 @@ function cmdInstall(args) {
 // skill somebody edited in place is unrecoverable — there is no other copy —
 // and the manifest exists precisely so that case is detectable rather than a
 // coin flip.
+// The unattended contract needs ONE finalizer that every exit reaches — a return,
+// an early error, or a throw. process.exit() inside the body skipped stampRun(),
+// which meant a failing run left the throttle unset and every following session
+// pulled again.
 function cmdUpdate(args) {
+  try { runUpdate(args); }
+  catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    console.error(`❌ ${err.message}`);
+    process.exitCode = 1;
+  }
+  finally { if (typeof pendingFinish === 'function') pendingFinish(); }
+}
+
+let pendingFinish = null;
+
+function runUpdate(args) {
   const { names, flags, targetSpec, destOverride } = parseFlags(args);
   const check = flags.has('--check') || flags.has('-n') || flags.has('--dry-run');
   const auto = flags.has('--auto');
@@ -512,7 +619,18 @@ function cmdUpdate(args) {
     const got = acquireLock();
     if (!got) return;               // another run is already doing this
     release = got;
+    // `finally` does not run when a signal kills the process, and Node's 'exit'
+    // event fires only for a normal end or process.exit() — so a SIGTERM during
+    // a fetch left the throttle unstamped and every later session refetched.
+    // Handle the catchable signals, finalize, then exit with the conventional
+    // code. SIGKILL and power loss remain uncoverable, by definition.
     process.on('exit', release);
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      // pendingFinish, not finish: this runs before finish is declared, and a
+      // signal landing in that window would hit the temporal dead zone. The
+      // module-level binding is null until there is something to run.
+      process.on(sig, () => { try { pendingFinish?.(); } finally { process.exit(sig === 'SIGINT' ? 130 : 143); } });
+    }
   }
   // Buffered so a no-op run prints nothing at all — a SessionStart hook that
   // chatters every time is a hook people turn off.
@@ -531,9 +649,11 @@ function cmdUpdate(args) {
   // session pulls again, and the one after that, which is how a quiet updater
   // turns into a machine hammering GitHub on every session start.
   let finished = false;
+  // eslint-disable-next-line prefer-const
   const finish = () => {
     if (!auto || finished) return;
     finished = true;
+    pendingFinish = null;
     // Worth waking a human for: something changed, something was declined, the
     // source refresh did not go to plan, or a run failed. "Already fine" is not news.
     const sourceTrouble = ['dirty', 'pull-failed', 'fetch-failed'].includes(pull.status);
@@ -541,6 +661,7 @@ function cmdUpdate(args) {
     stampRun();
     release();
   };
+  pendingFinish = finish;   // so the try/finally wrapper reaches it on a throw
 
   // 1. Refresh the source. Unlike install, update's default scope is every known
   //    target directory that exists — you install per-tool, but you update "my
@@ -558,13 +679,17 @@ function cmdUpdate(args) {
   const available = skillDirs();
   if (!available.length) {
     console.error(`❌ no skills found in ${SKILLS_DIR}`);
-    process.exit(1);
+    process.exitCode = 1;
+    finish();
+    return;
   }
   const unknown = names.filter((n) => !available.includes(n));
   if (unknown.length) {
     console.error(`❌ unknown skill(s): ${unknown.join(', ')}`);
     console.error(`   run "list" to see the ${available.length} available skills.`);
-    process.exit(1);
+    process.exitCode = 1;
+    finish();
+    return;
   }
 
   // A dry run must answer "what will change", not "what differs right now". When
@@ -598,14 +723,22 @@ function cmdUpdate(args) {
 
 
   for (const { label, dir } of destDirs) {
-    const manifest = readManifest(dir) || { version: 1, skills: {} };
-    manifest.skills ||= {};
-    // A manifest from a different library is evidence about somebody else's
-    // install, not ours. Read nothing from its hashes.
-    const trusted = sameLibrary(manifest);
-    if (!trusted) {
-      say(`   ⚠️  installed by a different library (${manifest.origin || manifest.source || 'unknown source'}) — its records are not ours to act on`);
+    for (const n of recoverInterrupted(dir)) {
+      say(`   ♻️  ${n}  restored from an interrupted update`);
+      anyChange = true;
     }
+    // A manifest from a different library is evidence about somebody else's
+    // install. Suppressing its per-skill lookups was not enough: the object was
+    // still carried, so its `all` and `mode` stayed live, and the first write
+    // stamped OUR origin onto it — after which every retained foreign hash was
+    // trusted on the next run. Drop it entirely and start our own.
+    const foundManifest = readManifest(dir);
+    const trusted = !foundManifest || sameLibrary(foundManifest);
+    if (!trusted) {
+      say(`   ⚠️  installed by a different library (${foundManifest.origin || foundManifest.source || 'unknown source'}) — its records are not ours to act on`);
+    }
+    const manifest = trusted ? (foundManifest || { version: 1, skills: {} }) : { version: 1, skills: {} };
+    manifest.skills ||= {};
     const tally = { updated: 0, live: 0, current: 0, added: 0, removed: 0, skipped: 0, foreign: 0, failed: 0 };
     const hints = new Set();
     say(`\n[${label}] ${dir}`);
@@ -624,7 +757,7 @@ function cmdUpdate(args) {
       if (names.length && !names.includes(name)) continue;
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
-      const record = trusted ? manifest.skills[name] : undefined;
+      const record = manifest.skills[name];
 
       let st = null;
       try { st = lstatSync(dst); } catch { /* not installed */ }
@@ -661,8 +794,14 @@ function cmdUpdate(args) {
         }
         if (target && normalizeTarget(target) === normalizeTarget(src)) {
           if (!existsSync(target)) {
-            // The skill was deleted upstream; the link now dangles.
-            if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
+            // The skill was deleted upstream; the link now dangles. Pointing at
+            // our skills dir proves where a link POINTS, not who made it — a
+            // hand-made link has the same target as an installed one, so without
+            // a record this is not ours to delete.
+            if (!record && !adopt) {
+              say(`   ! ${name}  dangling link we have no record of installing — --adopt to remove it too`);
+              tally.skipped++; hints.add('--adopt');
+            } else if (!prune) { say(`   ! ${name}  dangling link (deleted upstream) — --prune to remove`); tally.skipped++; hints.add('--prune'); }
             else if (check) { say(`   - ${name}  (dangling — would remove)`); tally.removed++; anyChange = true; }
             else { removeExisting(dst); delete manifest.skills[name]; say(`   - ${name}  (dangling — removed)`); tally.removed++; anyChange = true; }
             continue;
@@ -698,8 +837,14 @@ function cmdUpdate(args) {
           say(`   ! ${name}  no longer in the library — --prune to remove`);
           tally.skipped++; hints.add('--prune'); continue;
         }
+        // --adopt claims things we never installed. It must NOT double as
+        // permission to delete a skill we DID install and you have since edited
+        // — that is --force's job, and conflating them means adopting one
+        // unrelated directory silently authorises losing edits in every skill
+        // that happens to have been removed upstream.
         const stillOurs = record?.hash && record.hash === hashSkill(dst);
-        if (!stillOurs && !force && !adopt) {
+        const mayRemove = stillOurs || (record ? force : adopt);
+        if (!mayRemove) {
           say(`   ! ${name}  removed upstream but edited locally — --force to remove anyway`);
           tally.skipped++; hints.add('--force'); continue;
         }
@@ -788,16 +933,29 @@ function cmdUpdate(args) {
 // exists means a full disk, an unreadable source or an interrupt leaves nothing
 // there — and the catch cannot put it back, because the only copy was the one
 // just deleted. So: stage a complete copy, move the old one aside, promote the
-// staged one, and only then drop the backup. Every failure rolls back.
+// staged one, and only then drop the backup.
+//
+// The guarantee this provides is RECOVERABILITY, not "the destination is never
+// absent". Two renames are each atomic but the pair is not, so a kill between
+// them leaves the destination missing — with the content intact in the backup,
+// which recoverInterrupted() restores on the next run. If even the rollback
+// fails, the backup is kept and its path printed rather than cleaned up.
 //
 // Staging lives in a DOT-directory. A sibling named `security.new` would hold a
 // SKILL.md and be scanned as a skill in its own right for as long as it exists;
 // scanners skip dotfiles, and so does this CLI's own enumeration.
 function applySkill(src, dst, mode, manifest, name) {
+  // Staging paths are unique PER ATTEMPT. Shared `${name}.new` / `${name}.old`
+  // meant two processes touching the same skill would delete each other's
+  // staging tree, or promote one while the other was still copying it — which
+  // is precisely the half-written destination the staging exists to prevent.
   const tmpRoot = join(dirname(dst), '.ai-skills-tmp');
-  const staged = join(tmpRoot, `${name}.new`);
-  const backup = join(tmpRoot, `${name}.old`);
+  const attempt = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const staged = join(tmpRoot, `${name}.new.${attempt}`);
+  const backup = join(tmpRoot, `${name}.old.${attempt}`);
   let movedAside = false;
+  let promoted = false;
+  let keepTmp = false;
   try {
     mkdirSync(tmpRoot, { recursive: true });
     removeExisting(staged);
@@ -810,22 +968,68 @@ function applySkill(src, dst, mode, manifest, name) {
     // 2. Swap. Both renames are within one directory tree, so each is atomic.
     if (existsSync(dst) || isLink(dst)) { renameSync(dst, backup); movedAside = true; }
     renameSync(staged, dst);
+    promoted = true;                 // <- the commit point; everything after is cleanup
 
-    // 3. Only now is the old copy expendable.
-    removeExisting(backup);
+    // 3. Record what landed BEFORE touching the backup. A failure while deleting
+    //    the backup used to return false with the new content already installed
+    //    and no hash recorded — leaving a stale baseline that made the fresh copy
+    //    look edited on the next run.
     manifest.skills[name] = { mode, hash: mode === 'copy' ? hashSkill(dst) : null };
+    try { removeExisting(backup); }
+    catch { console.error(`   ⚠️  ${name}: installed, but its backup could not be removed — see ${backup}`); keepTmp = true; }
     return true;
   } catch (err) {
+    // Past the commit point the new content is installed; do not roll back over it.
+    if (promoted) {
+      console.error(`   ⚠️  ${name}: installed, but cleanup failed: ${err.message}`);
+      keepTmp = true;
+      return true;
+    }
     // Put the original back if we got as far as moving it.
+    let rolledBack = true;
     if (movedAside && !existsSync(dst) && !isLink(dst)) {
-      try { renameSync(backup, dst); } catch { /* nothing further we can do */ }
+      try { renameSync(backup, dst); } catch { rolledBack = false; }
     }
     try { removeExisting(staged); } catch { /* best effort */ }
     console.error(`   ❌ ${name}: ${err.message}`);
+    if (!rolledBack) {
+      // The only copy of this skill is the backup. Say where it is and KEEP it —
+      // the finally below would otherwise delete the thing we failed to restore.
+      console.error(`   ⚠️  ${name}: could not restore it — your copy is at ${backup}`);
+      keepTmp = true;
+    }
     return false;
   } finally {
-    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* leave it */ }
+    // Only this attempt's artifacts — another process may be mid-copy in here.
+    if (!keepTmp) {
+      for (const p of [staged, backup]) { try { rmSync(p, { recursive: true, force: true }); } catch { /* leave it */ } }
+      try { rmdirSync(tmpRoot); } catch { /* not empty, or gone — either is fine */ }
+    }
   }
+}
+
+// Recover from a run that was killed between "move the old aside" and "promote
+// the new one" — which leaves the destination missing and the only copy of that
+// skill sitting in the staging directory. This has to be a sweep, not a check
+// inside applySkill: a skill that is MISSING never enters the per-skill loop, so
+// nothing would ever look at its backup, and the next run's cleanup would delete
+// it. Runs before anything else touches the directory.
+function recoverInterrupted(dir) {
+  const tmpRoot = join(dir, '.ai-skills-tmp');
+  if (!existsSync(tmpRoot)) return [];
+  const restored = [];
+  let entries = [];
+  try { entries = readdirSync(tmpRoot); } catch { return restored; }
+  for (const e of entries) {
+    // `<name>.old.<attempt>` — the attempt suffix keeps concurrent runs apart.
+    const m = e.match(/^(.+)\.old\.[^.]+$/);
+    if (!m) continue;
+    const name = m[1];
+    const dst = join(dir, name);
+    if (existsSync(dst) || isLink(dst)) continue;          // the swap completed after all
+    try { renameSync(join(tmpRoot, e), dst); restored.push(name); } catch { /* leave it in place */ }
+  }
+  return restored;
 }
 
 // existsSync follows symlinks, so a dangling link reads as absent — which would
@@ -896,6 +1100,7 @@ function cmdValidate() {
 
   console.log(`Validating skills in ${SKILLS_DIR}\n`);
   let fail = false;
+  const outcomeVocabularyOwners = [];
 
   for (const name of names) {
     const md = join(SKILLS_DIR, name, 'SKILL.md');
@@ -999,13 +1204,14 @@ function cmdValidate() {
     // 7. Where a skill defines a canonical outcome vocabulary, it must be defined
     //    exactly once and must be able to express failure. A vocabulary that
     //    declares itself exhaustive and omits FAIL makes a failure unrecordable.
-    const enumOwners = docs.filter((d) => /^PASS_FULL\s/m.test(readFileSync(d, 'utf8')));
+    const enumOwners = docs.filter((d) => /^OUTCOME_VOCABULARY$/m.test(readFileSync(d, 'utf8')));
+    outcomeVocabularyOwners.push(...enumOwners);
     if (enumOwners.length > 1) {
       console.log(`❌ ${name}: the outcome vocabulary is defined in ${enumOwners.length} files — it must have exactly one owner.`);
       err = fail = true;
     } else if (enumOwners.length === 1) {
       const body = readFileSync(enumOwners[0], 'utf8');
-      for (const v of ['PASS_FULL', 'FAIL', 'NOT_TRIGGERED', 'DEGRADED'])
+      for (const v of ['PASS', 'FAIL', 'NOT_TRIGGERED', 'NOT_APPLICABLE', 'DEGRADED'])
         if (!new RegExp(`^${v}\\s`, 'm').test(body)) {
           console.log(`❌ ${name}: the outcome vocabulary omits ${v}.`);
           err = fail = true;
@@ -1013,6 +1219,11 @@ function cmdValidate() {
     }
 
     if (!err) console.log(`✅ ${name}`);
+  }
+
+  if (outcomeVocabularyOwners.length !== 1) {
+    console.log(`❌ canonical outcome vocabulary has ${outcomeVocabularyOwners.length} owners — expected exactly one.`);
+    fail = true;
   }
 
   // The repo's own guidance files are held to the retired-vocabulary rule too.
@@ -1049,7 +1260,69 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\bGATE [345]\b/g, 'ship-ticket uses named phases and checks, not numbered gates', ['ship-ticket', 'vapt', 'generate-ticket', 'code-quality']],
+  [/\bfinal\s+`?mutation_round`?/gi, 'mutation_round is derived and is never a stored final field', ['ship-ticket']],
+  [/\bmutation_round:\s*\d+\b/gi, 'mutation_round is derived and is never a stored scalar', ['ship-ticket']],
+  [/mutation_round`?\s+is the length of `?batches\[\]`?/gi, 'mutation_round is partitioned by active run_id, not counted across ticket history', ['ship-ticket']],
+  [/\bnew (?:approved plan and a )?run record\b/gi, 'a new execution appends a run partition to the existing record', ['ship-ticket']],
+  [/\bOne schema, three consumers\b/g, 'the run record has a truthful precommit projection and a separate external postcommit projection', ['ship-ticket']],
+  [/\bany stop (?:after it )?ends the current run\b/gi, 'REVIEW stops conclude; resumable external SHIP failures pause without reopening review', ['ship-ticket']],
+  [/\bAny PR, tracker or CI check fails\b/g, 'SHIP distinguishes resumable service failures from deterministic red checks and content changes', ['ship-ticket']],
+  [/\bresume SHIP only if the final candidate manifest\b/gi, 'SHIP resumes by representation-independent reviewed_content_id, not a manifest changed by commit', ['ship-ticket']],
+  [/\bA retry that changes no repository bytes may rerun CI only\b/gi, 'SHIP resumes missing idempotent external operations under reviewed_content_id', ['ship-ticket']],
+  [/\b(?:one CI wait|wait exactly once for CI)\b/gi, 'SHIP has one enumerated CI gate; infrastructure retries do not reopen REVIEW', ['ship-ticket']],
+  [/\bwait once for CI\b/gi, 'SHIP waits for the enumerated gate and may resume an infrastructure-interrupted wait', ['ship-ticket']],
+  [/\bpost-verdict session-log entry\b/gi, 'the session log stops at the precommit SHIP_READY cutoff', ['ship-ticket']],
+  [/\bremaining SHIP timing\/result entries\b/gi, 'only knowable SHIP_READY facts enter the committed projection', ['ship-ticket']],
+  [/\bSHIP result slots may be appended\b/gi, 'repository result writes end at the precommit SHIP_READY cutoff', ['ship-ticket']],
+  [/\bso they ride the single gated commit\b/gi, 'postcommit outcomes stay external because they do not exist at the commit cutoff', ['ship-ticket']],
+  [/\bAdd one merge-blocking check\b/g, 'VAPT GATE detects enforcement; only explicit setup work may install it', ['vapt']],
+  [/\bInstalling (?:the|it) check is repo setup, never something (?:a|this) ticket adds after the freeze\b/gi, 'CI enforcement is caller-aware: detect in GATE, install only in explicit pre-freeze setup work', ['ship-ticket', 'vapt']],
+  [/\band a merge-blocking CI check[\s\S]{0,120}is what actually stops a regression\b/gi, 'VAPT accepts declared enforcement degradation in GATE mode while committed tests still run in CI', ['vapt']],
+  [/\bTwo vocabularies, at two levels\b/g, 'rule rows and whole checks share one canonical outcome vocabulary', ['ship-ticket']],
+  [/\bPASS_(?:FULL|GROUPED|REUSED)\b/g, 'execution detail belongs in execution_mode; PASS is the canonical outcome', ['ship-ticket', 'vapt']],
+  [/\bNOT_APPLICABLE_NO_SCREEN_REFERENCE\b/g, 'NOT_APPLICABLE is the outcome and NO_SCREEN_REFERENCE is a reason_code', ['ship-ticket']],
+  [/\bPASS\s*\/\s*FAIL\s*\/\s*N-A\b/g, 'rule rows use the canonical outcome vocabulary', ['ship-ticket', 'code-quality']],
+  [/\bN-A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'code-quality']],
+  [/\bN\/A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'vapt', 'angular-code-quality', 'backend-code-quality', 'code-quality', 'pr-review']],
+  [/\bFIXED\b/g, 'a fixed finding has outcome PASS and records fixed as disposition evidence', ['vapt']],
+  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality', 'pr-review']],
+  [/\| Rule \| Surface \| Verdict \| Evidence \|/g, 'VAPT rows use the canonical Subject ID | Outcome | Evidence shape', ['vapt']],
+  [/\bBoth halves are load-bearing, and REVIEW compares the pair\b/g, 'test coverage matches body digests first so a name-only rename remains equivalent', ['ship-ticket']],
+  [/\beach test ID being PROVE's name-plus-body-digest pair\b/g, 'coverage vectors use body-digest multisets; test names are locators and rename evidence', ['ship-ticket']],
+  [/\b(?:terminal verdict when one is required|when terminal review is required)\b/gi, 'every ship-ticket run gets an unconditional terminal reviewer', ['ship-ticket']],
+  [/\bno terminal verdict recorded\b/gi, 'ship-ticket resumption keys on whether REVIEW started, not whether a verdict exists', ['ship-ticket']],
+  [/\bauthz (?:predicate|component)\b/gi, 'boundary identity excludes prose authorization labels; executable test IDs carry authorization coverage', ['ship-ticket']],
+  [/\bship-ticket(?:'s)?\s+step\s+\d+(?:\.\d+)?\b/gi, 'ship-ticket uses named phases rather than numbered steps', ['vapt', 'generate-ticket']],
+  [/\bsigns later\b/gi, 'the terminal reviewer is the only signature; the plan-critique route never signs', ['ship-ticket']],
+  [/\bempty schema-defined slots?\b/gi, 'parity and VAPT evidence artifacts freeze whole; later results live in the plan run-state block', ['ship-ticket']],
+  [/\b(?:barrier 2|round 3|further rounds?)\b/gi, 'ship-ticket review has one repair barrier and one terminal verdict', ['ship-ticket']],
+  [/\b(?:F2|Fn|F\(n[−-]1\))\b/g, 'ship-ticket review has only F0 and an optional F1 candidate', ['ship-ticket']],
+  [/\bscope[_ -]digests?\b/gi, 'terminal review binds to manifests and the frozen-record digest; the separate scope digest was deleted', ['ship-ticket']],
+  [/\bpayload[_ -]digests?\b/gi, 'the separate signing payload and its digest were deleted', ['ship-ticket']],
+  [/\bunsigned verdicts?\b/gi, 'review outputs now feed one terminal verdict directly', ['ship-ticket']],
+  [/\bindependent signatures?\b/gi, 'independence now belongs to the terminal reviewer, with no separate signing dispatch', ['ship-ticket', 'generate-ticket', 'vapt']],
+  [/\bsignature blocks?\b/gi, 'separate parity and security signature blocks were folded into the terminal verdict', ['ship-ticket']],
+  [/\bsigners?\b/gi, 'ship-ticket and vapt use reviewers and outcomes, not a separate signer role', ['ship-ticket', 'vapt']],
+  [/\bresumable signer route\b/gi, 'the terminal reviewer is a one-shot route', ['ship-ticket']],
+  [/\bre[- ]?sign(?:ing|atures?)\b/gi, 'terminal outcomes are never reopened inside the same run', ['ship-ticket']],
+  [/\bsame[- ]reviewer rule\b/gi, 'the signing resumption ceremony was deleted', ['ship-ticket']],
+  [/\bstaleness rule\b/gi, 'record immutability and manifest binding replace signature staleness', ['ship-ticket']],
+  [/\bevery (?:claim, count, citation and )?conclusion (?:a reader would check )?belongs in the prefix\b/gi, 'conclusions live in the append-only run-state block; the frozen prefix holds only pre-F0 claims', ['ship-ticket']],
+  [/\bevery batch carries `?fix_packet_digest`?\b/gi, 'only the REVIEW barrier-1 batch carries a fix packet; PROVE and pre-F0 batches precede any packet', ['ship-ticket']],
+  [/\b(?:a )?config boundary\b/gi, 'record boundaries by vapt kind code — security-config, never prose', ['ship-ticket']],
+  [/\boutbound credential path\b/gi, 'record boundaries by vapt kind code — outbound-data, never prose', ['ship-ticket']],
+  [/\bparity verdict (?:is )?re-derived\b/gi, 'the complete parity comparison runs once in round 1', ['ship-ticket']],
+  [/\bregenerate the parity draft\b/gi, 'post-F0 UI changes receive a targeted impact check instead', ['ship-ticket']],
+  [/\bstrict mode\b/gi, 'vapt no longer owns a separate review or signing mode', ['vapt']],
+  [/\bsigned-off:/gi, 'vapt produces runtime evidence; ship-ticket terminal review owns review attestation', ['vapt']],
   [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket', 'pr-review']],
+  [/\bREVIEW timing degraded\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
+  [/\brun A, B and C serially\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
+  [/\bserial round 1\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
+  [/\bformatters and generators first\b/gi, 'the mutation budget is read before anything that writes, formatters included', ['ship-ticket']],
+  [/\bRun formatters and generators before\b/gi, 'the mutation budget is read before anything that writes, formatters included', ['ship-ticket']],
+  [/\bno record mutation\b/gi, 'the post-F0 ban names candidate files and frozen prefixes; append-only run-state writes are required', ['ship-ticket']],
   [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
   [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
   [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
@@ -1127,10 +1400,21 @@ Examples:
 
 // ---- dispatch --------------------------------------------------------------
 
+// Turn a CliError into a message + exit code; let anything else surface as the
+// bug it is.
+function runCommand(fn) {
+  try { fn(); }
+  catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    console.error(`❌ ${err.message}`);
+    process.exitCode = 1;
+  }
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
   case 'list': cmdList(); break;
-  case 'install': case 'add': cmdInstall(rest); break;
+  case 'install': case 'add': runCommand(() => cmdInstall(rest)); break;
   case 'update': case 'upgrade': cmdUpdate(rest); break;
   case 'autoupdate': case 'auto': cmdAutoupdate(rest); break;
   case 'validate': case 'lint': cmdValidate(); break;

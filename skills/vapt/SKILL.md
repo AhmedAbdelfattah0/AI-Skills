@@ -6,7 +6,7 @@ description: |
   boundaries a change introduces, attacks each one, and leaves the abuse cases
   behind as COMMITTED TESTS in the repo's own runners so CI re-runs them forever.
   Stack-agnostic: detects the runners and the harness, never prescribes them.
-  Runs in two modes — GATE (the diff, as ship-ticket's GATE 5) and AUDIT
+  Runs in two modes — GATE (the diff, during ship-ticket's PROVE phase) and AUDIT
   (backfill over already-shipped code in the base branch).
 
   Trigger when:
@@ -16,7 +16,7 @@ description: |
     for IDOR", "check authz", or "is this endpoint safe to expose"
   - an endpoint, auth path, upload, form, or rendering surface was just built or
     changed and nothing has yet sent it a hostile request
-  - ship-ticket reaches GATE 5
+  - ship-ticket reaches PROVE's live-attack stage
 
   Do NOT use for: secure-by-default patterns while writing (use security),
   static rule enforcement on the diff (use backend-code-quality BE-SEC-*),
@@ -43,12 +43,16 @@ is a merge-blocking fact that keeps running after everyone forgets the ticket.
 
 | Command | Mode | Scope |
 |---|---|---|
-| `/vapt` | **GATE** | The current diff (vs. the base branch). This is ship-ticket's GATE 5. |
+| `/vapt` | **GATE** | The current diff (vs. the base branch), including ship-ticket's PROVE-phase invocation. |
 | `/vapt.audit` | **AUDIT** | Already-shipped code in the base branch, in risk-ordered waves, resumable. |
 | `/vapt.fix <ID>` | either | Jump to one tracked finding with minimum context load. |
 
 Artifacts live in `.specs/vapt/` — `<TICKET>.md` per gate run, `surfaces.md` +
 `findings.md` for the audit.
+
+When ship-ticket invokes GATE mode, use that caller's canonical boundary-record
+shape so its later `F0`/optional-`F1` comparison consumes the same inventory VAPT
+attacked.
 
 ---
 
@@ -84,18 +88,18 @@ so a security test of it produces cost and nothing else.
 A changed (GATE) or existing (AUDIT) file is **in scope** if it introduces or
 changes any of:
 
-| # | Trust boundary | Examples (detect the repo's idiom, don't assume one) |
+| Kind | Trust boundary | Examples (detect the repo's idiom, don't assume one) |
 |---|---|---|
-| 1 | Request handler or its route registration | controller, handler, resolver, RPC method, route table |
-| 2 | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy |
-| 3 | Query or command taking external input | ORM call, raw SQL, search filter, sort/pagination param |
-| 4 | Rendering a value it did not author | template, component, `innerHTML`-class sink, markdown/HTML render |
-| 5 | Input that reaches a server | form, upload widget, URL/query param binding |
-| 6 | File or path handling | upload, download, archive, path join, static serve |
-| 7 | Client-side storage | cookie, `localStorage`, `sessionStorage`, IndexedDB |
-| 8 | Outbound call carrying credentials or user data | webhook send, third-party SDK, server-to-server fetch |
-| 9 | Async consumer of external payloads | queue worker, cron, webhook receiver, event handler |
-| 10 | Security-relevant config | CORS, headers, cookie options, secret wiring, ACL/policy files |
+| `request-handler` | Request handler or its route registration | controller, handler, resolver, RPC method, route table |
+| `auth-lifecycle` | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy |
+| `external-input-operation` | Query or command taking external input | ORM call, raw SQL, search filter, sort/pagination param |
+| `rendering-sink` | Rendering a value it did not author | template, component, `innerHTML`-class sink, markdown/HTML render |
+| `server-input` | Input that reaches a server | form, upload widget, URL/query param binding |
+| `file-path` | File or path handling | upload, download, archive, path join, static serve |
+| `client-storage` | Client-side storage | cookie, `localStorage`, `sessionStorage`, IndexedDB |
+| `outbound-data` | Outbound call carrying credentials or user data | webhook send, third-party SDK, server-to-server fetch |
+| `async-consumer` | Async consumer of external payloads | queue worker, cron, webhook receiver, event handler |
+| `security-config` | Security-relevant config | CORS, headers, cookie options, secret wiring, ACL/policy files |
 
 **Explicitly out of scope:** pure functions over trusted input, type/DTO
 declarations, styling, copy, existing tests, build config that touches none of
@@ -103,7 +107,7 @@ the above.
 
 **Name every exclusion.** The artifact lists each changed file you excluded and
 which reason applies. An unexplained exclusion is the hole this step exists to
-close — the same reason GATE 4 forces every stub to link a follow-up ticket.
+close.
 
 ## STEP 3 — Principals (without these, half the rules cannot be tested)
 
@@ -184,7 +188,7 @@ exists; this skill **proves** it engages:
 
 **Detect the runners; never prescribe them.** Read `package.json` scripts, the
 Makefile, `pyproject.toml`, `composer.json`, `go.mod`, or the CI config — the
-same way ship-ticket's step 9 does. Then:
+same way ship-ticket's UNDERSTAND phase enumerates the repository commands. Then:
 
 | Surface | Harness |
 |---|---|
@@ -228,58 +232,68 @@ A finding is fixed in **production code**, not by loosening the test.
 - Re-run the abuse tests after every fix. Red → green on the same test is the
   proof; a deleted test is not a fix.
 
-## STEP 7 — The artifact and the verdict
+## STEP 7 — The artifact and the outcome
 
 Write `.specs/vapt/<TICKET>.md` (GATE) or `.specs/vapt/findings.md` (AUDIT):
 
 ```
 target:      http://localhost:3000 · disposable seed DB (docker compose)
-mode:        GATE · strict          # strict when the ticket is security-sensitive
+mode:        GATE
+outcome:     PASS
+execution_mode: FULL
 surfaces:    POST /api/orders · GET /api/orders/:id · OrderList component
 excluded:    src/utils/format-date.ts (no trust boundary, reason 0)
 principals:  anon · userA(tenantA) · userB(tenantB) · admin
 degraded:    VAPT-WEB-01 — no browser runner in this repo; proved at request layer
 
-| Rule | Surface | Verdict | Evidence |
-|---|---|---|---|
-| VAPT-API-01 | GET /api/orders/:id | PASS | test/abuse/orders.spec.ts:24 — B→A's id returns 404 |
-| VAPT-API-04 | POST /api/orders | FIXED | accepted `tenant_id` from body; now derived from token (services/order.ts:31) |
-| VAPT-API-08 | POST /api/orders | N/A  | [D], no rate limiter in this project — documented in CLAUDE.md |
-
-signed-off: <independent reviewer>        # strict mode only
+| Subject ID | Outcome | Evidence |
+|---|---|---|
+| VAPT-API-01 @ GET /api/orders/:id | PASS | `user B cannot read user A's order` in `test/abuse/orders.spec.ts` |
+| VAPT-API-04 @ POST /api/orders | PASS | fixed: `OrderService.create` derives tenant from the authenticated principal |
+| VAPT-API-08 @ POST /api/orders | NOT_APPLICABLE | [D], no rate limiter in this project — documented in CLAUDE.md |
 ```
 
-**PASS** ⇔ every in-scope surface has a committed test for every applicable
-rule · all those tests are green · zero unfixed `[NN]` findings · every excluded
-file and every degraded rule named · and, in strict mode, an **independent**
-signature from an agent that did not build the code.
+Use [ship-ticket's canonical outcome vocabulary](../ship-ticket/references/ship.md)
+when it is installed. Standalone fallback: the only outcome tokens are `PASS`,
+`FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE` and `DEGRADED`; execution detail belongs
+in `execution_mode`, not in a new verdict token.
 
-**FAIL** ⇔ anything else. An unfixed `[NN]`, an unexplained exclusion, a
-"probably fine", or a rule marked PASS with no test behind it.
+`outcome: PASS` with `execution_mode: FULL` means every in-scope surface has a
+committed test for every applicable rule; all tests are green; there are zero
+unfixed `[NN]` findings; and every exclusion is named, with no coverage
+degradation. Use `execution_mode: GROUPED` when shared test definitions were used
+and every route was still executed against them.
 
-**Strict mode is about signing, not coverage.** Every GATE run executes every
-STEP 4 rule applicable to every in-scope surface — applicability alone decides
-which rules are in force, and any rule not run is declared inapplicable with
-evidence. `security-sensitive` (auth, tenancy, billing, payments, secrets)
-selects **strict**, which adds the independent signature the PASS contract
-requires. It does not change rule selection.
+`outcome: DEGRADED` with `execution_mode: REDUCED` requires the executed reduced set to be green and every unexercised
+rule or family to be named with its cause.
 
-A non-sensitive run is **unsigned, never reduced**. There is no lighter rule set
-for ordinary work: an unlabelled ticket is exactly where a mass-assignment,
-injection or CORS defect ships silently, so the label cannot be what decides
-whether those classes run.
+Use `outcome: FAIL` for anything else.
+
+Security sensitivity never changes VAPT coverage. VAPT runs attacks and produces
+runtime evidence; it does not dispatch a reviewer or attest to its own result.
+When ship-ticket invokes it, that skill's terminal reviewer judges the frozen
+evidence together with the repaired candidate.
 
 ## STEP 8 — CI enforcement (this is what makes it real)
 
 The abuse tests run in the repo's existing test job for free — that half is
 already machine-enforced.
 
-Add one merge-blocking check in the **same slot as `nn-guard`'s CI job and
-ship-ticket's GATE 4 check**: if the PR's diff touches a trust boundary (derive
-the glob from where this repo's handlers, components, and config actually live —
-the point is the signal, not a fixed pattern), then `.specs/vapt/<TICKET>.md`
-must exist and be **PASS**. Without this, the gate is honor-system, which is the
-failure mode it was built to remove.
+**First classify the caller.** In GATE mode, including when `ship-ticket` invokes
+VAPT, detect the repository's existing required checks and CI configuration but
+do not add or edit CI. If an artifact-validation check exists, verify that it
+triggers when the derived trust-boundary paths change and accepts the canonical
+outcome record. If it is absent, record `enforcement_outcome: DEGRADED` with the
+checked policy/config locations and keep the committed abuse tests in the repo's
+existing test job. The calling ticket neither widens its Design Contract nor
+creates post-freeze CI content.
+
+Install or change an artifact-validation check only in explicit setup work: the
+user asked for that setup, or an approved plan names the exact CI paths in its
+Design Contract, and the change occurs before its freeze. Derive the trigger from
+the repository's handlers, components and security configuration rather than a
+fixed glob. That check uses the same merge-blocking slot as `nn-guard` and
+ship-ticket's design-parity artifact check.
 
 ---
 
@@ -340,7 +354,7 @@ failure, not a shortcut.
 
 - **Write secure code in the first place** — that's `security`. This runs after.
 - **Enforce static rules on the diff** — that's `backend-code-quality`
-  (`BE-SEC-*`) at ship-ticket's GATE 3.
+  (`BE-SEC-*`) in ship-ticket's round-1 rule pass.
 - **Read the whole codebase for vulnerabilities** — that's `security-audit`.
 - **Test functionality** — the repo's own unit and integration tests own that.
   Every test this skill writes asserts a *refusal* or a *leak*, never a feature.
@@ -352,6 +366,8 @@ failure, not a shortcut.
 
 Working when: every trust boundary a change introduces has a committed,
 rule-named abuse test that failed before the fix and passes after; every excluded
-file and degraded rule is named in the artifact; no `[NN]` finding ships
-unfixed or unwaived; and a merge-blocking CI check — not an agent's summary —
-is what actually stops a regression.
+file and degraded rule is named in the artifact; no `[NN]` finding ships unfixed
+or unwaived; the abuse tests run in existing CI; and artifact enforcement is
+either verified present or explicitly `DEGRADED`. Installing missing artifact
+enforcement is complete only in explicit setup work, never as an implicit GATE
+side effect.

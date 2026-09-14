@@ -133,7 +133,7 @@ the degradation. A watchdog expiry *alone*, with a resumable session, is a
 recoverable event, not a missing companion.
 
 Read `finalMessage` from `result.json`; record `threadId` — it identifies the
-session for a follow-up and is the audit trail if this route signs later.
+session for a bounded recovery and is the critique's audit trail.
 
 ### Reconcile — your judgment, not Codex's
 
@@ -153,15 +153,10 @@ approves the reconciled plan, not the draft plus a list of things you would chan
 Needs **only the `codex` binary**. A missing `codex-delegate` costs the plan
 critique and leaves this intact — never disable both because one is absent.
 
-**It runs twice.** In round 1, over the frozen manifest, concurrently with passes A
-and C. In round 2, over the fix delta `F(n−1) → Fn`, concurrently with pass A and
-the fix review — the changes a reviewer asked for need a second model as much as
-the original code did. Run it from the repo root **in the background**; it is
-routinely the longest pass, so it starts first within its round.
-
-Its round-2 dispatch is **blind like its round-1 one**: give it the delta and the
-ticket context, never the findings that produced it. The pass that is shown those
-is the fix review, and it is a different agent.
+**It runs once**, in round 1 over `F0`, concurrently with pass A and pass C. Run
+it from the repository root in the background because it is routinely the
+longest round-1 pass. Give it the complete retrieval recipe, ticket context and
+bounded finding request. It has no terminal-review or signing role.
 
 **`codex exec -s read-only` is the preferred carrier** — measured ~1.3x faster
 than `codex review` on identical input (289s vs 384s), because you hand it the
@@ -192,5 +187,10 @@ Never let an unbounded external wait silently become the run's critical path.
 ## PR-side bots are not a gate
 
 Once the PR is open, CodeRabbit's GitHub app and any Codex cloud review wired to
-the repo may re-review the same diff. Read them only if they have already posted.
-Never wait on one.
+the repo may re-review the same diff. **Never wait on one, and never feed one back
+into a concluded run.** The terminal verdict ended that run; a bot finding arriving
+afterwards is input to a *new* approved run, exactly like a finding reported next
+week. Treating it as one more thing to fix and re-review is how a bounded phase
+becomes unbounded again through a door nobody guarded.
+
+Read them if they have already posted, and record anything real as a follow-up.

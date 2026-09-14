@@ -212,7 +212,7 @@ ticket or by the user** (a code comment is never ratification) · the rule prote
 **forbidden wherever it enforces or isolates any security, privacy, availability or integrity
 control, judged by effect not by a list**, regardless of tier letter · the alternative really
 would be a second pattern. All four → the rule does not
-fire, recorded as an `N/A — replaced by established project architecture` row with its
+fire, recorded as a `NOT_APPLICABLE — replaced by established project architecture` row with its
 evidence, outside the waiver ledger. Fewer than four → it stands. The specialists beat the
 hub's per-stack *summaries*; they never beat its foundation.
 
@@ -265,23 +265,41 @@ rule, name the lines it replaces; if it belongs to one phase, it goes in that
 phase's reference, not the spine.
 
 The phases are **UNDERSTAND → PLAN → BUILD → PROVE → REVIEW → SHIP**. There are no
-numbered steps and no numbered gates any more; the old `GATE 3/4/5` are the rule
-pass, the parity check and the attack testing. The numbering never meant anything
+numbered steps and no numbered gates any more; the retired `GATE 3/4/5` labels
+meant the rule pass, the parity check and the attack testing. The numbering never meant anything
 — a GATE 1 and a GATE 2 never existed. **Do not reintroduce numbered steps**: the
 cross-references between them were a defect generator.
 
-**Two rules the rewrite exists to protect.** *Coverage is constant*: every
-applicable rule, screen, surface and attack class runs on every ticket at constant
-reasoning effort, and no ticket property — size, label, urgency — reduces it.
-`security-sensitive` *adds* an independent signature and changes no coverage; a
-reduced attack set selected by a ticket's label is exactly how an unlabelled auth
-defect ships. *Loops terminate*: one global `mutation_round` counter, persisted in
-the plan artifact, covers every post-build fix loop — gate fixes, attack fixes,
-review fixes and signature invalidation alike. It increments once per batched
-mutation at a write barrier only, the third is always validated, a required fourth
-is a STOP, and only a human-approved re-plan resets it. Four separate local caps
-preceded it and the one that mattered was missing, which is how a run reached a
-twelfth signing round.
+**Three rules the rewrite exists to protect.** *Coverage is applicability-driven*:
+every applicable rule, owned screen, trust boundary and attack class is checked at
+constant reasoning effort. `security-sensitive` requires an explicit security
+outcome in the terminal verdict; it changes neither attack coverage nor reviewer
+count.
+
+*Review terminates*: the plan, parity and VAPT narrative prefixes are swept once
+before `F0` and then immutable. Later findings, dispositions and outcomes live in
+the plan's delimited append-only run-state block. The REVIEW-start `timings[]`
+entry is the phase's first action and the point of no return: any REVIEW-phase
+stop after it ends the current run unshipped, whether or not a terminal verdict
+exists. A terminal PASS enters SHIP; external SHIP transport failures pause that
+run and resume only under a representation-independent `reviewed_content_id`,
+never by re-entering REVIEW. Round 1 runs A, B and C once. Barrier 1 permits one
+code-and-test repair batch. Round 2 is one unconditional sighted terminal
+reviewer. There is no in-run exception to any REVIEW stop.
+
+*Parity depth runs once*: pass A performs the complete comparison for each
+reference-backed owned screen — structure, style, behaviour and i18n, in every
+locale and direction the project ships. After barrier 1, the terminal reviewer
+checks only the dependency-closed nodes and properties the fix could affect. If
+that slice cannot be bounded, the terminal verdict is FAIL.
+
+`mutation_round` still bounds PROVE and every pre-terminal candidate-repair batch,
+using the sole derivation in the ship-ticket spine and no stored scalar. Run-state
+entries carry an opaque `run_id`; the count uses only batches for the final
+appended run `START`, so append-only history cannot spend a later run's budget.
+The third mutation is validated; a required additional write ends the current
+run. Human approval appends a new run partition; it does not extend the current
+one.
 
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own
@@ -299,59 +317,44 @@ machinery: the trust-boundary and view-layer
 detectors, the command selection, and any wave partitioning all derive from the
 repository — they must never harden into fixed globs or an assumed runner.
 
-**`ship-ticket`'s cross-model review depends on things this repo does not ship —
-and its two Codex touchpoints do not depend on the same ones.**
-Those touchpoints are the **PLAN-phase critique** (the drafted plan goes to
-Codex read-only *before* the user approves it — it runs on every ticket, and its
-absence is a declared degradation) and **pass B in the REVIEW phase**
-(`codex review` on the local diff, run **concurrently** with the fresh-Claude pass A and
-the rule pass C over that round's frozen manifest — and **again in round 2 over the fix
-delta**, because the changes a reviewer asked for need a second model as much as the
-original code did — with `/coderabbit:code-review` as the declared fallback). The **plan review needs both** the external
-[`codex-delegate`](https://github.com/amElnagdy/delegate-skills) skill *and* the
-`codex` CLI on PATH, because it dispatches through the relay; **pass B needs only
-the `codex` binary.** A missing `codex-delegate` therefore costs the plan critique
-and leaves the diff review intact — never disable both because one is absent. Two rules keep that dependency honest: **check the
-binary, not the skill list** (a CLI companion is available only if `codex --version`
-succeeds — the availability table's skill test cannot see it), and **never reference
-`codex-delegate` by relative path** — it installs to `~/.agents/skills`, not beside
-this repo's skills, so the `../<sibling>/` convention used inside the code-quality
-family does not resolve for it; invoke it **by name** and let it supply its own relay
-path. Codex is always a *contributor*: it critiques the plan and the diff, it never
-approves either, and its absence degrades the review loudly rather than stopping the
-run. It is also an accepted signer for the independent parity signature (a
-separate process with no build context), recorded as `codex <version>, session
-<threadId>` from the relay's `result.json`.
+**`ship-ticket` has two Codex touchpoints with different dependencies.** The
+PLAN critique needs both `codex-delegate` and the `codex` binary. Pass B needs
+only the binary and runs once, in REVIEW round 1 over `F0`, concurrently with
+pass A and pass C. A missing plan relay does not disable pass B, and a missing
+pass-B engine is declared with the documented fallback.
 
-**`ship-ticket` borrows `pr-review`'s blind concurrent A/B/C structure** for its diff
-review — **then reviews the fixes those reviewers caused.** Round 1 runs A, B and C
-concurrently and mutually blind. Round 2 runs the **fix review** — a reviewer shown
-each finding paired with the change it produced, asking whether the finding was real,
-whether the fix addresses it, and whether it broke anything — alongside A and B again
-over the fix delta, still blind. The old design re-reviewed that delta but never told
-anyone *which finding caused which change*, so nobody could judge a fix's fit or catch
-one made for a finding that was never real.
+Check the binary with `codex --version`; do not infer availability from the skill
+list. Invoke `codex-delegate` by name because it is installed outside this
+library's sibling-skill layout. Codex contributes findings and never approves
+the plan or the change. The terminal verdict belongs to one sighted reviewer
+independent of the builder; it is not a second Codex pass or a later signing
+dispatch.
 
-Three things are load-bearing. The passes are **report-only** (a reviewer that fixes
-code invalidates its peers' conclusions). **Blindness binds A, B and C, not every
-pass** — the fix review is deliberately sighted, which is its entire purpose; do not
-"restore" a global blindness rule over it. And barrier 1 must build a **fix packet**
-— preimages captured before mutating, change units, a many-to-many finding↔change map,
-and a balance check that every change between the two manifests is attributed — because
-none of it can be reconstructed from the diff afterwards. Each round gets its own
-manifest: **`F0`, `F1`, `F2` are a chain, not one manifest reused.** Every pass in a
-round is bound to that round's **frozen manifest** — `merge-base…HEAD committed delta + index/worktree status +
-untracked files, with per-path digests, modes, rename origins, deletion tombstones
-and symlink targets` (the committed layer matters: a resumed branch may carry WIP
-commits that `git status` cannot see) — computed
-**once** and handed to all of them, because a bare `git diff` hides staged changes and a
-pass that reviewed a narrower set has gated nothing. The manifest is an integrity check
-over the live tree, **not a commit**: SHIP creates the only commit the workflow
-*creates*, followed by the step-20 tracker transition — pre-existing WIP commits on
-a resumed branch may survive it, but only by an explicit human decision.
-Concurrency itself is a **third kind of companion** — an orchestration capability, not a
-skill or a binary — and its absence degrades the wave to serial execution over the same
-manifest, declared like any other degradation. It never removes a pass.
+**`ship-ticket` borrows `pr-review`'s blind concurrent A/B/C structure only for
+round 1.** A, B and C review `F0` once, mutually blind and report-only. For UI
+tickets, pass A also performs the sole complete parity comparison.
+
+Barrier 1 reconciles those findings, captures preimages and applies at most one
+code-and-test repair batch. Its fix packet carries change units, the many-to-many
+finding attribution, the affected caller/contract closure, a dependency-closed
+parity impact slice and, where `F1` exists, the exact `F0`/`F1` boundary
+comparison. The ticket-owned
+narrative is already frozen; a record finding or attempted narrative repair ends
+the current run.
+
+Round 2 is one sighted reviewer, independent of the builder. It reads the fix
+packet, the frozen record, round 1's complete parity result, the targeted parity
+slice and the runtime attack evidence. Its verdict is the signature. PASS moves
+to SHIP; any finding, uncertainty, coverage failure, record mismatch or non-PASS
+outcome ends the current run unshipped.
+
+`F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
+round-1 pass is bound to `F0`; the terminal verdict is bound to the final
+candidate. There is one candidate write barrier. After the verdict, only its
+predeclared precommit run-state and session-log projection may be appended; code,
+tests and frozen narrative never change. The commit is the repository cutoff:
+commit, push, PR, CI, tracker and completion results are reported externally and
+never cause a second repository write.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

@@ -54,13 +54,14 @@ depends on them is your decision after they all return.
    parallel implementation.
 4. **Resume, don't restart.** `.specs/plans/<TICKET>.md` present → read
    `approval_status` literally and route through the spine's resume table.
-5. **Size it** for the plan's *Size* line — files, subsystems, security-sensitive.
-   This shapes how much plan the ticket warrants and how wide the waves fan out.
-   **It reduces no check.**
+5. **Classify it** for the plan's *Shape* line — frontend, backend or full-stack,
+   and security-sensitive or not. Estimate the touched files and subsystems for
+   the right-sizing decision below; neither classification reduces a check.
 6. **Right-sized?** A spec spanning several independently shippable units — a seam
    plus its consumers, more than one authoritative write path — gets said **now**,
    with a proposed split, and the user decides. Do not silently build a
-   three-ticket epic as one PR. If they say build it as one, note it in *Size*.
+   three-ticket epic as one PR. If they say build it as one, record that decision
+   in *Risks & unknowns*.
 7. **A STOP here cancels concurrent work.** If triage stops the ticket, stop the
    design read too rather than letting it finish into a run that will not happen.
 

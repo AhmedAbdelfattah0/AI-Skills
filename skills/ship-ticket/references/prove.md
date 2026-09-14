@@ -40,11 +40,55 @@ enumerated before the fix that created it was never enumerated.
 
 **Stage 4 recomputes the trust-boundary trigger and the complete inventory from
 the changed tree** — an attack fix is production code and can add or move a route,
-a middleware, a config boundary, a rendering sink or an outbound credential path.
+a `request-handler`, an `auth-lifecycle`, a `security-config`, a `rendering-sink`
+or an `outbound-data` boundary. Use the exact VAPT kind code when recording each
+one. CORS, header, cookie, secret-wiring and ACL/policy surfaces map to
+`security-config`; an egress operation carrying credentials or user data maps to
+`outbound-data`. Never store a descriptive family label in `kind`.
 
-Both loops increment the **mutation budget** once per batch, and both are bounded
-by it. Fan-out width stays proportional to the work; four owned screens is four
-concurrent parity diffs, not one agent walking four screens in sequence.
+**Record every boundary in one canonical shape, and freeze those records with the
+inventory.** REVIEW compares the repaired candidate to this exact data; it never
+normalizes human descriptions or decides that two permission labels mean the
+same thing. This replaces the prior key that embedded a human permission label in
+boundary identity. The record is:
+
+```text
+boundary_id             kind + NUL + identity
+kind                    exact `kind` code from vapt's trust-boundary table
+identity                exact stable surface name used by the repository
+rule_ids[]               applicable VAPT rule IDs, sorted bytewise
+positive_test_ids[]      test name + NUL + body digest, sorted bytewise
+refusal_test_ids[]       test name + NUL + body digest, sorted bytewise
+authorization_test_ids[] authorization-test name + NUL + body digest, sorted bytewise
+implementation_inputs[] path + content digest for the surface implementation
+control_inputs[]         path + content digest for every transitive control owner
+```
+
+Each test ID pairs the committed test name with the SHA-256 digest of the test's
+**body** — its own source text from its declaration through its closing delimiter,
+never the whole file's. The digest is the coverage identity; the name is its
+human locator. REVIEW compares the digest multiset first within each boundary and
+polarity list, then uses names to report unchanged or renamed tests. A body edit
+therefore changes coverage even when the name stays fixed, while a name-only edit
+is recorded as a rename and keeps coverage. A whole-file digest would swing the
+other way and stop the run for an unrelated edit elsewhere in the same file.
+
+Use the route method plus path template, middleware export, sink symbol,
+configuration key, outbound client operation, job/listener name or equivalent
+repository-native identifier. If no stable identity exists, record that failure
+instead of inventing one; REVIEW treats it as a new boundary.
+
+`boundary_id` deliberately excludes authorization prose. Authorization is
+represented by executable test IDs; for a boundary with no authorization
+concern, `authorization_test_ids` is exactly `[]`. A code alias such as `admin`
+versus `role:admin` changes neither field. If its implementation changed, REVIEW
+re-runs the same mapped tests and records their evidence instead of making a
+semantic-equivalence judgment.
+
+Both loops append one `batch` entry carrying the active `run_id` per changed batch
+and are bounded by that run's mutation budget. PROVE prepares screen
+classifications and pinned inputs; the complete screen comparisons happen once,
+inside round-1 pass A.
 
 ## The static proof
 
@@ -60,10 +104,10 @@ ticket did not touch.
 control with no readable owner — say so. That half is **declared degraded**, not
 proven, so the runtime test is checked against a claim you actually made.
 
-**Emit a security-scope digest** over the in-scope surfaces, every transitive
-control owner traced (including unchanged files), those files' contents, and the
-rule-inventory version, using the manifest's canonical serialization. The rule
-pass may reference deterministic output bound to it — never a semantic judgment.
+**Emit a stable security-evidence map** listing each in-scope surface, every
+transitive control owner, the applicable rule-inventory version and the named
+tests. Bind the artifact to the reviewed file contents through the review
+manifest; do not maintain a second scope-binding ceremony.
 
 A fix here is production code: it re-runs the repo's commands for the files it
 touched.
@@ -87,10 +131,10 @@ never to skip it.
 **Every `VAPT-*` class whose surface the diff touches is in force, in every run.**
 Any class not run is declared inapplicable *with evidence*.
 
-**`security-sensitive` adds an independent signature. It changes no coverage.** A
-non-sensitive run is unsigned, never reduced. There is no reduced set selected by
-a ticket's label — the only reduced set in this workflow is the missing-engine
-fallback below, which is a declared degradation with a named cause.
+**`security-sensitive` requires an explicit security outcome in terminal review
+and changes no attack coverage.** There is no label-selected reduced set; only a
+missing-engine fallback may reduce execution, and that reduction is declared by
+name.
 
 ### Local only
 
@@ -98,7 +142,9 @@ Attack a **local, disposable instance**. Never production, never shared staging,
 no matter who owns it. Only a shared environment reachable → ✋ STOP and ask. App
 cannot be run locally at all → ✋ STOP.
 
-### The output is committed tests
+The artifact records stable rule IDs, route names, test names, control symbols
+and outcomes. Do not maintain hand counts or use mutable line numbers as the
+identity of evidence. This replaces later citation and count repairs.
 
 Each abuse case becomes a test in **this repo's own runners**, named for the rule
 it defends (`VAPT-API-01: user B cannot read user A's invoice`) and asserting the
@@ -156,38 +202,28 @@ rules you cannot enumerate by ID without the skill, declare
 an ID.** With the skill installed, families instead of IDs is an under-declaration
 and therefore a FAIL.
 
-### The verdict
+### Runtime outcome and review handoff
 
-**PASS** ⇔ a canonical **class → routes → controls → tests** map in which every
-applicable rule is green for every equivalence class · every route carries its own
-reachability positive control and auth rejection · any route whose equivalence to
-its class is unproven carries its own full tests · zero unfixed `[NN]` findings ·
-a green `test-quality` pass, or its declared `TEST | DEGRADED` row · every excluded
-changed file named in the artifact · plus, when `security-sensitive`, an
-independent signature bound to the gate's final scope digest.
+Use the canonical outcome vocabulary in [ship.md](ship.md). `outcome: PASS` with
+`execution_mode: FULL` means the canonical class → routes → controls → tests map
+is complete; every applicable rule is green for every route; each route has its
+positive control and refusal assertion; there are zero unfixed `[NN]` findings;
+test-quality passed or its degradation is declared; every excluded changed file
+is named; and there is no coverage degradation.
 
-**DEGRADED** ⇔ all of that except that named rules could not be exercised — the
-skill is absent, or principals could not be built. Requires the reduced set
-actually committed and green, and every unexercised rule listed by ID (or the
-`untested_families` form).
+Use `outcome: PASS` with `execution_mode: GROUPED` when the same conditions hold,
+shared test definitions were used, and every route was still executed against
+them. Use `outcome: DEGRADED` with `execution_mode: REDUCED` when the executed
+reduced set is committed and green and every unexercised rule or family is named
+with its cause. Otherwise use `outcome: FAIL`.
 
-**FAIL** ⇔ otherwise — including a rule marked PASS with no test behind it, or a
-degradation that was not declared.
-
-**When `security-sensitive`, the signer is dispatched, not assumed.** Spin up an
-independent reviewer with no build context — through a **resumable** route, checked
-before planning — brief it on the surface inventory, the rule→test map and the
-abuse tests, and have it return an **unsigned** verdict stamped with the scope
-digest it reviewed.
-
-**The signature contract is the spine's *Signatures* section**, shared with parity.
-This check's **scope digest** covers every in-scope surface, every route tested,
-the abuse-test files and the production files they defend; its **payload** is the
-surface inventory · the rule→test map · the per-class result. Signing happens at
-close-out, once the payload is final.
-
-**A run with no dispatched signer is not `security-sensitive`-complete** — losing
-every independent-reviewer route is a ✋ STOP, never an implicit downgrade.
+PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
+Hand the frozen surface map, rule-to-test map, test outcomes and production
+control paths to REVIEW's single terminal reviewer. That reviewer returns
+`attack_review_outcome`, and `security_outcome` when the plan is
+security-sensitive, without running the attacks again. The VAPT artifact remains
+whole-file frozen; those terminal outcomes are appended only to the plan's
+run-state `outcomes[]`.
 
 ### Enforcement is machine, not honour-system
 
@@ -196,16 +232,19 @@ always exists.
 
 A merge-blocking CI check that validates the artifact — same PR-side slot as
 `nn-guard` — is stronger, and **its presence is checked with the other companions,
-up front**. If the repo has it, the run waits for it. **If the repo does not, say
-so in the run record as a declared degradation and do not wait for a check that
-does not exist.** Installing it is a repo-setup task, not something this ticket
-adds after the freeze — post-freeze CI code would be unreviewed content in the
-commit, which is exactly what the allowlist forbids.
+up front**. This GATE invocation is detect-only: if the repo has it, validate its
+trigger and wait for it; if not, record `enforcement_outcome: DEGRADED` with the
+policy/config locations checked and do not invent a check. Installation belongs
+only to explicit setup work whose approved Design Contract names the CI paths and
+whose edit occurs before its own freeze.
 
-Where the check does exist it accepts `PASS_FULL`, `PASS_GROUPED` or `DEGRADED`;
-for `DEGRADED` it verifies each in-scope surface carries its family's reduced set,
-green, and that every unexercised rule is listed by ID. A verdict it cannot parse
-is a FAIL.
+Where the check does exist it accepts `outcome: PASS` with `execution_mode: FULL |
+GROUPED`, or `outcome: DEGRADED` with `execution_mode: REDUCED`. For `DEGRADED`
+it verifies each in-scope surface carries its family's reduced set, green. When
+the VAPT inventory exists, every unexercised rule is listed by ID. When the skill
+itself was unavailable, the record instead carries every untested family plus
+`rule_inventory: unavailable`; consumers must accept that declared fallback and
+must not require invented IDs. A verdict it cannot parse is a FAIL.
 
 ## Tests and docs
 
