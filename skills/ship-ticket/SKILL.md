@@ -625,6 +625,7 @@ so the answer is one message and not a negotiation.
 - `mutation_round` is already 3 and the record sweep or barrier 1 requires a write.
 - The fix packet does not balance.
 - An affected deterministic command is red after barrier 1's repair.
+- A submodule is dirty at `F0` and is not manifested recursively.
 - The independent terminal reviewer is unavailable.
 - The terminal reviewer returns any finding, uncertainty, coverage failure,
   record mismatch or non-PASS outcome.

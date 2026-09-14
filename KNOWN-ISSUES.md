@@ -40,7 +40,33 @@ partition touches every one of them, and getting it wrong reintroduces the
 "two definitions of the same field" failure this branch spent four commits
 removing.
 
-### 2. The fix packet has no stated carrier · minor
+### 2. SHIP can re-enter a run that already concluded · blocker
+
+The spine says any stop after the REVIEW-start entry ends the current run. SHIP
+then permits resuming after a CI, PR or tracker stop, and permits a byte-identical
+retry that reruns CI only. Those two rules cannot both hold.
+
+It is worse than a wording conflict: the resume predicate cannot be satisfied
+after the commit even if you wanted it to be. The manifest includes `HEAD` and the
+committed/staged/unstaged split, and all of those change the moment the reviewed
+working tree becomes a commit — so the tree SHIP would resume against never
+matches the one REVIEW signed.
+
+*Shape of the fix:* pick one contract and state it everywhere. Either SHIP
+failures require a new run, or the point-of-no-return rule is narrowed to REVIEW
+and candidate failures and the resume predicate is changed from manifest equality
+to a reviewed-content identity that survives a representation-only commit.
+
+*Why it is open:* this is the only remaining path back into a concluded run, and
+it is a SHIP contract rather than a REVIEW one. Both branches are defensible and
+the choice changes what "one commit" means. It is the first thing to decide before
+this branch merges.
+
+*Note:* this does **not** reintroduce the review loop. Codex re-verified after the
+latest commits that the REVIEW graph has no path back into repair or re-review.
+The re-entry here is into SHIP, after a verdict, and it repeats no review.
+
+### 3. The fix packet has no stated carrier · minor
 
 Preimages are now required to live outside the worktree, but where the packet
 itself is stored — and how it survives between barrier 1 and the terminal
@@ -138,3 +164,4 @@ depend on someone remembering.
 | formatters ran before the budget was read | the budget is read before anything that writes; everything pre-freeze is one batch. Stated in all three places that give the instruction — the spine's REVIEW summary, `review.md` and `design-parity.md` |
 | "no record mutation after `F0`" forbade the run's own required records | the ban names candidate files and frozen prefixes; append-only slots are the exception |
 | a red deterministic command after barrier 1's repair had no branch, so "a finding you can fix is work" could invite a second repair | a red command there ends the run — the barrier has already spent its one repair |
+| a dirty submodule was frozen as a bare dirty bit, which cannot tell one dirty state from another | rejected at the freeze or manifested recursively by gitlink OID, and the spine's stop list carries the failing branch |
