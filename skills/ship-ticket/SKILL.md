@@ -364,8 +364,10 @@ artifact is a repository write like any other, and invariant 3 has no exception
 for it), write the artifact with `approval_status: pending`, and ✋ **STOP**,
 surfacing it as the approval ask.
 
-The metadata header carries `approval_status`, `design_ref`, `ui_required`,
-`owned_screens`, and `mutation_round: 0`. Every owned screen is classified
+The metadata header carries `approval_status`, `design_ref`, `ui_required` and
+`owned_screens`. **It does not carry `mutation_round`** — that value is derived
+from the run-state block's `batches[]`, and a second copy in a frozen header would
+be a scalar nothing may update. Every owned screen is classified
 **reference-backed** or **unreferenced** *now*, at plan time. An unreferenced
 screen needs search evidence and a **named human approver** — a screen the ticket
 invents has no comparator, and inventing one later is the self-attestation the
@@ -646,7 +648,7 @@ completion is worse than a loud failure.
 | `.specs/plans/<TICKET>.md`, `approval_status: approved`, **and no terminal verdict recorded** | the plan is settled and the run stopped before REVIEW concluded | confirm it still stands, re-enter after the phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
 | a recorded **terminal verdict of anything but PASS** | this run already concluded | ✋ STOP. **This row overrides the one above.** A terminal verdict is the end of that run, not a phase to re-enter — resuming past it is the recursion this phase was rebuilt to remove. Continuation needs a new approved plan and a new run record |
 | `.specs/plans/<TICKET>.md`, `pending` or absent | a previous run stopped *at* the approval ask | take it back through approval. Do not build on it |
-| `mutation_round` > 0 | rounds were already spent | read it, carry it forward. **Never auto-reset** |
+| the run-state block holds `batches[]` | repair batches were already spent | keep the entries. `mutation_round` is their count, so it carries forward by itself — **never truncate `batches[]` to reset it** |
 | a ticket branch | work exists | use it, rebased. WIP commits → ✋ STOP for the preserve-or-squash decision |
 | the parity artifact | round-1 parity evidence exists | reuse it only when its `F0` manifest and immutable prefix still match. Otherwise start a new approved run; never rewrite historical locators to fit the current tree
 | the vapt artifact | attacks ran | re-run its committed tests; only re-attack surfaces the resumed work changed |

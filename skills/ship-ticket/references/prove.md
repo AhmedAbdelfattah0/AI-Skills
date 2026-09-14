@@ -42,6 +42,24 @@ enumerated before the fix that created it was never enumerated.
 the changed tree** — an attack fix is production code and can add or move a route,
 a middleware, a config boundary, a rendering sink or an outbound credential path.
 
+**Record every boundary under a stable KEY, and freeze the key set with the
+inventory.** REVIEW's barrier 1 compares the repaired tree against this set to
+decide whether a repair introduced a surface the attacks never covered, and that
+comparison is only decidable if both sides are keyed the same way:
+
+```
+kind        route | middleware | rendering sink | control path | job | listener
+identity    the stable name the repo itself uses — route method+path template,
+            middleware export, sink symbol, guard or policy name
+authz       the permission, role, clearance or scope the boundary enforces
+```
+
+The `authz` component is part of the key, not an attribute of it: a boundary whose
+predicate changes is a different boundary, because the committed tests assert the
+old predicate and would pass against the new one while proving nothing about it.
+A boundary whose identity the repo does not name stably is recorded as such —
+REVIEW then treats it as new rather than guessing that it moved.
+
 Both loops increment the mutation budget once per changed batch and are bounded
 by it. PROVE prepares screen classifications and pinned inputs; the complete
 screen comparisons happen once, inside round-1 pass A.

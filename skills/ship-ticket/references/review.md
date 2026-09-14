@@ -37,24 +37,39 @@ Apply record repairs as one batch before `F0`. Then hash each reviewed prefix an
 make it immutable.
 
 **What the hashed prefix covers, and what it deliberately does not.** The prefix is
-the *narrative*: every claim, count, citation and conclusion a reader would check.
-It stops above a delimited **run-state block** that is outside the digest by
-construction. That block is the only place later writes land, and it holds exactly:
+the *narrative*: every claim, count, citation and conclusion a reader would check,
+and every conclusion drawn from them. It stops above a delimited **run-state
+block** that is outside the digest by construction, and that block is the only
+place later writes land.
+
+**Every field in it is append-only.** Each is a list, each entry is written once
+and never edited, and a value that "changes" is a new entry — which is what makes
+a later write provably not a rewrite of something already reviewed:
 
 ```
-mutation_round        incremented at the barrier, derived from the batches below
-batches[]             one entry per post-BUILD repair batch: phase, what changed
-reviewer_identity     round-1 pass identities, then the terminal reviewer
-manifest_ids          F0, and the F1 candidate if a repair happened
-outcomes              the terminal verdict and its sub-outcomes
-timings               phase start/end, agent time apart from human and CI waits
-dispositions          one per finding
+batches[]        one per post-BUILD repair batch: phase, changed paths, fix_packet_digest
+reviewers[]      one per dispatch: which pass, identity, run ID
+manifests[]      one per snapshot: label (F0 | F1), manifest ID
+outcomes[]       one per verdict or sub-outcome: name, value
+timings[]        one per phase boundary: phase, event, timestamp
+dispositions[]   one per finding: finding ID, disposition, the rule ID or locator it rests on
 ```
 
-Nothing narrative may enter that block, and nothing in it may be rewritten once
-written — `batches[]` and `dispositions` append, the rest fill exactly once.
+**The prefix/block split is about WHO may change a line, not about how it reads.**
+Entries here carry words — a changed path, a disposition, a rule ID — and that is
+fine: what disqualifies text from this block is not being prose but being something
+a reader would *check*, and therefore something that goes stale. A claim, a count,
+a citation of the tree, a conclusion: those belong in the prefix, before the
+freeze. A record of what this run did belongs here, is written once, and can never
+drift because nothing later rewrites it.
 
-**`mutation_round` is derived, never edited in place.** It is `batches[].length`.
+`dispositions[]` holds the disposition and the locator it rests on. Where a
+disposition needs an argument — a rejection the reader must be able to weigh — the
+argument goes in the fix packet, which is content the terminal reviewer reads and
+rules on, not run state.
+
+**`mutation_round` is derived, never stored.** It is `batches[].length`, and no
+artifact carries it as a field.
 A barrier that writes a batch entry increments it as a consequence; there is no
 separate scalar to update inside the frozen narrative, which is what made the
 counter and the freeze contradict each other.
@@ -140,18 +155,38 @@ In order:
 7. For each UI change, add its dependency-closed parity impact slice:
    changed nodes, selectors, declarations, tokens, states, translation keys and
    affected owned-screen consumers.
-8. **Re-derive the trust boundaries of `F1`, and compare against PROVE's frozen
-   inventory.** A repair can add or move a route, a middleware, a rendering sink
-   or a control path *after* the attacks ran — and a brand-new surface has no
-   abuse test, no inventory entry, and nothing in CI can invent one. Existing
-   tests only catch regressions on surfaces somebody already enumerated.
-   - **No new boundary** → say so in the packet and continue.
-   - **A boundary moved, on an already-enumerated surface** → re-run that
-     surface's committed abuse tests. Green, recorded, continue.
-   - **A boundary is genuinely new** → this repair needs coverage that does not
-     exist. **End the run unshipped** and name the surface. Writing the abuse
-     test here would be a second repair batch, which is the loop this phase was
-     rebuilt to remove.
+8. **Re-derive the trust boundaries of `F1` and compare them to PROVE's frozen
+   inventory by KEY.** A repair can add or move a route, a middleware, a rendering
+   sink or a control path *after* the attacks ran — and a brand-new surface has no
+   abuse test, no inventory entry, and nothing in CI can invent one. Existing tests
+   only catch regressions on surfaces somebody already enumerated.
+
+   **The key is what makes this decidable rather than a judgment call.** PROVE
+   records each boundary under a key of `kind` + `identity` + `authz predicate`:
+
+   ```
+   kind        route | middleware | rendering sink | control path | job | listener
+   identity    the stable name the repo itself uses — route method+path template,
+               middleware export, sink symbol, guard or policy name
+   authz       the permission, role, clearance or scope the boundary enforces
+   ```
+
+   Re-derive the same keys over `F1` and take the set difference:
+
+   - **No key added, no `authz` changed** → record `boundaries: unchanged` in the
+     packet and continue.
+   - **A key is present in both, and only its implementation moved** → re-run that
+     key's committed abuse tests. Green and recorded, continue.
+   - **A key present in both whose `authz` component CHANGED** → treat as new. The
+     committed tests assert the old predicate and will pass against the new one
+     while proving nothing about it.
+   - **A key exists in `F1` and not in the inventory** → genuinely new. **End the
+     run unshipped** and name the key. Writing the abuse test here would be a
+     second repair batch, which is the loop this phase was rebuilt to remove.
+
+   A boundary whose key cannot be derived is treated as new — an identity the repo
+   does not name stably is exactly the case where "it is the same one, moved"
+   cannot be established.
 9. Run only the affected deterministic commands.
 10. Snapshot the candidate as `F1` and balance the packet.
 
@@ -164,16 +199,10 @@ If no code or test changed, use `F0` as the candidate and record
 
 ## Round 2 — the terminal reviewer
 
-Run one sighted reviewer independent of the builder when any of these applies:
-
-- round 1 produced a fix or rejection;
-- `ui_required` is true;
-- attacks ran;
-- the ticket is security-sensitive.
-
-**Every run gets exactly one terminal verdict — there is no clean-`F0` shortcut.**
-A run that skipped it would carry no `reviewer_identity` and no signature, which is
-the one thing this phase exists to produce. Where `F1 == F0` the dispatch is cheap:
+**Run one sighted reviewer independent of the builder. Always — there is no
+condition on it.** A run that skipped this would carry no `reviewer_identity` and
+no signature, which is the one thing this phase exists to produce. Where `F1 == F0`
+the dispatch is cheap:
 the reviewer is handed the unchanged manifest and confirms the round-1 result, and
 that confirmation *is* the verdict.
 

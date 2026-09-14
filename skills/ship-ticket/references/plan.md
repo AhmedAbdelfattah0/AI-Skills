@@ -19,7 +19,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      approval_status: pending|approved   a human approval flips this, and only this
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
-     mutation_round: 0                   the global budget; never auto-reset
+     (no mutation_round — it is derived from the run-state block's batches[])
      owned_screens:                      one entry per screen:
        - impl: <path>
          reference: <path or null>
