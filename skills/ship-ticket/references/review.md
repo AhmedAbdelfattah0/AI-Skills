@@ -185,11 +185,21 @@ In order:
 2. If any finding concerns the frozen record, end the current run before writing.
 3. Derive `mutation_round` by the spine's sole definition. If it is already 3 and
    a write is required, end the run.
-4. Capture preimages for every file the repair will change.
+4. Capture preimages — the **contents**, not the digests — of every file the
+   repair will change, before mutating anything, and store them outside the
+   worktree. The manifest holds digests: once an uncommitted file is overwritten
+   its previous state is unrecoverable, and the question the packet exists to
+   answer — what did this look like before — becomes unanswerable.
 5. Apply at most one code-and-test repair batch inside the approved Design
    Contract.
-6. Build a fix packet containing each finding, disposition, change unit,
-   preimage, postimage and many-to-many attribution.
+6. Build the fix packet while changing the files; it cannot be reconstructed
+   afterwards from the diff. It holds each finding, its disposition, and its
+   **change units — not hunks**. A hunk cannot represent an add, a delete, a
+   rename, a mode change, a symlink retarget, a submodule move or an untracked
+   file, every one of which the `F0` manifest already records. Each change unit
+   carries its path, its kind, its preimage (or a deletion tombstone) and its
+   postimage. Attribution is many-to-many: each change unit lists the finding IDs
+   it serves, and each finding lists its change units.
 7. For each UI change, add its dependency-closed parity impact slice:
    changed nodes, selectors, declarations, tokens, states, translation keys and
    affected owned-screen consumers.
@@ -210,26 +220,58 @@ In order:
      it adds no attack coverage requirement. Any paired replacement also appears
      in the added-ID branch and therefore stops.
    - **ID present in both, coverage vector changed** → new attack coverage is
-     required. End the run and name the exact added or removed rule/test IDs.
+     required. End the run and name the exact rule and test IDs added, removed,
+     or changed in body.
    - **ID present in both, coverage vector identical, but an implementation or
      control-input digest changed** → re-run that boundary's already-mapped abuse
      tests. Green with recorded evidence continues; red or missing ends the run.
    - **ID, coverage vector and digests identical** → record it unchanged.
 
    The coverage vector is the bytewise-sorted rule IDs and positive, refusal and
-   authorization test IDs. Human predicate labels are not compared: `admin` and
+   authorization test IDs, each test ID being PROVE's name-plus-body-digest pair.
+   A test whose body changed under an unchanged name therefore lands in the
+   coverage-changed branch and ends the run, exactly as deleting it would —
+   because it is the same act. The frozen attack evidence was produced against
+   the old body and no longer corresponds to the committed test. Re-running would
+   prove nothing here: a weakened test passes *because* it was weakened. This is
+   deliberate rather than a false stop, and it is the one branch that catches a
+   repair which fixes the proof instead of the code.
+
+   Human predicate labels are not compared: `admin` and
    `role:admin` cannot create a false stop, and no semantic-equivalence judgment
    is needed. A non-authorization boundary has an empty authorization-test list by
    PROVE's schema.
 10. Run only the affected deterministic commands, append the boundary comparison
     and rerun evidence to the fix packet, then balance it.
 
-Every change between `F0` and `F1` must belong to an attributed change unit.
+**To balance is to satisfy all four of these, arithmetically and without
+judgment.** The spine makes an unbalanced packet a stop; this is what it means:
+
+```text
+every change unit between F0 and F1  ==  the union of all attributed change units
+every referenced finding id resolves · every referenced change unit resolves
+every preimage matches F0 · every postimage matches F1
+```
+
+"An unattributed fix is itself a finding" detects nothing if the executor simply
+omits the attribution. The balance check is what makes it real. The cases that
+break naive attribution, and their answers:
+
+| Case | Answer |
+|---|---|
+| a changed file no finding named | allowed **if** it is inside the approved Design Contract and carries a stated causal reason; outside the contract it is a material divergence that ends the run, not an attribution problem |
+| a rejected finding carrying change units | the rejection was not a rejection |
+| formatter or generator output | attributed as a mechanical consequence of the change that triggered it, or reverted before the packet closes |
+| a change serving no finding at all | **the balance check fails** — that is the hole this packet exists to close |
+
 Record text, comments, docblocks and artifact prefixes remain unchanged. An
 unbalanced packet or an unbounded parity impact ends the run.
 
-If no code or test changed, use `F0` as the candidate and record
-`fix_packet_digest: none`.
+`fix_packet_digest` is the `ship-ticket-manifest-v1` SHA-256 digest over the
+packet's findings, dispositions, change units — each with its path, kind,
+preimage and postimage — and its attribution map, under the manifest's
+serialization. If no code or test changed there is no packet: use `F0` as the
+candidate and record `fix_packet_digest: none`.
 
 ## Round 2 — the terminal reviewer
 

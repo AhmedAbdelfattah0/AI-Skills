@@ -57,12 +57,20 @@ boundary_id             kind + NUL + identity
 kind                    exact `kind` code from vapt's trust-boundary table
 identity                exact stable surface name used by the repository
 rule_ids[]               applicable VAPT rule IDs, sorted bytewise
-positive_test_ids[]      stable committed test names, sorted bytewise
-refusal_test_ids[]       stable committed test names, sorted bytewise
-authorization_test_ids[] stable committed authorization-test names, sorted bytewise
+positive_test_ids[]      test name + NUL + body digest, sorted bytewise
+refusal_test_ids[]       test name + NUL + body digest, sorted bytewise
+authorization_test_ids[] authorization-test name + NUL + body digest, sorted bytewise
 implementation_inputs[] path + content digest for the surface implementation
 control_inputs[]         path + content digest for every transitive control owner
 ```
+
+Each test ID pairs the stable committed test name with the SHA-256 digest of the
+test's **body** — its own source text from its declaration through its closing
+delimiter, never the whole file's. Both halves are load-bearing, and REVIEW
+compares the pair. The name alone cannot see a test that keeps its name and loses
+its assertions, which is precisely how a repair can appear to fix a finding while
+deleting the proof of it. A whole-file digest would swing the other way and stop
+the run for an unrelated edit elsewhere in the same file.
 
 Use the route method plus path template, middleware export, sink symbol,
 configuration key, outbound client operation, job/listener name or equivalent
