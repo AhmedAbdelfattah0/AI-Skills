@@ -25,7 +25,8 @@ Create `.specs/design-parity/<TICKET>.md` with:
 - its pinned reference path, or its approved unreferenced classification;
 - accepted deviations already approved by a named human.
 
-Run formatters and generators before the record sweep. The artifact's reviewed
+Formatters and generators run before the record sweep and inside the same
+pre-`F0` batch, after the mutation budget has been read. The artifact's reviewed
 prefix is the whole file and is frozen with the rest of the record before `F0`.
 Pass A's result and the terminal verdict are appended to the plan's run-state
 block; they reference this artifact and its digest instead of rewriting it. This

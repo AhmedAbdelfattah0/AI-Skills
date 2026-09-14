@@ -110,11 +110,11 @@ closed first.
 | Was | Now |
 |---|---|
 | "the fix packet does not balance" was a stop condition with no definition of balancing | the four-line arithmetic is back, with the four attribution cases it does not settle |
-| the packet had been reduced to "change unit, preimage, postimage" | preimages are contents stored outside the worktree; change units carry adds, deletes, renames, modes, symlinks, submodules and untracked files |
+| the packet had been reduced to "change unit, preimage, postimage" | preimages are contents stored outside the worktree; change units carry adds, deletes, renames, modes, symlinks, submodules and untracked files — and the `F0` manifest now records a gitlink OID or rejects a dirty submodule, so it can actually supply the preimage a submodule change unit claims |
 | `fix_packet_digest` referenced in four places, defined in none | defined |
 | a test gutted in place read as "unchanged" | test IDs carry a body digest; weakening lands in the coverage-changed branch |
 | "round 1 must run concurrently" with a serial branch four lines below | serial is a stop, not a mode — it buys nothing with three times the wall clock |
 | a UI ticket with no fresh-reviewer route degraded instead of stopping, leaving nothing to produce the parity comparison | the stop is back, as it was at `f40171f` |
-| formatters ran before the budget was read | the budget is read before anything that writes; everything pre-freeze is one batch |
+| formatters ran before the budget was read | the budget is read before anything that writes; everything pre-freeze is one batch. Stated in all three places that give the instruction — the spine's REVIEW summary, `review.md` and `design-parity.md` |
 | "no record mutation after `F0`" forbade the run's own required records | the ban names candidate files and frozen prefixes; append-only slots are the exception |
 | a red deterministic command after barrier 1's repair had no branch, so "a finding you can fix is work" could invite a second repair | a red command there ends the run — the barrier has already spent its one repair |

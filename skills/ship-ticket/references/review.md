@@ -116,7 +116,11 @@ The manifest records:
 - committed, staged, unstaged and untracked state;
 - each ordinary candidate path's status, mode, content digest, rename origin and
   deletion tombstone;
-- symlink targets and dirty submodule state;
+- symlink targets, hashed as link-target bytes and never dereferenced;
+- submodules either **rejected dirty at the freeze** or manifested **recursively**
+  by gitlink OID. A bare dirty bit cannot tell one dirty submodule state from
+  another, so it is not a freeze — and a fix packet cannot carry a submodule
+  change unit's preimage and postimage without it;
 - reviewed paths and reasoned exclusions;
 - `design_ref`, owned screens and attack surfaces;
 - each artifact's immutable-prefix digest;

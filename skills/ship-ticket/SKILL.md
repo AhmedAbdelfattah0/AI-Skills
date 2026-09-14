@@ -483,9 +483,10 @@ reviewer returned a verdict. This replaces the old verdict-only resume condition
 
 First sweep the ticket-owned record once: the plan, parity and VAPT artifact
 prefixes, changed comments and docblocks, ticket-produced docs, hand-maintained
-counts and citations. Run formatters and generators first. If the sweep requires a
-repair, apply the mutation budget before writing and record the repair as one
-batch. Then freeze the reviewed prefixes and compute `F0`. After `F0`, a record
+counts and citations. Apply the mutation budget **before** running anything that
+writes, formatters and generators included — they are writes, and a run already at
+three must not spend a fourth while tidying up. Everything written before the
+freeze is one batch. Then freeze the reviewed prefixes and compute `F0`. After `F0`, a record
 mismatch ends the current run; it is never repaired inside REVIEW.
 
 **Round 1 — find.** Dispatch A, B and C together, mutually blind and report-only,
