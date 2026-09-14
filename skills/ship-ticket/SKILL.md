@@ -105,8 +105,9 @@ checking less.
 
 **In REVIEW round 1 this is a requirement, not an optimisation.** Passes A, B and C
 start together, B first because it is usually the longest, so the round costs the
-longest pass rather than their sum. Serial round 1 is permitted only as a declared
-missing-capability degradation, and cannot claim the ~20-minute REVIEW target.
+longest pass rather than their sum. There is no serial round 1: an orchestrator
+that cannot dispatch the three concurrently ends the run rather than paying their
+summed wall clock for identical coverage.
 
 Load the phase's reference when you enter it, not before:
 
@@ -255,12 +256,16 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
 | a fresh-reviewer route | pass A | declare pass A unavailable rather than presenting a builder self-review as independent; pass B and pass C still run |
 | a one-shot independent reviewer route | every run's terminal verdict | a fresh reviewer subagent or read-only delegated review. No fallback to the builder. Check immediately after appending the REVIEW-start timing entry; absence ends the run there |
-| round-1 concurrency | REVIEW wall clock, never coverage | run A, B and C serially **only when no concurrent route exists**. Before dispatch, say: "⚠️ REVIEW timing degraded: this agent cannot dispatch A, B and C concurrently. Round 1 will run them serially, so its wall clock is their sum rather than the longest pass; the ~20-minute REVIEW target is not expected to hold. Coverage is unchanged." Persist the same sentence in the run record |
+| round-1 concurrency | **nothing — this one is a STOP** | serial A, B and C costs their summed wall clock for identical coverage, which is the six-hour REVIEW this phase exists to end. There is no serial mode: end the run unshipped, recording "⛔ REVIEW stopped: this agent cannot dispatch A, B and C concurrently." Re-run REVIEW on an orchestrator that can fan out |
 | the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |
 
-**One loss is a STOP:** the terminal reviewer must be independent of the builder
-on every run. A one-shot route is sufficient. Pass A's absence is a declared
-round-1 degradation; terminal self-review is not.
+**Two losses are STOPs, and they are the two the phase is built on.** The terminal
+reviewer must be independent of the builder on every run — a one-shot route is
+sufficient, and pass A's absence is a declared round-1 degradation while terminal
+self-review is not. Round 1 must be dispatched concurrently; every other row above
+trades coverage or evidence for availability, but serial execution trades only
+time, and buying nothing with three times the wall clock is the failure this
+rebuild was for.
 
 **`/code-review` is CodeRabbit's**, not Claude's — the repo reserves that name.
 Pass A is a **fresh reviewer subagent with no build context**; `/coderabbit:code-review`
@@ -685,9 +690,10 @@ orchestration around them: the contract, the `F0`/optional-`F1` manifests, the
 discovery wave, the repair barrier, the terminal verdict and the mutation budget.
 
 It does **not** choose or impose a stack — the stack is the repo's. It does not
-provide the concurrency; a serial orchestrator runs identical passes over an
-identical manifest and says so. Concurrency changes the wall clock, never a
-verdict. It does not merge the PR or run `/compact` — both are the user's.
+provide the concurrency either: it requires it, and REVIEW stops on an
+orchestrator that cannot fan out round 1. Concurrency changes the wall clock,
+never a verdict — which is exactly why paying three times over for the same
+verdict is not a trade this skill offers. It does not merge the PR or run `/compact` — both are the user's.
 
 **Always follow the repository's own instruction file** — it outranks this file
 on any conflict. **Read both `AGENTS.md` and `CLAUDE.md` if both exist**, and do

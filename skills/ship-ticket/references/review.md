@@ -145,18 +145,21 @@ verifiable coverage, the run stops.
 — then dispatch A and C immediately over the identical `F0`. The wall clock is the
 longest pass, not their sum. Workflow and plain fan-out are both conforming routes.
 
-**Serial execution is a missing-capability degradation, not a preference.** Running
-A, B and C one after another costs roughly three times the wall clock for exactly
-the same coverage and the same findings, which is why it may not be chosen freely.
-Where no concurrent route exists, announce before dispatch:
+**Concurrent dispatch is a required capability, and its absence is a stop — not a
+slower mode.** Running A, B and C one after another costs roughly three times the
+wall clock for exactly the same coverage and the same findings. That is the
+six-hour REVIEW this phase was rebuilt to end, so serial execution is not offered
+as a degraded path: an orchestrator that cannot fan out ends the run unshipped
+and records
 
-> ⚠️ REVIEW timing degraded: this agent cannot dispatch A, B and C concurrently.
-> Round 1 will run them serially, so its wall clock is their sum rather than the
-> longest pass; the ~20-minute REVIEW target is not expected to hold. Coverage is
-> unchanged.
+> ⛔ REVIEW stopped: this agent cannot dispatch A, B and C concurrently. Serial
+> round 1 costs their summed wall clock rather than the longest pass, which
+> abandons the ~20-minute target for identical coverage. Re-run REVIEW on an
+> orchestrator that can fan out.
 
-Copy that sentence into the run record. Round 2 has one reviewer and therefore has
-no orchestration mode.
+as a `degradations[]` entry. Nothing about coverage is at stake here and no
+judgment is involved; the only thing serial execution buys is time spent. Round 2
+has one reviewer and therefore has no orchestration mode.
 
 ## Round 1 — find once
 
