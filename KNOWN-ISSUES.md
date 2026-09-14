@@ -105,6 +105,26 @@ closed first.
 
 ---
 
+## The failure that produced most of this
+
+Seven of the defects fixed on this branch are the same mistake: a rule was
+rewritten in one file and left standing in another. Not a subtle one — "round 1
+must run concurrently" sat four lines above a serial degradation branch, and "run
+formatters and generators first" survived in three files after being corrected in
+one. Reading the edit shows what was added; it cannot show what failed to be
+removed.
+
+Care did not fix this, and had six chances. So the six retired phrases are now in
+`RETIRED_VOCABULARY` in `scripts/cli.mjs`, and the validator fails the build if any
+of them reappears anywhere under `skills/` or in `AGENTS.md`. The first run caught
+a seventh survivor that three greps and a full Codex review had all missed.
+
+If you change a load-bearing rule in this repo, add its old phrasing to that table
+in the same commit. That is the cheapest check here and the only one that does not
+depend on someone remembering.
+
+---
+
 ## Closed on this branch
 
 | Was | Now |

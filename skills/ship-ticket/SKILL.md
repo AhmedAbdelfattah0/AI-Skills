@@ -105,9 +105,10 @@ checking less.
 
 **In REVIEW round 1 this is a requirement, not an optimisation.** Passes A, B and C
 start together, B first because it is usually the longest, so the round costs the
-longest pass rather than their sum. There is no serial round 1: an orchestrator
-that cannot dispatch the three concurrently ends the run rather than paying their
-summed wall clock for identical coverage.
+longest pass rather than their sum. Running them one at a time is not a slower
+mode of this phase, it is a stop: an orchestrator that cannot dispatch the three
+concurrently ends the run rather than paying their summed wall clock for
+identical coverage.
 
 Load the phase's reference when you enter it, not before:
 
