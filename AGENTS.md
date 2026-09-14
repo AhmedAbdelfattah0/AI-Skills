@@ -299,9 +299,9 @@ that slice cannot be bounded, the terminal verdict is FAIL.
 using the sole derivation in the ship-ticket spine and no stored scalar. Run-state
 entries carry an opaque `run_id`; the count uses only batches for the final
 appended run `START`, so append-only history cannot spend a later run's budget.
-The third mutation is validated; a required additional write ends the current
-run. Human approval appends a new run partition; it does not extend the current
-one.
+The third mutation is validated; a required additional candidate mutation ends
+the current run. Human approval appends a new run partition; it does not extend
+the current one.
 
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own
@@ -336,22 +336,31 @@ dispatch.
 round 1.** A, B and C review `F0` once, mutually blind and report-only. For UI
 tickets, pass A also performs the sole complete parity comparison.
 
-Barrier 1 reconciles those findings and, before any candidate mutation, seals one
-finite repair-induced prose impact slice beside the dependency-closed parity
-slice. Its allowed paths are the complete eligible source/test and ticket-doc
-projection of the approved Design Contract at `F0`; its parser/document inventory
-must account for every prose range in them and is mechanically partitioned into
-slice entries and reasoned exclusions. Each entry carries an exact path, unique
+In this contract, a **candidate mutation** means a change to a candidate file or
+to a plan, parity or VAPT prefix frozen at `F0`. Required append-only run-state
+entries remain permitted through their stated cutoff and are not candidate
+mutations. Barrier 1 reconciles the findings and, before any candidate mutation,
+seals one finite repair-induced prose impact slice beside the
+dependency-closed parity slice. Its allowed paths are the complete eligible
+source/test and ticket-doc projection of the approved Design Contract at `F0`.
+The parser/document inventory must account for every prose range in them and be
+mechanically partitioned into slice entries and reasoned exclusions. Each entry
+carries an exact path, unique
 stable anchor, `F0` bytes and digest, a claim verified true at `F0`, and one causal
 planned code/test change-unit ID. An unbounded, incomplete or contract-crossing
 inventory ends the run, and its digest may never widen after sealing. A
-pre-existing record finding still ends the run before writing. The plan prefix
-and the parity and VAPT artifacts never enter the slice; neither do findings,
-dispositions or run state.
+pre-existing record finding is appended with its disposition, failed outcome and
+`REVIEW_CONCLUDED` event, then ends the run before any candidate mutation. The
+plan prefix and the parity and VAPT artifacts never enter the slice; neither do
+findings, dispositions or run state.
 
 The barrier then captures preimages and applies one sealed candidate batch. Only
 a slice claim the code/test repair actually made false may be updated or deleted,
 with the reciprocal causal edge and exact `F0`/`F1` images in the balanced packet.
+Before terminal review or private-carrier cleanup, the barrier batch durably
+copies every sealed entry's path, anchor, claim, reconstructable base64 `F0`
+bytes, digest, truth evidence and causal code/test unit into append-only run
+state, and verifies that projection against the packet.
 Its fix packet also carries the many-to-many finding attribution, affected
 caller/contract closure, parity impact slice and, where `F1` exists, the exact
 `F0`/`F1` boundary comparison. There is no second record sweep, repair or candidate
@@ -361,14 +370,14 @@ Round 2 is one sighted reviewer, independent of the builder. It reads the fix
 packet, the frozen record, round 1's complete parity result, the targeted parity
 slice, the sealed prose inventory and impact results, and the runtime attack
 evidence. It examines the prose slice once; a residual or newly false claim,
-invalid exclusion, missing causal edge or edit outside the slice is terminal FAIL
-with no repair. Its verdict is the signature. PASS moves to SHIP; any finding,
-uncertainty, coverage failure, record mismatch or non-PASS outcome ends the
-current run unshipped.
+invalid exclusion, missing causal edge, durable-projection mismatch or edit
+outside the slice is terminal FAIL with no repair. Its verdict is the signature.
+PASS moves to SHIP; any finding, uncertainty, coverage failure, record mismatch
+or non-PASS outcome ends the current run unshipped.
 
 `F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
 round-1 pass is bound to `F0`; the terminal verdict is bound to the final
-candidate. There is one candidate write barrier. After the verdict, only its
+candidate. There is one candidate-mutation barrier. After the verdict, only its
 predeclared precommit run-state and session-log projection may be appended; code,
 tests, candidate prose and frozen evidence never change. The commit is the
 repository cutoff: commit, push, PR, CI, tracker and completion results are

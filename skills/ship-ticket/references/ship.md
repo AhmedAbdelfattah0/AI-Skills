@@ -67,8 +67,11 @@ block, record:
 - round-1 reviewer identities and verified paths;
 - finding IDs, dispositions and the fix-packet digest when barrier 1 repaired the
   candidate;
-- the sealed record-impact basis, prose inventory, slice digest, exclusions,
-  causal edges and `F0`/`F1` result rows when barrier 1 repaired the candidate;
+- when barrier 1 repaired the candidate, the sealed record-impact basis, prose
+  inventory, exclusions, causal edges, slice digest and `F0`/`F1` result rows,
+  plus the barrier batch's complete `record_impact_evidence[]`: each entry's path,
+  kind, stable anchor, claim, reconstructable base64 `f0_bytes`, `f0_digest`,
+  `f0_truth_evidence` and causal code/test unit, with its ordered evidence digest;
 - terminal reviewer identity and every terminal sub-outcome;
 - per reference-backed screen: round-1 grade, stable divergences, barrier-1
   impact slice and terminal parity outcome;
