@@ -51,10 +51,10 @@ every gateway configurable.
 
 ## Design source of truth
 
-- **Reference screen:** `templates/Admin/pages-sc1.jsx → GatewaysPage` — GATE 4 applies; pin the SHA before building.
+- **Reference screen:** `templates/Admin/pages-sc1.jsx → GatewaysPage` — design parity applies; pin the SHA before building.
 - **Token file:** `templates/Admin/tokens.css`
 - **Conventions doc:** follow `CLAUDE.md` (bilingual/RTL, numeric LTR-isolation).
-- **[TODO-VERIFY: confirm GatewaysPage is the committed reference and not an uncommitted working-tree file]** — ship-ticket Step 0.5 will refuse to build against an unpinned reference.
+- **[TODO-VERIFY: confirm GatewaysPage is the committed reference and not an uncommitted working-tree file]** — ship-ticket's UNDERSTAND phase will refuse to build against an unpinned reference.
 
 ---
 
@@ -124,7 +124,7 @@ create table tenant_payment_credentials (
 - [ ] Runtime behaviour unchanged — still COD-only, no live charge
 - [ ] EN/AR + RTL correct
 - [ ] `npx nx run-many -t build lint test` green *(this example's repo is nx — use **your** repo's real command)*
-- [ ] GATE 4 parity passed against pinned SHA for GatewaysPage
+- [ ] Design parity passed against the pinned SHA for GatewaysPage
 
 ---
 

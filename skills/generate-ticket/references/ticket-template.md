@@ -43,7 +43,7 @@ mechanics — this is what lets them make good calls under ambiguity.>`
 
 ## Design source of truth  *(UI tickets only)*
 
-- **Reference screen(s):** `<file path(s) to build against>` — GATE 4 applies; pin the SHA before building.
+- **Reference screen(s):** `<file path(s) to build against>` — design parity applies; pin the SHA before building.
 - **Token / theme file:** `<path>`
 - **Conventions doc:** `<path or "none — follow CLAUDE.md">`
 - `<If any unknown: **[TODO-VERIFY: locate design reference for X]** and add a Recon line.>`
@@ -135,7 +135,7 @@ mechanics — this is what lets them make good calls under ambiguity.>`
 - [ ] `<the project's REAL build/lint/test command>` green — read it from
       `package.json`, `CLAUDE.md`, the Makefile, or CI; do not copy a command
       from this template or the example
-- [ ] `<UI only: GATE 4 parity passed against pinned SHA, per screen/template>`
+- [ ] `<UI only: design parity passed against the pinned SHA, per screen/template>`
 
 **Bug tickets add, and lead with:**
 

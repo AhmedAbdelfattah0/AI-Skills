@@ -8,7 +8,7 @@ description: |
   conventions. Angular, React, Vue, Express/Node, Django, Laravel, Go, Rails,
   Cloudflare Workers, Postgres/Supabase — all supported.
 
-    Six phases: UNDERSTAND the ticket, PLAN it with human approval, BUILD it,
+  Six phases: UNDERSTAND the ticket, PLAN it with human approval, BUILD it,
   PROVE it works and is not exploitable, REVIEW it with one discovery wave, one
   repair barrier and one terminal verdict, then SHIP it. UI work pins its design
   source and receives one complete parity comparison in round 1; the terminal
@@ -56,9 +56,9 @@ its own glossary, it is not a name — say what happened instead.
 
 | Instead of | Say |
 |---|---|
-| GATE 3 / the rule pass | **Checking the code against the project's rules** |
-| GATE 4 / parity | **Checking the screen matches the design** |
-| GATE 5 / VAPT | **Trying to break the new code on purpose** |
+| the rule pass | **Checking the code against the project's rules** |
+| parity | **Checking the screen matches the design** |
+| VAPT | **Trying to break the new code on purpose** |
 | pass A | **A second reviewer who didn't write the code** |
 | pass B | **A different AI reviewing it independently** |
 | pass C | **Going through the rule checklist one by one** |
@@ -72,7 +72,7 @@ its own glossary, it is not a name — say what happened instead.
 ```
 ✅  Stopped: I can't run the app locally, so I can't test whether the new endpoint
     is actually protected. I need a way to run it.
-❌  STOP: GATE 5 has no local instance.
+❌  STOP: attack testing has no local instance.
 ```
 
 Rule IDs stay in findings, skips and artifacts — the ID *is* the citation — but
@@ -96,7 +96,7 @@ it is not a question.
 | **PLAN** | draft, get an independent critique, get **human approval** | `.specs/plans/<TICKET>.md` only | an approved plan + the Design Contract |
 | **BUILD** | branch, then implement in the plan's sequence inside the contract | contracted files | the feature, rules applied as it was written |
 | **PROVE** | run the repo's commands; prove the security controls exist, then that they engage | production + test code | green commands, committed abuse tests |
-| **REVIEW** | sweep and freeze the record; run A/B/C once; repair once; obtain one terminal verdict | one record-sweep batch before `F0`, then one code-and-test repair batch | PASS, or the current run ends unshipped | fixes at barriers only | a signed, reconciled change |
+| **REVIEW** | sweep and freeze the record; run A/B/C once; repair once; obtain one terminal verdict | predeclared run-state entries; one record-sweep batch before `F0`; one code-and-test repair batch | terminal PASS, or the current run ends unshipped |
 | **SHIP** | one commit, one push, one PR, one CI wait, ticket to Done | the single gated commit | a linked PR and a closed ticket |
 
 **Phases are ordered. Independent work inside a phase runs concurrently** — that is
@@ -195,7 +195,7 @@ repro: the failing test that proves the secure behaviour, then the implementatio
 ## The mutation budget
 
 PROVE may need repair cycles; REVIEW may not. `mutation_round` counts every
-post-BUILD repository write batch before the terminal verdict:
+post-BUILD candidate-changing repair batch before the terminal verdict:
 
 - a PROVE repair batch;
 - the one pre-`F0` record-sweep repair batch, if it changes anything;
@@ -208,24 +208,22 @@ scalar to read-then-edit inside the frozen prefix, which is what previously made
 the counter and the record freeze contradict each other: every real repair would
 have had to either break the count or trip the mismatch that ends the run.
 
-Appending a batch entry is a write to the run-state block, never to the narrative,
-so it is not a record mismatch. A read-only validation appends nothing and
-therefore spends nothing.
+Run-state events and result-slot writes are not candidate repairs and do not enter
+`batches[]`. A read-only validation appends no batch and therefore spends nothing.
 
 Always validate mutation 3. If validation requires another write, end the current
 run before making it. Owner approval cannot extend the counter inside that run;
 continuation requires a new approved plan and a new run record.
 
-Round 2 has no write path and therefore cannot negotiate with this budget. Any
-terminal finding is the outcome, not another mutation request.
-refute a claim about a specific case — instantiate the case.
+Round 2 has no candidate write path and therefore cannot negotiate with this
+budget. Any terminal finding is the outcome, not another mutation request.
 
 ## Verification has a stopping condition
 
 The run ships only when:
 
 > the terminal verdict is PASS · the enumerated CI gate is green · the frozen
-> record prefix is unchanged.
+> record prefixes are unchanged.
 
 A terminal FAIL is not revalidated inside the same run. Preserve the branch,
 report the evidence and end unshipped. If a required mechanical check never ran,
@@ -256,13 +254,13 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `codex-delegate` **+** `codex` CLI | the plan critique | present the plan for approval saying "no cross-model plan review — skill or CLI unavailable". The user's approval was always the gate |
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
 | a fresh-reviewer route | pass A | declare pass A unavailable rather than presenting a builder self-review as independent; pass B and pass C still run |
-| a one-shot independent reviewer route | the terminal verdict when one is required | a fresh reviewer subagent or read-only delegated review. No fallback to the builder. Check when REVIEW starts; absence ends the run there |
+| a one-shot independent reviewer route | every run's terminal verdict | a fresh reviewer subagent or read-only delegated review. No fallback to the builder. Check immediately after appending the REVIEW-start timing entry; absence ends the run there |
 | round-1 concurrency | REVIEW wall clock, never coverage | run A, B and C serially **only when no concurrent route exists**. Before dispatch, say: "⚠️ REVIEW timing degraded: this agent cannot dispatch A, B and C concurrently. Round 1 will run them serially, so its wall clock is their sum rather than the longest pass; the ~20-minute REVIEW target is not expected to hold. Coverage is unchanged." Persist the same sentence in the run record |
 | the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |
 
-**One loss is a STOP:** when terminal review is required, its reviewer must be
-independent of the builder. A one-shot route is sufficient. Pass A's absence is a
-declared round-1 degradation; terminal self-review is not.
+**One loss is a STOP:** the terminal reviewer must be independent of the builder
+on every run. A one-shot route is sufficient. Pass A's absence is a declared
+round-1 degradation; terminal self-review is not.
 
 **`/code-review` is CodeRabbit's**, not Claude's — the repo reserves that name.
 Pass A is a **fresh reviewer subagent with no build context**; `/coderabbit:code-review`
@@ -365,9 +363,8 @@ for it), write the artifact with `approval_status: pending`, and ✋ **STOP**,
 surfacing it as the approval ask.
 
 The metadata header carries `approval_status`, `design_ref`, `ui_required` and
-`owned_screens`. **It does not carry `mutation_round`** — that value is derived
-from the run-state block's `batches[]`, and a second copy in a frozen header would
-be a scalar nothing may update. Every owned screen is classified
+`owned_screens`. **It does not carry `mutation_round`; the mutation-budget
+definition above is its sole definition.** Every owned screen is classified
 **reference-backed** or **unreferenced** *now*, at plan time. An unreferenced
 screen needs search evidence and a **named human approver** — a screen the ticket
 invents has no comparator, and inventing one later is the self-attestation the
@@ -469,11 +466,18 @@ not a fix. No local instance, or the only reachable one is shared → ✋ STOP.
 Load [references/review.md](references/review.md) and, for pass B,
 [references/codex-cli.md](references/codex-cli.md).
 
+Append the REVIEW-start entry to `timings[]` as this phase's first action, before
+checking the terminal-reviewer route, sweeping the record or dispatching a pass.
+It is the durable point of no return for this run. Once it exists, **every
+REVIEW-phase stop concludes the run unshipped**, whether or not the terminal
+reviewer returned a verdict. This replaces the old verdict-only resume condition.
+
 First sweep the ticket-owned record once: the plan, parity and VAPT artifact
 prefixes, changed comments and docblocks, ticket-produced docs, hand-maintained
-counts and citations. Run formatters and generators first. Apply any record
-repairs as one batch, then freeze the reviewed prefix and compute `F0`. After
-`F0`, a record mismatch ends the current run; it is never repaired inside REVIEW.
+counts and citations. Run formatters and generators first. If the sweep requires a
+repair, apply the mutation budget before writing and record the repair as one
+batch. Then freeze the reviewed prefixes and compute `F0`. After `F0`, a record
+mismatch ends the current run; it is never repaired inside REVIEW.
 
 **Round 1 — find.** Dispatch A, B and C together, mutually blind and report-only,
 over `F0`. Pass A is the fresh reviewer and performs the sole complete parity
@@ -484,12 +488,13 @@ declared fallback. Pass C walks every applicable rule row.
 Give every code-or-test finding one disposition, capture preimages and apply at
 most one batched repair. Build the fix packet while changing the files. For every
 UI repair, include the dependency-closed nodes and properties it can affect.
-Snapshot the candidate as `F1`; if nothing changed, `F1` is `F0`.
+If the repair changed code or tests, snapshot the candidate as `F1`; otherwise
+the final candidate remains `F0` and no `F1` exists.
 
 **Round 2 — terminal verdict.** One sighted reviewer independent of the builder
-reads the round-1 findings, dispositions, fix packet, frozen record, affected
-closure, round-1 parity result and runtime attack evidence. It does not rerun pass
-A, pass B, pass C or the attacks.
+reads the round-1 findings, dispositions, frozen record, round-1 parity result and
+runtime attack evidence, plus the fix packet and affected closure when barrier 1
+changed the candidate. It does not rerun pass A, pass B, pass C or the attacks.
 
 For parity, the reviewer consumes pass A's complete `F0` result. If barrier 1
 changed UI, it compares only the affected nodes, selectors, tokens, states,
@@ -499,7 +504,8 @@ direction. If that impact cannot be bounded, parity is FAIL.
 The terminal verdict is the signature. PASS proceeds to SHIP. Any finding,
 uncertainty, overturned rejection, suspected regression, coverage failure,
 record mismatch or non-PASS sub-outcome ends the current run unshipped. There is
-no repository write after this verdict.
+no later candidate or frozen-narrative write; only its predeclared run-state and
+SHIP result slots may be appended.
 
 
 ## SHIP
@@ -508,9 +514,10 @@ no repository write after this verdict.
 
 Load [references/ship.md](references/ship.md).
 
-**Fill the schema-defined terminal fields and session-log fields once**, so they
-ride the commit. Verify that the reviewed record prefix still matches its frozen
-digest and that every later byte belongs to an exact append-only result slot.
+With the terminal verdict already appended, **fill only the schema-defined SHIP
+and session-log fields**, so they ride the commit. Verify that the reviewed
+prefixes still match their frozen digests and that every later byte belongs to an
+exact append-only result slot.
 Any other code, test, comment, doc or artifact change ends the run as unreviewed.
 Then make one commit and one push, open the PR, link the ticket and wait once for
 CI.
@@ -519,20 +526,10 @@ PR is ready and ask them to run `/compact`.
 
 ## The terminal verdict is the signature
 
-There is no separate signing phase. The terminal reviewer returns:
-
-```text
-reviewer_identity
-source_manifest_id
-candidate_manifest_id
-fix_packet_digest | none
-frozen_record_digest
-change_outcome
-parity_outcome | NOT_TRIGGERED
-attack_review_outcome | NOT_TRIGGERED
-security_outcome | NOT_TRIGGERED
-overall_outcome
-```
+There is no separate signing phase. The terminal reviewer returns the one
+canonical verdict shape defined in [review.md](references/review.md), including
+the reviewer and manifest identities, the frozen-record digest and status,
+findings, every triggered sub-outcome and `overall_outcome`.
 
 `parity_outcome` combines pass A's complete comparison bound to `F0` with the
 terminal reviewer's targeted impact check bound to the final candidate.
@@ -540,7 +537,8 @@ terminal reviewer's targeted impact check bound to the final candidate.
 for running the attacks in PROVE. `security_outcome` is mandatory when the plan
 is security-sensitive.
 
-The reviewer is report-only. The orchestrator writes these exact fields once.
+The reviewer is report-only. The orchestrator appends that verdict once to the
+plan's run-state block.
 `overall_outcome: PASS` is the only result that proceeds. No second digest,
 return dispatch, record repair or repeated attestation follows it.
 
@@ -607,15 +605,15 @@ so the answer is one message and not a negotiation.
 - A security-sensitive run reaches terminal review without a reviewable runtime
   attack artifact or without an explicit terminal security outcome.
 
-*Review*
+*Review — every item below concludes the current run, even before a verdict exists*
 - A round-1 pass cannot return verifiable coverage after one schema-only
   correction request.
 - The manifest changes while round 1 is running.
-- The frozen record prefix changes after `F0`, or a reviewer finds it false.
+- A frozen record prefix changes after `F0`, or a reviewer finds it false.
 - Barrier 1 requires a repository path outside the approved contract.
-- `mutation_round` is already 3 and barrier 1 requires a write.
+- `mutation_round` is already 3 and the record sweep or barrier 1 requires a write.
 - The fix packet does not balance.
-- A required independent terminal reviewer is unavailable.
+- The independent terminal reviewer is unavailable.
 - The terminal reviewer returns any finding, uncertainty, coverage failure,
   record mismatch or non-PASS outcome.
 
@@ -632,28 +630,26 @@ not a shipped ticket.
 
 ## Stopping and resuming
 
-Most stops are pauses. A terminal-review failure ends the current run; continuing
-the implementation requires a new human-approved plan and run record. In every
-case leave the work recoverable: do not revert, reset, stash or delete the branch,
-and create no WIP close-out commit. Report what exists, what failed and what a new
-run would need. **do not revert, reset, stash or
-delete the branch**, and **commit nothing to close it out** — this skill never
-creates WIP commits. Report the branch, the phase you stopped in, what exists
-versus what is missing, which artifacts are on disk, and the single concrete thing
-needed to continue. Say explicitly what is **not** done. A stop that reads like a
-completion is worse than a loud failure.
+Most stops before REVIEW are pauses. Once the REVIEW-start timing entry exists,
+any stop ends the current run; continuing the implementation requires a new
+human-approved plan and run record. In every case leave the work recoverable:
+**do not revert, reset, stash or delete the branch**, and **commit nothing to close
+it out** — this skill never creates WIP commits. Report the branch, the phase that
+stopped, what exists versus what is missing, which artifacts are on disk, and the
+single concrete thing needed to continue. Say explicitly what is **not** done. A
+stop that reads like a completion is worse than a loud failure.
 
 | On disk | Means | Do |
 |---|---|---|
-| `.specs/plans/<TICKET>.md`, `approval_status: approved`, **and no terminal verdict recorded** | the plan is settled and the run stopped before REVIEW concluded | confirm it still stands, re-enter after the phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
-| a recorded **terminal verdict of anything but PASS** | this run already concluded | ✋ STOP. **This row overrides the one above.** A terminal verdict is the end of that run, not a phase to re-enter — resuming past it is the recursion this phase was rebuilt to remove. Continuation needs a new approved plan and a new run record |
+| `.specs/plans/<TICKET>.md`, `approval_status: approved`, and no REVIEW-start entry in `timings[]` | the plan is settled and the run stopped before REVIEW | confirm it still stands, then resume after the pre-REVIEW phase that stopped. **Do not re-run plan mode**, and do not re-dispatch the critique — it is part of that plan |
+| a REVIEW-start entry exists and `overall_outcome: PASS` does not | this run concluded unshipped, with or without a terminal verdict | ✋ STOP. Never re-enter REVIEW. Continuation needs a new approved plan and a new run record |
+| `overall_outcome: PASS` | REVIEW concluded successfully | resume SHIP only if the final candidate manifest and frozen prefixes still match; otherwise start a new approved run |
 | `.specs/plans/<TICKET>.md`, `pending` or absent | a previous run stopped *at* the approval ask | take it back through approval. Do not build on it |
-| the run-state block holds `batches[]` | repair batches were already spent | keep the entries. `mutation_round` is their count, so it carries forward by itself — **never truncate `batches[]` to reset it** |
+| the run-state block holds `batches[]` | repair batches were already spent | keep the entries and apply the mutation-budget definition above — **never truncate `batches[]` to reset it** |
 | a ticket branch | work exists | use it, rebased. WIP commits → ✋ STOP for the preserve-or-squash decision |
 | the parity artifact | round-1 parity evidence exists | reuse it only when its `F0` manifest and immutable prefix still match. Otherwise start a new approved run; never rewrite historical locators to fit the current tree
 | the vapt artifact | attacks ran | re-run its committed tests; only re-attack surfaces the resumed work changed |
 | `design_ref` | the reference is pinned | **reuse that SHA.** Re-pinning silently changes what the screen is verified against |
-| a recorded wave | passes ran | resume only if the manifest ID still equals the current state |
 
 **Re-check triage anyway** — blockers, assignees and open PRs all move.
 
@@ -685,8 +681,8 @@ file short enough to follow.
 | the review engines themselves | `/coderabbit:code-review`, `codex`, the reviewer subagent |
 
 This skill owns *when* each is asked, *what it is asked about*, and the
-orchestration around them: the contract, the manifest chain, the rounds, the barriers, the
-mutation budget and the delta routing.
+orchestration around them: the contract, the `F0`/optional-`F1` manifests, the
+discovery wave, the repair barrier, the terminal verdict and the mutation budget.
 
 It does **not** choose or impose a stack — the stack is the repo's. It does not
 provide the concurrency; a serial orchestrator runs identical passes over an

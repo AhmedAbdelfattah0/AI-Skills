@@ -19,7 +19,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      approval_status: pending|approved   a human approval flips this, and only this
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
-     (no mutation_round — it is derived from the run-state block's batches[])
+     (no mutation_round field — the spine owns the sole derivation)
      owned_screens:                      one entry per screen:
        - impl: <path>
          reference: <path or null>
@@ -79,6 +79,12 @@ plan carries no cross-model review>
 Live attacks stay serial regardless — shared port and datastore. The screen list
 drives one complete parity comparison; later UI checking is limited to the
 barrier-1 impact slice.
+
+<!-- RUN-STATE:BEGIN -->
+<!-- Append JSON-lines entries here according to review.md; never edit an
+     existing entry. This block is outside the frozen narrative digest and
+     replaces implicit run-state placement. -->
+<!-- RUN-STATE:END -->
 ```
 
 ## The `Par` column

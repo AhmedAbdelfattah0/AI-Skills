@@ -23,12 +23,13 @@ Create `.specs/design-parity/<TICKET>.md` with:
 - `design_ref`;
 - each owned screen and its implementation path;
 - its pinned reference path, or its approved unreferenced classification;
-- accepted deviations already approved by a named human;
-- empty schema-defined slots for the round-1 result and terminal outcome.
+- accepted deviations already approved by a named human.
 
 Run formatters and generators before the record sweep. The artifact's reviewed
-prefix is frozen with the rest of the record before `F0`. Reviewer outputs fill
-the defined result slots once; they do not rewrite that prefix.
+prefix is the whole file and is frozen with the rest of the record before `F0`.
+Pass A's result and the terminal verdict are appended to the plan's run-state
+block; they reference this artifact and its digest instead of rewriting it. This
+replaces the distributed empty result slots.
 
 Use stable component, selector, token, state and translation-key anchors. A line
 number may be retained only as a historical locator bound to `F0`; it is never
@@ -146,9 +147,9 @@ Where a merge-blocking artifact check exists, it validates:
 
 - `persisted ui_required OR the repository's view-layer detector`;
 - the artifact and its immutable-prefix digest;
-- a complete round-1 result bound to `F0`;
-- the recorded terminal impact slice when UI changed;
-- `parity_outcome: PASS` bound to the final candidate manifest.
+- a complete round-1 result in the plan's run-state block, bound to `F0`;
+- the recorded terminal impact slice there when UI changed;
+- `parity_outcome: PASS` there, bound to the final candidate manifest.
 
 Missing or unparseable metadata fails closed. If the check is absent, declare
 that once and do not wait for it.

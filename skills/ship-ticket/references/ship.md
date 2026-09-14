@@ -15,8 +15,12 @@ with plain sentences; the log and artifacts carry the identifiers.
 A **rule row** inside the rule pass answers `PASS` / `FAIL` / `N-A` — that is a
 verdict about one rule against one diff. A **check as a whole** — the rule pass,
 the parity check, the attack testing — declares one of the outcomes below in the
-run record and in its artifact, because a check can be reused, grouped, untriggered
-or degraded in ways a single rule row cannot.
+one location determined by when it runs, because a check can be reused, grouped,
+untriggered or degraded in ways a single rule row cannot. A pre-`F0` producer such
+as VAPT records it in the frozen evidence artifact. A post-`F0` check records it
+in the plan's run-state block and never writes back into a frozen artifact. The
+user report and session log are projections of that canonical location; they do
+not become competing sources of truth.
 
 They map one way only: **any `FAIL` row makes its check `FAIL`.** A check may not
 report `PASS_FULL` over a table containing a `FAIL` row.
@@ -37,37 +41,59 @@ DEGRADED                           + the classes that could not run, by ID
 ```
 
 **A blank table, an omitted row, or a bare "N/A" is a FAIL.** Coverage is
-constant, so a check that examined less than it should is a bug. Presentation may
-aggregate rows already computed per rule — naming the IDs and the identical
-detector, inputs, digest and result behind them. Evaluation may not: a
-family-level detector standing in for per-rule evaluation is coverage loss.
+applicability-driven, so a check that examined less than it should is a bug.
+Presentation may aggregate rows already computed per rule — naming the IDs and
+the identical detector, inputs, digest and result behind them. Evaluation may not:
+a family-level detector standing in for per-rule evaluation is coverage loss.
 
-Record, in the artifacts:
+### Path, frozen prefix and allowed later fields
+
+This map replaces the former conceptual artifact list with exact storage and
+mutation boundaries.
+
+| Path | Frozen at `F0` | The only later writes |
+|---|---|---|
+| `.specs/plans/<TICKET>.md` | metadata, approved plan and Design Contract above `RUN-STATE:BEGIN` | JSON-lines entries appended between the existing run-state markers: `batches[]`, `reviewers[]`, `manifests[]`, `findings[]`, `dispositions[]`, `outcomes[]`, `timings[]`, `degradations[]` |
+| `.specs/design-parity/<TICKET>.md` | the whole pre-`F0` evidence artifact | none; pass A and terminal parity results go to the plan's run-state block |
+| `.specs/vapt/<TICKET>.md` | the whole runtime-evidence artifact | none; terminal attack/security outcomes go to the plan's run-state block |
+| changed comments, docs and ticket-produced artifacts | the entire manifested content | none |
+| `session-log.md` | all pre-existing entries | one new ticket-keyed entry in SHIP, derived from the run-state block; no earlier entry may change |
+
+The run-state storage categories and repair-batch shape are defined in
+[review.md](review.md); check outcomes use the enum above. The terminal verdict is
+one `outcomes[]` entry with review.md's canonical verdict shape. The frozen
+prefixes contain only pre-`F0` candidate claims; post-`F0` findings, dispositions
+and reviewer conclusions belong in run state by design.
+
+Across the frozen evidence and the plan's run-state block, record:
 
 - companion degradations and orchestration mode;
 - `F0`, the final candidate manifest and the frozen-record digest;
 - round-1 reviewer identities and verified paths;
-- finding IDs, dispositions and fix-packet digest;
+- finding IDs, dispositions and the fix-packet digest when barrier 1 repaired the
+  candidate;
 - terminal reviewer identity and every terminal sub-outcome;
 - per reference-backed screen: round-1 grade, stable divergences, barrier-1
   impact slice and terminal parity outcome;
 - per unreferenced screen: approver, date and search evidence;
 - attack surfaces, named abuse tests, excluded files and degraded rule IDs;
-- plan-critique dispositions and final `mutation_round`;
+- plan-critique dispositions and the append-only repair-batch entries;
 - phase timings and concurrency windows.
 
 Persist lists, not hand-maintained totals. Derive counts when presenting the
 record.
 
 **Written so it survives the context.** "Tried to break the new endpoint — all
-attacks refused" is recoverable months later; "GATE 5: PASS" is not. "Skipped some
+attacks refused" is recoverable months later; "security gate: PASS" is not. "Skipped some
 findings that conflicted with our conventions" is worthless.
 
 ## Before the commit
 
-**Write the run record and the session log first**, so they ride the single gated
-commit rather than a second one. Run `/session-logger`, or write the entry
-yourself to `session-log.md`; either way it must be on disk before the commit.
+**Confirm the terminal verdict is already present in `outcomes[]`, then append only
+the remaining SHIP timing/result entries and the session-log projection**, so they
+ride the single gated commit rather than a second one. Run `/session-logger`, or
+write the entry yourself to `session-log.md`; either way it must be on disk before
+the commit.
 
 **Then verify the frozen record and exact append slots.** The reviewed prefixes
 must still match their digests. Every later byte must belong to the terminal
@@ -79,7 +105,7 @@ comment, doc or narrative artifact change ends the run as unreviewed.
 **One commit, containing everything:**
 
 - the code
-- `.specs/plans/<TICKET>.md` — with its final `mutation_round`
+- `.specs/plans/<TICKET>.md` — with its immutable prefix and append-only run state
 - `.specs/design-parity/<TICKET>.md` — **iff `ui_required`**
 - `.specs/vapt/<TICKET>.md` **and the abuse tests it produced** — **iff the diff
   touched a trust boundary**

@@ -1253,6 +1253,15 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\bGATE [345]\b/g, 'ship-ticket uses named phases and checks, not numbered gates', ['ship-ticket', 'vapt', 'generate-ticket', 'code-quality']],
+  [/\bfinal\s+`?mutation_round`?/gi, 'mutation_round is derived and is never a stored final field', ['ship-ticket']],
+  [/\bmutation_round:\s*\d+\b/gi, 'mutation_round is derived and is never a stored scalar', ['ship-ticket']],
+  [/\b(?:terminal verdict when one is required|when terminal review is required)\b/gi, 'every ship-ticket run gets an unconditional terminal reviewer', ['ship-ticket']],
+  [/\bno terminal verdict recorded\b/gi, 'ship-ticket resumption keys on whether REVIEW started, not whether a verdict exists', ['ship-ticket']],
+  [/\bauthz (?:predicate|component)\b/gi, 'boundary identity excludes prose authorization labels; executable test IDs carry authorization coverage', ['ship-ticket']],
+  [/\bship-ticket(?:'s)?\s+step\s+\d+(?:\.\d+)?\b/gi, 'ship-ticket uses named phases rather than numbered steps', ['vapt', 'generate-ticket']],
+  [/\bsigns later\b/gi, 'the terminal reviewer is the only signature; the plan-critique route never signs', ['ship-ticket']],
+  [/\bempty schema-defined slots?\b/gi, 'parity and VAPT evidence artifacts freeze whole; later results live in the plan run-state block', ['ship-ticket']],
   [/\b(?:barrier 2|round 3|further rounds?)\b/gi, 'ship-ticket review has one repair barrier and one terminal verdict', ['ship-ticket']],
   [/\b(?:F2|Fn|F\(n[−-]1\))\b/g, 'ship-ticket review has only F0 and an optional F1 candidate', ['ship-ticket']],
   [/\bscope[_ -]digests?\b/gi, 'terminal review binds to manifests and the frozen-record digest; the separate scope digest was deleted', ['ship-ticket']],
@@ -1265,6 +1274,10 @@ const RETIRED_VOCABULARY = [
   [/\bre[- ]?sign(?:ing|atures?)\b/gi, 'terminal outcomes are never reopened inside the same run', ['ship-ticket']],
   [/\bsame[- ]reviewer rule\b/gi, 'the signing resumption ceremony was deleted', ['ship-ticket']],
   [/\bstaleness rule\b/gi, 'record immutability and manifest binding replace signature staleness', ['ship-ticket']],
+  [/\bevery (?:claim, count, citation and )?conclusion (?:a reader would check )?belongs in the prefix\b/gi, 'conclusions live in the append-only run-state block; the frozen prefix holds only pre-F0 claims', ['ship-ticket']],
+  [/\bevery batch carries `?fix_packet_digest`?\b/gi, 'only the REVIEW barrier-1 batch carries a fix packet; PROVE and pre-F0 batches precede any packet', ['ship-ticket']],
+  [/\b(?:a )?config boundary\b/gi, 'record boundaries by vapt kind code — security-config, never prose', ['ship-ticket']],
+  [/\boutbound credential path\b/gi, 'record boundaries by vapt kind code — outbound-data, never prose', ['ship-ticket']],
   [/\bparity verdict (?:is )?re-derived\b/gi, 'the complete parity comparison runs once in round 1', ['ship-ticket']],
   [/\bregenerate the parity draft\b/gi, 'post-F0 UI changes receive a targeted impact check instead', ['ship-ticket']],
   [/\bstrict mode\b/gi, 'vapt no longer owns a separate review or signing mode', ['vapt']],

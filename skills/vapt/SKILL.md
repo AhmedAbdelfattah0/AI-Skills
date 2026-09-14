@@ -6,7 +6,7 @@ description: |
   boundaries a change introduces, attacks each one, and leaves the abuse cases
   behind as COMMITTED TESTS in the repo's own runners so CI re-runs them forever.
   Stack-agnostic: detects the runners and the harness, never prescribes them.
-  Runs in two modes — GATE (the diff, as ship-ticket's GATE 5) and AUDIT
+  Runs in two modes — GATE (the diff, during ship-ticket's PROVE phase) and AUDIT
   (backfill over already-shipped code in the base branch).
 
   Trigger when:
@@ -16,7 +16,7 @@ description: |
     for IDOR", "check authz", or "is this endpoint safe to expose"
   - an endpoint, auth path, upload, form, or rendering surface was just built or
     changed and nothing has yet sent it a hostile request
-  - ship-ticket reaches GATE 5
+  - ship-ticket reaches PROVE's live-attack stage
 
   Do NOT use for: secure-by-default patterns while writing (use security),
   static rule enforcement on the diff (use backend-code-quality BE-SEC-*),
@@ -43,12 +43,16 @@ is a merge-blocking fact that keeps running after everyone forgets the ticket.
 
 | Command | Mode | Scope |
 |---|---|---|
-| `/vapt` | **GATE** | The current diff (vs. the base branch). This is ship-ticket's GATE 5. |
+| `/vapt` | **GATE** | The current diff (vs. the base branch), including ship-ticket's PROVE-phase invocation. |
 | `/vapt.audit` | **AUDIT** | Already-shipped code in the base branch, in risk-ordered waves, resumable. |
 | `/vapt.fix <ID>` | either | Jump to one tracked finding with minimum context load. |
 
 Artifacts live in `.specs/vapt/` — `<TICKET>.md` per gate run, `surfaces.md` +
 `findings.md` for the audit.
+
+When ship-ticket invokes GATE mode, use that caller's canonical boundary-record
+shape so its later `F0`/optional-`F1` comparison consumes the same inventory VAPT
+attacked.
 
 ---
 
@@ -84,18 +88,18 @@ so a security test of it produces cost and nothing else.
 A changed (GATE) or existing (AUDIT) file is **in scope** if it introduces or
 changes any of:
 
-| # | Trust boundary | Examples (detect the repo's idiom, don't assume one) |
+| Kind | Trust boundary | Examples (detect the repo's idiom, don't assume one) |
 |---|---|---|
-| 1 | Request handler or its route registration | controller, handler, resolver, RPC method, route table |
-| 2 | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy |
-| 3 | Query or command taking external input | ORM call, raw SQL, search filter, sort/pagination param |
-| 4 | Rendering a value it did not author | template, component, `innerHTML`-class sink, markdown/HTML render |
-| 5 | Input that reaches a server | form, upload widget, URL/query param binding |
-| 6 | File or path handling | upload, download, archive, path join, static serve |
-| 7 | Client-side storage | cookie, `localStorage`, `sessionStorage`, IndexedDB |
-| 8 | Outbound call carrying credentials or user data | webhook send, third-party SDK, server-to-server fetch |
-| 9 | Async consumer of external payloads | queue worker, cron, webhook receiver, event handler |
-| 10 | Security-relevant config | CORS, headers, cookie options, secret wiring, ACL/policy files |
+| `request-handler` | Request handler or its route registration | controller, handler, resolver, RPC method, route table |
+| `auth-lifecycle` | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy |
+| `external-input-operation` | Query or command taking external input | ORM call, raw SQL, search filter, sort/pagination param |
+| `rendering-sink` | Rendering a value it did not author | template, component, `innerHTML`-class sink, markdown/HTML render |
+| `server-input` | Input that reaches a server | form, upload widget, URL/query param binding |
+| `file-path` | File or path handling | upload, download, archive, path join, static serve |
+| `client-storage` | Client-side storage | cookie, `localStorage`, `sessionStorage`, IndexedDB |
+| `outbound-data` | Outbound call carrying credentials or user data | webhook send, third-party SDK, server-to-server fetch |
+| `async-consumer` | Async consumer of external payloads | queue worker, cron, webhook receiver, event handler |
+| `security-config` | Security-relevant config | CORS, headers, cookie options, secret wiring, ACL/policy files |
 
 **Explicitly out of scope:** pure functions over trusted input, type/DTO
 declarations, styling, copy, existing tests, build config that touches none of
@@ -103,7 +107,7 @@ the above.
 
 **Name every exclusion.** The artifact lists each changed file you excluded and
 which reason applies. An unexplained exclusion is the hole this step exists to
-close — the same reason GATE 4 forces every stub to link a follow-up ticket.
+close.
 
 ## STEP 3 — Principals (without these, half the rules cannot be tested)
 
@@ -184,7 +188,7 @@ exists; this skill **proves** it engages:
 
 **Detect the runners; never prescribe them.** Read `package.json` scripts, the
 Makefile, `pyproject.toml`, `composer.json`, `go.mod`, or the CI config — the
-same way ship-ticket's step 9 does. Then:
+same way ship-ticket's UNDERSTAND phase enumerates the repository commands. Then:
 
 | Surface | Harness |
 |---|---|
@@ -228,13 +232,14 @@ A finding is fixed in **production code**, not by loosening the test.
 - Re-run the abuse tests after every fix. Red → green on the same test is the
   proof; a deleted test is not a fix.
 
-## STEP 7 — The artifact and the verdict
+## STEP 7 — The artifact and the outcome
 
 Write `.specs/vapt/<TICKET>.md` (GATE) or `.specs/vapt/findings.md` (AUDIT):
 
 ```
 target:      http://localhost:3000 · disposable seed DB (docker compose)
-mode:        GATE          # strict when the ticket is security-sensitive
+mode:        GATE
+outcome:     PASS_FULL
 surfaces:    POST /api/orders · GET /api/orders/:id · OrderList component
 excluded:    src/utils/format-date.ts (no trust boundary, reason 0)
 principals:  anon · userA(tenantA) · userB(tenantB) · admin
@@ -247,9 +252,14 @@ degraded:    VAPT-WEB-01 — no browser runner in this repo; proved at request l
 | VAPT-API-08 | POST /api/orders | N/A | [D], no rate limiter in this project — documented in CLAUDE.md |
 ```
 
-**PASS** ⇔ every in-scope surface has a committed test for every applicable rule;
-all tests are green; there are zero unfixed `[NN]` findings; and every exclusion
-and degradation is named.
+**PASS_FULL** ⇔ every in-scope surface has a committed test for every applicable
+rule; all tests are green; there are zero unfixed `[NN]` findings; and every
+exclusion is named, with no coverage degradation. Use **PASS_GROUPED** instead
+when shared test definitions were used and every route was still executed against
+them.
+
+**DEGRADED** requires the executed reduced set to be green and every unexercised
+rule or family to be named with its cause.
 
 **FAIL** ⇔ anything else.
 
@@ -264,11 +274,12 @@ The abuse tests run in the repo's existing test job for free — that half is
 already machine-enforced.
 
 Add one merge-blocking check in the **same slot as `nn-guard`'s CI job and
-ship-ticket's GATE 4 check**: if the PR's diff touches a trust boundary (derive
-the glob from where this repo's handlers, components, and config actually live —
-the point is the signal, not a fixed pattern), then `.specs/vapt/<TICKET>.md`
-must exist and be **PASS**. Without this, the gate is honor-system, which is the
-failure mode it was built to remove.
+ship-ticket's design-parity artifact check**: if the PR's diff touches a trust
+boundary (derive the glob from where this repo's handlers, components, and config
+actually live — the point is the signal, not a fixed pattern), then
+`.specs/vapt/<TICKET>.md` must carry **PASS_FULL**, **PASS_GROUPED** or a fully
+enumerated **DEGRADED** outcome. Without this, the gate is honor-system, which is
+the failure mode it was built to remove.
 
 ---
 
@@ -329,7 +340,7 @@ failure, not a shortcut.
 
 - **Write secure code in the first place** — that's `security`. This runs after.
 - **Enforce static rules on the diff** — that's `backend-code-quality`
-  (`BE-SEC-*`) at ship-ticket's GATE 3.
+  (`BE-SEC-*`) in ship-ticket's round-1 rule pass.
 - **Read the whole codebase for vulnerabilities** — that's `security-audit`.
 - **Test functionality** — the repo's own unit and integration tests own that.
   Every test this skill writes asserts a *refusal* or a *leak*, never a feature.

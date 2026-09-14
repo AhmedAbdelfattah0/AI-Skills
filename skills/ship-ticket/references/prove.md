@@ -40,25 +40,41 @@ enumerated before the fix that created it was never enumerated.
 
 **Stage 4 recomputes the trust-boundary trigger and the complete inventory from
 the changed tree** — an attack fix is production code and can add or move a route,
-a middleware, a config boundary, a rendering sink or an outbound credential path.
+a `request-handler`, an `auth-lifecycle`, a `security-config`, a `rendering-sink`
+or an `outbound-data` boundary. Use the exact VAPT kind code when recording each
+one. CORS, header, cookie, secret-wiring and ACL/policy surfaces map to
+`security-config`; an egress operation carrying credentials or user data maps to
+`outbound-data`. Never store a descriptive family label in `kind`.
 
-**Record every boundary under a stable KEY, and freeze the key set with the
-inventory.** REVIEW's barrier 1 compares the repaired tree against this set to
-decide whether a repair introduced a surface the attacks never covered, and that
-comparison is only decidable if both sides are keyed the same way:
+**Record every boundary in one canonical shape, and freeze those records with the
+inventory.** REVIEW compares the repaired candidate to this exact data; it never
+normalizes human descriptions or decides that two permission labels mean the
+same thing. This replaces the prior key that embedded a human permission label in
+boundary identity. The record is:
 
+```text
+boundary_id             kind + NUL + identity
+kind                    exact `kind` code from vapt's trust-boundary table
+identity                exact stable surface name used by the repository
+rule_ids[]               applicable VAPT rule IDs, sorted bytewise
+positive_test_ids[]      stable committed test names, sorted bytewise
+refusal_test_ids[]       stable committed test names, sorted bytewise
+authorization_test_ids[] stable committed authorization-test names, sorted bytewise
+implementation_inputs[] path + content digest for the surface implementation
+control_inputs[]         path + content digest for every transitive control owner
 ```
-kind        route | middleware | rendering sink | control path | job | listener
-identity    the stable name the repo itself uses — route method+path template,
-            middleware export, sink symbol, guard or policy name
-authz       the permission, role, clearance or scope the boundary enforces
-```
 
-The `authz` component is part of the key, not an attribute of it: a boundary whose
-predicate changes is a different boundary, because the committed tests assert the
-old predicate and would pass against the new one while proving nothing about it.
-A boundary whose identity the repo does not name stably is recorded as such —
-REVIEW then treats it as new rather than guessing that it moved.
+Use the route method plus path template, middleware export, sink symbol,
+configuration key, outbound client operation, job/listener name or equivalent
+repository-native identifier. If no stable identity exists, record that failure
+instead of inventing one; REVIEW treats it as a new boundary.
+
+`boundary_id` deliberately excludes authorization prose. Authorization is
+represented by executable test IDs; for a boundary with no authorization
+concern, `authorization_test_ids` is exactly `[]`. A code alias such as `admin`
+versus `role:admin` changes neither field. If its implementation changed, REVIEW
+re-runs the same mapped tests and records their evidence instead of making a
+semantic-equivalence judgment.
 
 Both loops increment the mutation budget once per changed batch and are bounded
 by it. PROVE prepares screen classifications and pinned inputs; the complete
@@ -178,10 +194,14 @@ and therefore a FAIL.
 
 ### Runtime outcome and review handoff
 
-**PASS** ⇔ the canonical class → routes → controls → tests map is complete; every
-applicable rule is green for every route; each route has its positive control and
-refusal assertion; there are zero unfixed `[NN]` findings; test-quality passed or
-its degradation is declared; and every excluded changed file is named.
+**PASS_FULL** ⇔ the canonical class → routes → controls → tests map is complete;
+every applicable rule is green for every route; each route has its positive
+control and refusal assertion; there are zero unfixed `[NN]` findings;
+test-quality passed or its degradation is declared; every excluded changed file
+is named; and there is no coverage degradation.
+
+**PASS_GROUPED** ⇔ the same conditions hold, shared test definitions were used,
+and every route was still executed against them.
 
 **DEGRADED** ⇔ the executed reduced set is committed and green, while every
 unexercised rule or family is named with its cause.
@@ -191,8 +211,10 @@ unexercised rule or family is named with its cause.
 PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
 Hand the frozen surface map, rule-to-test map, test outcomes and production
 control paths to REVIEW's single terminal reviewer. That reviewer returns
-`attack_review_outcome`, and `security_outcome` when required, without running
-the attacks again.
+`attack_review_outcome`, and `security_outcome` when the plan is
+security-sensitive, without running the attacks again. The VAPT artifact remains
+whole-file frozen; those terminal outcomes are appended only to the plan's
+run-state `outcomes[]`.
 
 ### Enforcement is machine, not honour-system
 

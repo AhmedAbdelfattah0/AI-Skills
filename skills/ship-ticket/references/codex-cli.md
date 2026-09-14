@@ -133,7 +133,7 @@ the degradation. A watchdog expiry *alone*, with a resumable session, is a
 recoverable event, not a missing companion.
 
 Read `finalMessage` from `result.json`; record `threadId` — it identifies the
-session for a follow-up and is the audit trail if this route signs later.
+session for a bounded recovery and is the critique's audit trail.
 
 ### Reconcile — your judgment, not Codex's
 

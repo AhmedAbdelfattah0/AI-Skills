@@ -265,8 +265,8 @@ rule, name the lines it replaces; if it belongs to one phase, it goes in that
 phase's reference, not the spine.
 
 The phases are **UNDERSTAND → PLAN → BUILD → PROVE → REVIEW → SHIP**. There are no
-numbered steps and no numbered gates any more; the old `GATE 3/4/5` are the rule
-pass, the parity check and the attack testing. The numbering never meant anything
+numbered steps and no numbered gates any more; the retired `GATE 3/4/5` labels
+meant the rule pass, the parity check and the attack testing. The numbering never meant anything
 — a GATE 1 and a GATE 2 never existed. **Do not reintroduce numbered steps**: the
 cross-references between them were a defect generator.
 
@@ -276,11 +276,14 @@ constant reasoning effort. `security-sensitive` requires an explicit security
 outcome in the terminal verdict; it changes neither attack coverage nor reviewer
 count.
 
-*Review terminates*: the ticket-owned record is swept once before `F0` and its
-reviewed prefix is then immutable. Round 1 runs A, B and C once. Barrier 1 permits
-one code-and-test repair batch. Round 2 is one sighted terminal reviewer; any
-finding or non-PASS outcome ends the current run unshipped. There is no in-run
-exception to that stop.
+*Review terminates*: the plan, parity and VAPT narrative prefixes are swept once
+before `F0` and then immutable. Later findings, dispositions and outcomes live in
+the plan's delimited append-only run-state block. The REVIEW-start `timings[]`
+entry is the phase's first action and the point of no return: any stop after it
+ends the current run unshipped, whether or not a terminal verdict exists. Round 1
+runs A, B and C once. Barrier 1 permits one code-and-test repair batch. Round 2 is
+one unconditional sighted terminal reviewer. There is no in-run exception to any
+REVIEW stop.
 
 *Parity depth runs once*: pass A performs the complete comparison for each
 reference-backed owned screen — structure, style, behaviour and i18n, in every
@@ -288,7 +291,8 @@ locale and direction the project ships. After barrier 1, the terminal reviewer
 checks only the dependency-closed nodes and properties the fix could affect. If
 that slice cannot be bounded, the terminal verdict is FAIL.
 
-`mutation_round` still bounds PROVE and every pre-terminal write batch. The third
+`mutation_round` still bounds PROVE and every pre-terminal candidate-repair batch,
+using the sole derivation in the ship-ticket spine and no stored scalar. The third
 mutation is validated; a required additional write ends the current run. Human
 approval starts a new run; it does not extend the current one.
 
@@ -327,9 +331,11 @@ tickets, pass A also performs the sole complete parity comparison.
 
 Barrier 1 reconciles those findings, captures preimages and applies at most one
 code-and-test repair batch. Its fix packet carries change units, the many-to-many
-finding attribution and a dependency-closed parity impact slice. The ticket-owned
-record is already frozen; a record finding or attempted record repair ends the
-current run.
+finding attribution, the affected caller/contract closure, a dependency-closed
+parity impact slice and, where `F1` exists, the exact `F0`/`F1` boundary
+comparison. The ticket-owned
+narrative is already frozen; a record finding or attempted narrative repair ends
+the current run.
 
 Round 2 is one sighted reviewer, independent of the builder. It reads the fix
 packet, the frozen record, round 1's complete parity result, the targeted parity
@@ -339,8 +345,9 @@ outcome ends the current run unshipped.
 
 `F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
 round-1 pass is bound to `F0`; the terminal verdict is bound to the final
-candidate. There is one review write barrier and no review mutation after the
-terminal verdict.
+candidate. There is one candidate write barrier. After the verdict, only its
+predeclared run-state and SHIP result slots may be appended; code, tests and
+frozen narrative never change.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
