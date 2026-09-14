@@ -144,9 +144,12 @@ These bind in every phase. Everything else is procedure.
    is deliberately sighted on their findings and consequences, and is independent
    of the builder.
 8. **REVIEW has one write barrier.** Sweep and freeze the ticket-owned record
-   before `F0`; barrier 1 may then change code and tests once. No record mutation
-   is permitted after `F0`, and no repository mutation is permitted after the
-   terminal verdict.
+   before `F0`; barrier 1 may then change code and tests once. After `F0` no
+   candidate file and no frozen prefix may change; after the terminal verdict no
+   candidate file may change at all. The append-only run-state slots are the
+   exception to both, and are how the run records what it did — findings,
+   dispositions, outcomes, timings and the post-verdict session-log entry are
+   required writes, not violations of this rule.
 9. **Attacks run against a local, disposable instance. Never production, never
    shared staging**, whoever owns it.
 10. **Three mutations, then a human.** See *The mutation budget*.
@@ -199,7 +202,8 @@ PROVE may need repair cycles; REVIEW may not. `mutation_round` counts every
 post-BUILD candidate-changing repair batch before the terminal verdict:
 
 - a PROVE repair batch;
-- the one pre-`F0` record-sweep repair batch, if it changes anything;
+- the one pre-`F0` batch, if it changes anything — formatter output, generator
+  output and the record-sweep repair are that single batch, counted once;
 - barrier 1's code-and-test repair batch.
 
 **It is derived, not stored.** `mutation_round` is the length of `batches[]` in the
@@ -254,7 +258,7 @@ dispatch, not at the check; treat that as the same degradation when it happens.
 | `docs-accuracy` | the wider DOC rule set | the rename grep still runs |
 | `codex-delegate` **+** `codex` CLI | the plan critique | present the plan for approval saying "no cross-model plan review — skill or CLI unavailable". The user's approval was always the gate |
 | `codex` CLI | pass B | `/coderabbit:code-review` on the same manifest. If neither exists, say "**pass B unavailable: one free-form reviewer plus rule pass C**" — never a second self-review presented as pass B |
-| a fresh-reviewer route | pass A | declare pass A unavailable rather than presenting a builder self-review as independent; pass B and pass C still run |
+| a fresh-reviewer route | pass A | **a UI or `security-sensitive` ticket STOPs** — pass A is the sole producer of the complete parity comparison that round 2 and CI both consume, and the terminal reviewer is forbidden from repeating it, so there would be nothing to degrade to. Otherwise declare pass A unavailable rather than presenting a builder self-review as independent; pass B and pass C still run |
 | a one-shot independent reviewer route | every run's terminal verdict | a fresh reviewer subagent or read-only delegated review. No fallback to the builder. Check immediately after appending the REVIEW-start timing entry; absence ends the run there |
 | round-1 concurrency | **nothing — this one is a STOP** | serial A, B and C costs their summed wall clock for identical coverage, which is the six-hour REVIEW this phase exists to end. There is no serial mode: end the run unshipped, recording "⛔ REVIEW stopped: this agent cannot dispatch A, B and C concurrently." Re-run REVIEW on an orchestrator that can fan out |
 | the merge-blocking artifact checks | machine enforcement of the parity and attack artifacts | **detect them up front**: list the repo's required checks (`gh api repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`, or the Azure Repos branch policy) or read the CI config for a job naming the artifact paths. Absent → declare it in the run record and **do not wait for a check that does not exist**. The abuse tests still run in the repo's own test job, which is enforcement that always exists. Installing the check is repo setup, never something a ticket adds after the freeze |

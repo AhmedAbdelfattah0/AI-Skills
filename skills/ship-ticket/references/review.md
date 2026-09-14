@@ -26,8 +26,14 @@ this entry, not verdict absence.
 
 ## Sweep the record once, then close it
 
-Run repository formatters and generators first. Sweep the ticket-owned record in
-one pass:
+Derive `mutation_round` by the spine's sole definition **before** running
+anything that writes. Repository formatters and generators are writes: running
+them first, as an apparently neutral tidy-up, spends mutation 4 before the budget
+is ever read. A value of 3 ends the run here. Otherwise run them, and attribute
+their output to the same pre-`F0` record batch as the sweep below — it is one
+batch, not two.
+
+Then sweep the ticket-owned record in one pass:
 
 - the plan and its metadata;
 - parity and VAPT artifact prefixes;
@@ -39,10 +45,12 @@ one pass:
 Prefer stable symbols, selectors, rule IDs, test names, route names and manifest
 IDs. Replace hand counts with lists or derived presentation values.
 
-If the sweep requires a repair, derive `mutation_round` by the spine's sole
-definition before writing. A value of 3 ends the run; otherwise apply one record
-repair batch and append its base-shape `batches[]` entry. Then hash each reviewed
-prefix and make it immutable.
+If the sweep requires a repair, it joins the pre-`F0` batch already opened above
+rather than opening a second one: everything written before the freeze —
+formatter output, generator output and the record repair — is one batch with one
+base-shape `batches[]` entry, because it is one pass over the record and the
+budget counts passes. The budget was read before the first of those writes and is
+not re-derived here. Then hash each reviewed prefix and make it immutable.
 
 **What the hashed prefixes cover, and what they deliberately do not.** They are
 the pre-`F0` candidate narrative: each claim, count and citation about the tree
