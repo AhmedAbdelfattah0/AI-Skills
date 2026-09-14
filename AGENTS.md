@@ -284,8 +284,10 @@ stop after it ends the current run unshipped, whether or not a terminal verdict
 exists. A terminal PASS enters SHIP; external SHIP transport failures pause that
 run and resume only under a representation-independent `reviewed_content_id`,
 never by re-entering REVIEW. Round 1 runs A, B and C once. Barrier 1 permits one
-code-and-test repair batch. Round 2 is one unconditional sighted terminal
-reviewer. There is no in-run exception to any REVIEW stop.
+sealed candidate repair batch: its planned code/test units plus only prose claims
+inside a finite pre-mutation impact slice that those units actually falsify.
+Round 2 is one unconditional sighted terminal reviewer. There is no in-run
+exception to any REVIEW stop.
 
 *Parity depth runs once*: pass A performs the complete comparison for each
 reference-backed owned screen — structure, style, behaviour and i18n, in every
@@ -334,27 +336,43 @@ dispatch.
 round 1.** A, B and C review `F0` once, mutually blind and report-only. For UI
 tickets, pass A also performs the sole complete parity comparison.
 
-Barrier 1 reconciles those findings, captures preimages and applies at most one
-code-and-test repair batch. Its fix packet carries change units, the many-to-many
-finding attribution, the affected caller/contract closure, a dependency-closed
-parity impact slice and, where `F1` exists, the exact `F0`/`F1` boundary
-comparison. The ticket-owned
-narrative is already frozen; a record finding or attempted narrative repair ends
-the current run.
+Barrier 1 reconciles those findings and, before any candidate mutation, seals one
+finite repair-induced prose impact slice beside the dependency-closed parity
+slice. Its allowed paths are the complete eligible source/test and ticket-doc
+projection of the approved Design Contract at `F0`; its parser/document inventory
+must account for every prose range in them and is mechanically partitioned into
+slice entries and reasoned exclusions. Each entry carries an exact path, unique
+stable anchor, `F0` bytes and digest, a claim verified true at `F0`, and one causal
+planned code/test change-unit ID. An unbounded, incomplete or contract-crossing
+inventory ends the run, and its digest may never widen after sealing. A
+pre-existing record finding still ends the run before writing. The plan prefix
+and the parity and VAPT artifacts never enter the slice; neither do findings,
+dispositions or run state.
+
+The barrier then captures preimages and applies one sealed candidate batch. Only
+a slice claim the code/test repair actually made false may be updated or deleted,
+with the reciprocal causal edge and exact `F0`/`F1` images in the balanced packet.
+Its fix packet also carries the many-to-many finding attribution, affected
+caller/contract closure, parity impact slice and, where `F1` exists, the exact
+`F0`/`F1` boundary comparison. There is no second record sweep, repair or candidate
+barrier.
 
 Round 2 is one sighted reviewer, independent of the builder. It reads the fix
 packet, the frozen record, round 1's complete parity result, the targeted parity
-slice and the runtime attack evidence. Its verdict is the signature. PASS moves
-to SHIP; any finding, uncertainty, coverage failure, record mismatch or non-PASS
-outcome ends the current run unshipped.
+slice, the sealed prose inventory and impact results, and the runtime attack
+evidence. It examines the prose slice once; a residual or newly false claim,
+invalid exclusion, missing causal edge or edit outside the slice is terminal FAIL
+with no repair. Its verdict is the signature. PASS moves to SHIP; any finding,
+uncertainty, coverage failure, record mismatch or non-PASS outcome ends the
+current run unshipped.
 
 `F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
 round-1 pass is bound to `F0`; the terminal verdict is bound to the final
 candidate. There is one candidate write barrier. After the verdict, only its
 predeclared precommit run-state and session-log projection may be appended; code,
-tests and frozen narrative never change. The commit is the repository cutoff:
-commit, push, PR, CI, tracker and completion results are reported externally and
-never cause a second repository write.
+tests, candidate prose and frozen evidence never change. The commit is the
+repository cutoff: commit, push, PR, CI, tracker and completion results are
+reported externally and never cause a second repository write.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

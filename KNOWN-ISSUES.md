@@ -1,7 +1,7 @@
 # Known issues — `ship-ticket`
 
 Historical defects found in the `ship-ticket` skill on the
-`refactor/review-terminates` branch. **None of the seven issues in this document
+`refactor/review-terminates` branch. **None of the eight issues in this document
 remains open.** Each section records the contract chosen by the implementation
 pass so later edits can verify the same decision everywhere it is consumed.
 
@@ -12,9 +12,10 @@ agree it terminates: one discovery wave, one repair barrier, one terminal verdic
 no round 3, PR-bot findings routed to a new run. That part is done. None of the
 closed issues below reintroduces a loop.
 
-**Untested against a real ticket.** The ~20-minute target is a model, not a
-measurement. Nothing below is more important than running one real ticket and
-timing it.
+**First real-ticket result.** P1-38 was the first execution of the rewritten
+skill. Its terminal reviewer correctly failed the run on record truth and test
+coverage even though it found no behavioural, correctness or security regression.
+That run exposed issue 8 below; it was not part of the earlier seven-item audit.
 
 ---
 
@@ -91,6 +92,30 @@ suites.
 
 ---
 
+## Closed — found by the first real-ticket run
+
+### 8. A valid barrier repair could make true prose false with no permitted remedy · closed structural defect
+
+On P1-38, a valid barrier-1 repair removed a consumer. Three source comments that
+were true at `F0` then named that consumer in the present tense. The pre-`F0`
+record sweep could not repair a consequence that did not exist yet, while the old
+post-`F0` rule forbade the barrier from correcting it. Terminal review therefore
+had to fail and a second run was the only remedy.
+
+The chosen contract is a predeclared repair-induced prose impact slice, not a
+general prose permission. Before any candidate write, barrier 1 enumerates the
+complete eligible prose inventory inside the Design Contract, partitions it into
+the impact slice and reasoned exclusions, binds every slice entry to one planned
+code/test change unit, proves each claim true at `F0`, and seals the basis and
+membership by digest. Only an entry that its named unit actually falsifies may be
+updated or deleted in the same single batch, with exact `F0`/`F1` images and the
+causal edge in the balanced packet. The plan, parity and VAPT evidence, findings,
+dispositions and run state remain outside the slice. An incomplete, unbounded or
+contract-crossing slice stops; the terminal reviewer examines it once, and any
+residual or newly false prose is terminal FAIL with no repair.
+
+---
+
 ## The failure that produced most of this
 
 Seven of the defects fixed on this branch are the same mistake: a rule was
@@ -125,3 +150,4 @@ depend on someone remembering.
 | "no record mutation after `F0`" forbade the run's own required records | the ban names candidate files and frozen prefixes; append-only slots are the exception |
 | a red deterministic command after barrier 1's repair had no branch, so "a finding you can fix is work" could invite a second repair | a red command there ends the run — the barrier has already spent its one repair |
 | a dirty submodule was frozen as a bare dirty bit, which cannot tell one dirty state from another | rejected at the freeze or manifested recursively by gitlink OID, and the spine's stop list carries the failing branch |
+| a barrier-1 repair could invalidate prose that was true during the only record sweep, while every later prose write was forbidden | a finite prose inventory and repair-induced impact slice are sealed before mutation; only claims actually falsified by their predeclared causal unit may change in the same barrier, and terminal review has no repair path |

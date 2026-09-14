@@ -6,10 +6,10 @@ Loaded when REVIEW starts. Pass B's CLI contract lives in
 ## The shape
 
 ```text
-record     sweep once, repair once if needed, freeze the reviewed prefixes
+record     sweep once, repair once if needed, freeze the evidence prefixes
 F0         snapshot the complete candidate and frozen record
 round 1    pass A + pass B + pass C, mutually blind and report-only
-barrier 1  reconcile; stop on record findings; repair code/tests once; build optional F1
+barrier 1  reconcile; stop on F0 record defects; seal impact slices; repair once; build optional F1
 round 2    one sighted independent reviewer returns the terminal verdict
 PASS       continue to SHIP
 FAIL       end the current run unshipped
@@ -50,15 +50,18 @@ rather than opening a second one: everything written before the freeze —
 formatter output, generator output and the record repair — is one batch with one
 base-shape `batches[]` entry, because it is one pass over the record and the
 budget counts passes. The budget was read before the first of those writes and is
-not re-derived here. Then hash each reviewed prefix and make it immutable.
+not re-derived here. Then hash the plan, parity and VAPT evidence prefixes and
+make them immutable. Candidate comments, docblocks and ticket-produced docs stay
+ordinary `F0`-manifested paths; barrier 1's sealed exception for a repair-induced
+false claim is defined below.
 
-**What the hashed prefixes cover, and what they deliberately do not.** They are
-the pre-`F0` candidate narrative: each claim, count and citation about the tree
-that a reviewer must be able to check. In the plan, that prefix stops above the
-delimited **run-state block**; the parity and VAPT evidence artifacts are frozen in
-full. Findings, dispositions, reviewer conclusions and verdicts arise after the
-freeze and therefore live only in the plan's run-state block; no frozen prefix
-claims to contain them.
+**What the hashed prefixes cover, and what they deliberately do not.** The plan's
+prefix stops above the delimited **run-state block**; the parity and VAPT evidence
+artifacts are frozen in full. Those three evidence prefixes have no post-`F0`
+mutation route. Candidate comments, docblocks and ticket-produced docs are swept
+for truth here but are not evidence prefixes. Findings, dispositions, reviewer
+conclusions and verdicts arise after the freeze and therefore live only in the
+plan's run-state block; no frozen prefix claims to contain them.
 
 **Every field in it is append-only.** Each is a list, each entry is written once
 and never edited, and a value that "changes" is a new entry — which is what makes
@@ -108,9 +111,12 @@ mutation-budget section is the sole definition of `mutation_round`: count only
 that active `run_id`'s batch entries. No artifact carries the count as a field;
 this schema stores only the partition key and underlying entries.
 
-A post-`F0` record mismatch, narrative edit or correction request ends the current
-run. Historical finding locators stay bound to their source manifest; they are
-not rewritten to match the candidate.
+After `F0`, any mismatch or change in a plan, parity or VAPT evidence prefix ends
+the current run. A candidate prose claim already false at `F0` does too. The only
+later prose route is the predeclared repair-induced impact slice in barrier 1; no
+correction request opens another sweep or another write barrier. Historical
+finding locators stay bound to their source manifest and are not rewritten to
+match the candidate.
 
 ## Freeze `F0`
 
@@ -214,20 +220,34 @@ manifest or an unreadable result after its schema correction ends the run.
 In order:
 
 1. Reconcile the three result sets and give every finding one disposition.
-2. If any finding concerns the frozen record, end the current run before writing.
+2. If any finding concerns a plan, parity or VAPT evidence prefix, or identifies
+   candidate prose that was already false at `F0`, end the current run before any
+   repository write. That is a pre-existing record defect, not a consequence of
+   the repair.
 3. Derive `mutation_round` by the spine's sole definition. If it is already 3 and
    a write is required, end the run.
 4. Create a per-run private temporary directory outside the worktree, accessible
    only to the current user. Its `packet.json` is the fix packet carrier and its
    opaque change-unit subpaths hold preimage contents. Failure to create or read
-   that carrier ends the run before mutation. Capture the **contents**, not the
-   digests, of every file the repair will change into it before mutating anything.
-   The manifest holds digests: once an uncommitted file is overwritten its
-   previous state is unrecoverable, and the question the packet exists to answer
-   — what did this look like before — becomes unanswerable.
-5. Apply at most one code-and-test repair batch inside the approved Design
-   Contract.
-6. Build `packet.json` in that carrier while changing the files; it cannot be
+   that carrier ends the run before mutation. Assign stable IDs to the planned
+   code/test change units and capture the **contents**, not the digests, of their
+   paths and the complete eligible prose corpus into it before mutating anything.
+   Step 5 isolates each prose entry's exact bytes from those captured images. The
+   manifest holds digests: once an uncommitted file is overwritten its previous
+   state is unrecoverable, and the question the packet exists to answer — what
+   did this look like before — becomes unanswerable.
+5. Before the first candidate write, derive the planned code/test units' affected
+   caller/contract closure and seal the finite `record_impact_basis`,
+   `record_impact_slice[]` and `record_impact_slice_digest` defined below. A slice
+   that is unbounded, incomplete, outside the approved Design Contract or unable
+   to prove every included claim true at `F0` ends the run under step 2.
+6. Apply one sealed candidate repair batch inside the approved Design Contract.
+   Apply the planned code/test units, recompute their actual affected closure,
+   and require it to remain inside the sealed basis before any prose write. Then
+   update or delete only a slice entry whose claim that repair actually made
+   false, and only through its predeclared causal code/test unit. Code/test writes
+   and their permitted prose consequences are one batch and one barrier.
+7. Build `packet.json` in that carrier while changing the files; it cannot be
    reconstructed afterwards from the diff. Pass its absolute path and expected
    digest read-only to the terminal reviewer, then remove the private directory
    after the verdict is appended or the run stops. It holds each finding, its
@@ -238,14 +258,14 @@ In order:
    carries its path, its kind, its preimage (or a deletion tombstone) and its
    postimage. Attribution is many-to-many: each change unit lists the finding IDs
    it serves, and each finding lists its change units.
-7. For each UI change, add its dependency-closed parity impact slice:
+8. For each UI change, add its dependency-closed parity impact slice:
    changed nodes, selectors, declarations, tokens, states, translation keys and
    affected owned-screen consumers.
-8. If code or tests changed, snapshot the repaired candidate as `F1`. Add its
+9. If the candidate changed, snapshot it as `F1`. Add its
    affected caller/contract closure to the fix packet: changed files, direct
    callers and exposed contracts. With no candidate change, retain `F0` and skip
    to terminal review.
-9. **Re-derive `F1`'s boundary records and compare them to PROVE's frozen
+10. **Re-derive `F1`'s boundary records and compare them to PROVE's frozen
    inventory by `boundary_id`.** A repair can add or move a route, middleware,
    rendering sink, outbound call or security configuration after the attacks ran.
    Use PROVE's record shape exactly; do not invent predicate aliases.
@@ -283,12 +303,107 @@ In order:
    `role:admin` cannot create a false stop, and no semantic-equivalence judgment
    is needed. A non-authorization boundary has an empty authorization-test list by
    PROVE's schema.
-10. Run only the affected deterministic commands, append the boundary comparison
+11. Run only the affected deterministic commands, append the boundary comparison
     and rerun evidence to the fix packet, then balance it. **A red command here
     ends the run unshipped.** It is not a finding to repair: the barrier has
     already spent its one repair, and fixing what the repair broke is the second
     repair this phase does not have. "A finding you can fix is work" governs
     BUILD, not a closed barrier.
+
+### The repair-induced prose impact slice
+
+This is the same dependency-closed mechanism as the parity impact slice, applied
+to candidate prose and sealed earlier because it grants write authority. It is
+not another record sweep.
+
+The allowed corpus is exact and finite: comments and docblocks in **every**
+candidate source or test path named by the approved Design Contract, plus every
+ticket-produced doc named by that contract. `allowed_paths[]` is the exact
+eligible-path projection of the Design Contract against `F0`, not a subset the
+repair author chooses. It never includes the plan, the parity artifact, the VAPT
+artifact, findings, dispositions, reviewer conclusions, `runs[]` or any other
+run-state entry. A required path outside that corpus or contract ends the run; it
+does not widen the corpus.
+
+Before the first candidate write, enumerate every comment/docblock or document
+assertion anchor in those allowed paths as `prose_inventory[]`. Partition that
+inventory into `record_impact_slice[]` — every claim whose subject intersects the
+planned code/test units' affected caller/contract closure — and
+`reasoned_exclusions[]`. The packet records `record_impact_basis` with the `F0`
+manifest ID, approved Design Contract digest, exact `allowed_paths[]`, stable
+affected symbol/contract IDs, planned code/test change-unit IDs, parser or search
+method and inputs, and the ordered inventory IDs. Each exclusion carries its
+inventory ID, path, anchor and the reason its claim cannot be affected. The
+enumerator must account for every parser-reported comment/docblock range and
+every prose assertion segment in a ticket-produced doc; if the repository's
+language or document shape cannot be enumerated completely, the slice is
+unbounded and the run stops.
+
+Each `record_impact_slice[]` entry has exactly:
+
+```text
+record_impact_id
+path
+kind: comment | docblock | ticket_doc
+stable_anchor: enclosing stable symbol/selector/heading plus unique F0 byte span
+f0_bytes
+f0_digest
+claim
+f0_truth_evidence
+causal_code_or_test_change_unit_id
+```
+
+`f0_bytes` is the exact byte content stored in the private carrier, not merely a
+digest. The anchor must resolve exactly once at `F0`; its byte span prevents a
+same-symbol ambiguity. Verify the atomic claim against `F0` and record stable
+evidence. If the claim is already false, it is the step-2 record finding and no
+candidate write occurs.
+
+Seal `record_impact_slice_digest` over the basis, ordered inventory, slice and
+exclusions under the manifest serialization. Before mutation, require all of the
+following mechanically:
+
+```text
+prose_inventory ids  ==  slice ids ∪ exclusion ids
+slice ids ∩ exclusion ids  ==  ∅
+allowed paths  ==  eligible source/test and ticket-doc paths in the Design Contract at F0
+enumerated anchors  ==  every parser/document prose range in every allowed path
+every inventory id resolves once
+every slice causal id resolves to one planned code/test change unit
+every slice F0 byte image and digest match F0
+```
+
+The digest and those set equalities seal membership before the first candidate
+write. No entry, path, anchor, causal edge or exclusion may be added, removed,
+reordered or replaced afterwards. If the actual repair reaches a subject outside
+the sealed affected closure, exposes an omitted claim, or otherwise shows the
+slice incomplete, end the run without a prose write. In particular, discovering
+an omitted entry after code mutation does not authorize a wider nominal batch.
+
+After the code/test units are applied, evaluate every slice claim and decide one
+`record_impact_results[]` row per slice ID before touching prose:
+
+```text
+record_impact_id
+post_code_claim_status: TRUE | FALSE
+action: NONE | UPDATE | DELETE
+causal_code_or_test_change_unit_id
+prose_change_unit_id | none
+f1_bytes_or_tombstone
+f1_digest_or_tombstone
+f1_truth_evidence
+```
+
+`TRUE` requires `NONE`. `FALSE` permits `UPDATE` or `DELETE` only when the stated
+predeclared code/test unit actually caused the falsification. Each resulting
+prose change is an ordinary packet change unit with exact `F0`/`F1` images,
+finding attribution, `record_impact_id` and a reciprocal causal edge to that
+code/test unit. A merely desirable cleanup, an already-false claim, an unproven
+causal edge or a prose change outside the slice ends the run. No prose edit may
+start until all rows and intended final byte images have been decided. Apply
+exactly those bytes, then require every resulting image and digest to match its
+row; once prose mutation starts the slice is still sealed, and there is no second
+sweep or repair.
 
 **To balance is to satisfy all four of these, arithmetically and without
 judgment.** The spine makes an unbalanced packet a stop; this is what it means:
@@ -310,14 +425,20 @@ break naive attribution, and their answers:
 | formatter or generator output | attributed as a mechanical consequence of the change that triggered it, or reverted before the packet closes |
 | a change serving no finding at all | **the balance check fails** — that is the hole this packet exists to close |
 
-Record text, comments, docblocks and artifact prefixes remain unchanged. An
-unbalanced packet or an unbounded parity impact ends the run.
+The plan, parity and VAPT evidence prefixes remain byte-identical. Candidate
+prose changes balance only when they satisfy the sealed slice rules above; their
+change units participate in the same four arithmetic checks as every other
+change. Reciprocal slice/causal IDs are resolved by the existing referenced-unit
+check. An unbalanced packet, an invalid prose slice or an unbounded parity impact
+ends the run.
 
 `fix_packet_digest` is the `ship-ticket-manifest-v1` SHA-256 digest over the
 packet's findings, dispositions, change units — each with its path, kind,
-preimage and postimage — and its attribution map, under the manifest's
-serialization. If no code or test changed there is no packet: use `F0` as the
-candidate and record `fix_packet_digest: none`.
+preimage and postimage — its attribution map, affected closure,
+`record_impact_basis`, ordered prose inventory, sealed slice,
+`record_impact_slice_digest`, exclusions and results, under the manifest's
+serialization. If the candidate did not change there is no packet: use `F0` as
+the candidate and record `fix_packet_digest: none`.
 
 ## Round 2 — the terminal reviewer
 
@@ -336,6 +457,8 @@ Give the terminal reviewer:
 - the balanced fix packet and affected caller/contract closure when barrier 1
   changed the candidate; otherwise `none` and `[]`;
 - pass A's complete parity result and any barrier-1 parity impact slice;
+- the sealed prose inventory, impact slice, exclusions and result rows when
+  barrier 1 changed the candidate;
 - the frozen runtime attack evidence.
 
 The reviewer answers:
@@ -349,6 +472,7 @@ fix_packet_digest | none
 frozen_record_digest
 frozen_record_status: UNCHANGED | MISMATCH
 change_outcome: PASS | FAIL
+record_impact_outcome: PASS | FAIL | NOT_TRIGGERED
 parity_outcome: PASS | FAIL | NOT_TRIGGERED
 attack_review_outcome: PASS | FAIL | NOT_TRIGGERED
 security_outcome: PASS | FAIL | NOT_TRIGGERED
@@ -370,11 +494,21 @@ evidence never covered. For parity it consumes the complete `F0` comparison and
 checks only the recorded impact slice against the pinned reference. For security
 it reviews the runtime evidence that PROVE already generated.
 
+For prose it performs no second sweep and creates no work. It examines the sealed
+inventory and impact slice once: the actual closure must fit the predeclared
+basis; every edited entry must have been true at `F0`, made false by its exact
+causal code/test unit, and true or removed at `F1`; every unchanged slice entry
+must still be true; every exclusion must still be valid; and no candidate prose
+outside the slice may have changed. A residual false claim, an invalid exclusion
+that exposes newly false prose, an uncovered causal edge or any other incomplete
+slice is a terminal finding and `record_impact_outcome: FAIL`. It is never repaired
+in this run. With no barrier-1 candidate change the outcome is `NOT_TRIGGERED`.
+
 PASS requires an unchanged frozen record, every applicable check covered or its
 documented companion-unavailability degradation declared, no findings and PASS
-for every triggered terminal sub-outcome. Anything else is terminal FAIL. Append
-the returned verdict once to `outcomes[]`; make no code, test or frozen-narrative
-change. On FAIL, end the current run.
+for every triggered terminal sub-outcome, including the prose impact check.
+Anything else is terminal FAIL. Append the returned verdict once to `outcomes[]`;
+make no candidate or frozen-prefix change. On FAIL, end the current run.
 
 ## Dispositions at barrier 1
 
@@ -386,5 +520,6 @@ change. On FAIL, end the current run.
 | **reject — out of scope** | real but belongs elsewhere | approved exclusion or ticket key |
 | **human waiver** | an `[NN]` rule would bend | stop for the user's decision |
 
-A record finding has no repair disposition inside REVIEW. A finding contradicting
-an `[NN]` rule is never skipped.
+A pre-existing record finding has no repair disposition inside REVIEW. A sealed
+repair-induced prose consequence is a causal change unit, not that disposition.
+A finding contradicting an `[NN]` rule is never skipped.
