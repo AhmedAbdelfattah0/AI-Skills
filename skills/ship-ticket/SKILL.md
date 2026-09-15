@@ -230,12 +230,25 @@ becomes a plan risk, **WAIT_FOR_USER**, or **FAIL**; it does not create another 
 Load [references/plan.md](references/plan.md) and
 [references/codex-cli.md](references/codex-cli.md).
 
-Research only. Draft the complete plan, run deterministic path/command/dependency
-prechecks, then send the finished draft to Codex for a bounded read-only critique
-when available. Reconcile each critique finding into the draft or reject it with
-checkable evidence.
+When the host exposes native Plan Mode, start the predeclared PLAN timing and
+then invoke `EnterPlanMode` before any PLAN research unless it is already active.
+Calling this phase PLAN is not a substitute for changing the host mode. Keep
+native Plan Mode active through research, drafting, deterministic prechecks, the
+bounded read-only Codex critique, and reconciliation.
 
-Present the reconciled plan for human approval. This is **WAIT_FOR_USER**.
+Present the reconciled plan with `ExitPlanMode`; that native transition is the
+human approval handoff and holds `WAIT_FOR_USER` until answered. Do not exit Plan
+Mode before Codex's findings have been reconciled, and do not treat Codex's
+response as approval.
+
+There is exactly one plan approval. When `ExitPlanMode` returns approved,
+transition to **CONTINUE** and execute the after-approval actions immediately.
+Never ask the user to also say “go”, “continue”, or “confirm”. In the headless
+fallback, the first explicit approval of the presented reconciled plan has the
+same effect and must not be followed by another approval prompt.
+
+If native Plan Mode is unavailable, follow the headless fallback below and make
+the ordinary approval request **WAIT_FOR_USER**.
 
 After approval:
 
@@ -246,7 +259,8 @@ After approval:
   approved build sequence.
 
 In a headless environment, branch, write the plan with approval status pending,
-and use **WAIT_FOR_USER**; do not implement.
+and use **WAIT_FOR_USER**; do not implement. This fallback does not weaken the
+approval gate or permit implementation before approval.
 
 ## BUILD
 

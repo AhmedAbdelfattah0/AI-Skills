@@ -8,6 +8,34 @@ sequence it* actually happens. The plan is also the handoff that makes model
 tiering real — strong plans, medium builds from the plan. Review passes are
 excluded from tiering; they run at constant effort.
 
+## Native Plan Mode is the mechanical boundary
+
+When `EnterPlanMode` and `ExitPlanMode` are available, use them. After the
+predeclared PLAN timing markers, invoke `EnterPlanMode` before PLAN research or
+critique unless the session is already in that mode. The PLAN phase name, a
+read-only promise, and a Codex critique are not replacements for the host
+permission mode: Plan Mode mechanically restricts Claude to read-only
+exploration.
+
+Remain in Plan Mode while drafting and while Codex critiques the finished draft.
+Reconcile the critique there, then invoke `ExitPlanMode` with the reconciled plan.
+That tool presents the approval surface and exits only through the host's approval
+flow. Do not emit a separate approval message and end the turn before calling it.
+The pending tool approval is the PLAN phase's `WAIT_FOR_USER` state.
+
+Approval is edge-triggered and consumed once. An approved `ExitPlanMode` result
+immediately authorizes the already presented plan: close PLAN telemetry, create
+the branch, persist the approved plan and continue BUILD. Do not report that the
+plan is approved and then request “go”, “continue”, “confirm”, or any equivalent
+second signal. For the headless fallback, one explicit user approval of the
+reconciled plan is likewise sufficient; a product-answer or clarification given
+before the complete plan was presented is not plan approval.
+
+If the native transition tools are absent, use the spine's headless fallback:
+keep research read-only, run the critique, create the ticket branch before saving
+the pending artifact, and request human approval without implementing. Record
+`native_plan_mode: unavailable` in the plan metadata.
+
 ## The template
 
 Use it exactly — same headings, same order, so every plan reads the same way.
@@ -18,6 +46,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 <!-- the YAML header above this body carries:
      run_id: <opaque ID created when workflow timing began>
      timing_telemetry: active|degraded
+     native_plan_mode: active|already_active|unavailable
      approval_status: pending|approved   a human approval flips this, and only this
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer

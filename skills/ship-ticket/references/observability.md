@@ -80,6 +80,22 @@ Use a unique event ID for every occurrence, for example
 `prove-repository-checks-1`. Do not create an interval for every shell command or
 status message; the extra bookkeeping would distort the workflow being measured.
 
+### Native Plan Mode and logging
+
+Native Plan Mode permits read-only shell commands and must not be bypassed to
+write telemetry. Immediately before `EnterPlanMode`, start the PLAN phase and a
+`native_plan_mode` activity with `--metric write_suspended=true`. Do not invoke
+the logger again while Plan Mode is active. Immediately after approved
+`ExitPlanMode` returns, end that activity and the PLAN phase as the first two
+actions, with `--metric approval=approved`, then continue directly into the
+after-approval work. Do not open another approval wait.
+
+That activity's wall time intentionally includes research, Codex critique and the
+human approval wait because the read-only boundary prevents trustworthy nested
+writes. While it is open, the summary reports `planning_or_approval`, not
+`open_without_wait`. If Plan Mode is unavailable, log PLAN activities and the
+ordinary approval wait normally.
+
 Useful end metrics are:
 
 - REVIEW phase: `review_profile=standard|elevated`, `finding_count=<n>`,
@@ -132,10 +148,10 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs summary \
 ```
 
 The JSON summary reports phase/activity/wait durations, open intervals and their
-age, `waiting_runs`, `open_without_wait`, repair and confirmation counts,
-optional-review degradations, review medians, and the median REVIEW-to-BUILD
-ratio. `active_or_unexpected_stop` is expected during live work; if its age keeps
-growing after the agent turn ended, it is a continuation failure.
+age, `planning_runs`, `waiting_runs`, `open_without_wait`, repair and confirmation
+counts, optional-review degradations, review medians, and the median
+REVIEW-to-BUILD ratio. `active_or_unexpected_stop` is expected during live work;
+if its age keeps growing after the agent turn ended, it is a continuation failure.
 
 One real ticket is a smoke test. Use three to five representative tickets before
 judging the redesign. The redesign is working when:
