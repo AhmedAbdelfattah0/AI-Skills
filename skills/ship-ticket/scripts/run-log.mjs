@@ -268,20 +268,23 @@ function buildRun(ticket, runId, rows) {
   );
   const workflow = intervals.find((interval) => interval.kind === 'workflow');
   const hasOpenWait = openIntervals.some((interval) => interval.kind === 'wait');
+  const hasOpenNativePlan = openIntervals.some(
+    (interval) => interval.kind === 'activity' && interval.name === 'native_plan_mode',
+  );
   const oldestOpenTimestamp = openIntervals
     .map((interval) => Date.parse(interval.started_at))
     .filter(Number.isFinite)
     .sort((left, right) => left - right)[0];
+  let openState = 'closed';
+  if (openIntervals.length > 0 && hasOpenWait) openState = 'waiting';
+  else if (openIntervals.length > 0 && hasOpenNativePlan) openState = 'planning_or_approval';
+  else if (openIntervals.length > 0) openState = 'active_or_unexpected_stop';
 
   return {
     ticket,
     run_id: runId,
     outcome: workflow?.outcome ?? (openIntervals.length > 0 ? 'open' : 'unknown'),
-    open_state: openIntervals.length === 0
-      ? 'closed'
-      : hasOpenWait
-        ? 'waiting'
-        : 'active_or_unexpected_stop',
+    open_state: openState,
     oldest_open_age_ms: oldestOpenTimestamp === undefined
       ? null
       : Math.max(0, Date.now() - oldestOpenTimestamp),
@@ -325,6 +328,7 @@ function aggregate(runs) {
     completed_runs: completed.length,
     failed_runs: runs.filter((run) => run.outcome === 'fail').length,
     open_runs: runs.filter((run) => run.open_intervals.length > 0).length,
+    planning_runs: runs.filter((run) => run.open_state === 'planning_or_approval').length,
     waiting_runs: runs.filter((run) => run.open_state === 'waiting').length,
     open_without_wait: runs.filter(
       (run) => run.open_state === 'active_or_unexpected_stop',

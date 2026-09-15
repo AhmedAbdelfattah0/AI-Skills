@@ -294,12 +294,24 @@ A phase announcement, finding, tool result, timeout fallback or degradation repo
 is not a stopping condition. Required capability is preflighted before REVIEW;
 optional Codex/concurrency loss degrades instead of serializing or ending the run.
 
+*PLAN means native Plan Mode when the host provides it*: after the predeclared
+timing marker, `EnterPlanMode` runs before PLAN research and `ExitPlanMode`
+presents the reconciled, Codex-critiqued plan for human approval. A phase heading
+or a read-only prompt is not the permission mode. Headless environments retain
+the pending-plan approval fallback and never implement before approval.
+Plan approval is consumed exactly once: an approved `ExitPlanMode` result, or the
+single headless approval response, continues directly into execution. A second
+“say go”/confirmation stop is a workflow defect.
+
 *Measure the state machine*: `scripts/run-log.mjs` records workflow, phase,
 expensive-activity and legitimate-wait intervals under the target repository's
 Git metadata (`ai-skills/ship-ticket/`), never in the worktree. This is operational
 state rather than a spec artifact, so it does not introduce another `.specs`
 root or alter candidate identity. An open phase with no open wait identifies an
 accidental stop; logging failure is declared and never blocks execution.
+Because native Plan Mode permits only read-only shell activity, telemetry starts
+a `native_plan_mode` interval before entry and closes it immediately after
+approved exit; no logger write may be used to bypass that boundary.
 
 PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
 one targeted confirmation. Read-only checks and compact append-only execution
