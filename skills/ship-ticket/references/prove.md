@@ -46,49 +46,33 @@ one. CORS, header, cookie, secret-wiring and ACL/policy surfaces map to
 `security-config`; an egress operation carrying credentials or user data maps to
 `outbound-data`. Never store a descriptive family label in `kind`.
 
-**Record every boundary in one canonical shape, and freeze those records with the
-inventory.** REVIEW compares the repaired candidate to this exact data; it never
-normalizes human descriptions or decides that two permission labels mean the
-same thing. This replaces the prior key that embedded a human permission label in
-boundary identity. The record is:
+**Record every boundary in one stable shape.** REVIEW uses this evidence without
+re-running the attacks:
 
 ```text
-boundary_id             kind + NUL + identity
-kind                    exact `kind` code from vapt's trust-boundary table
-identity                exact stable surface name used by the repository
-rule_ids[]               applicable VAPT rule IDs, sorted bytewise
-positive_test_ids[]      test name + NUL + body digest, sorted bytewise
-refusal_test_ids[]       test name + NUL + body digest, sorted bytewise
-authorization_test_ids[] authorization-test name + NUL + body digest, sorted bytewise
-implementation_inputs[] path + content digest for the surface implementation
-control_inputs[]         path + content digest for every transitive control owner
+boundary_id          stable repository-native identity
+kind                 exact kind code from vapt's trust-boundary table
+surface              route, handler, sink, job or configuration key
+rule_ids[]            applicable VAPT rule IDs
+control_paths[]       implementation and transitive control owners
+positive_tests[]      test names and outcomes
+refusal_tests[]       test names and outcomes
+authorization_tests[] test names and outcomes, or []
+commands[]            exact executed commands and results
 ```
-
-Each test ID pairs the committed test name with the SHA-256 digest of the test's
-**body** — its own source text from its declaration through its closing delimiter,
-never the whole file's. The digest is the coverage identity; the name is its
-human locator. REVIEW compares the digest multiset first within each boundary and
-polarity list, then uses names to report unchanged or renamed tests. A body edit
-therefore changes coverage even when the name stays fixed, while a name-only edit
-is recorded as a rename and keeps coverage. A whole-file digest would swing the
-other way and stop the run for an unrelated edit elsewhere in the same file.
 
 Use the route method plus path template, middleware export, sink symbol,
 configuration key, outbound client operation, job/listener name or equivalent
-repository-native identifier. If no stable identity exists, record that failure
-instead of inventing one; REVIEW treats it as a new boundary.
+repository-native identifier. If no stable identity exists, record the exact
+limitation rather than inventing one. A REVIEW repair touching a boundary reruns
+its mapped tests; a newly introduced boundary receives its applicable attack
+coverage before targeted confirmation.
 
-`boundary_id` deliberately excludes authorization prose. Authorization is
-represented by executable test IDs; for a boundary with no authorization
-concern, `authorization_test_ids` is exactly `[]`. A code alias such as `admin`
-versus `role:admin` changes neither field. If its implementation changed, REVIEW
-re-runs the same mapped tests and records their evidence instead of making a
-semantic-equivalence judgment.
-
-Both loops append one `batch` entry carrying the active `run_id` per changed batch
-and are bounded by that run's mutation budget. PROVE prepares screen
-classifications and pinned inputs; the complete screen comparisons happen once,
-inside round-1 pass A.
+PROVE may apply at most two consolidated repair batches. Each batch fixes every
+currently known failure, then rederives affected inventories and reruns affected
+commands. Needing a third candidate-changing batch is `FAIL`. PROVE prepares
+screen classifications and pinned inputs; the complete screen comparison belongs
+to REVIEW's independent primary reviewer.
 
 ## The static proof
 
@@ -106,8 +90,8 @@ proven, so the runtime test is checked against a claim you actually made.
 
 **Emit a stable security-evidence map** listing each in-scope surface, every
 transitive control owner, the applicable rule-inventory version and the named
-tests. Bind the artifact to the reviewed file contents through the review
-manifest; do not maintain a second scope-binding ceremony.
+tests. Bind the artifact to the reviewed file contents through REVIEW's candidate
+ID; do not maintain a second scope-binding ceremony.
 
 A fix here is production code: it re-runs the repo's commands for the files it
 touched.
@@ -131,16 +115,16 @@ never to skip it.
 **Every `VAPT-*` class whose surface the diff touches is in force, in every run.**
 Any class not run is declared inapplicable *with evidence*.
 
-**`security-sensitive` requires an explicit security outcome in terminal review
-and changes no attack coverage.** There is no label-selected reduced set; only a
+**`security-sensitive` requires explicit attack and security outcomes in the
+primary review and changes no attack coverage.** There is no label-selected reduced set; only a
 missing-engine fallback may reduce execution, and that reduction is declared by
 name.
 
 ### Local only
 
 Attack a **local, disposable instance**. Never production, never shared staging,
-no matter who owns it. Only a shared environment reachable → ✋ STOP and ask. App
-cannot be run locally at all → ✋ STOP.
+no matter who owns it. Only a shared environment reachable, or an app that cannot
+run locally at all → `WAIT_FOR_USER` with the one safe capability needed.
 
 The artifact records stable rule IDs, route names, test names, control symbols
 and outcomes. Do not maintain hand counts or use mutable line numbers as the
@@ -167,8 +151,8 @@ carries its own full tests.
 Enumerating surfaces and designing abuse cases are read-only and parallelize
 cleanly — the count is in the plan's section 8. **Running** the attacks does not:
 concurrent workers share the port, the disposable datastore, the principal
-fixtures, and each other's destructive state. **Live attacks run serially, full
-stop.** (`vapt`'s risk-ordered waves belong to its AUDIT mode, where the run owns
+fixtures, and each other's destructive state. **Live attacks run serially,
+without exception.** (`vapt`'s risk-ordered waves belong to its AUDIT mode, where the run owns
 its environment. This is GATE mode over one ticket's diff.)
 
 ### Fixes
@@ -218,12 +202,12 @@ reduced set is committed and green and every unexercised rule or family is named
 with its cause. Otherwise use `outcome: FAIL`.
 
 PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
-Hand the frozen surface map, rule-to-test map, test outcomes and production
-control paths to REVIEW's single terminal reviewer. That reviewer returns
+Hand the final surface map, rule-to-test map, test outcomes and production control
+paths to REVIEW's independent primary reviewer. That reviewer returns
 `attack_review_outcome`, and `security_outcome` when the plan is
-security-sensitive, without running the attacks again. The VAPT artifact remains
-whole-file frozen; those terminal outcomes are appended only to the plan's
-run-state `outcomes[]`.
+security-sensitive, without running the attacks again. A REVIEW repair that
+touches a mapped boundary reruns only its affected abuse tests; a new boundary
+receives its applicable attack coverage before confirmation.
 
 ### Enforcement is machine, not honour-system
 
@@ -255,9 +239,9 @@ and get no exemption. That single result is the evidence for the rule pass's
 affected tests. It is its own step precisely so a change that adds tests but
 touches no trust boundary still produces `TEST` evidence rather than an empty row.
 
-**Docs, before the freeze.** Where the diff touches docs surfaces, run the full
+**Docs, before REVIEW.** Where the diff touches docs surfaces, run the full
 `docs-accuracy` guard — that is the `DOC` row's evidence, and a row backed only by
 a rename grep would be overclaiming. **Additionally, wherever this ticket renamed
 or changed documented behaviour** — a symbol, endpoint, flag or default — grep
-every docs surface for the old name and **fix it now**. A doc edit made after the
-review is unreviewed content in the commit.
+every docs surface for the old name and **fix it now**. A doc edit made after
+REVIEW passes would be unreviewed content in the commit.

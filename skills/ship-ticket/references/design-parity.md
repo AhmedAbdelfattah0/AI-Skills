@@ -1,4 +1,4 @@
-# Design parity — one complete comparison and one terminal impact slice
+# Design parity — one complete comparison and one repair impact slice
 
 Loaded during PROVE when `ui_required`. The reference pin happens earlier, in
 [understand.md](understand.md).
@@ -16,7 +16,7 @@ the enumerated affected consumers. That ticket performs one complete comparison
 over that list and cannot create another consumer sweep for the same component
 change.
 
-## What PROVE produces before `F0`
+## What PROVE produces before REVIEW
 
 Create `.specs/design-parity/<TICKET>.md` with:
 
@@ -25,16 +25,14 @@ Create `.specs/design-parity/<TICKET>.md` with:
 - its pinned reference path, or its approved unreferenced classification;
 - accepted deviations already approved by a named human.
 
-Formatters and generators run before the record sweep and inside the same
-pre-`F0` batch, after the mutation budget has been read. The artifact's reviewed
-prefix is the whole file and is frozen with the rest of the record before `F0`.
-Pass A's result and the terminal verdict are appended to the plan's run-state
-block; they reference this artifact and its digest instead of rewriting it. This
-replaces the distributed empty result slots.
+Formatters, generators and documentation updates finish in PROVE. The primary
+reviewer's comparison result is appended to the plan's execution block with the
+candidate ID and artifact digest; do not rewrite the evidence artifact to insert
+a verdict.
 
 Use stable component, selector, token, state and translation-key anchors. A line
-number may be retained only as a historical locator bound to `F0`; it is never
-updated to follow later edits. Persist lists and derive counts.
+number is only a locator bound to the reviewed candidate. Persist lists and
+derive counts.
 
 ## Unreferenced screens
 
@@ -50,13 +48,13 @@ design_system_sources
 ```
 
 It remains bound by the pinned design system, tokens, shared components and
-conventions. If literal parity is required, stop before implementation and obtain
+conventions. If literal parity is required, use `WAIT_FOR_USER` before implementation and obtain
 a committed reference.
 
-## Round 1 — the sole complete comparison
+## Primary review — the sole complete comparison
 
-Pass A receives the pinned reference, implementation, acceptance criteria and
-comparison depth, with no BUILD conclusions.
+The independent primary reviewer receives the pinned reference, implementation,
+acceptance criteria and comparison depth, with no BUILD conclusions.
 
 For each reference-backed owned screen, compare the complete implementation
 against `design_ref` at all three layers:
@@ -68,17 +66,17 @@ against `design_ref` at all three layers:
 - **Behaviour + i18n:** interactions, state and every locale and text direction
   the project ships. Omit only dimensions the project genuinely does not ship.
 
-Run this complete comparison once, over `F0`.
+Run this complete comparison once, over the initial reviewed candidate.
 
 **Use the repository's parity harness first where it compares against the pin.**
 Run its render, snapshot, DOM or component comparisons across the owned screens,
 required states, shipped locales and directions it covers, bind the output to
-`F0`, and hand those mechanical differences to pass A as deterministic evidence.
+the candidate ID, and hand those mechanical differences to the primary reviewer.
 On a bilingual RTL project this is the difference between reading every node twice
 by hand and reading only what a harness cannot see.
 
-**A harness substitutes for a dimension only if it demonstrably compares the `F0`
-implementation against the pinned `design_ref` for that dimension, state and
+**A harness substitutes for a dimension only if it demonstrably compares the
+reviewed candidate against the pinned `design_ref` for that dimension, state and
 locale.** This is the whole test, and most harnesses fail it: a snapshot suite
 compares the implementation to *its own committed snapshot*, which moves when the
 implementation moves. Such a suite proves the screen did not change unintentionally
@@ -94,14 +92,16 @@ Whatever the harness covered, the model's own read always keeps visual hierarchy
 interaction feel, and rendering defects outside the harness's demonstrated scope.
 
 If no suitable harness exists, declare `PARITY | MANUAL — no repository harness`.
-The complete manual comparison still runs; the ~20-minute REVIEW target is not
-assured.
+The complete manual comparison still runs. During UNDERSTAND, set and record a
+realistic primary-review ceiling from the number of owned screens, states,
+locales and directions rather than discovering the default is too short after
+dispatch.
 
-Pass A returns, per screen:
+The primary reviewer returns, per screen:
 
 ```text
 screen
-source_manifest_id
+candidate_id
 reviewer_identity
 grade
 divergences[]: id · layer · severity · stable reference anchor · stable implementation anchor
@@ -109,12 +109,13 @@ divergences[]: id · layer · severity · stable reference anchor · stable impl
 
 Grades are **Faithful**, **Minor**, **Major** or **Not-built**. Faithful and Minor
 may pass. Every residual Major or Not-built result requires a human-approved
-deviation already present before `F0`.
+deviation already present before the reviewed candidate was captured.
 
-## Barrier 1 — derive the impact slice while repairing
+## Review repair — derive the impact slice
 
-Never repeat the complete screen comparison after round 1. For each UI change,
-the fix packet records the narrowest dependency-closed slice that may have moved:
+Never repeat the complete screen comparison after the initial review. For each UI
+repair, the execution event records the narrowest dependency-closed slice that
+may have moved:
 
 - template or DOM change — the changed subtree and its direct composition/layout
   contracts;
@@ -125,33 +126,33 @@ the fix packet records the narrowest dependency-closed slice that may have moved
 - shared component change — every occurrence of that component inside the owned
   screens of this ticket.
 
-This slice replaces the later complete comparison. If its boundary cannot be
-proved, terminal parity is FAIL.
+This slice replaces a later complete comparison. If its boundary cannot be
+proved, confirmation parity is FAIL.
 
-## Round 2 — terminal parity outcome
+## Targeted confirmation
 
-The terminal reviewer consumes pass A's complete `F0` result. When barrier 1 did
-not change parity inputs, that result directly covers the final candidate.
+The primary review result directly covers the final candidate when REVIEW makes
+no UI repair.
 
-When parity inputs changed, compare only the recorded impact slice against the
-pinned reference, at the affected layers and in every applicable locale and
-direction. Resolve each round-1 divergence touched by the repair and report any
-regression inside the slice.
+When parity inputs changed, the same independent primary reviewer compares only
+the recorded impact slice against the pinned reference, at the affected layers
+and in every applicable locale and direction. Resolve each initial divergence
+touched by the repair and report any regression inside the slice.
 
-The final per-screen grade is derived from the round-1 result plus those targeted
-resolutions. The terminal reviewer returns `parity_outcome: PASS | FAIL |
-NOT_TRIGGERED` as part of the overall terminal verdict. There is no later parity
-dispatch.
+The final per-screen grade is derived from the initial result plus those targeted
+resolutions. The reviewer returns `parity_outcome: PASS | FAIL | NOT_TRIGGERED`
+inside its confirmation. There is no later parity dispatch.
 
 ## CI
 
 Where a merge-blocking artifact check exists, it validates:
 
 - `persisted ui_required OR the repository's view-layer detector`;
-- the artifact and its immutable-prefix digest;
-- a complete round-1 result in the plan's run-state block, bound to `F0`;
-- the recorded terminal impact slice there when UI changed;
-- `parity_outcome: PASS` there, bound to the final candidate manifest.
+- the artifact and its content digest;
+- a complete primary-review result in the plan's execution block, bound to the
+  initial candidate ID;
+- the recorded confirmation impact slice there when UI changed;
+- `parity_outcome: PASS` there, bound to the final candidate ID.
 
 Missing or unparseable metadata fails closed. If the check is absent, declare
 that once and do not wait for it.

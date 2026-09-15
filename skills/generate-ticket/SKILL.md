@@ -221,9 +221,8 @@ in order:
 7. **Invariants & security** — single-writer rules, tenant-scoping/RLS,
    fail-closed secrets, server-side validation, idempotency, audit. Anything that,
       if violated, is a correctness or security bug. Flag security-sensitive tickets
-   so ship-ticket routes them to its strong model and requires an explicit security
-   outcome in the terminal review. The flag changes neither which attack classes
-   run nor how many reviewers are dispatched.
+   so ship-ticket selects elevated review and requires explicit attack and security
+   outcomes. The flag changes reviewer redundancy, not which attack classes run.
    If the ticket crosses a trust boundary, name the **abuse cases** it must
    survive in the implementer's own words — "user B must not read user A's
    invoice", "`role` submitted in the body must be ignored" — so the attack

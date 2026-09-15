@@ -16,10 +16,14 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 # Plan — <TICKET>: <ticket title>
 
 <!-- the YAML header above this body carries:
+     run_id: <opaque ID created when workflow timing began>
+     timing_telemetry: active|degraded
      approval_status: pending|approved   a human approval flips this, and only this
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
-     (no mutation_round field — the spine owns the sole derivation)
+     review_profile: STANDARD|ELEVATED
+     review_profile_reasons: [<evidence-backed trigger>]
+     review_timeouts: {primary: 12m, optional: 10m, confirmation: 6m}
      owned_screens:                      one entry per screen:
        - impl: <path>
          reference: <path or null>
@@ -28,9 +32,10 @@ Use it exactly — same headings, same order, so every plan reads the same way.
          #   carve_out_approved_by: <a named human>
          #   carve_out_date: <YYYY-MM-DD>  -->
 
-**Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no>
-<security-sensitive: yes requires an explicit terminal security outcome. It
-changes neither attack coverage nor reviewer count.>
+**Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
+<STANDARD/ELEVATED>
+<Security-sensitive selects ELEVATED and requires explicit attack and security
+outcomes. It does not change attack-class applicability.>
 
 ## 1. What & why (read this first)
 <2–4 plain sentences: what the user gets when this is done, and the approach in
@@ -69,31 +74,26 @@ plan carries no cross-model review>
 | <blocker: step 2 imports X, which step 4 creates> | incorporated | resequenced — X now lands in step 1 |
 | <minor: extract a shared helper> | rejected | one call site today; YAGNI until there's a second |
 
-## 8. What runs concurrently later
-| Stage | Fans out by | Scope for this ticket |
+## 8. Proof and review routing
+| Work | Scope for this ticket | Execution |
 |---|---|---|
-| round-1 parity | reference-backed owned screen | <list the screen paths, or "n/a — no UI"> |
-| attack inventory + design | trust boundary | <list the surfaces, or "n/a"> |
-| the rule pass | rule family | <list the families the diff puts in force> |
-
-Live attacks stay serial regardless — shared port and datastore. The screen list
-drives one complete parity comparison; later UI checking is limited to the
-barrier-1 impact slice.
+| parity | <reference-backed screen paths, or not triggered> | primary reviewer performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
+| attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial |
+| rule coverage | <families and specialist selected> | primary reviewer checks each applicable row in the same semantic read |
+| optional second opinion | <profile reason or not triggered> | ELEVATED only, concurrent with the primary reviewer |
 
 <!-- RUN-STATE:BEGIN -->
-<!-- Append JSON-lines entries here according to review.md; never edit an
-     existing entry. This block is outside the frozen narrative digest and
-     replaces implicit run-state placement. -->
-<!-- After approval, the first entry for each execution is a run START with a
-     new opaque run_id and approved_plan_digest. Every later entry carries it. -->
+<!-- Append one compact JSON object per execution event; never edit or reorder
+     an existing entry. The event vocabulary is defined in ship.md. -->
+<!-- After approval, append START with the workflow run_id and
+     approved_plan_digest. Every later event carries the same run_id. -->
 <!-- RUN-STATE:END -->
 ```
 
-When the human approves an execution, append its `run` `START` entry before any
-post-approval phase writes another run-state object. A later execution of the
-same ticket gets a new `run_id`; it never edits or clears a prior run's entries.
-The active run is the final appended `START` entry. Approval of prose without the
-matching start entry is not an executable run.
+When the human approves an execution, append `START` before another event using
+the run ID already created by workflow telemetry. A later execution of the same
+ticket gets a new `run_id`; it never edits or clears prior entries. Approval
+without the matching start event is not executable.
 
 ## The `Par` column
 
@@ -140,7 +140,7 @@ clear of them starts immediately. If a file's dependency is unclear, it waits.
 
 What genuinely cannot overlap: verifying against the real endpoint, and attacking
 it. And if the shape is *not* settled — the ticket is vague, or it depends on a
-decision nobody has made — that is a *Risks* row or a ✋ STOP, not a parallelism
+decision nobody has made — that is a *Risks* row or `WAIT_FOR_USER`, not a parallelism
 problem. Building both halves against different guesses is worse than serialising.
 
 ## Formatting rules that keep it readable

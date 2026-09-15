@@ -51,8 +51,8 @@ Artifacts live in `.specs/vapt/` — `<TICKET>.md` per gate run, `surfaces.md` +
 `findings.md` for the audit.
 
 When ship-ticket invokes GATE mode, use that caller's canonical boundary-record
-shape so its later `F0`/optional-`F1` comparison consumes the same inventory VAPT
-attacked.
+shape so its reviewer consumes the same inventory VAPT attacked and any review
+repair can rerun the mapped boundary tests.
 
 ---
 
@@ -271,8 +271,9 @@ Use `outcome: FAIL` for anything else.
 
 Security sensitivity never changes VAPT coverage. VAPT runs attacks and produces
 runtime evidence; it does not dispatch a reviewer or attest to its own result.
-When ship-ticket invokes it, that skill's terminal reviewer judges the frozen
-evidence together with the repaired candidate.
+When ship-ticket invokes it, that skill's independent primary reviewer judges the
+evidence together with the candidate. A review repair touching a mapped boundary
+reruns its affected abuse tests before targeted confirmation.
 
 ## STEP 8 — CI enforcement (this is what makes it real)
 
@@ -354,7 +355,7 @@ failure, not a shortcut.
 
 - **Write secure code in the first place** — that's `security`. This runs after.
 - **Enforce static rules on the diff** — that's `backend-code-quality`
-  (`BE-SEC-*`) in ship-ticket's round-1 rule pass.
+  (`BE-SEC-*`) in ship-ticket's checklist-backed primary review.
 - **Read the whole codebase for vulnerabilities** — that's `security-audit`.
 - **Test functionality** — the repo's own unit and integration tests own that.
   Every test this skill writes asserts a *refusal* or a *leak*, never a feature.

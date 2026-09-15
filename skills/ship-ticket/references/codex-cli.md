@@ -1,7 +1,9 @@
 # Talking to Codex — one CLI contract, two touchpoints
 
-Codex is asked twice, for different things, through different carriers. **What
-the CLI does is identical; what happens on failure is not.** Keep both halves.
+Codex has two possible touchpoints, for different things and through different
+carriers: the PLAN critique when available, and an optional REVIEW opinion only
+for elevated risk. **What the CLI does is identical; what happens on failure is
+not.** Keep both halves.
 
 Codex is always a **contributor, never an approver**. It critiques the plan and
 the diff; it never approves either, and its absence degrades the review loudly
@@ -148,49 +150,45 @@ the ticket requires — surface the disagreement and let the user decide. If the
 critique changes the approach materially, **redraft before presenting**: the user
 approves the reconciled plan, not the draft plus a list of things you would change.
 
-## Touchpoint 2 — pass B, the diff review
+## Touchpoint 2 — the elevated second opinion
 
-Needs **only the `codex` binary**. A missing `codex-delegate` costs the plan
-critique and leaves this intact — never disable both because one is absent.
+Needs **only the `codex` binary**. A missing `codex-delegate` costs the PLAN
+critique and leaves this route intact.
 
-**It runs once**, in round 1 over `F0`, concurrently with pass A and pass C. Run
-it from the repository root in the background because it is routinely the
-longest round-1 pass. Give it the complete retrieval recipe, ticket context and
-bounded finding request. It has no terminal-review or signing role.
+This touchpoint runs only when REVIEW selects `ELEVATED`. Start it concurrently
+with the required primary reviewer. It is a free-form second opinion, not another
+rule checklist and never the final approver. A standard ticket does not dispatch
+it.
 
 **`codex exec -s read-only` is the preferred carrier** — measured ~1.3x faster
-than `codex review` on identical input (289s vs 384s), because you hand it the
-diff instead of having it rediscover the scope. `codex review` remains valid.
-Either is acceptable; what is not acceptable is inheriting the global effort.
+than `codex review` on identical input (289s vs 384s), because the orchestrator
+hands it the scope. `codex review` remains valid. Either way, set reasoning effort
+explicitly to `high`; profile selection controls whether this optional opinion
+runs, while effort remains constant when it does run.
 
-**Give it the retrieval recipe, not just a file list.** A list of paths and
-digests does not tell a reviewer how to *see* the change. Hand over the exact
-tracked-diff command from the merge-base through the final working tree — covering
-committed, staged and unstaged layers — plus instructions to read every
-**untracked** file in full, plus the manifest's per-path stage metadata so
-deletions and renames are visible as such. The normal path is uncommitted work,
-and a bare `git diff` hides staged changes.
+**Give it the retrieval recipe, not just a file list.** Supply the exact diff
+command from the merge base through the working tree, instructions to read every
+untracked candidate file, the `candidate_id` and changed-path list, the ticket's
+acceptance criteria, and the plan's *Not in this ticket* section. Require
+`file:line`, quoted evidence, consequence and fix shape. Ask for an independent
+judgment; the primary reviewer owns the applicable rule checklist.
 
-Give it the ticket's ACs, the plan's *Not in this ticket* list, and a demand for
-`file:line` + quoted code + fix shape. Let it use its own judgment about what to
-look for — it does not need to re-run the rule catalogue; that is pass C's job.
+Bound the output to twelve actionable findings, blockers and majors first, with
+at most three minors. More blockers/majors return `overflow: true` instead of an
+unbounded narrative.
 
-**Bound its wait. Default ceiling: 15 minutes**, overridable by the repo or the
-user — record which applied *before* dispatching. On timeout, declare the
-degradation exactly like a missing engine and fall back to
-`/coderabbit:code-review` on the same manifest. **A declared timeout that falls
-back is a degradation, not a stop** — it is a review engine failing over, not a
-review step failing.
-
-Never let an unbounded external wait silently become the run's critical path.
+**Default ceiling: 10 minutes**, overridable by the repository or user before
+dispatch. On timeout, fall back once to `/coderabbit:code-review` on the same
+candidate. If that route is also unavailable, record the elevated second opinion
+as `DEGRADED` and continue with the required primary reviewer. Never serialize an
+optional retry after the primary review completes, and never let an external wait
+silently become the critical path.
 
 ## PR-side bots are not a gate
 
 Once the PR is open, CodeRabbit's GitHub app and any Codex cloud review wired to
-the repo may re-review the same diff. **Never wait on one, and never feed one back
-into a concluded run.** The terminal verdict ended that run; a bot finding arriving
-afterwards is input to a *new* approved run, exactly like a finding reported next
-week. Treating it as one more thing to fix and re-review is how a bounded phase
-becomes unbounded again through a door nobody guarded.
+the repo may review the same diff. **Never wait on one and never feed it back into
+a completed REVIEW execution.** A later bot finding is follow-up input, not a
+reason to reopen the bounded local review automatically.
 
 Read them if they have already posted, and record anything real as a follow-up.

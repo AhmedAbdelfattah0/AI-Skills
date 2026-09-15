@@ -1392,6 +1392,13 @@ const RETIRED_VOCABULARY = [
   [/\bappend the boundary comparison\s+and rerun evidence to the fix packet, then balance i[t]\b/gi, 'the barrier batch must durably project sealed F0 prose evidence before terminal review or cleanup', ['ship-ticket']],
   [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
   [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
+  [/\bmutation_round\b/gi, 'ship-ticket now has separate explicit PROVE and REVIEW repair limits', ['ship-ticket']],
+  [/\b(?:F0|F1)\b/g, 'ship-ticket review now binds one candidate ID and an optional repaired candidate ID', ['ship-ticket']],
+  [/\b(?:fix[_ -]packet|record[_ -]impact)\b/gi, 'ship-ticket review records compact findings and affected closure instead of a byte-level repair ledger', ['ship-ticket']],
+  [/\b(?:barrier 1|REVIEW_BARRIER_1)\b/gi, 'ship-ticket review now has one named repair batch and targeted confirmation', ['ship-ticket']],
+  [/\bround[- ]?[12]\b/gi, 'ship-ticket review uses an initial review and targeted confirmation, not numbered rounds', ['ship-ticket']],
+  [/\bterminal reviewer\b/gi, 'ship-ticket uses one primary reviewer and only confirms after a repair', ['ship-ticket']],
+  [/\bterminal verdict\b/gi, 'ship-ticket records the primary result or targeted confirmation without a separate verdict dispatch', ['ship-ticket']],
   [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
   [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
 ];
