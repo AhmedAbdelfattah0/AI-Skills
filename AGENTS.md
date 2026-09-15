@@ -253,12 +253,13 @@ existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
 working while new ones converge. **Never introduce a third root**, and when
 adding a skill that writes artifacts, put them under `.specs/<skill-name>/`.
 
-**`ship-ticket` is a six-phase spine plus on-demand references.** `SKILL.md` is
-the ~660-line workflow — the phase table, the invariants, the companion routing,
-the run-record contract, the STOP list and the resume table. Everything a single
+**`ship-ticket` is a six-phase spine plus on-demand references.** `SKILL.md` owns
+the phase table, invariants, state transitions, companion routing and resume
+contract. Everything a single
 phase consumes lives in `references/<phase>.md` and is loaded when that phase
 starts: `understand`, `plan`, `codex-cli`, `prove`, `design-parity`, `review`,
-`ship`. **Keep it that way.** It was a 2359-line monolith and the length was
+`ship`, with cross-phase operational timing isolated in `observability`. **Keep
+it that way.** It was a 2359-line monolith and the length was
 itself a defect: policy deleted in one place stayed executable in a dozen others,
 and parallelism decided in one section was ignored 350 lines later. If you add a
 rule, name the lines it replaces; if it belongs to one phase, it goes in that
@@ -270,38 +271,40 @@ meant the rule pass, the parity check and the attack testing. The numbering neve
 — a GATE 1 and a GATE 2 never existed. **Do not reintroduce numbered steps**: the
 cross-references between them were a defect generator.
 
-**Three rules the rewrite exists to protect.** *Coverage is applicability-driven*:
-every applicable rule, owned screen, trust boundary and attack class is checked at
-constant reasoning effort. `security-sensitive` requires an explicit security
-outcome in the terminal verdict; it changes neither attack coverage nor reviewer
-count.
+**Three rules the bounded workflow exists to protect.** *Coverage and redundancy
+are different decisions*: every applicable rule, owned screen, trust boundary and
+attack class is checked. Reviewer redundancy is evidence-based: a standard ticket
+gets one independent checklist-backed semantic review; elevated risk adds one
+concurrent Codex opinion when available. Security-sensitive work is elevated and
+requires explicit attack and security outcomes, but attack applicability still
+comes from the changed trust boundaries.
 
-*Review terminates*: the plan, parity and VAPT narrative prefixes are swept once
-before `F0` and then immutable. Later findings, dispositions and outcomes live in
-the plan's delimited append-only run-state block. The REVIEW-start `timings[]`
-entry is the phase's first action and the point of no return: any REVIEW-phase
-stop after it ends the current run unshipped, whether or not a terminal verdict
-exists. A terminal PASS enters SHIP; external SHIP transport failures pause that
-run and resume only under a representation-independent `reviewed_content_id`,
-never by re-entering REVIEW. Round 1 runs A, B and C once. Barrier 1 permits one
-sealed candidate repair batch: its planned code/test units plus only prose claims
-inside a finite pre-mutation impact slice that those units actually falsify.
-Round 2 is one unconditional sighted terminal reviewer. There is no in-run
-exception to any REVIEW stop.
+*Review is bounded*: PROVE finishes formatters, generators, tests, docs and
+evidence before REVIEW. A clean standard candidate needs one semantic dispatch.
+An elevated candidate may add one concurrent optional opinion. Accepted findings
+form at most one consolidated repair batch and only that repair's affected closure
+receives one targeted confirmation. A failed confirmation is the result, never a
+new review cycle. The exhaustive prose inventory, copied byte preimages,
+many-to-many repair packet and unconditional clean-candidate signing dispatch were
+deleted because they made workflow bookkeeping cost more than code review.
 
-*Parity depth runs once*: pass A performs the complete comparison for each
-reference-backed owned screen — structure, style, behaviour and i18n, in every
-locale and direction the project ships. After barrier 1, the terminal reviewer
-checks only the dependency-closed nodes and properties the fix could affect. If
-that slice cannot be bounded, the terminal verdict is FAIL.
+*Progress never yields*: `CONTINUE` and `AUTO_FIX` execute the next action in the
+same turn. Only `WAIT_FOR_USER`, `FAIL` and final `COMPLETE` end the assistant turn.
+A phase announcement, finding, tool result, timeout fallback or degradation report
+is not a stopping condition. Required capability is preflighted before REVIEW;
+optional Codex/concurrency loss degrades instead of serializing or ending the run.
 
-`mutation_round` still bounds PROVE and every pre-terminal candidate-repair batch,
-using the sole derivation in the ship-ticket spine and no stored scalar. Run-state
-entries carry an opaque `run_id`; the count uses only batches for the final
-appended run `START`, so append-only history cannot spend a later run's budget.
-The third mutation is validated; a required additional candidate mutation ends
-the current run. Human approval appends a new run partition; it does not extend
-the current one.
+*Measure the state machine*: `scripts/run-log.mjs` records workflow, phase,
+expensive-activity and legitimate-wait intervals under the target repository's
+Git metadata (`ai-skills/ship-ticket/`), never in the worktree. This is operational
+state rather than a spec artifact, so it does not introduce another `.specs`
+root or alter candidate identity. An open phase with no open wait identifies an
+accidental stop; logging failure is declared and never blocks execution.
+
+PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
+one targeted confirmation. Read-only checks and compact append-only execution
+events spend neither limit. A Design Contract expansion always returns to human
+approval rather than being disguised as a repair.
 
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own
@@ -320,68 +323,27 @@ detectors, the command selection, and any wave partitioning all derive from the
 repository — they must never harden into fixed globs or an assumed runner.
 
 **`ship-ticket` has two Codex touchpoints with different dependencies.** The
-PLAN critique needs both `codex-delegate` and the `codex` binary. Pass B needs
-only the binary and runs once, in REVIEW round 1 over `F0`, concurrently with
-pass A and pass C. A missing plan relay does not disable pass B, and a missing
-pass-B engine is declared with the documented fallback.
+PLAN critique needs both `codex-delegate` and the `codex` binary. The REVIEW
+touchpoint needs only the binary, runs only for an elevated profile, and starts
+concurrently with the required primary reviewer. A missing plan relay does not
+disable the REVIEW route; a missing optional REVIEW engine follows its fallback
+and then degrades without blocking the primary reviewer.
 
 Check the binary with `codex --version`; do not infer availability from the skill
 list. Invoke `codex-delegate` by name because it is installed outside this
 library's sibling-skill layout. Codex contributes findings and never approves
-the plan or the change. The terminal verdict belongs to one sighted reviewer
-independent of the builder; it is not a second Codex pass or a later signing
-dispatch.
+the plan or change. The independent primary reviewer owns acceptance-criteria,
+behavioral, applicable-rule and triggered parity/security outcomes in one read.
+If a repair occurs, that same independent reviewer confirms only the findings and
+dependency-closed affected surface; it never repeats the whole review.
 
-**`ship-ticket` borrows `pr-review`'s blind concurrent A/B/C structure only for
-round 1.** A, B and C review `F0` once, mutually blind and report-only. For UI
-tickets, pass A also performs the sole complete parity comparison.
-
-In this contract, a **candidate mutation** means a change to a candidate file or
-to a plan, parity or VAPT prefix frozen at `F0`. Required append-only run-state
-entries remain permitted through their stated cutoff and are not candidate
-mutations. Barrier 1 reconciles the findings and, before any candidate mutation,
-seals one finite repair-induced prose impact slice beside the
-dependency-closed parity slice. Its allowed paths are the complete eligible
-source/test and ticket-doc projection of the approved Design Contract at `F0`.
-The parser/document inventory must account for every prose range in them and be
-mechanically partitioned into slice entries and reasoned exclusions. Each entry
-carries an exact path, unique
-stable anchor, `F0` bytes and digest, a claim verified true at `F0`, and one causal
-planned code/test change-unit ID. An unbounded, incomplete or contract-crossing
-inventory ends the run, and its digest may never widen after sealing. A
-pre-existing record finding is appended with its disposition, failed outcome and
-`REVIEW_CONCLUDED` event, then ends the run before any candidate mutation. The
-plan prefix and the parity and VAPT artifacts never enter the slice; neither do
-findings, dispositions or run state.
-
-The barrier then captures preimages and applies one sealed candidate batch. Only
-a slice claim the code/test repair actually made false may be updated or deleted,
-with the reciprocal causal edge and exact `F0`/`F1` images in the balanced packet.
-Before terminal review or private-carrier cleanup, the barrier batch durably
-copies every sealed entry's path, anchor, claim, reconstructable base64 `F0`
-bytes, digest, truth evidence and causal code/test unit into append-only run
-state, and verifies that projection against the packet.
-Its fix packet also carries the many-to-many finding attribution, affected
-caller/contract closure, parity impact slice and, where `F1` exists, the exact
-`F0`/`F1` boundary comparison. There is no second record sweep, repair or candidate
-barrier.
-
-Round 2 is one sighted reviewer, independent of the builder. It reads the fix
-packet, the frozen record, round 1's complete parity result, the targeted parity
-slice, the sealed prose inventory and impact results, and the runtime attack
-evidence. It examines the prose slice once; a residual or newly false claim,
-invalid exclusion, missing causal edge, durable-projection mismatch or edit
-outside the slice is terminal FAIL with no repair. Its verdict is the signature.
-PASS moves to SHIP; any finding, uncertainty, coverage failure, record mismatch
-or non-PASS outcome ends the current run unshipped.
-
-`F0` and `F1` are distinct manifests when barrier 1 changes the candidate. Every
-round-1 pass is bound to `F0`; the terminal verdict is bound to the final
-candidate. There is one candidate-mutation barrier. After the verdict, only its
-predeclared precommit run-state and session-log projection may be appended; code,
-tests, candidate prose and frozen evidence never change. The commit is the
-repository cutoff: commit, push, PR, CI, tracker and completion results are
-reported externally and never cause a second repository write.
+The candidate is bound by `scripts/candidate-id.mjs`, which hashes the final state
+of every changed and untracked candidate path relative to the merge base. The plan
+artifact and session log are excluded: the approved-plan digest protects the plan
+narrative, while compact append-only events record PROVE, REVIEW, repair,
+confirmation and SHIP readiness without invalidating reviewed code. SHIP
+recomputes the candidate ID before commit and on resume. Commit, push, PR, CI and
+tracker outcomes are external facts and never cause a second repository write.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)
@@ -398,7 +360,7 @@ skill still makes sense installed alone. If you rename a gate in `ship-ticket`,
 update those glosses too.
 
 **`pr-review` reviews a PR that already exists — the one review skill that is
-*not* about the local diff.** `ship-ticket`'s passes and the CodeRabbit
+*not* about the local diff.** `ship-ticket`'s bounded review and the CodeRabbit
 `code-review` skill both judge a diff **before** a PR exists; `pr-review` takes a
 PR **URL or ID** (GitHub via `gh`, Azure DevOps via the `repo_pull_request*` MCP
 tools), which is usually someone *else's* PR. Three properties are load-bearing:
@@ -437,28 +399,28 @@ command exits during argument parsing. So a Codex pass is either *instructed*
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
 worktree paths**, so dedupe and strip the prefix before anything is posted.
-**`ship-ticket`'s pass B carries the same constraint** — it used to
+**`ship-ticket`'s elevated Codex opinion carries the same constraint** — it used to
 document `codex review --uncommitted "<instructions>"`, which exits during
 argument parsing on 0.145.0, and now states the scope in the prompt instead.
-**Pass B also always sets `-c model_reasoning_effort=` explicitly rather than
+**That optional opinion always sets `-c model_reasoning_effort=` explicitly rather than
 inheriting the account's global default** — measured on this repo, same diff and
 prompt, `xhigh` took 384s against `medium`'s 177s (2.2x) — and asks for
 severity-ordered findings rather than unbounded enumeration.
 
 **What the two skills must keep in sync, and what they need not.** The *CLI
 contract* is shared and must match in both: the scope-flag-vs-prompt conflict, the
-duplicated final report, and the absolute paths. The *cost policy* — explicit
-an explicit, constant `model_reasoning_effort` and the bounded ask — is
+duplicated final report, and the absolute paths. The *cost policy* — an explicit,
+constant `model_reasoning_effort` and the bounded ask — is
 `ship-ticket`'s; `pr-review` reviews one PR and may keep a bare invocation.
-**Effort is pinned, never scaled by ticket size**: with a probabilistic reviewer a
-lower effort on the same prompt is a lower detection rate, not merely a shorter wait. If you change how either skill talks to the CLI, change both; if
-you change only the effort policy, you need not. If you
-change how either skill invokes Codex, change both.
+**Effort is pinned whenever the optional opinion runs**: profile selection decides
+whether redundancy is needed; it does not weaken a dispatched review. If you
+change how either skill invokes Codex, change both. An effort-policy-only change
+may remain local to ship-ticket.
 
-## Two script-delivery patterns
+## Script-delivery patterns
 
-Most skills are pure `SKILL.md`. Two ship scripts, in different ways — mirror the matching pattern when
-extending them:
+Most skills are pure `SKILL.md`. Three use scripts in different ways — mirror the
+matching pattern when extending them:
 
 - **`spec-driven`** — *bundles* `scripts/*.sh` in the repo (`specify.sh`, `plan.sh`, `tasks.sh`, …) and
   its `setup.sh` copies them into a target project's `.claude/skills/spec-driven/scripts/` at first use.
@@ -467,6 +429,10 @@ extending them:
   `.claude/hooks/nn-guard.sh` (a `mv`/`chmod` in the `SKILL.md`), then wiring it as a PostToolUse hook
   and a CI check. Nothing is bundled; the invariant-3 check passes because the `SKILL.md` creates the
   file it references.
+- **`ship-ticket`** — *executes bundled cross-platform Node helpers in place*.
+  `scripts/candidate-id.mjs` computes stable reviewed-candidate identity;
+  `scripts/run-log.mjs` appends local timing telemetry under Git metadata. Neither
+  needs project-local setup, so symlink and copy installs behave the same.
 
 ## Adding or editing a skill
 

@@ -227,7 +227,7 @@ Claude-only.
 | self-healing | — |
 | session-logger | — |
 | session-restore | — |
-| ship-ticket | — |
+| ship-ticket | `references/` + `scripts/` (bounded review, stable candidate identity, and local timing telemetry) |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |

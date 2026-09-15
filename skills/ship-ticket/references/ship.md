@@ -1,167 +1,144 @@
-# SHIP — the run record, one commit, and an external completion projection
+# SHIP — compact evidence, one commit, and external completion
 
-Loaded when the SHIP phase starts. The spine carries the two things that must be
-done from phase 1: capture timings as you go, and declare the companion mode up
-front.
-
-## The run record — the full schema
-
-**One logical record, two temporal projections.** The committed projection is the
-plan run state plus the ticket-keyed session-log entry and stops at `SHIP_READY`:
-it contains only facts knowable before the commit. The postcommit projection
-contains the commit, push, PR, CI and tracker results. It is emitted to the user
-and appended to the tracker when reachable; it never writes back into the
-repository. The two projections share `run_id` and `reviewed_content_id`.
+Loaded when SHIP starts. REVIEW has already returned PASS for one exact candidate.
 
 ## Canonical outcome vocabulary
 
-This is the sole owner of outcome tokens for `ship-ticket`, its routed rule rows
-and VAPT evidence. Every row uses the parseable shape `subject_id | outcome |
-evidence`; checks may add `execution_mode` and `reason_code` fields, but those are
-not outcomes. A pre-`F0` producer records its row in the frozen evidence artifact;
-a post-`F0` producer appends it to the plan run state.
+Every rule, proof and review row uses:
 
+```text
 OUTCOME_VOCABULARY
-PASS             the subject ran and satisfied every applicable condition
-FAIL             the subject did not pass; blocks acceptance and close-out
-NOT_TRIGGERED    the check's trigger was false; requires detector, complete changed-file classification and digest
-NOT_APPLICABLE   the rule or parity comparator does not apply; requires the specific applicability evidence
-DEGRADED         a reduced capability ran; requires every omitted class by ID or, only when no inventory exists, named family
+PASS             ran and satisfied every applicable condition
+FAIL             did not pass and blocks completion
+NOT_TRIGGERED    the detector proved the check's trigger false
+NOT_APPLICABLE   a specific rule or comparator does not apply, with evidence
+DEGRADED         reduced coverage ran and every omitted class/family is named
+```
 
-`execution_mode` is one of `FULL`, `REUSED`, `GROUPED` or `REDUCED`. `REUSED`
-names the deterministic output and bound digest and is never used for semantic
-judgment. `GROUPED` names the shared definitions and proves every route executed
-against them. `REDUCED` accompanies `DEGRADED`, never `PASS`.
+Execution detail may use FULL, REUSED, GROUPED or REDUCED. REDUCED accompanies
+DEGRADED, never PASS. Blank, missing or unknown outcomes fail closed.
 
-**Any `FAIL` rule row makes its check `FAIL`.** A blank table, omitted row or
-unrecognized token is also `FAIL`. Coverage is applicability-driven, so a check
-that examined less than it should is a bug. Presentation may aggregate rows
-already computed per rule — naming the IDs and the identical detector, inputs,
-digest and result behind them. Evaluation may not: a family-level detector
-standing in for per-rule evaluation is coverage loss.
+## The execution record
 
-### Path, frozen prefix and allowed later fields
+The approved plan ends with a delimited execution block. Append one UTF-8 JSON
+object per event immediately before its end marker. Never edit or reorder an
+existing object.
 
-This map replaces the former conceptual artifact list with exact storage and
-mutation boundaries.
+Every event carries run_id, event and timestamp. Use only these event names:
 
-| Path | Frozen at `F0` | The only later writes |
-|---|---|---|
-| `.specs/plans/<TICKET>.md` | metadata, approved plan and Design Contract above `RUN-STATE:BEGIN` | JSON-lines entries appended between the existing run-state markers: `runs[]`, `batches[]`, `reviewers[]`, `manifests[]`, `findings[]`, `dispositions[]`, `outcomes[]`, `timings[]`, `degradations[]`; every entry carries its `run_id` |
-| `.specs/design-parity/<TICKET>.md` | the whole pre-`F0` evidence artifact | none; pass A and terminal parity results go to the plan's run-state block |
-| `.specs/vapt/<TICKET>.md` | the whole runtime-evidence artifact | none; terminal attack/security outcomes go to the plan's run-state block |
-| candidate comments and docblocks, plus ticket-produced docs inside the Design Contract | their complete `F0` images | before the terminal verdict, only barrier 1 change units whose `record_impact_id` belongs to the pre-mutation sealed slice, whose exact causal code/test unit actually falsified the `F0` claim, and whose `F0`/`F1` images balance; none after the verdict |
-| `session-log.md` | all pre-existing entries | one new ticket-keyed `SHIP_READY` entry before the commit, derived from the run-state block; no earlier entry may change and no postcommit result is written back |
+| Event | Required evidence |
+|---|---|
+| **START** | approved-plan digest, human approver and target base |
+| **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
+| **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
+| **REPAIR** | finding IDs, changed paths, affected closure, rerun commands and new candidate ID |
+| **CONFIRM** | reviewer, candidate ID, checked findings/closure and outcome |
+| **WAIT_FOR_USER** | phase, reason and the one action needed |
+| **FAIL** | phase, terminal evidence and remaining work |
+| **SHIP_READY** | reviewed candidate ID and approved-plan digest |
 
-The run-state storage categories and repair-batch shape are defined in
-[review.md](review.md); check outcomes use the enum above. The terminal verdict is
-one `outcomes[]` entry with review.md's canonical verdict shape. The frozen
-prefixes contain only pre-`F0` candidate claims; post-`F0` findings, dispositions
-and reviewer conclusions belong in run state by design.
+This is an execution summary, not a source archive. Do not store copied source
+bytes, prose preimages, per-line timing chatter or duplicate findings. Persist
+lists and derive counts when presenting them.
 
-In the committed projection across the frozen evidence and the plan's run-state
-block, record:
+The local run log from [observability.md](observability.md) is the timing source
+of truth. The committed execution block records compact outcomes and the run ID,
+not duplicate timing chatter. A status message creates neither kind of event.
 
-- companion degradations and orchestration mode;
-- `F0`, the final candidate manifest and the frozen-record digest;
-- round-1 reviewer identities and verified paths;
-- finding IDs, dispositions and the fix-packet digest when barrier 1 repaired the
-  candidate;
-- when barrier 1 repaired the candidate, the sealed record-impact basis, prose
-  inventory, exclusions, causal edges, slice digest and `F0`/`F1` result rows,
-  plus the barrier batch's complete `record_impact_evidence[]`: each entry's path,
-  kind, stable anchor, claim, reconstructable base64 `f0_bytes`, `f0_digest`,
-  `f0_truth_evidence` and causal code/test unit, with its ordered evidence digest;
-- terminal reviewer identity and every terminal sub-outcome;
-- per reference-backed screen: round-1 grade, stable divergences, barrier-1
-  impact slice and terminal parity outcome;
-- per unreferenced screen: approver, date and search evidence;
-- attack surfaces, named abuse tests, excluded files and degraded rule IDs;
-- plan-critique dispositions and the append-only repair-batch entries;
-- phase timings and concurrency windows through `SHIP_READY`; later external wait
-  and completion timing belongs to the postcommit projection.
+## Candidate identity
 
-The external postcommit projection carries `run_id`, `reviewed_content_id`,
-commit OID, push result, PR URL, CI result, tracker transition and completion
-timestamp, plus `ship_outcome: PASS | FAIL` once terminal. A paused operation has
-`ship_outcome` absent and carries `paused_operation` plus its error instead of
-pretending to be terminal. Facts absent at the cutoff are absent, not predicted
-or backfilled.
+REVIEW computes the candidate ID with
+scripts/candidate-id.mjs from the installed ship-ticket folder. It hashes the
+final state of all changed and untracked candidate paths relative to the merge
+base.
 
-Persist lists, not hand-maintained totals. Derive counts when presenting the
-record.
+The command excludes:
 
-**Written so it survives the context.** "Tried to break the new endpoint — all
-attacks refused" is recoverable months later; "security gate: PASS" is not. "Skipped some
-findings that conflicted with our conventions" is worthless.
+- the plan artifact, whose approved narrative is protected by its separately
+  recorded approved-plan digest;
+- session-log.md, whose single predeclared entry is appended before commit.
+
+Recompute with the same base and exclusions immediately before commit and on any
+SHIP resume. A mismatch is FAIL because the candidate is no longer the one that
+passed review.
 
 ## Before the commit
 
-**Confirm the terminal verdict is already present in `outcomes[]`, then append the
-`SHIP_READY` run event, SHIP-start timing and precommit session-log projection.**
-Do not claim a commit OID, push, PR, CI result, tracker transition, completion
-timestamp or final SHIP outcome: none exists yet. Run `/session-logger`, or write
-the entry yourself to `session-log.md`; either way this cutoff must be on disk
-before the commit.
+Confirm:
 
-**Then recompute `reviewed_content_id` and verify the frozen record and exact
-append slots.** It must equal the terminal reviewer's value. The reviewed prefixes
-must still match their digests, and every later byte must belong to the terminal
-verdict, `SHIP_READY`, timing or session-log fields defined before `F0`. Any code,
-test, comment, doc or narrative artifact change ends the run as unreviewed.
+- the final REVIEW or CONFIRM event is PASS;
+- the approved-plan digest still matches;
+- the recomputed candidate ID matches the reviewed ID;
+- every candidate path remains inside the Design Contract;
+- all required locally runnable commands remain green or have unchanged reusable
+  evidence;
+- no unrelated user changes would enter the commit.
 
-## The commit
+Append SHIP_READY and the one predeclared ticket-keyed session-log entry. Those two
+recording writes are excluded from candidate identity. No code, test, comment,
+documentation, parity or VAPT evidence may change after REVIEW PASS.
 
-**One commit, containing everything:**
+## One commit
 
-- the code
-- `.specs/plans/<TICKET>.md` — with its immutable prefix and append-only run state
-- `.specs/design-parity/<TICKET>.md` — **iff `ui_required`**
-- `.specs/vapt/<TICKET>.md` **and the abuse tests it produced** — **iff the diff
-  touched a trust boundary**
-- the doc updates
-- `session-log.md`
+The commit contains:
 
-A non-UI ticket produces no parity artifact and a ticket touching no trust
-boundary produces no attack artifact. Their absence is correct, and the run record
-says `NOT_TRIGGERED` with the detector evidence rather than leaving a silent gap.
+- implementation and tests;
+- the approved plan and compact execution events;
+- the UI parity artifact when UI is triggered;
+- the VAPT artifact and committed abuse tests when a trust boundary is triggered;
+- documentation changes;
+- the ticket-keyed session-log entry.
 
-**Push it once.**
+Create one commit and push once. Do not create a WIP commit or amend later merely
+to record external results.
 
-The commit is the repository cutoff. From this point through ticket completion,
-write no repository file. Collect results in the external postcommit projection;
-never amend or add a second commit merely to record an outcome that did not exist
-at the cutoff.
+Commit, push, PR, CI and tracker results do not exist before the commit. Report
+them to the user and tracker as an external completion projection keyed by run ID
+and candidate ID; do not write another repository commit to backfill them.
 
-## The PR
+## Open and link the PR
 
-Open it **on the repo's actual host** — Azure Repos via the ADO repo tools, or
-GitHub via `gh`, per the tracker table in [understand.md](understand.md). Link the
-ticket to the PR and report the URL.
+Use the repository's actual host. For Azure Repos use its repository tools; for
+GitHub use gh. Link the tracker item by its supported artifact link, development
+panel integration or description/comment convention.
 
-Then wait for the one enumerated CI execution. Do not wait for PR-side review
-bots. A host, network or explicitly rerunnable CI infrastructure failure pauses
-SHIP. On resume, recompute the same `reviewed_content_id`, verify the frozen
-prefixes and append-only record, inspect which external operations already
-succeeded, and perform only the missing idempotent operation. Never rerun REVIEW.
-A deterministic red check, a changed identity or any required repository fix
-concludes the run unshipped and requires a new human-approved execution.
+Wait for the CI commands enumerated from the repository configuration during
+UNDERSTAND. Do not wait for optional PR review bots. A missing artifact-specific
+check is a previously declared degradation, not a check to poll forever.
 
-## Closing the ticket
+## CI and external failures
 
-Transition it to **Done** only after the gate checks are green, using the
-tracker's transition operation — the Jira workflow transition, or
-`wit_update_work_item` to the work item type's resolved completed-category state.
+- A deterministic red CI result is FAIL. Do not mutate the reviewed commit or
+  reopen REVIEW automatically.
+- A host, network, rate-limit, PR-service, tracker-service or explicitly
+  rerunnable CI infrastructure failure pauses only that external operation.
+- On resume, recompute the same candidate ID, verify the approved-plan digest and
+  inspect which idempotent operations already succeeded. Continue only the
+  missing operation.
 
-Record each postcommit event only after it happens. After the transition succeeds,
-append the final projection to the ticket when the tracker supports comments;
-the transition's own history is evidence for its result. If the tracker is the
-unavailable service that paused SHIP, report the partial projection to the user
-and continue it when the same run resumes. The tracker history/comment and user
-report are the durable homes for these facts; the committed projection remains
-truthfully cut off at `SHIP_READY`.
+Reporting a transient failure is not completion. Use WAIT_FOR_USER only when the
+user must provide credentials, permission or an external decision; otherwise
+retry the bounded idempotent operation automatically.
 
-Then tell the user the PR is open and ready to merge, and ask them to run
-`/compact`. Both the merge and `/compact` are theirs; this skill does neither.
+## Complete the tracker item
 
-For UI tickets, the user is also the human approver of any accepted deviation.
+Transition only after CI is green. Jira uses the workflow's real completion
+transition. Azure DevOps uses the work-item type's completed-category state, which
+may be Done, Closed or a custom name; never guess it.
+
+Record the postcommit projection in the tracker when supported:
+
+```text
+run_id
+candidate_id
+commit
+push outcome
+PR URL
+CI outcome
+tracker transition
+completion timestamp
+ship outcome
+```
+
+Then report COMPLETE with the PR URL. The user owns merging the PR and any context
+compaction request.

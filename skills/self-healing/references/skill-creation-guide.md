@@ -109,17 +109,16 @@ places — the spine, its reference file, a YAML template, a resume or recovery
 table, a companion skill. Removing it from the file you were looking at is the
 partial fix that feels complete.
 
-Measured on this library's own `ship-ticket` rewrite, where three consecutive
-independent reviews each refused the change for this one reason:
+The current `ship-ticket` workflow provides the same kind of cross-file test:
 
 | The rule | Deleted in | Survived in |
 |---|---|---|
-| `mutation_round` is derived, never stored | `review.md` | `SKILL.md`'s plan header — then, after that was fixed, `plan.md`'s YAML template |
-| the terminal reviewer is unconditional | the sentence added below it | the condition list directly above it, in the same section |
-| tooling never replaces the independent read | — | nothing; the load-bearing sentence was deleted and nothing replaced it |
+| a progress report never yields control | `SKILL.md` state table | phase transitions, timeout fallbacks and `review.md`'s exit rules |
+| the optional second opinion never blocks the primary review | companion table | Codex timeout, missing-concurrency and REVIEW-profile branches |
+| REVIEW permits one repair and one targeted confirmation | `review.md` | the repair limit, failure list and resume table |
 
-The third row is the mirror image and costs the same: **deleting a constraint
-while keeping the instruction it constrained.** So the check runs both ways — grep
+The inverse costs the same: **deleting a constraint while keeping the instruction
+it constrained.** So the check runs both ways — grep
 for the old rule to prove it is gone, and re-read the new rule to confirm it still
 carries every condition the old one enforced.
 

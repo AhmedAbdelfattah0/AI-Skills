@@ -17,7 +17,7 @@ optional:
   Agile and CMMI use `Closed`; custom processes use whatever they define. Resolve
   the work item type's actual completed-category state with
   `wit_get_work_item_type` and set that. Never assume the literal string exists.
-  **If it cannot be resolved, ✋ STOP** — do not guess a state name and do not
+  **If it cannot be resolved, use `WAIT_FOR_USER`** — do not guess a state name and do not
   close the ticket by approximation.
 - **The PR host and the tracker are independent.** An ADO work item's code may
   live in Azure Repos (open the PR with the ADO repo tools and link it) or on
@@ -25,7 +25,7 @@ optional:
   integration links it; if that integration is not set up, fall back to
   `wit_add_artifact_link` or a comment carrying the URL). Check `git remote` first.
 
-Ambiguous, or the ID resolves in neither → ✋ STOP and ask. Do not guess.
+Ambiguous, or the ID resolves in neither → `WAIT_FOR_USER` and ask. Do not guess.
 
 ## Read the spec, in full
 
@@ -34,7 +34,7 @@ linked parents and attachments — the spec is routinely split across them. The
 availability check needs nothing from the ticket, so it can run alongside this
 fetch rather than ahead of it.
 
-Cannot fetch it — auth, IP, wrong instance, missing permission → ✋ STOP.
+Cannot fetch it — auth, IP, wrong instance, missing permission → `WAIT_FOR_USER`.
 
 ## Triage — cheap here, expensive later
 
@@ -44,7 +44,7 @@ several blockers means several fetches at once, not a queue. The only thing that
 depends on them is your decision after they all return.
 
 1. **Blockers.** Fetch each linked blocker and check its state. Not completed →
-   ✋ STOP: name the blocker, its state, and what it was supposed to provide. If
+   `WAIT_FOR_USER`: name the blocker, its state, and what it was supposed to provide. If
    the user says proceed anyway, record that in the session log.
 2. **Acceptance criteria must exist.** With none there is nothing to verify
    against and you would be inventing the definition of done. Ask the user for
@@ -55,15 +55,23 @@ depends on them is your decision after they all return.
 4. **Resume, don't restart.** `.specs/plans/<TICKET>.md` present → read
    `approval_status` literally and route through the spine's resume table.
 5. **Classify it** for the plan's *Shape* line — frontend, backend or full-stack,
-   and security-sensitive or not. Estimate the touched files and subsystems for
-   the right-sizing decision below; neither classification reduces a check.
+   and security-sensitive or not. Select `ELEVATED` review for auth,
+   authorization, tenancy, billing, payments, secrets, migrations, schemas,
+   public APIs/events, shared contracts/components, broad cross-subsystem impact,
+   or an explicit repository/user requirement. Otherwise select `STANDARD`.
+   Review profile changes redundancy, never applicability coverage.
 6. **Right-sized?** A spec spanning several independently shippable units — a seam
    plus its consumers, more than one authoritative write path — gets said **now**,
    with a proposed split, and the user decides. Do not silently build a
    three-ticket epic as one PR. If they say build it as one, record that decision
    in *Risks & unknowns*.
-7. **A STOP here cancels concurrent work.** If triage stops the ticket, stop the
-   design read too rather than letting it finish into a run that will not happen.
+7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists.
+   For `ELEVATED`, check `codex --version`, the CodeRabbit fallback and whether an
+   optional second opinion can run concurrently. Missing primary capability is
+   `WAIT_FOR_USER`; missing optional capability is a recorded degradation.
+8. **A terminal decision here cancels concurrent work.** If triage cannot
+   continue, cancel the design read rather than letting it finish into a run that
+   will not happen.
 
 ## The design source of truth
 
@@ -95,15 +103,15 @@ respects.
 **Self-locate it.** If the ticket does not point at the design files, or names
 them incompletely, search the repo: a token or theme file, a `design/` directory,
 a component library, a Master-Orientation doc. The read is mandatory even when the
-ticket forgets to reference it. UI in scope and no design system findable → ✋
-STOP and ask where it lives. Do not invent a visual language.
+ticket forgets to reference it. UI in scope and no design system findable →
+`WAIT_FOR_USER` and ask where it lives. Do not invent a visual language.
 
 ### Pinning — this is what makes the parity check real
 
 A parity check against a *moving* reference passes vacuously.
 
 - **The reference must already be committed.** Uncommitted working-tree files, or
-  files not in the repo at all → ✋ STOP. There is no SHA to diff against, and a
+  files not in the repo at all → `WAIT_FOR_USER`. There is no SHA to diff against, and a
   screen closed against an uncommitted reference is unverifiable. (This is the
   SCRUM-108 failure: the ticket closed 46 minutes *before* its own reference was
   committed. Nothing could have diffed it.)
@@ -178,7 +186,7 @@ discovering that a component already exists *creates* the next question.
 1. Enumerate the questions the plan must answer; dispatch the independent ones
    concurrently as read-only investigations.
 2. Synthesize the answers yourself, and let them raise the next wave.
-3. Stop when a wave raises no question that would change the plan.
+3. End recon when a wave raises no question that would change the plan.
 
 **The stopping rule.** Stated naively — "know every file and every contract" — it
 is circular and invites unbounded traversal. So:
@@ -189,7 +197,7 @@ is circular and invites unbounded traversal. So:
   the plan actually calls it.
 - **Three waves, maximum.** Each must resolve a plan-changing question or end recon.
 - **At the cap, an unresolved question becomes output**, not another wave: a row
-  in *Risks & unknowns* with what you would do about it, or a ✋ STOP if it
+  in *Risks & unknowns* with what you would do about it, or `WAIT_FOR_USER` if it
   genuinely blocks the plan.
 
 **Defer the detail of test knowledge, never the paths.** Recon establishes the
@@ -220,7 +228,7 @@ forces a divergence or quietly pressures you to skip the test. What defers is th
   + quoted line has to be re-asked.
 
 Recon investigators return `question` · `answer` · `paths` · `signatures` ·
-`quoted lines` · `confidence`. **No manifest ID and no verdict** — recon is
+`quoted lines` · `confidence`. **No candidate ID and no verdict** — recon is
 answering questions about code that does not exist yet.
 
 **Good first wave — almost always independent:**
