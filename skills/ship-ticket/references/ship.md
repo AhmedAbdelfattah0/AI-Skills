@@ -50,7 +50,7 @@ mutation boundaries.
 | `.specs/plans/<TICKET>.md` | metadata, approved plan and Design Contract above `RUN-STATE:BEGIN` | JSON-lines entries appended between the existing run-state markers: `runs[]`, `batches[]`, `reviewers[]`, `manifests[]`, `findings[]`, `dispositions[]`, `outcomes[]`, `timings[]`, `degradations[]`; every entry carries its `run_id` |
 | `.specs/design-parity/<TICKET>.md` | the whole pre-`F0` evidence artifact | none; pass A and terminal parity results go to the plan's run-state block |
 | `.specs/vapt/<TICKET>.md` | the whole runtime-evidence artifact | none; terminal attack/security outcomes go to the plan's run-state block |
-| changed comments, docs and ticket-produced artifacts | the entire manifested content | none |
+| candidate comments and docblocks, plus ticket-produced docs inside the Design Contract | their complete `F0` images | before the terminal verdict, only barrier 1 change units whose `record_impact_id` belongs to the pre-mutation sealed slice, whose exact causal code/test unit actually falsified the `F0` claim, and whose `F0`/`F1` images balance; none after the verdict |
 | `session-log.md` | all pre-existing entries | one new ticket-keyed `SHIP_READY` entry before the commit, derived from the run-state block; no earlier entry may change and no postcommit result is written back |
 
 The run-state storage categories and repair-batch shape are defined in
@@ -67,6 +67,11 @@ block, record:
 - round-1 reviewer identities and verified paths;
 - finding IDs, dispositions and the fix-packet digest when barrier 1 repaired the
   candidate;
+- when barrier 1 repaired the candidate, the sealed record-impact basis, prose
+  inventory, exclusions, causal edges, slice digest and `F0`/`F1` result rows,
+  plus the barrier batch's complete `record_impact_evidence[]`: each entry's path,
+  kind, stable anchor, claim, reconstructable base64 `f0_bytes`, `f0_digest`,
+  `f0_truth_evidence` and causal code/test unit, with its ordered evidence digest;
 - terminal reviewer identity and every terminal sub-outcome;
 - per reference-backed screen: round-1 grade, stable divergences, barrier-1
   impact slice and terminal parity outcome;

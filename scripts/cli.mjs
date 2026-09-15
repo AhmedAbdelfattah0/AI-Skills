@@ -1086,6 +1086,34 @@ function cmdAutoupdate(args) {
 // Port of scripts/validate.sh — same three invariants, cross-platform.
 const ROOT = join(SKILLS_DIR, '..');
 
+// Retired prose is written in Markdown, where an editor may wrap any inter-word
+// space. Collapse whitespace for matching, but retain an offset for every
+// normalized character so diagnostics and guidance exemptions still address the
+// original source text.
+function normalizeRetiredVocabularyInput(source) {
+  let text = '';
+  const originalOffsets = [];
+
+  for (let sourceOffset = 0; sourceOffset < source.length;) {
+    if (/\s/u.test(source[sourceOffset])) {
+      originalOffsets.push(sourceOffset);
+      text += ' ';
+      do { sourceOffset += 1; } while (sourceOffset < source.length && /\s/u.test(source[sourceOffset]));
+      continue;
+    }
+    originalOffsets.push(sourceOffset);
+    text += source[sourceOffset];
+    sourceOffset += 1;
+  }
+
+  return { text, originalOffsets };
+}
+
+function originalLineForRetiredHit(source, originalOffsets, normalizedOffset) {
+  const sourceOffset = originalOffsets[normalizedOffset] ?? source.length;
+  return source.slice(0, sourceOffset).split('\n').length;
+}
+
 function cmdValidate() {
   // All subdirectories — including any missing a SKILL.md, so we can flag them.
   const names = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -1188,14 +1216,17 @@ function cmdValidate() {
     // 6. Retired vocabulary stays retired. A concept deleted from a skill but left
     //    referenced elsewhere is the failure mode that put a dozen dead references
     //    to a removed classifier into ship-ticket. Each entry: /regex/ + why.
+    const retiredDocs = docs.map((doc) => {
+      const source = readFileSync(doc, 'utf8');
+      return { doc, source, ...normalizeRetiredVocabularyInput(source) };
+    });
     for (const [re, why, scope] of RETIRED_VOCABULARY) {
       if (scope && !scope.includes(name)) continue;
-      for (const doc of docs) {
-        const body = readFileSync(doc, 'utf8');
+      for (const { doc, source, text, originalOffsets } of retiredDocs) {
         re.lastIndex = 0;
-        const hit = re.exec(body);
+        const hit = re.exec(text);
         if (!hit) continue;
-        const line = body.slice(0, hit.index).split('\n').length;
+        const line = originalLineForRetiredHit(source, originalOffsets, hit.index);
         console.log(`❌ ${name}: ${relative(SKILLS_DIR, doc)}:${line} uses retired '${hit[0]}' — ${why}`);
         err = fail = true;
       }
@@ -1234,14 +1265,16 @@ function cmdValidate() {
   for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
     const gp = join(ROOT, guide);
     if (!existsSync(gp)) continue;
-    const body = readFileSync(gp, 'utf8');
+    const source = readFileSync(gp, 'utf8');
+    const { text, originalOffsets } = normalizeRetiredVocabularyInput(source);
+    const sourceLines = source.split('\n');
     for (const [re, why] of RETIRED_VOCABULARY) {   // guidance files: all terms apply
       re.lastIndex = 0;
       let hit;
-      while ((hit = re.exec(body)) !== null) {
+      while ((hit = re.exec(text)) !== null) {
         // A line may cite retired vocabulary while explaining that it is retired.
-        const line = body.slice(0, hit.index).split('\n').length;
-        const src = body.split('\n')[line - 1];
+        const line = originalLineForRetiredHit(source, originalOffsets, hit.index);
+        const src = sourceLines[line - 1];
         if (/\b(retired|deleted|removed|no longer|never existed|does not exist)\b/i.test(src)) continue;
         console.log(`❌ ${guide}:${line} uses retired '${hit[0]}' — ${why}`);
         fail = true;
@@ -1320,9 +1353,43 @@ const RETIRED_VOCABULARY = [
   [/\bREVIEW timing degraded\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
   [/\brun A, B and C serially\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
   [/\bserial round 1\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
-  [/\bformatters and generators first\b/gi, 'the mutation budget is read before anything that writes, formatters included', ['ship-ticket']],
-  [/\bRun formatters and generators before\b/gi, 'the mutation budget is read before anything that writes, formatters included', ['ship-ticket']],
-  [/\bno record mutation\b/gi, 'the post-F0 ban names candidate files and frozen prefixes; append-only run-state writes are required', ['ship-ticket']],
+  [/\bformatters and generators first\b/gi, 'the mutation budget is read before the first candidate mutation, formatters included', ['ship-ticket']],
+  [/\bRun formatters and generators before\b/gi, 'the mutation budget is read before the first candidate mutation, formatters included', ['ship-ticket']],
+  [/\bno record mutatio[n]\b/gi, 'the post-F0 ban names candidate files and frozen prefixes; append-only run-state writes are required', ['ship-ticket']],
+  [/\bRecord text, comments, docblocks and artifact prefixes remain unchange[d]\b/gi, 'plan/parity/VAPT evidence stays frozen while only a sealed repair-induced candidate-prose slice may change', ['ship-ticket']],
+  [/\bA post-`?F0`? record mismatch, narrative edit or correction request ends the current ru[n]\b/gi, 'post-F0 evidence mismatches stop, but a predeclared repair-induced candidate-prose consequence may share barrier 1', ['ship-ticket']],
+  [/\bbarrier 1 may then change code and tests onc[e]\b/gi, 'barrier 1 seals one candidate batch that may include only predeclared prose consequences actually caused by its code/test units', ['ship-ticket']],
+  [/\b(?:Apply at most one |one |barrier 1's )code-and-test repair batc[h]\b/gi, 'barrier 1 is one sealed candidate batch, not a code/test-only batch', ['ship-ticket']],
+  [/\bA record finding ends the current ru[n]\b/gi, 'pre-existing record defects stop; sealed repair-induced prose consequences are causal change units', ['ship-ticket']],
+  [/\bIf any finding concerns the frozen record, end the current run before writin[g]\b/gi, 'the stop distinguishes immutable evidence and F0-false prose from predeclared repair-induced consequences', ['ship-ticket']],
+  [/\battempted narrative repair ends the current ru[n]\b/gi, 'only predeclared candidate prose actually falsified by barrier 1 is repairable; evidence narrative remains immutable', ['ship-ticket']],
+  [/\| changed comments, docs and ticket-produced artifacts \| the entire manifested content \| non[e] \|/gi, 'SHIP recognizes the sealed barrier-1 prose slice while forbidding all post-verdict prose writes', ['ship-ticket']],
+  [/\bbefore (?:running )?anything that writ(?:e|es)\b/gi, 'REVIEW reads the budget before the first candidate mutation; required append-only run-state remains writable', ['ship-ticket']],
+  [/\bNothing writes while they ru[n]\b/gi, 'round 1 forbids candidate mutation, not required append-only run-state entries', ['ship-ticket']],
+  [/\bbefore any repository writ[e]\b/gi, 'REVIEW stops before candidate mutation after appending the required run-state evidence', ['ship-ticket']],
+  [/\bcandidate writ(?:e|es|ing)\b/gi, 'REVIEW uses candidate mutation consistently for candidate files and frozen prefixes', ['ship-ticket']],
+  [/\bfrozen-narrative writ[e]\b/gi, 'REVIEW uses candidate mutation consistently for candidate files and frozen prefixes', ['ship-ticket']],
+  [/\bno candidate or frozen-prefix chang[e]\b/gi, 'REVIEW uses candidate mutation consistently for candidate files and frozen prefixes', ['ship-ticket']],
+  [/\brecord sweep or barrier 1 requires a writ[e]\b/gi, 'the mutation-budget stop concerns a candidate mutation, never a required run-state append', ['ship-ticket']],
+  [/\bpre-existing record finding still ends the run before writin[g]\b/gi, 'record the finding and stop before candidate mutation; append-only run-state remains permitted', ['ship-ticket']],
+  [/\bthe sealed record-impact basis, prose inventory, slice digest, exclusions,\s+causal edges and `?F0`?\/`?F1`? result rows\b/gi, 'the committed projection must include the slice claims, reconstructable F0 bytes and F0 truth evidence', ['ship-ticket']],
+  [/\bexact byte content stored in the private carrier, not merely a diges[t]\b/gi, 'sealed slice F0 bytes and truth evidence must also survive in the durable barrier-batch projection', ['ship-ticket']],
+  [/\beverything written before the freez[e]\b/gi, 'the pre-F0 batch counts candidate mutations, not required append-only run-state entries', ['ship-ticket']],
+  [/\b(?:Always validate mutation 3\. If validation requires another|The third mutation is validated; a required additional) writ[e]\b/gi, 'the mutation-budget stop concerns another candidate mutation, never a required run-state append', ['ship-ticket']],
+  [/\bREVIEW has one write barrie[r]\b/gi, 'REVIEW has one candidate-mutation barrier; append-only run-state writes are outside it', ['ship-ticket']],
+  [/\bthe only review write barrie[r]\b/gi, 'REVIEW has one candidate-mutation barrier; append-only run-state writes are outside it', ['ship-ticket']],
+  [/\bcorrection request opens another sweep or another write barrie[r]\b/gi, 'a record correction never opens another candidate-mutation barrier', ['ship-ticket']],
+  [/\bCode\/test write[s]\b/gi, 'code/test changes inside REVIEW are candidate mutations', ['ship-ticket']],
+  [/\bgrants write authorit[y]\b/gi, 'the sealed prose slice grants narrowly bounded candidate-mutation authority', ['ship-ticket']],
+  [/\bRun-state events and result-slot writes are not candidate repair[s]\b/gi, 'required append-only run-state entries are not candidate mutations', ['ship-ticket']],
+  [/\bpre-existing record finding has no repair disposition inside REVIE[W]\b/gi, 'an F0 record finding is durably recorded with the stop disposition before the run concludes', ['ship-ticket']],
+  [/\bsource_manifest_id, candidate_manifest_id and fix_packet_diges[t]\b/gi, 'the barrier batch must also retain the sealed slice entries and their evidence digest', ['ship-ticket']],
+  [/\bonly that batch entry carries its diges[t]\./gi, 'the barrier batch must also retain the sealed slice entries and their evidence digest', ['ship-ticket']],
+  [/\bbefore any prose writ[e]\b/gi, 'the sealed slice grants candidate-prose mutation authority without affecting run-state appends', ['ship-ticket']],
+  [/\bwithout a prose writ[e]\b/gi, 'the sealed slice grants candidate-prose mutation authority without affecting run-state appends', ['ship-ticket']],
+  [/\bbudget was read before the first of those write[s]\b/gi, 'the mutation budget is read before the first candidate mutation', ['ship-ticket']],
+  [/\bIf it is already 3 and\s+a write is required, end the ru[n]\b/gi, 'the mutation-budget stop concerns a candidate mutation, never a required run-state append', ['ship-ticket']],
+  [/\bappend the boundary comparison\s+and rerun evidence to the fix packet, then balance i[t]\b/gi, 'the barrier batch must durably project sealed F0 prose evidence before terminal review or cleanup', ['ship-ticket']],
   [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
   [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
   [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],

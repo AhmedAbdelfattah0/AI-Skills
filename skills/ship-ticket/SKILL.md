@@ -96,7 +96,7 @@ it is not a question.
 | **PLAN** | draft, get an independent critique, get **human approval** | `.specs/plans/<TICKET>.md` only | an approved plan + the Design Contract |
 | **BUILD** | branch, then implement in the plan's sequence inside the contract | contracted files | the feature, rules applied as it was written |
 | **PROVE** | run the repo's commands; prove the security controls exist, then that they engage | production + test code | green commands, committed abuse tests |
-| **REVIEW** | sweep and freeze the record; run A/B/C once; repair once; obtain one terminal verdict | predeclared run-state entries; one record-sweep batch before `F0`; one code-and-test repair batch | terminal PASS, or the current run ends unshipped |
+| **REVIEW** | sweep and freeze the record; run A/B/C once; repair once; obtain one terminal verdict | predeclared run-state entries; one record-sweep batch before `F0`; one sealed candidate repair batch, including only predeclared repair-induced prose consequences | terminal PASS, or the current run ends unshipped |
 | **SHIP** | one commit, one push, one PR, the enumerated CI gate, ticket to Done | the precommit projection and single gated commit; postcommit results stay external | a linked PR and a closed ticket |
 
 **Phases are ordered. Independent work inside a phase runs concurrently** — that is
@@ -144,14 +144,21 @@ These bind in every phase. Everything else is procedure.
 7. **Round-1 reviewers are report-only and mutually blind.** The terminal reviewer
    is deliberately sighted on their findings and consequences, and is independent
    of the builder.
-8. **REVIEW has one write barrier.** Sweep and freeze the ticket-owned record
-   before `F0`; barrier 1 may then change code and tests once. After `F0` no
-   candidate file and no frozen prefix may change; after the terminal verdict no
-   candidate file may change at all. Before the commit, the append-only run-state
-   slots and predeclared session-log projection are the exception; they record
-   findings, dispositions, outcomes and timings without rewriting a reviewed
-   prefix. The commit is the repository cutoff: SHIP outcomes that arise later
-   are reported externally and never create another repository write.
+8. **REVIEW has one candidate-mutation barrier.** A **candidate mutation** means a
+   change to a candidate file or a plan, parity or VAPT prefix frozen at `F0`;
+   required append-only run-state entries remain permitted through their stated
+   cutoff and are not candidate mutations. Sweep the ticket-owned record and
+   freeze those prefixes before `F0`.
+   Before its first candidate mutation, barrier 1 seals one finite repair batch:
+   planned code/test units plus
+   only the candidate comments, docblocks or ticket-produced docs in the
+   predeclared repair-induced impact slice. No other candidate path and no frozen
+   prefix may change after `F0`; after the terminal verdict no candidate path may
+   change at all. Before the commit, the append-only run-state slots and
+   predeclared session-log projection are the exception; they record findings,
+   dispositions, outcomes and timings without rewriting a reviewed prefix. The
+   commit is the repository cutoff: SHIP outcomes that arise later are reported
+   externally and never create another repository write.
 9. **Attacks run against a local, disposable instance. Never production, never
    shared staging**, whoever owns it.
 10. **Three mutations, then a human.** See *The mutation budget*.
@@ -206,7 +213,8 @@ post-BUILD candidate-changing repair batch before the terminal verdict:
 - a PROVE repair batch;
 - the one pre-`F0` batch, if it changes anything — formatter output, generator
   output and the record-sweep repair are that single batch, counted once;
-- barrier 1's code-and-test repair batch.
+- barrier 1's sealed candidate repair batch — planned code/test units and only
+  their predeclared, actually falsified prose consequences.
 
 **It is derived, not stored, and partitioned by run.** Human approval appends one
 `run` `START` entry with a new opaque `run_id`; every later run-state entry carries
@@ -217,15 +225,16 @@ scalar to read-then-edit inside the frozen prefix, which is what previously made
 the counter and the record freeze contradict each other: every real repair would
 have had to either break the count or trip the mismatch that ends the run.
 
-Run-state events and result-slot writes are not candidate repairs and do not enter
-`batches[]`. A read-only validation appends no batch and therefore spends nothing.
+Required append-only run-state entries are not candidate mutations and do not
+enter `batches[]`. A read-only validation appends no batch and therefore spends
+nothing.
 
-Always validate mutation 3. If validation requires another write, end the current
-run before making it. Owner approval cannot extend the counter inside that run;
-continuation requires a newly approved execution and a new `run_id`, appended
-without removing or rewriting the concluded run.
+Always validate mutation 3. If validation requires another candidate mutation,
+end the current run before making it. Owner approval cannot extend the counter
+inside that run; continuation requires a newly approved execution and a new
+`run_id`, appended without removing or rewriting the concluded run.
 
-Round 2 has no candidate write path and therefore cannot negotiate with this
+Round 2 permits no candidate mutation and therefore cannot negotiate with this
 budget. Any terminal finding is the outcome, not another mutation request.
 
 ## Verification has a stopping condition
@@ -488,23 +497,44 @@ reviewer returned a verdict. This replaces the old verdict-only resume condition
 
 First sweep the ticket-owned record once: the plan, parity and VAPT artifact
 prefixes, changed comments and docblocks, ticket-produced docs, hand-maintained
-counts and citations. Apply the mutation budget **before** running anything that
-writes, formatters and generators included — they are writes, and a run already at
-three must not spend a fourth while tidying up. Everything written before the
-freeze is one batch. Then freeze the reviewed prefixes and compute `F0`. After `F0`, a record
-mismatch ends the current run; it is never repaired inside REVIEW.
+counts and citations. Apply the mutation budget **before the first candidate
+mutation**, including formatter and generator output — a run already at three
+must not spend a fourth while tidying up. Every candidate mutation before the
+freeze is one batch. Then freeze the plan, parity and VAPT evidence prefixes and
+compute `F0`. A false claim at `F0` or a later evidence-prefix mismatch ends the
+current run; neither is repaired inside REVIEW. The sole candidate-prose
+exception is a consequence that barrier 1 proves true at `F0`, predeclares in its
+sealed impact slice and then proves its own code/test repair made false.
 
 **Round 1 — find.** Dispatch A, B and C together, mutually blind and report-only,
 over `F0`. Pass A is the fresh reviewer and performs the sole complete parity
 comparison for every reference-backed owned screen. Pass B is Codex or its
 declared fallback. Pass C walks every applicable rule row.
 
-**Barrier 1 — reconcile and repair once.** A record finding ends the current run.
-Give every code-or-test finding one disposition, capture preimages and apply at
-most one batched repair. Build the fix packet while changing the files. For every
-UI repair, include the dependency-closed nodes and properties it can affect.
-If the repair changed code or tests, snapshot the candidate as `F1`; otherwise
-the final candidate remains `F0` and no `F1` exists.
+**Barrier 1 — reconcile and repair once.** A pre-existing record finding is
+recorded in append-only run state and ends the current run before any candidate
+mutation. Give every code-or-test finding one disposition and assign its planned
+change-unit IDs. Before the first candidate mutation, enumerate every prose
+anchor in the Design Contract's candidate source/test paths and ticket-produced
+docs; partition that finite inventory into the repair-induced
+`record_impact_slice[]` and reasoned exclusions; verify every slice claim true at
+`F0`; bind each to one causal code/test unit; and seal the inventory, basis,
+membership and exclusions by digest. An unbounded, incomplete or
+contract-crossing slice stops. It may never widen after sealing.
+
+Capture all preimages and apply the one sealed batch. Only a slice entry the
+code/test repair actually falsified may be updated or deleted, with reciprocal
+causal IDs and exact `F0`/`F1` images in the balanced fix packet. The code/test
+units and those consequences are one batch, not another sweep or repair. For
+every UI repair, include the dependency-closed nodes and properties it can
+affect. If the candidate changed, snapshot it as `F1`; otherwise the final
+candidate remains `F0` and no `F1` exists.
+
+Before terminal review or private-carrier cleanup, append the barrier batch's
+durable copy of every slice entry: exact path and stable anchor, claim, base64
+`f0_bytes`, `f0_digest`, `f0_truth_evidence` and causal code/test unit, plus the
+ordered projection digest. It must reconstruct and equal the packet's sealed
+slice; this append-only evidence is not another candidate mutation.
 
 **Round 2 — terminal verdict.** One sighted reviewer independent of the builder
 reads the round-1 findings, dispositions, frozen record, round-1 parity result and
@@ -516,10 +546,15 @@ changed UI, it compares only the affected nodes, selectors, tokens, states,
 translations and their owned-screen consumers, in every applicable locale and
 direction. If that impact cannot be bounded, parity is FAIL.
 
+For prose, it examines the predeclared inventory and fixed impact slice once. A
+changed entry without its exact causal edge, a residual or newly false claim, an
+invalid exclusion, a prose edit outside the slice or evidence that the slice was
+incomplete is terminal FAIL. There is no terminal repair or second sweep.
+
 The terminal verdict is the signature. PASS proceeds to SHIP. Any finding,
 uncertainty, overturned rejection, suspected regression, coverage failure,
 record mismatch or non-PASS sub-outcome ends the current run unshipped. There is
-no later candidate or frozen-narrative write; only predeclared run-state fields
+no later candidate mutation; only predeclared run-state fields
 through the precommit `SHIP_READY` cutoff may be appended.
 
 
@@ -629,15 +664,24 @@ so the answer is one message and not a negotiation.
 - A round-1 pass cannot return verifiable coverage after one schema-only
   correction request.
 - The manifest changes while round 1 is running.
-- A frozen record prefix changes after `F0`, or a reviewer finds it false.
+- A plan, parity or VAPT evidence prefix changes after `F0`, or a reviewer finds
+  it false.
+- Candidate prose was already false at `F0`; the repair-induced prose impact
+  inventory is unbounded, incomplete, contract-crossing or cannot be sealed
+  before the first candidate mutation; or it would need to widen after sealing.
+- Candidate prose changes outside the sealed slice, without actual falsification
+  by its predeclared causal code/test unit, or without exact `F0`/`F1` images.
+- The barrier batch omits a sealed slice entry's claim, reconstructable `F0`
+  bytes or truth evidence, or its durable projection does not match the packet.
 - Barrier 1 requires a repository path outside the approved contract.
-- `mutation_round` is already 3 and the record sweep or barrier 1 requires a write.
+- `mutation_round` is already 3 and the record sweep or barrier 1 requires a
+  candidate mutation.
 - The fix packet does not balance.
 - An affected deterministic command is red after barrier 1's repair.
 - A submodule is dirty at `F0` and is not manifested recursively.
 - The independent terminal reviewer is unavailable.
 - The terminal reviewer returns any finding, uncertainty, coverage failure,
-  record mismatch or non-PASS outcome.
+  record mismatch, residual or newly false prose claim, or non-PASS outcome.
 
 *Everywhere*
 - A `Par` group was serialized with no stated reason, or the execution record is
