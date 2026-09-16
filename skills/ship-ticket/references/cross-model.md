@@ -22,8 +22,12 @@ primary REVIEW workflow stays independent of all builders, even if it uses the
 host's family. Never reuse a PLAN or BUILD session for REVIEW.
 
 Record `host_agent`, `counterpart_agent`, CLI version, carrier and exact session
-ID. Missing counterpart capability is a declared degradation, never silently
-replaced by the same family and described as cross-model agreement. STANDARD
+ID. PLAN requires actual counterpart participation: unavailable capability or a
+failed dispatch is `WAIT_FOR_USER` after bounded recovery, unless the user
+explicitly authorizes solo planning. Record `DEGRADED` for diagnostics, but never
+treat that label as permission to skip the debate. The optional REVIEW opinion
+retains its separate fallback policy. Never substitute the same family and claim
+cross-model agreement. STANDARD
 retains one primary workflow; an explicit request for two code reviewers selects
 ELEVATED. Human approval remains the PLAN gate.
 
@@ -39,6 +43,49 @@ mechanics here, not the delegates' implement-and-land workflows.
   `claude auth status`. A missing relay makes that route unavailable. A check
   blocked by the host sandbox is not proof of logout; follow the host's normal
   permission process, never bypass permissions.
+
+### Claude CLI authentication, not a separate API integration
+
+Use the installed `claude-delegate/scripts/relay.mjs`, which launches
+`claude -p --output-format stream-json --verbose`. Do not replace it with an
+Anthropic SDK, HTTP request, API-key setup or a request to buy API credits.
+The CLI can itself select API-key billing, so launching `claude` alone does not
+prove that it uses the user's subscription.
+
+For the subscription route, check authentication in the **same child environment
+and permission context** used for dispatch and resume. Omit `ANTHROPIC_API_KEY`
+and `ANTHROPIC_AUTH_TOKEN` from that child environment only; preserve the user's
+OAuth login, HOME and runtime paths. Never print credential values or edit global
+shell profiles, credential files or account settings. If a custom endpoint,
+third-party provider or `apiKeyHelper` still selects another authentication route,
+report that conflict instead of sending a paid request through it.
+
+For POSIX shells, the explicit preflight/dispatch shape is:
+
+```bash
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+  node "<installed-claude-delegate>/scripts/relay.mjs" \
+  --cd "<target-repo>" --read-only --effort high --timeout 10m
+```
+
+Send the brief on stdin; replace the timeout with the remaining debate budget.
+For a reply, add `--session <sessionId>` with the same environment and flags.
+On Windows, construct a copied child environment in Node, delete those two keys,
+and spawn the same installed relay with argument arrays; do not mutate persistent
+environment settings. Keep only safe authentication metadata in reports:
+`loggedIn`, `authMethod`, `apiProvider`, `subscriptionType` (when supplied).
+Require successful subscription authentication (`authMethod: claude.ai` on the
+verified CLI), not merely `loggedIn: true` with `authMethod: api_key`.
+
+On macOS, a Codex sandbox can block the CLI's Keychain access and incorrectly
+make the subscription look logged out. Retry the sanitized auth check, and the
+read-only relay dispatch if needed, through the host's normal escalation approval.
+Keep `--read-only`; host escalation is not Claude permission bypass. If login
+still fails, ask the user to authenticate their CLI. If subscription usage itself
+is exhausted, report the actual CLI result and pause; do not infer API billing
+from the word “credits” alone. This auth behavior follows the
+[Claude authentication documentation](https://code.claude.com/docs/en/authentication).
 
 Both relays accept this shape, using the discovered absolute skill path:
 
@@ -70,8 +117,8 @@ a reviewer brief.
 
 Host Plan Mode restrictions also apply to the carrier. Temporary files do not
 make a forbidden shell write permissible. Preflight a permitted read-only carrier
-before entry; if invocation is blocked, declare the debate unavailable and retain
-the normal approval gate, without exiting early to run it.
+before entry; if invocation is blocked, use `WAIT_FOR_USER` for the required
+carrier or explicit solo-planning choice, without exiting early to run it.
 
 ## PLAN debate
 
@@ -127,7 +174,9 @@ after one response. Do not manufacture debate to fill the budget.
 At the response/time cap, repeated disagreement without new evidence, or overflow,
 stop debate and record `UNRESOLVED`: the best reconciled draft, remaining IDs and
 both positions. Unavailable/invalid/timed-out transport means `DEGRADED`, with what
-was actually reviewed recorded. Never invent consensus or promise an objectively
+was actually reviewed recorded, and pauses for recovery or an explicit solo-plan
+waiver; ordinary approval of a draft does not implicitly waive the missing debate.
+Never invent consensus or promise an objectively
 best plan. Present outstanding choices through the normal human plan approval;
 unresolved product/security/scope decisions must be explicit in that request.
 Implementation still requires human approval of the final design.

@@ -95,11 +95,17 @@ write telemetry. This exception overrides every generic start/end/wait instructi
 If Plan Mode was already active at invocation, do not start logger intervals or
 exit merely to log. Keep timestamps in session context, declare telemetry delayed,
 and after approval resume logging with `started_late=true`; never invent earlier
-logger events. Immediately before `EnterPlanMode`, start the PLAN phase and a
+logger events. When an interactive Codex mode switch requires the user, record a
+`wait` named `plan_mode_switch` while writes are still permitted. If it cannot be
+closed after switching because Plan Mode forbids writes, defer closing until the
+host permits logging and mark `includes_native_plan_mode=true`; do not interpret
+that interval as pure user wait. Keep actual switch/debate timestamps in context.
+Immediately before an available native entry transition, start the PLAN phase and a
 `native_plan_mode` activity with `--metric write_suspended=true`. Do not invoke
-the logger again while Plan Mode is active. Immediately after approved
-`ExitPlanMode` returns, end that activity and the PLAN phase as the first two
-actions, with `--metric approval=approved`, then continue directly into the
+the logger again while Plan Mode is active. Immediately after human approval
+and exit from Plan Mode (Claude: approved `ExitPlanMode`; Codex: approved
+implementation handoff and host mode change), end existing activity/phase intervals
+with `--metric approval=approved`, then continue directly into the
 after-approval work. Also record `frontend_contract=accepted` and
 `backend_contract=accepted` for full-stack work. Do not open another approval
 wait.

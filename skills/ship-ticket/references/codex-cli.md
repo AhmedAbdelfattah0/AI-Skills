@@ -35,8 +35,8 @@ Read `finalMessage` and `threadId` from `result.json` after completion.
 For a delta or bounded timeout recovery, use that exact `--session <threadId>`
 and repeat directory, read-only and effort flags. Recovery requests completed
 findings only and consumes the debate's existing time and response budget.
-Without a usable session, return the declared degradation rather than restarting
-the repository read.
+Without a usable session, record the degradation and follow the required PLAN
+counterpart pause in cross-model policy rather than restarting the repository read.
 
 ## REVIEW carrier
 

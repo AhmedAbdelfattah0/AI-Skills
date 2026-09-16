@@ -10,6 +10,37 @@ excluded from tiering; they run at constant effort.
 
 ## Native Plan Mode is the mechanical boundary
 
+Select the mode mechanism by host; missing Claude tools do not mean Codex lacks
+Plan Mode.
+
+### Codex
+
+Read the host-provided collaboration mode. If it is Plan, stay there throughout
+research and the cross-model debate. If interactive Codex is in Default mode,
+use an exposed native mode-transition tool if one exists. Otherwise stop before
+PLAN research with `WAIT_FOR_USER` and one concrete instruction: “Run `/plan` in
+this conversation, then resume this ticket.” Preserve completed UNDERSTAND work;
+do not create the pending plan artifact as a substitute for entering the mode.
+This is a host-control handoff, not plan approval. Do not run `/plan` in a shell,
+invent `EnterPlanMode`, or claim that prose, a task checklist, or a read-only
+subprocess changes the parent session's mode.
+
+The [Codex CLI documentation](https://developers.openai.com/codex/cli/slash-commands)
+documents `/plan` as a client command that is unavailable while a turn is running.
+For a fresh CLI run, users can submit `/plan Use $ship-ticket for <TICKET>`.
+For another Codex client, use its actual Plan control and verify the host's mode
+instructions; do not assume a keyboard shortcut or an agent-callable API exists.
+
+Present the reconciled plan using the output format prescribed by Codex's active
+Plan Mode instructions (including `<proposed_plan>` when required), so the client
+can offer its native implementation handoff. Human approval is consumed once,
+but approval does not override host mode restrictions: begin BUILD only after the
+host leaves Plan Mode. If the user approved while the host still reports Plan,
+request only the mode transition, never another approval or “go”. Resume the
+approved plan immediately once the host permits implementation.
+
+### Claude
+
 When `EnterPlanMode` and `ExitPlanMode` are available, use them. After the
 predeclared PLAN timing markers, invoke `EnterPlanMode` before PLAN research or
 critique unless the session is already in that mode. The PLAN phase name, a
@@ -31,7 +62,14 @@ second signal. For the headless fallback, one explicit user approval of the
 reconciled plan is likewise sufficient; a product-answer or clarification given
 before the complete plan was presented is not plan approval.
 
-If the native transition tools are absent, use the spine's headless fallback:
+### Genuinely headless fallback
+
+Use this only when the carrier has no native interactive planning surface (for
+example, a non-interactive execution), or the user explicitly authorizes plain
+approval instead. An interactive Codex session without Claude's tool names does
+not qualify. If native mode was explicitly requested and is genuinely unsupported,
+report that limitation and ask for a supported host or explicit fallback choice.
+Otherwise use the spine's headless fallback:
 keep research read-only, run the bounded debate, create the ticket branch before saving
 the pending artifact, and request human approval without implementing. Record
 `native_plan_mode: unavailable` in the plan metadata.
@@ -47,6 +85,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      run_id: <opaque ID created when workflow timing began>
      timing_telemetry: active|degraded
      native_plan_mode: active|already_active|unavailable
+     plan_mode_carrier: codex|claude|headless
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|other|unavailable
      plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED}

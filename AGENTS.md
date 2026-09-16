@@ -313,13 +313,16 @@ A phase announcement, finding, tool result, timeout fallback or degradation repo
 is not a stopping condition. Required capability is preflighted before REVIEW;
 optional counterpart/concurrency loss degrades instead of serializing or ending the run.
 
-*PLAN means native Plan Mode when the host provides it*: after the predeclared
-timing marker, `EnterPlanMode` runs before PLAN research and `ExitPlanMode`
-presents the reconciled, cross-model-debated plan for human approval. A phase heading
+*PLAN means native Plan Mode when the host provides it*: Claude uses
+`EnterPlanMode`/`ExitPlanMode`; Codex uses the host's Plan collaboration mode and
+native final-plan handoff. If interactive Codex is in Default mode with no
+agent-callable transition, request the client's `/plan` switch before PLAN research.
+Absence of Claude tools is not evidence that Codex is headless. A phase heading
 or a read-only prompt is not the permission mode. Headless environments retain
 the pending-plan approval fallback and never implement before approval.
 Plan approval is consumed exactly once: an approved `ExitPlanMode` result, or the
-single headless approval response, continues directly into execution. A second
+native Codex implementation handoff, or single headless approval response,
+continues directly into execution once the host permits writes. A second
 “say go”/confirmation stop is a workflow defect.
 
 *Measure the state machine*: `scripts/run-log.mjs` records workflow, phase,
@@ -366,7 +369,11 @@ approval, never manufactured consensus or an endless loop.
 
 Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
 alone. Claude uses `claude-delegate`'s read-only relay for both. Discover delegates
-by name and check CLI versions; missing optional capability degrades. Claude's
+by name and check CLI versions; missing optional REVIEW capability degrades.
+PLAN counterpart failure pauses after bounded recovery unless the user explicitly
+waives cross-model planning. Claude runs through its CLI relay using verified
+subscription authentication: omit API-key/token overrides from the child process
+only and use normal host escalation when Keychain access is blocked. Claude's
 read-only carrier cannot run Git, so supply the actual diff and repository
 instructions. REVIEW uses a fresh counterpart session concurrently only for an
 elevated profile and never inherits the PLAN debate loop. The counterpart
