@@ -123,7 +123,7 @@ Useful end metrics are:
   `debate_calls=<n>` (includes failed attempts),
   `debate_status=converged|unresolved|degraded`, `debate_elapsed_ms=<n>`;
 - `primary_review`: `finding_count=<n>`;
-- `optional_review`: `counterpart_agent=claude|codex|other`, outcome `pass`, `findings`, or `degraded` and metric
+- `optional_review`: `counterpart_agent=claude|codex|other|unavailable`, outcome `pass`, `findings`, or `degraded` and metric
   `reason=timeout|unavailable|no_concurrency|tool_error`;
 - PROVE phase: `repair_batches=0|1|2`;
 - CI wait: `poll_count=<n>`.
