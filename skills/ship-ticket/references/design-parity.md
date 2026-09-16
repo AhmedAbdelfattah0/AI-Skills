@@ -53,7 +53,8 @@ a committed reference.
 
 ## Primary review — the sole complete comparison
 
-The independent primary reviewer receives the pinned reference, implementation,
+The independent primary reviewer or full-stack frontend review partition receives
+the pinned reference, implementation,
 acceptance criteria and comparison depth, with no BUILD conclusions.
 
 For each reference-backed owned screen, compare the complete implementation
@@ -134,7 +135,7 @@ proved, confirmation parity is FAIL.
 The primary review result directly covers the final candidate when REVIEW makes
 no UI repair.
 
-When parity inputs changed, the same independent primary reviewer compares only
+When parity inputs changed, the same independent primary workflow compares only
 the recorded impact slice against the pinned reference, at the affected layers
 and in every applicable locale and direction. Resolve each initial divergence
 touched by the repair and report any regression inside the slice.

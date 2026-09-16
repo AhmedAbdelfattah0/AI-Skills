@@ -1399,6 +1399,8 @@ const RETIRED_VOCABULARY = [
   [/\bround[- ]?[12]\b/gi, 'ship-ticket review uses an initial review and targeted confirmation, not numbered rounds', ['ship-ticket']],
   [/\bterminal reviewer\b/gi, 'ship-ticket uses one primary reviewer and only confirms after a repair', ['ship-ticket']],
   [/\bterminal verdict\b/gi, 'ship-ticket records the primary result or targeted confirmation without a separate verdict dispatch', ['ship-ticket']],
+  [/\bPar column\b/gi, 'ship-ticket schedules an execution DAG from dependencies, ownership and resource locks', ['ship-ticket']],
+  [/\bbuild sequence\b/gi, 'ship-ticket uses an execution DAG whose table order does not serialize ready nodes', ['ship-ticket']],
   [/\bGATE [12]\b/g, 'there was never a GATE 1 or GATE 2', null],
   [/Claude Code\'s built-in review/g, '/code-review belongs to the CodeRabbit plugin; a fresh reviewer subagent is the independent route', null],
 ];

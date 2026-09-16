@@ -70,15 +70,21 @@ they explain most variance:
 | Phase | Activity name |
 |---|---|
 | UNDERSTAND | `tracker_fetch`, `repository_recon`, `review_preflight` |
-| PLAN | `plan_draft`, `plan_critique` |
-| BUILD | `implementation` |
-| PROVE | `repository_checks`, `runtime_attacks`, `ui_evidence` |
-| REVIEW | `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
+| PLAN | `native_plan_mode` (its end metrics carry provider/consumer contract outcomes) |
+| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join` |
+| PROVE | `frontend_proof`, `backend_proof`, `shared_proof`, `runtime_attacks`, `ui_evidence` |
+| REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
 | SHIP | `commit_push_pr`, `ci_wait`, `tracker_completion` |
 
 Use a unique event ID for every occurrence, for example
 `prove-repository-checks-1`. Do not create an interval for every shell command or
 status message; the extra bookkeeping would distort the workflow being measured.
+
+Give activities that were actually dispatched together the same
+`--metric parallel_group=<stable-id>`. Use one high-level interval per worker or
+proof/review partition, not one per command. The summary derives group wall time,
+summed worker time, estimated saved time, peak concurrency and frontend/backend
+overlap from their timestamps.
 
 ### Native Plan Mode and logging
 
@@ -88,7 +94,9 @@ write telemetry. Immediately before `EnterPlanMode`, start the PLAN phase and a
 the logger again while Plan Mode is active. Immediately after approved
 `ExitPlanMode` returns, end that activity and the PLAN phase as the first two
 actions, with `--metric approval=approved`, then continue directly into the
-after-approval work. Do not open another approval wait.
+after-approval work. Also record `frontend_contract=accepted` and
+`backend_contract=accepted` for full-stack work. Do not open another approval
+wait.
 
 That activity's wall time intentionally includes research, Codex critique and the
 human approval wait because the read-only boundary prevents trustworthy nested
@@ -150,8 +158,10 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs summary \
 The JSON summary reports phase/activity/wait durations, open intervals and their
 age, `planning_runs`, `waiting_runs`, `open_without_wait`, repair and confirmation
 counts, optional-review degradations, review medians, and the median
-REVIEW-to-BUILD ratio. `active_or_unexpected_stop` is expected during live work;
-if its age keeps growing after the agent turn ended, it is a continuation failure.
+REVIEW-to-BUILD ratio. It also reports parallel groups, peak concurrency,
+estimated parallel savings and median frontend/backend overlap. An
+`active_or_unexpected_stop` is expected during live work; if its age keeps growing
+after the agent turn ended, it is a continuation failure.
 
 One real ticket is a smoke test. Use three to five representative tickets before
 judging the redesign. The redesign is working when:
@@ -163,6 +173,8 @@ judging the redesign. The redesign is working when:
 - every completed run has zero open intervals;
 - every intentional cross-turn pause has an open `wait` while paused;
 - review repair batches never exceed one and confirmation never exceeds one;
+- full-stack BUILD shows one group containing both `frontend_build` and
+  `backend_build`, with non-zero overlap unless concurrency was declared degraded;
 - optional reviewer timeouts appear as degradations, not stalled workflows.
 
 Treat a run with an old open phase and no open wait as a continuation defect.

@@ -67,8 +67,9 @@ expensive to catch mid-build.
 
 **Run the deterministic pre-checks first; they are free.** Verify mechanically
 that every path exists or is explicitly new, every command exists in the repo's
-own config, the sequence is acyclic with each step's dependencies landing before
-it, and no existing implementation of this already exists. Findings go straight
+own config, the execution DAG is acyclic with complete dependencies and disjoint
+concurrent write ownership, and no existing implementation of this already
+exists. Findings go straight
 into the draft. **Send their results as *given*, with an instruction not to
 re-verify them** — re-reading the tree to confirm what `test -e` already proved is
 the single biggest avoidable cost here.
@@ -90,13 +91,14 @@ tree survives the round trip.
 |---|---|
 | `<task>` | the ticket's spec and ACs, the **drafted plan verbatim**, the detected stack, the repo's **real** commands, and the pre-check results as given |
 | `<grounding_rules>` | every claim cites a path or line from this repo; label inferences; read the files the plan names before judging them |
-| `<structured_output_contract>` | findings severity-ordered, blockers first, minors truncatable, capped: severity · the plan section hit · `file:line` evidence · the concrete change proposed. Then one line: is this plan buildable as sequenced? |
+| `<structured_output_contract>` | findings severity-ordered, blockers first, minors truncatable, capped: severity · the plan section hit · `file:line` evidence · the concrete change proposed. Then one line: is this contract and execution DAG buildable? |
 
 **Ask only what a repo-grounded second model can answer** — the pre-checks already
 covered path existence and duplicate implementation:
 
-1. Is the build sequence buildable in that order — does step *n* depend on
-   something step *n+2* creates?
+1. Is the execution DAG complete and buildable — are dependencies, contract
+   inputs, file ownership or exclusive resources missing, and can every claimed
+   concurrent node really overlap?
 2. What is missing that the ticket's ACs require?
 3. What in the risks section is wrong, and what risk is absent?
 
@@ -156,7 +158,7 @@ Needs **only the `codex` binary**. A missing `codex-delegate` costs the PLAN
 critique and leaves this route intact.
 
 This touchpoint runs only when REVIEW selects `ELEVATED`. Start it concurrently
-with the required primary reviewer. It is a free-form second opinion, not another
+with the required primary workflow. It is a free-form second opinion, not another
 rule checklist and never the final approver. A standard ticket does not dispatch
 it.
 
@@ -171,7 +173,7 @@ command from the merge base through the working tree, instructions to read every
 untracked candidate file, the `candidate_id` and changed-path list, the ticket's
 acceptance criteria, and the plan's *Not in this ticket* section. Require
 `file:line`, quoted evidence, consequence and fix shape. Ask for an independent
-judgment; the primary reviewer owns the applicable rule checklist.
+judgment; the primary workflow owns the applicable rule checklist.
 
 Bound the output to twelve actionable findings, blockers and majors first, with
 at most three minors. More blockers/majors return `overflow: true` instead of an
@@ -180,7 +182,7 @@ unbounded narrative.
 **Default ceiling: 10 minutes**, overridable by the repository or user before
 dispatch. On timeout, fall back once to `/coderabbit:code-review` on the same
 candidate. If that route is also unavailable, record the elevated second opinion
-as `DEGRADED` and continue with the required primary reviewer. Never serialize an
+as `DEGRADED` and continue with the required primary workflow. Never serialize an
 optional retry after the primary review completes, and never let an external wait
 silently become the critical path.
 

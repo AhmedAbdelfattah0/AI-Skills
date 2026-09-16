@@ -71,11 +71,14 @@ and execution continues; measurement must never become a new blocker.
 | **PLAN** | independently critiqued, human-approved plan and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
-| **REVIEW** | one bounded independent semantic review, plus one concurrent second opinion only for elevated risk; at most one repair and targeted confirmation |
+| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one concurrent second opinion only for elevated risk; at most one repair and targeted confirmation |
 | **SHIP** | one commit, one push, one PR, green CI and completed tracker item |
 
-Phases are ordered. Independent work inside a phase may run concurrently when the
-repository and available orchestration make that safe.
+Phases are ordered, but independent work inside every phase is dependency-driven
+and concurrent by default. At each scheduling point, dispatch every material
+ready node that has disjoint writes and no shared mutable runtime resource. Do
+not wait for an unrelated slow node. Serial execution needs a named dependency,
+write collision, exclusive resource, or unavailable concurrency capability.
 
 Load a phase reference only when entering that phase:
 
@@ -90,6 +93,32 @@ Load a phase reference only when entering that phase:
 | REVIEW | [references/review.md](references/review.md) |
 | REVIEW with elevated Codex | [references/codex-cli.md](references/codex-cli.md) |
 | SHIP | [references/ship.md](references/ship.md) |
+
+## Dependency-driven orchestration
+
+Treat each phase as a directed acyclic graph, not a prose checklist. A node is
+ready when all of its declared inputs exist. Two ready nodes run concurrently
+when:
+
+- their owned write paths do not overlap;
+- neither can change an input the other is reading;
+- they do not share an exclusive port, datastore, fixture set, generator output,
+  lockfile, cache/output directory, or other mutable resource;
+- the available carrier can isolate their permissions and return results.
+
+When two or more material nodes satisfy those conditions and subagents or a
+workflow fan-out are available, dispatch them together. A missing concurrency
+carrier is a recorded performance degradation: run the same DAG serially and
+continue; never use **WAIT_FOR_USER** merely because parallel execution is
+unavailable.
+
+Every writing subagent receives an ownership packet: approved plan and contract
+IDs, owned paths, forbidden shared paths, dependencies, required tests, exclusive
+resources and completion schema. Tell it that other workers are active, that it
+must not revert their work, and that it must stop and report rather than edit
+outside ownership. Workers do not commit, switch branches, install dependencies,
+run whole-repo formatters/generators, or change an approved integration contract.
+The orchestrator owns shared seams, barriers, reconciliation and Git operations.
 
 ## Invariants
 
@@ -123,6 +152,8 @@ Determine these during UNDERSTAND and record them in the plan:
 - whether Codex and its fallback are available for an elevated second opinion;
 - whether the available orchestrator can dispatch that optional opinion
   concurrently;
+- the available concurrent worker width and whether the carrier safely supports
+  simultaneous disjoint writes in the target worktree;
 - the primary, optional and confirmation time ceilings.
 
 **ELEVATED** applies to auth, authorization, tenancy, billing, payments, secrets,
@@ -195,6 +226,7 @@ critical.
 | Codex during elevated REVIEW | use CodeRabbit on the same candidate when available; otherwise declare the optional second opinion degraded and continue |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | elevated concurrency | run only the required primary review and declare the optional opinion degraded |
+| implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
 | artifact-specific CI check | record its absence and rely on committed tests in the repository's existing CI; never wait for a nonexistent check |
 
 The /code-review command belongs to the CodeRabbit plugin. A fresh reviewer is
@@ -206,9 +238,11 @@ the primary independent route. Never launch a user-billed ultra review.
 
 Load [references/understand.md](references/understand.md).
 
-Fetch the full ticket and concurrently check blockers, ownership, existing
-branches/PRs, prior plan artifacts, repository instructions, stack manifests,
-commands, CI configuration, design sources and review capabilities.
+In the first wave, fetch the ticket while concurrently checking repository-side
+ownership signals, existing branches/PRs, prior plan artifacts, instructions,
+stack manifests, commands, CI configuration, design sources and orchestration
+capabilities. In the second wave, use the fetched relations to load blockers,
+parents and attachments concurrently. Synthesize only after each wave joins.
 
 Before leaving:
 
@@ -256,7 +290,10 @@ After approval:
 - save the approved plan under .specs/plans/<TICKET>.md;
 - append a **START** event with the workflow run ID and approved-plan digest;
 - invoke the routed quality skill and write one Design Contract derived from the
-  approved build sequence.
+  approved execution DAG;
+- for full-stack work, materialize or generate the approved Integration Contract,
+  record its digest, and make both frontend and backend nodes depend on that same
+  contract ID.
 
 In a headless environment, branch, write the plan with approval status pending,
 and use **WAIT_FOR_USER**; do not implement. This fallback does not weaken the
@@ -270,14 +307,27 @@ Read the plan and Design Contract from disk before writing.
 
 - Reuse an existing ticket branch. If it contains unknown WIP commits, use
   **WAIT_FOR_USER** for the preserve-or-squash decision.
-- Follow dependency order. Independent plan groups may be delegated concurrently
-  only when they share no files.
+- Schedule the execution DAG continuously: whenever a node finishes, dispatch
+  every newly ready conflict-free node without waiting for unrelated siblings.
+- On full-stack work, after the Integration Contract is materialized and frozen,
+  dispatch frontend and backend implementation workers concurrently. Neither
+  waits for the other's implementation, tests, or review; both depend only on
+  the same approved contract and their own prerequisites.
+- Give each writing worker exclusive file ownership and a completion report of
+  changed paths, tests, unresolved dependencies and contract assumptions. The
+  orchestrator owns shared files and the integration join.
 - Apply routed rules while each file is written.
 - Build UI from existing tokens and shared components, checking each owned screen
   while its design is in context.
 - For security-sensitive behavior, add the failing refusal/isolation test first.
 - Use the repository's existing migration mechanism.
 - Keep every write inside the Design Contract.
+
+At the full-stack join, verify the contract digest is unchanged, every changed
+path has exactly one owner, generated clients/types are current, and both provider
+and consumer conformance checks pass. Only then run real endpoint integration,
+end-to-end checks, and attacks. Contract drift pauses both sides and returns to
+PLAN approval; it is never repaired independently by one worker.
 
 Continue until implementation is complete. Report progress without yielding.
 
@@ -288,8 +338,10 @@ Continue until implementation is complete. Report progress without yielding.
 Load [references/prove.md](references/prove.md) and, for UI,
 [references/design-parity.md](references/design-parity.md).
 
-Run the repository's own commands, then perform the applicable static-security,
-test-quality, docs, parity-preparation and attack work. Consolidate failures before
+Build the PROVE ready set from command inputs and resource locks. Run independent
+repository commands and read-only static-security, test-quality, docs,
+parity-preparation and attack-design nodes concurrently where
+[references/prove.md](references/prove.md) permits it. Consolidate failures before
 repairing them. After each repair, rederive every affected inventory and rerun
 every affected command.
 
@@ -314,14 +366,20 @@ Do not announce REVIEW until its preflight in
 Load [references/review.md](references/review.md).
 
 Compute the candidate ID. Dispatch one checklist-backed independent primary
-reviewer. On **ELEVATED**, start the optional Codex opinion concurrently when
-available.
+workflow. For a material full-stack diff, partition frontend, backend and shared
+contract coverage as defined in the review reference; otherwise use one reviewer.
+On **ELEVATED**, start the optional Codex opinion concurrently when available.
 
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
 findings receive one consolidated repair batch and one targeted confirmation by
 the primary reviewer. A material elevated-review disagreement gets the same
 targeted confirmation without inventing a repair. Confirmation PASS continues;
 any required further candidate change is **FAIL**.
+
+Within the one repair batch, disjoint finding units may be assigned concurrently
+under the same ownership protocol. Join them, rerun the union of affected proof,
+and dispatch only one targeted confirmation. Parallel repairs do not create extra
+review rounds.
 
 The review checks acceptance criteria, behavior, every applicable rule, UI parity
 when triggered and frozen runtime evidence when trust boundaries are triggered.

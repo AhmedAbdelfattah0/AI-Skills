@@ -64,7 +64,8 @@ passed review.
 
 ## Before the commit
 
-Confirm:
+Against the immutable reviewed candidate, run these read-only confirmations
+concurrently, then join once:
 
 - the final REVIEW or CONFIRM event is PASS;
 - the approved-plan digest still matches;
@@ -99,8 +100,10 @@ and candidate ID; do not write another repository commit to backfill them.
 ## Open and link the PR
 
 Use the repository's actual host. For Azure Repos use its repository tools; for
-GitHub use gh. Link the tracker item by its supported artifact link, development
-panel integration or description/comment convention.
+GitHub use gh. Commit, push and PR creation remain serial dependencies. After the
+PR exists, link/comment it in the tracker while polling the required CI checks;
+these operations are independent and may overlap. Use the tracker's supported
+artifact link, development-panel integration or description/comment convention.
 
 Wait for the CI commands enumerated from the repository configuration during
 UNDERSTAND. Do not wait for optional PR review bots. A missing artifact-specific
