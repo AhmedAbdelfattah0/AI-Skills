@@ -91,7 +91,11 @@ frontend/backend overlap from their timestamps.
 ### Native Plan Mode and logging
 
 Native Plan Mode permits read-only shell commands and must not be bypassed to
-write telemetry. Immediately before `EnterPlanMode`, start the PLAN phase and a
+write telemetry. This exception overrides every generic start/end/wait instruction.
+If Plan Mode was already active at invocation, do not start logger intervals or
+exit merely to log. Keep timestamps in session context, declare telemetry delayed,
+and after approval resume logging with `started_late=true`; never invent earlier
+logger events. Immediately before `EnterPlanMode`, start the PLAN phase and a
 `native_plan_mode` activity with `--metric write_suspended=true`. Do not invoke
 the logger again while Plan Mode is active. Immediately after approved
 `ExitPlanMode` returns, end that activity and the PLAN phase as the first two
@@ -100,18 +104,26 @@ after-approval work. Also record `frontend_contract=accepted` and
 `backend_contract=accepted` for full-stack work. Do not open another approval
 wait.
 
-That activity's wall time intentionally includes research, Codex critique and the
+That activity's wall time intentionally includes research, cross-model debate and the
 human approval wait because the read-only boundary prevents trustworthy nested
 writes. While it is open, the summary reports `planning_or_approval`, not
 `open_without_wait`. If Plan Mode is unavailable, log PLAN activities and the
-ordinary approval wait normally.
+ordinary approval wait normally. Time each `plan_debate_exchange` with its own
+ID and `round=<n>` when writes are allowed. In native Plan Mode, keep exchange
+start/end timestamps in the permitted plan draft or session context and persist
+those in section 7 after approval; do not backdate logger events. The final PLAN
+metrics carry total measured debate time without conflating it with user wait.
 
 Useful end metrics are:
 
 - REVIEW phase: `review_profile=standard|elevated`, `finding_count=<n>`,
   `repair_batches=0|1`, `confirmation_count=0|1`;
+- PLAN phase (or `native_plan_mode` end): `host_agent=claude|codex|other|unknown`,
+  `counterpart_agent=claude|codex|other|unavailable`, `debate_responses=0|1|2|3`,
+  `debate_calls=<n>` (includes failed attempts),
+  `debate_status=converged|unresolved|degraded`, `debate_elapsed_ms=<n>`;
 - `primary_review`: `finding_count=<n>`;
-- `optional_review`: outcome `pass`, `findings`, or `degraded` and metric
+- `optional_review`: `counterpart_agent=claude|codex|other`, outcome `pass`, `findings`, or `degraded` and metric
   `reason=timeout|unavailable|no_concurrency|tool_error`;
 - PROVE phase: `repair_batches=0|1|2`;
 - CI wait: `poll_count=<n>`.

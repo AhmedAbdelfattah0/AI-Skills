@@ -72,8 +72,10 @@ decision.
    split or approved multi-repository shipping contract; the default one-branch,
    one-commit, one-PR workflow covers a single repository only.
 7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists.
-   For `ELEVATED`, check `codex --version`, the CodeRabbit fallback and whether an
-   optional second opinion can run concurrently. Missing primary capability is
+   Select and preflight the opposite-model PLAN counterpart using
+   [cross-model.md](cross-model.md): Claude host uses Codex; Codex host uses Claude.
+   For `ELEVATED`, also check its REVIEW carrier, CodeRabbit fallback and whether
+   the optional opinion can run concurrently. Missing primary capability is
    `WAIT_FOR_USER`; missing optional capability is a recorded degradation.
 8. **A terminal decision here cancels concurrent work.** If triage cannot
    continue, cancel the design read rather than letting it finish into a run that

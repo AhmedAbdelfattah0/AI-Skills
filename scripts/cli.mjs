@@ -1293,6 +1293,8 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\boptional Codex opinion\b/gi, 'ship-ticket selects its optional counterpart from the host identity', ['ship-ticket']],
+  [/\bCross-model plan critique\b/g, 'ship-ticket PLAN uses bounded reciprocal debate and records convergence', ['ship-ticket']],
   [/\bGATE [345]\b/g, 'ship-ticket uses named phases and checks, not numbered gates', ['ship-ticket', 'vapt', 'generate-ticket', 'code-quality']],
   [/\bfinal\s+`?mutation_round`?/gi, 'mutation_round is derived and is never a stored final field', ['ship-ticket']],
   [/\bmutation_round:\s*\d+\b/gi, 'mutation_round is derived and is never a stored scalar', ['ship-ticket']],

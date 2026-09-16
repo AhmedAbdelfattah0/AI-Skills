@@ -1,7 +1,7 @@
 # PLAN — the template, the metadata, and the Design Contract
 
-Loaded when the PLAN phase starts. The critique dispatch lives in
-[codex-cli.md](codex-cli.md).
+Loaded when the PLAN phase starts. The debate and host routing live in
+[cross-model.md](cross-model.md).
 
 Planning is strong-model work: this is where deciding *what to build and how to
 sequence it* actually happens. The plan is also the handoff that makes model
@@ -13,12 +13,12 @@ excluded from tiering; they run at constant effort.
 When `EnterPlanMode` and `ExitPlanMode` are available, use them. After the
 predeclared PLAN timing markers, invoke `EnterPlanMode` before PLAN research or
 critique unless the session is already in that mode. The PLAN phase name, a
-read-only promise, and a Codex critique are not replacements for the host
+read-only promise, and a model debate are not replacements for the host
 permission mode: Plan Mode mechanically restricts Claude to read-only
 exploration.
 
-Remain in Plan Mode while drafting and while Codex critiques the finished draft.
-Reconcile the critique there, then invoke `ExitPlanMode` with the reconciled plan.
+Remain in Plan Mode while drafting and throughout the host/counterpart debate.
+Reconcile its result there, then invoke `ExitPlanMode` with the final plan.
 That tool presents the approval surface and exits only through the host's approval
 flow. Do not emit a separate approval message and end the turn before calling it.
 The pending tool approval is the PLAN phase's `WAIT_FOR_USER` state.
@@ -32,7 +32,7 @@ reconciled plan is likewise sufficient; a product-answer or clarification given
 before the complete plan was presented is not plan approval.
 
 If the native transition tools are absent, use the spine's headless fallback:
-keep research read-only, run the critique, create the ticket branch before saving
+keep research read-only, run the bounded debate, create the ticket branch before saving
 the pending artifact, and request human approval without implementing. Record
 `native_plan_mode: unavailable` in the plan metadata.
 
@@ -47,6 +47,9 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      run_id: <opaque ID created when workflow timing began>
      timing_telemetry: active|degraded
      native_plan_mode: active|already_active|unavailable
+     host_agent: claude|codex|other|unknown
+     counterpart_agent: codex|claude|other|unavailable
+     plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED}
      worker_width: <available concurrent workers>
      parallelism_degradations: []
      approval_status: pending|approved   a human approval flips this, and only this
@@ -120,14 +123,18 @@ no producer/consumer boundary changes.>
 ## 6. Rejected alternative
 <one line: the other approach considered, and why not>
 
-## 7. Cross-model plan critique
-**Ran:** <yes — codex <version>, session <threadId>> / <no — unavailable; this
-plan carries no cross-model review>
+## 7. Cross-model planning debate
+**Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
+**Result:** <CONVERGED / UNRESOLVED / DEGRADED and why>
+**Draft:** <final version; last version actually checked by counterpart>
+**Timing:** <start/end UTC, calls attempted, responses received, total budget>
 
-| Finding (severity) | Disposition | Reason / what changed |
-|---|---|---|
-| <blocker: step 2 imports X, which step 4 creates> | incorporated | resequenced — X now lands in step 1 |
-| <minor: extract a shared helper> | rejected | one call site today; YAGNI until there's a second |
+| Finding ID / severity | Host response and evidence | Counterpart response | Final disposition |
+|---|---|---|---|
+| <P1 / major> | <changed design or evidence-backed challenge> | <conceded / defended, evidence> | <resolved / unresolved> |
+
+**Outstanding decisions:** <remaining positions, recommendation and human choice
+needed; or none>. Model agreement is advice, not approval.
 
 ## 8. Proof and review routing
 | Work | Scope for this ticket | Execution |
@@ -150,7 +157,7 @@ the run ID already created by workflow telemetry. A later execution of the same
 ticket gets a new `run_id`; it never edits or clears prior entries. Approval
 without the matching start event is not executable.
 
-## Contract convergence before critique
+## Contract convergence before debate
 
 For a full-stack boundary, draft one Integration Contract and dispatch two
 read-only checks concurrently while native Plan Mode is active:
@@ -163,8 +170,12 @@ read-only checks concurrently while native Plan Mode is active:
 They inspect the same draft; neither authors a competing contract and neither is
 a human approver. Reconcile evidence-backed requests once and recheck only a side
 whose contract surface changed. If the two sides still cannot accept one shape,
-record the disagreement in Risks and use `WAIT_FOR_USER`. Only then send the
-semantically complete plan to Codex for the broader plan critique.
+record the disagreement in Risks and use `WAIT_FOR_USER` for the missing product
+decision. That answer is clarification, not approval of an unfinished plan.
+After resolving it, send the
+semantically complete plan to the selected counterpart for the broader debate.
+If that debate changes the contract, refresh affected compatibility checks before
+calling the revised plan converged; the debate budget does not reset.
 
 The approved plan digest binds the plan-form contract. After approval, the first
 candidate-writing node materializes or generates its source-of-truth artifact

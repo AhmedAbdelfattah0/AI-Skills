@@ -1,7 +1,7 @@
 # REVIEW — one independent review, one repair, one targeted confirmation
 
-Loaded only when REVIEW starts. Codex invocation details live in
-[codex-cli.md](codex-cli.md); UI comparison depth lives in
+Loaded only when REVIEW starts. Counterpart selection and dispatch live in
+[cross-model.md](cross-model.md); UI comparison depth lives in
 [design-parity.md](design-parity.md).
 
 The purpose of REVIEW is to catch semantic defects that deterministic PROVE
@@ -13,7 +13,7 @@ own bookkeeping.
 ```text
 preflight     prove the candidate and required reviewers are ready
 review        one independent checklist-backed review
-elevated      optionally add one concurrent Codex opinion
+elevated      optionally add one concurrent opposite-model opinion
 clean         record PASS and continue to SHIP
 findings      reconcile once, then apply at most one repair batch
 confirmation  check only repaired findings and their affected closure
@@ -45,7 +45,7 @@ Finish these checks before announcing REVIEW or appending its start event:
 
 An unavailable primary reviewer is `WAIT_FOR_USER` here. Do not enter REVIEW and
 invalidate otherwise usable work merely to discover that required capability is
-missing. Missing optional Codex or concurrency degrades the elevated second
+missing. Missing optional counterpart or concurrency degrades the elevated second
 opinion; it does not block the primary review.
 
 ## Bind reviewers to one candidate
@@ -97,11 +97,11 @@ profile.
 | Profile | Initial semantic review |
 |---|---|
 | `STANDARD` | one independent primary workflow |
-| `ELEVATED` | the primary workflow plus Codex, concurrently when available |
+| `ELEVATED` | the primary workflow plus the selected counterpart, concurrently when available |
 
 When elevated concurrency is unavailable, run the required primary workflow and
 record `second_opinion: DEGRADED — concurrent route unavailable`; do not serialize
-an optional review into the critical path. A missing or timed-out Codex route uses
+an optional review into the critical path. A missing or timed-out counterpart route uses
 its documented fallback, then degrades if the fallback is also unavailable.
 
 ## The primary review workflow
@@ -154,16 +154,19 @@ with at most three minors. More than twelve blockers/majors returns
 `overflow: true` and `outcome: FAIL`; it does not spend time narrating an
 unbounded catalogue.
 
-## The optional Codex opinion
+## The optional opposite-model opinion
 
-On `ELEVATED`, start Codex concurrently with the primary workflow. Codex is a
-free-form second opinion, not another rule pass and never the approver. Its
-default ceiling is 10 minutes. Timeout or invalid output follows the fallback in
-[codex-cli.md](codex-cli.md) without restarting the primary review.
+On `ELEVATED`, start Codex for a Claude host or Claude for a Codex host,
+concurrently with the primary workflow in a fresh session. It is a free-form
+second opinion, not another rule pass or approver. Its 10-minute budget includes
+fallback. Follow [cross-model.md](cross-model.md) for carrier, cancellation and
+fallback; do not import the PLAN debate into REVIEW.
 
 ## Output contract
 
-Each reviewer returns:
+The primary workflow returns the complete schema below. The optional counterpart
+returns identity, candidate ID, findings, overflow and an outcome; its free-form
+opinion does not claim the primary workflow's checklist coverage.
 
 ```text
 reviewer_identity
@@ -264,7 +267,9 @@ outcome; do not copy source bytes into the plan.
   phase and continue immediately to SHIP.
 - Confirmation PASS → continue immediately to SHIP.
 - Unusable required reviewer → `WAIT_FOR_USER` with the single capability needed.
-- Failed confirmation, overflow, contract expansion or unresolved `[NN]` issue →
+- Contract expansion or a needed explicit `[NN]` waiver → `WAIT_FOR_USER`, as in
+  the spine; never treat waiting for that decision as permission to mutate.
+- Failed confirmation, overflow or a non-waivable unresolved defect →
   `FAIL`; preserve the branch and report exactly what remains.
 
 Reporting any of these transitions is not itself a reason to yield. Only

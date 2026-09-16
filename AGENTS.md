@@ -257,8 +257,8 @@ adding a skill that writes artifacts, put them under `.specs/<skill-name>/`.
 the phase table, invariants, state transitions, companion routing and resume
 contract. Everything a single
 phase consumes lives in `references/<phase>.md` and is loaded when that phase
-starts: `understand`, `plan`, `codex-cli`, `prove`, `design-parity`, `review`,
-`ship`, with cross-phase operational timing isolated in `observability`. **Keep
+starts: `understand`, `plan`, `cross-model`, `codex-cli`, `prove`, `design-parity`,
+`review`, `ship`, with cross-phase operational timing isolated in `observability`. **Keep
 it that way.** It was a 2359-line monolith and the length was
 itself a defect: policy deleted in one place stayed executable in a dozen others,
 and parallelism decided in one section was ignored 350 lines later. If you add a
@@ -281,8 +281,8 @@ formatters/generators or contract changes. The orchestrator owns shared seams,
 joins and barriers.
 
 For full-stack work, PLAN drafts one Integration Contract and concurrently checks
-it from frontend-consumer and backend-provider perspectives before Codex critiques
-the whole plan. Human approval pins that contract. BUILD materializes its source
+it from frontend-consumer and backend-provider perspectives before the host and
+opposite-model counterpart debate the whole plan. Human approval pins that contract. BUILD materializes its source
 artifact, then frontend and backend workers depend on the same contract ID—not on
 each other's implementation—and run concurrently. The join verifies the digest,
 ownership, generated output, provider conformance and consumer conformance before
@@ -293,7 +293,7 @@ are different decisions*: every applicable rule, owned screen, trust boundary an
 attack class is checked. Reviewer redundancy is evidence-based: a standard ticket
 gets one independent checklist-backed semantic review workflow; a material
 full-stack diff may partition frontend, backend and shared-contract coverage
-inside that one workflow. Elevated risk adds one concurrent Codex opinion when
+inside that one workflow. Elevated risk adds one concurrent opposite-model opinion when
 available. Security-sensitive work is elevated and
 requires explicit attack and security outcomes, but attack applicability still
 comes from the changed trust boundaries.
@@ -311,11 +311,11 @@ deleted because they made workflow bookkeeping cost more than code review.
 same turn. Only `WAIT_FOR_USER`, `FAIL` and final `COMPLETE` end the assistant turn.
 A phase announcement, finding, tool result, timeout fallback or degradation report
 is not a stopping condition. Required capability is preflighted before REVIEW;
-optional Codex/concurrency loss degrades instead of serializing or ending the run.
+optional counterpart/concurrency loss degrades instead of serializing or ending the run.
 
 *PLAN means native Plan Mode when the host provides it*: after the predeclared
 timing marker, `EnterPlanMode` runs before PLAN research and `ExitPlanMode`
-presents the reconciled, Codex-critiqued plan for human approval. A phase heading
+presents the reconciled, cross-model-debated plan for human approval. A phase heading
 or a read-only prompt is not the permission mode. Headless environments retain
 the pending-plan approval fallback and never implement before approval.
 Plan approval is consumed exactly once: an approved `ExitPlanMode` result, or the
@@ -356,17 +356,22 @@ machinery: the trust-boundary and view-layer
 detectors, the command selection, and any wave partitioning all derive from the
 repository — they must never harden into fixed globs or an assumed runner.
 
-**`ship-ticket` has two Codex touchpoints with different dependencies.** The
-PLAN critique needs both `codex-delegate` and the `codex` binary. The REVIEW
-touchpoint needs only the binary, runs only for an elevated profile, and starts
-concurrently with the required primary workflow. A missing plan relay does not
-disable the REVIEW route; a missing optional REVIEW engine follows its fallback
-and then degrades without blocking the primary workflow.
+**`ship-ticket` selects the opposite-model counterpart from the host.** Claude
+uses Codex; Codex uses Claude. PLAN is a bounded debate: the host drafts and
+responds, the counterpart challenges and checks revisions, with at most three
+counterpart calls and 20 minutes total by default (failed attempts count).
+Same-final-draft agreement ends it;
+budget exhaustion or unresolved differences are recorded for the one human
+approval, never manufactured consensus or an endless loop.
 
-Check the binary with `codex --version`; do not infer availability from the skill
-list. Invoke `codex-delegate` by name because it is installed outside this
-library's sibling-skill layout. Codex contributes findings and never approves
-the plan or change. The independent primary workflow owns acceptance-criteria,
+Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
+alone. Claude uses `claude-delegate`'s read-only relay for both. Discover delegates
+by name and check CLI versions; missing optional capability degrades. Claude's
+read-only carrier cannot run Git, so supply the actual diff and repository
+instructions. REVIEW uses a fresh counterpart session concurrently only for an
+elevated profile and never inherits the PLAN debate loop. The counterpart
+contributes findings and never approves the plan or change. The independent
+primary workflow owns acceptance-criteria,
 behavioral, applicable-rule and triggered parity/security outcomes. A full-stack
 partition assigns each path and rule once and uses one independent seam
 coordinator for the result; it is not multiple full reviews. If a repair occurs,
