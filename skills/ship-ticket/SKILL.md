@@ -228,7 +228,7 @@ critical.
 | vapt | run the family-appropriate reduced attacks from [references/prove.md](references/prove.md), commit them as tests, and name omitted families |
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
-| selected counterpart or its PLAN carrier | present the plan with debate degradation declared; human approval remains the gate |
+| selected counterpart or its PLAN carrier | bounded recovery, then **WAIT_FOR_USER** for restored CLI access or an explicit solo-planning waiver; never silently present solo work as a completed debate |
 | selected counterpart during elevated REVIEW | use CodeRabbit on the same candidate when available; otherwise declare the optional second opinion degraded and continue |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | elevated concurrency | run only the required primary review and declare the optional opinion degraded |
@@ -423,6 +423,7 @@ Use **WAIT_FOR_USER** only for:
 
 - plan approval or approval of changed scope;
 - a required native host mode transition that has no agent-callable control;
+- a required PLAN counterpart that failed after bounded recovery, unless the user explicitly waived cross-model planning;
 - missing acceptance criteria or unresolved product behavior;
 - a live blocker, ownership conflict or unknown WIP history;
 - an uncommitted or missing UI design reference;

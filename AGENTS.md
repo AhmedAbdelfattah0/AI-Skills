@@ -369,7 +369,11 @@ approval, never manufactured consensus or an endless loop.
 
 Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
 alone. Claude uses `claude-delegate`'s read-only relay for both. Discover delegates
-by name and check CLI versions; missing optional capability degrades. Claude's
+by name and check CLI versions; missing optional REVIEW capability degrades.
+PLAN counterpart failure pauses after bounded recovery unless the user explicitly
+waives cross-model planning. Claude runs through its CLI relay using verified
+subscription authentication: omit API-key/token overrides from the child process
+only and use normal host escalation when Keychain access is blocked. Claude's
 read-only carrier cannot run Git, so supply the actual diff and repository
 instructions. REVIEW uses a fresh counterpart session concurrently only for an
 elevated profile and never inherits the PLAN debate loop. The counterpart
