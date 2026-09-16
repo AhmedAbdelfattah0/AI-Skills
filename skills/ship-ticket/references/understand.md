@@ -38,10 +38,13 @@ Cannot fetch it — auth, IP, wrong instance, missing permission → `WAIT_FOR_U
 
 ## Triage — cheap here, expensive later
 
-Run these lookups **concurrently**. Every blocker's state, the assignee, the
-ticket state, the branch/PR search and the plan-artifact check are independent;
-several blockers means several fetches at once, not a queue. The only thing that
-depends on them is your decision after they all return.
+Use two dependency-correct waves. **Wave A:** fetch the ticket while repository
+instructions, CI, branch/PR search, plan-artifact search and capability preflight
+run concurrently. **Wave B:** once the ticket exposes its relations, fetch every
+blocker, parent, attachment and related specification concurrently. Assignee and
+ticket state arrive with the ticket; do not pretend blocker IDs were known before
+that fetch. The only thing that depends on the joined results is the triage
+decision.
 
 1. **Blockers.** Fetch each linked blocker and check its state. Not completed →
    `WAIT_FOR_USER`: name the blocker, its state, and what it was supposed to provide. If
@@ -65,6 +68,9 @@ depends on them is your decision after they all return.
    with a proposed split, and the user decides. Do not silently build a
    three-ticket epic as one PR. If they say build it as one, record that decision
    in *Risks & unknowns*.
+   A frontend/backend scope spanning separate repositories also needs an explicit
+   split or approved multi-repository shipping contract; the default one-branch,
+   one-commit, one-PR workflow covers a single repository only.
 7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists.
    For `ELEVATED`, check `codex --version`, the CodeRabbit fallback and whether an
    optional second opinion can run concurrently. Missing primary capability is
@@ -202,7 +208,7 @@ is circular and invites unbounded traversal. So:
 
 **Defer the detail of test knowledge, never the paths.** Recon establishes the
 repo's real commands and **the exact test and fixture files the plan will create
-or touch** — they go in the build sequence, and a test file outside the contract
+or touch** — they go in the execution DAG, and a test file outside the contract
 forces a divergence or quietly pressures you to skip the test. What defers is the
 *internal* detail: how an assertion is spelled, how a fixture is built.
 

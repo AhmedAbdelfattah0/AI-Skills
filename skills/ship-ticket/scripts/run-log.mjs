@@ -222,6 +222,86 @@ function median(values) {
     : sorted[middle];
 }
 
+function parallelGroups(intervals) {
+  const grouped = new Map();
+  for (const interval of intervals) {
+    const group = interval.metrics.parallel_group;
+    if (typeof group !== 'string' || group.length === 0) continue;
+    const members = grouped.get(group) ?? [];
+    members.push(interval);
+    grouped.set(group, members);
+  }
+
+  const results = [];
+  for (const [group, members] of grouped) {
+    if (members.length < 2) continue;
+    const spans = members.map((member) => ({
+      ...member,
+      start_ms: Date.parse(member.started_at),
+      end_ms: Date.parse(member.ended_at),
+    })).filter((member) => Number.isFinite(member.start_ms) && Number.isFinite(member.end_ms));
+    if (spans.length < 2) continue;
+
+    // A reused ID must not merge separate waves. Split each group into connected
+    // overlap components; correctly-authored waves have one component, while a
+    // reused ID gets deterministic `#2`, `#3`, ... suffixes in the report.
+    spans.sort((left, right) => left.start_ms - right.start_ms || left.end_ms - right.end_ms);
+    const components = [];
+    for (const span of spans) {
+      const component = components.at(-1);
+      if (!component || span.start_ms >= component.end_ms) {
+        components.push({ spans: [span], end_ms: span.end_ms });
+      } else {
+        component.spans.push(span);
+        component.end_ms = Math.max(component.end_ms, span.end_ms);
+      }
+    }
+
+    components.forEach(({ spans: componentSpans }, index) => {
+      if (componentSpans.length < 2) return;
+      const startedAt = Math.min(...componentSpans.map((member) => member.start_ms));
+      const endedAt = Math.max(...componentSpans.map((member) => member.end_ms));
+      const workMs = componentSpans.reduce((sum, member) => sum + member.duration_ms, 0);
+      const peakConcurrency = Math.max(...componentSpans.map((point) => componentSpans.filter(
+        (member) => member.start_ms <= point.start_ms && member.end_ms > point.start_ms,
+      ).length));
+
+      const frontend = componentSpans.find((member) => member.name === 'frontend_build');
+      const backend = componentSpans.find((member) => member.name === 'backend_build');
+      let frontendBackendOverlapPct = null;
+      if (frontend && backend) {
+        const overlapMs = Math.max(
+          0,
+          Math.min(frontend.end_ms, backend.end_ms) - Math.max(frontend.start_ms, backend.start_ms),
+        );
+        const shorterMs = Math.min(frontend.duration_ms, backend.duration_ms);
+        frontendBackendOverlapPct = shorterMs === 0
+          ? 0
+          : Number(((overlapMs / shorterMs) * 100).toFixed(1));
+      }
+
+      const wallMs = Math.max(0, endedAt - startedAt);
+      results.push({
+        parallel_group: components.length === 1 ? group : `${group}#${index + 1}`,
+        started_at: new Date(startedAt).toISOString(),
+        ended_at: new Date(endedAt).toISOString(),
+        member_count: componentSpans.length,
+        peak_concurrency: peakConcurrency,
+        wall_ms: wallMs,
+        work_ms: workMs,
+        estimated_savings_ms: Math.max(0, workMs - wallMs),
+        frontend_backend_overlap_pct: frontendBackendOverlapPct,
+        members: componentSpans.map((member) => ({
+          event_id: member.event_id,
+          name: member.name,
+          duration_ms: member.duration_ms,
+        })),
+      });
+    });
+  }
+  return results;
+}
+
 function buildRun(ticket, runId, rows) {
   const starts = new Map();
   const intervals = [];
@@ -267,6 +347,7 @@ function buildRun(ticket, runId, rows) {
     (interval) => interval.kind === 'phase' && interval.name === 'REVIEW',
   );
   const workflow = intervals.find((interval) => interval.kind === 'workflow');
+  const measuredParallelGroups = parallelGroups(intervals);
   const hasOpenWait = openIntervals.some((interval) => interval.kind === 'wait');
   const hasOpenNativePlan = openIntervals.some(
     (interval) => interval.kind === 'activity' && interval.name === 'native_plan_mode',
@@ -301,6 +382,7 @@ function buildRun(ticket, runId, rows) {
         (interval) => interval.name === 'optional_review' && interval.outcome === 'degraded',
       ).length,
     },
+    parallel_groups: measuredParallelGroups,
     open_intervals: openIntervals,
     intervals,
   };
@@ -322,6 +404,10 @@ function aggregate(runs) {
   const reviewToBuildRatios = runs
     .filter((run) => Number.isFinite(run.durations.review_ms) && run.durations.build_ms > 0)
     .map((run) => Number((run.durations.review_ms / run.durations.build_ms).toFixed(3)));
+  const measuredParallelGroups = runs.flatMap((run) => run.parallel_groups);
+  const frontendBackendOverlaps = measuredParallelGroups
+    .map((group) => group.frontend_backend_overlap_pct)
+    .filter(Number.isFinite);
 
   return {
     runs: runs.length,
@@ -343,6 +429,16 @@ function aggregate(runs) {
       (sum, run) => sum + run.counters.reviewer_degradations,
       0,
     ),
+    parallel_groups: measuredParallelGroups.length,
+    peak_concurrency: measuredParallelGroups.reduce(
+      (peak, group) => Math.max(peak, group.peak_concurrency),
+      0,
+    ),
+    estimated_parallel_savings_ms: measuredParallelGroups.reduce(
+      (sum, group) => sum + group.estimated_savings_ms,
+      0,
+    ),
+    frontend_backend_overlap_pct_median: median(frontendBackendOverlaps),
   };
 }
 

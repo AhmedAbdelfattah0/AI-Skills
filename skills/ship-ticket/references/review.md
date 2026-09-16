@@ -21,16 +21,20 @@ PASS          continue to SHIP
 FAIL          end once with the exact evidence and required next decision
 ```
 
-A clean standard ticket has one semantic dispatch. An elevated ticket has at
-most two concurrent initial dispatches. Only a candidate repair or a material
-cross-review disagreement creates a confirmation dispatch. There is no generic
-signing review after a clean result and no full review after a repair.
+A clean standard ticket has one primary workflow: one dispatch for a small or
+coupled diff, or one bounded concurrent coverage fan-out for a material full-stack
+diff. An elevated ticket adds at most one concurrent optional opinion. Only a
+candidate repair or material cross-review disagreement creates confirmation.
+There is no generic signing review after a clean result and no full review after
+a repair.
 
 ## Preflight before REVIEW starts
 
 Finish these checks before announcing REVIEW or appending its start event:
 
 - the approved plan and Design Contract still match the intended change;
+- the Integration Contract digest, generated outputs, provider conformance and
+  consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;
 - test-quality, docs-accuracy, applicable static security rows and runtime attack
   work are complete or carry a named degradation;
@@ -66,9 +70,10 @@ its digest is verified separately. The append-only execution record and session
 log are excluded so recording a verdict cannot invalidate the verdict.
 
 Give every initial reviewer the same `candidate_id`, changed-path list, retrieval
-recipe, ticket, acceptance criteria, approved plan, Design Contract, deterministic
-results and applicable parity/VAPT evidence. Candidate files do not change while
-they run. If the ID changes, discard their results and classify why:
+recipe, ticket, acceptance criteria, approved plan, Integration Contract, Design
+Contract, deterministic results and applicable parity/VAPT evidence. Candidate
+files do not change while they run. If the ID changes, discard their results and
+classify why:
 
 - an expected external formatter or generator was missed → return to PROVE;
 - another actor changed the worktree → `WAIT_FOR_USER`;
@@ -91,19 +96,38 @@ profile.
 
 | Profile | Initial semantic review |
 |---|---|
-| `STANDARD` | one independent primary reviewer |
-| `ELEVATED` | the primary reviewer plus Codex, concurrently when available |
+| `STANDARD` | one independent primary workflow |
+| `ELEVATED` | the primary workflow plus Codex, concurrently when available |
 
-When elevated concurrency is unavailable, run the required primary reviewer and
+When elevated concurrency is unavailable, run the required primary workflow and
 record `second_opinion: DEGRADED — concurrent route unavailable`; do not serialize
 an optional review into the critical path. A missing or timed-out Codex route uses
 its documented fallback, then degrades if the fallback is also unavailable.
 
-## The primary reviewer
+## The primary review workflow
 
-The primary reviewer is independent of the builder and receives no BUILD
-narrative conclusions. It combines the former free-form and rule-catalogue work
-in one read:
+The primary workflow is independent of every builder and receives no BUILD
+narrative conclusions. A small or tightly coupled candidate uses one reviewer.
+A material full-stack candidate may partition coverage concurrently when the
+approved Integration Contract and Design Contract give exact ownership:
+
+| Partition | Owns |
+|---|---|
+| frontend | frontend paths, frontend rules, tests and parity |
+| backend | backend paths, backend rules, tests and security evidence |
+| seam coordinator | Integration Contract, shared paths, cross-stack acceptance criteria, exclusions and final output |
+
+This is one primary review workflow, not three opinions: candidate paths and rule
+rows are assigned exactly once, while the seam coordinator checks only the shared
+interactions. All partitions receive the same candidate ID and run concurrently.
+Resume the seam coordinator with the two bounded partition results; it detects
+coverage gaps and emits the one primary output without rereading their owned
+paths. If the candidate cannot be partitioned without overlap, or the carrier
+cannot run the partitions concurrently, use one reviewer; never serialize three
+partition dispatches.
+
+Whether partitioned or not, the primary workflow combines the former free-form
+and rule-catalogue work:
 
 - verify every acceptance criterion and approved scope boundary;
 - inspect behavior, edge cases, errors and regression risk;
@@ -119,7 +143,8 @@ Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
 evidence.
 
-Default ceiling: 12 minutes. If it expires and the carrier has a resumable
+Default ceiling: 12 minutes for the whole primary workflow, including partition
+synthesis. If it expires and the carrier has a resumable
 session, allow one three-minute request for the already-completed, severity-ordered
 result. Do not restart the semantic read. Without a usable independent result,
 record `WAIT_FOR_USER` and the missing capability.
@@ -131,7 +156,7 @@ unbounded catalogue.
 
 ## The optional Codex opinion
 
-On `ELEVATED`, start Codex concurrently with the primary reviewer. Codex is a
+On `ELEVATED`, start Codex concurrently with the primary workflow. Codex is a
 free-form second opinion, not another rule pass and never the approver. Its
 default ceiling is 10 minutes. Timeout or invalid output follows the fallback in
 [codex-cli.md](codex-cli.md) without restarting the primary review.
@@ -145,6 +170,7 @@ reviewer_identity
 candidate_id
 reviewed_paths[]
 reasoned_exclusions[]
+coverage_partitions[]: identity · owned paths/rules · outcome
 acceptance_criteria[]: criterion · outcome · evidence
 rule_rows[]: subject_id · outcome · evidence
 parity_outcome: PASS | FAIL | NOT_TRIGGERED
@@ -187,6 +213,12 @@ The batch may change only Design Contract paths. Update directly affected tests,
 comments and docs in the same batch; ordinary diff review is sufficient—there is
 no repository-wide prose inventory or byte-preimage ledger.
 
+Finding units with disjoint write ownership and exclusive resources may be fixed
+concurrently by workers that receive the same old candidate ID and exact finding
+IDs. Workers never edit the Integration Contract or each other's paths. Join all
+units before any command rerun, candidate-ID recomputation or confirmation; they
+remain one repair batch.
+
 Then:
 
 - run the deterministic commands affected by the repair;
@@ -202,7 +234,8 @@ change is not allowed in this REVIEW execution.
 
 ## Targeted confirmation
 
-Use the same independent primary reviewer, preserving its session when possible.
+Use the same independent primary workflow, preserving its coordinator and
+partition sessions when possible.
 Give it the original findings and dispositions, the old and new candidate IDs,
 the repair diff, affected callers/contracts, relevant command results, attack
 reruns and UI slice. It checks only:
@@ -215,6 +248,10 @@ reruns and UI slice. It checks only:
 Default ceiling: 6 minutes. It returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle.
+
+When the affected closure spans independent frontend/backend partitions, their
+targeted checks may run concurrently; the seam coordinator still emits one
+confirmation after both return.
 
 ## Record and transition
 

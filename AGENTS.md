@@ -271,16 +271,35 @@ meant the rule pass, the parity check and the attack testing. The numbering neve
 — a GATE 1 and a GATE 2 never existed. **Do not reintroduce numbered steps**: the
 cross-references between them were a defect generator.
 
+**Parallelize the dependency graph, not only BUILD.** Every phase derives ready
+nodes with explicit inputs, write ownership and exclusive resources. Material
+ready nodes run concurrently by default; serialization needs a real dependency,
+overlapping writes, shared mutable state or unavailable orchestration. Missing
+concurrency is a declared performance degradation, never a user stop. Writing
+workers receive disjoint owned paths and never run Git operations, global
+formatters/generators or contract changes. The orchestrator owns shared seams,
+joins and barriers.
+
+For full-stack work, PLAN drafts one Integration Contract and concurrently checks
+it from frontend-consumer and backend-provider perspectives before Codex critiques
+the whole plan. Human approval pins that contract. BUILD materializes its source
+artifact, then frontend and backend workers depend on the same contract ID—not on
+each other's implementation—and run concurrently. The join verifies the digest,
+ownership, generated output, provider conformance and consumer conformance before
+real integration. Contract drift returns to approval.
+
 **Three rules the bounded workflow exists to protect.** *Coverage and redundancy
 are different decisions*: every applicable rule, owned screen, trust boundary and
 attack class is checked. Reviewer redundancy is evidence-based: a standard ticket
-gets one independent checklist-backed semantic review; elevated risk adds one
-concurrent Codex opinion when available. Security-sensitive work is elevated and
+gets one independent checklist-backed semantic review workflow; a material
+full-stack diff may partition frontend, backend and shared-contract coverage
+inside that one workflow. Elevated risk adds one concurrent Codex opinion when
+available. Security-sensitive work is elevated and
 requires explicit attack and security outcomes, but attack applicability still
 comes from the changed trust boundaries.
 
 *Review is bounded*: PROVE finishes formatters, generators, tests, docs and
-evidence before REVIEW. A clean standard candidate needs one semantic dispatch.
+evidence before REVIEW. A clean standard candidate needs one primary workflow.
 An elevated candidate may add one concurrent optional opinion. Accepted findings
 form at most one consolidated repair batch and only that repair's affected closure
 receives one targeted confirmation. A failed confirmation is the result, never a
@@ -312,6 +331,9 @@ accidental stop; logging failure is declared and never blocks execution.
 Because native Plan Mode permits only read-only shell activity, telemetry starts
 a `native_plan_mode` interval before entry and closes it immediately after
 approved exit; no logger write may be used to bypass that boundary.
+Concurrent high-level activities share a `parallel_group` metric; summaries
+report wall time, summed work, estimated savings, peak concurrency and
+frontend/backend overlap so parallelism is observable rather than aspirational.
 
 PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
 one targeted confirmation. Read-only checks and compact append-only execution
@@ -337,17 +359,19 @@ repository — they must never harden into fixed globs or an assumed runner.
 **`ship-ticket` has two Codex touchpoints with different dependencies.** The
 PLAN critique needs both `codex-delegate` and the `codex` binary. The REVIEW
 touchpoint needs only the binary, runs only for an elevated profile, and starts
-concurrently with the required primary reviewer. A missing plan relay does not
+concurrently with the required primary workflow. A missing plan relay does not
 disable the REVIEW route; a missing optional REVIEW engine follows its fallback
-and then degrades without blocking the primary reviewer.
+and then degrades without blocking the primary workflow.
 
 Check the binary with `codex --version`; do not infer availability from the skill
 list. Invoke `codex-delegate` by name because it is installed outside this
 library's sibling-skill layout. Codex contributes findings and never approves
-the plan or change. The independent primary reviewer owns acceptance-criteria,
-behavioral, applicable-rule and triggered parity/security outcomes in one read.
-If a repair occurs, that same independent reviewer confirms only the findings and
-dependency-closed affected surface; it never repeats the whole review.
+the plan or change. The independent primary workflow owns acceptance-criteria,
+behavioral, applicable-rule and triggered parity/security outcomes. A full-stack
+partition assigns each path and rule once and uses one independent seam
+coordinator for the result; it is not multiple full reviews. If a repair occurs,
+that workflow confirms only the findings and dependency-closed affected surface;
+it never repeats the whole review.
 
 The candidate is bound by `scripts/candidate-id.mjs`, which hashes the final state
 of every changed and untracked candidate path relative to the merge base. The plan

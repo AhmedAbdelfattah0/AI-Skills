@@ -8,16 +8,20 @@ Two claims, and they are not the same: **the control exists in the code**, and
 registered in the wrong order or a guard whose route matcher misses the new path.
 Establish the first, then test the second.
 
-## The four stages
+## The proof DAG and its barriers
 
-Almost all of stage 1 is reading, and the reads do not need each other. The rest
-is ordered, because a fix changes what the later stages were derived *from*.
+Build a ready set from declared inputs, writes and exclusive resources. Formatting,
+generation or snapshot-update nodes that mutate the candidate finish and join
+before readers consume the final snapshot. Whole-repo commands are not assumed
+independent: run them concurrently only when their output directories, caches,
+ports, datastores and fixtures are proven disjoint.
 
 | Stage | What | Concurrent? |
 |---|---|---|
-| 1 | static security rows · the parity screen list and classifications · the attack surface inventory and abuse-case *design* · the docs scan | **yes** |
+| 0 | candidate-normalizing writers: formatters · generators · snapshot updates | only disjoint ownership; then join |
+| 1 | isolated non-mutating repo commands · static security rows · parity classifications · attack inventory/design · docs scan | **yes — dispatch the ready set** |
 | 2 | **barrier** → write stage 1's artifacts → one batch of fixes → re-derive | no — write barrier |
-| 3 | live attacks | no — serial by nature |
+| 3 | live attacks | serial per disposable environment; isolated environments may overlap |
 | 4 | **barrier** → attack fixes → back to stage 2 | no — write barrier |
 
 **Stage 1 is read-only — it writes nothing at all, artifacts included.** Its
@@ -46,6 +50,15 @@ one. CORS, header, cookie, secret-wiring and ACL/policy surfaces map to
 `security-config`; an egress operation carrying credentials or user data maps to
 `outbound-data`. Never store a descriptive family label in `kind`.
 
+### Full-stack proof joins at the contract
+
+Frontend and backend unit/lint/build/conformance nodes may overlap when their
+outputs and resources are isolated. Each side proves against the same Integration
+Contract ID and digest. The orchestrator then joins them, verifies generated
+artifacts and ownership, and runs the real integration/end-to-end node that
+depends on both. A provider test does not replace consumer conformance, and a
+frontend mock does not prove the live provider.
+
 **Record every boundary in one stable shape.** REVIEW uses this evidence without
 re-running the attacks:
 
@@ -72,7 +85,12 @@ PROVE may apply at most two consolidated repair batches. Each batch fixes every
 currently known failure, then rederives affected inventories and reruns affected
 commands. Needing a third candidate-changing batch is `FAIL`. PROVE prepares
 screen classifications and pinned inputs; the complete screen comparison belongs
-to REVIEW's independent primary reviewer.
+to REVIEW's independent primary workflow.
+
+Within one batch, fixes with disjoint owned paths and mutable resources may run
+concurrently. They still join at one barrier and consume one batch; the
+orchestrator rederives evidence from their combined final tree, never from each
+worker's partial view.
 
 ## The static proof
 
@@ -146,14 +164,15 @@ shared middleware branches on method, path, route metadata, parameters, resource
 type and datastore state — so a route whose equivalence to its class is unproven
 carries its own full tests.
 
-### Inventory and design fan out; attacks do not
+### Inventory and design fan out; attack environments isolate
 
 Enumerating surfaces and designing abuse cases are read-only and parallelize
-cleanly — the count is in the plan's section 8. **Running** the attacks does not:
-concurrent workers share the port, the disposable datastore, the principal
-fixtures, and each other's destructive state. **Live attacks run serially,
-without exception.** (`vapt`'s risk-ordered waves belong to its AUDIT mode, where the run owns
-its environment. This is GATE mode over one ticket's diff.)
+cleanly — the count is in the plan's section 8. Within one disposable environment,
+live attacks are serial because workers share the port, datastore, principals,
+fixtures and destructive state. They may overlap only when the repository already
+supports proven-isolated instances with distinct ports, datastores, principals,
+credentials and no shared external state. Do not build extra infrastructure only
+to manufacture concurrency; uncertain isolation means serial execution.
 
 ### Fixes
 
@@ -203,7 +222,7 @@ with its cause. Otherwise use `outcome: FAIL`.
 
 PROVE runs the attacks and produces the evidence. It dispatches no reviewer.
 Hand the final surface map, rule-to-test map, test outcomes and production control
-paths to REVIEW's independent primary reviewer. That reviewer returns
+paths to REVIEW's independent primary workflow. That workflow returns
 `attack_review_outcome`, and `security_outcome` when the plan is
 security-sensitive, without running the attacks again. A REVIEW repair that
 touches a mapped boundary reruns only its affected abuse tests; a new boundary
@@ -245,3 +264,9 @@ a rename grep would be overclaiming. **Additionally, wherever this ticket rename
 or changed documented behaviour** — a symbol, endpoint, flag or default — grep
 every docs surface for the old name and **fix it now**. A doc edit made after
 REVIEW passes would be unreviewed content in the commit.
+
+Once ordinary and abuse tests are final, `test-quality`, `docs-accuracy`, final
+static rows and UI-evidence preparation form a read-only ready set and run
+concurrently when their inputs and tools do not mutate shared output. Collect all
+must-fix results before opening the single repair barrier; do not repair one while
+another reader is still inspecting the old candidate.

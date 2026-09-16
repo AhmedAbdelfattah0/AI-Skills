@@ -47,6 +47,8 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      run_id: <opaque ID created when workflow timing began>
      timing_telemetry: active|degraded
      native_plan_mode: active|already_active|unavailable
+     worker_width: <available concurrent workers>
+     parallelism_degradations: []
      approval_status: pending|approved   a human approval flips this, and only this
      design_ref: <SHA>                   the pin
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
@@ -70,12 +72,36 @@ outcomes. It does not change attack-class applicability.>
 <2–4 plain sentences: what the user gets when this is done, and the approach in
 one line. No jargon — write it for the person approving, not for the builder.>
 
-## 2. Build sequence
-| # | Step (plain words) | Files touched | Depends on | Par |
-|---|---|---|---|---|
-| 1 | Add the state/data layer for X | <real path, in THIS repo's layout> | — | A |
-| 2 | Add the Y lookup service | <real path> | — | A |
-| 3 | Build the X list screen | <real path(s), incl. template/style files> | 1 | B |
+## 2. Integration contract and execution DAG
+
+### Integration contract
+<For full-stack work or any shared API/event/schema. Otherwise: NOT_TRIGGERED —
+no producer/consumer boundary changes.>
+
+| Field | Approved value |
+|---|---|
+| contract ID | <stable ticket-scoped identifier> |
+| source of truth | <existing/generated artifact path, or plan-bound shape until materialized> |
+| approved shape binding | <approved-plan digest; materialized artifact digest is recorded after approval> |
+| operations | <method + path, event identity, RPC, or equivalent> |
+| request | <fields, types, requiredness, nullability and validation> |
+| success response | <status/event and fields> |
+| error model | <statuses/codes and payload shape> |
+| access rules | <authentication, authorization and tenancy behavior> |
+| side effects | <idempotency, ordering, pagination/versioning where applicable> |
+| client mechanism | <generated client/shared DTO/temporary adapter and deletion point> |
+| consumer conformance | <command/fixture/mock proving frontend expectations> |
+| provider conformance | <command/test proving backend implementation> |
+| frontend compatibility | ACCEPTED — <path-backed evidence> |
+| backend compatibility | ACCEPTED — <path-backed evidence> |
+
+### Execution DAG
+| ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |
+|---|---|---|---|---|---|
+| contract | orchestrator | Materialize the approved contract artifact | <real path> | — | generator outputs |
+| backend | backend worker | Build provider and provider tests | <real paths> | contract | <database/none> |
+| frontend | frontend worker | Build consumer and consumer tests | <real paths> | contract | <output dir/none> |
+| integration | orchestrator | Join and verify the real integration | <real paths> | backend, frontend | local app + datastore |
 
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
@@ -106,10 +132,10 @@ plan carries no cross-model review>
 ## 8. Proof and review routing
 | Work | Scope for this ticket | Execution |
 |---|---|---|
-| parity | <reference-backed screen paths, or not triggered> | primary reviewer performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
-| attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial |
-| rule coverage | <families and specialist selected> | primary reviewer checks each applicable row in the same semantic read |
-| optional second opinion | <profile reason or not triggered> | ELEVATED only, concurrent with the primary reviewer |
+| parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
+| attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
+| rule coverage | <frontend/backend/shared families and specialist selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
+| optional second opinion | <profile reason or not triggered> | ELEVATED only, concurrent with the primary workflow |
 
 <!-- RUN-STATE:BEGIN -->
 <!-- Append one compact JSON object per execution event; never edit or reorder
@@ -124,27 +150,52 @@ the run ID already created by workflow telemetry. A later execution of the same
 ticket gets a new `run_id`; it never edits or clears prior entries. Approval
 without the matching start event is not executable.
 
-## The `Par` column
+## Contract convergence before critique
 
-Steps sharing a letter have no dependency on each other and **touch no file in
-common**, so they are built concurrently. Steps with no peer get their own letter.
-Two rules keep the column honest: a step may only share a group with steps it does
-**not** list in *Depends on*, and **two steps touching the same file are never in
-the same group** — that is a write conflict, not parallelism. If everything is
-sequential, say so; a column of A B C D is a real answer.
+For a full-stack boundary, draft one Integration Contract and dispatch two
+read-only checks concurrently while native Plan Mode is active:
+
+- the **frontend consumer check** traces the screens/services that consume the
+  shape and returns `ACCEPTED` or `CHANGE_REQUESTED` with path-backed evidence;
+- the **backend provider check** traces the route/service/data constraints that
+  produce the shape and returns the same bounded result.
+
+They inspect the same draft; neither authors a competing contract and neither is
+a human approver. Reconcile evidence-backed requests once and recheck only a side
+whose contract surface changed. If the two sides still cannot accept one shape,
+record the disagreement in Risks and use `WAIT_FOR_USER`. Only then send the
+semantically complete plan to Codex for the broader plan critique.
+
+The approved plan digest binds the plan-form contract. After approval, the first
+candidate-writing node materializes or generates its source-of-truth artifact
+and records that artifact's digest. Every producer and consumer worker receives
+the same contract ID and digest.
+
+## The execution DAG
+
+`Depends on` is the scheduler; table order is presentation only. At any moment,
+all nodes whose dependencies are complete form the ready set. Dispatch every
+material ready node concurrently when its file ownership and exclusive resources
+do not conflict. Do not hold a ready node for another node it does not depend on.
+
+Every file has one owner. Shared schema/generator outputs, lockfiles, route
+registries and integration seams belong to the orchestrator unless the DAG names
+one dedicated owner. A worker that discovers an unlisted dependency reports it;
+it does not widen its ownership. If concurrency is unavailable, preserve the DAG,
+run ready nodes serially and record the performance degradation and reason.
 
 ### Full-stack: the frontend does not wait for the backend
 
 What the frontend depends on is the **API contract — the request and response
 shape — not the backend's implementation of it.** Pin the contract as its own
-first step; frontend and backend then sit in the same group:
+first node; frontend and backend then become ready together:
 
-| # | Step | Depends on | Par |
-|---|---|---|---|
-| 1 | Produce the artifact the frontend compiles against | — | A |
-| 2 | Build the endpoint: handler, service, data access | 1 | **B** |
-| 3 | Build the screen against the agreed shape | 1 | **B** |
-| 4 | Wire the screen to the live endpoint and verify end to end | 2, 3 | C |
+| ID | Owner | Step | Depends on | Exclusive resources |
+|---|---|---|---|---|
+| contract | orchestrator | Produce the artifact both sides compile or test against | — | generator outputs |
+| backend | backend worker | Build the endpoint: handler, service, data access and provider tests | contract | backend-owned resources |
+| frontend | frontend worker | Build the screen, client/service and consumer tests | contract | frontend-owned resources |
+| integration | orchestrator | Verify contract digests, wire the real endpoint and test end to end | backend, frontend | local app + datastore |
 
 **Step 1 must name an artifact, not an agreement.** "We agreed the shape" is not
 something a compiler accepts:
@@ -152,8 +203,9 @@ something a compiler accepts:
 - the repo **generates its client** from a committed schema (`openapi.json`, a
   `.proto`, a GraphQL SDL) → step 1 is *generate and commit that schema*;
 - there is a **shared types package or DTO file** both sides import → that file;
-- neither → the shape written into the plan, and the frontend hand-writes a
-  temporary interface it deletes at the wiring step.
+- neither → the plan-bound shape plus a consumer fixture and provider conformance
+  test; the frontend may hand-write a temporary adapter only when the repo permits
+  it, and deletes it at the integration node.
 
 Check for a generator before assuming the third case: a repo that generates *and*
 forbids hand-written shapes — a conformance test, a lint rule — will reject the
@@ -167,10 +219,12 @@ directly. **Derive the split from the imports**: trace what actually consumes th
 generated types and put only those files in the waiting group. Anything provably
 clear of them starts immediately. If a file's dependency is unclear, it waits.
 
-What genuinely cannot overlap: verifying against the real endpoint, and attacking
-it. And if the shape is *not* settled — the ticket is vague, or it depends on a
-decision nobody has made — that is a *Risks* row or `WAIT_FOR_USER`, not a parallelism
-problem. Building both halves against different guesses is worse than serialising.
+At the integration join, verify the materialized contract digest, generated
+outputs, changed-path ownership, provider conformance and consumer conformance
+before exercising the real endpoint. If the shape is *not* settled — the ticket
+is vague, or it depends on a decision nobody has made — that is a *Risks* row or
+`WAIT_FOR_USER`, not a parallelism problem. Building both halves against different
+guesses is worse than serialising.
 
 ## Formatting rules that keep it readable
 
@@ -188,13 +242,15 @@ problem. Building both halves against different guesses is worse than serialisin
 ## The Design Contract
 
 The contract governs **which files may be written**, so it must exist before any
-code. Branch first, then:
+code. It is distinct from the Integration Contract: the Integration Contract
+governs behavior exchanged across a producer/consumer seam; the Design Contract
+governs file ownership and rules. Branch first, then:
 
 1. **Confirm the routing** still selects the same family member now the plan is
    final.
 2. **Invoke that skill by name** — load it, do not recall it.
 3. **Run its Design Contract gate**, deriving the file list from the approved
-   build sequence.
+   execution DAG.
 
 ### When the routed skill has no contract gate of its own
 
@@ -219,6 +275,12 @@ A full-stack ticket invokes two specialists and produces **one** contract and
 compose rather than concatenate: **one table, one row per file, each row carrying
 the role vocabulary of the side that owns it.** A file appears exactly once. Two
 tables mean two half-reviews, and a rule that fell between them is invisible.
+
+Invoke the frontend and backend specialists concurrently as read-only row
+proposals against the approved execution DAG. The orchestrator owns shared seam
+files, resolves duplicate ownership, and composes their proposals into the one
+Design Contract before any implementation worker starts. A specialist may flag a
+missing path; it may not expand the approved plan or write candidate files.
 
 ### The parity metadata
 
