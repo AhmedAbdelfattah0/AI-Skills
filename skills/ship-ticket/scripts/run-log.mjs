@@ -242,43 +242,61 @@ function parallelGroups(intervals) {
     })).filter((member) => Number.isFinite(member.start_ms) && Number.isFinite(member.end_ms));
     if (spans.length < 2) continue;
 
-    const startedAt = Math.min(...spans.map((member) => member.start_ms));
-    const endedAt = Math.max(...spans.map((member) => member.end_ms));
-    const workMs = spans.reduce((sum, member) => sum + member.duration_ms, 0);
-    const peakConcurrency = Math.max(...spans.map((point) => spans.filter(
-      (member) => member.start_ms <= point.start_ms && member.end_ms > point.start_ms,
-    ).length));
-
-    const frontend = spans.find((member) => member.name === 'frontend_build');
-    const backend = spans.find((member) => member.name === 'backend_build');
-    let frontendBackendOverlapPct = null;
-    if (frontend && backend) {
-      const overlapMs = Math.max(
-        0,
-        Math.min(frontend.end_ms, backend.end_ms) - Math.max(frontend.start_ms, backend.start_ms),
-      );
-      const shorterMs = Math.min(frontend.duration_ms, backend.duration_ms);
-      frontendBackendOverlapPct = shorterMs === 0
-        ? 0
-        : Number(((overlapMs / shorterMs) * 100).toFixed(1));
+    // A reused ID must not merge separate waves. Split each group into connected
+    // overlap components; correctly-authored waves have one component, while a
+    // reused ID gets deterministic `#2`, `#3`, ... suffixes in the report.
+    spans.sort((left, right) => left.start_ms - right.start_ms || left.end_ms - right.end_ms);
+    const components = [];
+    for (const span of spans) {
+      const component = components.at(-1);
+      if (!component || span.start_ms >= component.end_ms) {
+        components.push({ spans: [span], end_ms: span.end_ms });
+      } else {
+        component.spans.push(span);
+        component.end_ms = Math.max(component.end_ms, span.end_ms);
+      }
     }
 
-    const wallMs = Math.max(0, endedAt - startedAt);
-    results.push({
-      parallel_group: group,
-      started_at: new Date(startedAt).toISOString(),
-      ended_at: new Date(endedAt).toISOString(),
-      member_count: spans.length,
-      peak_concurrency: peakConcurrency,
-      wall_ms: wallMs,
-      work_ms: workMs,
-      estimated_savings_ms: Math.max(0, workMs - wallMs),
-      frontend_backend_overlap_pct: frontendBackendOverlapPct,
-      members: spans.map((member) => ({
-        event_id: member.event_id,
-        name: member.name,
-        duration_ms: member.duration_ms,
-      })),
+    components.forEach(({ spans: componentSpans }, index) => {
+      if (componentSpans.length < 2) return;
+      const startedAt = Math.min(...componentSpans.map((member) => member.start_ms));
+      const endedAt = Math.max(...componentSpans.map((member) => member.end_ms));
+      const workMs = componentSpans.reduce((sum, member) => sum + member.duration_ms, 0);
+      const peakConcurrency = Math.max(...componentSpans.map((point) => componentSpans.filter(
+        (member) => member.start_ms <= point.start_ms && member.end_ms > point.start_ms,
+      ).length));
+
+      const frontend = componentSpans.find((member) => member.name === 'frontend_build');
+      const backend = componentSpans.find((member) => member.name === 'backend_build');
+      let frontendBackendOverlapPct = null;
+      if (frontend && backend) {
+        const overlapMs = Math.max(
+          0,
+          Math.min(frontend.end_ms, backend.end_ms) - Math.max(frontend.start_ms, backend.start_ms),
+        );
+        const shorterMs = Math.min(frontend.duration_ms, backend.duration_ms);
+        frontendBackendOverlapPct = shorterMs === 0
+          ? 0
+          : Number(((overlapMs / shorterMs) * 100).toFixed(1));
+      }
+
+      const wallMs = Math.max(0, endedAt - startedAt);
+      results.push({
+        parallel_group: components.length === 1 ? group : `${group}#${index + 1}`,
+        started_at: new Date(startedAt).toISOString(),
+        ended_at: new Date(endedAt).toISOString(),
+        member_count: componentSpans.length,
+        peak_concurrency: peakConcurrency,
+        wall_ms: wallMs,
+        work_ms: workMs,
+        estimated_savings_ms: Math.max(0, workMs - wallMs),
+        frontend_backend_overlap_pct: frontendBackendOverlapPct,
+        members: componentSpans.map((member) => ({
+          event_id: member.event_id,
+          name: member.name,
+          duration_ms: member.duration_ms,
+        })),
+      });
     });
   }
   return results;

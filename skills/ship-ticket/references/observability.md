@@ -81,10 +81,12 @@ Use a unique event ID for every occurrence, for example
 status message; the extra bookkeeping would distort the workflow being measured.
 
 Give activities that were actually dispatched together the same
-`--metric parallel_group=<stable-id>`. Use one high-level interval per worker or
-proof/review partition, not one per command. The summary derives group wall time,
-summed worker time, estimated saved time, peak concurrency and frontend/backend
-overlap from their timestamps.
+`--metric parallel_group=<stable-id>`. Allocate that ID per dispatch wave and
+never reuse it within a run; when a later ready set is dispatched, create a new
+ID even if it performs the same kind of work. Use one high-level interval per
+worker or proof/review partition, not one per command. The summary derives group
+wall time, summed worker time, estimated saved time, peak concurrency and
+frontend/backend overlap from their timestamps.
 
 ### Native Plan Mode and logging
 

@@ -112,6 +112,10 @@ carrier is a recorded performance degradation: run the same DAG serially and
 continue; never use **WAIT_FOR_USER** merely because parallel execution is
 unavailable.
 
+Assign a fresh stable `parallel_group` ID to each dispatch wave and never reuse
+an ID within the same run. Activities in one wave share its ID; a later ready
+set gets a new ID even when it uses the same worker names.
+
 Every writing subagent receives an ownership packet: approved plan and contract
 IDs, owned paths, forbidden shared paths, dependencies, required tests, exclusive
 resources and completion schema. Tell it that other workers are active, that it
