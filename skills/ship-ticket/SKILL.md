@@ -270,26 +270,30 @@ becomes a plan risk, **WAIT_FOR_USER**, or **FAIL**; it does not create another 
 Load [references/plan.md](references/plan.md) and
 [references/cross-model.md](references/cross-model.md).
 
-When the host exposes native Plan Mode, start the predeclared PLAN timing and
-then invoke `EnterPlanMode` before any PLAN research unless it is already active.
+Use the host-specific native mode procedure in the plan reference before PLAN
+research: Claude uses `EnterPlanMode`; Codex uses its actual Plan collaboration
+mode. Interactive Codex in Default mode must request the client's `/plan` switch
+when no native transition tool is exposed, not silently take the headless path.
 Calling this phase PLAN is not a substitute for changing the host mode. Keep
 native Plan Mode active through research, drafting, deterministic prechecks, the
 bounded read-only Claude–Codex debate, and reconciliation. The host responds to
 findings and the counterpart checks revisions; stop at convergence or the recorded
 response/time budget, then present unresolved decisions honestly.
 
-Present the reconciled plan with `ExitPlanMode`; that native transition is the
-human approval handoff and holds `WAIT_FOR_USER` until answered. Do not exit Plan
+Present the reconciled plan through the host's native approval handoff:
+`ExitPlanMode` on Claude, the host-prescribed final plan format on Codex.
+Hold `WAIT_FOR_USER` until answered. Do not exit Plan
 Mode before the debate result has been reconciled, and do not treat either model's
 agreement as human approval.
 
-There is exactly one plan approval. When `ExitPlanMode` returns approved,
-transition to **CONTINUE** and execute the after-approval actions immediately.
+There is exactly one plan approval. Once it is approved and the host permits
+implementation, transition to **CONTINUE** and execute after-approval actions immediately.
 Never ask the user to also say “go”, “continue”, or “confirm”. In the headless
 fallback, the first explicit approval of the presented reconciled plan has the
 same effect and must not be followed by another approval prompt.
 
-If native Plan Mode is unavailable, follow the headless fallback below and make
+Only for a genuinely headless carrier or explicit user opt-out, follow the
+headless fallback below and make
 the ordinary approval request **WAIT_FOR_USER**.
 
 After approval:
@@ -418,6 +422,7 @@ any candidate-byte change is **FAIL** and never silently reopens REVIEW.
 Use **WAIT_FOR_USER** only for:
 
 - plan approval or approval of changed scope;
+- a required native host mode transition that has no agent-callable control;
 - missing acceptance criteria or unresolved product behavior;
 - a live blocker, ownership conflict or unknown WIP history;
 - an uncommitted or missing UI design reference;
