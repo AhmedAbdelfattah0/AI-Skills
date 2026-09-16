@@ -227,7 +227,7 @@ Claude-only.
 | self-healing | — |
 | session-logger | — |
 | session-restore | — |
-| ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, bounded review, stable candidate identity, and timing telemetry) |
+| ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, Claude↔Codex planning debate and review, stable candidate identity, and timing telemetry) |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |

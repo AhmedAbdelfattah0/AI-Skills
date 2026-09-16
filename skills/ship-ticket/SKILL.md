@@ -68,7 +68,7 @@ and execution continues; measurement must never become a new blocker.
 | Phase | Outcome |
 |---|---|
 | **UNDERSTAND** | full tracker specification, startable ticket, detected stack and commands, pinned UI design, review capability preflight |
-| **PLAN** | independently critiqued, human-approved plan and Design Contract |
+| **PLAN** | cross-model debated, human-approved plan and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
 | **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one concurrent second opinion only for elevated risk; at most one repair and targeted confirmation |
@@ -85,13 +85,13 @@ Load a phase reference only when entering that phase:
 | Entering | Load |
 |---|---|
 | Workflow start | [references/observability.md](references/observability.md) |
-| UNDERSTAND | [references/understand.md](references/understand.md) |
-| PLAN | [references/plan.md](references/plan.md) and [references/codex-cli.md](references/codex-cli.md) |
+| UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) |
+| PLAN | [references/plan.md](references/plan.md) and [references/cross-model.md](references/cross-model.md) |
 | BUILD | this spine |
 | PROVE | [references/prove.md](references/prove.md) |
 | PROVE with UI | [references/design-parity.md](references/design-parity.md) |
 | REVIEW | [references/review.md](references/review.md) |
-| REVIEW with elevated Codex | [references/codex-cli.md](references/codex-cli.md) |
+| REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 
 ## Dependency-driven orchestration
@@ -153,7 +153,9 @@ Determine these during UNDERSTAND and record them in the plan:
 
 - a primary reviewer independent from the builder is available;
 - whether **STANDARD** or **ELEVATED** applies;
-- whether Codex and its fallback are available for an elevated second opinion;
+- host identity and the opposite-model counterpart: Claude host → Codex;
+  Codex host → Claude, following [references/cross-model.md](references/cross-model.md);
+- whether that counterpart and its fallback are available;
 - whether the available orchestrator can dispatch that optional opinion
   concurrently;
 - the available concurrent worker width and whether the carrier safely supports
@@ -167,7 +169,7 @@ preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
 If the independent primary route is absent, use **WAIT_FOR_USER** before REVIEW
-begins. Missing optional Codex or concurrency is a declared degradation; do not
+begins. Missing optional counterpart or concurrency is a declared degradation; do not
 serialize optional work into the critical path.
 
 ## Security sensitivity
@@ -226,8 +228,8 @@ critical.
 | vapt | run the family-appropriate reduced attacks from [references/prove.md](references/prove.md), commit them as tests, and name omitted families |
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
-| codex-delegate or Codex during PLAN | present the plan with the missing cross-model critique declared; human approval remains the gate |
-| Codex during elevated REVIEW | use CodeRabbit on the same candidate when available; otherwise declare the optional second opinion degraded and continue |
+| selected counterpart or its PLAN carrier | present the plan with debate degradation declared; human approval remains the gate |
+| selected counterpart during elevated REVIEW | use CodeRabbit on the same candidate when available; otherwise declare the optional second opinion degraded and continue |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | elevated concurrency | run only the required primary review and declare the optional opinion degraded |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
@@ -266,18 +268,20 @@ becomes a plan risk, **WAIT_FOR_USER**, or **FAIL**; it does not create another 
 > Preparing a buildable plan and asking for approval.
 
 Load [references/plan.md](references/plan.md) and
-[references/codex-cli.md](references/codex-cli.md).
+[references/cross-model.md](references/cross-model.md).
 
 When the host exposes native Plan Mode, start the predeclared PLAN timing and
 then invoke `EnterPlanMode` before any PLAN research unless it is already active.
 Calling this phase PLAN is not a substitute for changing the host mode. Keep
 native Plan Mode active through research, drafting, deterministic prechecks, the
-bounded read-only Codex critique, and reconciliation.
+bounded read-only Claude–Codex debate, and reconciliation. The host responds to
+findings and the counterpart checks revisions; stop at convergence or the recorded
+response/time budget, then present unresolved decisions honestly.
 
 Present the reconciled plan with `ExitPlanMode`; that native transition is the
 human approval handoff and holds `WAIT_FOR_USER` until answered. Do not exit Plan
-Mode before Codex's findings have been reconciled, and do not treat Codex's
-response as approval.
+Mode before the debate result has been reconciled, and do not treat either model's
+agreement as human approval.
 
 There is exactly one plan approval. When `ExitPlanMode` returns approved,
 transition to **CONTINUE** and execute the after-approval actions immediately.
@@ -372,7 +376,8 @@ Load [references/review.md](references/review.md).
 Compute the candidate ID. Dispatch one checklist-backed independent primary
 workflow. For a material full-stack diff, partition frontend, backend and shared
 contract coverage as defined in the review reference; otherwise use one reviewer.
-On **ELEVATED**, start the optional Codex opinion concurrently when available.
+On **ELEVATED**, start the selected opposite-model opinion concurrently in a fresh
+session when available. Keep the planning debate out of the bounded code review.
 
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
 findings receive one consolidated repair batch and one targeted confirmation by
@@ -439,7 +444,7 @@ message look like completion.
 ## Resume
 
 - Approved plan, no review result: recheck ticket ownership and resume the phase
-  that stopped. Do not repeat the plan critique.
+  that stopped. Do not repeat the planning debate.
 - Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution. It does not replay UNDERSTAND or PLAN.
