@@ -40,13 +40,22 @@ Finish these checks before announcing REVIEW or appending its start event:
   work are complete or carry a named degradation;
 - UI metadata and the parity artifact are complete when UI is in scope;
 - formatters, generators, comments and ticket-produced docs are already current;
-- one independent primary-reviewer route is available;
+- one independent primary-reviewer route can enforce its deadline and cancel
+  unfinished work, including all partitions;
 - the review profile, time ceilings and optional-engine fallback are recorded.
 
 An unavailable primary reviewer is `WAIT_FOR_USER` here. Do not enter REVIEW and
 invalidate otherwise usable work merely to discover that required capability is
 missing. Missing optional counterpart or concurrency degrades the elevated second
 opinion; it does not block the primary review.
+
+A native timed wait only limits polling; it does not stop a reviewer. Verify the
+carrier's actual deadline/cancellation mechanism before dispatch. Prefer a native
+route with reliable enforcement; otherwise use an existing read-only delegate
+relay with its watchdog and the complete coverage packet below. Do not build a
+second delegation framework. If neither route is available, use `WAIT_FOR_USER`
+for restored capability or an explicit advisory-only deadline exception. Record
+that exception; never silently claim an advisory ceiling was enforced.
 
 ## Bind reviewers to one candidate
 
@@ -69,6 +78,14 @@ refuses dirty submodules. The approved plan is context, not candidate content;
 its digest is verified separately. The append-only execution record and session
 log are excluded so recording a verdict cannot invalidate the verdict.
 
+Allocate one prefixed opaque `review_execution` ID before dispatch and bind all
+phase, reviewer, repair and confirmation events to it. Record the candidate,
+configured ceilings, enforcement capability, host/counterpart and skill
+revision/content hash as described in [observability.md](observability.md).
+Recovery and schema correction remain in this execution and its original budget.
+A user-authorized retry gets a new ID with its predecessor under the same workflow
+run; a new ID is not permission to retry or reset limits.
+
 Give every initial reviewer the same `candidate_id`, changed-path list, retrieval
 recipe, ticket, acceptance criteria, approved plan, Integration Contract, Design
 Contract, deterministic results and applicable parity/VAPT evidence. Candidate
@@ -78,6 +95,12 @@ classify why:
 - an expected external formatter or generator was missed → return to PROVE;
 - another actor changed the worktree → `WAIT_FOR_USER`;
 - the orchestrator mutated the candidate during review → `FAIL` with the paths.
+
+When a relay replaces a native primary, preserve the whole checklist: supply the
+actual diff including staged/untracked/deleted paths, repository instructions,
+applicable rule catalogues, pinned UI inputs and frozen proof/security evidence.
+A carrier that cannot retrieve these inputs is not a valid primary route. A
+short free-form counterpart prompt is not a substitute for primary coverage.
 
 ## Select the profile
 
@@ -148,6 +171,11 @@ synthesis. If it expires and the carrier has a resumable
 session, allow one three-minute request for the already-completed, severity-ordered
 result. Do not restart the semantic read. Without a usable independent result,
 record `WAIT_FOR_USER` and the missing capability.
+
+Set the watchdog to the remaining ceiling before dispatch. Stop unfinished
+analysis at expiry and verify cancellation before recovery; a background worker
+must not continue a semantic read while its recovery call asks for results.
+Schema-only correction also spends the remaining budget, never a fresh allowance.
 
 The result is bounded to twelve actionable findings, blockers and majors first,
 with at most three minors. More than twelve blockers/majors returns
@@ -251,6 +279,9 @@ reruns and UI slice. It checks only:
 Default ceiling: 6 minutes. It returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle.
+
+Apply the same preflighted watchdog/cancellation route to confirmation. Its
+ceiling covers partitions and synthesis together, not six minutes per worker.
 
 When the affected closure spans independent frontend/backend partitions, their
 targeted checks may run concurrently; the seam coordinator still emits one

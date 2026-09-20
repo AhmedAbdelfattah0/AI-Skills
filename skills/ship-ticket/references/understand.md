@@ -71,7 +71,8 @@ decision.
    A frontend/backend scope spanning separate repositories also needs an explicit
    split or approved multi-repository shipping contract; the default one-branch,
    one-commit, one-PR workflow covers a single repository only.
-7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists.
+7. **Preflight REVIEW now.** Confirm an independent primary-reviewer route exists
+   with the deadline/cancellation capability required by [review.md](review.md).
    Select and preflight the opposite-model PLAN counterpart using
    [cross-model.md](cross-model.md): Claude host uses Codex; Codex host uses Claude.
    For `ELEVATED`, also check its REVIEW carrier, CodeRabbit fallback and whether

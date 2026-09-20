@@ -60,7 +60,10 @@ current phase and the workflow. Use workflow outcome `complete` or `fail` so the
 summary can classify the run.
 
 The phase duration is wall-clock time and includes nested activities and waits.
-Kind totals therefore overlap and must not be added together.
+Kind totals therefore overlap and must not be added together. Repeated phases
+are summed, not replaced by their first occurrence. A missing measurement is
+unknown, not zero. Raw records remain `ship-ticket-run-log-v1`; the changed
+summary contract is `ship-ticket-run-summary-v2`. Existing logs are never rewritten.
 
 ## What to time
 
@@ -84,9 +87,70 @@ Give activities that were actually dispatched together the same
 `--metric parallel_group=<stable-id>`. Allocate that ID per dispatch wave and
 never reuse it within a run; when a later ready set is dispatched, create a new
 ID even if it performs the same kind of work. Use one high-level interval per
-worker or proof/review partition, not one per command. The summary derives group
-wall time, summed worker time, estimated saved time, peak concurrency and
-frontend/backend overlap from their timestamps.
+worker or proof/review partition, not one per command. Explicit wave IDs are
+authoritative: keep sequential or single-member waves visible with limitations,
+rather than silently splitting or dropping them. Summaries measure concurrent
+wall overlap and peak concurrency, not causal time savings. Frontend/backend
+overlap uses the union of all intervals on each side. Per-wave
+`concurrent_wall_overlap_ms` counts wall time with at least two members active,
+not summed worker time. `frontend_overlap_pct` and `backend_overlap_pct` use
+their respective side's union as denominator; `frontend_backend_union_overlap_pct`
+uses the combined union. Thus 100% of the shorter side is not 100% of BUILD.
+Check `timing_basis`, `carrier_timed_members` and `flags` before comparing waves.
+
+### Execution identity and timing provenance
+
+Before each authorized REVIEW execution, allocate `review_execution=review-<opaque>`
+and attach it to its phase, reviewer, repair and confirmation events. The prefix
+prevents numeric metric coercion. Record candidate ID, host/counterpart, skill
+revision or content hash, configured primary/recovery/optional/confirmation
+ceilings and whether deadlines are enforced. A user-authorized retry keeps the
+workflow run ID but gets a new execution ID and predecessor; generating an ID
+never authorizes a retry. Legacy unlabelled events remain unknown execution scope.
+
+Use metrics `candidate_id`, `host_agent`, `counterpart_agent`, `skill_revision`,
+`primary_ceiling_ms`, `recovery_ceiling_ms`, `optional_ceiling_ms`,
+`confirmation_ceiling_ms`, `deadline_enforcement=enforced|advisory`, and
+`previous_review_execution` on a retry. Put execution metadata on its REVIEW
+phase start; put the ID and current candidate on each activity. Confirmation
+binds the repaired candidate, not the initial candidate; never change identity
+inside an already-started activity.
+
+Logger timestamps describe when records were appended. They must not be backdated
+to make delayed result collection look like prompt completion. When the detected
+carrier/version provides trustworthy start/finish timestamps, retain those
+separately with their source and collection delay. A blocking-return timestamp is
+valid only when completion was actually observed then; later batch collection is
+not a blocking return. Manual estimates remain approximate. Never import relay
+prompts, output text, stderr or credentials into telemetry.
+
+For a supported `delegate-relay.result.v1` result, bind a fresh absolute result
+path **before** dispatch (its file must not exist), and give the relay its parent
+directory as `--out-dir`:
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs start \
+  --repo <TARGET_REPO> --ticket <TICKET> --run-id <RUN_ID> \
+  --kind activity --name primary_review --event-id primary-review-1 \
+  --metric candidate_id=<CANDIDATE_ID> --metric review_execution=review-<OPAQUE_ID> \
+  --carrier-result <FRESH_ABSOLUTE_RESULT_JSON>
+```
+
+After collecting the result, end that same event with the registered
+`--carrier-result` path and the orchestrator's assessed `--outcome`. Process
+completion alone is not a passing review. The helper verifies repository,
+read-only mode and dispatch binding, then imports only whitelisted timing/status
+metadata plus a result digest into `carrier_timing`: `started_at`, `ended_at`,
+`duration_ms`, `collection_delay_ms`, `source=relay_result`, `tool` and `status`.
+Candidate/execution identity comes from the registered dispatch. The result path
+and contents are not exposed in the summary. Repeating the identical import is
+idempotent; do not add `--metric` on that repeated end call.
+
+Unsupported or invalid result imports degrade telemetry, not ticket execution:
+close the event normally without `--carrier-result` and report the missing
+carrier measurement. Legacy/missing carrier timing uses logger intervals, which
+may include deferred collection. Native Plan Mode's no-write boundary below
+overrides result registration/import just as it overrides ordinary logging.
 
 ### Native Plan Mode and logging
 
@@ -122,7 +186,7 @@ metrics carry total measured debate time without conflating it with user wait.
 
 Useful end metrics are:
 
-- REVIEW phase: `review_profile=standard|elevated`, `finding_count=<n>`,
+- REVIEW phase, per execution: `review_profile=standard|elevated`, `finding_count=<n>`,
   `repair_batches=0|1`, `confirmation_count=0|1`;
 - PLAN phase (or `native_plan_mode` end): `host_agent=claude|codex|other|unknown`,
   `counterpart_agent=claude|codex|other|unavailable`, `debate_responses=0|1|2|3`,
@@ -158,8 +222,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs start \
 
 On the first action after resuming, end that wait with outcome `resumed`, then
 continue the still-open phase. An open phase with an open wait is an intentional
-pause. An old open phase with no open wait is evidence that the agent stopped
-without entering a terminal state.
+pause. An old open phase without a wait is a diagnostic lead, not proof of an
+agent stop: the logger may have failed or records may be missing.
 
 If a previous session's run ID is not in context, recover it with `summary` and
 resume the latest open run for that ticket. Do not invent a second run merely
@@ -175,28 +239,50 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs summary \
   --repo <TARGET_REPO> --all
 ```
 
-The JSON summary reports phase/activity/wait durations, open intervals and their
-age, `planning_runs`, `waiting_runs`, `open_without_wait`, repair and confirmation
-counts, optional-review degradations, review medians, and the median
-REVIEW-to-BUILD ratio. It also reports parallel groups, peak concurrency,
-estimated parallel savings and median frontend/backend overlap. An
-`active_or_unexpected_stop` is expected during live work; if its age keeps growing
-after the agent turn ended, it is a continuation failure.
+The v2 JSON summary exposes `counters.repair_batches` and `counters.confirmations`
+as `{observed, declared, declaration_complete, mismatch}`. Observed zero means no
+matching activity record, not proven absence of repairs. Missing declarations
+are `null`; disagreement remains explicit rather than silently choosing a count.
+`review_executions` partitions these counters by recorded IDs; apply limits per
+execution, not to the run-wide sum. Legacy logs cannot prove that multiple
+confirmations belonged to one execution. Both primary and optional degradations
+remain visible as observed counts. Check which runs have measurements before
+comparing medians; older runs without provenance are not a controlled baseline.
+
+Wall durations and REVIEW-to-BUILD ratios remain available separately from
+`build_wall_excluding_recorded_waits_ms` and
+`review_wall_excluding_recorded_waits_ms`: union and clip waits to the measured interval
+before subtracting them. This is not active compute time, and incomplete wait
+logging limits its meaning. `phase_coverage[].uninstrumented_ms` is time without
+covering activity or wait evidence, not idle time. Overlapping activity totals are
+not elapsed time. `durations.build_ms` and `durations.review_ms` sum all completed
+occurrences, including authorized retries rather than hiding them behind the first.
+
+Malformed, truncated or unsupported records produce integrity warnings while
+valid records remain readable. Affected runs have unknown integrity-dependent
+state, not a diagnosed unexpected stop. Writers refuse unsafe appends to damaged
+history, including an incomplete tail; leave the file untouched and report
+telemetry degradation rather than repairing history automatically. A missing end
+record cannot establish whether a reviewer ran too long or was collected late.
 
 One real ticket is a smoke test. Use three to five representative tickets before
 judging the redesign. The redesign is working when:
 
-- completed standard reviews normally finish within the 15-minute primary
-  ceiling and elevated reviews within their bounded primary-plus-optional window;
+- the primary workflow stays within its 12-minute ceiling plus at most three
+  minutes for result recovery; confirmation has its separate six-minute ceiling.
+  The full REVIEW phase also includes reconciliation, repair and legitimate waits,
+  so its wall time is not the primary reviewer's deadline;
 - REVIEW-to-BUILD time falls materially from the old workflow and does not grow
   across repeated review cycles;
 - every completed run has zero open intervals;
 - every intentional cross-turn pause has an open `wait` while paused;
-- review repair batches never exceed one and confirmation never exceeds one;
+- review repair batches never exceed one and confirmation never exceeds one per
+  authorized execution, with no contradictory observed/declared counters;
 - full-stack BUILD shows one group containing both `frontend_build` and
   `backend_build`, with non-zero overlap unless concurrency was declared degraded;
 - optional reviewer timeouts appear as degradations, not stalled workflows.
 
-Treat a run with an old open phase and no open wait as a continuation defect.
-Inspect its last completed interval to locate where the agent reported and then
-failed to execute the next action.
+Investigate an old open phase with no open wait against transcript/carrier
+evidence before calling it a continuation defect. For the next full-stack trial,
+check provenance, enforced deadlines, complete counters and real timing sources
+first; do not rerun shipped tickets merely to fill missing telemetry.

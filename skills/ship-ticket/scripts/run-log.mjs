@@ -6,9 +6,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
 } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 
 const SCHEMA = 'ship-ticket-run-log-v1';
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
@@ -27,6 +30,9 @@ function usage() {
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
+Optional start/end: --carrier-result <result.json> binds a fresh relay result at
+dispatch and imports its timing on completion. Start requires candidate_id and
+review_execution=review-<id> metrics. Summary schema v2; raw events stay v1.
 `;
 }
 
@@ -90,6 +96,10 @@ function parseMetrics(values) {
     if (!SAFE_METRIC.test(key)) fail(`invalid metric key: ${key}`);
     if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
     metrics[key] = parseMetricValue(value);
+    if (['review_execution', 'previous_review_execution'].includes(key)
+      && (typeof metrics[key] !== 'string' || !/^review-[A-Za-z0-9._-]+$/.test(metrics[key]))) {
+      fail(`${key} must be a prefixed review-<opaque> ID`);
+    }
   }
   return metrics;
 }
@@ -116,20 +126,97 @@ function logPath(directory, ticket) {
   return join(directory, `${ticket}.jsonl`);
 }
 
-function readRows(path) {
-  if (!existsSync(path)) return [];
+function readRows(path, tolerant = false) {
+  if (!existsSync(path)) return { rows: [], warnings: [] };
   const contents = readFileSync(path, 'utf8');
-  if (!contents.trim()) return [];
-  return contents.trimEnd().split('\n').map((line, index) => {
+  const rows = [];
+  const warnings = [];
+  if (contents && !contents.endsWith('\n')) warnings.push({ code: 'incomplete_tail' });
+  for (const [index, line] of contents.split('\n').entries()) {
+    if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
-      if (row.schema !== SCHEMA) fail(`${path}:${index + 1} has an unsupported schema`);
-      return row;
+      if (row?.schema !== SCHEMA) throw new Error('unsupported_schema');
+      if (!['start', 'end'].includes(row.event) || !KINDS.has(row.kind)
+        || !['ticket', 'run_id', 'event_id', 'name'].every((key) => typeof row[key] === 'string' && SAFE_ID.test(row[key]))
+        || typeof row.timestamp !== 'string' || !Number.isFinite(Date.parse(row.timestamp))
+        || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)
+        || (row.event === 'end' && (!Number.isFinite(row.duration_ms) || row.duration_ms < 0 || typeof row.outcome !== 'string'))) {
+        throw new Error('invalid_record');
+      }
+      if (Object.hasOwn(row, 'carrier_timing') && !validCarrierTiming(row.carrier_timing, row.timestamp)) throw new Error('invalid_carrier_timing');
+      if (row.ticket !== basename(path, '.jsonl')) throw new Error('ticket_mismatch');
+      rows.push(row);
     } catch (error) {
-      if (error instanceof SyntaxError) fail(`${path}:${index + 1} is not valid JSON`);
-      throw error;
+      warnings.push({ line: index + 1, code: error instanceof SyntaxError ? 'invalid_json' : error.message });
     }
-  });
+  }
+  // Pairing errors are integrity errors too: writers must not append into an
+  // ambiguous history even if every individual line parses successfully.
+  const byRun = new Map();
+  for (const row of rows) {
+    if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
+    byRun.get(row.run_id).push(row);
+  }
+  for (const [id, runRows] of byRun) {
+    warnings.push(...buildRun('', id, runRows).integrity_warnings
+      .map((warning) => ({ ...warning, run_id: id })));
+  }
+  if (!tolerant && warnings.length) fail(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
+  return { rows, warnings };
+}
+
+function validCarrierTiming(timing, collectedAt) {
+  if (!timing || typeof timing !== 'object' || Array.isArray(timing)) return false;
+  const start = Date.parse(timing.started_at);
+  const end = Date.parse(timing.ended_at);
+  return timing.source === 'relay_result' && ['claude', 'codex'].includes(timing.tool)
+    && ['completed', 'failed', 'timeout', 'aborted', 'claude_unavailable', 'codex_unavailable'].includes(timing.status)
+    && typeof timing.result_sha256 === 'string' && /^[a-f0-9]{64}$/.test(timing.result_sha256)
+    && typeof timing.candidate_id === 'string' && SAFE_ID.test(timing.candidate_id)
+    && typeof timing.review_execution === 'string' && /^review-[A-Za-z0-9._-]+$/.test(timing.review_execution)
+    && typeof timing.started_at === 'string' && typeof timing.ended_at === 'string'
+    && Number.isFinite(start) && Number.isFinite(end) && end >= start
+    && end <= Date.parse(collectedAt) && timing.duration_ms === end - start
+    && timing.collection_delay_ms === Date.parse(collectedAt) - end;
+}
+
+function carrierBinding(options, metrics) {
+  if (!options['carrier-result']) return undefined;
+  if (typeof metrics.candidate_id !== 'string' || !SAFE_ID.test(metrics.candidate_id)
+    || typeof metrics.review_execution !== 'string' || !/^review-[A-Za-z0-9._-]+$/.test(metrics.review_execution)) {
+    fail('--carrier-result requires candidate_id and prefixed review_execution metrics at dispatch');
+  }
+  const path = resolve(options['carrier-result']);
+  if (existsSync(path)) fail('carrier result path must be fresh at dispatch');
+  return { result_path: path, candidate_id: metrics.candidate_id, review_execution: metrics.review_execution };
+}
+
+function importCarrier(options, started, root, timestamp) {
+  if (!options['carrier-result']) return null;
+  const binding = started.carrier_binding;
+  if (!binding || resolve(options['carrier-result']) !== binding.result_path) fail('carrier result must match the path bound at dispatch');
+  let bytes, result;
+  try { bytes = readFileSync(binding.result_path); result = JSON.parse(bytes); }
+  catch { fail('carrier result is missing or invalid JSON'); }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) fail('carrier result must be an object');
+  const tool = result.tool === 'claude' ? 'claude' : !result.tool && typeof result.codexVersion === 'string' ? 'codex' : null;
+  const readOnly = tool === 'claude' ? result.readOnly === true : result.sandbox === 'read-only';
+  if (result.schema !== 'delegate-relay.result.v1' || !tool
+    || !['completed', 'failed', 'timeout', 'aborted', 'claude_unavailable', 'codex_unavailable'].includes(result.status)
+    || typeof result.workdir !== 'string' || !existsSync(result.workdir)
+    || realpathSync(result.workdir) !== realpathSync(root) || !readOnly) {
+    fail('unsupported carrier result or mismatched repository/read-only binding');
+  }
+  const start = Date.parse(result.startedAt), end = Date.parse(result.finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < Date.parse(started.timestamp)
+    || end < start || end > timestamp.getTime()) fail('invalid carrier execution timestamps');
+  // Import only timing and enum metadata, never model output or credential-bearing paths.
+  return { source: 'relay_result', tool, status: result.status,
+    result_sha256: createHash('sha256').update(bytes).digest('hex'),
+    candidate_id: binding.candidate_id, review_execution: binding.review_execution,
+    started_at: result.startedAt, ended_at: result.finishedAt,
+    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end };
 }
 
 function appendRow(directory, ticket, row) {
@@ -155,11 +242,13 @@ function start(options) {
   const { directory } = locations(repo);
   const interval = intervalOptions(options);
   const path = logPath(directory, interval.ticket);
-  const duplicate = readRows(path).find(
+  const duplicate = readRows(path).rows.find(
     (row) => row.run_id === interval.runId && row.event_id === interval.eventId,
   );
   if (duplicate) fail(`event ${interval.eventId} already exists in run ${interval.runId}`);
 
+  const metrics = parseMetrics(options.metric);
+  const binding = carrierBinding(options, metrics);
   const row = {
     schema: SCHEMA,
     ticket: interval.ticket,
@@ -169,7 +258,8 @@ function start(options) {
     kind: interval.kind,
     name: interval.name,
     timestamp: new Date().toISOString(),
-    metrics: parseMetrics(options.metric),
+    metrics,
+    ...(binding ? { carrier_binding: binding } : {}),
   };
   appendRow(directory, interval.ticket, row);
   process.stdout.write(`${JSON.stringify(row)}\n`);
@@ -177,23 +267,35 @@ function start(options) {
 
 function end(options) {
   const repo = requireOption(options, 'repo');
-  const { directory } = locations(repo);
+  const { directory, root } = locations(repo);
   const interval = intervalOptions(options);
   const path = logPath(directory, interval.ticket);
-  const rows = readRows(path);
+  const rows = readRows(path).rows;
   const matching = rows.filter(
     (row) => row.run_id === interval.runId && row.event_id === interval.eventId,
   );
   const started = matching.find((row) => row.event === 'start');
   if (!started) fail(`event ${interval.eventId} has no start in run ${interval.runId}`);
-  if (matching.some((row) => row.event === 'end')) {
-    fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
-  }
   if (started.kind !== interval.kind || started.name !== interval.name) {
     fail(`event ${interval.eventId} must end with its original kind and name`);
   }
 
   const timestamp = new Date();
+  const timing = importCarrier(options, started, root, timestamp);
+  const previous = matching.find((row) => row.event === 'end');
+  if (previous) {
+    if (timing && previous.carrier_timing?.result_sha256 === timing.result_sha256
+      && (options.outcome === undefined || options.outcome === previous.outcome)
+      && options.metric.length === 0) {
+      process.stdout.write(`${JSON.stringify(previous)}\n`);
+      return;
+    }
+    fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
+  }
+  const metrics = parseMetrics(options.metric);
+  for (const key of ['candidate_id', 'review_execution']) {
+    if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
+  }
   const startedAt = Date.parse(started.timestamp);
   if (!Number.isFinite(startedAt)) fail(`event ${interval.eventId} has an invalid start timestamp`);
   const row = {
@@ -207,241 +309,12 @@ function end(options) {
     timestamp: timestamp.toISOString(),
     duration_ms: Math.max(0, timestamp.getTime() - startedAt),
     outcome: options.outcome ?? 'complete',
-    metrics: parseMetrics(options.metric),
+    metrics,
+    ...(timing ? { carrier_timing: timing } : {}),
   };
   appendRow(directory, interval.ticket, row);
   process.stdout.write(`${JSON.stringify(row)}\n`);
 }
-
-function median(values) {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? Number(((sorted[middle - 1] + sorted[middle]) / 2).toFixed(3))
-    : sorted[middle];
-}
-
-function parallelGroups(intervals) {
-  const grouped = new Map();
-  for (const interval of intervals) {
-    const group = interval.metrics.parallel_group;
-    if (typeof group !== 'string' || group.length === 0) continue;
-    const members = grouped.get(group) ?? [];
-    members.push(interval);
-    grouped.set(group, members);
-  }
-
-  const results = [];
-  for (const [group, members] of grouped) {
-    if (members.length < 2) continue;
-    const spans = members.map((member) => ({
-      ...member,
-      start_ms: Date.parse(member.started_at),
-      end_ms: Date.parse(member.ended_at),
-    })).filter((member) => Number.isFinite(member.start_ms) && Number.isFinite(member.end_ms));
-    if (spans.length < 2) continue;
-
-    // A reused ID must not merge separate waves. Split each group into connected
-    // overlap components; correctly-authored waves have one component, while a
-    // reused ID gets deterministic `#2`, `#3`, ... suffixes in the report.
-    spans.sort((left, right) => left.start_ms - right.start_ms || left.end_ms - right.end_ms);
-    const components = [];
-    for (const span of spans) {
-      const component = components.at(-1);
-      if (!component || span.start_ms >= component.end_ms) {
-        components.push({ spans: [span], end_ms: span.end_ms });
-      } else {
-        component.spans.push(span);
-        component.end_ms = Math.max(component.end_ms, span.end_ms);
-      }
-    }
-
-    components.forEach(({ spans: componentSpans }, index) => {
-      if (componentSpans.length < 2) return;
-      const startedAt = Math.min(...componentSpans.map((member) => member.start_ms));
-      const endedAt = Math.max(...componentSpans.map((member) => member.end_ms));
-      const workMs = componentSpans.reduce((sum, member) => sum + member.duration_ms, 0);
-      const peakConcurrency = Math.max(...componentSpans.map((point) => componentSpans.filter(
-        (member) => member.start_ms <= point.start_ms && member.end_ms > point.start_ms,
-      ).length));
-
-      const frontend = componentSpans.find((member) => member.name === 'frontend_build');
-      const backend = componentSpans.find((member) => member.name === 'backend_build');
-      let frontendBackendOverlapPct = null;
-      if (frontend && backend) {
-        const overlapMs = Math.max(
-          0,
-          Math.min(frontend.end_ms, backend.end_ms) - Math.max(frontend.start_ms, backend.start_ms),
-        );
-        const shorterMs = Math.min(frontend.duration_ms, backend.duration_ms);
-        frontendBackendOverlapPct = shorterMs === 0
-          ? 0
-          : Number(((overlapMs / shorterMs) * 100).toFixed(1));
-      }
-
-      const wallMs = Math.max(0, endedAt - startedAt);
-      results.push({
-        parallel_group: components.length === 1 ? group : `${group}#${index + 1}`,
-        started_at: new Date(startedAt).toISOString(),
-        ended_at: new Date(endedAt).toISOString(),
-        member_count: componentSpans.length,
-        peak_concurrency: peakConcurrency,
-        wall_ms: wallMs,
-        work_ms: workMs,
-        estimated_savings_ms: Math.max(0, workMs - wallMs),
-        frontend_backend_overlap_pct: frontendBackendOverlapPct,
-        members: componentSpans.map((member) => ({
-          event_id: member.event_id,
-          name: member.name,
-          duration_ms: member.duration_ms,
-        })),
-      });
-    });
-  }
-  return results;
-}
-
-function buildRun(ticket, runId, rows) {
-  const starts = new Map();
-  const intervals = [];
-  for (const row of rows) {
-    if (row.event === 'start') {
-      starts.set(row.event_id, row);
-      continue;
-    }
-    if (row.event !== 'end') continue;
-    const started = starts.get(row.event_id);
-    if (!started) continue;
-    intervals.push({
-      event_id: row.event_id,
-      kind: row.kind,
-      name: row.name,
-      started_at: started.timestamp,
-      ended_at: row.timestamp,
-      duration_ms: row.duration_ms,
-      outcome: row.outcome,
-      metrics: { ...started.metrics, ...row.metrics },
-    });
-    starts.delete(row.event_id);
-  }
-
-  const openIntervals = [...starts.values()].map((row) => ({
-    event_id: row.event_id,
-    kind: row.kind,
-    name: row.name,
-    started_at: row.timestamp,
-    metrics: row.metrics,
-  }));
-  const durationByKind = Object.fromEntries(
-    [...KINDS].map((kind) => [
-      `${kind}_ms`,
-      intervals
-        .filter((interval) => interval.kind === kind)
-        .reduce((sum, interval) => sum + interval.duration_ms, 0),
-    ]),
-  );
-  const phaseDuration = (name) =>
-    intervals.find((interval) => interval.kind === 'phase' && interval.name === name)?.duration_ms ?? null;
-  const review = intervals.find(
-    (interval) => interval.kind === 'phase' && interval.name === 'REVIEW',
-  );
-  const workflow = intervals.find((interval) => interval.kind === 'workflow');
-  const measuredParallelGroups = parallelGroups(intervals);
-  const hasOpenWait = openIntervals.some((interval) => interval.kind === 'wait');
-  const hasOpenNativePlan = openIntervals.some(
-    (interval) => interval.kind === 'activity' && interval.name === 'native_plan_mode',
-  );
-  const oldestOpenTimestamp = openIntervals
-    .map((interval) => Date.parse(interval.started_at))
-    .filter(Number.isFinite)
-    .sort((left, right) => left - right)[0];
-  let openState = 'closed';
-  if (openIntervals.length > 0 && hasOpenWait) openState = 'waiting';
-  else if (openIntervals.length > 0 && hasOpenNativePlan) openState = 'planning_or_approval';
-  else if (openIntervals.length > 0) openState = 'active_or_unexpected_stop';
-
-  return {
-    ticket,
-    run_id: runId,
-    outcome: workflow?.outcome ?? (openIntervals.length > 0 ? 'open' : 'unknown'),
-    open_state: openState,
-    oldest_open_age_ms: oldestOpenTimestamp === undefined
-      ? null
-      : Math.max(0, Date.now() - oldestOpenTimestamp),
-    review_profile: review?.metrics.review_profile ?? null,
-    durations: {
-      ...durationByKind,
-      build_ms: phaseDuration('BUILD'),
-      review_ms: phaseDuration('REVIEW'),
-    },
-    counters: {
-      repair_batches: intervals.filter((interval) => interval.name === 'review_repair').length,
-      confirmations: intervals.filter((interval) => interval.name === 'review_confirmation').length,
-      reviewer_degradations: intervals.filter(
-        (interval) => interval.name === 'optional_review' && interval.outcome === 'degraded',
-      ).length,
-    },
-    parallel_groups: measuredParallelGroups,
-    open_intervals: openIntervals,
-    intervals,
-  };
-}
-
-function aggregate(runs) {
-  const completed = runs.filter((run) => run.outcome === 'complete');
-  const reviewDurations = runs
-    .map((run) => run.durations.review_ms)
-    .filter(Number.isFinite);
-  const standardReviewDurations = runs
-    .filter((run) => run.review_profile === 'standard')
-    .map((run) => run.durations.review_ms)
-    .filter(Number.isFinite);
-  const elevatedReviewDurations = runs
-    .filter((run) => run.review_profile === 'elevated')
-    .map((run) => run.durations.review_ms)
-    .filter(Number.isFinite);
-  const reviewToBuildRatios = runs
-    .filter((run) => Number.isFinite(run.durations.review_ms) && run.durations.build_ms > 0)
-    .map((run) => Number((run.durations.review_ms / run.durations.build_ms).toFixed(3)));
-  const measuredParallelGroups = runs.flatMap((run) => run.parallel_groups);
-  const frontendBackendOverlaps = measuredParallelGroups
-    .map((group) => group.frontend_backend_overlap_pct)
-    .filter(Number.isFinite);
-
-  return {
-    runs: runs.length,
-    completed_runs: completed.length,
-    failed_runs: runs.filter((run) => run.outcome === 'fail').length,
-    open_runs: runs.filter((run) => run.open_intervals.length > 0).length,
-    planning_runs: runs.filter((run) => run.open_state === 'planning_or_approval').length,
-    waiting_runs: runs.filter((run) => run.open_state === 'waiting').length,
-    open_without_wait: runs.filter(
-      (run) => run.open_state === 'active_or_unexpected_stop',
-    ).length,
-    review_median_ms: median(reviewDurations),
-    standard_review_median_ms: median(standardReviewDurations),
-    elevated_review_median_ms: median(elevatedReviewDurations),
-    review_to_build_ratio_median: median(reviewToBuildRatios),
-    runs_with_review_repair: runs.filter((run) => run.counters.repair_batches > 0).length,
-    runs_with_confirmation: runs.filter((run) => run.counters.confirmations > 0).length,
-    optional_reviewer_degradations: runs.reduce(
-      (sum, run) => sum + run.counters.reviewer_degradations,
-      0,
-    ),
-    parallel_groups: measuredParallelGroups.length,
-    peak_concurrency: measuredParallelGroups.reduce(
-      (peak, group) => Math.max(peak, group.peak_concurrency),
-      0,
-    ),
-    estimated_parallel_savings_ms: measuredParallelGroups.reduce(
-      (sum, group) => sum + group.estimated_savings_ms,
-      0,
-    ),
-    frontend_backend_overlap_pct_median: median(frontendBackendOverlaps),
-  };
-}
-
 function summary(options) {
   const repo = requireOption(options, 'repo');
   const { directory } = locations(repo);
@@ -461,18 +334,23 @@ function summary(options) {
   }
 
   const runs = [];
+  const integrityWarnings = [];
   for (const ticket of tickets) {
-    const rows = readRows(logPath(directory, ticket));
+    const { rows, warnings } = readRows(logPath(directory, ticket), true);
+    integrityWarnings.push(...warnings.map((warning) => ({ ticket, ...warning })));
     const byRun = new Map();
     for (const row of rows) {
       const runRows = byRun.get(row.run_id) ?? [];
       runRows.push(row);
       byRun.set(row.run_id, runRows);
     }
-    for (const [runId, runRows] of byRun) runs.push(buildRun(ticket, runId, runRows));
+    for (const [runId, runRows] of byRun) {
+      const runWarnings = warnings.filter((warning) => warning.run_id === undefined || warning.run_id === runId);
+      runs.push(buildRun(ticket, runId, runRows, runWarnings));
+    }
   }
 
-  const result = { schema: SCHEMA, aggregate: aggregate(runs), runs };
+  const result = { schema: SUMMARY_SCHEMA, event_schema: SCHEMA, integrity_warnings: integrityWarnings, aggregate: aggregate(runs), runs };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

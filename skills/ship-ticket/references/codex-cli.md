@@ -40,16 +40,21 @@ counterpart pause in cross-model policy rather than restarting the repository re
 
 ## REVIEW carrier
 
-Only the binary is required; absence of the PLAN relay does not disable REVIEW.
-Prefer `codex exec -s read-only -c model_reasoning_effort=high` with the scope
+The binary plus a verified watchdog/cancellation route suffices; absence of the
+PLAN relay alone does not disable REVIEW. Prefer the existing read-only relay
+when available, with its explicit `--timeout` set to the remaining budget.
+Otherwise use `codex exec -s read-only -c model_reasoning_effort=high` with the scope
 packet on stdin. An instructed `codex review` is also valid:
 
 ```bash
 codex review -c model_reasoning_effort=high "<instructions including exact scope>"
 ```
 
-Use an external watchdog within the optional budget; these commands have no
-relay timeout flag. Supply the exact merge-base-to-working-tree retrieval recipe,
+For bare binary commands, use the host's verified external watchdog within the
+optional budget; these commands have no relay timeout flag. A native timed wait
+is not such a watchdog. Without enforcement/cancellation, skip the optional
+opinion with a degradation; required primary handling is in [review.md](review.md).
+Supply the exact merge-base-to-working-tree retrieval recipe,
 all untracked candidate files, candidate ID, ACs and exclusions. Start fresh,
 concurrently with the primary workflow. Result and fallback policy are shared
 with the Claude route in [cross-model.md](cross-model.md).
