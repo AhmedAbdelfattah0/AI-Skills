@@ -92,29 +92,41 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
   const seen = new Set();
   const intervals = [];
   const warnings = [...fileWarnings];
+  const warn = (code, eventId) => {
+    if (!warnings.some((w) => w.code === code && w.event_id === eventId && w.run_id === runId)) {
+      warnings.push({ code, event_id: eventId, run_id: runId });
+    }
+  };
   for (const row of rows) {
     if (row.event === 'start') {
-      if (seen.has(row.event_id)) { warnings.push({ code: 'duplicate_start', event_id: row.event_id }); continue; }
+      if (seen.has(row.event_id)) { warn('duplicate_start', row.event_id); continue; }
       seen.add(row.event_id);
       starts.set(row.event_id, row);
       continue;
     }
     const start = starts.get(row.event_id);
     if (!start || start.kind !== row.kind || start.name !== row.name || Date.parse(row.timestamp) < Date.parse(start.timestamp)) {
-      warnings.push({ code: 'invalid_pair', event_id: row.event_id });
+      warn('invalid_pair', row.event_id);
       continue;
     }
     const duration = Date.parse(row.timestamp) - Date.parse(start.timestamp);
-    if (row.duration_ms !== duration) warnings.push({ code: 'duration_mismatch', event_id: row.event_id });
+    if (row.duration_ms !== duration) warn('duration_mismatch', row.event_id);
     const interval = { event_id: row.event_id, kind: row.kind, name: row.name,
       started_at: start.timestamp, ended_at: row.timestamp, duration_ms: duration,
       outcome: row.outcome, metrics: { ...start.metrics, ...row.metrics } };
+    for (const key of ['candidate_id', 'review_execution']) {
+      if (row.metrics[key] !== undefined && row.metrics[key] !== start.metrics[key]) {
+        warn('identity_mismatch', row.event_id);
+        if (Object.hasOwn(start.metrics, key)) interval.metrics[key] = start.metrics[key];
+        else delete interval.metrics[key];
+      }
+    }
     if (row.carrier_timing) {
       const timing = row.carrier_timing;
       if (Date.parse(timing.started_at) < Date.parse(start.timestamp)
         || timing.candidate_id !== start.metrics.candidate_id
         || timing.review_execution !== start.metrics.review_execution) {
-        warnings.push({ code: 'carrier_binding_mismatch', event_id: row.event_id });
+        warn('carrier_binding_mismatch', row.event_id);
       } else interval.carrier_timing = timing;
     }
     intervals.push(interval);

@@ -144,7 +144,7 @@ function readRows(path, tolerant = false) {
         || (row.event === 'end' && (!Number.isFinite(row.duration_ms) || row.duration_ms < 0 || typeof row.outcome !== 'string'))) {
         throw new Error('invalid_record');
       }
-      if (row.carrier_timing && !validCarrierTiming(row.carrier_timing, row.timestamp)) throw new Error('invalid_carrier_timing');
+      if (Object.hasOwn(row, 'carrier_timing') && !validCarrierTiming(row.carrier_timing, row.timestamp)) throw new Error('invalid_carrier_timing');
       if (row.ticket !== basename(path, '.jsonl')) throw new Error('ticket_mismatch');
       rows.push(row);
     } catch (error) {
@@ -158,15 +158,24 @@ function readRows(path, tolerant = false) {
     if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
     byRun.get(row.run_id).push(row);
   }
-  for (const [id, runRows] of byRun) warnings.push(...buildRun('', id, runRows).integrity_warnings);
+  for (const [id, runRows] of byRun) {
+    warnings.push(...buildRun('', id, runRows).integrity_warnings
+      .map((warning) => ({ ...warning, run_id: id })));
+  }
   if (!tolerant && warnings.length) fail(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
   return { rows, warnings };
 }
 
 function validCarrierTiming(timing, collectedAt) {
+  if (!timing || typeof timing !== 'object' || Array.isArray(timing)) return false;
   const start = Date.parse(timing.started_at);
   const end = Date.parse(timing.ended_at);
   return timing.source === 'relay_result' && ['claude', 'codex'].includes(timing.tool)
+    && ['completed', 'failed', 'timeout', 'aborted', 'claude_unavailable', 'codex_unavailable'].includes(timing.status)
+    && typeof timing.result_sha256 === 'string' && /^[a-f0-9]{64}$/.test(timing.result_sha256)
+    && typeof timing.candidate_id === 'string' && SAFE_ID.test(timing.candidate_id)
+    && typeof timing.review_execution === 'string' && /^review-[A-Za-z0-9._-]+$/.test(timing.review_execution)
+    && typeof timing.started_at === 'string' && typeof timing.ended_at === 'string'
     && Number.isFinite(start) && Number.isFinite(end) && end >= start
     && end <= Date.parse(collectedAt) && timing.duration_ms === end - start
     && timing.collection_delay_ms === Date.parse(collectedAt) - end;
@@ -285,7 +294,7 @@ function end(options) {
   }
   const metrics = parseMetrics(options.metric);
   for (const key of ['candidate_id', 'review_execution']) {
-    if (metrics[key] !== undefined && started.metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
+    if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
   }
   const startedAt = Date.parse(started.timestamp);
   if (!Number.isFinite(startedAt)) fail(`event ${interval.eventId} has an invalid start timestamp`);
@@ -335,7 +344,10 @@ function summary(options) {
       runRows.push(row);
       byRun.set(row.run_id, runRows);
     }
-    for (const [runId, runRows] of byRun) runs.push(buildRun(ticket, runId, runRows, warnings));
+    for (const [runId, runRows] of byRun) {
+      const runWarnings = warnings.filter((warning) => warning.run_id === undefined || warning.run_id === runId);
+      runs.push(buildRun(ticket, runId, runRows, runWarnings));
+    }
   }
 
   const result = { schema: SUMMARY_SCHEMA, event_schema: SCHEMA, integrity_warnings: integrityWarnings, aggregate: aggregate(runs), runs };

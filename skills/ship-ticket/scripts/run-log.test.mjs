@@ -178,12 +178,15 @@ test('carrier stale path, wrong root, identity mutation, and unbound import are 
 });
 
 test('delayed batch collection does not manufacture carrier concurrency', () => {
+  const metrics = { parallel_group: 'wave-1', candidate_id: 'sha-1', review_execution: 'review-1' };
+  const timing = { source: 'relay_result', status: 'completed', result_sha256: 'a'.repeat(64),
+    candidate_id: 'sha-1', review_execution: 'review-1' };
   const rows = [
-    ...pair('fe', 'activity', 'frontend_build', 0, 100, { parallel_group: 'wave-1' }),
-    ...pair('be', 'activity', 'backend_build', 0, 100, { parallel_group: 'wave-1' }),
+    ...pair('fe', 'activity', 'frontend_build', 0, 100, metrics),
+    ...pair('be', 'activity', 'backend_build', 0, 100, metrics),
   ];
-  rows[1].carrier_timing = { started_at: iso(0), ended_at: iso(20), duration_ms: 20, collection_delay_ms: 80, source: 'relay_result', tool: 'claude' };
-  rows[3].carrier_timing = { started_at: iso(20), ended_at: iso(30), duration_ms: 10, collection_delay_ms: 70, source: 'relay_result', tool: 'codex' };
+  rows[1].carrier_timing = { ...timing, started_at: iso(0), ended_at: iso(20), duration_ms: 20, collection_delay_ms: 80, tool: 'claude' };
+  rows[3].carrier_timing = { ...timing, started_at: iso(20), ended_at: iso(30), duration_ms: 10, collection_delay_ms: 70, tool: 'codex' };
   const r = buildRun('T1', 'run-1', rows);
   assert.equal(r.parallel_groups[0].concurrent_wall_overlap_ms, 0);
   assert.equal(r.parallel_groups[0].wall_ms, 30);
@@ -228,4 +231,82 @@ test('import refuses times outside the dispatch and collection interval', (t) =>
     assert.equal(f.cli('end', ...eventArgs, '--carrier-result', resultPath).status, 1);
   }
   assert.equal(f.summary().runs[0].open_intervals.length, 1);
+});
+
+test('pairing warnings affect only their run; file corruption still affects every run', (t) => {
+  const good = pair('workflow', 'workflow', 'ship_ticket', 0, 100, {}, 'complete');
+  const bad = pair('orphan', 'phase', 'REVIEW', 0, 10).slice(1).map((r) => ({ ...r, run_id: 'run-2' }));
+  const f = fixture(t, [...good, ...bad]);
+  const s = f.summary();
+  assert.equal(s.aggregate.integrity_affected_runs, 1);
+  assert.equal(s.runs[0].open_state, 'closed');
+  assert.deepEqual(s.runs[0].integrity_warnings, []);
+  assert.equal(s.runs[1].open_state, 'unknown_due_to_integrity');
+  assert.equal(s.runs[1].integrity_warnings.length, 1);
+  assert.equal(s.integrity_warnings[0].run_id, 'run-2');
+  writeFileSync(f.path, readFileSync(f.path, 'utf8') + '{broken}\n');
+  assert.equal(f.summary().aggregate.integrity_affected_runs, 2);
+});
+
+test('incomplete or invalid carrier timing is rejected, absent legacy timing remains valid', (t) => {
+  const metrics = { candidate_id: 'sha-1', review_execution: 'review-1', parallel_group: 'wave-1' };
+  const rows = pair('review', 'activity', 'primary_review', 0, 100, metrics);
+  const valid = { source: 'relay_result', tool: 'claude', status: 'completed',
+    result_sha256: 'a'.repeat(64), candidate_id: 'sha-1', review_execution: 'review-1',
+    started_at: iso(10), ended_at: iso(50), duration_ms: 40, collection_delay_ms: 50 };
+  const f = fixture(t);
+  const writeTiming = (timing) => writeFileSync(f.path,
+    [rows[0], { ...rows[1], carrier_timing: timing }].map((r) => JSON.stringify(r) + '\n').join(''));
+  writeTiming(valid);
+  assert.equal(f.summary().runs[0].parallel_groups[0].timing_basis, 'carrier');
+  const invalid = [null, false, {}, { ...valid, status: 'pending' },
+    { ...valid, result_sha256: 'A'.repeat(64) }, { ...valid, candidate_id: 'bad/path' },
+    { ...valid, review_execution: '123' }];
+  for (const key of ['status', 'result_sha256', 'candidate_id', 'review_execution']) {
+    const missing = { ...valid };
+    delete missing[key];
+    invalid.push(missing);
+  }
+  for (const timing of invalid) {
+    writeTiming(timing);
+    const before = readFileSync(f.path, 'utf8');
+    const s = f.summary();
+    assert.ok(s.integrity_warnings.some((w) => w.code === 'invalid_carrier_timing'));
+    assert.equal(s.runs[0].parallel_groups.length, 0);
+    assert.equal(f.cli('start', ...eventArgs).status, 1);
+    assert.equal(readFileSync(f.path, 'utf8'), before);
+  }
+  writeFileSync(f.path, rows.map((r) => JSON.stringify(r) + '\n').join(''));
+  assert.deepEqual(f.summary().integrity_warnings, []);
+  assert.equal(f.summary().runs[0].parallel_groups[0].timing_basis, 'logger_intervals');
+});
+
+test('end cannot introduce identity; matching identities and ordinary end metrics remain valid', (t) => {
+  const f = fixture(t);
+  assert.equal(f.cli('start', ...eventArgs).status, 0);
+  const before = readFileSync(f.path, 'utf8');
+  for (const metric of ['candidate_id=sha-1', 'review_execution=review-late']) {
+    assert.equal(f.cli('end', ...eventArgs, '--metric', metric).status, 1);
+    assert.equal(readFileSync(f.path, 'utf8'), before);
+  }
+  assert.equal(f.cli('end', ...eventArgs, '--metric', 'finding_count=0').status, 0);
+  const next = [...eventArgs.slice(0, -1), 'review-2'];
+  assert.equal(f.cli('start', ...next, '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-2').status, 0);
+  assert.equal(f.cli('end', ...next, '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-2').status, 0);
+});
+
+test('summary flags historical late or changed identities and never groups by them', (t) => {
+  const late = pair('late', 'activity', 'primary_review', 0, 100);
+  late[1] = { ...late[1], metrics: { candidate_id: 'sha-late', review_execution: 'review-late' } };
+  const changed = pair('changed', 'activity', 'primary_review', 0, 100,
+    { candidate_id: 'sha-original', review_execution: 'review-original' });
+  changed[1] = { ...changed[1], metrics: { candidate_id: 'sha-new', review_execution: 'review-new' } };
+  const f = fixture(t, [...late, ...changed]);
+  const r = f.summary().runs[0];
+  assert.equal(r.open_state, 'unknown_due_to_integrity');
+  assert.equal(r.intervals[0].metrics.review_execution, undefined);
+  assert.equal(r.intervals[0].metrics.candidate_id, undefined);
+  assert.equal(r.intervals[1].metrics.candidate_id, 'sha-original');
+  assert.deepEqual(r.review_executions.map((e) => e.review_execution), ['review-original']);
+  assert.equal(f.cli('start', ...eventArgs).status, 1);
 });
