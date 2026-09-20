@@ -56,8 +56,8 @@ and UNDERSTAND timers with the bundled `scripts/run-log.mjs` helper. Time every
 phase and the named expensive activities. End a phase before starting the next.
 
 Immediately before a legitimate `WAIT_FOR_USER`, start a wait interval; end it as
-the first action after resuming. An open phase with no open wait exposes the exact
-place where execution stopped after a progress report. The log lives in the
+the first action after resuming. An old open phase with no open wait warrants
+checking transcript and log integrity; it alone cannot prove an agent stop. The log lives in the
 target repository's Git metadata and never changes candidate identity.
 
 Telemetry is best effort. A missing or failed logger is a declared degradation
@@ -160,7 +160,8 @@ Determine these during UNDERSTAND and record them in the plan:
   concurrently;
 - the available concurrent worker width and whether the carrier safely supports
   simultaneous disjoint writes in the target worktree;
-- the primary, optional and confirmation time ceilings.
+- the primary, optional and confirmation time ceilings and a verified
+  deadline/cancellation route, not merely a timed native wait.
 
 **ELEVATED** applies to auth, authorization, tenancy, billing, payments, secrets,
 migrations, schemas, public APIs or events, shared contracts/components, unusually
@@ -168,7 +169,8 @@ broad cross-subsystem changes, or an explicit repository/user requirement. The
 preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
-If the independent primary route is absent, use **WAIT_FOR_USER** before REVIEW
+If the independent primary route or enforceable deadline is absent, follow the
+capability/explicit-exception procedure in the review reference before REVIEW
 begins. Missing optional counterpart or concurrency is a declared degradation; do not
 serialize optional work into the critical path.
 
@@ -430,6 +432,7 @@ Use **WAIT_FOR_USER** only for:
 - no safe local environment for required attacks;
 - an explicit [NN] waiver;
 - absence of the required independent primary reviewer;
+- absence of enforceable primary-review deadlines without an explicit advisory-only exception;
 - credentials, permissions or external authority only the user can provide.
 
 Use **FAIL** for:
@@ -453,7 +456,9 @@ message look like completion.
   that stopped. Do not repeat the planning debate.
 - Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
-  bounded REVIEW execution. It does not replay UNDERSTAND or PLAN.
+  bounded REVIEW execution with a new `review_execution` ID and predecessor under
+  the same workflow run. The ID itself never authorizes retry. It does not replay
+  UNDERSTAND or PLAN.
 - REVIEW PASS, SHIP incomplete: verify the same candidate ID and resume only the
   missing idempotent external operation. Never rerun REVIEW.
 - Changed scope, Design Contract or approved plan: return to human approval.

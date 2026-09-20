@@ -329,14 +329,30 @@ continues directly into execution once the host permits writes. A second
 expensive-activity and legitimate-wait intervals under the target repository's
 Git metadata (`ai-skills/ship-ticket/`), never in the worktree. This is operational
 state rather than a spec artifact, so it does not introduce another `.specs`
-root or alter candidate identity. An open phase with no open wait identifies an
-accidental stop; logging failure is declared and never blocks execution.
+root or alter candidate identity. An old open phase without a wait is a diagnostic
+lead, not proof of an accidental stop; log integrity and transcript evidence must
+be checked. Logging failure is declared and never blocks execution.
 Because native Plan Mode permits only read-only shell activity, telemetry starts
 a `native_plan_mode` interval before entry and closes it immediately after
 approved exit; no logger write may be used to bypass that boundary.
-Concurrent high-level activities share a `parallel_group` metric; summaries
-report wall time, summed work, estimated savings, peak concurrency and
-frontend/backend overlap so parallelism is observable rather than aspirational.
+Concurrent high-level activities share a unique per-wave `parallel_group` metric.
+Summaries measure concurrent wall overlap, peak concurrency and union-based
+frontend/backend overlap with timing coverage, not causal savings. Explicit waves
+remain visible even when sequential or single-member. Carrier execution times
+stay separate from logger append times and result-collection delay; never backdate.
+Raw logs remain v1; summary v2 distinguishes observed and declared counters,
+flags conflicts, sums repeated phases and represents missing data as unknown.
+Damaged logs remain readable with integrity warnings but reject unsafe appends;
+never silently repair them or diagnose continuation from corrupt telemetry.
+
+Each authorized REVIEW has a prefixed `review_execution` ID, candidate and skill
+provenance, configured ceilings and enforcement metadata. An explicitly authorized
+retry gets a new ID linked to its predecessor within the same workflow run; IDs
+do not grant authorization. Limits are per execution, not per ticket history.
+Native timed waits do not cancel reviewers. Preflight reliable deadline and
+cancellation support, or use an existing read-only relay watchdog with the full
+primary coverage packet. Without either, request an explicit advisory-only
+exception rather than silently weakening enforcement. Optional review degrades.
 
 PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
 one targeted confirmation. Read-only checks and compact append-only execution
@@ -368,7 +384,8 @@ budget exhaustion or unresolved differences are recorded for the one human
 approval, never manufactured consensus or an endless loop.
 
 Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
-alone. Claude uses `claude-delegate`'s read-only relay for both. Discover delegates
+with a verified watchdog/cancellation route, or the existing relay. Claude uses
+`claude-delegate`'s read-only relay for both. Discover delegates
 by name and check CLI versions; missing optional REVIEW capability degrades.
 PLAN counterpart failure pauses after bounded recovery unless the user explicitly
 waives cross-model planning. Claude runs through its CLI relay using verified

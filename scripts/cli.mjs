@@ -1293,6 +1293,7 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\bestimated (?:parallel )?(?:savings|saved time)\b/gi, 'ship-ticket reports measured concurrent overlap with timing limitations, not causal time savings', ['ship-ticket']],
   [/\boptional Codex opinion\b/gi, 'ship-ticket selects its optional counterpart from the host identity', ['ship-ticket']],
   [/\bCross-model plan critique\b/gi, 'ship-ticket PLAN uses bounded reciprocal debate and records convergence', ['ship-ticket']],
   [/\bGATE [345]\b/g, 'ship-ticket uses named phases and checks, not numbered gates', ['ship-ticket', 'vapt', 'generate-ticket', 'code-quality']],

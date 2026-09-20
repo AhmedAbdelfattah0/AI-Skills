@@ -38,7 +38,8 @@ transport instructions and relay `--help`. Use only read-only dispatch/result
 mechanics here, not the delegates' implement-and-land workflows.
 
 - **Codex:** PLAN needs `codex-delegate` and `codex --version`; REVIEW can use
-  the binary alone. Follow [codex-cli.md](codex-cli.md).
+  the binary with a verified watchdog/cancellation route, or the existing relay.
+  Follow [codex-cli.md](codex-cli.md).
 - **Claude:** use `claude-delegate`'s read-only relay, `claude --version` and
   `claude auth status`. A missing relay makes that route unavailable. A check
   blocked by the host sandbox is not proof of logout; follow the host's normal
@@ -99,6 +100,15 @@ temporary directory outside the repo. After process completion read `status`,
 `result.json`. Resume only that exact ID with `--session`, repeating directory,
 read-only, effort and timeout flags. Never use a global latest-session resume.
 A successful exit alone is not a substantive review.
+
+Use each existing relay's watchdog with the remaining phase budget; native
+timed polling is not equivalent to process cancellation. Preflight actual
+cancellation and completion reporting before promising a bounded review. Do not
+start a second timeout framework around a relay that already enforces it. Detect
+carrier timing fields for the installed version, retain actual start/finish and
+collection delay separately from logger timestamps, and never infer execution
+duration from when several results were collected together. See
+[observability.md](observability.md) for telemetry provenance and privacy.
 
 Claude's relay allows only Read, Glob and Grep in plan permission mode; it cannot
 run Git or tests. Supply the actual merge-base-to-working-tree diff (including
@@ -204,6 +214,10 @@ budget; otherwise declare `DEGRADED`. If the primary finishes first, collect an
 already-completed counterpart result or cancel the optional process and declare
 incomplete coverage. Never add an optional serial tail. Name CodeRabbit as a
 fallback, not as Claude/Codex agreement.
+
+Verify the cancellation route before launch. If the optional carrier cannot
+enforce the budget or be stopped when primary finishes, declare it unavailable
+and continue with primary coverage; an advisory prompt is not a watchdog.
 
 Reconcile under [review.md](review.md). Planning debate does **not** apply to code
 review: retain one repair batch and one targeted primary confirmation. PR-side
