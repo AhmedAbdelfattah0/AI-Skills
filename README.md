@@ -207,7 +207,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (20)
+## Skills (21)
 
 | Skill | Extras |
 |---|---|
@@ -221,6 +221,7 @@ Claude-only.
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
 | pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
+| project-audit | `references/` (whole-project assessment orchestrator for one or many repositories: pinned system state, coverage matrix, remediation backlog; `.specs/project-audit/`) |
 | researcher | — |
 | security | — |
 | security-audit | — |

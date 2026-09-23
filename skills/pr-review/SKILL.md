@@ -68,9 +68,10 @@ plumbing that exists to protect it.
 | Use instead | When |
 |---|---|
 | `/code-review` (CodeRabbit) | The diff is local and there is no PR yet. Also this skill's declared fallback engine when the `codex` CLI is unavailable. |
-| `ship-ticket` steps 13–14 | You are *implementing* a ticket and want the pre-PR review passes as part of that workflow. |
+| `ship-ticket` REVIEW phase | You are *implementing* a ticket and want its bounded pre-PR review as part of that workflow. |
 | `security-audit` | You want the whole codebase read for vulnerabilities, not one diff. |
 | `vapt` | You want the change **attacked at runtime**, not read. A PR review reads; it never proves a control engages. |
+| `project-audit` | You want the **whole built application** assessed — architecture, journeys, tests, docs, security and release risk — not one PR's diff. |
 
 This skill reviews. It does not fix, does not push, and does not approve.
 
