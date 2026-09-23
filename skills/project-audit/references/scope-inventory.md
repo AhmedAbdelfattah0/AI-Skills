@@ -63,7 +63,7 @@ audit" or "be thorough".
 | Class | Includes | Needs |
 |---|---|---|
 | **Static** | reading the pinned system state | invocation |
-| **Repository checks** | each repository's own build, lint, typecheck, test, docs and declared dependency-audit commands in their CI/non-interactive form, inside its audit worktree; the lockfile-frozen dependency install those commands need; a repository-native test harness that creates and destroys its own isolated ephemeral datastore | invocation. Never write flags, deploys, publishes or pushes. Never standalone migrations, seeds, or a boot path that mutates a datastore. A self-provisioning harness qualifies only after its configuration has been checked to show it creates the datastore it uses and cannot reach a developer or shared one |
+| **Repository checks** | each repository's own build, lint, typecheck, test and docs commands in their CI/non-interactive form, inside its audit worktree; a dependency audit per package ecosystem, as declared or, when none is declared, the ecosystem's read-only lockfile audit (see the `C` row of the matrix); the lockfile-frozen dependency install those commands need; a repository-native test harness that creates and destroys its own isolated ephemeral datastore | invocation. Never write flags, deploys, publishes or pushes. Never standalone migrations, seeds, or a boot path that mutates a datastore. A self-provisioning harness qualifies only after its configuration has been checked to show it creates the datastore it uses and cannot reach a developer or shared one |
 | **Local runtime, read-only** | booting the units locally, alone or assembled, against disposable datastores, and exercising journeys that change no state, where no boot path migrates or seeds | invocation, a safe target, disposable datastores |
 | **Stateful runtime** | journeys that create, change or delete data; standalone migration and seed checks; booting a unit that auto-migrates or seeds on start; any mutation of a separately provisioned disposable datastore | explicit rules of engagement naming the targets and datastores |
 | **Adversarial** | attack classes through `vapt` AUDIT | explicit authorization plus vapt's own rules of engagement |
@@ -130,6 +130,18 @@ audit is the one-line case. The run ID derives from the digest
 ([state.md](state.md)). Create the run directory in the audit root's checkout and
 write the manifest with `phase: SCOPE`.
 
+**Other live runs.** Before creating the run directory, list every manifest
+under `.specs/project-audit/` in the audit root whose `status` is `IN_PROGRESS`
+or `WAITING_FOR_USER`, and every `git worktree list` entry outside the live
+checkout. Another session or agent (a second model auditing the same repository
+is a normal case) may own them. Record each as a `concurrent_run` event with its
+run ID. Their worktrees, ports, containers and processes are off-limits: never
+reuse, stop or clean them up, and choose this run's ports and container names so
+they cannot collide (see [evidence.md](evidence.md), runtime resources). A
+concurrent run is not an earlier run: its finding IDs are not reused, and its
+evidence is never read before this run's RECONCILE, to keep this run
+independent.
+
 Every lane reads and runs from the audit worktrees, never from a live checkout.
 Specialist skills that write their own artifacts therefore write into disposable
 space, and those artifacts are copied into `evidence/<artifact_key>/`. Cleanup
@@ -186,7 +198,7 @@ with no source is a guess; leave it out or mark it unresolved.
 | `O` | Operations and deployment — CI pipelines, build/package, containers, orchestration, infrastructure, configuration and secret wiring, health/readiness, logging and monitoring, backup and migration procedure | owning repository, or system-level when the orchestration root defines it; the files that define it |
 | `D` | Documentation surface — README, setup and operations guides, API reference, docstrings, changelog | owning repository; the claims it makes that the code can confirm or refute |
 | `N` | Non-functional constraint — only one a repository states: a performance budget, an accessibility standard, supported locales or platforms, a compliance note | where it is stated and how it could be measured |
-| `CMD` | Command — build, lint, typecheck, tests, docs build, declared dependency audit, or a system-level integration or end-to-end command | the repository it runs in, exact command, its source, whether CI gates on it, resources it needs |
+| `CMD` | Command — build, lint, typecheck, tests, docs build, dependency audit (declared, or the ecosystem's lockfile audit when none is declared), or a system-level integration or end-to-end command | the repository it runs in, exact command, its source, whether CI gates on it, resources it needs |
 
 **Component names** come from evidenced identifiers: the workspace member, module
 or package name, the deploy or service name in orchestration configuration, or
@@ -242,7 +254,7 @@ components it depends on and therefore the repository pins it depends on.
 
 | Subject | STATIC | AUTOMATED | FUNCTIONAL | ADVERSARIAL |
 |---|---|---|---|---|
-| `C` component | routed code-quality specialist, or the hub's checklist rows for a stack without one; test-quality on its tests | its build, lint, typecheck and test commands, in its repository | — (covered through journeys) | — (covered through boundaries) |
+| `C` component | routed code-quality specialist, or the hub's checklist rows for a stack without one; test-quality on its tests | its build, lint, typecheck and test commands, in its repository; plus a dependency audit of its lockfile — the repository's declared one, else the ecosystem's read-only audit (`pnpm audit --prod`, `npm audit --omit=dev`, `yarn npm audit`, `pip-audit -r`, `cargo audit`, `osv-scanner --lockfile`). An undeclared audit is never skipped as "not declared": a known-vulnerable framework version is a finding no code reading surfaces. If the audit cannot reach its advisory source, the row is `DEGRADED` naming the missing check, and the direct-dependency versions of the component's framework and runtime are recorded for manual advisory lookup | — (covered through journeys) | — (covered through boundaries) |
 | `X` contract | provider and every consumer agree on the pinned definitions: fields, types, versions, error shapes | contract or consumer-driven tests, where they exist | exercised through the assembled topology | — |
 | `J` journey | trace the path through every participating component; map which tests exercise it | the tests that exercise it: present and green | walk it on the local system, assembled when it crosses components | — |
 | `B` trust boundary | security-audit; the backend specialist's security rows | existing authorization or abuse tests: present and green | — | vapt AUDIT |

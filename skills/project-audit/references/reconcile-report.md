@@ -71,7 +71,9 @@ lane results meet.
 
 **RECONCILE exits** when the finding set is deduplicated, classified, verified
 where required, ID'd, and consistent with the matrix, and every runtime instance
-and disposable datastore the audit started has been stopped.
+and disposable datastore the audit started has been stopped by its recorded
+PID or container ID (never by a name pattern; see
+[evidence.md](evidence.md)).
 
 ## Finding schema and IDs
 
