@@ -96,7 +96,7 @@ specialist that owns it, component by component.
 
 | Phase | Entry | Exit | Load |
 |---|---|---|---|
-| **SCOPE** | the request; a pre-run preflight resolves the repository set and audit root before any run or manifest exists | repository set, audit root, orchestration root and in-scope missing units recorded with evidence; authority granted or declined by the request recorded; every repository pinned with its audit worktree; system digest and manifest written | [references/scope-inventory.md](references/scope-inventory.md), [references/state.md](references/state.md) |
+| **SCOPE** | the request; a pre-run preflight resolves the repository set and audit root before any run or manifest exists | repository set, audit root, orchestration root and in-scope missing units recorded with evidence; authority granted or declined by the request recorded; every pinnable repository pinned with its audit worktree; system digest and manifest written | [references/scope-inventory.md](references/scope-inventory.md), [references/state.md](references/state.md) |
 | **INVENTORY** | pinned worktrees | system model with qualified sources; coverage matrix where every row names lane, method, specialist, criticality and the components it depends on; capability preflight and rules of engagement recorded | [references/scope-inventory.md](references/scope-inventory.md) |
 | **EVIDENCE** | complete matrix | every row `DONE` with one outcome and its evidence or reason; worktree integrity verified at every join | [references/evidence.md](references/evidence.md) |
 | **RECONCILE** | all lanes joined | one deduplicated, classified, stably ID'd finding set consistent with the matrix; runtime instances and disposable datastores stopped | [references/reconcile-report.md](references/reconcile-report.md) |
@@ -206,9 +206,10 @@ and [references/reconcile-report.md](references/reconcile-report.md).
 The manifest under `.specs/project-audit/<run-id>/` in the audit root is the only
 resume source. Completed rows keep their outcomes, interrupted rows restart, and
 finding IDs never change. Everything is tracked per repository and against the
-system digest. A command that mutates a tracked file in one repository's audit
-worktree invalidates only the rows that depend on that repository and were
-collected after it. A live checkout moving past its pin invalidates nothing, but
+system digest. A command that mutates a tracked or untracked path in one
+repository's audit worktree invalidates only the rows that depend on that
+repository and were collected after it. A live checkout moving past its pin
+invalidates nothing, but
 the report names, per repository, the commits that were not audited. The full
 procedure, including cross-repository carry-forward, is in
 [references/state.md](references/state.md).

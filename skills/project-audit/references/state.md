@@ -192,13 +192,13 @@ Evidence is collected from detached audit worktrees at the pinned commits, so
 edits in any live checkout cannot enter it. Two kinds of drift remain, and both
 are handled per repository.
 
-**Audit-induced drift** — a command or worker changed a tracked file in an audit
-worktree. The integrity check runs at every join, for every worktree used since
-the last join:
+**Audit-induced drift** — a command or worker changed a tracked or untracked path
+in an audit worktree. The integrity check runs at every join, for every worktree
+used since the last join:
 
 ```text
 git -C <worktree> rev-parse HEAD                              # must equal that repository's pinned commit
-git -C <worktree> status --porcelain --untracked-files=no     # must be empty
+git -C <worktree> status --porcelain --untracked-files=all    # must be empty
 ```
 
 On a mismatch: record a `drift` event naming the repository, the worktree and the

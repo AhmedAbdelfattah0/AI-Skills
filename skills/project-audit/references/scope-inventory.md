@@ -141,8 +141,9 @@ is recorded as `cleanup_debt` with the exact repository and path.
 
 **SCOPE exits** when the repository set, audit root and orchestration root are
 recorded with their evidence, the in-scope missing units are recorded, the
-authority classes granted or declined by the request are recorded (quoted), every repository is pinned with its worktree, the
-system digest is recorded, and the manifest is written.
+authority classes granted or declined by the request are recorded (quoted),
+every pinnable repository is pinned with its worktree, the system digest is
+recorded, and the manifest is written.
 
 ## INVENTORY
 
