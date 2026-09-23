@@ -246,7 +246,8 @@ staging**; that rule of engagement is load-bearing, not boilerplate.
 
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
 library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
-(`.specs/vapt/`), `security-audit` (`.specs/security-audit/`), and `spec-driven`
+(`.specs/vapt/`), `security-audit` (`.specs/security-audit/`), `project-audit`
+(`.specs/project-audit/`), and `spec-driven`
 (`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
@@ -455,6 +456,52 @@ tools), which is usually someone *else's* PR. Three properties are load-bearing:
 
 **Do not rename it `code-review`** — that name is taken by the installed
 CodeRabbit plugin skill, and a collision shadows one of them.
+
+**`project-audit` assesses a whole built application and changes nothing.** It
+fills the scope none of the others own: `ship-ticket` is one ticket, `pr-review`
+one PR, `security-audit` static security only, `vapt` runtime attacks only, and the
+code-quality family owns rules. It is an orchestrator with **no rule catalogue** —
+every judgment routes to those specialists (report-only, as an explicit audit)
+or to the repository's own commands. Four properties are load-bearing:
+
+- **One pinned system state, read from detached audit worktrees.** Any stack or
+  shape: a single repository or monorepo has one pin; a system spread over several
+  local repositories has a per-repository pin vector plus a digest. Scope comes
+  from the user's selection and repository evidence, never from crawling sibling
+  directories or cloning referenced repositories. Edits in live checkouts cannot
+  enter the evidence. A checkout moving on invalidates nothing, but the report
+  names the unaudited commits per repository, and a changed pin vector is a new
+  run. Every path and finding carries its repository ID. Names come from
+  repository metadata, so they are never used raw on disk: evidence directories
+  use a slug-plus-hash `artifact_key`, every worktree and artifact destination
+  must resolve inside the audit's own directories or the run ends `INCOMPLETE`,
+  and repository identity has credentials, queries and fragments stripped before
+  it is hashed or stored. The only write is
+  `.specs/project-audit/<run-id>/` in one audit-root repository; other
+  repositories keep only this run's temporary worktree metadata.
+- **One coverage matrix, four lanes that never substitute** — static, automated,
+  functional, adversarial. Each subject-lane row gets exactly one of `PASS`,
+  `FAIL`, `DEGRADED` or `NOT_APPLICABLE`. A missing capability is `DEGRADED`,
+  never a pass, and a cross-system row with a missing participant is `DEGRADED`.
+  An in-scope repository that cannot be pinned becomes a placeholder component, so
+  it stays in the accounting, and a stub never passes a row for it. A `FAIL`
+  never cancels a gap: release assessment reads the critical coverage
+  degradations directly, not the outcome a row displays. It deliberately uses only these four tokens, not ship-ticket's
+  canonical five.
+- **`vapt` runs narrowed inside it:** AUDIT mode only with explicit authorization,
+  abuse tests written in a disposable worktree and exported as a patch, never
+  committed; no fix step, no CI change. Findings never authorize fixes.
+- **No health score.** The release assessment is categorical and derived from
+  the matrix, so an untested critical journey cannot be averaged away.
+- **Tracker publication is a separate, confirmed post-audit action.** The audit
+  writes only its local artifacts by default. On an explicit publish request,
+  selected findings may be drafted as Azure DevOps or Jira `Bug`/`Task` items;
+  the exact redacted payloads, destination, types and selection are shown before
+  one action-time confirmation. A stable run-and-finding marker is searched
+  before every create and after ambiguous failures, partial success is recorded
+  per item, and exploitable detail goes only to a verified private destination
+  or is redacted. Publication never changes the audit verdict and never
+  authorizes implementation.
 
 **Its `codex review` invocation is version-pinned knowledge, verified on
 `codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)
