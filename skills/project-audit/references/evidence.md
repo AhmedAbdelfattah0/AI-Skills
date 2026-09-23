@@ -60,6 +60,18 @@ dependency or exclusive resource. Without a concurrency carrier, run the same
 graph serially, record a `performance` degradation, and continue. That is
 never a reason to stop.
 
+**Runtime resources are owned by recorded ID, never by name pattern.** Every
+process, container, port and datastore the audit starts gets a run-unique name
+(`pa-<short digest>-…`) and is recorded in the manifest's rules of engagement
+with its PID or container ID the moment it starts. Before binding, check the
+port is free (`lsof -iTCP:<port> -sTCP:LISTEN`); if it is taken, pick another
+and record it — never assume a default port belongs to this run. Stopping means
+`kill <recorded PID>`, `docker stop <recorded container>`, or stopping the
+harness task that owns it. **Never `pkill -f`, `killall`, or any match on a
+command line or image name:** another audit, a developer's dev server, or a
+parallel agent on the same repository runs the same `node dist/main.js`, and a
+pattern match stops theirs too.
+
 Record each wave as an event with its members. At each join, run the integrity
 check from [state.md](state.md) on every worktree used since the last join.
 
@@ -237,4 +249,4 @@ Nothing in this phase loops.
 **EVIDENCE exits** when every row is `DONE` with an outcome, each outcome has
 evidence or a reason, and every worktree passed its last integrity check. Runtime
 instances and disposable datastores stay up for RECONCILE's one verification
-replay and are stopped when RECONCILE exits.
+replay and are stopped, by their recorded IDs only, when RECONCILE exits.
