@@ -222,8 +222,10 @@ says `none`; it is never left blank. Every unresolved critical coverage
 degradation appears both in "Untested or degraded" and in "Degradations",
 including those whose rows display `FAIL`.
 
-**Remediation routing** names the workflow, not the fix: `generate-ticket` to
-turn backlog items into tracker tickets, `ship-ticket` to implement one in its
-repository, and the exported abuse-test patches as the starting point for a
-`vapt` run that commits those tests. None of them starts from this report without
-the user's separate authorization.
+**Remediation routing** names the workflow, not the fix: the optional
+[publishing workflow](publish.md) to create selected Azure DevOps or Jira Bugs or
+Tasks from this exact audit, `generate-ticket` when a richer ticket-authoring or
+bulk-import workflow is wanted, `ship-ticket` to implement one in its repository,
+and the exported abuse-test patches as the starting point for a `vapt` run that
+commits those tests. None of them starts from this report without the user's
+separate authorization.

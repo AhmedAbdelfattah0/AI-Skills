@@ -221,7 +221,7 @@ Claude-only.
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
 | pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
-| project-audit | `references/` (whole-project assessment orchestrator for one or many repositories: pinned system state, coverage matrix, remediation backlog; `.specs/project-audit/`) |
+| project-audit | `references/` (whole-project assessment for one or many repositories, with optional confirmed publishing of findings as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
 | researcher | — |
 | security | — |
 | security-audit | — |

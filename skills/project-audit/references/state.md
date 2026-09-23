@@ -18,6 +18,7 @@ for this run's own audit worktrees.
 └── <run-id>/
     ├── manifest.json     durable state; the only source of truth on resume
     ├── inventory.md      the system model, every element citing a qualified anchor
+    ├── tracker-draft.json optional reviewed payloads and publication results
     ├── evidence/
     │   └── <artifact_key>/   logs, transcripts, specialist reports, exported patches
     └── report.md         backlog, coverage and release assessment (REPORT)
@@ -38,9 +39,11 @@ for this run's own audit worktrees.
 - **Evidence never holds a real secret.** Redact tokens, keys, cookies,
   passwords and connection strings to `<redacted>` before writing a log. Seeded
   fixture data only; never a real customer record.
-- **The directory is local and uncommitted.** The audit never commits, pushes or
-  posts it. When `report.md` contains an exploitable path, its header says so:
-  it must not become public before the fix exists.
+- **The directory is local and uncommitted.** The audit never commits or pushes
+  it. The optional publishing workflow reads from it but posts only the reviewed,
+  redacted fields in `tracker-draft.json`. When `report.md` contains an
+  exploitable path, its header says so: it must not become public before the fix
+  exists.
 
 ## Identifiers and paths
 
@@ -130,6 +133,7 @@ omitted.
 | `degradations` | `DG-NN`: `kind` (`coverage`, `independence`, `performance`), cause, affected rows and components, whether any affected row, component or missing unit is critical, `resolved` (true only when later evidence closed the gap), and the action that would close it |
 | `findings` | the reconciled finding records ([reconcile-report.md](reconcile-report.md) owns the schema) |
 | `release_assessment` | the category and its one-line reason (REPORT) |
+| `publication` | optional post-audit state: tracker kind and secret-free destination identity, draft digest, status (`DRAFT`, `WAITING_CONFIRMATION`, `PUBLISHING`, `PARTIAL`, `PUBLISHED` or `FAILED`), selected finding IDs, per-finding requested item type, stable marker, external item ID/URL when known, and append-only attempts; governed by [publish.md](publish.md) and never used to compute the audit status or assessment |
 | `checkout_drift` | per repository at REPORT and each resume: live head and the number of commits past its pin |
 | `cleanup_debt` | audit-owned worktrees that could not be removed: repository and exact path |
 | `events` | append-only: `{at, event, phase, detail}` for phase entry/exit, dispatch waves, joins, integrity checks, waits, resumes and drift |

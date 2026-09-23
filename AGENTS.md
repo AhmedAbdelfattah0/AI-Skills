@@ -493,6 +493,15 @@ or to the repository's own commands. Four properties are load-bearing:
   committed; no fix step, no CI change. Findings never authorize fixes.
 - **No health score.** The release assessment is categorical and derived from
   the matrix, so an untested critical journey cannot be averaged away.
+- **Tracker publication is a separate, confirmed post-audit action.** The audit
+  writes only its local artifacts by default. On an explicit publish request,
+  selected findings may be drafted as Azure DevOps or Jira `Bug`/`Task` items;
+  the exact redacted payloads, destination, types and selection are shown before
+  one action-time confirmation. A stable run-and-finding marker is searched
+  before every create and after ambiguous failures, partial success is recorded
+  per item, and exploitable detail goes only to a verified private destination
+  or is redacted. Publication never changes the audit verdict and never
+  authorizes implementation.
 
 **Its `codex review` invocation is version-pinned knowledge, verified on
 `codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)

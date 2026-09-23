@@ -1,18 +1,19 @@
 ---
 name: project-audit
 description: |
-  Evidence-backed audit of an already-built application or system on any detected
-  stack and topology: frontend, backend, full stack, modular monolith, monorepo,
-  multiple local repositories, or microservices. Pins the system state;
-  inventories architecture, journeys, contracts and trust boundaries; separates
-  static, automated, functional and adversarial evidence; routes judgments to
-  existing specialists; and produces a coverage matrix, remediation backlog and
-  categorical release assessment under `.specs/project-audit/`. Assessment only:
-  no product-code changes and no authorization to fix findings.
+  Evidence-backed audit of a built system on any detected stack or topology:
+  frontend, backend, full stack, monolith, monorepo, multiple repositories, or
+  microservices. Pins system state; inventories architecture, journeys, contracts
+  and trust boundaries; separates static, automated, functional and adversarial
+  evidence; routes judgments to specialists; and produces a coverage matrix,
+  remediation backlog and categorical release assessment under
+  `.specs/project-audit/`. Assessment only: no product changes or fixes.
 
   Trigger for /project-audit, /project.audit, "audit this project", "audit the
   whole app", "project health check", "full codebase assessment", "technical due
   diligence", "production-readiness review", or "is this app ready to release".
+  Also trigger when the user asks to publish a completed audit's findings as
+  Azure DevOps or Jira Bugs or Tasks.
   Do not use for one ticket, one PR, security-only review, standalone VAPT, diff
   rule enforcement, or implementing fixes.
 ---
@@ -48,8 +49,9 @@ specialist that owns it, component by component.
   single **audit root** repository. Every other repository in the set, and
   everything else in the audit root, stays untouched apart from the temporary
   `git worktree` metadata for this run's own audit worktrees, which cleanup
-  removes. No commits, branches, pushes, PR comments, tracker items or external
-  posts. Never introduce another artifact root.
+  removes. No commits, branches, pushes, PR comments or external posts. Tracker
+  items are created only through the separately authorized post-audit publishing
+  mode below. Never introduce another artifact root.
 - **One pinned system state.** Each repository in scope is pinned to one commit.
   The pin vector and its digest identify the state. A single repository is the
   one-entry case. Every lane reads and runs from detached audit worktrees at
@@ -83,6 +85,10 @@ specialist that owns it, component by component.
 - **No invented rule IDs, no invented score.** A rule ID comes only from a
   specialist that ran. The release assessment is categorical and shows its gaps.
 - **Findings do not authorize fixes.** The audit ends with a backlog.
+- **Publishing is never implied.** A request to audit, report or prepare tracker
+  drafts does not authorize creating work items. Creation needs the user's
+  confirmation of the exact destination, selected findings, item types and
+  payloads immediately before the external write.
 - **Secrets and exploits stay private.** Evidence is redacted. Exploitable paths
   are reported to the user directly and never placed anywhere public.
 
@@ -207,10 +213,26 @@ the report names, per repository, the commits that were not audited. The full
 procedure, including cross-repository carry-forward, is in
 [references/state.md](references/state.md).
 
+## Optional post-audit publishing
+
+`/project-audit publish <run-id>` (also `/project.audit.publish`) turns selected
+findings from a completed run into Azure DevOps or Jira work items. This is a
+separate workflow: it never changes the audit's terminal status, release
+assessment, evidence or finding IDs, and it never starts implementation.
+
+Load [references/publish.md](references/publish.md). The user chooses the tracker,
+destination project, selected finding IDs and whether each becomes a `Bug` or a
+`Task`. The workflow verifies the destination's supported types and required
+fields, prepares and displays exact payloads, checks for existing items by a
+stable audit marker, and waits for one explicit confirmation immediately before
+creation. Partial results and ambiguous timeouts are reconciled before any retry.
+Without that confirmation, the result is only a local draft.
+
 ## Scope boundary
 
 Repository instructions outrank this skill; read `AGENTS.md` and `CLAUDE.md`
 in each repository when present and follow their pointers. Specialists own their
-rules and methods, and this skill never restates them. Remediation —
-`generate-ticket` to turn the backlog into tickets, `ship-ticket` to implement
-one — starts only when the user separately authorizes it.
+rules and methods, and this skill never restates them. Remediation — the
+publishing mode above or `generate-ticket` to turn the backlog into tickets, and
+`ship-ticket` to implement one — starts only when the user separately authorizes
+it.
