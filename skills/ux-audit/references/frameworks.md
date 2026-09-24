@@ -18,7 +18,9 @@ theme files. On the live page it checks CSSOM fingerprints such as `--tw-*`,
 `--bs-*`, `.mat-`, `--mat-*`, `--mdc-*`, `.Mui`, `.chakra-`, and hashed classes
 typical of styled-components, Emotion, and CSS Modules.
 
-`stack.json` records every coexisting framework with version, confidence, and
+`stack.json` records the resolved `packageRoot` (in a monorepo, the workspace package that
+owns the framework config, such as `apps/web`; all source and template globs are rooted there),
+and every coexisting framework with version, confidence, and
 evidence; token sources; excluded vendor stylesheets; template globs; and known
 spacing, type, and radius scales with their source. Confidence describes the
 strength of detection, not audit quality. An optional config `framework`

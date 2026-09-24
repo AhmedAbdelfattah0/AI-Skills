@@ -21,7 +21,7 @@ export async function runAxe({ browser, config, schemes, axeBuilder }) {
   for (const route of config.routes) {
     for (const width of config.viewports) {
       for (const scheme of schemes) {
-        await withAuditPage(browser, config, route, { width, scheme }, async (page) => {
+        await withAuditPage(browser, config, route, { width, scheme, shared: true }, async (page) => {
           const audit = await new axeBuilder({ page }).withTags(TAGS).analyze();
           rows.push({
             route: route.id,

@@ -22,12 +22,16 @@ main { padding: 22px; }
 .spacing-22 { margin-top: 22px; }
 .spacing-37 { margin-top: 37px; }
 .icon-only { width: 44px; height: 44px; }
+.crowded-targets { display: inline-flex; gap: 0; }
 .tiny-target { width: 20px; height: 20px; padding: 0; }
 .small-target { width: 36px; height: 36px; padding: 0; }
 .no-focus:focus, .no-focus:focus-visible { outline: none; box-shadow: none; }
 .covered-focus { position: fixed; top: 20px; left: 250px; z-index: 1; }
 .slow-motion { transition: transform 600ms linear; }
 .slow-motion.moved { transform: translateX(80px); }
+.loading-spinner { display: inline-block; width: 20px; height: 20px; animation: spin 1s linear infinite; }
+.quick-color { transition: color 150ms ease; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .font-11 { font-size: 11px; }.font-12 { font-size: 12px; }.font-13 { font-size: 13px; }
 .font-14 { font-size: 14px; }.font-15 { font-size: 15px; }.font-16 { font-size: 16px; }
 .font-18 { font-size: 18px; }.font-20 { font-size: 20px; }.font-24 { font-size: 24px; }

@@ -15,10 +15,11 @@ async function projectLocaleSignals(root) {
       const absolute = resolve(directory, entry.name);
       if (entry.isDirectory()) await walk(absolute, depth + 1);
       else if (entry.isFile()) {
-        if (/(?:^|[._-])(ar|he|fa|ur)(?:[._-]|$)/i.test(entry.name)) localeFiles.push(entry.name);
+        const rel = absolute.slice(root.length + 1).split('\\').join('/');
+        if (/(?:^|[._\/-])(ar|he|fa|ur)(?:[._\/-]|$)/i.test(rel)) localeFiles.push(rel);
         if (/\.(?:css|scss|sass|less)$/i.test(entry.name) && cssRules.length < 20) {
           const contents = await readFile(absolute, 'utf8');
-          if (/:dir\(rtl\)|\[dir\s*=\s*["']?rtl/i.test(contents)) cssRules.push(entry.name);
+          if (/:dir\(rtl\)|\[dir\s*=\s*["']?rtl/i.test(contents)) cssRules.push(rel);
         }
       }
     }
@@ -36,43 +37,65 @@ async function pageRtlSignals(page) {
       } catch { /* Cross-origin CSSOM is unavailable. */ }
     }
     const rtlElement = document.querySelector('[dir="rtl"]');
+    const documentDirection = getComputedStyle(document.documentElement).direction;
+    const rtlElementDirection = rtlElement ? getComputedStyle(rtlElement).direction : null;
     return {
-      dir: getComputedStyle(document.documentElement).direction,
+      direction: documentDirection === 'rtl' || rtlElementDirection === 'rtl' ? 'rtl' : documentDirection,
       documentDir: document.documentElement.getAttribute('dir'),
-      rtlElement: rtlElement ? rtlElement.localName : null,
+      rtlElement: rtlElement ? (rtlElement.id ? `#${CSS.escape(rtlElement.id)}` : rtlElement.localName) : null,
+      rtlElementDirection,
       cssSignals: cssSignals.slice(0, 20),
     };
   });
 }
 
+async function configuredRouteSignals(browser, config, settings) {
+  const results = [];
+  for (const route of config.routes) {
+    const signals = await withAuditPage(browser, config, route, { width: 1440, scheme: 'light' }, async (page, opened) => {
+      if (settings.mode === 'attribute') {
+        if (!settings.attribute?.selector || !settings.attribute?.name) throw new Error('rtl.attribute requires selector, name, and value');
+        await page.locator(settings.attribute.selector).evaluate((element, attribute) => {
+          element.setAttribute(attribute.name, attribute.value ?? 'rtl');
+        }, settings.attribute);
+      }
+      return { ...(await pageRtlSignals(page)), url: opened.url };
+    });
+    results.push({ route: route.id, ...signals });
+  }
+  return results;
+}
+
 export async function runRtl({ browser, config }) {
   const settings = config.rtl ?? { mode: 'auto' };
-  const route = config.routes[0];
   const projectSignals = await projectLocaleSignals(config.projectRoot);
-  if (settings.mode === 'none') return { rtl: 'absent', dir: 'ltr', evidence: { mode: 'none', ...projectSignals } };
-  let signals;
+  if (settings.mode === 'none') {
+    return { rtl: 'absent', dir: 'ltr', routes: [], evidence: { mode: 'none', ...projectSignals } };
+  }
+  let routes;
   if (settings.mode === 'url') {
     if (!settings.url) throw new Error('rtl.url is required for url mode');
+    const route = config.routes[0];
     const targetUrl = new URL(settings.url, config.baseUrl).toString();
     const opened = await openAuditPage(browser, config, { ...route, path: targetUrl }, { width: 1440, scheme: 'light', url: targetUrl });
-    try { signals = await pageRtlSignals(opened.page); } finally { await opened.context.close(); }
-  } else if (settings.mode === 'attribute') {
-    if (!settings.attribute?.selector || !settings.attribute?.name) throw new Error('rtl.attribute requires selector, name, and value');
-    signals = await withAuditPage(browser, config, route, { width: 1440, scheme: 'light' }, async (page) => {
-      await page.locator(settings.attribute.selector).evaluate((element, attribute) => {
-        element.setAttribute(attribute.name, attribute.value ?? 'rtl');
-      }, settings.attribute);
-      return pageRtlSignals(page);
-    });
-  } else if (settings.mode === 'auto') {
-    signals = await withAuditPage(browser, config, route, { width: 1440, scheme: 'light' }, pageRtlSignals);
+    try {
+      routes = [{ route: route.id, ...(await pageRtlSignals(opened.page)), url: redactUrl(targetUrl) }];
+    } finally { await opened.context.close(); }
+  } else if (settings.mode === 'auto' || settings.mode === 'attribute') {
+    routes = await configuredRouteSignals(browser, config, settings);
   } else throw new Error(`Unsupported RTL mode: ${settings.mode}`);
-  const reachable = signals.dir === 'rtl' || signals.documentDir === 'rtl' || signals.rtlElement;
-  const hasProjectSignals = Boolean(signals.cssSignals.length || projectSignals.localeFiles.length
-    || projectSignals.cssRules.length || signals.rtlElement);
+  const reachable = routes.some((route) => route.direction === 'rtl' || route.documentDir === 'rtl' || route.rtlElementDirection === 'rtl');
+  const hasProjectSignals = routes.some((route) => route.cssSignals.length || route.rtlElement)
+    || projectSignals.localeFiles.length > 0 || projectSignals.cssRules.length > 0;
   return {
     rtl: reachable ? 'detected' : hasProjectSignals ? 'not-reachable' : 'absent',
-    dir: signals.dir,
-    evidence: { ...signals, ...projectSignals, url: settings.mode === 'url' ? redactUrl(routeUrl(config.baseUrl, settings.url)) : undefined },
+    dir: reachable ? 'rtl' : routes[0]?.direction ?? 'ltr',
+    routes: routes.map(({ cssSignals, ...route }) => route),
+    evidence: {
+      ...projectSignals,
+      cssSignals: [...new Set(routes.flatMap((route) => route.cssSignals))].slice(0, 20),
+      configuredRoutesChecked: routes.length,
+      url: settings.mode === 'url' ? redactUrl(routeUrl(config.baseUrl, settings.url)) : undefined,
+    },
   };
 }

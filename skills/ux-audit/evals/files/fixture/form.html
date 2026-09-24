@@ -11,7 +11,11 @@
   <main>
     <h1>Fixture form</h1>
     <form>
+      <label for="first-name">First name</label>
+      <input id="first-name" name="first-name" autocomplete="given-name" autofocus>
       <input id="email" type="email" placeholder="Email address">
+      <label for="start-date">Start date</label>
+      <input id="start-date" type="date">
       <button type="button" id="feedback">Show feedback</button>
       <p id="feedback-message" hidden>Visible feedback</p>
     </form>

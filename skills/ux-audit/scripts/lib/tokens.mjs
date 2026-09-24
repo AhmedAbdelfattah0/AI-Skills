@@ -14,6 +14,7 @@ function emptyCounts() {
 function increment(counts, key, rawValue, amount = 1) {
   const tokenValue = String(rawValue ?? '').trim();
   if (!tokenValue || tokenValue === 'none' || tokenValue === '0s' || tokenValue === '0px') return;
+  if (key === 'spacing' && /^(?:normal|auto|initial|inherit|unset|revert(?:-layer)?)$/i.test(tokenValue)) return;
   counts[key][tokenValue] = (counts[key][tokenValue] ?? 0) + amount;
 }
 
@@ -191,53 +192,138 @@ function proposalFormat(stack) {
   return 'css-custom-properties';
 }
 
+function nearestScale(raw, keys = {}) {
+  const value = pixels(raw);
+  if (value === null) return null;
+  return Object.entries(keys).map(([key, size]) => ({ key, size, distance: Math.abs(size - value) }))
+    .sort((left, right) => left.distance - right.distance || left.size - right.size)[0] ?? null;
+}
+
+function semanticTokenName(category, raw, stack) {
+  const value = pixels(raw);
+  const fontScale = stack.scales?.fontSize ?? [];
+  if (category === 'fontSize' && value !== null && fontScale.length && value < Math.min(...fontScale)) return '2xs';
+  if (category === 'fontSize') return value >= 48 ? 'display' : 'caption';
+  if (category === 'spacing') return value <= 16 ? 'compact' : value <= 48 ? 'control' : 'layout';
+  if (category === 'radius') return value <= 4 ? 'subtle' : value <= 12 ? 'card' : 'surface';
+  return category;
+}
+
+function deviationEntries(category, counts, offScale, stack, threshold = 3) {
+  const keys = stack.scales?.keys?.[category] ?? {};
+  const names = new Map();
+  return offScale.map((value) => {
+    const count = counts[value] ?? 0;
+    const nearest = nearestScale(value, keys);
+    if (count <= threshold && nearest) return { value, count, action: 'use-existing', key: nearest.key,
+      target: `${nearest.size}px`, recommendation: category === 'fontSize' ? `text-${nearest.key}` : nearest.key };
+    const baseKey = semanticTokenName(category, value, stack);
+    const occurrence = (names.get(baseKey) ?? 0) + 1;
+    names.set(baseKey, occurrence);
+    const key = occurrence === 1 ? baseKey : `${baseKey}-${occurrence}`;
+    return { value, count, action: 'add-token', key,
+      recommendation: category === 'fontSize' ? `text-${key}` : key };
+  }).sort((left, right) => right.count - left.count || left.value.localeCompare(right.value));
+}
+
+export function stripTransparentShadowLayers(value) {
+  const text = String(value);
+  const layers = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index <= text.length; index += 1) {
+    const char = text[index];
+    if (char === '(') depth += 1;
+    else if (char === ')') depth -= 1;
+    else if ((char === ',' && depth === 0) || index === text.length) {
+      const layer = text.slice(start, index).trim();
+      if (layer && !/rgba\([^)]*,\s*0(?:\.0+)?\s*\)/i.test(layer) && !/\/\s*0(?:\.0+)?\s*\)/i.test(layer)) layers.push(layer);
+      start = index + 1;
+    }
+  }
+  return layers.join(', ') || 'none';
+}
+
+function brandPalette(lockedColors, combinedColors, declaredTheme = []) {
+  const result = {};
+  // A locked colour the project's theme already defines needs no new token: proposing
+  // `brand-1: #B8843A` beside an existing `brand-500: #B8843A` only duplicates identity.
+  const declaredHex = new Set(declaredTheme.map((entry) => String(entry.value).trim().toLowerCase()));
+  for (const [index, raw] of lockedColors.entries()) {
+    if (declaredHex.has(String(raw).trim().toLowerCase())) continue;
+    const color = toOklch(raw);
+    if (!color) continue;
+    const sameHue = Object.keys(combinedColors).map((value) => toOklch(value)).filter(Boolean)
+      .filter((candidate) => Math.abs(candidate.h - color.h) <= 8 && candidate.c > 0.02);
+    const prefix = lockedColors.length === 1 ? 'brand' : `brand-${index + 1}`;
+    result[prefix] = { value: raw, source: 'lockedColors' };
+    if (sameHue.length < 3) {
+      result[`${prefix}-light`] = { value: `oklch(${Math.min(0.95, color.l + 0.16).toFixed(3)} ${color.c.toFixed(3)} ${color.h.toFixed(1)})`, source: 'lockedColors-tint' };
+      result[`${prefix}-dark`] = { value: `oklch(${Math.max(0.2, color.l - 0.16).toFixed(3)} ${color.c.toFixed(3)} ${color.h.toFixed(1)})`, source: 'lockedColors-shade' };
+    }
+  }
+  return result;
+}
+
 function proposalSnippet(format, proposal, stack) {
-  const groups = {
-    spacing: proposal.spacing.slice(0, 5).map((entry) => entry.value),
-    fontSize: proposal.fontSize.slice(0, 5).map((entry) => entry.value),
-    radius: proposal.radius.slice(0, 5).map((entry) => entry.value),
-    shadow: proposal.shadow.slice(0, 5).map((entry) => entry.value),
-    color: Object.keys(proposal.color).slice(0, 5),
-  };
-  const entries = (values, prefix) => values.map((value, index) => [`${prefix}${index + 1}`, value]);
-  const spacing = entries(groups.spacing, 'space');
+  const added = (group) => proposal[group].filter((entry) => entry.action === 'add-token').slice(0, 5);
+  const groups = { spacing: added('spacing'), fontSize: added('fontSize'), radius: added('radius'),
+    shadow: proposal.shadow.slice(0, 5), color: Object.entries(proposal.color).slice(0, 8) };
   if (format === 'tailwind-theme') {
     if (stack.tokenSources.some((source) => source.kind === 'theme-css')) {
       const variables = [
-        ...spacing.map(([name, value]) => [`--spacing-${name}`, value]),
-        ...entries(groups.fontSize, 'font').map(([name, value]) => [`--text-${name}`, value]),
-        ...entries(groups.radius, 'radius').map(([name, value]) => [`--radius-${name}`, value]),
-        ...entries(groups.shadow, 'shadow').map(([name, value]) => [`--shadow-${name}`, value]),
-        ...entries(groups.color, 'color').map(([name, value]) => [`--color-${name}`, value]),
+        ...groups.spacing.map((entry) => [`--spacing-${entry.key}`, entry.value]),
+        ...groups.fontSize.map((entry) => [`--text-${entry.key}`, entry.value]),
+        ...groups.radius.map((entry) => [`--radius-${entry.key}`, entry.value]),
+        ...groups.shadow.map((entry) => [`--shadow-${entry.key}`, entry.value]),
+        ...groups.color.map(([name, entry]) => [`--color-${name}`, entry.value]),
       ];
       return `@theme {\n${variables.map(([name, value]) => `  ${name}: ${value};`).join('\n')}\n}`;
     }
-    const object = (values, prefix) => entries(values, prefix).map(([name, value]) => `'${name}': '${value}'`).join(', ');
-    return `theme: { extend: { spacing: { ${object(groups.spacing, 'space')} }, fontSize: { ${object(groups.fontSize, 'font')} }, borderRadius: { ${object(groups.radius, 'radius')} }, boxShadow: { ${object(groups.shadow, 'shadow')} }, colors: { ${object(groups.color, 'color')} } } }`;
+    const object = (entries) => entries.map((entry) => `'${entry.key}': '${entry.value}'`).join(', ');
+    const colors = groups.color.map(([name, entry]) => `'${name}': '${entry.value}'`).join(', ');
+    return `theme: { extend: { spacing: { ${object(groups.spacing)} }, fontSize: { ${object(groups.fontSize)} }, borderRadius: { ${object(groups.radius)} }, boxShadow: { ${object(groups.shadow)} }, colors: { ${colors} } } }`;
   }
   if (format === 'bootstrap-sass') {
-    return [`$spacers: (${spacing.map(([name, value]) => `${name}: ${value}`).join(', ')});`,
-      groups.fontSize[0] ? `$font-size-base: ${groups.fontSize[0]};` : '',
-      groups.radius[0] ? `$border-radius: ${groups.radius[0]};` : '',
-      groups.shadow[0] ? `$box-shadow: ${groups.shadow[0]};` : '',
-      groups.color[0] ? `$primary: ${groups.color[0]};` : ''].filter(Boolean).join('\n');
+    return [`$spacers: (${groups.spacing.map((entry) => `${entry.key}: ${entry.value}`).join(', ')});`,
+      groups.fontSize[0] ? `$font-size-base: ${groups.fontSize[0].value};` : '',
+      groups.radius[0] ? `$border-radius: ${groups.radius[0].value};` : '',
+      groups.shadow[0] ? `$box-shadow: ${groups.shadow[0].value};` : '',
+      groups.color[0] ? `$primary: ${groups.color[0][1].value};` : ''].filter(Boolean).join('\n');
   }
   if (format === 'js-theme') {
-    const object = (values, prefix) => entries(values, prefix).map(([name, value]) => `${name}: '${value}'`).join(', ');
-    return `const theme = { space: { ${object(groups.spacing, 'space')} }, fontSizes: { ${object(groups.fontSize, 'font')} }, radii: { ${object(groups.radius, 'radius')} }, shadows: { ${object(groups.shadow, 'shadow')} }, colors: { ${object(groups.color, 'color')} } };`;
+    const object = (entries) => entries.map((entry) => `${entry.key}: '${entry.value}'`).join(', ');
+    const colors = groups.color.map(([name, entry]) => `${name}: '${entry.value}'`).join(', ');
+    return `const theme = { space: { ${object(groups.spacing)} }, fontSizes: { ${object(groups.fontSize)} }, radii: { ${object(groups.radius)} }, shadows: { ${object(groups.shadow)} }, colors: { ${colors} } };`;
   }
-  const variables = Object.entries(groups).flatMap(([group, values]) => entries(values, group)
-    .map(([name, value]) => [`--${name}`, value]));
+  const variables = [...groups.spacing, ...groups.fontSize, ...groups.radius, ...groups.shadow].map((entry) => [`--${entry.key}`, entry.value])
+    .concat(groups.color.map(([name, entry]) => [`--${name}`, entry.value]));
   return `:root {\n${variables.map(([name, value]) => `  ${name}: ${value};`).join('\n')}\n}`;
 }
 
-export function tokenProposal(rendered, declared, stack = { frameworks: [{ id: 'plain-css' }], tokenSources: [] }) {
+export function tokenProposal(rendered, declared, stack = { frameworks: [{ id: 'plain-css' }], tokenSources: [], scales: { keys: {} } }, options = {}) {
   const combined = emptyCounts();
   mergeCounts(combined, rendered);
   mergeCounts(combined, declared);
+  const offScale = options.offScale ?? {
+    spacing: spacingOffScale(combined.spacing, stack.scales?.spacing),
+    fontSize: fontSizeOffScale(combined.fontSize, stack.scales?.fontSize),
+  };
+  const radiusOffScale = Object.keys(combined.radius).filter((value) => {
+    const size = pixels(value);
+    return size !== null && stack.scales?.radius?.length && !stack.scales.radius.some((known) => Math.abs(known - size) <= 0.5);
+  });
   const proposal = {
-    spacing: clusterSpacing(combined.spacing), fontSize: clusterFontSizes(combined.fontSize),
-    radius: topLevels(combined.radius), shadow: topLevels(combined.shadow), color: clusterColors(combined.color),
+    spacing: deviationEntries('spacing', combined.spacing, offScale.spacing, stack),
+    fontSize: deviationEntries('fontSize', combined.fontSize, offScale.fontSize, stack),
+    radius: deviationEntries('radius', combined.radius, radiusOffScale, stack),
+    shadow: topLevels(combined.shadow).map((entry, index) => ({ ...entry,
+      key: `elevation-${index + 1}`, value: stripTransparentShadowLayers(entry.value) }))
+      // `none` and `!important` overrides are resets, not elevation levels.
+      .filter((entry) => !/^none\b/i.test(entry.value) && !/!important/i.test(entry.value))
+      .map((entry, index) => ({ ...entry, key: `elevation-${index + 1}` })),
+    color: brandPalette(options.lockedColors ?? [], combined.color, declared.theme ?? []),
+    colorClusters: clusterColors(combined.color),
   };
   proposal.format = proposalFormat(stack);
   proposal.snippet = proposalSnippet(proposal.format, proposal, stack);
@@ -269,10 +355,11 @@ export function extractTailwindArbitrary(source, file) {
 
 function arbitraryCategory(row) {
   if (row.utility.startsWith('inline-style:')) return bucketFor(row.utility.slice('inline-style:'.length));
-  if (/^(?:[mp][trblxy]?|gap(?:-[xy])?|space-[xy])-/i.test(row.utility)) return 'spacing';
-  if (/^rounded(?:-[trbl]{1,2})?-/i.test(row.utility)) return 'radius';
-  if (/^text-/i.test(row.utility) && pixels(row.value) !== null) return 'fontSize';
-  if (/^(?:text|bg|border|fill|stroke)-/i.test(row.utility) && parseColor(row.value)) return 'color';
+  const utility = row.utility.split(':').at(-1);
+  if (/^(?:[mp][trblxy]?|gap(?:-[xy])?|space-[xy]|(?:min-|max-)?[wh]|inset(?:-[xy])?|top|right|bottom|left)-/i.test(utility)) return 'spacing';
+  if (/^rounded(?:-[trbl]{1,2})?-/i.test(utility)) return 'radius';
+  if (/^text-/i.test(utility) && pixels(row.value) !== null) return 'fontSize';
+  if (/^(?:text|bg|border|fill|stroke)-/i.test(utility) && parseColor(row.value)) return 'color';
   return null;
 }
 
@@ -334,10 +421,13 @@ function extractJsTheme(declared, file, source) {
 }
 
 function derivedSourceGlobs(stack) {
+  if (stack.sourceGlobs?.length) return stack.sourceGlobs;
   const primary = stack.frameworks[0]?.id;
-  if (primary === 'tailwind') return ['**/*.{css,scss,sass,less}', 'tailwind.config.{js,cjs,mjs,ts}'];
-  if (['mui', 'chakra', 'styled-components', 'emotion', 'angular-material'].includes(primary)) return ['**/*.{css,scss,sass,less,js,jsx,ts,tsx}'];
-  return ['**/*.{css,scss,sass,less}'];
+  const roots = stack.packageRoots?.length ? stack.packageRoots : ['.'];
+  const rooted = (glob) => roots.map((root) => `${root === '.' ? '' : `${root}/`}${glob}`);
+  if (primary === 'tailwind') return [...rooted('**/*.{css,scss,sass,less}'), ...rooted('tailwind.config.{js,cjs,mjs,ts}')];
+  if (['mui', 'chakra', 'styled-components', 'emotion', 'angular-material'].includes(primary)) return rooted('**/*.{css,scss,sass,less,js,jsx,ts,tsx}');
+  return rooted('**/*.{css,scss,sass,less}');
 }
 
 export async function scanDeclaredTokens({ projectRoot, stack, sourceGlobs, templateGlobs }) {
@@ -402,6 +492,7 @@ async function renderedTokens(page) {
     const counts = { spacing: {}, fontSize: {}, fontFamily: {}, color: {}, radius: {}, shadow: {}, duration: {}, uaDefaults: { spacing: {} } };
     const add = (bucket, tokenValue, target = counts) => {
       if (!tokenValue || tokenValue === 'none' || tokenValue === '0s' || tokenValue === '0px') return;
+      if (bucket === 'spacing' && !/^-?\d*\.?\d+(?:px|rem)$/i.test(tokenValue)) return;
       target[bucket][tokenValue] = (target[bucket][tokenValue] ?? 0) + 1;
     };
     const visible = (element) => {
@@ -507,7 +598,7 @@ export async function runTokens({ browser, config, stack }) {
         spacing: spacingOffScale(authored.spacing, stack.scales.spacing),
         fontSize: fontSizeOffScale(authored.fontSize, stack.scales.fontSize),
       };
-  const proposal = tokenProposal(rendered, declared, stack);
+  const proposal = tokenProposal(rendered, declared, stack, { offScale, lockedColors: config.lockedColors });
   if (primary === 'unknown') {
     proposal.partial = true;
     proposal.reason = 'Unknown framework: native proposal formatting is unavailable';

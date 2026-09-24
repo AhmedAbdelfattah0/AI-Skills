@@ -14,14 +14,16 @@
   <main id="main">
     <h1>Deterministic audit fixture</h1>
     <p class="brand-copy">This locked brand text intentionally has insufficient contrast.</p>
+    <p>Read the <a id="inline-link" href="#details">fixture details</a> before continuing.</p>
     <section class="spacing-13">
       <h2>Planted controls</h2>
       <button class="icon-only"><span aria-hidden="true">★</span></button>
-      <button class="tiny-target" aria-label="Tiny action">T</button>
-      <button class="small-target">Small action</button>
+      <span class="crowded-targets"><button class="tiny-target" aria-label="Tiny action">T</button><button class="small-target">Small action</button></span>
       <button id="no-focus" class="no-focus">Focus disappears here</button>
       <button class="covered-focus">Covered focus target</button>
       <button class="slow-motion">Slow motion</button>
+      <span class="loading-spinner" role="progressbar" aria-label="Loading"></span>
+      <button class="quick-color">Quick colour feedback</button>
     </section>
     <section class="type-sampler spacing-22">
       <h2>Type sampler</h2>

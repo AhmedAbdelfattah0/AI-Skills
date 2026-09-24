@@ -37,14 +37,14 @@ failure. Otherwise mark the applicable coverage row checked-pass or gap.
 | `axe.json` | Map each violation to the applicable `A11Y-*` rule from `rules.md`; retain the axe rule ID as evidence, never as the finding's Rule value. Incomplete checks are gaps unless another required lane resolves them. |
 | `contrast.json` | Map failed text contrast to `A11Y-01`, failed non-text contrast to `A11Y-02`, and LOCKED brand failures to `ID-02` as well. `unmeasurable` is a gap. Cite colors, ratio, requirement, and proposal when present. |
 | `focus.json` | Map missing indicators to `A11Y-06`, obscured focus to `A11Y-07`, and illogical order or traps to `A11Y-08` or `A11Y-05` as demonstrated. Cite the step and selector. |
-| `targets.json` | `below24: true` fails `A11Y-09`; `below44: true` with `below24: false` is a recommendation only, not a WCAG failure. |
+| `targets.json` | `below24: true` fails `A11Y-09`. A row with `exception: spacing`, `inline`, or `ua` meets WCAG 2.5.8 through that exception and is not a failure. `below44: true` without a failure is a recommendation only. |
 | `forms.json` | `placeholderOnly: true` or `nameSource: none` fails `A11Y-16` and `FORM-01`; a `typeMismatch` maps to `FORM-04`; a personal-data field without `autocomplete` maps to `A11Y-27`. Cite the selector and width. |
 | `tokens.json` | Map spacing, type, palette, radius, shadow, and duplication evidence to applicable `VIS-*` rules. Judge off-scale values against the stack-aware scale. Turn app-authored `declared.arbitrary` entries into findings that cite file:line; framework defaults alone are never findings. Any section marked `partial: true` leaves its uninspected portion as a gap. Do not turn every raw value into a separate finding. |
 | `perf.json` | Map LCP, CLS, and configured-interaction measurements to `PERF-*`. LCP and INP are lab measurements, not field Core Web Vitals. A missing configured interaction is a `PERF-07` gap. |
-| `motion.json` | Map measured duration, property, token, and reduced-motion results to applicable `MOT-*` rules. A null reduced-motion result is a gap. |
+| `motion.json` | Each route lists `motion[]` entries (name, type, duration, `respected`, `exempt` with reason). A non-exempt entry with `respected: false` fails `MOT-04`; exempt entries (short colour/opacity transitions, loading spinners) are not failures. Durations map to `MOT-02`. A null `respected` is a gap. |
 | `reflow.json` | Map horizontal scroll to `A11Y-19` and `RESP-02`; map failed 200% zoom or text spacing to `A11Y-20`. |
 | `theme.json` | Map detected dark-theme behavior to `MOD-01`; `ambiguous` is a gap. Absence is reported as checked only when the project does not claim dark mode. |
-| `rtl.json` | Map reachable RTL behavior to `I18N-*`; if DESIGN.md says RTL or both but RTL is not reachable, record gaps for the affected rules. |
+| `rtl.json` | `routes[]` gives each configured route's rendered direction. Review the RTL routes' screenshots for `I18N-*`; if the identity says RTL or both but no configured route renders RTL, record gaps for the affected rules. |
 
 ## Visual review
 

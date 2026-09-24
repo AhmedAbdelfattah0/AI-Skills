@@ -17,6 +17,7 @@ import { runReflow } from './lib/reflow.mjs';
 import { runTheme } from './lib/theme.mjs';
 import { runRtl } from './lib/rtl.mjs';
 import { FRAMEWORK_IDS, runStack } from './lib/stack.mjs';
+import { closeSharedAuditPages, runtimeProfile } from './lib/runtime.mjs';
 import { assertInside, redactUrl, sanitizeId, writeJsonAtomic } from './lib/paths.mjs';
 
 const LANES = ['stack', 'capture', 'axe', 'contrast', 'focus', 'targets', 'forms', 'tokens', 'perf', 'motion', 'reflow', 'theme', 'rtl'];
@@ -262,9 +263,10 @@ async function main() {
       } catch (error) {
         stackError = safeMessage(error);
         stackResult = {
-          frameworks: [{ id: 'unknown', version: null, confidence: 'low', evidence: [stackError] }],
-          tokenSources: [], vendorStylesheets: [], templateGlobs: config.templateGlobs ?? [],
-          scales: { spacing: null, fontSize: null, radius: null, source: 'inferred' },
+          frameworks: [{ id: 'unknown', version: null, confidence: 'low', evidence: [stackError], packageRoot: '.', packageRoots: ['.'] }],
+          tokenSources: [], vendorStylesheets: [], packageRoot: '.', packageRoots: ['.'],
+          templateGlobs: config.templateGlobs ?? [], sourceGlobs: config.sourceGlobs ?? [],
+          scales: { spacing: null, fontSize: null, radius: null, source: 'inferred', keys: {} },
         };
         lanes.stack = { status: 'degraded', reason: stackError };
       }
@@ -316,11 +318,15 @@ async function main() {
       }
     }
   } finally {
-    await browser.close();
+    try {
+      await closeSharedAuditPages(browser);
+      const profile = runtimeProfile(browser);
+      counts.navigation = `${profile.navigations} loads, ${profile.reusedPages} reuses, ${profile.navigationMs}ms; routes=${JSON.stringify(profile.routes)}`;
+    } finally { await browser.close(); }
   }
   await writeJsonAtomic(assertInside(runDir, join(runDir, 'lanes.json')), lanes);
   const summary = [...cli.selected].map((lane) => `${lane}:${lanes[lane].status}${counts[lane] === undefined ? '' : `(${counts[lane]})`}`).join(' ');
-  process.stdout.write(`ux-audit ${summary}\nrun directory: ${runDir}\n`);
+  process.stdout.write(`ux-audit ${summary}\nrun directory: ${runDir}\nnavigation profile: ${counts.navigation}\n`);
   if ([...cli.selected].some((lane) => lanes[lane].status === 'degraded')) process.exitCode = 3;
 }
 

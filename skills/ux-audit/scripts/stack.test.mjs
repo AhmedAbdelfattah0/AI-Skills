@@ -60,6 +60,7 @@ test('Bootstrap defaults are on-scale while app-authored 13px is off-scale', asy
 test('framework override wins while contrary evidence remains', async () => {
   const stack = await detectStack({ projectRoot: fixture('bootstrap5'), framework: 'tailwind' });
   assert.equal(stack.frameworks[0].id, 'tailwind');
+  assert.equal(stack.packageRoot, '.');
   assert.equal(stack.frameworks[0].override, true);
   assert.ok(stack.frameworks.some((framework) => framework.id === 'bootstrap'));
 });
@@ -88,4 +89,26 @@ test('Tailwind config is parsed statically and never executed', async (t) => {
     if (previous === undefined) delete process.env.UX_AUDIT_EXECUTED_CONFIG;
     else process.env.UX_AUDIT_EXECUTED_CONFIG = previous;
   }
+});
+
+test('monorepo Tailwind globs are rooted at the workspace package', async () => {
+  const projectRoot = fixture('tailwind-monorepo');
+  const stack = await detectStack({ projectRoot });
+  assert.equal(stack.frameworks[0].id, 'tailwind');
+  assert.equal(stack.packageRoot, 'apps/web');
+  assert.equal(stack.frameworks[0].packageRoot, 'apps/web');
+  assert.deepEqual(stack.packageRoots, ['apps/web']);
+  assert.ok(stack.frameworks[0].packageRoots.includes('apps/web'));
+  assert.ok(stack.templateGlobs.includes('apps/web/src/**/*.{html,tsx,jsx,vue,svelte,astro}'));
+  assert.ok(stack.sourceGlobs.includes('apps/web/**/*.{css,scss,sass,less}'));
+  const declared = await scanDeclaredTokens({ projectRoot, stack });
+  assert.ok(declared.arbitrary.some((row) => row.file === 'apps/web/src/x.tsx' && row.value === '44px'));
+});
+
+test('Tailwind v3 full default scales include large spacing and display type sizes', async () => {
+  const stack = await detectStack({ projectRoot: fixture('tailwind-v3') });
+  for (const value of [112, 128, 176, 208, 384]) assert.ok(stack.scales.spacing.includes(value));
+  for (const value of [12, 14, 16, 18, 20, 24, 30, 36, 48, 60, 72, 96, 128]) assert.ok(stack.scales.fontSize.includes(value));
+  assert.equal(stack.scales.keys.spacing['52'], 208);
+  assert.equal(stack.scales.keys.fontSize['9xl'], 128);
 });

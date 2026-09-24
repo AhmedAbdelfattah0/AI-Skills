@@ -6,7 +6,7 @@ export async function runForms({ browser, config }) {
   const rows = [];
   for (const route of config.routes) {
     for (const width of [390, 1440]) {
-      const fields = await withAuditPage(browser, config, route, { width, scheme: 'light' }, (page) => page.evaluate(() => {
+      const fields = await withAuditPage(browser, config, route, { width, scheme: 'light', shared: true }, (page) => page.evaluate(() => {
         const selector = (element) => {
           if (element.id) return `#${CSS.escape(element.id)}`;
           if (element.getAttribute('name')) return `${element.localName}[name="${CSS.escape(element.getAttribute('name'))}"]`;

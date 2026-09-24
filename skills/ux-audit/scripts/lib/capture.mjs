@@ -14,7 +14,7 @@ export async function runCapture({ browser, config, runDir, schemes }) {
         const file = screenshotName(route.id, width, scheme, scenario);
         const relativeFile = `screens/${file}`;
         try {
-          const url = await withAuditPage(browser, config, route, { width, scheme }, async (page, opened) => {
+          const url = await withAuditPage(browser, config, route, { width, scheme, shared: true }, async (page, opened) => {
             await page.addStyleTag({ content: `
               *, *::before, *::after {
                 animation-duration: 0s !important;
