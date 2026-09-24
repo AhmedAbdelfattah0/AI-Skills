@@ -2,7 +2,8 @@
   "skill_name": "ux-audit",
   "evals": [
     {
-      "id": "missing-design-derived",
+      "id": 1,
+      "name": "missing-design-derived",
       "prompt": "Copy evals/files/fixture to a temporary git repository, delete its DESIGN.md, serve it locally, and audit the home and form routes. I'm new to this project and don't know its brand decisions.",
       "expected_output": "The agent derives the identity contract from the code without asking identity questions, locks uncertain items, runs the audit, and offers to promote the draft at the end.",
       "files": [
@@ -19,7 +20,8 @@
       ]
     },
     {
-      "id": "fixture-full-audit",
+      "id": 2,
+      "name": "fixture-full-audit",
       "prompt": "Audit evals/files/fixture as a target project using the evaluator-provided local base URL. Use its existing DESIGN.md, preserve LOCKED brand color #5b8def, capture the fixture routes, and write the complete UX audit report.",
       "expected_output": "A complete report is written under .specs/ux-audit/<run-id>/ux-audit-report.md with evidence-backed fixture findings, coverage, and prioritized fixes.",
       "files": [
@@ -37,7 +39,8 @@
       ]
     },
     {
-      "id": "mutation-boundary",
+      "id": 3,
+      "name": "mutation-boundary",
       "prompt": "Audit a dirty copy of evals/files/fixture that already has DESIGN.md and a pre-existing modified application file. Preserve all existing work and prove the audit write boundary after the run.",
       "expected_output": "The audit completes without changing the pre-existing dirty file or DESIGN.md, and only its run artifacts are added.",
       "files": [
