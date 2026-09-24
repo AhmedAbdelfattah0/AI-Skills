@@ -33,7 +33,7 @@ Audit a user-supplied running web UI against [the rule catalogue](references/rul
 ## Invariants
 
 - **Report only.** Never modify application code. The only target writes are a
-  root `DESIGN.md`, after the identity interview and explicit consent, and
+  root `DESIGN.md`, only when the user accepts the promoted draft, and
   `.specs/ux-audit/<run-id>/**`. Record `git status --porcelain` before writing
   and compare it after the run.
 - **The user runs the app.** Never start, restart, build, seed, or deploy it.
@@ -55,7 +55,7 @@ Audit a user-supplied running web UI against [the rule catalogue](references/rul
 
 | Phase | Entry | Exit | Load |
 |---|---|---|---|
-| **IDENTITY** | target root selected | accepted DESIGN.md parsed, or one bundled interview asked and work stopped until answered | [design-md.md](references/design-md.md), [rules.md](references/rules.md) |
+| **IDENTITY** | target root selected | existing DESIGN.md parsed, or identity derived from the code into `DESIGN.draft.md` with evidence and confidence; uncertain items locked, never asked | [design-md.md](references/design-md.md), [rules.md](references/rules.md) |
 | **CONFIGURE** | identity and running base URL known | routes, viewports, schemes, scenarios, safe interactions, authentication path, framework overrides, and `config.json` recorded | [runtime.md](references/runtime.md), [frameworks.md](references/frameworks.md) |
 | **CAPTURE** | valid config and Node 20+ | `run.mjs` completed; `stack` ran first; requested artifacts and `lanes.json` exist, with degradations explicit | [runtime.md](references/runtime.md), [frameworks.md](references/frameworks.md) |
 | **REVIEW** | capture artifacts available | every successful screenshot reviewed against only the `V` checks in loaded sections; measured artifacts mapped without lane substitution | [rules.md](references/rules.md), [report.md](references/report.md), [frameworks.md](references/frameworks.md) |
@@ -63,7 +63,7 @@ Audit a user-supplied running web UI against [the rule catalogue](references/rul
 | **VERIFY** | report written | before/after status baseline compared; only allowed paths changed; user receives the report path, severity counts, and gaps | [runtime.md](references/runtime.md), [report.md](references/report.md) |
 
 Phases are ordered. A lane failure degrades its coverage but does not cancel
-independent lanes. Stop only for the missing DESIGN.md interview, a missing
+independent lanes. Never stop to ask what the code can answer. Stop only for a missing
 running base URL or required credential only the user can supply, an unsafe
 target, or an integrity failure outside the write allowlist.
 
@@ -107,7 +107,7 @@ At completion, tell the user:
 | Reference | Load when |
 |---|---|
 | [rules.md](references/rules.md) | Selecting loaded sections, mapping evidence to rule IDs, and applying default severity. |
-| [design-md.md](references/design-md.md) | Locating, validating, interviewing for, or creating the identity contract. |
+| [design-md.md](references/design-md.md) | Locating, validating, or deriving the identity contract from the code. |
 | [runtime.md](references/runtime.md) | Preparing `config.json`, capturing evidence, handling authentication, readiness, themes, RTL, dependencies, and integrity. |
 | [report.md](references/report.md) | Mapping artifacts, reviewing screenshots, calibrating severity, building coverage, and writing the final report. |
 | [frameworks.md](references/frameworks.md) | Detecting styling frameworks, separating defaults from app decisions, judging scales, and phrasing native fixes. |

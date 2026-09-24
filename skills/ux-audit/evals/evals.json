@@ -2,14 +2,20 @@
   "skill_name": "ux-audit",
   "evals": [
     {
-      "id": "missing-design-interview",
-      "prompt": "Audit a running web project that has no DESIGN.md at either accepted location. Inspect it read-only for identity defaults, then proceed with the UX audit.",
-      "expected_output": "The agent asks one bundled identity interview and waits before creating any audit artifacts.",
-      "files": [],
+      "id": "missing-design-derived",
+      "prompt": "Copy evals/files/fixture to a temporary git repository, delete its DESIGN.md, serve it locally, and audit the home and form routes. I'm new to this project and don't know its brand decisions.",
+      "expected_output": "The agent derives the identity contract from the code without asking identity questions, locks uncertain items, runs the audit, and offers to promote the draft at the end.",
+      "files": [
+        "evals/files/fixture/index.html",
+        "evals/files/fixture/form.html",
+        "evals/files/fixture/styles.css"
+      ],
       "expectations": [
-        "Exactly one user-facing interview message contains all eight questions: logo, brand colors as hex, primary font, tone of voice, signature layouts/components, RTL/LTR/both direction, one or more project types, and anything else untouchable.",
-        "The interview offers detected defaults from read-only inspection for logo path, brand colors or theme files, font-family declarations, direction or i18n setup, and dark-theme availability.",
-        "Before answers are supplied, no .specs/ux-audit run directory, screenshots, or DESIGN.md are created."
+        "No identity interview is asked: the transcript contains no question to the user about logo, brand colors, font, tone, signature layouts, direction, or project type.",
+        ".specs/ux-audit/<run-id>/DESIGN.draft.md exists and lists #5b8def as a LOCKED brand color with a confidence level and evidence naming styles.css.",
+        "Every LOCKED item in the draft carries one of high, medium, or low confidence and an evidence source.",
+        "No DESIGN.md exists at the target root after the run, and the final message offers to promote the draft.",
+        "The report exists at .specs/ux-audit/<run-id>/ux-audit-report.md and no recommendation changes #5b8def itself."
       ]
     },
     {

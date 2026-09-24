@@ -1,6 +1,6 @@
-# DESIGN.md — identity discovery and approval boundary
+# DESIGN.md — identity derivation and approval boundary
 
-Use this reference to locate, validate, or create the target project's identity contract before selecting rules or proposing fixes.
+Use this reference to locate, validate, or derive from the code the target project's identity contract before selecting rules or proposing fixes.
 
 ## Locate the contract
 
@@ -28,44 +28,50 @@ Required LOCKED fields are:
 `dashboard/admin`, and `SaaS onboarding`. They load `ETH`, `ECOM`, `DASH`, and
 `ONB`, respectively. Core sections 1–16 and `ID` always load.
 
-If a present file omits a required LOCKED field or `project_type`, list all
-missing values as one bundled set of questions. Do not rewrite, normalize, or
-complete the user's file without explicit consent. Continue only when the
-loaded packs and identity boundary are unambiguous; otherwise the affected
-checks are coverage gaps.
+If a present file omits a required LOCKED field or `project_type`, derive the
+missing values from the code as described below, mark them `inferred` in the
+report, and never rewrite, normalize, or complete the user's file.
 
-## Missing DESIGN.md
+## Missing DESIGN.md: derive, never interrogate
 
-First inspect the project read-only and prepare detected defaults:
+The person running the audit may be new to the project, so the code is the
+source of truth and the skill does the discovery. Never stop to ask questions
+the repository can answer. Inspect read-only and derive every field with
+evidence and a confidence of `high`, `medium`, or `low`:
 
-- likely logo asset paths;
-- CSS custom properties, theme files, and recurring brand-color hex values;
-- declared `font-family` values;
-- `<html dir>`, locale routing, and i18n configuration;
-- whether a distinct dark theme exists.
+| Field | Derive from |
+|---|---|
+| Logo | Image/SVG assets named or placed as logo/brand (`public/brand/`, `assets/logo*`), and what the header renders. |
+| Brand colors | Theme config and CSS custom properties (Tailwind `theme`/`@theme`, Sass variables, JS theme), ranked by rendered frequency on primary CTAs, headers, and links in the capture; comments naming a palette "brand" or "primary" raise confidence. Semantic status colors (success/warning/danger/info) are FLEXIBLE unless branded. |
+| Primary font | Font loading (`@font-face`, `next/font`, `<link>` to font services), theme `fontFamily`, and the computed family of body and headings. Record each locale's font when they differ. |
+| Tone of voice | The actual interface copy: i18n message files, page headings, CTA labels, and empty/error messages. Summarize in a few words (for example "warm, premium, bilingual") and quote two or three representative strings as evidence. |
+| Signature layouts | Distinctive sections repeated across routes or visible above the fold on the home page (hero treatment, navigation style, card system), confirmed against screenshots after capture. |
+| Direction | `<html dir>`, locale routing, RTL locale files, `[dir=rtl]` or `:dir(rtl)` styles. |
+| project_type | Routes and features: checkout/cart/orders → `e-commerce`; public marketing, sign-up or pricing → `consumer`; role dashboards/admin → `dashboard/admin`; first-run setup, welcome or checklist flows → `SaaS onboarding`. Multiple allowed. |
+| Dark theme | `.dark`/`[data-theme]` rules, `prefers-color-scheme` queries, theme toggles. |
 
-Then ask one bundled interview in a single message. Present detected values as
-defaults for confirmation rather than making the user retype them:
+**Uncertainty is locked, not asked.** A `medium` or `low` confidence item is
+treated as LOCKED for the run. The cost of over-locking is a missed
+suggestion; the cost of under-locking is a recommendation that damages the
+brand. When two candidates compete (for example two palettes for public and
+authenticated surfaces), lock both and name the surface each belongs to.
 
-1. Which logo or wordmark is locked?
-2. Which brand colors are locked? Supply hex values.
-3. What is the primary font?
-4. What tone of voice must remain recognizable?
-5. Which layouts or components are signature and untouchable?
-6. Is direction `LTR`, `RTL`, or `both`?
-7. Which project types apply: consumer, e-commerce, dashboard/admin, SaaS onboarding? Multiple are allowed.
-8. Is anything else untouchable?
+Write the derived contract to `.specs/ux-audit/<run-id>/DESIGN.draft.md` using
+the template below, with the evidence and confidence beside each item, and run
+the audit against it. Do not write `<target-root>/DESIGN.md` during the run.
+At completion, offer to promote the draft to `<target-root>/DESIGN.md`; that
+single write needs the user's explicit consent and is optional. Never
+overwrite an existing DESIGN.md.
 
-Stop after that message. Before the answers arrive, capture nothing, create no
-run directory, and write neither DESIGN.md nor audit artifacts. After the user
-answers, show the resolved values and create `<target-root>/DESIGN.md` only with
-their consent. Never overwrite either accepted location without explicit
-consent.
+Ask the user only when the code cannot decide a field that changes the audit
+(for example no styling source is readable at all); ask that one precise
+question, and keep running every lane that does not depend on it.
 
 ## Creation template
 
-Use this shape. Remove comments and replace every placeholder with a confirmed
-answer; use `none` when the user explicitly says a field has no locked value.
+Use this shape for both the draft and a promoted file. Every LOCKED item
+carries its confidence and evidence; use `none` only when the code shows no
+such item exists.
 
 ```markdown
 ---
@@ -78,12 +84,12 @@ project_type:
 
 ## LOCKED
 
-- **Logo:** <asset path or approved treatment>
-- **Brand colors:** <#RRGGBB, ...>
-- **Primary font:** <family>
-- **Tone of voice:** <description>
-- **Signature layouts/components:** <list>
-- **Direction:** <LTR | RTL | both>
+- **Logo:** <asset path or approved treatment> — <high|medium|low>; evidence: <file or observation>
+- **Brand colors:** <#RRGGBB (surface), ...> — <confidence>; evidence: <source>
+- **Primary font:** <family per locale> — <confidence>; evidence: <source>
+- **Tone of voice:** <description; quoted strings> — <confidence>; evidence: <source>
+- **Signature layouts/components:** <list> — <confidence>; evidence: <source>
+- **Direction:** <LTR | RTL | both> — <confidence>; evidence: <source>
 
 ## FLEXIBLE
 

@@ -11,7 +11,7 @@ without asking.
 Before writing, record `git status --porcelain` at the target root when it is a
 Git checkout. The only permitted target writes are:
 
-- a root `DESIGN.md`, only after the identity interview and explicit consent;
+- a root `DESIGN.md`, only when the user accepts the promoted draft at completion;
 - `.specs/ux-audit/<run-id>/**`.
 
 After the capture and report, run the same status command and compare it with
