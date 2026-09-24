@@ -50,7 +50,9 @@ comments; omit optional fields when unused.
   "rtl": {"mode":"auto","url":null,"attribute":null},
   "viewports": [320,390,768,1024,1440,1920],
   "lockedColors": ["#5b8def"],
+  "framework": "tailwind",
   "sourceGlobs": ["src/**/*.{css,scss,sass,less}"],
+  "templateGlobs": ["src/**/*.{html,tsx,jsx,vue,svelte,astro}"],
   "projectRoot": "/absolute/path/to/target"
 }
 ```
@@ -60,6 +62,12 @@ Allowed route-step actions are `click`, `fill`, `press`, `wait`, and
 `disabled`, or `other`. Redact query strings in recorded URLs. Store only the
 `storageState` path: never copy or log its contents, and never use it when the
 resolved base URL changes origin.
+
+`framework` is an optional user override of stack detection and must be an
+adapter ID defined in [frameworks.md](frameworks.md). `templateGlobs` narrows
+the app-authored templates scanned for framework utilities, arbitrary values,
+and inline styles. `sourceGlobs` narrows project style and theme sources; when
+omitted, derive it from `stack.json` rather than assuming a directory layout.
 
 ## Readiness and states
 
@@ -104,6 +112,14 @@ INP.
 
 ## Dependencies and execution
 
+The read-only `stack` lane runs first and writes `stack.json`. It inspects
+package manifests and framework configuration in the target plus CSSOM
+fingerprints on the supplied pages. Its result selects the declared-token
+adapter; rendered measurements remain framework-agnostic. Multiple frameworks
+may coexist. An `unknown` result permits rendered lanes but degrades declared
+token coverage. See [frameworks.md](frameworks.md) for detection, defaults, and
+native fix phrasing.
+
 Node 20 or newer is required because the pinned Playwright 1.63 dependency
 requires it. Bootstrap reuses a compatible target installation when available;
 otherwise it runs the scripts lockfile's `npm ci` in a version-keyed user cache,
@@ -121,9 +137,11 @@ networked environment.
 
 Exit codes are `0` for all requested lanes completed, `3` for a degraded run,
 and `2` for invalid usage or configuration. One lane failing never cancels the
-others. Treat every expected JSON file as evidence only when its lane status is
-`ok`; `degraded` and `skipped` require a reason and remediation and leave the
-corresponding rules as gaps.
+others. The lane list is `stack`, `capture`, `axe`, `contrast`, `focus`,
+`targets`, `tokens`, `perf`, `motion`, `reflow`, `theme`, and `rtl`; `stack`
+runs before every requested lane that consumes it. Treat every expected JSON
+file as evidence only when its lane status is `ok`; `degraded` and `skipped`
+require a reason and remediation and leave the corresponding rules as gaps.
 
 Screenshots use widths 320, 390, 768, 1024, 1440, and 1920 with heights 844,
 844, 1024, 768, 900, and 1080 respectively. Capture full-page light images,
