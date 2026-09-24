@@ -154,4 +154,11 @@ test('browser lanes produce deterministic fixture evidence', { timeout: 180_000 
   assert.ok(rtl.routes.some((row) => row.route === 'home-ar' && row.direction === 'rtl'));
   assert.equal(json(join(runDir, 'perf.json')).interactions[0].status, 'ok');
   assert.ok(Object.values(json(join(runDir, 'lanes.json'))).every((lane) => lane.status === 'ok'));
+  // A partial re-run must not mark the lanes it skipped as not-selected.
+  const partial = await runChild(process.execPath, [runScript, '--config', configPath, '--only', 'stack'], {
+    env: process.env,
+    timeout: 60_000,
+  });
+  assert.equal(partial.status, 0, `${partial.stdout}\n${partial.stderr}`);
+  assert.ok(Object.values(json(join(runDir, 'lanes.json'))).every((lane) => lane.status === 'ok'));
 });

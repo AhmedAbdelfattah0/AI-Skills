@@ -219,9 +219,13 @@ async function main() {
     return;
   }
   const runDir = dirname(cli.configPath);
+  // A partial re-run (--only) keeps the recorded status of every lane it does not run,
+  // so lanes.json keeps describing the evidence actually on disk in this run directory.
+  let previous = {};
+  try { previous = JSON.parse(await readFile(join(runDir, 'lanes.json'), 'utf8')); } catch { previous = {}; }
   const lanes = Object.fromEntries(LANES.map((lane) => [lane, cli.selected.has(lane)
     ? { status: 'skipped', reason: 'not-run' }
-    : { status: 'skipped', reason: 'not-selected' }]));
+    : previous[lane] ?? { status: 'skipped', reason: 'not-selected' }]));
   const deps = await resolveDeps({
     projectRoot: config.projectRoot,
     installBrowsers: cli.installBrowsers,
