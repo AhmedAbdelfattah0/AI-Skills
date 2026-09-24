@@ -247,7 +247,7 @@ staging**; that rule of engagement is load-bearing, not boilerplate.
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
 library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
 (`.specs/vapt/`), `security-audit` (`.specs/security-audit/`), `project-audit`
-(`.specs/project-audit/`), and `spec-driven`
+(`.specs/project-audit/`), `ux-audit` (`.specs/ux-audit/`), and `spec-driven`
 (`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
@@ -503,6 +503,16 @@ or to the repository's own commands. Four properties are load-bearing:
   or is redacted. Publication never changes the audit verdict and never
   authorizes implementation.
 
+**`ux-audit` is a report-only audit of a running web UI.** DESIGN.md is its
+identity lock: `LOCKED` items gate every finding and recommendation, while
+`FLEXIBLE` items may be refined. Its only target writes are a consented root
+`DESIGN.md` and `.specs/ux-audit/<run-id>/`; application code is never changed.
+The user-authored `references/rules.md` is the catalogue for rule IDs from
+`A11Y-*`, `HEUR-*`, and the intervening families through `ID-*`. Automated,
+measured, keyboard, visual and manual lanes never substitute, and declared-token
+analysis distinguishes app-authored choices from framework defaults before it
+judges scales or proposes framework-native fixes.
+
 **Its `codex review` invocation is version-pinned knowledge, verified on
 `codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)
 **each conflict with a custom `[PROMPT]`**, including the `-` stdin form — the
@@ -531,7 +541,7 @@ may remain local to ship-ticket.
 
 ## Script-delivery patterns
 
-Most skills are pure `SKILL.md`. Three use scripts in different ways — mirror the
+Most skills are pure `SKILL.md`. Four use scripts in different ways — mirror the
 matching pattern when extending them:
 
 - **`spec-driven`** — *bundles* `scripts/*.sh` in the repo (`specify.sh`, `plan.sh`, `tasks.sh`, …) and
@@ -545,6 +555,12 @@ matching pattern when extending them:
   `scripts/candidate-id.mjs` computes stable reviewed-candidate identity;
   `scripts/run-log.mjs` appends local timing telemetry under Git metadata. Neither
   needs project-local setup, so symlink and copy installs behave the same.
+- **`ux-audit`** — *executes bundled cross-platform Node helpers in place*, like
+  `ship-ticket`, but resolves its pinned npm dependencies (`playwright` and
+  `@axe-core/playwright` via `scripts/package-lock.json`) from
+  `UX_AUDIT_DEPS_DIR`, a compatible target install read-only, or a lockfile-keyed
+  user cache — never by installing into the audited project. It requires Node >=
+  20, while the repository CLI remains compatible with Node >= 18.
 
 ## Adding or editing a skill
 

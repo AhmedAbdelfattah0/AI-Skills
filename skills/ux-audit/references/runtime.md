@@ -138,7 +138,7 @@ networked environment.
 Exit codes are `0` for all requested lanes completed, `3` for a degraded run,
 and `2` for invalid usage or configuration. One lane failing never cancels the
 others. The lane list is `stack`, `capture`, `axe`, `contrast`, `focus`,
-`targets`, `tokens`, `perf`, `motion`, `reflow`, `theme`, and `rtl`; `stack`
+`targets`, `forms`, `tokens`, `perf`, `motion`, `reflow`, `theme`, and `rtl`; `stack`
 runs before every requested lane that consumes it. Treat every expected JSON
 file as evidence only when its lane status is `ok`; `degraded` and `skipped`
 require a reason and remediation and leave the corresponding rules as gaps.
