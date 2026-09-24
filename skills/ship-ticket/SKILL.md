@@ -475,6 +475,12 @@ This skill orchestrates; companion skills own their rule catalogues and detailed
 methods. Repository instructions outrank this skill. Read both AGENTS.md and
 CLAUDE.md when present and follow pointers rather than duplicating them.
 
-Unrelated defects become follow-up notes or tickets. Do not expand the current
-Design Contract to fix them. The user merges the PR and runs any requested context
-compaction; this skill does neither.
+Unrelated defects become tracker items the skill opens, or one explicit question
+to the user. Do not expand the current Design Contract to fix them. **A defect
+inside a Design Contract path is never a follow-up**: fix it before the freeze
+(REVIEW's repair batch fixes the whole defect class, not the cited line). The
+COMPLETE report carries no "follow-ups" list for the user to pick up; if an
+in-scope residue is found after merge, ship the fix, then report it.
+
+The user merges the PR and runs any requested context compaction; this skill
+does neither.

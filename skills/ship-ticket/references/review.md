@@ -234,15 +234,30 @@ Give every finding one disposition:
 
 A rejected optional-review finding that could affect correctness, security or
 parity must be included in the targeted confirmation even when no bytes change.
-Minors that do not affect correctness, security, the ticket contract or repository
-rules are reported as follow-ups; they do not force churn in this ticket.
+**An in-scope minor is `fix`, not a follow-up.** A minor inside a Design Contract
+path that can be repaired without changing behavior (a false or stale comment, a
+formatting or escaping slip, a wrong count) goes into the one repair batch.
+"Follow-up" is reserved for work outside the Design Contract, and even then it is
+an opened tracker item or an explicit question to the user, never a line in the
+final report left for the user to pick up.
 
 ## One repair batch
 
 If there are accepted in-scope findings, apply one batch containing all of them.
-The batch may change only Design Contract paths. Update directly affected tests,
-comments and docs in the same batch; ordinary diff review is sufficient—there is
-no repository-wide prose inventory or byte-preimage ledger.
+The batch may change only Design Contract paths.
+
+**Fix the defect class, not the cited lines.** A finding names one instance; the
+batch fixes every instance. Before declaring the batch complete, turn each
+accepted finding into a search (a regex, a grep for the false phrase, the same
+escape or pattern) and run it over **every candidate path in full**, not only
+the range the reviewer cited. Record the search and its zero-hit result in the
+`REPAIR` event. A confirmation that finds another instance of an accepted
+finding's class means this step was skipped, and there is no second batch to
+catch it.
+
+Update directly affected tests, comments and docs in the same batch; ordinary
+diff review is sufficient—there is no repository-wide prose inventory or
+byte-preimage ledger.
 
 Finding units with disjoint write ownership and exclusive resources may be fixed
 concurrently by workers that receive the same old candidate ID and exact finding
