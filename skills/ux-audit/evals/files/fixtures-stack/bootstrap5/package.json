@@ -1,0 +1,6 @@
+{
+  "name": "fixture-bootstrap-5",
+  "private": true,
+  "dependencies": { "bootstrap": "5.3.3" },
+  "devDependencies": { "sass": "1.80.0" }
+}

@@ -1,0 +1,48 @@
+:root {
+  --brand-locked: #5b8def;
+  --surface: #ffffff;
+  --text: #172033;
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--surface); color: var(--text); font-family: Arial, sans-serif; }
+.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 72px;
+  padding: 13px 22px;
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+}
+main { padding: 22px; }
+.brand-copy { color: var(--brand-locked); background: #ffffff; }
+.spacing-13 { padding: 13px; }
+.spacing-22 { margin-top: 22px; }
+.spacing-37 { margin-top: 37px; }
+.icon-only { width: 44px; height: 44px; }
+.crowded-targets { display: inline-flex; gap: 0; }
+.tiny-target { width: 20px; height: 20px; padding: 0; }
+.small-target { width: 36px; height: 36px; padding: 0; }
+.no-focus:focus, .no-focus:focus-visible { outline: none; box-shadow: none; }
+.covered-focus { position: fixed; top: 20px; left: 250px; z-index: 1; }
+.slow-motion { transition: transform 600ms linear; }
+.slow-motion.moved { transform: translateX(80px); }
+.loading-spinner { display: inline-block; width: 20px; height: 20px; animation: spin 1s linear infinite; }
+.quick-color { transition: color 150ms ease; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.font-11 { font-size: 11px; }.font-12 { font-size: 12px; }.font-13 { font-size: 13px; }
+.font-14 { font-size: 14px; }.font-15 { font-size: 15px; }.font-16 { font-size: 16px; }
+.font-18 { font-size: 18px; }.font-20 { font-size: 20px; }.font-24 { font-size: 24px; }
+.fixed-width { width: 400px; margin-top: 22px; padding: 13px; border: 1px solid #777777; }
+.focus-runway { min-height: 1200px; display: grid; align-content: end; gap: 37px; }
+.focus-runway a { display: block; padding: 13px; }
+.focus-obscured { position: sticky; top: 0; z-index: 1; }
+form { display: grid; gap: 13px; max-width: 400px; }
+input, form button { min-height: 44px; }
+
+@media (prefers-color-scheme: dark) {
+  :root { --surface: #111827; --text: #f9fafb; }
+  .brand-copy { background: #111827; }
+}

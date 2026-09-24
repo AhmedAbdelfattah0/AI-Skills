@@ -1,0 +1,7 @@
+{
+  "name": "web",
+  "private": true,
+  "devDependencies": {
+    "tailwindcss": "3.4.1"
+  }
+}

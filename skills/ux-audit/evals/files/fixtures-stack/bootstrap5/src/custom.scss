@@ -1,0 +1,9 @@
+$primary: #5b8def;
+$spacer: 1rem;
+
+@import "bootstrap/scss/bootstrap";
+
+.app-card {
+  padding: 13px;
+  border-radius: 0.25rem;
+}

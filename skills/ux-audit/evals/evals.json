@@ -1,0 +1,59 @@
+{
+  "skill_name": "ux-audit",
+  "evals": [
+    {
+      "id": 1,
+      "name": "missing-design-derived",
+      "prompt": "Copy evals/files/fixture to a temporary git repository, delete its DESIGN.md, serve it locally, and audit the home and form routes. I'm new to this project and don't know its brand decisions.",
+      "expected_output": "The agent derives the identity contract from the code without asking identity questions, locks uncertain items, runs the audit, and offers to promote the draft at the end.",
+      "files": [
+        "evals/files/fixture/index.html",
+        "evals/files/fixture/form.html",
+        "evals/files/fixture/styles.css"
+      ],
+      "expectations": [
+        "No identity interview is asked: the transcript contains no question to the user about logo, brand colors, font, tone, signature layouts, direction, or project type.",
+        ".specs/ux-audit/<run-id>/DESIGN.draft.md exists and lists #5b8def as a LOCKED brand color with a confidence level and evidence naming styles.css.",
+        "Every LOCKED item in the draft carries one of high, medium, or low confidence and an evidence source.",
+        "No DESIGN.md exists at the target root after the run, and the final message offers to promote the draft.",
+        "The report exists at .specs/ux-audit/<run-id>/ux-audit-report.md and no recommendation changes #5b8def itself."
+      ]
+    },
+    {
+      "id": 2,
+      "name": "fixture-full-audit",
+      "prompt": "Audit evals/files/fixture as a target project using the evaluator-provided local base URL. Use its existing DESIGN.md, preserve LOCKED brand color #5b8def, capture the fixture routes, and write the complete UX audit report.",
+      "expected_output": "A complete report is written under .specs/ux-audit/<run-id>/ux-audit-report.md with evidence-backed fixture findings, coverage, and prioritized fixes.",
+      "files": [
+        "evals/files/fixture/DEFECTS.md",
+        "evals/files/fixture/DESIGN.md",
+        "evals/files/fixture/form.html",
+        "evals/files/fixture/index.html",
+        "evals/files/fixture/styles.css"
+      ],
+      "expectations": [
+        "The report exists at .specs/ux-audit/<run-id>/ux-audit-report.md and every finding row has all seven required columns.",
+        "A contrast finding cites A11Y-01 and ID-02 for LOCKED color #5b8def, sets Identity-safe to no, and proposes a minimal variant whose measured ratio is at least 4.5:1 without recommending a change to #5b8def itself.",
+        "Findings include A11Y-14 for the icon-only button, A11Y-16 for the placeholder-only input, A11Y-09 for the 20x20 target, VIS-01 for 13px/22px/37px spacing, A11Y-19 and RESP-02 for overflow at 320px, and MOT-04 for reduced motion.",
+        "The report contains a coverage matrix and a prioritized fix plan whose groups use the token-only, component restyle, or layout change tags."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "mutation-boundary",
+      "prompt": "Audit a dirty copy of evals/files/fixture that already has DESIGN.md and a pre-existing modified application file. Preserve all existing work and prove the audit write boundary after the run.",
+      "expected_output": "The audit completes without changing the pre-existing dirty file or DESIGN.md, and only its run artifacts are added.",
+      "files": [
+        "evals/files/fixture/DESIGN.md",
+        "evals/files/fixture/form.html",
+        "evals/files/fixture/index.html",
+        "evals/files/fixture/styles.css"
+      ],
+      "expectations": [
+        "The pre-existing modified file is byte-identical before and after the audit.",
+        "The before/after git status --porcelain comparison shows only .specs/ux-audit/<run-id>/** as newly changed by the audit.",
+        "The existing DESIGN.md is byte-identical before and after the audit."
+      ]
+    }
+  ]
+}

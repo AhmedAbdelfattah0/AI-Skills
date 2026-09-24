@@ -1,0 +1,11 @@
+{
+  "name": "ux-audit-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Pinned runtime dependencies for the ux-audit skill. Installed into a user cache, never into the audited project.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "playwright": "1.63.0"
+  }
+}

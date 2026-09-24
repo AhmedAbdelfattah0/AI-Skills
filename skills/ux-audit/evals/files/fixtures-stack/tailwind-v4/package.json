@@ -1,0 +1,5 @@
+{
+  "name": "fixture-tailwind-v4",
+  "private": true,
+  "devDependencies": { "tailwindcss": "4.1.0" }
+}

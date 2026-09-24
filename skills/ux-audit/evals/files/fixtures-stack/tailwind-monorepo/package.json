@@ -1,0 +1,5 @@
+{
+  "name": "tailwind-monorepo-fixture",
+  "private": true,
+  "workspaces": ["apps/*"]
+}
