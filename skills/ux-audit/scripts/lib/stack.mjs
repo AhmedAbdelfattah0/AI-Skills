@@ -92,15 +92,58 @@ function balancedObject(source, start) {
   return null;
 }
 
+// Walks one object literal and records every string/number leaf under its full dotted
+// path, so nested palettes stay distinct: `brand: { 700: '#7B5526' }` and
+// `ink: { 700: '#2E3A38' }` become `brand.700` and `ink.700`, never one colliding `700`.
+// Values that are not literals (arrays, calls, spreads) are skipped, never evaluated.
+function objectLiterals(body, prefix, literals) {
+  const key = /\s*(?:['"]([^'"]+)['"]|([\w.-]+))\s*:\s*/y;
+  let index = 0;
+  while (index < body.length) {
+    while (index < body.length && /[\s,]/.test(body[index])) index += 1;
+    key.lastIndex = index;
+    const found = key.exec(body);
+    if (!found) {
+      const next = body.indexOf(',', index);
+      if (next < 0) break;
+      index = next + 1;
+      continue;
+    }
+    const name = prefix ? `${prefix}.${found[1] ?? found[2]}` : (found[1] ?? found[2]);
+    index = key.lastIndex;
+    const char = body[index];
+    if (char === '{') {
+      const inner = balancedObject(body, index);
+      if (inner === null) break;
+      objectLiterals(inner, name, literals);
+      index = body.indexOf('{', index) + inner.length + 2;
+    } else if (char === '"' || char === "'") {
+      const end = body.indexOf(char, index + 1);
+      if (end < 0) break;
+      literals[name] = body.slice(index + 1, end);
+      index = end + 1;
+    } else {
+      const number = /-?\d*\.?\d+/y;
+      number.lastIndex = index;
+      const value = number.exec(body);
+      if (value) literals[name] = value[0];
+      let depth = 0;
+      while (index < body.length && !(depth === 0 && body[index] === ',')) {
+        if ('[({'.includes(body[index])) depth += 1;
+        if ('])}'.includes(body[index])) depth -= 1;
+        index += 1;
+      }
+    }
+  }
+  return literals;
+}
+
 function sectionLiterals(source, key) {
   const match = new RegExp(`(?:^|[,\\s])${key}\\s*:`).exec(source);
   if (!match) return {};
   const body = balancedObject(source, match.index + match[0].length);
   if (body === null) return {};
-  const literals = {};
-  const entry = /(?:^|,)\s*(?:['"]([^'"]+)['"]|([\w.-]+))\s*:\s*(?:['"]([^'"]+)['"]|(-?\d*\.?\d+))/gm;
-  for (const found of body.matchAll(entry)) literals[found[1] ?? found[2]] = found[3] ?? found[4];
-  return literals;
+  return objectLiterals(body, '', {});
 }
 
 export function extractTailwindConfig(source) {

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectStack } from './lib/stack.mjs';
+import { detectStack, extractTailwindConfig } from './lib/stack.mjs';
 import { scanDeclaredTokens, spacingOffScale, tokenProposal } from './lib/tokens.mjs';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -111,4 +111,19 @@ test('Tailwind v3 full default scales include large spacing and display type siz
   for (const value of [12, 14, 16, 18, 20, 24, 30, 36, 48, 60, 72, 96, 128]) assert.ok(stack.scales.fontSize.includes(value));
   assert.equal(stack.scales.keys.spacing['52'], 208);
   assert.equal(stack.scales.keys.fontSize['9xl'], 128);
+});
+
+test('nested Tailwind palettes keep full dotted paths instead of colliding', () => {
+  const theme = extractTailwindConfig(`export default { theme: { extend: { colors: {
+    // brand palette
+    brand: { 500: "#B8843A", 700: "#7B5526" },
+    ink: { 700: "#2E3A38" },
+    accent: "#123456",
+    semantic: { DEFAULT: "var(--x)", fg: "var(--y)" },
+  } } } }`);
+  assert.equal(theme.colors['brand.700'], '#7B5526');
+  assert.equal(theme.colors['ink.700'], '#2E3A38');
+  assert.equal(theme.colors.accent, '#123456');
+  assert.equal(theme.colors['semantic.DEFAULT'], 'var(--x)');
+  assert.equal(Object.hasOwn(theme.colors, '700'), false);
 });
