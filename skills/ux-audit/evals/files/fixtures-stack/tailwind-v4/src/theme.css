@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+@theme {
+  --spacing-panel: 18px;
+  --color-brand: #5b8def;
+  --radius-card: 7px;
+}

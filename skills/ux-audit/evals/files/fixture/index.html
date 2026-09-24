@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UX Audit Fixture — Home</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="sticky-header">
+    <a href="#main">Skip to content</a>
+    <nav aria-label="Primary"><a href="index.html">Home</a> <a href="form.html">Form</a></nav>
+  </header>
+  <main id="main">
+    <h1>Deterministic audit fixture</h1>
+    <p class="brand-copy">This locked brand text intentionally has insufficient contrast.</p>
+    <section class="spacing-13">
+      <h2>Planted controls</h2>
+      <button class="icon-only"><span aria-hidden="true">★</span></button>
+      <button class="tiny-target" aria-label="Tiny action">T</button>
+      <button class="small-target">Small action</button>
+      <button id="no-focus" class="no-focus">Focus disappears here</button>
+      <button class="covered-focus">Covered focus target</button>
+      <button class="slow-motion">Slow motion</button>
+    </section>
+    <section class="type-sampler spacing-22">
+      <h2>Type sampler</h2>
+      <p class="font-11">Eleven</p><p class="font-12">Twelve</p><p class="font-13">Thirteen</p>
+      <p class="font-14">Fourteen</p><p class="font-15">Fifteen</p><p class="font-16">Sixteen</p>
+      <p class="font-18">Eighteen</p><p class="font-20">Twenty</p><p class="font-24">Twenty-four</p>
+    </section>
+    <div class="fixed-width">This element is fixed at 400 pixels and overflows a 320-pixel viewport.</div>
+    <div class="focus-runway spacing-37">
+      <a class="focus-obscured" href="#one">Focusable item one</a>
+      <a href="#two">Focusable item two</a>
+      <a href="#three">Focusable item three</a>
+      <a href="#four">Focusable item four</a>
+      <a href="#five">Focusable item five</a>
+    </div>
+  </main>
+  <script>
+    document.querySelector('.slow-motion').addEventListener('click', (event) => event.currentTarget.classList.toggle('moved'));
+  </script>
+</body>
+</html>

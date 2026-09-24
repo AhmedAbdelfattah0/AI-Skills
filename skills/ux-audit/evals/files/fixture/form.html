@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UX Audit Fixture — Form</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="sticky-header"><nav aria-label="Primary"><a href="index.html">Home</a> <a href="form.html">Form</a></nav></header>
+  <main>
+    <h1>Fixture form</h1>
+    <form>
+      <input id="email" type="email" placeholder="Email address">
+      <button type="button" id="feedback">Show feedback</button>
+      <p id="feedback-message" hidden>Visible feedback</p>
+    </form>
+  </main>
+  <script>
+    document.querySelector('#feedback').addEventListener('click', () => {
+      document.querySelector('#feedback-message').hidden = false;
+    });
+  </script>
+</body>
+</html>
