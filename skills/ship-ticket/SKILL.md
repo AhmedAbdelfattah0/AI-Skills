@@ -183,7 +183,8 @@ labels. Record the result in the plan.
 Security-sensitive work:
 
 - is **ELEVATED**;
-- starts with a failing test proving the secure behavior;
+- starts with a failing test proving the secure behavior, recorded as a `RED`
+  event before any production path is written (see BUILD);
 - runs the same applicability-driven attack inventory as any other trust-boundary
   change;
 - requires explicit attack and security outcomes from the primary reviewer.
@@ -333,7 +334,16 @@ Read the plan and Design Contract from disk before writing.
 - Apply routed rules while each file is written.
 - Build UI from existing tokens and shared components, checking each owned screen
   while its design is in context.
-- For security-sensitive behavior, add the failing refusal/isolation test first.
+- **Red before production code.** For security-sensitive work, and for any bug
+  fix, the plan's test node runs first and ends with a `RED` event (see
+  [references/ship.md](references/ship.md)). Until that event exists, write
+  only test files, fixtures and test stubs; no other Design Contract path. The
+  red run must fail on a behavioral assertion. A missing module, import or type
+  error is not red: stub the seam the test needs (a bare export or signature
+  that throws), then run again. If the new behavior cannot be reached without
+  production changes, first write the smallest stub that compiles, and record
+  it in the event. A red run produced afterwards against the base branch is a
+  declared degradation (`red: RETROACTIVE`), never test-first.
 - Use the repository's existing migration mechanism.
 - Keep every write inside the Design Contract.
 
