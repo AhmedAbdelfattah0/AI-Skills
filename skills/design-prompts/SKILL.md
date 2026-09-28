@@ -14,6 +14,8 @@ description: |
     "update my design with [feature]"
   - starting a new design project, or extending an existing one, and a
     comprehensive prompt is needed instead of ad-hoc instructions
+  - the user wants to redesign an EXISTING app ("go through every page and
+    component and generate design prompts") — read the codebase first
 
   Do NOT use for: implementing the design in code (use the code-quality family),
   or one-off visual tweaks that don't need a structured prompt.
@@ -23,6 +25,13 @@ description: |
 # Claude Design Prompts — Reusable Recipe
 
 This skill codifies a proven approach to writing Claude Design prompts: standalone, fully-specified, scope-bounded, with explicit file boundaries and reuse constraints. It produces prompts that yield consistent, high-quality designs across any kind of digital product.
+
+**Proven defaults (use unless the user asks otherwise):**
+- **Output format = React components + HTML preview**, one folder per surface ([component-format](references/component-format.md)). Claude Design previews it directly and the PO can click through every screen. Proven on a multi-surface e-commerce product and on a 13-prompt redesign of a 123-page existing app.
+- **Prompt 01 = Foundation** (tokens + component library + one STATUS map + style guide) that every surface copies unchanged ([foundation-template](references/foundation-template.md)).
+- **Large surfaces split into part 1 + part 2** building one folder ([split-surface-template](references/split-surface-template.md)).
+- **Existing app? Inventory the code first** with parallel agents, then delegate prompt writing with one shared brief ([codebase-inventory](references/codebase-inventory.md), [writer-brief](references/writer-brief.md)).
+- **Depth standard** ([depth-standard](references/depth-standard.md)): the minimum detail per page, weak-vs-strong snippets, length proportions and a self-check. Every prompt meets it; this is what makes a first prompt set for a new project come out as detailed as one built from a codebase inventory.
 
 ## Two modes
 
@@ -59,9 +68,15 @@ Then branch to the appropriate process below.
 
 Execute these phases in order. The user's input drives every decision — do not invent surfaces, features, or design choices they didn't ask for.
 
+## Phase 0: Codebase inventory (existing apps only)
+
+If the product already exists in a repo (or the user says "go through every page"), run Steps 1-2 of [codebase-inventory](references/codebase-inventory.md) BEFORE Discovery: enumerate every route, read the project's CLAUDE.md / DESIGN.md / design docs, and fan out parallel inventory agents (≈10-30 pages each + one design-system agent) that write per-page inventories (purpose, sections, real fields/columns, actions, modals, states, weaknesses) to the scratchpad. Then return to Discovery (Phase 1) and plan confirmation (Phase 2); Steps 3-6 of that reference belong to Phases 3-5. Discovery questions shrink to what code cannot answer: how far the brand may move (respect LOCKED items in a brand contract), mood per surface, which surfaces, output format.
+
+If the user points at a previous successful Claude Design output (a folder or project), read its structure and make it the format reference in the Master and the writer brief.
+
 ## Phase 1: Discovery
 
-Before writing any prompts, gather the project context. **Use `ask_user_input_v0` if available** for mobile-friendly tap answers. Required inputs:
+Before writing any prompts, gather the project context. **Use the host's structured question tool** (`AskUserQuestion` in Claude Code, `ask_user_input_v0` in claude.ai) for tap answers; batch up to 4 questions per call. Required inputs:
 
 ### 1. Project basics
 - **Project name** — short identifier
@@ -100,6 +115,7 @@ Ask which surfaces this design system needs to cover. Don't assume — let the u
 - **Density** — generous whitespace vs. information-dense
 
 ### 7. Output format
+- **Component + HTML preview (default, proven)**: one folder per surface: preview HTML loading React UMD + Babel, `tokens.css`, `styles.css`, `data.js`, i18n files, `icons.jsx`, `components-core.jsx`, `components-shell.jsx`, `pages-N.jsx`, `App.jsx` hash router with screen launcher + State switch. See [component-format](references/component-format.md). Recommend this first.
 - **HTML showcase**: one self-contained HTML file per surface (all pages as `<section id="page-*">` blocks). Easy to review, harder to integrate.
 - **Component-based**: separate component files (.jsx/.tsx/.vue/etc.) per page + shared data, i18n, shell modules. Easier to integrate into a real codebase.
 - **Mixed**: HTML for marketing/external, components for internal/app surfaces.
@@ -123,7 +139,8 @@ Based on Discovery, decide the prompt count and order. The default sequence foll
 | # | Prompt | Always? |
 |---|---|---|
 | 00 | Master Orientation | YES |
-| 01-N | One prompt per primary user-facing surface (or per variant of it) | Project-dependent |
+| 01 | Foundation: design system + component library + style guide | YES for the component format (any size); optional for HTML showcase |
+| 02-N | One prompt per primary user-facing surface (or per variant of it) | Project-dependent |
 | Next | Administrative surface (if separate) | If applicable |
 | Next | Platform-operator surface | If applicable |
 | Next | Onboarding flow | If applicable |
@@ -132,10 +149,14 @@ Based on Discovery, decide the prompt count and order. The default sequence foll
 | Next | Mobile companion | Only if requested |
 | Next | Other surfaces from Discovery | If applicable |
 
-Each prompt is INDEPENDENT — they don't depend on each other's outputs, only on the Master Orientation establishing shared brand rules.
+Each prompt is INDEPENDENT in its text (self-contained recap), but surfaces COPY the Foundation's `tokens.css`, `styles.css`, `icons.jsx` and `components-core.jsx` unchanged. That shared code, not prose, is what keeps 10+ surfaces coherent.
+
+**Split rule:** a surface with more than ~15-18 pages, or with one giant tool (calendar/scheduler, multi-step sales wizard), becomes part 1 + part 2 building one folder ([split-surface-template](references/split-surface-template.md)). Part 1 creates the full shell with `coming-soon` placeholders; part 2 is update-style (new files + exact edits, no regeneration).
+
+**Mood per surface:** public/marketing, customer and staff surfaces usually deserve different moods (e.g. editorial premium / warm friendly / calm dense) on the same tokens. Ask, then state each mood in the Master and restate it in each surface prompt.
 
 **Brief the user on the plan before writing.** Example:
-> "Plan: 5 prompts total. 00 Master Orientation, 01 Main App (your `dashboard`), 02 Admin Settings, 03 Onboarding, 04 Marketing Page. Each standalone, ~one HTML file each. Sound right?"
+> "Plan: 6 prompts. 00 Master Orientation, 01 Foundation (tokens + components + style guide), 02 Main App (your `dashboard`), 03 Admin Settings, 04 Onboarding, 05 Marketing Page. Each surface is one folder of React components with an HTML preview, built on the Foundation files. Sound right?"
 
 Adjust based on their answer. Don't write until they confirm.
 
@@ -156,23 +177,30 @@ For each surface, use the appropriate appendix as a starting structure, then fil
 
 These appendices are SKELETONS, not finished products. Adapt them to the actual product. Don't include sections that don't apply.
 
+For big sets (≈6+ surface prompts), write 00 and 01 yourself, then write a shared `WRITER-BRIEF.md` ([writer-brief](references/writer-brief.md)) and fan out writer agents (1-3 prompts each) pointed at the brief, 00, 01 and their inventory. Include the depth standard in the brief. Then run the set verification in [codebase-inventory](references/codebase-inventory.md) Step 5 yourself (route coverage, duplicates across prompts, handshake chain, master vs surface consistency, cross-surface reuse, copy rules).
+
 Each prompt MUST contain:
-1. Header: "Prompt N of M — [Surface Name]" + "Produces ONE file: [exact-filename]"
-2. Surface identity (visual tone, distinct from other surfaces in this project)
-3. Complete page/section list (numbered, named per the project's conventions)
-4. Key page details (sections within each page, states, components)
-5. Translation glossary specific to this surface's voice (only if multi-language)
-6. Visual + UX requirements
-7. Deliverable specification (exact filename, scope boundary)
-8. Verification checklist
-9. Handshake to next prompt ("After delivery, reply: '[X] complete. Ready for prompt N+1.'")
+1. Header: "Prompt N of M — [Surface Name]" + "Produces ONE folder: `{Project}-{Surface}/`" (or ONE file, for the HTML-showcase format)
+2. Self-contained recap (5-8 lines: product, brand essentials, mood; component format adds "copy Foundation files unchanged")
+3. Surface identity (visual tone, distinct from other surfaces in this project)
+4. Files to deliver (component format: exact tree, each `pages-N.jsx` listing its page keys; HTML showcase: the one filename, everything inline, each page a `<section id="page-*">`)
+5. Shell (nav groups + every link with an icon, top bar, switchers, phone behaviour, review tools)
+6. Complete page list as page keys (incl. 404 / no access / error)
+7. Key page details for EVERY page, meeting [depth-standard](references/depth-standard.md) (real fields, columns, modals with fields + validation, actions, loading/empty/error + domain states). Design the intended behaviour, not bugs found in the code; flag new ideas "Proposal for PO approval"
+8. Mock data (realistic for the market, sized to look real)
+9. Translation glossary specific to this surface's voice (only if multi-language)
+10. Visual + UX requirements
+11. Deliverable specification (exact folder/files, scope boundary) + verification checklist
+12. Handshake to next prompt ("After delivery, reply: '[X] complete. Ready for prompt N+1.'")
 
 ## Phase 5: Save and deliver
 
-Save all prompts to `/mnt/user-data/outputs/<project-slug>-design-prompts/` with predictable naming. Call `present_files` with all files in order.
+Before saving, run the self-check in [depth-standard](references/depth-standard.md) §4 on every prompt (including ones written by delegated agents) and fix anything that fails.
+
+In Claude Code, save to the repo at `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. Always add a `README.md` (sections: how to run · prompt/folder/language table · design direction · Decisions for the PO · assets to upload): run order, prompt → folder → language table, design direction, **Decisions for the PO** (every "Proposal for PO approval" and behaviour change the writers introduced, grouped), and assets the user must upload to Claude Design (self-hosted fonts, logos — Claude Design cannot fetch them from the repo).
 
 End with usage instructions:
-> "Open a fresh Claude Design project. Paste 00 first, wait for the orientation confirmation. Then paste 01-N in order. Each produces one file."
+> "Open a fresh Claude Design project. Paste 00 first, wait for the orientation confirmation. Then paste 01-N in order in the same project. Part-2 prompts extend the part-1 folder." 
 
 ---
 
@@ -226,7 +254,7 @@ The OUTPUT clause is the most important part. It explicitly tells Claude Design 
 
 ## Phase 4: Save and deliver
 
-Save to `/mnt/user-data/outputs/<project-slug>-update-prompts/<feature-slug>.md`. Call `present_files`.
+In Claude Code, save to the repo next to the greenfield set (e.g. `docs/design-prompts/updates/<feature-slug>.md`, or where the user says). In claude.ai, save to `/mnt/user-data/outputs/<project-slug>-update-prompts/<feature-slug>.md` and call `present_files`.
 
 End with:
 > "Paste this into your existing Claude Design project (the same conversation where you built the original designs). Claude Design will add just this feature to the existing files."
@@ -237,9 +265,9 @@ End with:
 
 1. **Every prompt is self-contained.** Do not write "as defined earlier" or "matching prompt 2." Repeat necessary context in every prompt.
 
-2. **Every prompt explicitly forbids file-splitting** (greenfield) or **regeneration** (update). Always include an explicit output-scope clause.
+2. **Every prompt bounds its output.** Component format: "deliver only these files in this folder; no single-file version, no other folders". HTML-showcase format: "one file, do not split". Update and part-2 prompts: "do not regenerate or restyle anything not listed". Always include an explicit output-scope clause.
 
-3. **Every prompt names its output file exactly.** No placeholders like `[filename].html` in the final prompt — actual filename derived from the project name.
+3. **Every prompt names its output exactly**: the folder and its file tree (component format) or the filename (HTML showcase). No placeholders like `[filename].html` in the final prompt; names derive from the project name.
 
 4. **Every multi-language surface includes a translation glossary** with concrete examples specific to that surface's voice. Skip this section entirely for monolingual products.
 
@@ -254,6 +282,12 @@ End with:
 9. **Project naming carries through.** If the project is "BookFlow", file names are `BookFlow-{surface}.html`. If it's "Helios HR", file names are `Helios-HR-{surface}.html`. The skill never imposes naming conventions from other projects.
 
 10. **Templates are skeletons.** The appendices below are starting structures. Adapt them — don't copy them verbatim. A media app's "primary surface" looks nothing like a B2B dashboard's "primary surface," even though both use Appendix B.
+
+11. **Design intended behaviour, not bugs.** When prompts come from a code inventory, bugs (wrong timezone, mislabelled status, hover-only actions, browser `prompt()` boxes) become requirements for the correct version. Report the bugs to the user separately.
+
+12. **Flag, don't smuggle.** Anything new (a feature, a font, a renamed nav item, content that doesn't exist) is marked "Proposal for PO approval" in the prompt and listed in the README.
+
+13. **Respect the brand contract.** If the repo has a DESIGN.md / brand doc with LOCKED items, keep them and modernise how they are used; changes to locked items are proposals.
 
 ---
 
@@ -299,8 +333,15 @@ The product surface spans:
 ## Language rules
 {Only include this section if multi-language. Otherwise omit entirely.}
 
-Every design surface must support {languages} from day one. The pattern:
+Every design surface must support {languages} from day one.
 
+{COMPONENT FORMAT — use these rules:}
+1. Every visible string comes from `t('key')` (LangCtx); dictionaries live in `i18n-{lang}.js`, merged by `i18n.js` into `window.makeT(lang)`; no hard-coded copy in JSX
+2. The language toggle calls `setLang`, which updates `lang` and `dir` on the root element
+3. Every key exists in every locale dictionary
+{Then rules 5-8 below for RTL.}
+
+{HTML-SHOWCASE FORMAT — use these rules:}
 1. Every visible string carries `data-i18n="someKey"` attribute
 2. Form placeholders use `data-i18n-placeholder="someKey"`
 3. An in-page `const T = { {lang1}: {...}, {lang2}: {...} }` dictionary contains every key
@@ -311,12 +352,16 @@ Every design surface must support {languages} from day one. The pattern:
 7. Numbers, currency, dates, IDs, and code wrap in `<span dir="ltr">` even within RTL content
 8. Never mix LTR and RTL text on the same line — keep each language on its own line in mixed-language content
 
-## File output rules (CRITICAL)
+## Output format (CRITICAL)
 
+{DEFAULT — component format: paste the folder tree and rules 1-8 from
+[component-format](references/component-format.md), with this project's prefix.}
+
+{ALTERNATIVE — HTML showcase format:}
 1. **Output is ONE file** per prompt, named exactly as the prompt says
 2. **Do NOT split into multiple files** unless the prompt explicitly says "deliver as N separate files"
 3. **Do NOT generate ancillary files** (separate CSS/JS) — everything inline
-4. **Self-contained**: HTML + inline `<style>` + inline `<script>` in a single file (or per output format the project chose)
+4. **Self-contained**: HTML + inline `<style>` + inline `<script>` in a single file
 
 ## Verification standard
 
@@ -329,7 +374,8 @@ Every deliverable must pass:
 - [ ] `dir="rtl"` applies correctly when {RTL language} is active
 - [ ] CSS uses logical properties throughout
 - [ ] Numbers/currency/IDs stay LTR in RTL context
-- [ ] Self-contained — opens directly without external dependencies
+- [ ] Component format: previews in Claude Design (or over local HTTP, e.g. `python3 -m http.server`; external `.jsx` does not load from `file://`) and every page key is reachable from the launcher or demo strip
+- [ ] HTML showcase: self-contained, opens directly without external dependencies
 
 ## Confirming you're oriented
 
@@ -339,6 +385,8 @@ Do not generate any design until you receive the first specific design prompt. T
 ```
 
 ---
+
+> **Appendices B-G are written for the HTML-showcase format. With the component format (default), convert every one of them:** header "Produces ONE folder: `{Project}-{Surface}/`"; add the Recap, Files to deliver, Shell and Mock data sections from the 12-section list in Phase 4; turn each `page-*` section into a page key in `SHELL_PAGES` / `FULL_PAGES`; replace the Deliverable section's "ONE file" and "Self-contained" checks with the component verification lines in [component-format](references/component-format.md); use `t('key')` instead of `data-i18n`. Page-content guidance applies unchanged.
 
 ## Appendix B — Primary Application Surface Template (Greenfield)
 
@@ -421,7 +469,7 @@ Verification checklist:
 - {If multi-language: language toggle works}
 - [ ] Mobile responsive at 375px
 - [ ] {Specific verifications for this surface — e.g., search interactions, drag-and-drop, infinite scroll, etc.}
-- [ ] Self-contained
+- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
 
 After delivery, reply: "{Surface} complete. Ready for prompt {N+1} ({next surface name})."
 ```
@@ -493,7 +541,7 @@ Verification checklist:
 - {If multi-language: language toggle on every page}
 - {If RTL: logical CSS properties throughout, numbers LTR in RTL context}
 - [ ] Mobile responsive at 375px (sidebar collapses appropriately)
-- [ ] Self-contained
+- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
 
 After delivery, reply: "{Surface} complete. Ready for prompt {N+1}."
 ```
@@ -554,7 +602,7 @@ Verification:
 - {If pricing has billing toggle: works}
 - [ ] Testimonials stack on mobile
 - [ ] Footer complete in all languages
-- [ ] Self-contained
+- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
 
 After delivery, reply: "Landing page complete. Ready for prompt {N+1}."
 ```
@@ -684,7 +732,7 @@ Verification:
 - [ ] Final success state designed
 - {If multi-language: language toggle works}
 - [ ] Mobile responsive
-- [ ] Self-contained
+- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
 
 After delivery, reply: "Onboarding complete. Ready for prompt {N+1}."
 ```
@@ -809,6 +857,15 @@ sections — extend the existing file only.
 
 ## How the OUTPUT clause works (CRITICAL)
 
+**Component-format projects:** replace "extend the existing file only" with a component OUTPUT block. Include each item that applies to this feature and omit the rest:
+1. **Existing files to edit**: file, the component or section inside it, and the exact change (e.g. "`pages-3.jsx`, `SettingsPage`: add a Notifications section after Security"). A change to an existing page usually needs only this item plus 5 and 6
+2. **New files**, only if the feature needs them (e.g. `pages-7.jsx` for a new page, `components-{surface}-2.jsx`, `styles-{surface}-2.css`)
+3. **Preview HTML** for every new file: the exact tag and its insertion point (locales before `i18n.js`, components before the shell, pages before `App.jsx`, stylesheets after the last `<link>`), because a file the HTML does not load never renders
+4. **Routing and nav**, only for a new page: `SHELL_PAGES` / `FULL_PAGES` key and launcher entry in `App.jsx`; nav item in `components-shell.jsx` (new icons go in `icons-{surface}.jsx`, never into the Foundation `icons.jsx`)
+5. **data.js** and **every** `i18n-{lang}.js`: the appended globals and keys
+6. "Do not regenerate or restyle any other file."
+The same shape at surface scale: [split-surface-template](references/split-surface-template.md).
+
 The OUTPUT clause is the most important part of an update prompt. It MUST tell Claude Design:
 
 1. **What to add** — the specific page/section/feature
@@ -889,3 +946,8 @@ update mode changes exactly one feature without regenerating its siblings.
   shell location and a sibling layout reference.
 - **More than 1–2 features to add:** switch that surface to greenfield mode
   rather than stacking update prompts.
+- **Surfaces look like different products:** there is no Foundation prompt, or surface prompts don't say "copy tokens.css / styles.css / icons.jsx / components-core.jsx from Foundation unchanged".
+- **A 25-page surface came back thin or truncated:** split it into part 1 + part 2 (`references/split-surface-template.md`).
+- **Designs miss real fields, modals or states of an existing app:** the prompts were written from route names; run the codebase inventory first.
+- **The same page appears in two surfaces:** keep it where it shares components (e.g. all payment outcomes in Checkout) and leave a pointer line in the other prompt.
+- **Arabic (or brand) typography looks wrong in Claude Design:** a self-hosted font wasn't uploaded to the project; list required uploads in the README.

@@ -216,7 +216,7 @@ Claude-only.
 | backend-code-quality | `references/` |
 | code-quality | `references/` (per-stack rule sets) |
 | cost-reducer | — |
-| design-prompts | — |
+| design-prompts | `references/` (component + HTML preview format, Foundation, part-2 split, codebase inventory, writer brief, depth standard) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
