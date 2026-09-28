@@ -207,7 +207,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (21)
+## Skills (22)
 
 | Skill | Extras |
 |---|---|
@@ -221,7 +221,7 @@ Claude-only.
 | linkedin-content-coach | — |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
 | pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
-| project-audit | `references/` (whole-project assessment for one or many repositories, with optional confirmed publishing of findings as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
+| project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
 | researcher | — |
 | security | — |
 | security-audit | — |
@@ -231,6 +231,7 @@ Claude-only.
 | ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, Claude↔Codex planning debate and review, stable candidate identity, and timing telemetry) |
 | spec-driven | `scripts/` (bundled; copied into a project via `setup.sh`) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
+| ux-audit | `references/` + `scripts/` (report-only running-interface audit; preserves DESIGN.md identity locks) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |
 
 Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.

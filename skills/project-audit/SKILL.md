@@ -13,7 +13,7 @@ description: |
   whole app", "project health check", "full codebase assessment", "technical due
   diligence", "production-readiness review", or "is this app ready to release".
   Also trigger when the user asks to publish a completed audit's findings as
-  Azure DevOps or Jira Bugs or Tasks.
+  Azure DevOps or Jira Bugs or Tasks, or to compare earlier audit reports for gaps.
   Do not use for one ticket, one PR, security-only review, standalone VAPT, diff
   rule enforcement, or implementing fixes.
 ---
@@ -85,6 +85,10 @@ specialist that owns it, component by component.
 - **No invented rule IDs, no invented score.** A rule ID comes only from a
   specialist that ran. The release assessment is categorical and shows its gaps.
 - **Findings do not authorize fixes.** The audit ends with a backlog.
+- **Earlier findings cannot silently disappear.** RECONCILE accounts for every
+  prior finding observation, not just matching IDs. Partial mappings preserve
+  their residual scope as coverage gaps; omission never means resolved. Run the
+  continuity checker before REPORT, as specified in the reconciliation reference.
 - **Publishing is never implied.** A request to audit, report or prepare tracker
   drafts does not authorize creating work items. Creation needs the user's
   confirmation of the exact destination, selected findings, item types and
@@ -99,7 +103,7 @@ specialist that owns it, component by component.
 | **SCOPE** | the request; a pre-run preflight resolves the repository set and audit root before any run or manifest exists | repository set, audit root, orchestration root and in-scope missing units recorded with evidence; authority granted or declined by the request recorded; every pinnable repository pinned with its audit worktree; system digest and manifest written | [references/scope-inventory.md](references/scope-inventory.md), [references/state.md](references/state.md) |
 | **INVENTORY** | pinned worktrees | system model with qualified sources; coverage matrix where every row names lane, method, specialist, criticality and the components it depends on; capability preflight and rules of engagement recorded | [references/scope-inventory.md](references/scope-inventory.md) |
 | **EVIDENCE** | complete matrix | every row `DONE` with one outcome and its evidence or reason; worktree integrity verified at every join | [references/evidence.md](references/evidence.md) |
-| **RECONCILE** | all lanes joined | one deduplicated, classified, stably ID'd finding set consistent with the matrix; runtime instances and disposable datastores stopped by their recorded IDs | [references/reconcile-report.md](references/reconcile-report.md) |
+| **RECONCILE** | all lanes joined | one deduplicated, classified, stably ID'd finding set consistent with the matrix; every prior finding accounted for and continuity checker passed; runtime instances and disposable datastores stopped by their recorded IDs | [references/reconcile-report.md](references/reconcile-report.md) |
 | **REPORT** | reconciled findings | `report.md` written, terminal status set, this run's audit worktrees removed or recorded as cleanup debt | [references/reconcile-report.md](references/reconcile-report.md), [references/state.md](references/state.md) |
 
 Load a reference when its phase starts, and on resume load
@@ -213,6 +217,16 @@ invalidates nothing, but
 the report names, per repository, the commits that were not audited. The full
 procedure, including cross-repository carry-forward, is in
 [references/state.md](references/state.md).
+
+## Comparing completed reports
+
+When asked only to compare reports, load [references/reconcile-report.md](references/reconcile-report.md)
+and [references/state.md](references/state.md). Read the named reports and their
+manifests and evidence; compare the union of findings using the historical
+reconciliation rules. This is read-only: do not start a new audit, reopen a
+terminal run, rerun runtime checks or publish anything. Report retained, partial,
+absent and disputed claims separately, with source-run references and limitations.
+An absent item is a gap in the newer report, not proof of a current defect or fix.
 
 ## Optional post-audit publishing
 

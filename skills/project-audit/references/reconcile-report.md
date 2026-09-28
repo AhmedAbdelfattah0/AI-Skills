@@ -84,9 +84,14 @@ lane results meet.
    rows, and that every dependent row lists the placeholder and is `DEGRADED`
    (or `FAIL` with the gap linked). Confirm no row passed on a stub standing in
    for an in-scope unit.
+9. **Reconcile history.** Complete the prior-finding ledger below and run its
+   read-only checker. This happens after independent lanes join; do not seed
+   workers with earlier conclusions. Unverified history stays visible as a gap,
+   never as newly confirmed evidence.
 
 **RECONCILE exits** when the finding set is deduplicated, classified, verified
-where required, ID'd, and consistent with the matrix, and every runtime instance
+where required, ID'd, consistent with the matrix and historically accounted for
+(continuity checker passes), and every runtime instance
 and disposable datastore the audit started has been stopped by its recorded
 PID or container ID (never by a name pattern; see
 [evidence.md](evidence.md)).
@@ -112,12 +117,94 @@ PID or container ID (never by a name pattern; see
 | `remediation` | the direction of the fix, not a patch; the repositories it touches; and the workflow that would carry it |
 
 **Stable IDs.** The fingerprint uses only what survives between runs: repository
-IDs and paths rather than line numbers or per-run subject numbers. Before
-assigning, read the findings of earlier runs under `.specs/project-audit/` in
-the audit root. A finding whose fingerprint matches an earlier one reuses that
-ID. Otherwise it takes the next number above the highest ID ever used. IDs are
+IDs and paths rather than line numbers or per-run subject numbers. Use the full
+historical ledger below when assigning: a matching root cause reuses its earlier
+ID. Match fingerprints against anchors and full claim scope; a renamed fingerprint
+does not force a new ID, and a reused ID does not prove complete coverage. A new
+root cause takes the next number above the highest ID ever used. IDs are
 fixed once written and never renumbered, so a backlog item can be tracked across
 audits.
+
+## Historical reconciliation
+
+Inventory **all earlier terminal manifests** under the audit root's
+`.specs/project-audit/` whose repository identities overlap this run, including
+`INCOMPLETE` runs with findings. Do not select only the latest report or only
+matching IDs. Explicitly named reports elsewhere also belong in the comparison.
+Unavailable, malformed or unsupported history is a named reconciliation blocker,
+not an empty history. Terminal reports remain immutable; older manifests without
+this ledger remain readable as historical inputs and are not retrofitted.
+
+Compare secret-free repository identities and commit vectors, not digest suffixes
+alone. Equal pins with different digest encodings are the same source state;
+record the encoding discrepancy. Match subjects by `subject_key` and anchors, not
+display IDs such as `X03`. Different pins require current evidence before claiming
+a fix or regression; a changed commit alone proves neither.
+
+Each **observation** (`<run-id>/<finding-id>`) needs exactly one ledger entry.
+Several observations may represent one root cause; count both units explicitly.
+Read the entire old problem, risk and affected paths before calling a merge or
+split complete. A broader title or a related example is not full coverage.
+
+| `disposition` | Required decision |
+|---|---|
+| `RETAINED` | Same ID and full claim scope supported in this run. |
+| `MAPPED` | Full claim scope maps to one or more current findings; explain the merge, split or identity correction. |
+| `PARTIAL` | Only part maps; name the missing paths/subclaims and the current findings covering the rest. |
+| `NOT_RECHECKED` | No current decision; keep the old claim visible without asserting it is currently confirmed. |
+| `RESOLVED` | Current pinned evidence demonstrates the old defect no longer holds; absence from the new list is not evidence. |
+| `REJECTED` | Evidence disproves the old claim or it fails the finding contract / a cited specialist rule; explain why. |
+| `OUT_OF_SCOPE` | Cite the agreed scope exclusion, not an inability to finish the check. |
+
+Store `reconciliation.prior_runs` as the exhaustive run-ID list and
+`reconciliation.prior_findings` as an array with these fields:
+
+| Field | Content |
+|---|---|
+| `source` | One `<run-id>/<finding-id>`; no duplicates or omissions. |
+| `disposition` | One token from the table above. |
+| `current_ids` | Nonempty for RETAINED/MAPPED/PARTIAL; empty otherwise. RETAINED uses exactly the old ID. |
+| `reason` | Specific mapping or decision rationale. |
+| `evidence` | Nonempty list of run-qualified evidence locators supporting the decision; may be empty only for NOT_RECHECKED. |
+| `classification_changes` | Object keyed by current finding ID. For each mapped finding whose severity or status differs from this observation, record `{reason, evidence}` explaining that particular change, including old/new values. |
+| `residual` | Required for PARTIAL/NOT_RECHECKED: `{description, rows, degradations}` naming the unaccounted claim, current coverage rows and unresolved coverage-degradation IDs. |
+
+Every residual row links the listed degradation and is DEGRADED, or FAIL with
+the gap still linked. Each listed degradation names its affected rows and closing
+action. An unverified prior High/Critical claim remains a critical coverage gap;
+so does any gap on a current critical row. These gaps prevent
+`NO_BLOCKERS_OBSERVED` even if another finding makes the row FAIL. Do not import
+old CONFIRMED labels as new confirmations, and do not add unbounded review loops:
+when the bounded verification cannot decide, use NOT_RECHECKED and finish
+`COMPLETE_DEGRADED` with the named closing action.
+
+Keep **historical evidence distinct from current execution**. A historical build
+pass and a current timeout may both be true. Report command, pin, environment,
+exit and tests actually run for each; a timeout or `-DskipTests` invocation is not
+a test failure or functional proof. Do not replay an unsafe historical command.
+Historical runtime evidence never turns a new runtime row PASS. Normalize count
+units before comparing scanner results (e.g. unique advisory IDs vs unique
+package/advisory pairs), findings (root causes vs observations), and coverage
+(rows vs files fully read). Fewer findings or more rows alone imply no improvement.
+
+Before REPORT, run the bundled dependency-free Node checker (Node >=18):
+
+```text
+node <skill-dir>/scripts/check-continuity.mjs <current-run>/manifest.json [<extra-prior-manifest> ...]
+```
+
+[check-continuity.mjs](../scripts/check-continuity.mjs) discovers sibling terminal
+runs by identity overlap and creation time; extra paths include named history
+outside that root. It validates exhaustive accounting, target links, explicit
+classification changes and residual coverage links without editing any file.
+First audits still record empty `prior_runs` and `prior_findings` arrays. Exit 1
+means invalid accounting; exit 2 means unreadable/unsupported input. Fix accounting
+before declaring completion; if history cannot be read, report INCOMPLETE with
+that blocker. A pass proves structure, **not semantic equivalence or a fix**:
+manually verify full claim scope and cited evidence. Run tests with
+`node --test <skill-dir>/scripts/check-continuity.test.mjs` when changing the guard.
+At REPORT, rerun the checker on the final manifest, including its proposed
+terminal status and release assessment, before delivering it as complete.
 
 ## Severity calibration
 
@@ -217,6 +304,16 @@ What's wrong / Risk / Where / Fix shape as above — never a table row alone>
 ## Suspected risks
 <each SUSPECTED finding in the same shape, with the severity it would have if
 confirmed and its confirm_by>
+
+## Prior-finding dispositions
+<source runs with repository identities and pins; observation count and distinct
+root-cause count, with the mapping basis; counts per disposition>
+| Prior run / finding | Disposition | Current findings | Rationale and evidence | Uncovered scope / gap |
+<every historical observation, including resolved/rejected/excluded and unverified
+items; spell out severity/status changes with old/new values and reasons>
+<historical vs current command outcomes and normalized count units when compared;
+checker result and remaining semantic uncertainty — a blanket "not cleared" note
+does not replace the ledger>
 
 ## Coverage by repository and component
 | Repository | Component | STATIC | AUTOMATED | FUNCTIONAL | ADVERSARIAL |

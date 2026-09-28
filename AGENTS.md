@@ -462,7 +462,7 @@ fills the scope none of the others own: `ship-ticket` is one ticket, `pr-review`
 one PR, `security-audit` static security only, `vapt` runtime attacks only, and the
 code-quality family owns rules. It is an orchestrator with **no rule catalogue** —
 every judgment routes to those specialists (report-only, as an explicit audit)
-or to the repository's own commands. Four properties are load-bearing:
+or to the repository's own commands. These properties are load-bearing:
 
 - **One pinned system state, read from detached audit worktrees.** Any stack or
   shape: a single repository or monorepo has one pin; a system spread over several
@@ -493,6 +493,12 @@ or to the repository's own commands. Four properties are load-bearing:
   committed; no fix step, no CI change. Findings never authorize fixes.
 - **No health score.** The release assessment is categorical and derived from
   the matrix, so an untested critical journey cannot be averaged away.
+- **No silent loss of historical findings.** Every observation from prior terminal
+  runs gets an explicit disposition; partial mappings and unverified claims keep
+  linked coverage gaps. Severity/status changes need evidence and a reason.
+  The bundled continuity checker gates REPORT structurally, not semantically.
+  Comparing completed reports is read-only and never reopens them or imports
+  historical runtime results as current passes.
 - **Tracker publication is a separate, confirmed post-audit action.** The audit
   writes only its local artifacts by default. On an explicit publish request,
   selected findings may be drafted as Azure DevOps or Jira `Bug`/`Task` items;
@@ -541,7 +547,7 @@ may remain local to ship-ticket.
 
 ## Script-delivery patterns
 
-Most skills are pure `SKILL.md`. Four use scripts in different ways — mirror the
+Most skills are pure `SKILL.md`. These use scripts in different ways — mirror the
 matching pattern when extending them:
 
 - **`spec-driven`** — *bundles* `scripts/*.sh` in the repo (`specify.sh`, `plan.sh`, `tasks.sh`, …) and
@@ -555,6 +561,9 @@ matching pattern when extending them:
   `scripts/candidate-id.mjs` computes stable reviewed-candidate identity;
   `scripts/run-log.mjs` appends local timing telemetry under Git metadata. Neither
   needs project-local setup, so symlink and copy installs behave the same.
+- **`project-audit`** — *executes its bundled dependency-free Node continuity
+  checker in place*. It reads current/prior manifests without writing to the
+  audited repositories; structural accounting does not replace evidence review.
 - **`ux-audit`** — *executes bundled cross-platform Node helpers in place*, like
   `ship-ticket`, but resolves its pinned npm dependencies (`playwright` and
   `@axe-core/playwright` via `scripts/package-lock.json`) from

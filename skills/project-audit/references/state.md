@@ -132,6 +132,7 @@ omitted.
 | `coverage` | the matrix rows (below) |
 | `degradations` | `DG-NN`: `kind` (`coverage`, `independence`, `performance`), cause, affected rows and components, whether any affected row, component or missing unit is critical, `resolved` (true only when later evidence closed the gap), and the action that would close it |
 | `findings` | the reconciled finding records ([reconcile-report.md](reconcile-report.md) owns the schema) |
+| `reconciliation` | by RECONCILE: `prior_runs` and `prior_findings`, exhaustive historical dispositions per [reconcile-report.md](reconcile-report.md); retain lane merge/drop records separately. Empty arrays explicitly mean no prior observations; older terminal inputs lacking this field are readable history, never silently cleared findings. |
 | `release_assessment` | the category and its one-line reason (REPORT) |
 | `publication` | optional post-audit state: tracker kind and secret-free destination identity, draft digest, status (`DRAFT`, `WAITING_CONFIRMATION`, `PUBLISHING`, `PARTIAL`, `PUBLISHED` or `FAILED`), selected finding IDs, per-finding requested item type, stable marker, external item ID/URL when known, and append-only attempts; governed by [publish.md](publish.md) and never used to compute the audit status or assessment |
 | `checkout_drift` | per repository at REPORT and each resume: live head and the number of commits past its pin |

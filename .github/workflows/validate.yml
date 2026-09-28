@@ -18,3 +18,5 @@ jobs:
         run: node scripts/cli.mjs validate
       - name: Test ship-ticket telemetry
         run: node --test skills/ship-ticket/scripts/run-log.test.mjs
+      - name: Test project-audit continuity
+        run: node --test skills/project-audit/scripts/check-continuity.test.mjs
