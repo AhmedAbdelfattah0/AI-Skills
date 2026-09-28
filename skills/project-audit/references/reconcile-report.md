@@ -7,12 +7,26 @@ template. Row outcomes, qualified paths and the manifest are defined in
 
 ## The finding contract
 
-A finding is **an anchor, the evidence, a severity and a remediation direction**:
+A finding is **an anchor, the evidence, the problem, the risk, a severity and a
+remediation direction**:
 
 - the anchor is a qualified `<repo-id>:<path>:<line>` with the quoted code or
   configuration, or, for runtime evidence, the exact request or journey step, the
   component that served it, and the observed response;
+- the **problem** says in plain language what the code or system actually does
+  wrong, so a reader who never opened the file understands the defect: the
+  endpoint, input or component, and the behavior. A title, a rule ID or a
+  category restated is not a problem statement;
+- the **risk** says who can trigger it (anonymous caller, any customer,
+  authenticated user, insider with repository or log access, operator, or no
+  one — concurrency or failure alone), under what preconditions, and what then
+  happens in business terms: money lost, data exposed, accounts taken over,
+  orders corrupted, service down. When the impact depends on something the
+  repositories cannot show (ingress rules, port publishing, platform controls),
+  the risk names that dependency instead of assuming either way;
 - evidence without an anchor, or with no nameable direction, is not a finding.
+  A finding without a problem and a risk statement is incomplete and is never
+  reported in that state: RECONCILE writes both before the report.
 
 This follows the library's shared review standard
 ([review-standard.md](../../code-quality/references/review-standard.md) — a finding
@@ -33,7 +47,9 @@ lane results meet.
    or in several repositories is one finding with several rows and attributions
    (for example `static:backend-code-quality` + `adversarial:vapt`). A contract
    mismatch is one finding that cites both sides. Identical paths in different
-   repositories are different anchors, never duplicates.
+   repositories are different anchors, never duplicates. Write each merged
+   finding's `problem` and `risk` from the combined evidence of all its sources
+   (the finding contract above); never carry over only a title and anchors.
 3. **Classify each finding:**
    - `CONFIRMED`: reproduced at runtime, or directly checkable in the pinned
      source or a command log. Basis is `reproduction` or `direct-evidence`.
@@ -82,6 +98,8 @@ PID or container ID (never by a name pattern; see
 | `id` | `PA-NNN`, stable (below) |
 | `fingerprint` | `<category>::<primary qualified path without line, or runtime entry point>::<root-cause slug>` |
 | `title` | one line, the defect rather than the symptom |
+| `problem` | plain language: what the code or system does wrong, per the finding contract |
+| `risk` | plain language: who can trigger it, under what preconditions, and the business consequence; names any deployment fact the impact depends on |
 | `category` | `architecture`, `contract`, `functional`, `security`, `test-adequacy`, `code-quality`, `documentation`, `build-deploy`, `operations`, `performance`, `dependency` |
 | `severity` | `Critical`, `High`, `Medium`, `Low` (calibration below) |
 | `source_severity` | optional: the specialist's own band or rule tier, kept verbatim |
@@ -154,8 +172,8 @@ suspected risk. The release decision belongs to the user.
 Write `report.md` in the audit root's run directory, set the terminal status in
 the manifest, remove the audit worktrees this run recorded (recording any
 `cleanup_debt`), and give the terminal summary. The terminal summary holds the
-header, the assessment, the release-blocking findings and the counts; the file
-holds everything.
+header, the assessment, the release-blocking findings (each with a one-line
+problem and risk, not a title alone) and the counts; the file holds everything.
 
 ```markdown
 # Project audit — <system name> @ <short system digest>
@@ -179,16 +197,26 @@ holds everything.
 Observed: <rows PASS/FAIL per lane>. Untested or degraded: <every unresolved critical coverage degradation first, including those on FAIL rows and on placeholder or dependent rows, each with cause; then the standard ones>.
 
 ## Release-blocking findings
-### PA-007 — <title> · Critical · CONFIRMED (reproduction)
-Rows: B02.ADVERSARIAL, B02.STATIC · Affects: orders-service/api, J03 checkout, B02 order read
-Evidence: <qualified anchor + quote | request/response and serving component | CMD-04 log>
-Remediation: <direction> · repositories: <repo-ids> → <workflow>
+### <finding-id> — <title>
+**<severity>** · <status> (<basis>) · <category> · <release-blocking | not release-blocking>
+
+**What's wrong:** <plain-language problem: the endpoint, input or component and what it does wrong>
+
+**Risk:** <who can trigger it, under what preconditions, and the business consequence; any deployment fact the impact depends on>
+
+**Where:** <qualified anchors + short quote (secrets redacted) | request/response and serving component | CMD-04 log>
+
+**Fix:** <direction> · repositories: <repo-ids> → <workflow>
+
+<sub>Rows: <row IDs> · Affects: <repositories, components, journeys, contracts and boundaries> · Found by: <attributions> · Rule IDs: <only from specialists that ran></sub>
 
 ## Backlog
-<all other findings, ordered by severity, then CONFIRMED before SUSPECTED, then category>
+<all other CONFIRMED findings, ordered by severity, then category, each in the same
+What's wrong / Risk / Where / Fix shape as above — never a table row alone>
 
 ## Suspected risks
-<each SUSPECTED finding with its confirm_by>
+<each SUSPECTED finding in the same shape, with the severity it would have if
+confirmed and its confirm_by>
 
 ## Coverage by repository and component
 | Repository | Component | STATIC | AUTOMATED | FUNCTIONAL | ADVERSARIAL |
