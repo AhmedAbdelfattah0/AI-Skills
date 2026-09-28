@@ -29,6 +29,7 @@ Every event carries run_id, event and timestamp. Use only these event names:
 | Event | Required evidence |
 |---|---|
 | **START** | approved-plan digest, human approver and target base |
+| **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write |
 | **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
 | **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
 | **REPAIR** | finding IDs, changed paths, affected closure, rerun commands and new candidate ID |

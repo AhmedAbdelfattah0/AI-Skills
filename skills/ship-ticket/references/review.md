@@ -36,6 +36,10 @@ Finish these checks before announcing REVIEW or appending its start event:
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;
+- for security-sensitive work or a bug fix, a `RED` event precedes the first
+  non-test write, with behavioral assertion failures (not missing-module or
+  compile errors); otherwise the PROVE event declares `red: RETROACTIVE` and the
+  report says so;
 - test-quality, docs-accuracy, applicable static security rows and runtime attack
   work are complete or carry a named degradation;
 - UI metadata and the parity artifact are complete when UI is in scope;
