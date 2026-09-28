@@ -1,6 +1,6 @@
 # Prompt 01 template: Foundation (design system + component library)
 
-Always prompt 01 in a greenfield set with more than two surfaces. It produces `{Project}-Foundation/`, which every later surface copies unchanged (`tokens.css`, `styles.css`, `icons.jsx`, `components-core.jsx`). This is what makes 10+ independently generated surfaces look like one product. It doubles as a clickable style guide for the PO.
+Always prompt 01 in a component-format set, whatever its size (optional for the HTML-showcase format). It produces `{Project}-Foundation/`, which every later surface copies unchanged (`tokens.css`, `styles.css`, `icons.jsx`, `components-core.jsx`). This is what makes 10+ independently generated surfaces look like one product. It doubles as a clickable style guide for the PO.
 
 Meet the [depth standard](depth-standard.md): list every primitive with its variants and a complete STATUS map; a thin Foundation produces thin surfaces.
 
