@@ -99,6 +99,9 @@ Each payload includes, when applicable:
 - audit run and pinned system digest;
 - status, basis, severity and release-blocking state;
 - affected repositories, components, journeys, contracts and boundaries;
+- the finding's plain-language `problem` and `risk` statements, first in the
+  description so a reader understands the defect and its consequence before any
+  anchor (redacted under the same sensitivity decision as the rest);
 - concise redacted evidence or reproduction with expected versus observed;
 - remediation direction, `confirm_by` for suspected findings, and verifiable
   acceptance criteria derived from the evidence;
