@@ -197,8 +197,8 @@ problem and risk, not a title alone) and the counts; the file holds everything.
 Observed: <rows PASS/FAIL per lane>. Untested or degraded: <every unresolved critical coverage degradation first, including those on FAIL rows and on placeholder or dependent rows, each with cause; then the standard ones>.
 
 ## Release-blocking findings
-### PA-007 — <title>
-**Critical** · CONFIRMED (reproduction) · <category> · release-blocking
+### <finding-id> — <title>
+**<severity>** · <status> (<basis>) · <category> · <release-blocking | not release-blocking>
 
 **What's wrong:** <plain-language problem: the endpoint, input or component and what it does wrong>
 
@@ -208,7 +208,7 @@ Observed: <rows PASS/FAIL per lane>. Untested or degraded: <every unresolved cri
 
 **Fix:** <direction> · repositories: <repo-ids> → <workflow>
 
-<sub>Rows: B02.ADVERSARIAL, B02.STATIC · Affects: orders-service/api, J03 checkout, B02 order read · Found by: <attributions> · Rule IDs: <only from specialists that ran></sub>
+<sub>Rows: <row IDs> · Affects: <repositories, components, journeys, contracts and boundaries> · Found by: <attributions> · Rule IDs: <only from specialists that ran></sub>
 
 ## Backlog
 <all other CONFIRMED findings, ordered by severity, then category, each in the same
