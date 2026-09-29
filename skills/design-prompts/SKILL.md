@@ -860,7 +860,7 @@ sections — extend the existing file only.
 **Component-format projects:** replace "extend the existing file only" with a component OUTPUT block. Include each item that applies to this feature and omit the rest:
 1. **Existing files to edit**: file, the component or section inside it, and the exact change (e.g. "`pages-3.jsx`, `SettingsPage`: add a Notifications section after Security"). A change to an existing page usually needs only this item plus 5 and 6
 2. **New files**, only if the feature needs them (e.g. `pages-7.jsx` for a new page, `components-{surface}-2.jsx`, `styles-{surface}-2.css`)
-3. **Preview HTML** for every new file: the exact tag and its insertion point (locales before `i18n.js`, components before the shell, pages before `App.jsx`, stylesheets after the last `<link>`), because a file the HTML does not load never renders
+3. **Preview HTML** for every new file: the exact tag and its insertion point (data files right after `data.js`, locales before `i18n.js`, components before the shell, pages before `App.jsx`, stylesheets after the last `<link>`), because a file the HTML does not load never renders
 4. **Routing and nav**, only for a new page: `SHELL_PAGES` / `FULL_PAGES` key and launcher entry in `App.jsx`; nav item in `components-shell.jsx` (new icons go in `icons-{surface}.jsx`, never into the Foundation `icons.jsx`)
 5. **data.js** and **every** `i18n-{lang}.js`: the appended globals and keys
 6. "Do not regenerate or restyle any other file."

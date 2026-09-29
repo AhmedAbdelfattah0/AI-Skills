@@ -9,7 +9,7 @@ Claude Design output degrades when one prompt carries more than ~15-18 pages or 
   - `ComingSoonPage`, `NotFoundPage`, `NoAccessPage` in `pages-1.jsx`
   - a marked placeholder block in `SHELL_PAGES` and a `PART2_KEYS` array
   - `LAUNCHER_GROUPS` and `NAV_PARENT` as data (not hard-coded JSX)
-  - comment markers (`/* PART 2 DATA BELOW */`) at the end of `data.js` and **every** `i18n-{lang}.js`, and the three HTML insertion comments (LOCALES before `i18n.js`, COMPONENTS before the shell, PAGES before `App.jsx`) from the component-format skeleton
+  - comment markers (`/* PART 2 DATA BELOW */`) at the end of `data.js` and **every** `i18n-{lang}.js`, and the four HTML insertion comments (DATA after `data.js`, LOCALES before `i18n.js`, COMPONENTS before the shell, PAGES before `App.jsx`) from the component-format skeleton
   - nav badges read from data (`{PREFIX}.navBadges`) so part 2 can set them without touching the shell
 - **Part 2 is written update-style** (ALL CAPS scope discipline from Appendix H, but at surface size):
 
@@ -28,7 +28,7 @@ Claude Design output degrades when one prompt carries more than ~15-18 pages or 
 i18n-{lang}-2.js for EVERY locale if data is large, components-{surface}-2.jsx}
 
 ## Exact edits to existing files
-- HTML: add locale extensions at the LOCALES insertion point (before `i18n.js`), new component files at COMPONENTS, new pages at PAGES (before `App.jsx`), new stylesheets after the last `<link>`; list each tag in order …
+- HTML: if part 2 creates `data-2.js`, add it immediately after `data.js` (before any `i18n` script) so its globals exist before any page reads them; add locale extensions at the LOCALES insertion point (before `i18n.js`), new component files at COMPONENTS, new pages at PAGES (before `App.jsx`), new stylesheets after the last `<link>`; list each tag in order …
 - App.jsx: add these keys to SHELL_PAGES / FULL_PAGES; empty PART2_KEYS; add launcher groups …
 - data.js and every i18n-{lang}.js: append after the marker (the same keys in every locale) …
 - components-shell.jsx: {only if unavoidable, list the exact change}

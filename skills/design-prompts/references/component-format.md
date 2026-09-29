@@ -48,7 +48,7 @@ Paste this block (adapted: project prefix, surfaces, bilingual or not) into the 
 
 ## Preview HTML skeleton (give Claude Design this shape)
 
-Load order is a dependency order: data, locale dictionaries, the merge, icons, core, surface components, shell, pages, then `App.jsx` last. The three HTML comments are the insertion points later prompts refer to.
+Load order is a dependency order: data, locale dictionaries, the merge, icons, core, surface components, shell, pages, then `App.jsx` last. The four HTML comments (DATA, LOCALES, COMPONENTS, PAGES) are the insertion points later prompts refer to.
 
 ```html
 <!DOCTYPE html>
@@ -66,6 +66,7 @@ Load order is a dependency order: data, locale dictionaries, the merge, icons, c
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
   <script src="data.js"></script>
+  <!-- DATA: data-2.js and other data extensions go here, right after data.js -->
   <!-- LOCALES: every i18n-{lang}.js (and any -2 extensions) go here, before i18n.js -->
   <script src="i18n-en.js"></script><script src="i18n-ar.js"></script>
   <script src="i18n.js"></script>
