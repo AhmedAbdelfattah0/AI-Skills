@@ -289,10 +289,11 @@ End with:
 
 13. **Respect the brand contract.** If the repo has a DESIGN.md / brand doc with LOCKED items, keep them and modernise how they are used; changes to locked items are proposals.
 14. **When Claude Design's output deviates from the prompt, diagnose before you edit.** Don't change the prompts on the first bad result. Follow these steps in order:
-    1. Diff the failing prompt's format section against the known-good reference prompts.
-    2. Diff the bad output against the known-good output.
-    3. If the prompts already match the reference, the cause is the environment, for example the Claude Design project is in Design Component mode (`.dc.html` + `support.js`) or was created from a template. Tell the user what to change in Claude Design, and leave the prompts alone.
-    4. Only when the prompts differ from the reference, change the prompts, and only by moving them toward the reference.
+    1. **Get a baseline.** Use the known-good reference from Discovery. If there isn't one, ask the user for a previous output that previewed correctly. If they have none, the baseline is the output format selected in Discovery: the folder tree and rules in [component-format](references/component-format.md), or the HTML-showcase rules.
+    2. Diff the failing prompt's format section against the baseline prompts (or the selected format's rules).
+    3. Diff the bad output against the baseline output (or the selected format's folder tree).
+    4. If the prompts already match the baseline, keep them unchanged and treat the environment as a **hypothesis**, not a finding. Possible causes: the Claude Design project is in Design Component mode (`.dc.html` + `support.js`), or it was created from a template. Ask the user to check the project's mode and how it was created. Recommend a settings change or a new project only after that check confirms a cause.
+    5. Only when the prompts differ from the baseline, change the prompts, and only by moving them toward the baseline.
     Never add "forbid X" locks or retarget the format based on one run. (In the 2026-09-30 AppCMS incident, both of those fixes were wrong and cost the user two rounds.)
 
 ---
@@ -946,7 +947,7 @@ update mode changes exactly one feature without regenerating its siblings.
 
 ## Troubleshooting
 
-- **Claude Design produced `X.dc.html` + `support.js`, or says "in this project every design has to be a Design Component":** the Claude Design *project* is in Design Component mode. It isn't a prompt problem: the same component-format prompts preview fine in a plain project. Start a new plain Claude Design project and paste the Master again. Don't rewrite the prompts to `.dc.html`, and don't add "forbid .dc.html" locks.
+- **Claude Design produced `X.dc.html` + `support.js`, or says "in this project every design has to be a Design Component":** the likely cause is the Claude Design *project* (Design Component mode, or created from a template), not the prompts: the same component-format prompts preview fine in a plain project. Run the rule 14 diagnosis, ask the user to check the project's mode and how it was created, and once that is confirmed, start a new plain project and paste the Master again. Don't rewrite the prompts to `.dc.html`, and don't add "forbid .dc.html" locks.
 - **Claude Design regenerates too much:** the prompt is missing its OUTPUT clause
   — bound the scope explicitly.
 - **The feature lands in the wrong place:** the prompt omitted WHERE — name the
