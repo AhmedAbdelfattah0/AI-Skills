@@ -4,6 +4,10 @@ Proven on a multi-tenant e-commerce product (storefront, admin, super admin, mar
 
 Paste this block (adapted: project prefix, surfaces, bilingual or not) into the Master Orientation under "Output format (CRITICAL)", and restate the folder tree inside every surface prompt.
 
+## Before running: use a plain Claude Design project
+
+This format previews in a **plain** Claude Design project. A project in Design Component mode forces `.dc.html` (+ `support.js`) and refuses this tree. If that happens, start a new plain project. The prompts are fine as written, so don't change them.
+
 ## Folder per surface
 
 ```

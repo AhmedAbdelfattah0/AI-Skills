@@ -72,7 +72,7 @@ Execute these phases in order. The user's input drives every decision — do not
 
 If the product already exists in a repo (or the user says "go through every page"), run Steps 1-2 of [codebase-inventory](references/codebase-inventory.md) BEFORE Discovery: enumerate every route, read the project's CLAUDE.md / DESIGN.md / design docs, and fan out parallel inventory agents (≈10-30 pages each + one design-system agent) that write per-page inventories (purpose, sections, real fields/columns, actions, modals, states, weaknesses) to the scratchpad. Then return to Discovery (Phase 1) and plan confirmation (Phase 2); Steps 3-6 of that reference belong to Phases 3-5. Discovery questions shrink to what code cannot answer: how far the brand may move (respect LOCKED items in a brand contract), mood per surface, which surfaces, output format.
 
-If the user points at a previous successful Claude Design output (a folder or project), read its structure and make it the format reference in the Master and the writer brief.
+**Always ask for a known-good reference**, even if the user doesn't offer one: "Do you have a previous Claude Design output that previewed correctly? Give me the folder path and the prompts that produced it." If they have one, read its structure and its Master's output-format section, and make it the format reference in the Master and the writer brief. Record both paths in the README ("Format reference"), so any later format issue can be diffed against it.
 
 ## Phase 1: Discovery
 
@@ -288,6 +288,13 @@ End with:
 12. **Flag, don't smuggle.** Anything new (a feature, a font, a renamed nav item, content that doesn't exist) is marked "Proposal for PO approval" in the prompt and listed in the README.
 
 13. **Respect the brand contract.** If the repo has a DESIGN.md / brand doc with LOCKED items, keep them and modernise how they are used; changes to locked items are proposals.
+14. **When Claude Design's output deviates from the prompt, diagnose before you edit.** Don't change the prompts on the first bad result. Follow these steps in order:
+    1. **Get a baseline.** Use the known-good reference from Discovery. If there isn't one, ask the user for a previous output that previewed correctly. If they have none, the baseline is the output format selected in Discovery: the folder tree and rules in [component-format](references/component-format.md), or the HTML-showcase rules.
+    2. Diff the failing prompt's format section against the baseline prompts (or the selected format's rules).
+    3. Diff the bad output against the baseline output (or the selected format's folder tree).
+    4. If the prompts already match the baseline, keep them unchanged and treat the environment as a **hypothesis**, not a finding. Possible causes: the Claude Design project is in Design Component mode (`.dc.html` + `support.js`), or it was created from a template. Ask the user to check the project's mode and how it was created. Recommend a settings change or a new project only after that check confirms a cause.
+    5. Only when the prompts differ from the baseline, change the prompts, and only by moving them toward the baseline.
+    Never add "forbid X" locks or retarget the format based on one run. (In the 2026-09-30 AppCMS incident, both of those fixes were wrong and cost the user two rounds.)
 
 ---
 
@@ -940,6 +947,7 @@ update mode changes exactly one feature without regenerating its siblings.
 
 ## Troubleshooting
 
+- **Claude Design produced `X.dc.html` + `support.js`, or says "in this project every design has to be a Design Component":** the likely cause is the Claude Design *project* (Design Component mode, or created from a template), not the prompts: the same component-format prompts preview fine in a plain project. Run the rule 14 diagnosis, ask the user to check the project's mode and how it was created, and once that is confirmed, start a new plain project and paste the Master again. Don't rewrite the prompts to `.dc.html`, and don't add "forbid .dc.html" locks.
 - **Claude Design regenerates too much:** the prompt is missing its OUTPUT clause
   — bound the scope explicitly.
 - **The feature lands in the wrong place:** the prompt omitted WHERE — name the
