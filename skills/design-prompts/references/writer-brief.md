@@ -27,11 +27,13 @@ FORMAT: {component | html-showcase}. The items below are written for the compone
    - Anything genuinely new is marked "Proposal for PO approval".
 8. ## Mock data: what data.js holds, realistic for the market, sized to look real.
 9. ## Translation glossary (multi-language surfaces only, 25-40 rows per extra locale in this surface's voice); a single-language surface states its language and direction instead ({primary language, ltr|rtl} from Discovery).
-10. ## Visual and UX requirements: phone behaviour, tables to cards, sheets, tap targets, RTL mirroring, shortcuts, reduced motion.
+10. ## Visual and UX requirements: phone behaviour, tables to cards, sheets, tap targets, RTL mirroring, shortcuts, reduced motion. Then ## Motion and finish: this surface's motion level and finish from the Master, and for every component type on the surface its pattern from motion-and-finish §3 with tokens and choreography (what slides, what fades first, what morphs, how overlays enter and leave, hover/press/focus/loading states). Never write only "smooth" or "animated".
 11. ## Deliverable: folder, "deliver only these files", verification checklist.
 12. Handshake: 'After delivery, reply: "<Surface> complete. Ready for prompt NN+1 (<next>)."'
 
 DEPTH: meet {path}/references/depth-standard.md (minimum per page, weak vs strong, proportions) and run its §4 self-check on your files before replying.
+
+MOTION AND FINISH: meet {path}/references/motion-and-finish.md (principles, tokens, pattern catalogue, weak vs strong) and run its §6 self-check on your files before replying.
 
 STYLE: {project copy rules, e.g. no em dashes in UI copy}. Completeness over brevity: a 15-page surface is typically 400-900 lines.
 

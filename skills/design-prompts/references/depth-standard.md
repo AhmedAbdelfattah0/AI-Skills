@@ -78,3 +78,4 @@ Answer yes to each, or fix the prompt:
 - [ ] There is no vague wording like "etc.", "and so on", "various", "as needed", "appropriate", "some", "relevant" left in a spec line.
 - [ ] Mock data is sized and described so tables, calendars and charts look real.
 - [ ] Anything invented is marked "Proposal for PO approval".
+- [ ] The prompt passes the motion and finish self-check in [motion-and-finish](motion-and-finish.md) §6: complete content is half the bar; how it moves and how it looks at rest is the other half.
