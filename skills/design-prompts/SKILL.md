@@ -32,6 +32,7 @@ This skill codifies a proven approach to writing Claude Design prompts: standalo
 - **Large surfaces split into part 1 + part 2** building one folder ([split-surface-template](references/split-surface-template.md)).
 - **Existing app? Inventory the code first** with parallel agents, then delegate prompt writing with one shared brief ([codebase-inventory](references/codebase-inventory.md), [writer-brief](references/writer-brief.md)).
 - **Depth standard** ([depth-standard](references/depth-standard.md)): the minimum detail per page, weak-vs-strong snippets, length proportions and a self-check. Every prompt meets it; this is what makes a first prompt set for a new project come out as detailed as one built from a codebase inventory.
+- **Motion and finish standard** ([motion-and-finish](references/motion-and-finish.md)): how every component moves and looks, not only what it shows. Shared indicators that slide instead of jumping, choreographed collapse and expand, elements that morph into compact forms, layered depth, and a full set of interaction states. Every prompt, in both modes and for every surface, states these as requirements, because Claude Design treats animation and finish as optional polish unless told otherwise. This is what separates a modern, premium-feeling result from a correct but flat one.
 
 ## Two modes
 
@@ -113,6 +114,8 @@ Ask which surfaces this design system needs to cover. Don't assume — let the u
 - **Typography preference** — modern sans-serif / classic serif / display / monospace-accent / etc.
 - **Mood** — pick from or describe: warm/friendly, austere/professional, playful, editorial/premium, dense/utilitarian, bold/energetic, minimal/spacious, technical/precise, etc.
 - **Density** — generous whitespace vs. information-dense
+- **Motion level** — subtle (quick fades, sliding indicators, no overshoot) / expressive (choreographed transitions, staggered entrances, small spring on toggles and badges) / rich (adds celebratory moments, counters, drawn-in charts). Default: expressive for customer-facing and marketing surfaces, subtle for dense operator and admin surfaces. Never "none": every surface gets the shared-indicator, morph and interaction-state rules from [motion-and-finish](references/motion-and-finish.md).
+- **Finish** — flat and crisp / soft layered depth / floating glass panels / bold neon-accent glow. Default: soft layered depth. This decides the elevation scale, surface treatment and accent expression in [motion-and-finish](references/motion-and-finish.md) §4.
 
 ### 7. Output format
 - **Component + HTML preview (default, proven)**: one folder per surface: preview HTML loading React UMD + Babel, `tokens.css`, `styles.css`, `data.js`, i18n files, `icons.jsx`, `components-core.jsx`, `components-shell.jsx`, `pages-N.jsx`, `App.jsx` hash router with screen launcher + State switch. See [component-format](references/component-format.md). Recommend this first.
@@ -189,13 +192,13 @@ Each prompt MUST contain:
 7. Key page details for EVERY page, meeting [depth-standard](references/depth-standard.md) (real fields, columns, modals with fields + validation, actions, loading/empty/error + domain states). Design the intended behaviour, not bugs found in the code; flag new ideas "Proposal for PO approval"
 8. Mock data (realistic for the market, sized to look real)
 9. Translation glossary specific to this surface's voice (only if multi-language)
-10. Visual + UX requirements
+10. Visual + UX requirements, including a **Motion and finish** subsection that names, for this surface's components, the patterns from [motion-and-finish](references/motion-and-finish.md) §3 with their tokens and choreography, plus the surface's elevation, surface treatment and accent expression from §4
 11. Deliverable specification (exact folder/files, scope boundary) + verification checklist
 12. Handshake to next prompt ("After delivery, reply: '[X] complete. Ready for prompt N+1.'")
 
 ## Phase 5: Save and deliver
 
-Before saving, run the self-check in [depth-standard](references/depth-standard.md) §4 on every prompt (including ones written by delegated agents) and fix anything that fails.
+Before saving, run the self-check in [depth-standard](references/depth-standard.md) §4 and the self-check in [motion-and-finish](references/motion-and-finish.md) §6 on every prompt (including ones written by delegated agents) and fix anything that fails.
 
 In Claude Code, save to the repo at `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. Always add a `README.md` (sections: how to run · prompt/folder/language table · design direction · Decisions for the PO · assets to upload): run order, prompt → folder → language table, design direction, **Decisions for the PO** (every "Proposal for PO approval" and behaviour change the writers introduced, grouped), and assets the user must upload to Claude Design (self-hosted fonts, logos — Claude Design cannot fetch them from the repo).
 
@@ -295,6 +298,7 @@ End with:
     4. If the prompts already match the baseline, keep them unchanged and treat the environment as a **hypothesis**, not a finding. Possible causes: the Claude Design project is in Design Component mode (`.dc.html` + `support.js`), or it was created from a template. Ask the user to check the project's mode and how it was created. Recommend a settings change or a new project only after that check confirms a cause.
     5. Only when the prompts differ from the baseline, change the prompts, and only by moving them toward the baseline.
     Never add "forbid X" locks or retarget the format based on one run. (In the 2026-09-30 AppCMS incident, both of those fixes were wrong and cost the user two rounds.)
+15. **Specify motion and finish, never assume them.** Every prompt, greenfield or update, for every surface and every component type, states how things move and how they look at rest, using the patterns and tokens in [motion-and-finish](references/motion-and-finish.md). "Smooth", "modern", "animated" or "nice transitions" on their own are not specifications. The rule applies to everything (tabs, modals, tables, cards, forms, toasts, steppers), not only navigation.
 
 ---
 
@@ -331,6 +335,23 @@ The product surface spans:
 - Corner radius: {Xpx} on cards, {Xpx} on inputs/buttons
 - Shadow style: {soft and low / subtle and sharp / none}
 - Mood: {warm / austere / playful / editorial / etc.}
+
+## Motion and finish
+
+Every surface in this project is held to these. They are requirements, not polish.
+
+- **Motion level per surface:** {e.g. Storefront: expressive · Admin: subtle · Landing: rich}
+- **Finish per surface:** {e.g. soft layered depth, floating panels with large radius and a top-edge highlight}
+- **Motion tokens** (defined in Foundation `tokens.css`): `--dur-instant` {100ms}, `--dur-fast` {200ms}, `--dur-base` {320ms}, `--dur-slow` {500ms}; `--ease-standard` `cubic-bezier(.4,0,.2,1)`, `--ease-out`, `--ease-in`{, `--ease-spring` if the mood allows}.
+- **Principles:**
+  1. Shared elements move: the active indicator of any nav, tab, segment, step or selection is ONE element that slides to the new position. Never restyle items on and off.
+  2. Choreograph: when things change together, text and icons leave first and return last; containers resize in between. Nothing squashes or wraps mid-animation.
+  3. Morph, do not hide: compact forms are shape changes (badge to dot, field to icon, button to icon), not disappearances.
+  4. Layered depth: raised surfaces combine a soft deep shadow, a 1px border, a faint top-edge highlight and a subtle gradient.
+  5. Every interactive element has hover, press, focus-visible, selected, disabled and loading states, each animated with the tokens.
+- **Reduced motion:** state changes stay visible; travel, scale and stagger are removed.
+
+Each surface prompt restates its motion level and names the specific patterns its components use.
 
 ## Voice and tone
 
@@ -375,6 +396,11 @@ Every design surface must support {languages} from day one.
 Every deliverable must pass:
 - [ ] One file (or as specified — never more than what's asked)
 - [ ] Mobile responsive at 375px width
+- [ ] Every active/selected indicator slides between items; nothing jumps
+- [ ] Every collapse, expand, open and close is choreographed with the motion tokens; nothing snaps or squashes
+- [ ] Every interactive element shows hover, press, focus-visible, disabled and loading states
+- [ ] Raised and floating surfaces use the layered elevation tokens
+- [ ] `prefers-reduced-motion` removes travel and stagger but keeps state changes visible
 - {If multi-language:}
 - [ ] Language toggle works — every string changes
 - {If RTL:}
@@ -394,6 +420,8 @@ Do not generate any design until you receive the first specific design prompt. T
 ---
 
 > **Appendices B-G are written for the HTML-showcase format. With the component format (default), convert every one of them:** header "Produces ONE folder: `{Project}-{Surface}/`"; add the Recap, Files to deliver, Shell and Mock data sections from the 12-section list in Phase 4; turn each `page-*` section into a page key in `SHELL_PAGES` / `FULL_PAGES`; replace the Deliverable section's "ONE file" and "Self-contained" checks with the component verification lines in [component-format](references/component-format.md); use `t('key')` instead of `data-i18n`. Page-content guidance applies unchanged.
+>
+> **Every surface prompt (any format, any appendix) also carries a `## Motion and finish` section** after its page details: the surface's motion level and finish, then each component pattern it uses from [motion-and-finish](references/motion-and-finish.md) §3 with tokens and choreography spelled out (see its weak vs strong examples), and the motion lines from the Master's verification standard in its checklist.
 
 ## Appendix B — Primary Application Surface Template (Greenfield)
 
@@ -845,6 +873,17 @@ If the feature is simpler (one section, no panels), describe it as
 "SECTIONS (top to bottom):" with each section bulleted, or "FORM FIELDS:" / 
 "COMPONENTS:" / etc. as fits.}
 
+MOTION AND FINISH (match the rest of the {surface}):
+- {For each component in this feature, its pattern from the motion-and-finish
+  catalogue with the existing motion tokens: e.g. "Tabs: the existing sliding
+  pill indicator, content cross-fades with a 6px shift"; "Add rule: new card
+  enters with fade + 6px rise, highlight fades over 2s"; "Delete: ConfirmDialog
+  scales in, removed row collapses its height"}
+- Hover, press, focus-visible, disabled and loading states on every new control
+- Reuse the existing motion tokens, elevation levels and indicators — do not
+  introduce new durations, easings or shadow styles
+- Reduced motion: state changes stay visible; no travel or stagger
+
 RULES (match the rest of the {surface}):
 - {If multi-language: Full {language} i18n for all labels and helper text; if RTL is involved, never mix LTR and RTL on one line}
 - Use existing design tokens and the existing {input / toggle / color-picker /
@@ -915,6 +954,8 @@ A good prompt produces a design that, when generated by Claude Design and droppe
 
 Both greenfield prompts and update prompts are held to this bar.
 
+The bar includes how it feels. If the user has to come back and ask for "smoother transitions", "make the active state slide", "make it look less flat" or "add hover states", the prompt was incomplete in the same way as a missing empty state.
+
 ## A note on adaptability
 
 This skill works equally well for:
@@ -958,4 +999,5 @@ update mode changes exactly one feature without regenerating its siblings.
 - **A 25-page surface came back thin or truncated:** split it into part 1 + part 2 (`references/split-surface-template.md`).
 - **Designs miss real fields, modals or states of an existing app:** the prompts were written from route names; run the codebase inventory first.
 - **The same page appears in two surfaces:** keep it where it shares components (e.g. all payment outcomes in Checkout) and leave a pointer line in the other prompt.
+- **Designs are complete but look flat, static or dated** (highlights jump, panels snap, boxes with one hard shadow, nothing reacts on hover): the prompts described content but not motion and finish. Add the `## Motion and finish` section to each surface prompt and the motion tokens to Foundation, per [motion-and-finish](references/motion-and-finish.md); for an existing project, write one update prompt per surface that applies only the motion and finish layer and changes nothing else.
 - **Arabic (or brand) typography looks wrong in Claude Design:** a self-hosted font wasn't uploaded to the project; list required uploads in the README.

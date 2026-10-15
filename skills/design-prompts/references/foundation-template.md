@@ -28,8 +28,10 @@ neutrals (bg, sunken, surface, raised, tinted, text x4, border x3), dark surface
 (sidebar, hero gradient), status x5 each with -bg/-text/-border, CATEGORY colours for
 the product's core object types (e.g. lesson types, order sources, ticket kinds), type
 families + scale + leading + weights, 4px space scale, radius, shadow (incl. focus
-rings per surface family), motion (durations, easings), [dir="rtl"] font switch,
-prefers-reduced-motion.}
+rings per surface family), motion (--dur-instant/fast/base/slow and --ease-standard/out/in
+and, if the mood allows, --ease-spring, per [motion-and-finish](motion-and-finish.md) §2),
+a layered elevation scale (resting/raised/overlay, each soft shadow + border + top-edge
+highlight), [dir="rtl"] font switch, prefers-reduced-motion.}
 
 ## components-core.jsx
 {Numbered list of primitives with ALL variants and states: Button, Field + every
@@ -40,7 +42,13 @@ below 768px + skeleton, Tabs, FilterBar, Modal that becomes a BottomSheet on pho
 Drawer with stacked back header, ConfirmDialog with optional required reason, Menu,
 Toast + host, EmptyState with illustration slot, ErrorState, Banner, Avatar/PersonCell,
 Stepper/Timeline, Progress bar/ring, Money/DateTime/Countdown formatters, small charts,
-and the product's DOMAIN components (e.g. LessonCard, ProductCard, CalendarEvent).}
+and the product's DOMAIN components (e.g. LessonCard, ProductCard, CalendarEvent).
+Every primitive also lists its motion and interaction states from
+[motion-and-finish](motion-and-finish.md) §3: hover, press, focus-visible, selected,
+disabled, loading, and how it enters, leaves, collapses or morphs. Tabs, segmented
+controls and nav use ONE sliding indicator; Modal scales in and becomes a sliding
+BottomSheet; Toasts slide and stack; DataTable rows stagger in on first load and
+collapse on delete; Button keeps its width while showing a spinner.}
 
 ## One status language (STATUS map)
 {Every status enum the product has, each mapped to ONE tone (success, warning, danger,
@@ -52,14 +60,19 @@ colours the same status differently on different pages, say so and fix it here.}
 why the old UI felt bland), colour, type (flag new font choices "Proposal for PO
 approval"), space/radius/shadow/motion, buttons, inputs, forms (a realistic domain
 form), status map table, data display, feedback, overlays, navigation (each shell
-family), domain components, imagery.}
+family, with the collapsible nav demonstrating the sliding indicator, label fade,
+badge-to-dot morph and edge toggle), a **Motion** page where every pattern can be
+triggered live (open/close, collapse/expand, switch tabs, add/remove a row, show a
+toast, toggle reduced motion), domain components, imagery.}
 
 ## Translation glossary (bilingual only)
 {25-40 rows of the customer vocabulary reused across surfaces.}
 
 ## Deliverable
 {folder + verification: every component in every state, STATUS map complete, table
-stacking and bottom sheet at 375px, RTL flips, tokens only, proposals flagged.}
+stacking and bottom sheet at 375px, RTL flips, tokens only, proposals flagged, every
+component's motion and interaction states visible on the Motion page, reduced motion
+honoured.}
 
 After delivery, reply: "Foundation complete. Ready for prompt 02 ({next})."
 ```
