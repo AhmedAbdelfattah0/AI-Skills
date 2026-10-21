@@ -124,6 +124,25 @@ outside ownership. Workers do not commit, switch branches, install dependencies,
 run whole-repo formatters/generators, or change an approved integration contract.
 The orchestrator owns shared seams, barriers, reconciliation and Git operations.
 
+### Never wait on a notification alone
+
+A delegated agent's completion message can be lost (host sleep, a stopped
+sub-worker, an interrupted handback). Before ending a turn while any worker,
+reviewer or gate is in flight:
+
+- Give every worker a durable completion marker it must write before reporting
+  (the `RED`/`GREEN`/`REPAIR` RUN-STATE line, a `result.json`, a gate summary
+  ending in `ALLDONE`).
+- Start one `run_in_background` watcher per in-flight item that exits when its
+  marker appears **or** when nothing in its owned paths has changed for 20
+  minutes. Its exit re-invokes you even when the agent's own message never
+  arrives.
+- On any re-invocation, a host wake-up (date jump, `sleep` errors) or a user
+  "status?", read the markers first. Marker present without a report → proceed
+  from the marker (recompute the candidate, continue the phase). No marker and
+  no recent file change → the worker is dead; resume it or take over the step.
+- A reply of "still running" is valid only if a watcher is armed for that item.
+
 ## Invariants
 
 - The specification comes from the tracker, including acceptance criteria,
@@ -485,8 +504,14 @@ This skill orchestrates; companion skills own their rule catalogues and detailed
 methods. Repository instructions outrank this skill. Read both AGENTS.md and
 CLAUDE.md when present and follow pointers rather than duplicating them.
 
-Unrelated defects become tracker items the skill opens, or one explicit question
-to the user. Do not expand the current Design Contract to fix them. **A defect
+**Close gaps in the same run, don't defer them by default.** When PLAN, PROVE or
+REVIEW confirms a real gap outside the Design Contract, ask the user once, as soon
+as it is confirmed (batch every open gap into one question). Offer two options:
+fold it into the current ticket as an approved Design Contract expansion, or add
+it as another ticket in the current run and ship it before COMPLETE. Recommend
+folding it in. Open a deferred tracker item only when the user chooses to defer.
+Never file a follow-up silently. Do not expand the Design Contract without that
+approval. **A defect
 inside a Design Contract path is never a follow-up**: fix it before the freeze
 (REVIEW's repair batch fixes the whole defect class, not the cited line). The
 COMPLETE report carries no "follow-ups" list for the user to pick up; if an

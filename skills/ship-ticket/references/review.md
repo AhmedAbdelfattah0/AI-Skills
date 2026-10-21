@@ -232,7 +232,7 @@ Give every finding one disposition:
 |---|---|---|
 | `fix` | a real in-scope defect | affected contract path and planned repair |
 | `reject — factually wrong` | its premise is false | cited code or ticket fact |
-| `reject — out of scope` | real but excluded from this ticket | approved exclusion or follow-up ticket |
+| `reject — out of scope` | real but excluded from this ticket | approved exclusion, or the user's same-run answer (folded in, added ticket, or explicitly deferred) |
 | `not applicable` | a rule does not fire | named rule ID and applicability evidence |
 | `human waiver` | an `[NN]` invariant would bend | `WAIT_FOR_USER`; never self-approve |
 
@@ -241,9 +241,11 @@ parity must be included in the targeted confirmation even when no bytes change.
 **An in-scope minor is `fix`, not a follow-up.** A minor inside a Design Contract
 path that can be repaired without changing behavior (a false or stale comment, a
 formatting or escaping slip, a wrong count) goes into the one repair batch.
-"Follow-up" is reserved for work outside the Design Contract, and even then it is
-an opened tracker item or an explicit question to the user, never a line in the
-final report left for the user to pick up.
+"Follow-up" is reserved for work outside the Design Contract. Even then, the
+default is the spine's same-run question: fold it into this ticket, or add a
+ticket to the current run. A deferred tracker item exists only when the user
+chooses to defer. It is never a line in the final report left for the user to
+pick up.
 
 ## One repair batch
 
@@ -258,6 +260,17 @@ the range the reviewer cited. Record the search and its zero-hit result in the
 `REPAIR` event. A confirmation that finds another instance of an accepted
 finding's class means this step was skipped, and there is no second batch to
 catch it.
+
+**When the defect sits behind a function, search by caller, not by pattern.** For
+a cost/complexity finding (per-item re-enumeration, an unbounded scan, quadratic
+work), or for any finding whose bad behaviour lives inside a helper, list
+**every call site of that helper**, including those that reach it through
+wrappers (`grep -n "helperName("` and then `grep` each wrapper's own callers),
+and fix or clear each one by name in the `REPAIR` event. A pattern grep that only
+matches the cited caller is not a class search. The regression test must also go
+through each fixed caller, not only the one the reviewer cited. (#27666: guarding
+`pushLevel` left the guard-findings loop calling `positionOf → orderKeyOf` once
+per finding, and confirmation failed.)
 
 Update directly affected tests, comments and docs in the same batch; ordinary
 diff review is sufficient—there is no repository-wide prose inventory or
