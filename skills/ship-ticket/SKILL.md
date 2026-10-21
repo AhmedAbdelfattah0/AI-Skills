@@ -127,21 +127,38 @@ The orchestrator owns shared seams, barriers, reconciliation and Git operations.
 ### Never wait on a notification alone
 
 A delegated agent's completion message can be lost (host sleep, a stopped
-sub-worker, an interrupted handback). Before ending a turn while any worker,
-reviewer or gate is in flight:
+sub-worker, an interrupted handback). This adds recovery evidence. It does **not**
+add a yield condition: the turn still ends only in the states of the continuation
+table, and an in-flight worker is not one of them.
 
-- Give every worker a durable completion marker it must write before reporting
-  (the `RED`/`GREEN`/`REPAIR` RUN-STATE line, a `result.json`, a gate summary
-  ending in `ALLDONE`).
-- Start one `run_in_background` watcher per in-flight item that exits when its
-  marker appears **or** when nothing in its owned paths has changed for 20
-  minutes. Its exit re-invokes you even when the agent's own message never
-  arrives.
-- On any re-invocation, a host wake-up (date jump, `sleep` errors) or a user
-  "status?", read the markers first. Marker present without a report → proceed
-  from the marker (recompute the candidate, continue the phase). No marker and
-  no recent file change → the worker is dead; resume it or take over the step.
-- A reply of "still running" is valid only if a watcher is armed for that item.
+- **Fresh, bound markers.** Each dispatch names a fresh marker path that must not
+  exist yet. The marker lives outside candidate paths, and the dispatch records
+  its run, node, execution ID and candidate ID. Writing workers write their own
+  marker (a `result.json`, a gate summary ending in `ALLDONE`, a RUN-STATE event
+  carrying that execution ID). For read-only delegates the carrier owns the marker
+  (for example the relay's result file, or the orchestrator persisting the
+  returned schema). A marker from another dispatch, execution or candidate is
+  ignored.
+- **Watch only where the host can wake you.** Preflight whether the host
+  re-invokes the orchestrator when a background command exits (`run_in_background`
+  on Claude Code). If it does, arm one watcher per in-flight item: it exits when
+  its marker appears, or after 20 minutes without a marker or owned-path change.
+  If it doesn't, use the carrier's supported bounded wait inside the active turn,
+  and declare recovery degraded.
+- **On re-invocation, validate before advancing.** This covers a watcher exit, a
+  host wake-up (date jump, `sleep` errors) or a user "status?". Read the markers
+  first. A marker only lets you *collect* the result. The phase advances only
+  after the substantive result passes its normal exit conditions: the REVIEW
+  schema and PASS rules in [references/review.md](references/review.md), or the
+  PROVE gate rules. A missing or invalid result uses that phase's bounded recovery
+  budget.
+- **Inactivity is a diagnostic, not proof of death.** Read-only reviewers and
+  long tests may not write anything. Before replacing a worker, check its
+  carrier/process status. Then verify cancellation, and keep REVIEW's deadline,
+  recovery budget and reviewer-independence rules. The builder never takes over a
+  review.
+- A reply of "still running" is valid only if a watcher or an active bounded
+  wait covers that item.
 
 ## Invariants
 
@@ -506,10 +523,29 @@ CLAUDE.md when present and follow pointers rather than duplicating them.
 
 **Close gaps in the same run, don't defer them by default.** When PLAN, PROVE or
 REVIEW confirms a real gap outside the Design Contract, ask the user once, as soon
-as it is confirmed (batch every open gap into one question). Offer two options:
-fold it into the current ticket as an approved Design Contract expansion, or add
-it as another ticket in the current run and ship it before COMPLETE. Recommend
-folding it in. Open a deferred tracker item only when the user chooses to defer.
+as it is confirmed. Batch every open gap into one `WAIT_FOR_USER` question, and
+offer these options, recommending the first:
+
+1. **Fold it into this ticket.** This is a Design Contract expansion and returns
+   to human approval as the Resume rules require. After approval, route the gap
+   by the phase that found it:
+   - **Before REVIEW** (PLAN, BUILD or PROVE): it returns to the matching
+     implementation and proof work like any other contract path.
+   - **During REVIEW**: its disposition is `fix`, and it joins the unspent repair
+     batch, with the same proof and confirmation coverage as the rest.
+   - **Batch already spent, or found by the confirmation**: the execution keeps
+     its terminal FAIL. The gap ships only through an explicitly authorized retry
+     (Resume) or as a queued ticket.
+
+   Folding a gap in never opens an extra repair batch.
+2. **Queue it as its own ticket in this run.** Open the tracker item now and add
+   it to an explicit run queue. Each queued ticket is a separate, complete
+   workflow: its own UNDERSTAND, plan approval, branch, candidate, review
+   execution and repair limits. When the current ticket ships, report its own
+   COMPLETE, then start the next queued ticket. The run is finished only when
+   every queued ticket has shipped or the user explicitly defers it.
+3. **Defer.** Open a tracker item outside this run.
+
 Never file a follow-up silently. Do not expand the Design Contract without that
 approval. **A defect
 inside a Design Contract path is never a follow-up**: fix it before the freeze
