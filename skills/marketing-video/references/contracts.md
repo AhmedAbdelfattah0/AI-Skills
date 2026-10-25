@@ -103,12 +103,14 @@ the button exists, not that a task takes one click.
       "position": "top|center|bottom", "text": "…", "class": "factual", "claimId": "c-add",
       "startFrame": 6, "endFrame": 110 } ],
   "voice": [ { "id": "v2", "shotId": "s2", "assetId": "vo-add", "startFrame": 6,
-      "class": "factual", "claimId": "c-add", "text": "…" } ] }
+      "class": "factual", "claimId": "c-add", "text": "…" } ],
+  "music": { "assetId": "bed", "volume": 0.3, "duckVolume": 0.08, "rampFrames": 8,
+      "fadeInFrames": 15, "fadeOutFrames": 30 } }
 ```
 
 Frames are integers relative to their shot. `camera.cx/cy` is the normalized
 point of the asset kept nearest the frame centre; `scale` 1 covers the frame.
-Every rendered revision snapshot is digested; QA, reviews and approvals bind to that digest and the MP4 hash, so editing a snapshot invalidates them. `highlight` is in asset pixels and must stay wholly inside the safe area, clear of caption and label bands, from the first caption, voice line or highlight of its shot, whichever is earliest (MV-FRAMING); use `camera.moveFrames` to arrive before the line about the target plays. Shot IDs are stable across revisions — a
+Every rendered revision snapshot is digested; QA, reviews and approvals bind to that digest and the MP4 hash, so editing a snapshot invalidates them. A camera point may use `"fit": true` (the whole asset inside the side safe margins, over a blurred copy) — open on it and zoom in, rather than starting on an already-cropped view. `transitionIn` is `{"type": "fade"|"crossfade", "frames": n}`; with a crossfade, the incoming shot's words start and the outgoing shot's words end outside the overlap. `highlight` is in asset pixels and must stay wholly inside the safe area, clear of caption and label bands, from the first caption, voice line or highlight of its shot, whichever is earliest (MV-FRAMING); use `camera.moveFrames` to arrive before the line about the target plays. Shot IDs are stable across revisions — a
 revision edits shots in place and increments `revision`, setting
 `parentRevision`.
 

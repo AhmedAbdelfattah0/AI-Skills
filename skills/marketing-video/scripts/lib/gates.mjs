@@ -2,6 +2,7 @@
 // every gate is unit-testable without a renderer. A `block` finding stops
 // render and delivery; a `draft` finding allows a preview but forbids a final.
 import { camAt, cameraBox, contentArea, onScreen } from './camera.mjs';
+import { MUSIC_DEFAULTS } from './audio.mjs';
 import { shotSpans, voiceFrames } from './timing.mjs';
 
 const TEXT_CLASSES = new Set(['factual', 'conceptual', 'cta', 'brand', 'neutral']);
@@ -15,6 +16,7 @@ export const ASSET_KINDS = {
   logo: ['provided', 'manual'],
   generated: ['generated'],
   voice: ['tts', 'provided'],
+  music: ['provided', 'generated'],
 };
 // Shot fields that would draw an interaction the product never performed.
 const SYNTHETIC_INTERACTION = ['interaction', 'cursor', 'click', 'typing', 'tap'];
@@ -56,6 +58,7 @@ export function checkRun({ project = {}, manifest = {}, claims = {}, timeline = 
     if (!SENSITIVITY_OK.has(s.status)) add('MV-PRIV', 'block', `asset ${asset.id}: sensitivity is ${s.status || 'unreviewed'}`);
     else if (s.reviewedSha256 !== asset.sha256) add('MV-PRIV', 'block', `asset ${asset.id}: privacy review was for different bytes`);
     if (asset.rights?.commercialUse !== 'yes') add('MV-RIGHTS', 'draft', `asset ${asset.id}: commercial use is ${asset.rights?.commercialUse || 'unknown'}`);
+    if (asset.provenance?.placeholder) add('MV-PLACEHOLDER', 'draft', `asset ${asset.id} is a stand-in; replace it before a final delivery`);
   }
   for (const [name, rights] of Object.entries(project.toolRights || {})) {
     if (rights?.commercialUse !== 'yes') add('MV-RIGHTS', 'draft', `tool ${name}: commercial use is ${rights?.commercialUse || 'unknown'}`);
@@ -150,7 +153,7 @@ export function checkRun({ project = {}, manifest = {}, claims = {}, timeline = 
       const lines = [...(timeline.text || []), ...(timeline.voice || [])].filter((t) => t.shotId === shot.id).map((t) => t.startFrame || 0);
       const from = Math.min(Math.round(shot.durationFrames * 0.2), ...lines);
       for (let f = from; f < shot.durationFrames; f += 1) {
-        const r = onScreen(h, cameraBox(dims, W, H, camAt(shot, f)));
+        const r = onScreen(h, cameraBox(dims, W, H, camAt(shot, f, dims, W, H)));
         if (r.x < area.left - 0.5 || r.y < area.top - 0.5 || r.x + r.w > area.right + 0.5 || r.y + r.h > area.bottom + 0.5) {
           add('MV-FRAMING', 'block', `shot ${shot.id}: at shot frame ${f} the highlighted target (${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.w)}x${Math.round(r.h)}) leaves the clear area ${JSON.stringify(area)}; change the zoom, focus point or moveFrames`);
           break;
@@ -209,6 +212,61 @@ export function checkRun({ project = {}, manifest = {}, claims = {}, timeline = 
     list.sort((a, b) => a.s - b.s);
     for (let i = 1; i < list.length; i += 1) {
       if (list[i].s < list[i - 1].e) add('MV-TIMING', 'block', `captions ${list[i - 1].id} and ${list[i].id} overlap`);
+    }
+  }
+  // Background music: a real music asset, sane levels, ducking below the voice.
+  if (timeline.music) {
+    const m = timeline.music;
+    const a = assets.get(m.assetId);
+    if (!a) add('MV-REF', 'block', `music: unknown asset ${m.assetId}`);
+    else if (a.kind !== 'music') add('MV-REF', 'block', `music: asset ${a.id} is not a music asset`);
+    for (const k of ['volume', 'duckVolume']) if (m[k] !== undefined && !(Number.isFinite(m[k]) && m[k] >= 0 && m[k] <= 1)) add('MV-SCHEMA', 'block', `music.${k} must be between 0 and 1`);
+    const resolved = { ...MUSIC_DEFAULTS, ...m };
+    if (Number.isFinite(resolved.volume) && Number.isFinite(resolved.duckVolume) && resolved.duckVolume > resolved.volume) add('MV-SCHEMA', 'block', `music: ducked level ${resolved.duckVolume} exceeds the normal level ${resolved.volume} (defaults included)`);
+    for (const k of ['rampFrames', 'fadeInFrames', 'fadeOutFrames']) if (m[k] !== undefined && !(Number.isInteger(m[k]) && m[k] >= 0)) add('MV-SCHEMA', 'block', `music.${k} must be a non-negative integer`);
+  }
+  // Two audio tracks never play at once (a crossfade overlaps shots, not lines).
+  // Kept recording audio plays for its whole shot; opacity does not fade it.
+  const voiceAbs = [
+    ...(timeline.voice || []).filter((v) => spans.has(v.shotId) && assets.get(v.assetId) && fps)
+      .map((v) => ({ id: `voice ${v.id}`, s: spans.get(v.shotId).start + (v.startFrame || 0), e: spans.get(v.shotId).start + (v.startFrame || 0) + voiceFrames(assets.get(v.assetId), fps) })),
+    ...shots.filter((s) => spans.has(s.id) && assets.get(s.assetId)?.audioPolicy === 'keep' && assets.get(s.assetId)?.media?.hasAudio)
+      .map((s) => ({ id: `recording audio of shot ${s.id}`, s: spans.get(s.id).start, e: spans.get(s.id).end })),
+  ].sort((a, b) => a.s - b.s);
+  for (let i = 1; i < voiceAbs.length; i += 1) {
+    if (voiceAbs[i].s < voiceAbs[i - 1].e) add('MV-TIMING', 'block', `${voiceAbs[i - 1].id} and ${voiceAbs[i].id} play at the same time`);
+  }
+  for (const [i, shot] of shots.entries()) {
+    // A camera that cannot be computed renders nothing and defeats the
+    // framing gate (every comparison with NaN is false), so it is refused.
+    for (const [end, p] of Object.entries(shot.camera && typeof shot.camera === 'object' ? { from: shot.camera.from, to: shot.camera.to } : {})) {
+      if (p === undefined) continue;
+      if (!p || typeof p !== 'object') { add('MV-SCHEMA', 'block', `shot ${shot.id}: camera.${end} must be an object`); continue; }
+      if (p.scale !== undefined && !(Number.isFinite(p.scale) && p.scale > 0)) add('MV-SCHEMA', 'block', `shot ${shot.id}: camera.${end}.scale must be a number above 0`);
+      if (p.fit !== undefined && typeof p.fit !== 'boolean') add('MV-SCHEMA', 'block', `shot ${shot.id}: camera.${end}.fit must be true or false`);
+      for (const k of ['cx', 'cy']) if (p[k] !== undefined && !(Number.isFinite(p[k]) && p[k] >= 0 && p[k] <= 1)) add('MV-SCHEMA', 'block', `shot ${shot.id}: camera.${end}.${k} must be between 0 and 1`);
+    }
+    if (shot.camera?.moveFrames !== undefined && !(Number.isInteger(shot.camera.moveFrames) && shot.camera.moveFrames > 0)) add('MV-SCHEMA', 'block', `shot ${shot.id}: camera.moveFrames must be a positive integer`);
+    const t = shot.transitionIn;
+    if (t && !['fade', 'crossfade'].includes(t.type)) add('MV-SCHEMA', 'block', `shot ${shot.id}: transitionIn.type must be fade or crossfade`);
+    if (t?.type === 'crossfade' && i === 0) add('MV-SCHEMA', 'block', `shot ${shot.id}: the first shot cannot crossfade`);
+    if (t && t.frames !== undefined && !(Number.isInteger(t.frames) && t.frames > 0)) add('MV-SCHEMA', 'block', `shot ${shot.id}: transitionIn.frames must be a positive integer`);
+    // Text of the incoming shot waits for the crossfade to finish, so it never
+    // stacks on the outgoing shot's words.
+    const overlapIn = spans.get(shot.id)?.overlapIn || 0;
+    for (const item of [...(timeline.text || []), ...(timeline.voice || [])].filter((x) => x.shotId === shot.id && (x.startFrame || 0) < overlapIn)) {
+      add('MV-TIMING', 'block', `${item.assetId ? 'voice' : 'text'} ${item.id}: starts during the ${overlapIn}-frame crossfade into shot ${shot.id}; start it at frame ${overlapIn} or later`);
+    }
+    // ...and the outgoing shot's words are gone before the crossfade begins.
+    if (overlapIn > 0 && i > 0) {
+      const prev = shots[i - 1];
+      const limit = prev.durationFrames - overlapIn;
+      for (const item of (timeline.text || []).filter((x) => x.shotId === prev.id && x.endFrame > limit)) {
+        add('MV-TIMING', 'block', `text ${item.id}: still on screen during the crossfade out of shot ${prev.id}; end it by frame ${limit}`);
+      }
+      for (const v of (timeline.voice || []).filter((x) => x.shotId === prev.id && assets.get(x.assetId) && fps && (x.startFrame || 0) + voiceFrames(assets.get(x.assetId), fps) > limit)) {
+        add('MV-TIMING', 'block', `voice ${v.id}: still speaking during the crossfade out of shot ${prev.id}; it must end by frame ${limit}`);
+      }
     }
   }
   for (const v of timeline.voice || []) {

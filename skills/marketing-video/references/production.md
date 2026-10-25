@@ -67,6 +67,23 @@ re-sized shots — never time-stretching that alters pitch.
 compare the measured duration with the previous take and report the actual
 change rather than the requested rate.
 
+## Music
+
+`ingest --kind music` (method `provided` or `generated`), then `timeline.music`.
+The composition ducks the music to `duckVolume` under every voice line with a
+short ramp and fades it in and out; QA-MIX measures the final mix and fails
+unless the quietest voice line is at least 6 dB above the loudest music-only
+passage. Music needs its own rights evidence like any asset; a library track's
+licence, a provider's plan terms, or "generated locally" for a placeholder.
+
+## Wide screens in a vertical video
+
+A desktop capture is far wider than a 9:16 frame. Crop recordings to the app
+window (`sanitize --crop`), open a shot with `"fit": true` and zoom over most
+of the shot (`moveFrames`), and match the end framing of one shot to the start
+of the next when they crossfade. Large zoom ratios done quickly look jumpy;
+the best fix is a capture from a narrower browser window.
+
 ## Generated scenes
 
 Only for clearly labeled cinematic or conceptual shots, never product UI or a

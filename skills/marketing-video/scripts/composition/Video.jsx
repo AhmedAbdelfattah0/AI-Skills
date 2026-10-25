@@ -3,6 +3,7 @@ import {
   AbsoluteFill, Audio, Img, OffthreadVideo, Sequence,
   continueRender, delayRender, interpolate, staticFile, useCurrentFrame,
 } from 'remotion';
+import { musicVolume, voiceWindows } from '../lib/audio.mjs';
 import { CAPTION_BAND, camAt, cameraBox } from '../lib/camera.mjs';
 import { shotSpans, totalFrames } from '../lib/timing.mjs';
 
@@ -51,12 +52,18 @@ function ShotVisual({ shot, asset, timeline, brand }) {
     const bg = shot.card?.background === 'ink' ? (brand.colors?.ink || '#111318') : (brand.colors?.primary || '#4f46e5');
     return <AbsoluteFill style={{ background: bg }} />;
   }
-  const box = cameraBox(asset, W, H, camAt(shot, frame));
+  const box = cameraBox(asset, W, H, camAt(shot, frame, asset, W, H));
   const media = { position: 'absolute', left: box.left, top: box.top, width: box.dw, height: box.dh };
+  // Letterboxed (whole screen visible): fill the bands with a blurred, dimmed
+  // copy of the same pixels rather than flat black.
+  const backdrop = { position: 'absolute', inset: -60, width: W + 120, height: H + 120, objectFit: 'cover', filter: 'blur(36px) brightness(0.45)' };
   const h = shot.highlight;
   const hIn = h ? interpolate(frame, [Math.round(shot.durationFrames * 0.2), Math.round(shot.durationFrames * 0.2) + 8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }) : 0;
   return (
     <AbsoluteFill style={{ background: '#000', overflow: 'hidden' }}>
+      {box.letterboxed ? (asset.kind === 'recording'
+        ? <OffthreadVideo src={staticFile(asset.file)} muted startFrom={shot.trimStartFrames || 0} style={backdrop} />
+        : <Img src={staticFile(asset.file)} style={backdrop} />) : null}
       {asset.kind === 'recording'
         ? <OffthreadVideo src={staticFile(asset.file)} muted={asset.audioPolicy !== 'keep'} startFrom={shot.trimStartFrames || 0} style={media} />
         : <Img src={staticFile(asset.file)} style={media} />}
@@ -107,7 +114,9 @@ export const Video = ({ timeline, assets, brand = {}, safeZone = {} }) => {
       {timeline.shots.map((shot) => {
         const span = spans.get(shot.id);
         const asset = shot.assetId ? assets[shot.assetId] : null;
-        const fade = shot.transitionIn?.type === 'fade' ? shot.transitionIn.frames || 8 : 0;
+        // 'fade' fades in from black; 'crossfade' fades in over the previous
+        // shot, which keeps rendering underneath for the overlap.
+        const fade = shot.transitionIn?.type === 'fade' ? shot.transitionIn.frames ?? 8 : span.overlapIn;
         return (
           <Sequence key={shot.id} from={span.start} durationInFrames={shot.durationFrames} name={shot.id}>
             <FadeIn frames={fade}><ShotVisual shot={shot} asset={asset} timeline={timeline} brand={brand} /></FadeIn>
@@ -125,6 +134,14 @@ export const Video = ({ timeline, assets, brand = {}, safeZone = {} }) => {
           </Sequence>
         );
       })}
+      {timeline.music && assets[timeline.music.assetId] ? (
+        <Audio
+          src={staticFile(assets[timeline.music.assetId].file)}
+          loop
+          loopVolumeCurveBehavior="extend"
+          volume={(f) => musicVolume(f, timeline, voiceWindows(timeline, Object.fromEntries(Object.entries(assets).map(([id, a]) => [id, a.durationSec]))))}
+        />
+      ) : null}
       {timeline.disclosure?.text ? <Pill id="disclosure" zone={zone} brand={brand} len={totalFrames(timeline)} offset={0} lang={timeline.disclosure.lang} bottom={timeline.disclosure.position === 'bottom'}>{timeline.disclosure.text}</Pill> : null}
     </AbsoluteFill>
   );

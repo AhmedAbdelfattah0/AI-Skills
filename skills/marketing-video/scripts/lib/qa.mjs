@@ -31,6 +31,7 @@ export function evidenceFrames(timeline) {
     add(Math.floor((s.start + s.end - 1) / 2), 'shot-mid', s.id);
     add(s.end - 1, 'shot-last', s.id);
     if (i > 0) { add(s.start - 2, 'boundary', spans[i - 1].id); add(s.start + 2, 'boundary', s.id); }
+    if (s.overlapIn > 0) add(s.start + Math.floor(s.overlapIn / 2), 'crossfade-mid', s.id);
   });
   const startOf = new Map(spans.map((s) => [s.id, s.start]));
   for (const t of timeline.text || []) add(startOf.get(t.shotId) + t.startFrame + 6, `text-visible:${t.id}`, t.shotId);

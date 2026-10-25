@@ -102,8 +102,8 @@ Report this honestly; never claim an unbuilt path works.
 | Automated browser capture (Playwright) | not built yet |
 | Browser-operated provider (voice, generative video) | a first-class execution path beside local, free API and paid API; not built for any provider yet. Each provider is authorized from its own recorded terms status (`permitted`, or `ambiguous` with a scoped user session approval), never by blanket rule — see production |
 | Recording redaction | static masks (browser bars, account menus) built; moving masks not built |
-| Music bed | not built |
-| Crossfade between shots | not built; `fade` fades in from black |
+| Background music that ducks under the voice, with a measured voice/music margin | built; the track itself needs rights evidence (user-supplied, provider-generated, or locally generated placeholder) |
+| Crossfades, whole-screen-then-zoom camera, cropping recordings to the app window | built |
 
 ## Governance
 
