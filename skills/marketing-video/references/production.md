@@ -57,6 +57,7 @@ is procedural and is yours to follow every time.
 | Provider | Status | Notes |
 |---|---|---|
 | none | always | captions carry the message |
+| A take the user generates by hand on a provider's website | built | `ingest --kind voice --method provided --provider … --text …`; rights per that provider's plan evidence |
 | `say` (macOS) | built | `voice --provider say --voice <name> --rate <wpm>`; Arabic is Majed (MSA), not Egyptian; commercial rights unverified → draft |
 | any other | not built | add only after the user picks one; record rights and cost |
 
@@ -75,7 +76,33 @@ and keep the video to real footage and cards.
 
 ## Browser-operated providers
 
-Per provider: confirm the user has access and the terms permit automated use;
-open the service in the user's browser session; pause for login/MFA/CAPTCHA;
-ask before any consuming click; download the result; ingest it as
-`generated` with cost and approval. Not yet built or verified for any provider.
+Operating a provider's website for the user (voice, generative video, any
+service) is decided per provider from its own current terms, never assumed
+from the fact that the user could click the same buttons by hand. Read the
+provider's terms, usage policy and any API terms; record the result in
+`project.json` `providers.<name>.browserAutomation` (see contracts) with dated
+evidence links. Classify each activity separately, because they differ:
+
+| Activity | What to look for |
+|---|---|
+| Ordinary operation of the official UI for the user | an express permission, an express ban on assistants/automation, or neither (ambiguous) |
+| Automated extraction or scraping | bans on bots/scrapers/data extraction; robots.txt |
+| Circumventing limits | bans on evading usage limits, plan restrictions, guardrails |
+| Commercial licensing | plan-based rights, generation-time rules, attribution |
+| Technical limits | extension site permission, login/MFA/CAPTCHA, downloads |
+
+Operate a provider UI only when its status is `permitted`, or when it is
+`ambiguous` and the user has approved one scoped session for that provider
+and one approved generation (`provider-ui-session` in approvals.json). That
+approval is the user's informed risk decision: it never changes the provider's
+status and is never standing permission. Every session: the user's own
+account, the user present, the user handles login, MFA and ordinary CAPTCHA,
+official UI controls only, one approved generation, ordinary credits, no
+network replay, no credential handling. A paywall, a denial or an explicit
+anti-automation challenge ends the session; never work around it.
+
+When the status is `ambiguous` or `unknown`, the default is human-assisted:
+you prepare the exact text, the user generates and downloads, and you ingest
+the file (`ingest --kind voice --method provided`). Offer to draft a written
+clarification request to the provider. No provider-specific automation code is
+built into this skill.
