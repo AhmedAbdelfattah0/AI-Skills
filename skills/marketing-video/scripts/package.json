@@ -1,0 +1,16 @@
+{
+  "name": "marketing-video-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Pinned runtime dependencies for the marketing-video skill. Installed into a user cache, never into the user project.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.533",
+    "@remotion/renderer": "4.0.533",
+    "remotion": "4.0.533",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

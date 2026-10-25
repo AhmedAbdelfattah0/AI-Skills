@@ -20,3 +20,5 @@ jobs:
         run: node --test skills/ship-ticket/scripts/run-log.test.mjs
       - name: Test project-audit continuity
         run: node --test skills/project-audit/scripts/check-continuity.test.mjs
+      - name: Test marketing-video gates
+        run: node --test skills/marketing-video/scripts/gates.test.mjs skills/marketing-video/scripts/qa.test.mjs

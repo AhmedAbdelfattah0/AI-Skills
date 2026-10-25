@@ -207,7 +207,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (22)
+## Skills (23)
 
 | Skill | Extras |
 |---|---|
@@ -219,6 +219,7 @@ Claude-only.
 | design-prompts | `references/` (component + HTML preview format, Foundation, part-2 split, codebase inventory, writer brief, depth standard) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | linkedin-content-coach | — |
+| marketing-video | `references/` + `scripts/` (factual product videos from real captures: claim-gated timeline, local Remotion render, measured QA, independent frame review, shot-preserving revisions; `.specs/marketing-video/`) |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
 | pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
 | project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
