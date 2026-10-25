@@ -24,6 +24,7 @@ Load during PRODUCE (gates) and PROVE (verify).
 | MV-TIMING | block | a caption is outside its shot, under 0.8 s, or overlaps another caption in the same language; a voice line overruns its shot |
 | MV-COST | block | spend without an active, unexpired user spend approval for that provider and unit; charged plus reserved above the cap; an approval awaiting reconciliation |
 | MV-RIGHTS | draft | an asset or tool lacks verified commercial use |
+| MV-PLACEHOLDER | draft | an asset is marked as a stand-in (`ingest --placeholder`), e.g. placeholder music |
 
 ## Verify — `verify --rev N`
 

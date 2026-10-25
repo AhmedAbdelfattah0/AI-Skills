@@ -102,8 +102,8 @@ Report this honestly; never claim an unbuilt path works.
 | Automated browser capture (Playwright) | not built yet |
 | Browser-operated generative/video provider | not built; per-provider, with the user completing login/CAPTCHA |
 | Recording redaction | static masks (browser bars, account menus) built; moving masks not built |
-| Music bed | not built |
-| Crossfade between shots | not built; `fade` fades in from black |
+| Background music that ducks under the voice, with a measured voice/music margin | built; the track itself needs rights evidence (user-supplied, provider-generated, or locally generated placeholder) |
+| Crossfades, whole-screen-then-zoom camera, cropping recordings to the app window | built |
 
 ## Governance
 

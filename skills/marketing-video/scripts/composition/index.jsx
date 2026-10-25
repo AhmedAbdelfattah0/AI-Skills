@@ -8,14 +8,18 @@ import { totalFrames } from '../lib/timing.mjs';
 // reviewer evidence never carry the unmasked pixels.
 // Masks are static for the whole clip: right for fixed UI chrome (browser
 // bars, account menus); moving content needs a re-capture instead.
-const Masked = ({ file, boxes = [], video = false }) => (
-  <AbsoluteFill>
-    {video
-      ? <OffthreadVideo src={staticFile(file)} muted style={{ width: '100%', height: '100%' }} />
-      : <Img src={staticFile(file)} style={{ width: '100%', height: '100%' }} />}
-    {boxes.map((b, i) => <div key={i} style={{ position: 'absolute', left: b.x, top: b.y, width: b.w, height: b.h, background: b.color || '#1f2329' }} />)}
-  </AbsoluteFill>
-);
+// An optional crop (in source pixels) keeps only the app window, so a
+// full-screen recording frames like a screenshot of the same page.
+const Masked = ({ file, boxes = [], video = false, width, height, crop }) => {
+  const c = crop || { x: 0, y: 0, w: width, h: height };
+  const media = { position: 'absolute', left: -c.x, top: -c.y, width, height };
+  return (
+    <AbsoluteFill style={{ overflow: 'hidden' }}>
+      {video ? <OffthreadVideo src={staticFile(file)} muted style={media} /> : <Img src={staticFile(file)} style={media} />}
+      {boxes.map((b, i) => <div key={i} style={{ position: 'absolute', left: b.x - c.x, top: b.y - c.y, width: b.w, height: b.h, background: b.color || '#1f2329' }} />)}
+    </AbsoluteFill>
+  );
+};
 
 // One generic, props-driven composition. Everything run-specific arrives as
 // input props built from timeline.json, so the editable source of a video is
@@ -30,7 +34,7 @@ const Root = () => (
     width={100}
     height={100}
     defaultProps={{ file: '', width: 100, height: 100, boxes: [] }}
-    calculateMetadata={({ props }) => ({ width: props.width, height: props.height })}
+    calculateMetadata={({ props }) => ({ width: props.crop?.w || props.width, height: props.crop?.h || props.height })}
   />
   <Composition
     id="SanitizeVideo"
@@ -40,7 +44,7 @@ const Root = () => (
     width={100}
     height={100}
     defaultProps={{ file: '', width: 100, height: 100, boxes: [], video: true, durationSec: 1 }}
-    calculateMetadata={({ props }) => ({ width: props.width, height: props.height, durationInFrames: Math.max(1, Math.floor(props.durationSec * 30)) })}
+    calculateMetadata={({ props }) => ({ width: props.crop?.w || props.width, height: props.crop?.h || props.height, durationInFrames: Math.max(1, Math.floor(props.durationSec * 30)) })}
   />
   <Composition
     id="MarketingVideo"

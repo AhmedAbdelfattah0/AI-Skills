@@ -123,3 +123,61 @@ test('a long mid-video silence in a voiced video fails; a short CTA tail passes'
   assert.deepEqual(silenceFindings([{ start: 5, end: 6.5 }, { start: 13.5, end: null }], 15.4), []);
   assert.equal(silenceFindings([{ start: 10, end: null }], 15.4).length, 1);
 });
+
+test('a crossfade starts a shot inside the previous one and shortens the video', async () => {
+  const { shotSpans, totalFrames } = await import('./lib/timing.mjs');
+  const t = { shots: [{ id: 'a', durationFrames: 60 }, { id: 'b', durationFrames: 60, transitionIn: { type: 'crossfade', frames: 10 } }, { id: 'c', durationFrames: 30, transitionIn: { type: 'fade', frames: 8 } }] };
+  assert.deepEqual(shotSpans(t).map((s) => [s.id, s.start, s.end, s.overlapIn]), [['a', 0, 60, 0], ['b', 50, 110, 10], ['c', 110, 140, 0]]);
+  assert.equal(totalFrames(t), 140);
+});
+
+test('editing a shot also affects the shot it crossfades with, and only that one', () => {
+  const xf = structuredClone(timeline);
+  xf.shots[1].transitionIn = { type: 'crossfade', frames: 10 };
+  xf.shots.push({ id: 'c', assetId: 'x', durationFrames: 60 });
+  const edited = structuredClone(xf);
+  edited.shots[0].camera = { to: { scale: 1.2 } };
+  const r = classifyShots(side(project, xf), side(project, edited));
+  assert.deepEqual(r.shots.map((s) => [s.id, s.affected]), [['a', true], ['b', true], ['c', false]]);
+});
+
+test('a long crossfade never lets three shots overlap', async () => {
+  const { shotSpans } = await import('./lib/timing.mjs');
+  const t = { shots: [0, 1, 2].map((i) => ({ id: 'abc'[i], durationFrames: 60, ...(i ? { transitionIn: { type: 'crossfade', frames: 50 } } : {}) })) };
+  const s = shotSpans(t);
+  assert.ok(s[2].start >= s[0].end, JSON.stringify(s));
+});
+
+test('changing a shot\'s length that changes its neighbour\'s resolved crossfade marks that neighbour affected', () => {
+  const mk = (a) => ({ ...timeline, shots: [{ id: 'a', assetId: 'x', durationFrames: a }, { id: 'b', assetId: 'x', durationFrames: 60, transitionIn: { type: 'crossfade', frames: 50 } }, { id: 'c', assetId: 'x', durationFrames: 60, transitionIn: { type: 'crossfade', frames: 50 } }], text: [] });
+  const r = classifyShots(side(project, mk(60)), side(project, mk(45)));
+  assert.equal(r.shots.find((s) => s.id === 'c').affected, true);
+});
+
+test('music ducks under every voice line, ramps back up, and fades at both ends', async () => {
+  const { musicVolume } = await import('./lib/audio.mjs');
+  const t = { fps: 30, shots: [{ id: 'a', durationFrames: 300 }], music: { volume: 0.3, duckVolume: 0.08, rampFrames: 8, fadeInFrames: 15, fadeOutFrames: 30 } };
+  const windows = [[100, 160]];
+  assert.equal(musicVolume(0, t, windows), 0);
+  assert.equal(musicVolume(50, t, windows), 0.3);
+  assert.equal(musicVolume(130, t, windows), 0.08);
+  const ramp = musicVolume(164, t, windows);
+  assert.ok(ramp > 0.08 && ramp < 0.3, String(ramp));
+  assert.equal(musicVolume(299, t, windows), 0);
+});
+
+test('with music, moving a later shot in time marks it affected', () => {
+  const base = { ...timeline, music: { assetId: 'x' }, shots: [{ id: 'a', assetId: 'x', durationFrames: 60 }, { id: 'b', assetId: 'x', durationFrames: 60 }], text: [] };
+  const longer = structuredClone(base);
+  longer.shots[0].durationFrames = 90;
+  const r = classifyShots(side(project, base), side(project, longer));
+  assert.deepEqual(r.shots.map((s) => [s.id, s.affected]), [['a', true], ['b', true]]);
+});
+
+test('with music, any change to the voice windows or total length changes the global identity', () => {
+  const g = (schedule) => globalsDigest({ compositionDigest: 'c', lockDigest: 'l', renderSettings: {}, project, timeline: { ...timeline, music: { assetId: 'm' } }, musicSha256: 'm1', musicSchedule: schedule });
+  const base = g({ total: 300, windows: [[10, 70], [100, 160]] });
+  assert.notEqual(base, g({ total: 270, windows: [[10, 70], [100, 160]] }), 'shorter video moves the fade-out');
+  assert.notEqual(base, g({ total: 300, windows: [[10, 70], [110, 170]] }), 'a moved voice line moves the ducking');
+  assert.equal(base, g({ total: 300, windows: [[10, 70], [100, 160]] }));
+});

@@ -256,3 +256,95 @@ test('a highlight outside the asset blocks', () => {
   input.timeline.shots[0].highlight = { x: 1000, y: 10, w: 200, h: 50 };
   assert.deepEqual(gatesOf(input), ['block:MV-SCHEMA']);
 });
+
+test('crossfades: lines may not overlap; the first shot cannot crossfade; unknown transitions block', () => {
+  const input = baseline();
+  input.timeline.shots[1].transitionIn = { type: 'crossfade', frames: 10 };
+  assert.deepEqual(gatesOf(input), ['block:MV-TIMING'], 'overlay t2 starts inside the crossfade');
+  input.timeline.text[1].startFrame = 10;
+  assert.deepEqual(gatesOf(input), []);
+  input.manifest.assets.push({ ...input.manifest.assets[1], id: 'vo2', media: { durationSec: 1 }, provenance: { ...input.manifest.assets[1].provenance, text: 'جرّبها الآن' } });
+  input.timeline.voice.push({ id: 'v2', shotId: 's2', assetId: 'vo2', startFrame: 10, class: 'cta', text: 'جرّبها الآن' });
+  // v1 plays frames 6–66; with a 10-frame crossfade s2 starts at 80, so no overlap.
+  assert.deepEqual(gatesOf(input), []);
+  // A 20-frame crossfade: text and voice of s2 that start inside it block.
+  input.timeline.shots[1].transitionIn.frames = 20;
+  assert.deepEqual(gatesOf(input), ['block:MV-TIMING', 'block:MV-TIMING']);
+  input.timeline.text[1].startFrame = 20;
+  input.timeline.voice[1].startFrame = 20;
+  assert.deepEqual(gatesOf(input), []);
+  // A 30-frame crossfade starts at frame 60 of s1, while v1 (6–66) still speaks.
+  input.timeline.shots[1].transitionIn.frames = 30;
+  input.timeline.text[1].startFrame = 30;
+  input.timeline.voice[1].startFrame = 30;
+  assert.deepEqual(gatesOf(input), ['block:MV-TIMING']);
+  const first = baseline();
+  first.timeline.shots[0].transitionIn = { type: 'crossfade', frames: 10 };
+  assert.ok(gatesOf(first).includes('block:MV-SCHEMA'));
+  const wipe = baseline();
+  wipe.timeline.shots[1].transitionIn = { type: 'wipe' };
+  assert.ok(gatesOf(wipe).includes('block:MV-SCHEMA'));
+});
+
+test('frames must be positive integers; kept recording audio may not overlap another track', () => {
+  for (const frames of [0, -3, 2.5, 'bad']) {
+    const input = baseline();
+    input.timeline.text[1].startFrame = 20;
+    input.timeline.shots[1].transitionIn = { type: 'crossfade', frames };
+    assert.ok(gatesOf(input).includes('block:MV-SCHEMA'), String(frames));
+  }
+  const input = baseline();
+  input.manifest.assets.push({ ...input.manifest.assets[0], id: 'rec', kind: 'recording', captureMethod: 'manual', audioPolicy: 'keep', media: { width: 1080, height: 1920, durationSec: 10, hasAudio: true } });
+  input.timeline.shots[1] = { id: 's2', assetId: 'rec', durationFrames: 60 };
+  input.timeline.text[1].class = 'cta';
+  assert.ok(gatesOf(input).every((g) => g !== 'block:MV-TIMING'), 'cut: no overlap');
+  input.timeline.shots[1].transitionIn = { type: 'crossfade', frames: 30 };
+  input.timeline.text[1].startFrame = 30;
+  assert.ok(gatesOf(input).includes('block:MV-TIMING'), 'v1 still plays while the recording audio starts');
+});
+
+test('a camera that cannot be computed is refused', () => {
+  for (const camera of [{ from: { scale: 0 } }, { to: { scale: -1 } }, { to: { scale: 'x' } }, { to: { cx: 1.5 } }, { from: { fit: 'yes' } }, { moveFrames: 0 }, { from: null }]) {
+    const input = baseline();
+    input.timeline.shots[0].camera = camera;
+    assert.ok(gatesOf(input).includes('block:MV-SCHEMA'), JSON.stringify(camera));
+  }
+});
+
+test('the outgoing shot\'s words must be gone before a crossfade starts (no conceptual text over real pixels)', () => {
+  const input = baseline();
+  input.timeline.shots[1].transitionIn = { type: 'crossfade', frames: 20 };
+  input.timeline.text[1].startFrame = 20;
+  // The crossfade starts at frame 70 of s1; t1 ends at 60 and v1 at 66: fine.
+  assert.deepEqual(gatesOf(input), []);
+  input.timeline.text[0].endFrame = 75;
+  assert.ok(gatesOf(input).includes('block:MV-TIMING'));
+});
+
+test('music must be a music asset with sane levels', () => {
+  const input = baseline();
+  input.manifest.assets.push({ ...input.manifest.assets[1], id: 'bed', kind: 'music', captureMethod: 'provided', provenance: { cost: { amount: 0, unit: 'USD' } } });
+  input.timeline.music = { assetId: 'bed', volume: 0.3, duckVolume: 0.08 };
+  assert.deepEqual(gatesOf(input), []);
+  for (const music of [{ assetId: 'vo', volume: 0.3 }, { assetId: 'nope' }, { assetId: 'bed', volume: 2 }, { assetId: 'bed', volume: 0.1, duckVolume: 0.2 }, { assetId: 'bed', fadeInFrames: -1 }]) {
+    const bad = baseline();
+    bad.manifest.assets.push({ ...bad.manifest.assets[1], id: 'bed', kind: 'music', captureMethod: 'provided', provenance: { cost: { amount: 0, unit: 'USD' } } });
+    bad.timeline.music = music;
+    assert.ok(gatesOf(bad).some((g) => g === 'block:MV-REF' || g === 'block:MV-SCHEMA'), JSON.stringify(music));
+  }
+});
+
+test('a placeholder asset keeps the delivery a draft', () => {
+  const input = baseline();
+  input.manifest.assets[0].provenance.placeholder = true;
+  const r = checkRun(input);
+  assert.equal(r.deliveryStatus, 'draft');
+  assert.deepEqual(r.findings.map((f) => f.gate), ['MV-PLACEHOLDER']);
+});
+
+test('music levels are validated after defaults are applied', () => {
+  const input = baseline();
+  input.manifest.assets.push({ ...input.manifest.assets[1], id: 'bed', kind: 'music', captureMethod: 'provided', provenance: { cost: { amount: 0, unit: 'USD' } } });
+  input.timeline.music = { assetId: 'bed', volume: 0.02 };
+  assert.ok(gatesOf(input).includes('block:MV-SCHEMA'), 'default duckVolume 0.08 would be louder than 0.02');
+});

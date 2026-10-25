@@ -10,6 +10,7 @@ import { SCRIPTS_DIR, compositorDir, depsDir, ensureDeps, inDepsCwd, lockDigest,
 import { ASSET_KINDS, checkRun } from './lib/gates.mjs';
 import { extractPng, frameDiff, fullDecode, levels, pcmSamples, probe, rawFrame, silences } from './lib/media.mjs';
 import { LANG_PATTERN, SCHEMA_VERSION, appendDecision, assertId, containedPath, copyDeliverable, deliverablePath, ensureRestricted, runWritePath, projectDir, readDecisions, readJson, runPaths, sha256File, sha256Json, writeJson } from './lib/run.mjs';
+import { MUSIC_DEFAULTS, voiceWindows } from './lib/audio.mjs';
 import { evidenceFrames, frameTime, layoutFindings, silenceFindings } from './lib/qa.mjs';
 import { classifyShots, globalsDigest, shotHashes } from './lib/revision.mjs';
 import { shotSpans, totalFrames, voiceFrames } from './lib/timing.mjs';
@@ -17,7 +18,7 @@ import { shotSpans, totalFrames, voiceFrames } from './lib/timing.mjs';
 const RENDER_SETTINGS = { codec: 'h264', crf: 18, pixelFormat: 'yuv420p', audioCodec: 'aac' };
 const COMPARE_THRESHOLD = { mean: 1.0, p99: 8 };
 // Library files the composition imports; they travel with every snapshot.
-const COMPOSITION_LIBS = ['timing.mjs', 'camera.mjs'];
+const COMPOSITION_LIBS = ['timing.mjs', 'camera.mjs', 'audio.mjs'];
 
 function args(argv) {
   const out = { _: [] };
@@ -183,13 +184,14 @@ function ingest(opts) {
       ...(opts.scenario ? { scenarioSha256: opts.scenario } : {}),
       ...(opts.provider ? { provider: opts.provider } : {}),
       ...(opts.text ? { text: opts.text, textVerifiedBy: opts['text-verified-by'] || 'unverified' } : {}),
+      ...(opts.placeholder ? { placeholder: true } : {}),
       cost: { amount: Number(opts['cost-amount'] || 0), unit: opts['cost-unit'] || 'USD' },
       ...(opts.approval ? { approvalId: opts.approval } : {}),
     },
     rights: { commercialUse: opts.rights || 'unknown', source: opts['rights-source'] || null, license: opts.license || null },
     sensitivity: { status: 'unreviewed' },
     media: mediaInfo(derivedFile, opts.kind),
-    audioPolicy: opts.kind === 'voice' ? 'keep' : opts.audio || 'mute',
+    audioPolicy: ['voice', 'music'].includes(opts.kind) ? 'keep' : opts.audio || 'mute',
   };
   manifest.assets.push(asset);
   writeJson(p.manifest, manifest);
@@ -235,21 +237,32 @@ async function bundleWith(publicDir, sourceDir = SCRIPTS_DIR) {
 
 // ----------------------------------------------------------------- sanitize
 async function sanitize(opts) {
-  need(opts, 'run', 'asset', 'boxes');
+  need(opts, 'run', 'asset');
   const runDir = resolve(opts.run);
   const { p, manifest } = load(runDir);
   const asset = manifest.assets.find((a) => a.id === opts.asset);
   if (!asset) throw new Error(`unknown asset ${opts.asset}`);
   if (!['screenshot', 'recording'].includes(asset.kind)) throw new Error('sanitize masks screenshots and recordings only');
   const video = asset.kind === 'recording';
-  const boxes = JSON.parse(opts.boxes);
+  const boxes = opts.boxes ? JSON.parse(opts.boxes) : [];
+  const crop = opts.crop ? JSON.parse(opts.crop) : null;
+  if (!boxes.length && !crop) throw new Error('sanitize needs --boxes and/or --crop');
+  // Crop and masks are given in ORIGINAL pixels (sanitize always renders
+  // from the restricted original), so they are checked against its size.
+  asset.original.media ||= { width: asset.media.width, height: asset.media.height };
+  const orig = asset.original.media;
+  const inside = (r) => ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k])) && r.x >= 0 && r.y >= 0 && r.w > 0 && r.h > 0 && r.x + r.w <= orig.width && r.y + r.h <= orig.height;
+  if (crop && !(inside(crop) && ['x', 'y', 'w', 'h'].every((k) => Number.isInteger(crop[k])) && crop.w % 2 === 0 && crop.h % 2 === 0)) throw new Error(`--crop must be even-sized integers inside the original (${orig.width}x${orig.height})`);
+  if (!boxes.every(inside)) throw new Error(`every --boxes rectangle must lie inside the original (${orig.width}x${orig.height})`);
   const stage = mkdtempSync(join(tmpdir(), 'mv-sanitize-'));
   try {
     const name = `in${extname(asset.original.file)}`;
     copyFileSync(join(runDir, asset.original.file), join(stage, name));
     const serveUrl = await bundleWith(stage);
     const { renderMedia, renderStill, selectComposition } = requireDeps()('@remotion/renderer');
-    const props = { file: name, width: asset.media.width, height: asset.media.height, boxes, video, durationSec: asset.media.durationSec || 1 };
+    // Always rendered from the restricted original, so masks and crop are
+    // given in original pixels and a re-sanitize never compounds.
+    const props = { file: name, width: orig.width, height: orig.height, boxes, crop, video, durationSec: asset.media.durationSec || 1 };
     const out = runWritePath(runDir, p.assets, `${asset.id}.${video ? 'mp4' : 'png'}`);
     await inDepsCwd(async () => {
       const composition = await selectComposition({ serveUrl, id: video ? 'SanitizeVideo' : 'Sanitize', inputProps: props });
@@ -259,8 +272,9 @@ async function sanitize(opts) {
     if (asset.file !== relative(runDir, out)) rmSync(join(runDir, asset.file), { force: true });
     asset.file = relative(runDir, out);
     asset.sha256 = sha256File(out);
-    asset.sanitized = { boxes, at: new Date().toISOString(), method: `opaque static masks baked into a derivative ${video ? 'video (30 fps, audio removed)' : 'still'}` };
-    if (video) { asset.media = mediaInfo(out, 'recording'); asset.audioPolicy = 'mute'; }
+    asset.sanitized = { boxes, ...(crop ? { crop } : {}), at: new Date().toISOString(), method: `opaque static masks baked into a derivative ${video ? 'video (30 fps, audio removed)' : 'still'}` };
+    asset.media = mediaInfo(out, asset.kind);
+    if (video) asset.audioPolicy = 'mute';
     asset.sensitivity = { status: 'unreviewed', note: 're-inspect the masked derivative, then attest --status redacted' };
     writeJson(p.manifest, manifest);
     appendDecision(runDir, { type: 'sanitize', asset: asset.id, boxes: boxes.length });
@@ -321,7 +335,7 @@ async function renderSnapshot(snap, out) {
   const manifest = readJson(join(snap, 'asset-manifest.json'));
   const preset = project.exportPresets?.[timeline.preset || 'reel'] || {};
   const assets = Object.fromEntries(manifest.assets.map((a) => [a.id, {
-    file: basename(a.file), kind: a.kind, width: a.media?.width, height: a.media?.height, audioPolicy: a.audioPolicy,
+    file: basename(a.file), kind: a.kind, width: a.media?.width, height: a.media?.height, durationSec: a.media?.durationSec, audioPolicy: a.audioPolicy,
   }]));
   const props = { timeline, assets, brand: project.brand || {}, safeZone: preset.safeZone || {} };
   const layout = [];
@@ -352,7 +366,7 @@ async function render(opts) {
   }
   const snap = join(p.snapshots, `r${rev}`);
   const out = join(p.previews, `r${rev}.mp4`);
-  const globals = globalsDigest({ compositionDigest: compositionDigest(), lockDigest: lockDigest(), renderSettings: RENDER_SETTINGS, project, timeline });
+  const globals = globalsDigest({ compositionDigest: compositionDigest(), lockDigest: lockDigest(), renderSettings: RENDER_SETTINGS, project, timeline, musicSha256: manifest.assets.find((a) => a.id === timeline.music?.assetId)?.sha256 ?? null, musicSchedule: timeline.music ? { total: totalFrames(timeline), windows: voiceWindows(timeline, Object.fromEntries(manifest.assets.map((a) => [a.id, a.media?.durationSec]))) } : null });
   const hashes = shotHashes(timeline, manifest);
   if (existsSync(out) || existsSync(snap)) {
     // A revision number names one set of inputs forever. Re-rendering is only
@@ -365,7 +379,7 @@ async function render(opts) {
   }
   // Assets shown, spoken, or cited as claim evidence all travel with the snapshot.
   const evidence = (claims.claims || []).flatMap((c) => (c.evidence || []).filter((e) => e.type === 'asset').map((e) => e.ref));
-  const used = new Set([...timeline.shots.map((s) => s.assetId), ...(timeline.voice || []).map((v) => v.assetId), ...evidence].filter((id) => id && manifest.assets.some((a) => a.id === id)));
+  const used = new Set([...timeline.shots.map((s) => s.assetId), ...(timeline.voice || []).map((v) => v.assetId), timeline.music?.assetId, ...evidence].filter((id) => id && manifest.assets.some((a) => a.id === id)));
   const usedAssets = manifest.assets.filter((a) => used.has(a.id));
   const started = Date.now();
   // Snapshot first, then render from it: what was rendered is exactly what
@@ -444,7 +458,7 @@ function verify(opts) {
   const manifest = readJson(join(snap, 'asset-manifest.json'));
   const assets = new Map(manifest.assets.map((a) => [a.id, a]));
   const keptRecordingAudio = timeline.shots.some((s) => assets.get(s.assetId)?.audioPolicy === 'keep' && assets.get(s.assetId)?.media?.hasAudio);
-  const expectAudio = (timeline.voice || []).length > 0 || keptRecordingAudio;
+  const expectAudio = (timeline.voice || []).length > 0 || keptRecordingAudio || Boolean(timeline.music);
   const audio = { expected: expectAudio, present: Boolean(pr.audio), segments: [] };
   if (expectAudio) {
     ok('QA-AUDIO-STREAM', Boolean(pr.audio), pr.audio ? `audio ${pr.audio.codec_name}` : 'voice declared but no audio stream');
@@ -460,6 +474,50 @@ function verify(opts) {
         const l = levels(samples, Math.floor(from), Math.floor(from + len));
         audio.segments.push({ id: v.id, ...l });
         ok(`QA-VOICE:${v.id}`, l.rmsDb > -40, `voice window RMS ${l.rmsDb.toFixed(1)} dBFS (silent below -40)`);
+      }
+      // With music under the voice, every line must stand clearly above the
+      // music-only passages (measured on the final mix, not assumed from volumes).
+      if (timeline.music && (timeline.voice || []).length) {
+        const durations = Object.fromEntries(manifest.assets.map((a) => [a.id, a.media?.durationSec]));
+        const windows = voiceWindows(timeline, durations);
+        const pad = Math.round(0.4 * timeline.fps);
+        const toS = (f) => Math.floor((f / timeline.fps) * rate);
+        const total = totalFrames(timeline);
+        const musicOnly = [];
+        let cursor = Math.round(0.6 * timeline.fps);
+        for (const [s, e] of [...windows].sort((a, b) => a[0] - b[0])) { if (s - pad > cursor) musicOnly.push([cursor, s - pad]); cursor = Math.max(cursor, e + pad); }
+        if (total - Math.round(1.2 * timeline.fps) > cursor) musicOnly.push([cursor, total - Math.round(1.2 * timeline.fps)]);
+        const voiceDb = Math.min(...audio.segments.map((x) => x.rmsDb));
+        const musicSamples = musicOnly.filter(([a, b]) => b - a >= 6).map(([a, b]) => levels(samples, toS(a), toS(b)).rmsDb);
+        const musicDb = musicSamples.length ? Math.max(...musicSamples) : null;
+        // Source-level check, independent of the mix: each voice file's own
+        // level against the music file's level at the ducked gain. A silent
+        // voice asset cannot hide behind music that happens to be loud.
+        const m = { ...MUSIC_DEFAULTS, ...timeline.music };
+        const musicAsset = manifest.assets.find((a) => a.id === m.assetId);
+        // The music that actually plays under each line: the same (looped)
+        // span of the music file, at the ducked gain.
+        const music = pcmSamples(join(snap, musicAsset.file));
+        const musicLen = music.samples.length;
+        const underLine = (startFrame, endFrame) => {
+          const a = Math.floor((startFrame / timeline.fps) * music.rate);
+          const b = Math.floor((endFrame / timeline.fps) * music.rate);
+          let sq = 0;
+          for (let i = a; i < b; i += 1) { const x = music.samples[i % musicLen]; sq += x * x; }
+          return 20 * Math.log10(Math.max(Math.sqrt(sq / Math.max(1, b - a)), 1e-9) / 32768) + 20 * Math.log10(Math.max(m.duckVolume, 1e-6));
+        };
+        const starts2 = new Map(shotSpans(timeline).map((s) => [s.id, s.start]));
+        const voiceSrc = (timeline.voice || []).map((v) => {
+          const asset = manifest.assets.find((a) => a.id === v.assetId);
+          const s = starts2.get(v.shotId) + (v.startFrame || 0);
+          const voiceDbSrc = levels(pcmSamples(join(snap, asset.file)).samples).rmsDb;
+          return { id: v.id, voiceDb: voiceDbSrc, musicUnderDb: underLine(s, s + voiceFrames(asset, timeline.fps)) };
+        });
+        const weakest = voiceSrc.reduce((w, x) => (x.voiceDb - x.musicUnderDb < w.voiceDb - w.musicUnderDb ? x : w), voiceSrc[0]);
+        audio.mix = { quietestVoiceDb: voiceDb, loudestMusicOnlyDb: musicDb, musicOnlyWindows: musicOnly.length, perLine: voiceSrc };
+        if (musicDb === null) ok('QA-MIX', false, 'no music-only passage long enough to measure the music level; the voice/music balance is unverified');
+        else ok('QA-MIX', voiceDb - musicDb >= 6, `final mix: quietest voice line ${voiceDb.toFixed(1)} dBFS vs loudest music-only passage ${musicDb.toFixed(1)} dBFS (needs ≥ 6 dB)`);
+        ok('QA-MIX-SOURCE', weakest.voiceDb - weakest.musicUnderDb >= 10, `per line, from the source files: tightest is ${weakest.id}, voice ${weakest.voiceDb.toFixed(1)} dBFS vs the music playing under it at ducked gain ${weakest.musicUnderDb.toFixed(1)} dBFS (needs ≥ 10 dB)`);
       }
       const gaps = silenceFindings(silences(mp4), pr.durationSec);
       audio.silentGaps = gaps;
@@ -706,9 +764,9 @@ function pkg(opts) {
 const HELP = `marketing-video CLI
   preflight [--install]                 capabilities; --install fetches pinned deps + headless browser into the user cache
   init --project <id> --run <id> [--root <dir>]
-  ingest --run <dir> --file <path> --id <id> --kind screenshot|recording|logo|generated|voice --method manual|automated|screenshot|provided|generated --origin <text> [--url --environment --scenario <sha256> --provider <p> --text <spoken words, voice only> --text-verified-by user (after the user listened) --from <s> --to <s> (cut a voice take) --rights yes|no|unknown --rights-source --license --audio keep|mute --cost-amount --cost-unit --approval <id>]
+  ingest --run <dir> --file <path> --id <id> --kind screenshot|recording|logo|generated|voice|music --method manual|automated|screenshot|provided|generated --origin <text> [--url --environment --scenario <sha256> --provider <p> --text <spoken words, voice only> --text-verified-by user (after the user listened) --from <s> --to <s> (cut a voice take) --placeholder (a stand-in: keeps delivery draft) --rights yes|no|unknown --rights-source --license --audio keep|mute --cost-amount --cost-unit --approval <id>]
   attest --run <dir> --asset <id> --status clean|redacted|contains-sensitive --method <how> [--frames <n> --notes]
-  sanitize --run <dir> --asset <id> --boxes '[{"x":0,"y":0,"w":10,"h":10}]'
+  sanitize --run <dir> --asset <id> [--boxes '[{"x":0,"y":0,"w":10,"h":10}]'] [--crop '{"x":0,"y":0,"w":100,"h":100}']   (original pixels)
   voice --run <dir> --id <id> --provider say --text <line> [--voice <name> --rate <wpm>]
   check --run <dir>
   render --run <dir> [--force]          --force re-renders identical inputs only

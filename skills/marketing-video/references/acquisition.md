@@ -7,7 +7,8 @@ provenance, rights and a privacy status bound to its bytes.
 
 | Source | How | Notes |
 |---|---|---|
-| Manual recording (MP4/MOV) | `ingest --kind recording --method manual` | ask whether its audio is wanted (`--audio keep`); default mute |
+| Manual recording (MP4/MOV) | `ingest --kind recording --method manual`, then `sanitize --crop` to the app window | ask whether its audio is wanted (`--audio keep`); default mute. For vertical video, ask for a capture from a narrower browser window (about 1280 px wide or less) |
+| Music | `ingest --kind music --method provided\|generated` | rights evidence required |
 | Screenshot (PNG/JPG/WebP) | `ingest --kind screenshot --method manual\|screenshot` | animated by camera moves only |
 | Logo, product imagery | `ingest --kind logo --method provided` | rights from the user |
 | Generated scene | `ingest --kind generated --method generated` with cost and approval | labeled on screen; never product UI |
