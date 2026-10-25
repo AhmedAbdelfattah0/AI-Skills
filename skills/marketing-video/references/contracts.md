@@ -35,7 +35,7 @@ ReviewReport = `reports/r<N>/qa.json` + the `review-<reviewer>.json` records + c
 `audience`, `tone`, `prohibitedClaims` (case-insensitive substrings that block
 any text or voice line), `channels`, `exportPresets.<name>` (`width`,
 `height`, `fps`, `safeZone` in pixels from each edge), `execution` (the
-provider policy below), `providers`, `disclosureLabels` (the only texts a timeline disclosure may use — it is never free text), `toolRights.<tool>` (`commercialUse:
+provider policy below), `providers`, `disclosureLabels` (the only texts a timeline disclosure may use — it is never free text), `providers.<name>.browserAutomation` (`status: permitted|ambiguous|prohibited|unknown`, `evidence` [{url, date, clause}], `conditions`, `decidedBy`, `decidedAt`; a user's session approval never changes it), `toolRights.<tool>` (`commercialUse:
 yes|no|unknown`, `license`, `source`), `captureOrigins`.
 
 ```json
@@ -115,14 +115,14 @@ revision edits shots in place and increments `revision`, setting
 ## approvals.json
 
 ```json
-{ "id": "ap-1", "type": "spend|final-video", "decidedBy": "user",
+{ "id": "ap-1", "type": "spend|final-video|provider-ui-session", "decidedBy": "user",
   "quote": "<the user's words>", "provider": "…", "scope": "…",
   "unit": "USD|credits", "cap": 10, "reserved": 0, "consumed": 0,
   "retriesMax": 2, "expires": "…", "status": "active|needs-reconciliation|closed",
   "revision": 3, "mp4Sha256": "…" }
 ```
 
-Write entries with `record-approval`, and only after the user says so; their
+A `provider-ui-session` entry (written by hand until the CLI supports it) names one provider, one approved generation and its date; it is consumed by that session. Write other entries with `record-approval`, and only after the user says so; their
 words go in `quote`. A `final-video` entry is bound to the MP4 hash watched.
 Reviews are `reports/r<N>/review-<reviewer>.json`, written by `record-review`.
 

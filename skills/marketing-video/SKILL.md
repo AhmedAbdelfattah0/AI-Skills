@@ -100,7 +100,7 @@ Report this honestly; never claim an unbuilt path works.
 | Egyptian Arabic voice | via a hand-generated take; automated generation needs a paid plan with commercial rights |
 | Natural-language revision with shot-level regression evidence | built; tested once on the generic fixture (sampled frames, audio not compared) |
 | Automated browser capture (Playwright) | not built yet |
-| Browser-operated generative/video provider | not built; per-provider, with the user completing login/CAPTCHA |
+| Browser-operated provider (voice, generative video) | a first-class execution path beside local, free API and paid API; not built for any provider yet. Each provider is authorized from its own recorded terms status (`permitted`, or `ambiguous` with a scoped user session approval), never by blanket rule — see production |
 | Recording redaction | static masks (browser bars, account menus) built; moving masks not built |
 | Music bed | not built |
 | Crossfade between shots | not built; `fade` fades in from black |
