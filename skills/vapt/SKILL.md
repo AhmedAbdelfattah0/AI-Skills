@@ -302,7 +302,7 @@ ship-ticket's design-parity artifact check.
 
 `/vapt.audit` runs the same rules against the base branch, for surfaces that
 shipped before this skill existed. It is **not** `security-audit`: that skill
-reads the codebase in waves and reasons about it. This one runs it and attacks it,
+reads the codebase source-first, hunting by coverage ledger, and verifies each finding independently. This one runs it and attacks it,
 and its output is tests. Run both — they catch different things.
 
 Work in **risk-ordered waves**, committing tests as you go so a stopped run keeps

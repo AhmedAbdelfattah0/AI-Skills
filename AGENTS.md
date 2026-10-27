@@ -177,7 +177,7 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
 
 - **`name:`** — must match the folder.
 - **`description:`** — a trigger-rich blurb (often listing literal phrases and slash-commands like
-  `/sec.audit`, `/cq.init`). This is what Claude Code matches on to decide whether to load the skill, so
+  `/vapt.audit`, `/cq.init`). This is what Claude Code matches on to decide whether to load the skill, so
   it is dense with "ALWAYS trigger when…" language by design, not prose.
 - **body** — the actual instructions/workflow the skill runs.
 - **`references/`** (optional) — supporting docs loaded on demand (e.g. `code-quality/references/*.md`

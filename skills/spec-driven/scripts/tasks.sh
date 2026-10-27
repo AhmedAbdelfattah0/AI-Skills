@@ -21,7 +21,7 @@
 # Write tasks.md directly using the format above
 
 # --- spec root -------------------------------------------------------------
-# `.specs/` is the library-wide standard (ship-ticket and security-audit already
+# `.specs/` is the library-wide standard (ship-ticket and vapt already
 # use it). A project that already has the legacy `.spec/` keeps using it, so
 # existing repos are never orphaned by the rename.
 SPEC_ROOT=".specs"

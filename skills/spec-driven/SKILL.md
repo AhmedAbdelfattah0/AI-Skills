@@ -82,8 +82,8 @@ Confirm to user: "✅ Constitution written to `<SPEC_ROOT>`/constitution.md — 
 ### Spec root — `.specs/`, with `.spec/` honoured
 
 Artifacts live under **`.specs/`**, the library-wide convention shared with
-`ship-ticket` (`.specs/plans/`, `.specs/design-parity/`) and `security-audit`
-(`.specs/security-audit/`). One home, not two directories a single character
+`ship-ticket` (`.specs/plans/`, `.specs/design-parity/`) and `vapt`
+(`.specs/vapt/`). One home, not two directories a single character
 apart.
 
 The bundled scripts resolve it: **an existing `.spec/` wins**, so a project

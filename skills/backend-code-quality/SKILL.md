@@ -571,7 +571,7 @@ Load only the one the task needs.
 - Frontend code — `angular-code-quality` owns components/templates/state.
 - Test-code review — `test-quality` owns TEST-* (this skill only carries the wiring row).
 - Docs accuracy — `docs-accuracy` owns DOC-* (wiring row only).
-- Security *audits* — `security-audit` owns whole-surface scans and runtime/deployment checks; this skill enforces BE-SEC-*/BE-AUTH-* on the diff.
+- Security *audits* — `security-audit` owns whole-surface scans (deployment facts it cannot see become `needs_validation`); this skill enforces BE-SEC-*/BE-AUTH-* on the diff.
 - Run linters/tests — judgment layer above the tooling, not a replacement.
 
 ## Success criteria
