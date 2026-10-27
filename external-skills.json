@@ -1,0 +1,12 @@
+{
+  "_comment": "Skills vendored unmodified from other repositories. scripts/sync-external.mjs refreshes them; .github/workflows/sync-external.yml runs it daily. Never edit the vendored folders by hand: the next sync overwrites them.",
+  "skills": [
+    {
+      "name": "security-audit",
+      "repo": "https://github.com/cloudflare/security-audit-skill.git",
+      "ref": "main",
+      "path": "skills/security-audit",
+      "license": "LICENSE"
+    }
+  ]
+}

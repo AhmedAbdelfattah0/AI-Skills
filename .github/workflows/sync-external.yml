@@ -1,0 +1,33 @@
+name: sync-external-skills
+
+# Keeps vendored third-party skills (external-skills.json) on their upstream's
+# latest commit. Runs daily; commits to main only when upstream changed and the
+# library still validates. Local installs then pick it up through `update --auto`.
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Sync external skills
+        run: node scripts/sync-external.mjs
+      - name: Validate library
+        run: node scripts/cli.mjs validate
+      - name: Commit if upstream changed
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then echo "No upstream changes."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(external): sync vendored skills from upstream"
+          git push

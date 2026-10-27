@@ -22,3 +22,5 @@ jobs:
         run: node --test skills/project-audit/scripts/check-continuity.test.mjs
       - name: Test marketing-video gates
         run: node --test skills/marketing-video/scripts/gates.test.mjs skills/marketing-video/scripts/qa.test.mjs
+      - name: Test vendored security-audit validators
+        run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs

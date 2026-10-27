@@ -225,6 +225,7 @@ Claude-only.
 | project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
 | researcher | — |
 | security | — |
+| security-audit | vendored from cloudflare/security-audit-skill; auto-synced daily (`scripts/sync-external.mjs`) |
 | self-healing | — |
 | session-logger | — |
 | session-restore | — |
