@@ -20,7 +20,7 @@ description: |
 Secure-by-default coding for fast-moving work — the guardrails that stop a
 vibecoded app from shipping an obvious vulnerability. Apply these **while
 writing**, without being asked. For a full audit of an existing codebase (waves,
-severity calibration, tracked findings), use the `security-audit` skill instead.
+severity calibration, tracked findings), use the `security-audit` skill instead (installed from cloudflare/security-audit-skill).
 
 ## When this applies
 
@@ -93,7 +93,7 @@ Network    □ HTTPS only  □ CORS restricted (not *)  □ CSP/X-Frame-Options 
 
 ## What this skill does not do
 
-- Full-codebase security audits — use `security-audit` (wave scanning, severity
+- Full-codebase security audits — use `security-audit` (Cloudflare's coverage-led audit, severity
   calibration, `.specs/` tracking).
 - Backend architecture/tenancy enforcement — that's `backend-code-quality` (`BE-SEC-*`).
 - Run scanners or dependency audits — it's the judgment layer, not the tooling.

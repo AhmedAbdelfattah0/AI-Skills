@@ -233,7 +233,7 @@ others:
 |---|---|---|
 | `security` | while writing | secure-by-default patterns, refuse-to-generate list |
 | `backend-code-quality` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, in ship-ticket's rule pass | static rule IDs — *the control exists in the file* |
-| `security-audit` (`.specs/security-audit/`) | whole codebase, on request | wave-based static reading, spec-tracked findings |
+| `security-audit` (external: cloudflare/security-audit-skill; output outside the repo) | whole codebase, on request | coverage-ledger hunting waves, independently verified findings, validated `findings.json` |
 | `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`) | after the code is written, in ship-ticket's PROVE phase | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
 
 `vapt` is scoped by **trust boundaries, not files** (a pure formatter has no
@@ -246,7 +246,7 @@ staging**; that rule of engagement is load-bearing, not boilerplate.
 
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
 library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
-(`.specs/vapt/`), `security-audit` (`.specs/security-audit/`), `project-audit`
+(`.specs/vapt/`), `security-audit` (external Cloudflare skill), `project-audit`
 (`.specs/project-audit/`), `ux-audit` (`.specs/ux-audit/`), and `spec-driven`
 (`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an

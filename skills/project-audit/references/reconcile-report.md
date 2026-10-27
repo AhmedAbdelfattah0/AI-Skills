@@ -229,7 +229,7 @@ of the category or the name of the check that failed.
   crosses a tenant or privilege boundary that administrator should not cross.
 - A `SUSPECTED` finding states the severity it would have if confirmed. It is
   never `release_blocking`, and the report shows it in its own section.
-- security-audit's exploitability scale and the specialists' tiers are kept in
+- security-audit's severity (confirmed records only) and the specialists' tiers are kept in
   `source_severity`. They inform the severity; they are not copied into it
   without checking reachability in this system.
 

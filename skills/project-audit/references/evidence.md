@@ -130,15 +130,13 @@ is pre-existing by nature. They report; they do not fix:
 - **test-quality** runs in review mode over each component's tests.
 - **docs-accuracy** runs in review mode over each `D` surface, verifying claims
   against the pinned source of the repositories they describe.
-- **security-audit** runs its audit command only, never its specify, plan,
-  tasks, implement or fix commands. Invoke it from the evidenced component or
-  repository root in the audit worktree, and only when its method supports that
-  layout and stack. The files are on disk, so never enter its chat or paste
-  mode, and never ask the user to paste repository files. Its report is copied
-  into `evidence/<artifact_key>/` for the logical ID
-  `security-audit:<component-id>`. Compare what it read with the assigned paths.
-  Surfaces it does not support, or did not reach because of its wave stop, go to
-  the direct-inspection fallback in the spine's routing table. They stay
+- **security-audit** (installed from cloudflare/security-audit-skill) runs in
+  full audit mode as a scoped run over the evidenced component's paths. It
+  writes outside the repository; copy its `findings.json`, `coverage-ledger.json`
+  and `REPORT.md` into `evidence/<artifact_key>/` for the logical ID
+  `security-audit:<component-id>`. Compare its ledger with the assigned paths.
+  Units it marks `out_of_scope`, `deferred` or `blocked` go to the
+  direct-inspection fallback in the spine's routing table. They stay
   `DEGRADED`, and are never filled in with guesses.
 
 Architecture, contract, operations, data store, integration and constraint rows
