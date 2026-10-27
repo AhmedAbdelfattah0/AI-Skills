@@ -247,8 +247,7 @@ staging**; that rule of engagement is load-bearing, not boilerplate.
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
 library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
 (`.specs/vapt/`), `security-audit` (external Cloudflare skill), `project-audit`
-(`.specs/project-audit/`), `ux-audit` (`.specs/ux-audit/`), and `spec-driven`
-(`.specs/constitution.md`, `.specs/features/<name>/`). `spec-driven` historically
+(`.specs/project-audit/`), and `ux-audit` (`.specs/ux-audit/`). The removed `spec-driven` skill historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
 working while new ones converge. **Never introduce a third root**, and when
@@ -550,9 +549,6 @@ may remain local to ship-ticket.
 Most skills are pure `SKILL.md`. These use scripts in different ways — mirror the
 matching pattern when extending them:
 
-- **`spec-driven`** — *bundles* `scripts/*.sh` in the repo (`specify.sh`, `plan.sh`, `tasks.sh`, …) and
-  its `setup.sh` copies them into a target project's `.claude/skills/spec-driven/scripts/` at first use.
-  Scripts create files; the skill only decides the content.
 - **`nn-guard`** — *generates* its script into the target project at install time, writing
   `.claude/hooks/nn-guard.sh` (a `mv`/`chmod` in the `SKILL.md`), then wiring it as a PostToolUse hook
   and a CI check. Nothing is bundled; the invariant-3 check passes because the `SKILL.md` creates the
