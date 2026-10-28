@@ -346,6 +346,12 @@ rather than asserted — and a **named human approver** recorded in the plan the
 user approved. CI validates the approver, the date and the search evidence, and
 fails closed without them.
 
+**A screen with no reference gets a sketch in the plan.** Put a plain ASCII
+layout of every no-reference screen (labels in plain words, column headers,
+where each action lives) in the approval message, and treat the human's answer
+as the design. Building an unsketched screen and redesigning it after review
+costs a full repair cycle.
+
 **Missing, unparseable or internally inconsistent metadata fails closed** to
 `ui_required: true` with no artifact, which is a FAIL.
 

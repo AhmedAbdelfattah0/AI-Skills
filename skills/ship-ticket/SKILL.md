@@ -255,6 +255,20 @@ PROVE and REVIEW have separate limits:
 Read-only checks and execution-record appends do not spend either limit. A Design
 Contract expansion is never counted as a repair; it is **WAIT_FOR_USER**.
 
+These limits also bind an orchestrator running several tickets: never start a
+second review round, a third design-parity grade, or a fresh full-gate run per
+amend. The finite sequence is:
+
+| Check | Runs | Re-runs only when |
+|---|---|---|
+| Full repository gates (build, all tests, DB suites) | once, on the final candidate right before SHIP | SQL, schema or server code changed after that run |
+| Scoped checks (lint/test/build of the touched apps + static guards) | after a UI-only or docs-only delta | — |
+| Design-parity grade | once after BUILD; after the repair only the changed elements | never a third time; the human approver may sign from screenshots instead |
+| Confirmation | once, on repaired items only | its findings get a targeted fix, never a new round |
+
+When reporting progress, name the step the ticket is on so the human can see the
+sequence is finite.
+
 ## Companions and degradation
 
 Check a CLI by executing its version command. Check a skill from the available
