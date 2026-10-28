@@ -255,19 +255,21 @@ PROVE and REVIEW have separate limits:
 Read-only checks and execution-record appends do not spend either limit. A Design
 Contract expansion is never counted as a repair; it is **WAIT_FOR_USER**.
 
-These limits also bind an orchestrator running several tickets: never start a
-second review round, a third design-parity grade, or a fresh full-gate run per
-amend. The finite sequence is:
+These limits apply per ticket and REVIEW execution, including multi-ticket
+orchestration. An explicitly authorized retry follows Resume; it is never started
+automatically. The finite sequence is:
 
 | Check | Runs | Re-runs only when |
 |---|---|---|
-| Full repository gates (build, all tests, DB suites) | once, on the final candidate right before SHIP | SQL, schema or server code changed after that run |
-| Scoped checks (lint/test/build of the touched apps + static guards) | after a UI-only or docs-only delta | — |
-| Design-parity grade | once after BUILD; after the repair only the changed elements | never a third time; the human approver may sign from screenshots instead |
-| Confirmation | once, on repaired items only | its findings get a targeted fix, never a new round |
+| Repository checks | all required locally runnable commands in PROVE, before REVIEW | after a consolidated repair, rerun commands whose direct or transitive inputs changed; reuse unchanged evidence |
+| Scope selection | derive affected checks from repository commands and dependency relationships | include shared libraries, config, dependencies/lockfiles, tests/fixtures, generators and base/rebase changes; UI/docs labels alone do not establish scope; if scope cannot be established, run the full required suite |
+| Confirmation | once after REVIEW repair, or to resolve a material review disagreement; checks findings, dispositions and their dependency-closed affected surface | a new actionable finding or failed check is terminal **FAIL**; no further candidate edits in this execution |
+| Design parity | one complete comparison by REVIEW's independent primary workflow; after UI repair, one dependency-closed impact-slice comparison within confirmation | no later parity dispatch; screenshots supplement evidence for the human approver, they never replace the comparison or prior approval of deviations |
 
-When reporting progress, name the step the ticket is on so the human can see the
-sequence is finite.
+Complete required checks before REVIEW. SHIP verifies that their evidence still
+applies to the immutable reviewed candidate; it does not schedule a fresh full run
+merely because shipping is next. When reporting progress, name the step the
+ticket is on so the human can see the sequence is finite.
 
 ## Companions and degradation
 
