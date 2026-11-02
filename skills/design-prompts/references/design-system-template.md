@@ -26,7 +26,7 @@ with light borders, no decorative effects: a data-heavy internal tool used all d
 {Name every group with values: brand scale, primary/hover/soft/on-primary, accent, neutrals (bg,
 sunken, surface, raised, tinted, text x4, border x3), dark surfaces, status x5 each with
 bg/text/border, CATEGORY colours for the product's core object types, type families + scale +
-leading + weights (per language if bilingual), 4px space scale, radius hierarchy, elevation (per the
+leading + weights (per language, for every language the product ships), 4px space scale, radius hierarchy, elevation (per the
 finish: flat = borders and tints; soft = layered shadows), focus ring, motion (durations and easings
 from motion-and-finish.md §2, only the tiers the direction uses), RTL font switch, reduced motion.}
 
@@ -54,8 +54,8 @@ elevation/motion, buttons, inputs, forms (a realistic domain form), status map, 
 feedback, overlays, navigation (each shell), domain components, imagery, and a motion screen where
 each chosen behaviour can be triggered, including the reduced-motion version.}
 
-## Translation glossary (bilingual only)
-{25-40 rows of the customer vocabulary reused across sections.}
+## Translation glossary (multi-language only)
+{25-40 rows per additional locale of the customer vocabulary reused across sections.}
 
 ## Proposals (not to build yet)
 {Anything new: fonts, colours outside the brand contract, components the product never had.}

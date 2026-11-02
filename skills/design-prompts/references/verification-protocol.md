@@ -22,7 +22,7 @@ Ask the user to check, or check yourself when you can open the result. Each phas
 **After each section prompt (03 on)**
 
 *G1: one design system*
-- [ ] Only design-system components and tokens appear; no new colours, buttons, shadows or status tones.
+- [ ] Shared UI uses design-system components and tokens; section-only components (the adapter's section component file or artboard) are built from design-system primitives and tokens. No new colours, buttons, shadows or status tones.
 - [ ] Every status uses the STATUS map tone.
 - [ ] The section uses only approved variants.
 - [ ] Nothing from Proposals was built.
@@ -39,7 +39,7 @@ Ask the user to check, or check yourself when you can open the result. Each phas
 - [ ] Every shared journey in 02-APP-MAP.md runs end to end and keeps its data after navigating away and back. Until each is run, G2 is **pending**.
 - [ ] Every screen key in 02-APP-MAP.md is built (no placeholders left) and reachable.
 
-Record the outcome per prompt and at the gate:
+`VERIFICATION.md` holds the phase checklists above (after 01, after 02, per section, final assembly gate), copied as they are, followed by this results table. Record the outcome per prompt and at the gate:
 
 ```markdown
 | Prompt | Date | Tool / release | G1 | G2 | Notes |

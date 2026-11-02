@@ -1,8 +1,8 @@
 # Adapter: code generators (React or HTML prototypes in one project)
 
-For tools that produce code: Claude Code, v0, Lovable, Bolt, a plain Claude artifact page, or any generator that writes files. The design is built as **one project** with one design-system module that every screen imports and one router that connects every screen. This replaces the earlier folder-per-surface format, whose copied design-system files and unlinked folders broke both gates (core-contract.md §1).
+For tools that produce code: Claude Code, v0, Lovable, Bolt, a plain Claude artifact page, or any generator that writes files. The design is built as **one project** with one design-system module that every screen imports and one router that connects every screen. It replaces the earlier format that gave each surface its own folder with copied design-system files; those copies and unlinked folders broke both gates (core-contract.md §1).
 
-Status: the old folder-per-surface variant was proven to preview; this one-project variant has **not yet been run end to end** (verification-protocol.md §2). Record it as untested until it passes.
+Status: the earlier format was proven to preview; this one-project variant has **not yet been run end to end** (verification-protocol.md §2). Record it as untested until it passes.
 
 ## Pick the mechanics
 
@@ -107,4 +107,4 @@ In a real stack, the equivalents are: the route table with placeholder routes, n
 - [ ] No design-system value or shared component was copied into the section
 - [ ] Every data screen honours the State switch
 - [ ] Responsive at 375, 768 and 1440px; tokens only
-- [ ] Bilingual: every string from `t()`, `dir` flips, logical CSS only, numbers LTR
+- [ ] Multi-language: every string from `t()`, `dir` flips, logical CSS only, numbers LTR

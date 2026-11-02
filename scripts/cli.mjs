@@ -1294,7 +1294,8 @@ function cmdValidate() {
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
   [/\bcopied unchanged\b/gi, 'design-prompts builds the design system once in the destination and references it; nothing is copied per section', ['design-prompts']],
-  [/\bFolder per surface\b/gi, 'design-prompts assembles every section into one container (core-contract G2)', ['design-prompts']],
+  [/\bcopy\b(?:(?!\.\s)[^\n]){0,200}?\bunchanged\b/gi, 'the design system is referenced from the one container, never copied into a section', ['design-prompts']],
+  [/\bfolder[- ]per[- ]surface\b/gi, 'design-prompts assembles every section into one container (core-contract G2)', ['design-prompts']],
   [/\{Project\}-\{Surface\}/g, 'per-surface containers were replaced by one container per product', ['design-prompts']],
   [/\{Project\}-Foundation\b/g, 'the design system is 01-DESIGN.md, built once in the destination', ['design-prompts']],
   [/\bProduces ONE (?:folder|file)\b/g, 'prompts extend the one container named in their Binding block', ['design-prompts']],

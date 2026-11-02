@@ -30,6 +30,8 @@ WHAT A PROMPT FILE MUST CONTAIN (in this order):
 12. ## Deliverable: per the adapter, "deliver only these files", the adapter's verification lines, and the G1/G2 checks from verification-protocol.md §1.
 13. Handshake: 'After delivery, reply: "<Section> complete. Ready for prompt NN+1 (<next>)."'
 
+NON-SCREEN DELIVERABLES (marketing site, transactional communications): keep items 1-5 and 8-13; replace items 6-7 with the structure of SKILL.md Appendix D (page sections, each site page one screen key from the map) or Appendix E (template table per channel; the review board is one screen key). Never invent screen keys for sections or templates.
+
 DEPTH: meet {skill path}/references/depth-standard.md and run its §4 self-check on your files before replying.
 
 MOTION: meet {skill path}/references/motion-and-finish.md (§1 required outcomes, the behaviours 01-DESIGN.md selected) and run its §6 self-check before replying.

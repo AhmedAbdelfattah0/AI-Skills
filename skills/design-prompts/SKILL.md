@@ -194,7 +194,7 @@ Each section brief MUST contain:
 
 Before saving, run the self-checks in [depth-standard](references/depth-standard.md) §4, [motion-and-finish](references/motion-and-finish.md) §6 and [verification-protocol](references/verification-protocol.md) §3 on every prompt (including ones written by delegated agents) and fix anything that fails.
 
-In Claude Code, save to `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. The `README.md` has: how to run · tool, adapter and its tested status · prompt/section/language table · design direction · gate status · Decisions for the PO (every proposal and behaviour change, grouped) · assets to upload (self-hosted fonts, logos the tool cannot fetch). Add an empty `VERIFICATION.md` with the table from [verification-protocol](references/verification-protocol.md) §1.
+In Claude Code, save to `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. The `README.md` has: how to run · tool, adapter and its tested status · prompt/section/language table · design direction · gate status · Decisions for the PO (every proposal and behaviour change, grouped) · assets to upload (self-hosted fonts, logos the tool cannot fetch). Add a `VERIFICATION.md` with the phase checklists and the empty results table from [verification-protocol](references/verification-protocol.md) §1.
 
 End with usage instructions:
 > "Open one new {container} and paste 00 first, then 01, 02 and the rest in order, all into that same {container}. As soon as your tool shows the {container}'s link, write it into the Binding blocks. After each prompt, tick that phase's checks in VERIFICATION.md before running the next."
@@ -210,6 +210,7 @@ Use this when the user wants to add or modify ONE feature in an existing design.
 ## Phase 1: Update Discovery
 
 1. **Which product, which container, which section?** Ask for `01-DESIGN.md` and `02-APP-MAP.md`. If they don't exist, establish before writing anything: the container (its link or path), where the design system lives and its version or date, the existing screen keys around the feature, and which section owns them. Read them from the container or the user's files; ask for what you cannot read. **Do not write the update until all four are known.** If the design has no shared design system or is split across containers, say so: the update would deepen the problem, so propose fixing that first (a greenfield 01 and 02 for the existing design).
+   Also ask **which tool the design lives in** and check it against the adapter table. If it has no adapter (or the user isn't sure), the update is delivered as a plan only (Phase 4).
 2. **What's being added/changed?** Feature name + 2-sentence purpose
 3. **Why now / what's the gap?** What exists vs. what's missing
 4. **Where does it go?** Nav placement, parent screen, screen key
@@ -235,6 +236,8 @@ In Claude Code, save next to the set (`docs/design-prompts/updates/<feature-slug
 
 End with:
 > "Paste this into the same {container} where the design lives. It adds just this feature."
+
+**No adapter for the design's tool:** deliver the brief as a plan only, without an adapter header or the paste line above, and say plainly that an adapter has to be written and tested first ([verification-protocol](references/verification-protocol.md) §2).
 
 ---
 
@@ -326,7 +329,9 @@ Reply with: "Oriented. Ready for prompt 01 (design system)."
 
 ---
 
-> **Appendices B-G give the page-content guidance per kind of section.** Every one is written as a bound section brief: it carries the header, Binding block and the 13 items from Phase 4; screens are screen keys from `02-APP-MAP.md`; files or artboards follow the adapter. Separate deliverables (D, E, G) still use `01-DESIGN.md` and are listed in the app map.
+> **Appendices B-G give the page-content guidance per kind of section.** Every one carries the header, the Binding block and the adapter's files or artboards, uses `01-DESIGN.md`, and is listed in `02-APP-MAP.md`.
+> - **Screen briefs (B, C, F, G):** the 13 items from Phase 4; screens are screen keys from `02-APP-MAP.md`.
+> - **Non-screen deliverables (D, E):** the items from Phase 4 that apply, with the screen list and screen details replaced by the appendix's own structure: D by its page sections (each page of the site is one screen key in the map), E by its template table per channel (the review board is one screen key). Do not invent screen keys for sections or templates; links to the app still use the app's screen keys.
 
 ## Appendix B — Primary Application Section
 

@@ -41,6 +41,8 @@ Define only the tiers the direction uses; values are defaults to adjust per bran
 | `--dur-fast` | 180-200ms | fades, label in/out, tooltips, icon swaps |
 | `--dur-base` | 300-350ms | indicators moving, width/height changes, drawers, sheets |
 | `--dur-slow` | 450-600ms | screen-level entrance, large layout shifts, celebratory moments |
+| `--dur-highlight` | ~2s | a "just changed" highlight fading out (informational, not an interaction) |
+| `--stagger-step` | 30-50ms | delay between items entering in sequence; `expressive` or `rich` only |
 | `--ease-standard` | `cubic-bezier(.4,0,.2,1)` | most movement |
 | `--ease-out` | `cubic-bezier(0,0,.2,1)` | things entering |
 | `--ease-in` | `cubic-bezier(.4,0,1,1)` | things leaving |
@@ -48,7 +50,7 @@ Define only the tiers the direction uses; values are defaults to adjust per bran
 
 Rules:
 - **Interaction transitions** (a control responding to the user) use the easing tokens, never `linear` or the bare `ease` keyword, and last at most 600ms.
-- **Continuous or informational animation** is exempt from that cap: spinners and indeterminate progress may be `linear`; a "just changed" highlight may fade over ~2s; a toast's countdown bar runs for its timeout.
+- **Continuous or informational animation** is exempt from that cap: spinners and indeterminate progress may be `linear`; a "just changed" highlight may fade over `--dur-highlight`; a toast's countdown bar runs for its timeout.
 - Prefer animating `transform` and `opacity`. Animate width or height only for the container actually being resized, or change it instantly.
 - On constrained environments, no blur or translucent backgrounds.
 
@@ -66,8 +68,8 @@ Rules:
 | | Success briefly morphs to a check; hover lift. | mood |
 | **Cards** | Clickable cards: cursor, hover tint or one elevation step, focus ring; selected: border plus tint. | default |
 | | Hover lift of 2px. | mood |
-| **Lists and tables** | Row hover tint; a newly added or edited row highlights then fades over ~2s; removed rows collapse their height; skeletons in the layout of the real rows. | default |
-| | Rows enter with a 30-50ms stagger (first ~8 rows, first load only). | mood |
+| **Lists and tables** | Row hover tint; a newly added or edited row highlights then fades over `--dur-highlight`; removed rows collapse their height; skeletons in the layout of the real rows. | default |
+| | Rows enter staggered by `--stagger-step` (first ~8 rows, first load only). | mood |
 | **Modals and dialogs** | Backdrop fades; panel scales from ~0.96 and fades in at `--dur-base` `--ease-out`, leaves faster with `--ease-in`; phone: bottom sheet sliding up. | default |
 | | Drag the sheet down to dismiss (changes behaviour: Proposal; never on destructive confirmations). | mood |
 | **Drawers and side panels** | Slide from their logical `inline-end` edge (RTL mirrors); content fades in after the panel arrives. | default |
@@ -127,7 +129,7 @@ Weak:
 > A table of orders. Show loading state.
 
 Strong:
-> Orders table: row hover tint at `--dur-instant`. Loading: 8 skeleton rows matching real column widths (static under reduced motion). A row whose status changes cross-fades its StatusPill and shows a tint that fades over 2s.
+> Orders table: row hover tint at `--dur-instant`. Loading: 8 skeleton rows matching real column widths (static under reduced motion). A row whose status changes cross-fades its StatusPill and shows a tint that fades over `--dur-highlight`.
 
 ## 6. Self-check
 
