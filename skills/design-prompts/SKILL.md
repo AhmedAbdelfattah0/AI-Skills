@@ -2,10 +2,12 @@
 name: design-prompts
 description: |
   Generates structured design prompts for any digital product (SaaS, e-commerce,
-  content, marketplace, mobile, dashboard, marketing site, …) in two modes:
-  GREENFIELD (a numbered prompt set for a new design system — master orientation
-  plus per-surface prompts) and UPDATE (one focused prompt to add or modify a
-  single feature without regenerating everything). Project-agnostic.
+  content, marketplace, mobile, dashboard, marketing site, …) for any design tool
+  (Claude Design canvas, code generators such as Claude Code / v0 / Lovable /
+  Bolt, or a tool chosen later), in two modes: GREENFIELD (a tool-neutral design
+  system, an app map that assembles every screen into one product, and bound
+  per-section briefs) and UPDATE (one focused brief that extends an existing
+  design without regenerating it). Project-agnostic.
 
   Trigger when:
   - the user types /design.prompts
@@ -22,43 +24,54 @@ description: |
 
 ---
 
-# Claude Design Prompts — Reusable Recipe
+# Design Prompts — Reusable Recipe
 
-This skill codifies a proven approach to writing Claude Design prompts: standalone, fully-specified, scope-bounded, with explicit file boundaries and reuse constraints. It produces prompts that yield consistent, high-quality designs across any kind of digital product.
+This skill writes the design once, in tool-neutral documents, and adds a thin adapter that says how to build it in the chosen tool. Design tools change (standalone Claude Design closes on 2026-12-14 and moves into Claude); when one does, only its adapter changes.
 
-**Proven defaults (use unless the user asks otherwise):**
-- **Output format = React components + HTML preview**, one folder per surface ([component-format](references/component-format.md)). Claude Design previews it directly and the PO can click through every screen. Proven on a multi-surface e-commerce product and on a 13-prompt redesign of a 123-page existing app.
-- **Prompt 01 = Foundation** (tokens + component library + one STATUS map + style guide) that every surface copies unchanged ([foundation-template](references/foundation-template.md)).
-- **Large surfaces split into part 1 + part 2** building one folder ([split-surface-template](references/split-surface-template.md)).
-- **Existing app? Inventory the code first** with parallel agents, then delegate prompt writing with one shared brief ([codebase-inventory](references/codebase-inventory.md), [writer-brief](references/writer-brief.md)).
-- **Depth standard** ([depth-standard](references/depth-standard.md)): the minimum detail per page, weak-vs-strong snippets, length proportions and a self-check. Every prompt meets it; this is what makes a first prompt set for a new project come out as detailed as one built from a codebase inventory.
-- **Motion and finish standard** ([motion-and-finish](references/motion-and-finish.md)): how every component moves and looks, not only what it shows. Shared indicators that slide instead of jumping, choreographed collapse and expand, elements that morph into compact forms, layered depth, and a full set of interaction states. Every prompt, in both modes and for every surface, states these as requirements, because Claude Design treats animation and finish as optional polish unless told otherwise. This is what separates a modern, premium-feeling result from a correct but flat one.
+**Two gates come before everything else** ([core-contract](references/core-contract.md) §1):
+- **G1: one design system, followed everywhere.** `01-DESIGN.md` is the only source; it is built once in the tool, and every screen uses its components and tokens by name. Sections differ only through approved variants it defines.
+- **G2: one assembled design.** Every screen of the product lives in one container (one canvas, project, file or codebase), linked, with shared components reused by reference. No section gets its own container.
+
+**What the skill delivers** ([core-contract](references/core-contract.md) §2): `00-Orientation.md`, `01-DESIGN.md` (design system), `02-APP-MAP.md` (the assembled product + binding, which also builds the app shell), one bound brief per section, a `README.md` and a `VERIFICATION.md`.
+
+**Standards every prompt meets:**
+- **Depth** ([depth-standard](references/depth-standard.md)): the minimum detail per screen, weak-vs-strong snippets, length proportions and a self-check.
+- **Motion and finish** ([motion-and-finish](references/motion-and-finish.md)): the direction is inferred from the project, written in plain words, and the behaviours are chosen from a catalogue; nothing is left to "smooth" or "modern".
+- **Existing app? Inventory the code first** with parallel agents, then delegate brief writing with one shared brief ([codebase-inventory](references/codebase-inventory.md), [writer-brief](references/writer-brief.md)).
+- **Verification** ([verification-protocol](references/verification-protocol.md)): the gates are checked after every prompt, and each adapter's own capability is tested separately.
+
+## Adapters (how to build in a tool)
+
+| Tool | Adapter | Status |
+|---|---|---|
+| Claude Design canvas (Design artifacts in Claude) | [adapter-claude-canvas](references/adapter-claude-canvas.md) | Partly tested 2026-10-14 (shared components, callbacks, links); see its Untested list |
+| Code generators (Claude Code, v0, Lovable, Bolt, a plain artifact page, the user's repo) | [adapter-code-generator](references/adapter-code-generator.md) | One-project variant untested |
+| Google Stitch, Figma, others | none yet | Not shipped until tested ([verification-protocol](references/verification-protocol.md) §2) |
+| Not sure yet | core documents only | Assembly pending: the README says the set still needs an adapter |
+
+Tell the user the status in plain words before they pick, and recommend a tool whose adapter can pass both gates for their constraints.
 
 ## Two modes
 
 ### GREENFIELD MODE
-**When**: starting a brand new design project from scratch, or restarting an existing one because previous Claude Design results were inconsistent.
-**Output**: a folder of numbered prompt files (`00-Master-Orientation.md`, `01-...md`, etc.) covering all the surfaces of a product.
+**When**: starting a new design project, or restarting one because earlier results were inconsistent or scattered.
+**Output**: the full prompt set above.
 
 ### UPDATE MODE
-**When**: an existing Claude Design project already has its design system, and the user wants to add or modify ONE specific feature/page without regenerating the rest.
-**Output**: a single focused `.md` prompt file with explicit scope constraints — "add this only, do not regenerate everything else."
+**When**: a design already exists in a container, and the user wants to add or modify ONE feature without regenerating the rest.
+**Output**: one focused brief in `updates/`, plus a scoped amendment to `01-DESIGN.md` or `02-APP-MAP.md` only when the feature needs one ([core-contract](references/core-contract.md) §7).
 
 ## Mode detection (do this FIRST)
 
-When the skill is triggered, decide which mode applies before asking anything else:
-
-- If the user mentions starting a new project, restarting fresh, or building a full system → **Greenfield**
-- If the user mentions adding/updating/modifying/extending an existing design, a specific page or feature, "just this part" → **Update**
-- If unclear, ask: "Is this a new project from scratch, or adding a feature to an existing design? I write different kinds of prompts for each."
-
-Then branch to the appropriate process below.
+- New project, restart, full system → **Greenfield**
+- Add/update/modify/extend an existing design, one page or feature, "just this part" → **Update**
+- Unclear: "Is this a new project from scratch, or adding a feature to an existing design? I write different kinds of prompts for each."
 
 ---
 
 ## When NOT to use this skill
 
-- The user wants you to GENERATE the design itself (not write a prompt for Claude Design)
+- The user wants you to GENERATE the design itself (not write prompts for a design tool)
 - The user has a single-line design need (just write it directly)
 - The user wants to debug or critique an existing design (use design review tools instead)
 - The user just wants UI copy or icon suggestions (these don't need a structured prompt)
@@ -67,752 +80,518 @@ Then branch to the appropriate process below.
 
 # GREENFIELD MODE — Process
 
-Execute these phases in order. The user's input drives every decision — do not invent surfaces, features, or design choices they didn't ask for.
+Execute these phases in order. The user's input drives every decision; do not invent screens, features or design choices they didn't ask for.
 
 ## Phase 0: Codebase inventory (existing apps only)
 
-If the product already exists in a repo (or the user says "go through every page"), run Steps 1-2 of [codebase-inventory](references/codebase-inventory.md) BEFORE Discovery: enumerate every route, read the project's CLAUDE.md / DESIGN.md / design docs, and fan out parallel inventory agents (≈10-30 pages each + one design-system agent) that write per-page inventories (purpose, sections, real fields/columns, actions, modals, states, weaknesses) to the scratchpad. Then return to Discovery (Phase 1) and plan confirmation (Phase 2); Steps 3-6 of that reference belong to Phases 3-5. Discovery questions shrink to what code cannot answer: how far the brand may move (respect LOCKED items in a brand contract), mood per surface, which surfaces, output format.
+If the product already exists in a repo (or the user says "go through every page"), run Steps 1-2 of [codebase-inventory](references/codebase-inventory.md) BEFORE Discovery: enumerate every route, read the project's CLAUDE.md / AGENTS.md / DESIGN.md / design docs, and fan out parallel inventory agents (≈10-30 pages each + one design-system agent) that write per-page inventories to the scratchpad. Then return to Discovery and plan confirmation; Steps 3-6 of that reference belong to Phases 3-5. Discovery shrinks to what code cannot answer.
 
-**Always ask for a known-good reference**, even if the user doesn't offer one: "Do you have a previous Claude Design output that previewed correctly? Give me the folder path and the prompts that produced it." If they have one, read its structure and its Master's output-format section, and make it the format reference in the Master and the writer brief. Record both paths in the README ("Format reference"), so any later format issue can be diffed against it.
+**Ask for a known-good reference**: "Do you have a previous design output you were happy with, in any tool? Give me the link or folder and the prompts that produced it." Record it in the README ("Reference").
 
 ## Phase 1: Discovery
 
-Before writing any prompts, gather the project context. **Use the host's structured question tool** (`AskUserQuestion` in Claude Code, `ask_user_input_v0` in claude.ai) for tap answers; batch up to 4 questions per call. Required inputs:
+**Use the host's structured question tool** (`AskUserQuestion` in Claude Code, `ask_user_input_v0` in claude.ai) for tap answers; batch up to 4 questions per call. Ask in plain words: the user may not be a designer. Required inputs:
 
 ### 1. Project basics
-- **Project name** — short identifier
-- **What the product is** — 2-3 sentences. What does it do? Who's the customer? What problem does it solve?
-- **Product category** — pick the closest: SaaS app, e-commerce, marketplace, content/media, social, internal tool, B2B platform, consumer mobile app, developer tool, education, healthcare, finance, other
+- **Project name**, **what the product is** (2-3 sentences: what it does, who the customer is, what problem it solves), **product category** (SaaS app, e-commerce, marketplace, content/media, social, internal tool, B2B platform, consumer mobile app, developer tool, education, healthcare, finance, other).
 
 ### 2. Audience and market
-- **Target users** — who uses it, their context, their level of technical comfort
-- **Geographic/cultural context** — does the design need to adapt to specific markets?
+- **Target users** (who, their context, technical comfort) and **geographic/cultural context**.
 
-### 3. Surfaces needed
-Ask which surfaces this design system needs to cover. Don't assume — let the user pick:
-- Primary application surface (the main thing users interact with — call it whatever fits: storefront, dashboard, feed, editor, console, etc.)
-- Administrative surface (settings/management, if separate from the primary)
-- Platform-operator surface (super-admin / internal ops dashboard, for multi-tenant products)
-- Marketing/landing page (pre-signup)
+### 3. Areas of the product
+Ask which areas the product has. These become **sections of one app** unless they are a separate deployment (core-contract.md §3):
+- Primary application area (storefront, dashboard, feed, editor, console…)
+- Administrative area (settings/management)
+- Platform-operator area (super-admin / internal ops, for multi-tenant products)
 - Authentication / onboarding flows
-- Transactional communications (emails, push notifications, SMS templates)
-- Mobile companion app
 - Help center / documentation
 - Public/shared views (read-only profile, share link, embed)
+- Separate deliverables that still share the design system: marketing/landing site, transactional communications (email, push, SMS), mobile companion app
 - Other (let user specify)
 
 ### 4. Variants
-- Does any single surface need **multiple visual variants** (e.g., themes the user can pick from, multiple brand expressions of the same surface)? If yes, how many and what differentiates them?
+- Does any area need different treatments (dense operator tables, a bolder marketing look, user-selectable themes)? These become **approved variants** in `01-DESIGN.md`, never per-section looks.
 
 ### 5. Languages and locale
-- **Primary language** — for UI copy
-- **Additional languages** (if any) — and whether any are RTL (Arabic, Hebrew, Persian, Urdu, etc.)
-- **Locale considerations** — currencies, date formats, number formats, address formats
+- **Primary language**, **additional languages** (and whether any are RTL: Arabic, Hebrew, Persian, Urdu…), **locale** (currencies, date, number and address formats).
 
 ### 6. Visual identity
-- **Brand colors** — primary, secondary, accent (if known); otherwise propose a palette based on product category and ask for approval
-- **Typography preference** — modern sans-serif / classic serif / display / monospace-accent / etc.
-- **Mood** — pick from or describe: warm/friendly, austere/professional, playful, editorial/premium, dense/utilitarian, bold/energetic, minimal/spacious, technical/precise, etc.
-- **Density** — generous whitespace vs. information-dense
-- **Motion level** — subtle (quick fades, sliding indicators, no overshoot) / expressive (choreographed transitions, staggered entrances, small spring on toggles and badges) / rich (adds celebratory moments, counters, drawn-in charts). Default: expressive for customer-facing and marketing surfaces, subtle for dense operator and admin surfaces. Never "none": every surface gets the shared-indicator, morph and interaction-state rules from [motion-and-finish](references/motion-and-finish.md).
-- **Finish** — flat and crisp / soft layered depth / floating glass panels / bold neon-accent glow. Default: soft layered depth. This decides the elevation scale, surface treatment and accent expression in [motion-and-finish](references/motion-and-finish.md) §4.
+- **Brand colors** (if known; otherwise propose a palette from the product category and ask for approval)
+- **Typography preference** in plain words (modern and clean / classic and editorial / technical / playful)
+- **Feel** in plain words (calm and serious / warm and friendly / bold and lively / premium and minimal)
+- **Density** (roomy vs packed with information)
+- Do NOT ask for motion levels or finishes. Infer them ([motion-and-finish](references/motion-and-finish.md) §0) and show them in the Phase 2 plan.
 
-### 7. Output format
-- **Component + HTML preview (default, proven)**: one folder per surface: preview HTML loading React UMD + Babel, `tokens.css`, `styles.css`, `data.js`, i18n files, `icons.jsx`, `components-core.jsx`, `components-shell.jsx`, `pages-N.jsx`, `App.jsx` hash router with screen launcher + State switch. See [component-format](references/component-format.md). Recommend this first.
-- **HTML showcase**: one self-contained HTML file per surface (all pages as `<section id="page-*">` blocks). Easy to review, harder to integrate.
-- **Component-based**: separate component files (.jsx/.tsx/.vue/etc.) per page + shared data, i18n, shell modules. Easier to integrate into a real codebase.
-- **Mixed**: HTML for marketing/external, components for internal/app surfaces.
-- **Other**: user specifies (e.g., Figma-style spec doc, raw CSS framework)
+### 7. Tool
+- **"Which tool will you build the design in?"** Claude Design (in Claude) / a code generator or your own repo / another tool / not sure yet. Show the adapter status table above in plain words. Another tool without an adapter, or not sure: deliver the core documents and say assembly is pending.
 
-### 8. Known gaps / required pages
-- Has the user pre-identified specific pages, states, or features they want covered? Capture them explicitly.
-- Common gaps to ask about: forgot password, error states (404/500), empty states, loading states, success states, print views, mobile responsive variants.
+### 8. Known gaps / required screens
+- Pre-identified screens, states or features to cover. Ask about: forgot password, error screens (404/500), empty states, loading states, success states, print views, phone layouts.
 
 ### 9. Constraints
-- Component library to reuse (Material, Tailwind, shadcn/ui, custom, etc.)
+- Existing component library or design system (Material, Fluent, Carbon, shadcn, in-house): its conventions are followed; items its brand contract marks LOCKED stay locked.
 - Accessibility requirements (WCAG AA, AAA, internal standards)
-- Performance constraints (low-bandwidth markets, offline-first, etc.)
+- Environment and performance (low-bandwidth markets, offline-first, VDI or kiosks, old devices)
 
-If the user can't answer some questions, propose reasonable defaults based on product category and explicitly note them as defaults so they can override.
+If the user can't answer some questions, propose defaults from the evidence and mark them as defaults.
 
-## Phase 2: Plan the prompt set
+## Phase 2: Plan the set
 
-Based on Discovery, decide the prompt count and order. The default sequence follows surface-by-surface, with Master Orientation always first:
+Decide the app map first ([core-contract](references/core-contract.md) §3): one product, its sections, layouts, every screen key, shared components and their owners, shared journeys, and which prompt builds which section. Then the run order:
 
 | # | Prompt | Always? |
 |---|---|---|
-| 00 | Master Orientation | YES |
-| 01 | Foundation: design system + component library + style guide | YES for the component format (any size); optional for HTML showcase |
-| 02-N | One prompt per primary user-facing surface (or per variant of it) | Project-dependent |
-| Next | Administrative surface (if separate) | If applicable |
-| Next | Platform-operator surface | If applicable |
-| Next | Onboarding flow | If applicable |
-| Next | Marketing landing page | If applicable |
-| Next | Transactional communications | If applicable |
-| Next | Mobile companion | Only if requested |
-| Next | Other surfaces from Discovery | If applicable |
+| 00 | Orientation | YES |
+| 01 | Design system (`01-DESIGN.md`) | YES |
+| 02 | App map and shell (`02-APP-MAP.md`): builds the shells, navigation and a placeholder for every screen key in the one container | YES |
+| 03-N | One bound brief per section (or per batch of small sections) | Project-dependent |
+| Next | Separate deliverables (marketing site, communications, mobile companion), each on the same design system | If applicable |
 
-Each prompt is INDEPENDENT in its text (self-contained recap), but surfaces COPY the Foundation's `tokens.css`, `styles.css`, `icons.jsx` and `components-core.jsx` unchanged. That shared code, not prose, is what keeps 10+ surfaces coherent.
+**Split rule:** a section with more than ~15-18 screens, or with one giant tool (calendar/scheduler, multi-step sales wizard), becomes part 1 + part 2 into the same container ([split-surface-template](references/split-surface-template.md)).
 
-**Split rule:** a surface with more than ~15-18 pages, or with one giant tool (calendar/scheduler, multi-step sales wizard), becomes part 1 + part 2 building one folder ([split-surface-template](references/split-surface-template.md)). Part 1 creates the full shell with `coming-soon` placeholders; part 2 is update-style (new files + exact edits, no regeneration).
-
-**Mood per surface:** public/marketing, customer and staff surfaces usually deserve different moods (e.g. editorial premium / warm friendly / calm dense) on the same tokens. Ask, then state each mood in the Master and restate it in each surface prompt.
-
-**Brief the user on the plan before writing.** Example:
-> "Plan: 6 prompts. 00 Master Orientation, 01 Foundation (tokens + components + style guide), 02 Main App (your `dashboard`), 03 Admin Settings, 04 Onboarding, 05 Marketing Page. Each surface is one folder of React components with an HTML preview, built on the Foundation files. Sound right?"
+**Brief the user on the plan before writing**, in plain words, including the inferred direction and the tool's gate status. Example:
+> "Plan: one app called BookFlow, built in one Claude Design canvas. 00 Orientation, 01 Design system (calm and quick, flat with light borders, because staff use it all day), 02 App map with every screen linked, then 03 Bookings, 04 Members, 05 Settings. The marketing site is prompt 06 on the same design system. The canvas adapter is partly tested: shared components and links work; editing a shared component everywhere at once hasn't been tested yet. Sound right?"
 
 Adjust based on their answer. Don't write until they confirm.
 
-## Phase 3: Write the Master Orientation prompt
+## Phase 3: Write 00, 01 and 02
 
-This is ALWAYS prompt 00. Use **Master Orientation Template** in Appendix A. Replace placeholders with the project's specific values from Discovery.
+- **00 Orientation**: Appendix A.
+- **01 Design system**: [design-system-template](references/design-system-template.md), with the adapter header.
+- **02 App map and shell**: [core-contract](references/core-contract.md) §3 (skeleton included), with the adapter header and the adapter's instructions for building the shells, navigation and placeholders in the one container the user opened at 00 (core-contract §2).
 
-## Phase 4: Write per-surface prompts
+## Phase 4: Write the section briefs
 
-For each surface, use the appropriate appendix as a starting structure, then fill in the specifics from Discovery:
+For each section, start from the matching appendix for its page-content guidance, then fill it from Discovery or the inventory:
 
-- **Primary application surface** (whatever the main UX is): Appendix B
-- **Administrative / management surface**: Appendix C
-- **Marketing / landing page**: Appendix D
-- **Transactional communications** (emails, push, SMS): Appendix E
+- **Primary application area**: Appendix B
+- **Administrative / management area**: Appendix C
+- **Marketing / landing site**: Appendix D
+- **Transactional communications** (email, push, SMS): Appendix E
 - **Onboarding / setup wizard**: Appendix F
 - **Mobile companion**: Appendix G
 
-These appendices are SKELETONS, not finished products. Adapt them to the actual product. Don't include sections that don't apply.
+These appendices are SKELETONS. Adapt them to the product. Don't include sections that don't apply.
 
-For big sets (≈6+ surface prompts), write 00 and 01 yourself, then write a shared `WRITER-BRIEF.md` ([writer-brief](references/writer-brief.md)) and fan out writer agents (1-3 prompts each) pointed at the brief, 00, 01 and their inventory. Include the depth standard in the brief. Then run the set verification in [codebase-inventory](references/codebase-inventory.md) Step 5 yourself (route coverage, duplicates across prompts, handshake chain, master vs surface consistency, cross-surface reuse, copy rules).
+For big sets (≈6+ section prompts), write 00-02 yourself, then write a shared `WRITER-BRIEF.md` ([writer-brief](references/writer-brief.md)) and fan out writer agents (1-3 prompts each) pointed at the brief, 00-02, the adapter and their inventory. Then run the set checks in [codebase-inventory](references/codebase-inventory.md) Step 5 and [verification-protocol](references/verification-protocol.md) §3 yourself.
 
-Each prompt MUST contain:
-1. Header: "Prompt N of M — [Surface Name]" + "Produces ONE folder: `{Project}-{Surface}/`" (or ONE file, for the HTML-showcase format)
-2. Self-contained recap (5-8 lines: product, brand essentials, mood; component format adds "copy Foundation files unchanged")
-3. Surface identity (visual tone, distinct from other surfaces in this project)
-4. Files to deliver (component format: exact tree, each `pages-N.jsx` listing its page keys; HTML showcase: the one filename, everything inline, each page a `<section id="page-*">`)
-5. Shell (nav groups + every link with an icon, top bar, switchers, phone behaviour, review tools)
-6. Complete page list as page keys (incl. 404 / no access / error)
-7. Key page details for EVERY page, meeting [depth-standard](references/depth-standard.md) (real fields, columns, modals with fields + validation, actions, loading/empty/error + domain states). Design the intended behaviour, not bugs found in the code; flag new ideas "Proposal for PO approval"
+Each section brief MUST contain:
+1. Header: "Prompt N of M — [Section]" + the adapter header + "Run AFTER prompt N-1"
+2. **Binding** block ([core-contract](references/core-contract.md) §4): container, design system, owned screen keys, extends, links out, shared components used and created, do not touch
+3. Recap: task context in 3-5 lines (product, this section's users and jobs); no design-system values
+4. Section identity: who, jobs, and which approved variant applies (or "default")
+5. Files or artboards to deliver, per the adapter
+6. Complete screen list as screen keys (incl. 404 / no access / error if the map assigns them here)
+7. Key screen details for EVERY screen, meeting [depth-standard](references/depth-standard.md); design the intended behaviour, not bugs found in the code
 8. Mock data (realistic for the market, sized to look real)
-9. Translation glossary specific to this surface's voice (only if multi-language)
-10. Visual + UX requirements, including a **Motion and finish** subsection that names, for this surface's components, the patterns from [motion-and-finish](references/motion-and-finish.md) §3 with their tokens and choreography, plus the surface's elevation, surface treatment and accent expression from §4
-11. Deliverable specification (exact folder/files, scope boundary) + verification checklist
-12. Handshake to next prompt ("After delivery, reply: '[X] complete. Ready for prompt N+1.'")
+9. Translation glossary specific to this section's voice (only if multi-language)
+10. Visual + UX requirements, and **Motion**: the behaviours `01-DESIGN.md` selected, named per component type, with any section-specific exception and its reason
+11. **Proposals (not to build yet)**
+12. Deliverable: the adapter's verification lines plus the G1/G2 checks from [verification-protocol](references/verification-protocol.md) §1
+13. Handshake: "After delivery, reply: '[X] complete. Ready for prompt N+1.'"
 
 ## Phase 5: Save and deliver
 
-Before saving, run the self-check in [depth-standard](references/depth-standard.md) §4 and the self-check in [motion-and-finish](references/motion-and-finish.md) §6 on every prompt (including ones written by delegated agents) and fix anything that fails.
+Before saving, run the self-checks in [depth-standard](references/depth-standard.md) §4, [motion-and-finish](references/motion-and-finish.md) §6 and [verification-protocol](references/verification-protocol.md) §3 on every prompt (including ones written by delegated agents) and fix anything that fails.
 
-In Claude Code, save to the repo at `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. Always add a `README.md` (sections: how to run · prompt/folder/language table · design direction · Decisions for the PO · assets to upload): run order, prompt → folder → language table, design direction, **Decisions for the PO** (every "Proposal for PO approval" and behaviour change the writers introduced, grouped), and assets the user must upload to Claude Design (self-hosted fonts, logos — Claude Design cannot fetch them from the repo).
+In Claude Code, save to `docs/design-prompts/` (or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-design-prompts/` and call `present_files`. The `README.md` has: how to run · tool, adapter and its tested status · prompt/section/language table · design direction · gate status · Decisions for the PO (every proposal and behaviour change, grouped) · assets to upload (self-hosted fonts, logos the tool cannot fetch). Add an empty `VERIFICATION.md` with the table from [verification-protocol](references/verification-protocol.md) §1.
 
 End with usage instructions:
-> "Open a fresh Claude Design project. Paste 00 first, wait for the orientation confirmation. Then paste 01-N in order in the same project. Part-2 prompts extend the part-1 folder." 
+> "Open one new {container} and paste 00 first, then 01, 02 and the rest in order, all into that same {container}. As soon as your tool shows the {container}'s link, write it into the Binding blocks. After each prompt, tick that phase's checks in VERIFICATION.md before running the next."
+
+**No adapter (tool not chosen, or a tool without one):** deliver the documents as a plan only. The README says plainly that they are not ready to paste: an adapter has to be chosen (or written and tested) and the adapter headers and Binding blocks filled in first. Do not give the paste instructions above.
 
 ---
 
 # UPDATE MODE — Process
 
-Use this when the user wants to add or modify ONE feature in an existing Claude Design project. The output is a single focused prompt, not a folder.
+Use this when the user wants to add or modify ONE feature in an existing design. The output is one focused brief, not a new set.
 
 ## Phase 1: Update Discovery
 
-Gather what's needed for a tight, scoped prompt:
+1. **Which product, which container, which section?** Ask for `01-DESIGN.md` and `02-APP-MAP.md`. If they don't exist, establish before writing anything: the container (its link or path), where the design system lives and its version or date, the existing screen keys around the feature, and which section owns them. Read them from the container or the user's files; ask for what you cannot read. **Do not write the update until all four are known.** If the design has no shared design system or is split across containers, say so: the update would deepen the problem, so propose fixing that first (a greenfield 01 and 02 for the existing design).
+2. **What's being added/changed?** Feature name + 2-sentence purpose
+3. **Why now / what's the gap?** What exists vs. what's missing
+4. **Where does it go?** Nav placement, parent screen, screen key
+5. **Layout to match**: an existing screen whose structure this should follow
+6. **Components needed**: which existing design-system and shared components are reused. Avoid inventing new visual language.
+7. **States required**: empty, loading, error, success, edit-in-place, locked, disabled…
+8. **Cross-cutting rules**: language coverage, validation, scheduling, permissions, dismissibility
+9. **Interactivity**: live preview, drag-to-reorder, cycling content, optimistic updates
 
-1. **Which project + which surface?** (e.g., "the admin panel of my HR tool", "the customer dashboard of my SaaS")
-2. **What's being added/changed?** — feature name + 2-sentence purpose
-3. **Why now / what's the gap?** — what currently exists vs. what's missing
-4. **Where in the surface does it go?** — nav placement, position in shell, parent page, route
-5. **Layout pattern to match** — is there an existing page in this surface whose structure should be matched? (e.g., "two-panel like the Settings page", "list+detail like the People page", "modal overlay like the Filters")
-6. **Components needed** — which existing design system components should be reused? (toggles, color pickers, date pickers, segmented controls, badges, modals, etc.) Avoid inventing new visual language.
-7. **States required** — empty, loading, error, success, edit-in-place, locked, disabled, etc.
-8. **Cross-cutting rules** — language coverage (matches existing project), validation, scheduling, permissions, dismissibility, etc.
-9. **Live preview / interactivity** — does this need a real-time preview panel? Drag-to-reorder? Cycling content? Optimistic updates?
-
-If the user has already written a draft of the feature description (well-formed prose with sections), parse it and only ask follow-ups about gaps.
+If the user already wrote a draft of the feature, parse it and only ask about gaps.
 
 ## Phase 2: Confirm scope
 
-Before writing, restate the scope in one sentence:
-
-> "Writing one update prompt for: **[Feature]** added to the **[Surface]**, placed in the **[Location]**, using the **[Pattern]** layout, with **[Key states]**, matching existing [language] rules. Ready to write?"
-
-This forces the scope to be small and explicit. If the user adds new requirements at this point, integrate them and re-confirm.
+> "Writing one update prompt for: **[Feature]** added to **[Section]** in **[container]**, placed at **[Location]**, using the **[Pattern]** layout, with **[Key states]**, on the existing design system. Ready to write?"
 
 ## Phase 3: Write the update prompt
 
-Use **Update Prompt Template** in Appendix H. The structure uses ALL CAPS section headers — this makes the prompt scannable and forces Claude Design to treat each section as a hard constraint.
-
-```
-# {Feature Name}
-
-CONTEXT: ...
-WHERE: ...
-PAGE LAYOUT: ...
-{Section by section breakdown}
-RULES: ...
-OUTPUT: ...
-```
-
-The OUTPUT clause is the most important part. It explicitly tells Claude Design to add ONLY this feature, NOT regenerate the rest of the design. Phrasings that work:
-- "add the new X page consistent with the existing [surface] file structure"
-- "extend the existing settings page with X — do not change other sections"
-- "add X to the header — keep everything else unchanged"
+Use **Appendix H**. Its ALL CAPS section headers make the prompt scannable and make each section a hard constraint. The OUTPUT clause is the most important part: it tells the tool to add ONLY this feature, in the existing container, without regenerating anything else.
 
 ## Phase 4: Save and deliver
 
-In Claude Code, save to the repo next to the greenfield set (e.g. `docs/design-prompts/updates/<feature-slug>.md`, or where the user says). In claude.ai, save to `/mnt/user-data/outputs/<project-slug>-update-prompts/<feature-slug>.md` and call `present_files`.
+In Claude Code, save next to the set (`docs/design-prompts/updates/<feature-slug>.md`, or where the user says); in claude.ai, save to `/mnt/user-data/outputs/<project-slug>-update-prompts/<feature-slug>.md` and call `present_files`. A scoped amendment to `01-DESIGN.md` or `02-APP-MAP.md` is saved beside it and applied to the documents.
 
 End with:
-> "Paste this into your existing Claude Design project (the same conversation where you built the original designs). Claude Design will add just this feature to the existing files."
+> "Paste this into the same {container} where the design lives. It adds just this feature."
 
 ---
 
 ## Critical rules — apply to BOTH modes
 
-1. **Every prompt is self-contained.** Do not write "as defined earlier" or "matching prompt 2." Repeat necessary context in every prompt.
+1. **Self-contained in task, never in design system.** Every prompt repeats the task context it needs, so it works pasted alone. It references the design system by component and token name and never restates its values ([core-contract](references/core-contract.md) §5).
 
-2. **Every prompt bounds its output.** Component format: "deliver only these files in this folder; no single-file version, no other folders". HTML-showcase format: "one file, do not split". Update and part-2 prompts: "do not regenerate or restyle anything not listed". Always include an explicit output-scope clause.
+2. **Every prompt bounds its output**: what it adds, where (the Binding), and "do not regenerate or restyle anything not listed".
 
-3. **Every prompt names its output exactly**: the folder and its file tree (component format) or the filename (HTML showcase). No placeholders like `[filename].html` in the final prompt; names derive from the project name.
+3. **Every prompt names its output exactly**: files or artboards per the adapter, derived from the project name and screen keys. No placeholders like `[filename]` in the final prompt.
 
-4. **Every multi-language surface includes a translation glossary** with concrete examples specific to that surface's voice. Skip this section entirely for monolingual products.
+4. **G1 and G2 are never traded away.** No section gets its own container, its own copy of a shared component, or its own visual tone. If the chosen tool cannot pass a gate, say so in the README instead of working around it.
 
-5. **Greenfield prompts end with a handshake** so the user knows what to paste next. Update prompts are standalone — no handshake needed.
+5. **Every multi-language section includes a translation glossary** in its voice. Skip it for monolingual products.
 
-6. **The user's input drives everything.** Do not invent surfaces, features, or layouts they didn't ask for. Do not skip what they did ask for.
+6. **Greenfield prompts end with a handshake** naming the next prompt. Update prompts are standalone.
 
-7. **Make prompts feel coherent within a project.** In greenfield, all prompts reference the same brand tokens, typography, and language rules established in the Master Orientation.
+7. **The user's input drives everything.** Do not invent sections, features or layouts they didn't ask for. Do not skip what they did ask for.
 
-8. **Push back if the brief is incomplete.** If the user says "make me a prompt" with no context, ask Discovery questions first — don't guess. Generic prompts produce generic designs.
+8. **Push back if the brief is incomplete.** If the user says "make me a prompt" with no context, ask Discovery questions first. Generic prompts produce generic designs.
 
-9. **Project naming carries through.** If the project is "BookFlow", file names are `BookFlow-{surface}.html`. If it's "Helios HR", file names are `Helios-HR-{surface}.html`. The skill never imposes naming conventions from other projects.
+9. **Project naming carries through** to containers, files and screen keys. The skill never imposes naming conventions from other projects.
 
-10. **Templates are skeletons.** The appendices below are starting structures. Adapt them — don't copy them verbatim. A media app's "primary surface" looks nothing like a B2B dashboard's "primary surface," even though both use Appendix B.
+10. **Templates are skeletons.** Adapt the appendices; don't copy them verbatim.
 
 11. **Design intended behaviour, not bugs.** When prompts come from a code inventory, bugs (wrong timezone, mislabelled status, hover-only actions, browser `prompt()` boxes) become requirements for the correct version. Report the bugs to the user separately.
 
-12. **Flag, don't smuggle.** Anything new (a feature, a font, a renamed nav item, content that doesn't exist) is marked "Proposal for PO approval" in the prompt and listed in the README.
+12. **Proposals stay pending.** Anything new (a feature, a font, a renamed nav item, a behaviour-changing gesture) goes under the brief's Proposals and the README's Decisions for the PO, and is not built until approved ([core-contract](references/core-contract.md) §6).
 
-13. **Respect the brand contract.** If the repo has a DESIGN.md / brand doc with LOCKED items, keep them and modernise how they are used; changes to locked items are proposals.
-14. **When Claude Design's output deviates from the prompt, diagnose before you edit.** Don't change the prompts on the first bad result. Follow these steps in order:
-    1. **Get a baseline.** Use the known-good reference from Discovery. If there isn't one, ask the user for a previous output that previewed correctly. If they have none, the baseline is the output format selected in Discovery: the folder tree and rules in [component-format](references/component-format.md), or the HTML-showcase rules.
-    2. Diff the failing prompt's format section against the baseline prompts (or the selected format's rules).
-    3. Diff the bad output against the baseline output (or the selected format's folder tree).
-    4. If the prompts already match the baseline, keep them unchanged and treat the environment as a **hypothesis**, not a finding. Possible causes: the Claude Design project is in Design Component mode (`.dc.html` + `support.js`), or it was created from a template. Ask the user to check the project's mode and how it was created. Recommend a settings change or a new project only after that check confirms a cause.
-    5. Only when the prompts differ from the baseline, change the prompts, and only by moving them toward the baseline.
+13. **Respect the brand contract.** If the repo has a DESIGN.md / brand doc with LOCKED items, keep them and modernise how they are used; changes to locked items are proposals. An existing design system's conventions are followed, not overridden.
+
+14. **When the output deviates from the prompt, diagnose before you edit.** Don't change the prompts on the first bad result:
+    1. **Get a baseline**: the user's known-good reference if there is one; otherwise the adapter's documented format and tested behaviour.
+    2. Compare the failing prompt with the baseline (header, Binding, format lines).
+    3. Compare the bad output with the baseline output or the adapter's documented format.
+    4. If the prompt already matches, treat the tool or project setup as a **hypothesis**, not a finding: ask the user how the project was created and what the tool reported, and recommend a change only after that check confirms a cause.
+    5. Only when the prompt differs from the baseline, change it, and only by moving it toward the baseline and the gates.
     Never add "forbid X" locks or retarget the format based on one run. (In the 2026-09-30 AppCMS incident, both of those fixes were wrong and cost the user two rounds.)
-15. **Specify motion and finish, never assume them.** Every prompt, greenfield or update, for every surface and every component type, states how things move and how they look at rest, using the patterns and tokens in [motion-and-finish](references/motion-and-finish.md). "Smooth", "modern", "animated" or "nice transitions" on their own are not specifications. The rule applies to everything (tabs, modals, tables, cards, forms, toasts, steppers), not only navigation.
+
+15. **Specify motion and finish, never assume them.** Every prompt names the behaviours its components use from the catalogue chosen in `01-DESIGN.md` ([motion-and-finish](references/motion-and-finish.md)). "Smooth", "modern", "animated" or "nice transitions" on their own are not specifications. Components the product doesn't have get no motion lines.
 
 ---
 
-## Appendix A — Master Orientation Template (Greenfield)
+## Appendix A — Orientation Template (prompt 00)
 
 ```markdown
-# {PROJECT_NAME} Design System — Master Orientation
+# {PROJECT_NAME} — Orientation
 
-> Paste this as the **FIRST message** in a fresh Claude Design project. It establishes context that all subsequent prompts reference. Do not skip this.
+> {Adapter header.} Paste this as the FIRST message in a new {container}. It sets context for every
+> later prompt. Do not generate any design yet.
 
 ## About {PROJECT_NAME}
+{1-2 paragraphs: what the product is, who uses it, its category.}
 
-{1-2 paragraphs explaining what the product is, who the user is, what category it falls in.}
-
-The product surface spans:
-{bulleted list of all surfaces this prompt set will cover}
-
-## Visual identity
-
-**Brand colors:**
-- Primary: `{HEX}`
-- {Secondary tokens — accent, surface, etc.}
-- Success/Warning/Danger: `{HEX}` / `{HEX}` / `{HEX}`
-- Neutrals: {scale, e.g., gray-50 through gray-900}
-
-**Typography:**
-- UI font: {choice — Inter, IBM Plex, system stack, etc.}
-- {If multi-language: per-language font choices, e.g., "Arabic UI: Cairo"}
-- Display / headings: {weight choice}
-- Monospace (for code, IDs, timestamps): {choice}
-
-**Visual style:**
-- Density: {generous / balanced / compact}
-- Corner radius: {Xpx} on cards, {Xpx} on inputs/buttons
-- Shadow style: {soft and low / subtle and sharp / none}
-- Mood: {warm / austere / playful / editorial / etc.}
-
-## Motion and finish
-
-Every surface in this project is held to these. They are requirements, not polish.
-
-- **Motion level per surface:** {e.g. Storefront: expressive · Admin: subtle · Landing: rich}
-- **Finish per surface:** {e.g. soft layered depth, floating panels with large radius and a top-edge highlight}
-- **Motion tokens** (defined in Foundation `tokens.css`): `--dur-instant` {100ms}, `--dur-fast` {200ms}, `--dur-base` {320ms}, `--dur-slow` {500ms}; `--ease-standard` `cubic-bezier(.4,0,.2,1)`, `--ease-out`, `--ease-in`{, `--ease-spring` if the mood allows}.
-- **Principles:**
-  1. Shared elements move: the active indicator of any nav, tab, segment, step or selection is ONE element that slides to the new position. Never restyle items on and off.
-  2. Choreograph: when things change together, text and icons leave first and return last; containers resize in between. Nothing squashes or wraps mid-animation.
-  3. Morph, do not hide: compact forms are shape changes (badge to dot, field to icon, button to icon), not disappearances.
-  4. Layered depth: raised surfaces combine a soft deep shadow, a 1px border, a faint top-edge highlight and a subtle gradient.
-  5. Every interactive element has hover, press, focus-visible, selected, disabled and loading states, each animated with the tokens.
-- **Reduced motion:** state changes stay visible; travel, scale and stagger are removed.
-
-Each surface prompt restates its motion level and names the specific patterns its components use.
+## How this design is built
+- One product, one {container}: every screen goes into this {container}, linked. Never start another one.
+- One design system: prompt 01 builds it once; every screen uses its components and tokens by name and only its approved variants.
+- Prompt 02 creates the app map: shells, navigation and a placeholder for every screen. Later prompts replace placeholders; they never add loose screens or copy shared components.
+- Anything under "Proposals (not to build yet)" in a prompt is NOT built.
 
 ## Voice and tone
-
-{If the product has one consistent voice, describe it once.}
-{If different surfaces have different voices (e.g., marketing is persuasive, admin is calm/professional), describe each.}
+{One consistent voice, or per-section voices if they differ (marketing persuasive, admin calm).}
 
 ## Language rules
-{Only include this section if multi-language. Otherwise omit entirely.}
+{Only if multi-language. Otherwise omit entirely.}
+1. Every visible string comes from the translation mechanism the adapter names (e.g. `t('key')`); no hard-coded copy
+2. The language switch updates `lang` and `dir` on the root
+3. Every key exists in every locale
+{If any language is RTL:}
+4. CSS uses logical properties throughout: `padding-inline-start`, `margin-inline-end`, `inset-inline-start`, `text-align: start`; never `left`/`right`
+5. Numbers, currency, dates, IDs and code stay LTR (`dir="ltr"` spans) inside RTL content
+6. Never mix LTR and RTL text on the same line
 
-Every design surface must support {languages} from day one.
-
-{COMPONENT FORMAT — use these rules:}
-1. Every visible string comes from `t('key')` (LangCtx); dictionaries live in `i18n-{lang}.js`, merged by `i18n.js` into `window.makeT(lang)`; no hard-coded copy in JSX
-2. The language toggle calls `setLang`, which updates `lang` and `dir` on the root element
-3. Every key exists in every locale dictionary
-{Then rules 5-8 below for RTL.}
-
-{HTML-SHOWCASE FORMAT — use these rules:}
-1. Every visible string carries `data-i18n="someKey"` attribute
-2. Form placeholders use `data-i18n-placeholder="someKey"`
-3. An in-page `const T = { {lang1}: {...}, {lang2}: {...} }` dictionary contains every key
-4. A language toggle flips `document.documentElement.lang` and replaces all `data-i18n` text content
-{If any language is RTL, add these rules:}
-5. The language toggle ALSO flips `document.documentElement.dir` between `ltr` and `rtl`
-6. CSS uses **logical properties throughout** — `padding-inline-start`, `margin-inline-end`, `inset-inline-start`, `text-align: start` — never `padding-left`, `margin-right`, `left`
-7. Numbers, currency, dates, IDs, and code wrap in `<span dir="ltr">` even within RTL content
-8. Never mix LTR and RTL text on the same line — keep each language on its own line in mixed-language content
-
-## Output format (CRITICAL)
-
-{DEFAULT — component format: paste the folder tree and rules 1-8 from
-[component-format](references/component-format.md), with this project's prefix.}
-
-{ALTERNATIVE — HTML showcase format:}
-1. **Output is ONE file** per prompt, named exactly as the prompt says
-2. **Do NOT split into multiple files** unless the prompt explicitly says "deliver as N separate files"
-3. **Do NOT generate ancillary files** (separate CSS/JS) — everything inline
-4. **Self-contained**: HTML + inline `<style>` + inline `<script>` in a single file
+## Tool rules
+{From the adapter: format, file or artboard naming, how screens link, how shared components are mounted or imported, what to deliver per prompt.}
 
 ## Verification standard
-
-Every deliverable must pass:
-- [ ] One file (or as specified — never more than what's asked)
-- [ ] Mobile responsive at 375px width
-- [ ] Every active/selected indicator slides between items; nothing jumps
-- [ ] Every collapse, expand, open and close is choreographed with the motion tokens; nothing snaps or squashes
-- [ ] Every interactive element shows hover, press, focus-visible, disabled and loading states
-- [ ] Raised and floating surfaces use the layered elevation tokens
-- [ ] `prefers-reduced-motion` removes travel and stagger but keeps state changes visible
-- {If multi-language:}
-- [ ] Language toggle works — every string changes
-- {If RTL:}
-- [ ] `dir="rtl"` applies correctly when {RTL language} is active
-- [ ] CSS uses logical properties throughout
-- [ ] Numbers/currency/IDs stay LTR in RTL context
-- [ ] Component format: previews in Claude Design (or over local HTTP, e.g. `python3 -m http.server`; external `.jsx` does not load from `file://`) and every page key is reachable from the launcher or demo strip
-- [ ] HTML showcase: self-contained, opens directly without external dependencies
+Every prompt's output must pass:
+- [ ] It landed in this {container}; nothing new was created elsewhere
+- [ ] Only design-system components and tokens; only approved variants; STATUS map tones
+- [ ] Every screen it owns is reachable, and links into and out of it work
+- [ ] Shared components are reused, not re-created
+- [ ] Responsive at 375px; reduced motion honoured (only colour and opacity animate)
+- {If multi-language:} [ ] Language switch changes every string; {If RTL:} RTL mirrors, logical CSS, numbers LTR
 
 ## Confirming you're oriented
-
-Reply with: "Oriented. Ready for prompt 1 ({first surface name})."
-
-Do not generate any design until you receive the first specific design prompt. This message is context only.
+Reply with: "Oriented. Ready for prompt 01 (design system)."
 ```
 
 ---
 
-> **Appendices B-G are written for the HTML-showcase format. With the component format (default), convert every one of them:** header "Produces ONE folder: `{Project}-{Surface}/`"; add the Recap, Files to deliver, Shell and Mock data sections from the 12-section list in Phase 4; turn each `page-*` section into a page key in `SHELL_PAGES` / `FULL_PAGES`; replace the Deliverable section's "ONE file" and "Self-contained" checks with the component verification lines in [component-format](references/component-format.md); use `t('key')` instead of `data-i18n`. Page-content guidance applies unchanged.
->
-> **Every surface prompt (any format, any appendix) also carries a `## Motion and finish` section** after its page details: the surface's motion level and finish, then each component pattern it uses from [motion-and-finish](references/motion-and-finish.md) §3 with tokens and choreography spelled out (see its weak vs strong examples), and the motion lines from the Master's verification standard in its checklist.
+> **Appendices B-G give the page-content guidance per kind of section.** Every one is written as a bound section brief: it carries the header, Binding block and the 13 items from Phase 4; screens are screen keys from `02-APP-MAP.md`; files or artboards follow the adapter. Separate deliverables (D, E, G) still use `01-DESIGN.md` and are listed in the app map.
 
-## Appendix B — Primary Application Surface Template (Greenfield)
+## Appendix B — Primary Application Section
 
-The "primary application surface" is whatever the main user-facing experience of the product is. For e-commerce it's the storefront. For a SaaS app it's the main dashboard. For a content platform it's the feed/reader. For a marketplace it's the browse + transaction surface. **Adapt this template to the project.**
+The "primary application section" is the main user-facing experience: the storefront for e-commerce, the dashboard for SaaS, the feed or reader for content, the browse + transaction area for a marketplace. **Adapt this template to the project.**
 
 ```markdown
-# Prompt {N} of {M} — {Surface Name}
+# Prompt {N} of {M} — {Section Name}
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-{surface-slug}.html`
+> {Adapter header.} Run AFTER prompt {N-1}.
 
-## Surface identity
+## Binding
+{core-contract.md §4}
 
-{1-paragraph description: what the user does on this surface, the primary tasks they accomplish here, the emotional/practical tone the surface should convey.}
+## Recap
+{3-5 lines of task context.}
 
-**Translation tone** (if multi-language): {specific to this surface — formal/casual/persuasive/contemplative/etc.}
+## Section identity
+{What the user does here, their main tasks, and which approved variant applies (or "default").}
 
-## Complete page list (single file, {X} page sections)
+**Translation tone** (if multi-language): {formal / casual / persuasive / …}
 
-Each page is a `<section id="page-*">` block in the file.
-
-{Group pages by the user's mental model. Common groupings, ADAPT TO THE PROJECT:
+## Complete screen list
+{Group screens by the user's mental model. ADAPT TO THE PROJECT:
 
 ### Entry / discovery
-- `page-home` or `page-feed` or `page-landing` — {what users see first}
-- `page-search` or `page-browse` — {discovery surface}
+- `home` or `feed` — {what users see first}
+- `search` or `browse` — {discovery}
 
 ### Detail / depth
-- `page-detail` or `page-item` or `page-profile` — {single-item view}
+- `detail` or `item` or `profile` — {single-item view}
 
 ### Action flows
-- `page-create` or `page-compose` or `page-checkout` or `page-book` — {primary action flow}
-- `page-confirm` — {post-action confirmation}
+- `create` or `checkout` or `book` — {primary action flow}
+- `confirm` — {post-action confirmation}
 
-### Account / settings
-- `page-account` — {user's own data}
-- {Other account sub-pages per the product}
+### Account
+- `account` — {user's own data}
 
-### Auth (if hosted in this surface)
-- `page-signin`
-- `page-signup`
-- `page-forgot-password`
-- `page-reset-password`
+### Auth (if hosted in this section)
+- `signin`, `signup`, `forgot-password`, `reset-password`
 
-### Utility / public (no auth)
-- `page-404` or `page-empty-result` — {error/empty states}
-- {Print/share/export views if applicable}
+### Utility
+- `404`, `empty-result`, {print/share/export views if applicable}
 }
 
-## Key page details
+## Key screen details
+{For EVERY screen, per depth-standard.md: purpose, sections top to bottom with real data, actions with target screen keys, overlays with fields and validation, states (loading, empty, error, success + domain states), phone behaviour.}
 
-{For the most important pages, describe sections, states, and components. Don't over-specify — describe what each page DOES and CONTAINS, not the exact pixel layout. Examples of detail to include per page:}
-
-### `page-{name}` — sections
-- {Section 1: purpose, what it contains, primary action}
-- {Section 2}
-- ...
-
-### `page-{name}` — states
-- Default
-- Loading
-- Empty (when user has no data)
-- Error
-- Success/confirmation
-
+## Mock data
 ## Translation glossary
+{Only if multi-language: ~20-40 phrases in this section's voice, grouped by navigation, status terms, actions, content labels.}
 
-{Only include if multi-language. Provide ~20-40 translations specific to this surface's voice. Group by category — navigation, status terms, actions, content labels.}
-
-| {Lang 1} | {Lang 2} |
-|---|---|
-| {phrase} | {translation} |
-{...}
+## Visual and UX requirements
+## Motion
+## Proposals (not to build yet)
 
 ## Deliverable
+{Adapter files or artboards; adapter verification lines; G1/G2 checks; section-specific checks such as search interactions, drag-and-drop, infinite scroll.}
 
-**ONE file**: `{project-slug}-{surface-slug}.html`
-
-Verification checklist:
-- [ ] All {X} page sections present, each with `id="page-*"`
-- {If multi-language: language toggle works}
-- [ ] Mobile responsive at 375px
-- [ ] {Specific verifications for this surface — e.g., search interactions, drag-and-drop, infinite scroll, etc.}
-- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
-
-After delivery, reply: "{Surface} complete. Ready for prompt {N+1} ({next surface name})."
+After delivery, reply: "{Section} complete. Ready for prompt {N+1} ({next})."
 ```
 
 ---
 
-## Appendix C — Administrative / Management Surface Template (Greenfield)
+## Appendix C — Administrative / Management Section
 
-For management dashboards, admin panels, settings consoles, operator surfaces.
+For management dashboards, admin panels, settings consoles, operator areas.
 
 ```markdown
-# Prompt {N} of {M} — {Surface Name}
+# Prompt {N} of {M} — {Section Name}
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-{surface-slug}.html`
+> {Adapter header.} Run AFTER prompt {N-1}.
 
-## Surface purpose
+## Binding
+## Recap
 
-{1-paragraph description: who manages what on this surface. Multi-tenant or single-org? Self-service or operator-led?}
+## Section identity
+{Who manages what here; multi-tenant or single-org; self-service or operator-led. Usually the `dense` approved variant if 01-DESIGN.md defines one: same brand, more compact, more data display.}
 
-## Visual identity
+## Complete screen list
 
-{Should usually feel different from the primary user-facing surface — denser, more utilitarian, more data-display oriented. Match the brand colors but apply them more austerely.}
+### Shell
+{The shell is created by prompt 02. List only what this section adds to it (nav items already exist as placeholders), e.g. a command palette or a notification panel if the map assigns it here.}
 
-## Complete page list (single file, ~{X} page sections)
+### Main screens
+- `dashboard` — {KPIs, summary, recent activity}
+- `{entity}-list` — {list of the entity this section manages}
+- `{entity}-detail` — {single entity view/edit}
+- `{settings-area}` — {grouped settings}
 
-### Shell components (always visible across pages)
-- Sidebar / nav — {what's in it, primary links}
-- Topbar — {what's in it: search, notifications, user menu, language toggle, etc.}
-- {Other persistent UI: command palette, notification panel, etc.}
+### Auxiliary screens (auth-style layout, if the map assigns them here)
+- `signin`, `forgot-password`, `reset-password`, `accept-invite`, `404`, `500`, `empty-workspace`
 
-### Main pages (inside shell)
-{Numbered list of management pages relevant to the product. Common ones:}
-- `page-dashboard` — {KPIs, summary, recent activity}
-- `page-{entity}-list` — {list of the entity the surface manages}
-- `page-{entity}-detail` — {single entity edit/view}
-- `page-{settings-area}` — {grouped settings}
-- ...
+## Key screen details
+{Per screen, be explicit about:}
+- Tables/lists: columns, filters, sort, pagination, bulk actions, row actions
+- Detail/edit: sections, form fields, validation, save/discard pattern
+- Empty states: what's shown with zero data
+- Permission-gated UI: hidden vs. disabled per role
 
-### Auxiliary pages (outside shell — auth-style centered layout)
-{Include only what applies:}
-- `page-signin`
-- `page-forgot-password`
-- `page-reset-password`
-- `page-accept-invite` (if collaborators are invited)
-- `page-404`
-- `page-500`
-- `page-empty-workspace` (if applicable: first-time experience)
-
-## Key page details
-
-{Per page: sections, states, components. Be explicit about:}
-- Table/list views: columns, filters, sort, pagination, bulk actions, row actions
-- Detail/edit pages: sections, form fields, validation, save/discard pattern
-- Empty states: what's shown when the user has zero data
-- Permission-gated UI: what's hidden vs. disabled for different roles
-
-## Translation glossary
-{If multi-language. Estimate key count. Group by page with comment headers.}
+## Mock data / Translation glossary / Visual and UX requirements / Motion / Proposals (not to build yet)
 
 ## Deliverable
+{Adapter files or artboards; adapter verification lines; G1/G2 checks; every auxiliary screen with its states; empty workspace designed; phone at 375px.}
 
-**ONE file**: `{project-slug}-{surface-slug}.html`
-
-Verification checklist:
-- [ ] All ~{X} page sections present
-- [ ] Shell components work consistently across all pages
-- [ ] All auxiliary pages present with all relevant states (default, error, success, expired/invalid, etc.)
-- [ ] Empty workspace / first-time state designed
-- {If multi-language: language toggle on every page}
-- {If RTL: logical CSS properties throughout, numbers LTR in RTL context}
-- [ ] Mobile responsive at 375px (sidebar collapses appropriately)
-- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
-
-After delivery, reply: "{Surface} complete. Ready for prompt {N+1}."
+After delivery, reply: "{Section} complete. Ready for prompt {N+1}."
 ```
 
 ---
 
-## Appendix D — Marketing / Landing Page Template (Greenfield)
+## Appendix D — Marketing / Landing Site
+
+A separate deliverable (often a separate deployment) on the same design system, using its `marketing` approved variant if one exists: more visual, display typography, more imagery and whitespace, same tokens.
 
 ```markdown
-# Prompt {N} of {M} — Marketing Landing Page
+# Prompt {N} of {M} — Marketing Landing Site
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-Landing.html`
+> {Adapter header.} Run AFTER prompt {N-1}. Builds in the same {container} as the app, as its own
+> screens, so the shared design system and links into sign-up stay connected.
 
-## What it is
+## Binding
+## Recap
 
-The pre-signup marketing site visitors see before becoming users. The top-of-funnel asset.
-
-## Visual identity — distinct from in-product surfaces
-
-Generally: more visual, larger typography (display weights), more imagery, more whitespace, more colorful than the in-product UI. Same brand colors so it's recognizable, but a richer expression of them.
-
-## Section list (single page, ~{X} sections)
-
-Adapt to the product. Common SaaS/digital product landing structure:
-
-1. **Navbar** — logo, nav links, sign-in link, primary CTA
+## Section list (top to bottom; omit what doesn't fit the product)
+1. **Navbar** — logo, nav links, sign-in link, primary CTA (links to the app's `signup` screen key)
 2. **Hero** — headline (6-10 words), subheadline (1-2 sentences), 2 CTAs, hero visual, trust strip
 3. **Social proof** — customer logos, key stats, testimonial snippet
 4. **How it works / features** — 3-6 steps or feature cards
-5. **Differentiation / "Why [product]"** — vs. alternatives, the unique value
-6. **Deep-dive section** — product screenshots, embedded video, interactive demo
+5. **Differentiation** — the unique value vs. alternatives
+6. **Deep-dive** — product screenshots, embedded video, interactive demo
 7. **Pricing** — tiers, billing toggle if applicable, comparison table, sales contact
 8. **Testimonials / case studies** — quotes with attribution
-9. **FAQ** — accordion with common questions
-10. **Final CTA** — last push to sign up
-11. **Footer** — multi-column with product/resources/company/legal/social links
-
-OMIT sections that don't fit the product. E.g., free tools may not have a pricing section; B2B-only products may downplay social proof in favor of case studies.
+9. **FAQ** — accordion
+10. **Final CTA**
+11. **Footer** — product/resources/company/legal/social links
 
 ## Key section details
+- Hero: exact headline + subheadline copy (if the user knows it)
+- Pricing: tiers, what's in each, billing options
+- Testimonials: real names, or placeholders marked [REAL TESTIMONIAL]
 
-{Per section: copy guidance, layout pattern, key components. Be explicit about:}
-- Hero: exact headline + subheadline copy (if user knows it)
-- Pricing: what tiers, what's in each, billing options
-- Testimonials: real names or placeholders with `<!-- TODO: real -->` markers
-
-## Translation
-{If multi-language. Persuasive marketing voice.}
+## Translation / Visual and UX requirements / Motion / Proposals (not to build yet)
 
 ## Deliverable
+- Hero above the fold at 1440px and 375px; all sections present; primary vs secondary CTAs distinct; billing toggle works (if any); testimonials stack on phones; footer complete in all languages; G1/G2 checks.
 
-**ONE file**: `{project-slug}-Landing.html`
-
-Verification:
-- [ ] Hero above the fold at 1440px and 375px
-- [ ] All sections present
-- [ ] CTAs visually distinct (primary vs. secondary)
-- {If pricing has billing toggle: works}
-- [ ] Testimonials stack on mobile
-- [ ] Footer complete in all languages
-- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
-
-After delivery, reply: "Landing page complete. Ready for prompt {N+1}."
+After delivery, reply: "Landing site complete. Ready for prompt {N+1}."
 ```
 
 ---
 
-## Appendix E — Transactional Communications Template (Greenfield)
+## Appendix E — Transactional Communications
 
-For email/SMS/push templates the product sends programmatically.
+Email, push and SMS templates the product sends. A separate deliverable on the same design system: tokens and voice are reused, but motion is `none` (many email clients don't run CSS animation; SMS has no visuals).
 
 ```markdown
 # Prompt {N} of {M} — Transactional Communications
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-Communications.html` (showcase format with all templates side-by-side).
+> {Adapter header.} Run AFTER prompt {N-1}. Builds a review board of every template in the same
+> {container}, so they are checked against the app's design system.
 
-## Channel-specific design constraints (CRITICAL)
+## Binding
+## Recap
 
-{Pick the channels that apply to this product:}
+## Channel constraints (CRITICAL)
 
-**For EMAIL templates:**
-1. Inline CSS only — `<style>` blocks get stripped by some clients
-2. Tables for layout, NOT divs — Outlook uses Word's rendering engine
-3. Max width 600px
-4. Mobile single-column
-5. No background images — many clients block them
-6. Web-safe fonts only with fallbacks
-7. Buttons via padded `<a>` tags with table wrappers — `<button>` doesn't work in Outlook
-8. Plain-text fallback URL displayed below every CTA
-9. Dark-mode safe: solid backgrounds + explicit text colors
+**EMAIL:**
+1. Inline CSS only (some clients strip `<style>` blocks)
+2. Tables for layout, not divs (Outlook uses Word's rendering engine)
+3. Max width 600px; single column on phones
+4. No background images; web-safe fonts with fallbacks
+5. Buttons as padded `<a>` tags inside table cells (`<button>` doesn't work in Outlook)
+6. A plain-text fallback URL below every CTA
+7. Dark-mode safe: solid backgrounds and explicit text colours
+8. No animation
 
-**For PUSH notifications:**
-1. Title under 50 chars
-2. Body under 150 chars
-3. Optional rich media (icon, image) — design at typical sizes
-4. Deep link target
+**PUSH:** title under 50 characters, body under 150, optional icon/image at typical sizes, deep link target (a screen key).
 
-**For SMS templates:**
-1. 160 chars per segment — write copy that fits
-2. No formatting except line breaks
-3. Include short URL pattern if linking
-4. Sender ID strategy
+**SMS:** 160 characters per segment, no formatting except line breaks, short URL pattern, sender ID strategy.
 
-## Templates to deliver
+## Templates
 
 | # | Template | Recipient | Trigger | Channel | Branding |
 |---|---|---|---|---|---|
-{Rows for each template the product needs. Common ones:}
-| 1 | Welcome | New user | After sign-up confirmed | Email | {Product} |
-| 2 | Email verification | New user | Before verification complete | Email | {Product} |
+| 1 | Welcome | New user | Sign-up confirmed | Email | {Product} |
+| 2 | Email verification | New user | Before verification | Email | {Product} |
 | 3 | Password reset | User | "Forgot password" | Email | {Product} |
-| 4 | Team invite | Invited person | Admin invites | Email | {Product} |
-| 5 | {Domain event 1, e.g. order confirmation} | {recipient} | {trigger} | {channel} | {brand} |
-| 6 | {Domain event 2} | ... |
-| ... | ... |
+| 4 | Team invite | Invitee | Admin invites | Email | {Product} |
+| 5 | {Domain event} | {recipient} | {trigger} | {channel} | {brand} |
 
 ## Each template specifies
-
-- Subject line (per language, for email)
-- Preheader text (for email)
-- Body content
-- Plain-text fallback URL displayed below every CTA (for email)
-- Variable placeholders documented at top using `{{name}}` syntax
-
-## Template content specs
-
-{For each template: exact subject/body, CTA, variables, language variants.}
+- Subject line and preheader (email, per language), body, CTA with its target screen key, plain-text fallback URL, variables documented with `{{name}}` syntax
 
 ## Deliverable
-
-**ONE file**: `{project-slug}-Communications.html` — showcase format with all templates rendered side-by-side for design review.
-
-Verification:
-- [ ] All templates rendered in the showcase
-- {For email: table-based layout, inline CSS, max-width 600px, plain-text fallback per CTA}
-- [ ] One clear primary action per template
-- [ ] Variable placeholders documented per template
-- [ ] {If multi-language: all language variants shown}
-- [ ] Customer-facing vs. operator-facing templates use the right branding (per the table)
+- Every template on the review board; email rules above followed; one clear primary action per template; variables documented; all language variants; customer-facing vs. operator-facing branding per the table; G1 checks.
 
 After delivery, reply: "Communications complete."
 ```
 
 ---
 
-## Appendix F — Onboarding Flow Template (Greenfield)
+## Appendix F — Onboarding Flow
 
 ```markdown
 # Prompt {N} of {M} — Onboarding Flow
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-Onboarding.html`
+> {Adapter header.} Run AFTER prompt {N-1}.
 
-## What it is
+## Binding
+{Usually a shared journey: the steps carry data from one to the next, so the adapter decides how state is held (e.g. one artboard on a canvas, the shared store in code).}
 
-First-time setup wizard new users go through after sign-up. {X} steps to get them to their first meaningful moment in the product.
+## Recap
 
-## Visual identity
-
-Distinct from main product chrome — usually no persistent nav, progress indicator at top, focused single-column or two-column layout. Welcoming, encouraging tone.
+## Section identity
+First-time setup after sign-up: {X} steps to the first meaningful moment. Uses the auth/full-screen layout from 02 (no persistent nav, progress indicator at top). Welcoming, encouraging tone.
 
 ## Step list
-
-{Adapt to the product. Common shape:}
-
-1. `step-welcome` — greeting + value reinforcement
-2. `step-{first-input}` — first big input (name, org info, role, primary intent, etc.)
-3. `step-{customize-or-choose}` — pick a preset, theme, or starting configuration
-4. `step-{first-action}` — actually do the first meaningful thing (add an item, connect a source, invite a teammate, etc.)
-5. `step-{integrations-or-payment}` — connect something downstream, or set up billing
-6. `step-success` — congratulations + first CTA into the actual product
+{Adapt to the product:}
+1. `onboarding-welcome` — greeting + value reinforcement
+2. `onboarding-{first-input}` — first big input (name, org, role, intent)
+3. `onboarding-{customize}` — pick a preset, theme or starting configuration
+4. `onboarding-{first-action}` — do the first meaningful thing
+5. `onboarding-{connect}` — integrations or billing
+6. `onboarding-success` — congratulations + CTA into the product (links to its first screen key)
 
 ## Key step details
+{Per step: title, copy, fields or actions, primary CTA, optional "Skip for now", validation, what happens on Back.}
 
-{For each step: title, subtitle/copy, form fields or actions, primary CTA, optional "Skip for now" link, validation rules, what happens if user backs out.}
-
-## Translation
-{If multi-language.}
+## Translation / Visual and UX requirements / Motion / Proposals (not to build yet)
 
 ## Deliverable
-
-**ONE file**: `{project-slug}-Onboarding.html`
-
-Verification:
-- [ ] All steps present, each with `id="step-*"`
-- [ ] Progress indicator updates correctly
-- [ ] Back / Continue navigation works
-- [ ] Skip-for-now on optional steps
-- [ ] Final success state designed
-- {If multi-language: language toggle works}
-- [ ] Mobile responsive
-- [ ] Self-contained (HTML showcase) or previews with every page key reachable (component format)
+- Every step present; progress indicator updates; Back / Continue work and keep entered data; skip on optional steps; success state; language switch; phone layout; G1/G2 checks.
 
 After delivery, reply: "Onboarding complete. Ready for prompt {N+1}."
 ```
 
 ---
 
-## Appendix G — Mobile Companion Template (Greenfield, only if requested)
+## Appendix G — Mobile Companion (only if requested)
+
+A separate deliverable on the same design system, built in the same container as phone-sized screens.
 
 ```markdown
 # Prompt {N} of {M} — Mobile App Screens
 
-> Run AFTER prompt {N-1}. Produces ONE file: `{project-slug}-Mobile.html` (showcase at mobile frames).
+> {Adapter header.} Run AFTER prompt {N-1}. Phone screens at 390×844 in the same {container}.
 
-## What it is
+## Binding
+## Recap
 
-{X} screens of the {project} mobile app, designed at native mobile dimensions and shown in iPhone-style frame mockups for design review.
-
-## Visual identity
-
-Mobile-specific brand expression: sticky bottom CTAs, large tap targets, native iOS/Android patterns (sheet modals, swipe-to-action, pull-to-refresh).
+## Section identity
+Mobile-specific expression of the same design system: sticky bottom CTAs, large tap targets, native patterns (sheet modals, swipe actions, pull-to-refresh). Behaviour-changing gestures go under Proposals until approved.
 
 ## Screen list
-
-{Adapt to the product. Examples:}
-1. `screen-onboarding`
-2. `screen-home` (with bottom tab bar)
-3. `screen-{detail}`
-4. `screen-{action}`
-5. `screen-profile`
-{...}
+1. `m-onboarding`
+2. `m-home` (with bottom tab bar)
+3. `m-{detail}`
+4. `m-{action}`
+5. `m-profile`
 
 ## Key screen details
-
-{Per-screen: what's on it, what the user does, native patterns used, edge cases.}
+{Per screen: what's on it, what the user does, native patterns used, edge cases.}
 
 ## Deliverable
-
-**ONE file**: `{project-slug}-Mobile.html` rendering screens in 375×812 frames side-by-side for review.
-
-Verification:
-- [ ] All screens at 375×812 in frame mockups
-- [ ] Bottom tab bar consistent across tabbed screens
-- [ ] Native input behavior (date picker, sheet modals)
-- [ ] Pull-to-refresh / swipe-to-action affordances
-- {If multi-language: language toggle + RTL mirror if applicable}
+- Every screen at 390×844; bottom tab bar consistent across tabbed screens and links between tabs work; native input behaviour (date picker, sheets); language switch and RTL mirror if applicable; G1/G2 checks.
 
 After delivery, reply: "Mobile complete."
 ```
@@ -821,183 +600,144 @@ After delivery, reply: "Mobile complete."
 
 ## Appendix H — Update Prompt Template (Update Mode)
 
-This is the template for adding/modifying ONE feature in an existing Claude Design project. Use ALL CAPS section headers — they make the prompt scannable and force hard constraints.
+The template for adding/modifying ONE feature in an existing design. ALL CAPS section headers make the prompt scannable and set hard constraints.
 
 ```markdown
-# {Feature Name — short and specific, e.g. "Announcement Bar manager", "Audit log filters", "Bulk export modal"}
+# {Feature Name — short and specific, e.g. "Announcement Bar manager", "Audit log filters"}
 
-CONTEXT: This continues the existing {project name} {surface name} design. Keep
-the same design system, tokens, spacing, and component style already
-established. {2-3 sentences explaining what currently exists, what's missing,
-and why users need this. Be specific — name the current behavior that's being
-upgraded, e.g. "currently hardcoded in the templates" or "currently not
-configurable per role" or "currently a manual CSV export with no preview".}
+> {Adapter header for the existing container.}
 
-WHERE: {Exact navigation placement. Which nav section? Which tab? Which modal?
-Reference a sibling page for clarity. E.g., "Add a new dedicated page in the
-admin, '{Feature}', in the main sidebar nav (place it near {sibling page}).
-Use the standard {surface} page shell ({describe: page title, description
-line, primary action button}) consistent with the other {surface} pages."}
+CONTEXT: This continues the existing {project} design in {container}, section {section}. Keep the
+same design system, tokens, spacing and component style already established. {2-3 sentences: what
+exists now, what's missing and why users need it. Name the current behaviour being upgraded.}
 
-PAGE LAYOUT: {Structural pattern, ideally referencing an existing page. E.g.,
-"two-panel, matching the {sibling page} pattern — Left panel: controls; Right
-panel: live preview with X updating in real time." Or "single-column list view
-matching the {sibling} pattern." If introducing a new pattern, describe it
-explicitly with reasoning.}
+BINDING: {container + link or path} · design system {where it lives in the tool + name/version} · this
+update owns screen key(s) {keys} · links to {keys} · shared components used {name (owner)} · do not touch
+anything else.
 
-{SECTION BREAKDOWN — typically multiple sections. Use ALL CAPS subheaders
-matching the layout. Common patterns:
+WHERE: {Exact placement: nav section, tab or modal, near which sibling screen. "Use the standard
+{section} screen shell (title, description line, primary action) like the other {section} screens."}
 
-LEFT PANEL — global settings (top):
-- {Component name + behavior}
-- {Component name + behavior}
-- {Cross-references to existing components — "same pattern as the existing
-  X controls"}
+PAGE LAYOUT: {Structure, ideally referencing an existing screen: "two-panel, matching {sibling}:
+left controls, right live preview updating in real time." A new pattern is described with reasons.}
 
-LEFT PANEL — {detail area} (below settings):
-- A list of {entity} rows; "Add {entity}" button at the bottom
-- Each row is an editable card with:
-  - {Field}: {behavior, validation, helper text}
-  - Optional {field}: {when shown, fallback behavior}
-  - Optional per-{entity} override (collapsed by default behind a toggle)
-  - {Schedule/active toggle/drag handle to reorder/delete (with confirm)} — if applicable
-- Status badges per row: {list states}
+{SECTION BREAKDOWN — ALL CAPS subheaders matching the layout, e.g.:
+
+LEFT PANEL — global settings:
+- {Component + behaviour; "same pattern as the existing X controls"}
+
+LEFT PANEL — {detail area}:
+- A list of {entity} rows; "Add {entity}" at the bottom
+- Each row is an editable card with: {field}: {behaviour, validation, helper text}; optional
+  {field}; schedule / active toggle / drag handle / delete with confirm, if applicable
+- Status badges per row from the STATUS map: {states}
 
 RIGHT PANEL — live preview:
-- Render {the feature} in the mini preview, styled with chosen tokens
-- Reflect changes live: {what updates in real time}
-- Handle empty state: {what shows when nothing is configured}
-{- Render in the currently selected preview language; if RTL, the {component} mirrors} — if multi-language
+- Render {the feature} with the design-system tokens; reflect changes live; empty state;
+  {if multi-language: current preview language, RTL mirrors}
 
-If the feature is simpler (one section, no panels), describe it as
-"SECTIONS (top to bottom):" with each section bulleted, or "FORM FIELDS:" / 
-"COMPONENTS:" / etc. as fits.}
+Simpler features use "SECTIONS (top to bottom):", "FORM FIELDS:" or "COMPONENTS:" instead.}
 
-MOTION AND FINISH (match the rest of the {surface}):
-- {For each component in this feature, its pattern from the motion-and-finish
-  catalogue with the existing motion tokens: e.g. "Tabs: the existing sliding
-  pill indicator, content cross-fades with a 6px shift"; "Add rule: new card
-  enters with fade + 6px rise, highlight fades over 2s"; "Delete: ConfirmDialog
-  scales in, removed row collapses its height"}
-- Hover, press, focus-visible, disabled and loading states on every new control
-- Reuse the existing motion tokens, elevation levels and indicators — do not
-  introduce new durations, easings or shadow styles
-- Reduced motion: state changes stay visible; no travel or stagger
+MOTION (match the rest of the {section}):
+- {Per component, the behaviour 01-DESIGN.md already selected, by name: e.g. "Tabs: the existing
+  sliding indicator; content cross-fades with a 6px shift"; "Delete: the existing ConfirmDialog;
+  the removed row collapses its height"}
+- The applicable interaction states on every new control (motion-and-finish.md §1)
+- Use the existing motion and elevation tokens. If the design system has none for something this
+  feature needs, add only the feature-scoped tokens as a scoped amendment to 01-DESIGN.md (listed in
+  OUTPUT); never hard-code durations, easings or shadows in components
+- Reduced motion: only colour and opacity animate
 
-RULES (match the rest of the {surface}):
-- {If multi-language: Full {language} i18n for all labels and helper text; if RTL is involved, never mix LTR and RTL on one line}
-- Use existing design tokens and the existing {input / toggle / color-picker /
-  date-picker / segmented-control / badge / modal / etc.} components — no new
-  visual language, no hardcoded colors except {user-controllable colors if applicable}
-- Empty states: {what shows when there's nothing} → friendly empty state with
-  an "{Add your first X}" CTA. A {entity} with blank {required field} is
-  treated as incomplete and excluded from {the preview / the list / submissions}
-- {Any cross-cutting rule specific to this feature: reordering affects priority,
-  scheduling controls visibility, permissions gate visibility, etc.}
+RULES (match the rest of the {section}):
+- {If multi-language: full i18n for all labels and helper text; never mix LTR and RTL on one line}
+- Use the existing design-system components ({input / toggle / colour picker / date picker /
+  segmented control / badge / modal …}): no new visual language, no hard-coded colours except
+  user-controllable ones
+- Empty states: {what shows} → friendly empty state with an "{Add your first X}" CTA
+- {Feature-specific rules: reordering sets priority, scheduling controls visibility, permissions}
 
-OUTPUT: add the new "{Feature Name}" {page/section/modal/component}
-({structural summary}) consistent with the existing {surface} file structure,
-component usage, and section comments. Do NOT regenerate other pages or
-sections — extend the existing file only.
+PROPOSALS (not to build yet): {anything new the feature could add, for PO approval}
+
+OUTPUT: add the new "{Feature}" {screen/section/modal} to the existing {container}, consistent
+with the existing {section} structure and components. Do NOT regenerate or restyle other screens or
+files — extend only what is listed.
 ```
 
 ## How the OUTPUT clause works (CRITICAL)
 
-**Component-format projects:** replace "extend the existing file only" with a component OUTPUT block. Include each item that applies to this feature and omit the rest:
-1. **Existing files to edit**: file, the component or section inside it, and the exact change (e.g. "`pages-3.jsx`, `SettingsPage`: add a Notifications section after Security"). A change to an existing page usually needs only this item plus 5 and 6
-2. **New files**, only if the feature needs them (e.g. `pages-7.jsx` for a new page, `components-{surface}-2.jsx`, `styles-{surface}-2.css`)
-3. **Preview HTML** for every new file: the exact tag and its insertion point (data files right after `data.js`, locales before `i18n.js`, components before the shell, pages before `App.jsx`, stylesheets after the last `<link>`), because a file the HTML does not load never renders
-4. **Routing and nav**, only for a new page: `SHELL_PAGES` / `FULL_PAGES` key and launcher entry in `App.jsx`; nav item in `components-shell.jsx` (new icons go in `icons-{surface}.jsx`, never into the Foundation `icons.jsx`)
-5. **data.js** and **every** `i18n-{lang}.js`: the appended globals and keys
-6. "Do not regenerate or restyle any other file."
-The same shape at surface scale: [split-surface-template](references/split-surface-template.md).
+List, per the adapter, each item that applies and omit the rest:
+1. **Existing files or artboards to edit**: which one, the component or region inside it, and the exact change (e.g. "`sections/settings/pages-settings-1.jsx`, `SettingsPage`: add a Notifications section after Security")
+2. **New files or artboards**, only if the feature needs them
+3. **Registration**: for code, the route and nav entries and whatever the project's entry needs to load the new files (the insertion comments in the preview variant, imports in a real stack); for a canvas, the new artboard (or journey state) and its links
+4. **Data and every locale**: the appended data and keys
+5. **Scoped amendments** to `01-DESIGN.md` or `02-APP-MAP.md`, if any
+6. "Do not regenerate or restyle any other file or screen."
 
-The OUTPUT clause is the most important part of an update prompt. It MUST tell Claude Design:
+The OUTPUT clause MUST tell the tool:
+1. **What to add**: the specific screen/section/feature
+2. **Where to add it**: in the existing container, referencing the existing structure
+3. **What NOT to do**: regenerate other parts
 
-1. **What to add** — the specific page/section/feature
-2. **Where to add it** — referencing the existing file/section structure
-3. **What NOT to do** — explicitly forbid regenerating other parts
+Good OUTPUT phrasings:
+- "add the new X screen to the existing {container}, consistent with the {section} structure and components"
+- "extend the existing Settings screen with the X section — do not modify other settings sections"
+- "add the X modal to the {parent screen} — do not regenerate the {parent screen}, just add the modal and its trigger"
 
-Good OUTPUT phrasings (use whichever fits):
-- "add the new X page consistent with the existing {surface} file structure, component usage, and section comments"
-- "extend the existing Settings page with the X section — do not modify other settings sections"
-- "add X to the header above the existing navbar — keep all other pages unchanged"
-- "add the X modal to the {parent page} — do not regenerate the {parent page} itself, just add the new modal markup and the trigger button"
-
-Bad OUTPUT phrasings (avoid):
+Bad OUTPUT phrasings:
 - "make this work" (too vague)
 - "redesign the page with this feature" (invites regeneration)
 - "update everything to support X" (scope creep)
 
 ## When to use rich section breakdowns vs. tight prose
 
-**Rich breakdown (LEFT PANEL / RIGHT PANEL with bullets per component)**: when the feature is structurally complex — settings + content + preview, multiple states, drag-reorder, scheduling, conditional rules.
+**Rich breakdown** (LEFT PANEL / RIGHT PANEL with bullets): structurally complex features — settings + content + preview, multiple states, drag-reorder, scheduling, conditional rules.
 
-**Tight prose (SECTIONS as numbered paragraphs)**: when the feature is a single linear flow or a smaller addition — a new tab, a new modal, a new section in an existing page. Reduces noise.
+**Tight prose** (SECTIONS as numbered paragraphs): a single linear flow or a small addition — a new tab, modal or section.
 
-**Form spec (FIELDS as a list)**: when the feature is purely a form — new settings, a new dialog, an input flow. Just list the fields with their type, default, validation, help text.
+**Form spec** (FIELDS as a list): purely a form — list the fields with type, default, validation and help text.
 
 ## Common pitfalls to avoid (update mode)
 
-- **Don't omit WHERE** — without explicit placement, Claude Design will guess and may put the feature in the wrong shell location.
-- **Don't omit the layout reference** — saying "two-panel" without naming a sibling leaves visual quality to chance.
-- **Don't invent new components** — if a color picker exists in the project, the update prompt should say "same color picker as in Theme Editor" / "same date picker as in the Schedule page" — not redesign one.
-- **Don't forget the OUTPUT clause** — without it, Claude Design defaults to regenerating large chunks.
-- **Don't over-specify** — leave room for tasteful micro-decisions. Specify what each component does and contains, not the exact pixel dimensions.
-- **Don't write update prompts for greenfield work** — if the user needs more than 1-2 features added, switch to greenfield mode for that surface.
+- **Don't omit WHERE or BINDING**: without them the tool guesses, and may put the feature in a new place or a new container.
+- **Don't omit the layout reference**: "two-panel" without a sibling leaves quality to chance.
+- **Don't invent new components**: "same colour picker as in Theme Editor", not a new one.
+- **Don't forget the OUTPUT clause**: without it, tools default to regenerating large chunks.
+- **Don't over-specify**: say what each component does and contains, not pixel dimensions.
+- **Don't write update prompts for greenfield work**: more than 1-2 features for a section → plan that section's next prompt (part 2 or a new section brief) in the same container, not a fresh design.
 
 ---
 
 ## Quality bar (both modes)
 
-A good prompt produces a design that, when generated by Claude Design and dropped into the project, needs zero structural changes — only content swaps (real copy, real data, real images replacing placeholders). If the user has to ask Claude Design to "also add the empty state" or "also add Arabic support" or "also add the error variant" after the fact, the prompt was incomplete.
+A good prompt produces a design that drops into the container needing zero structural changes — only content swaps (real copy, data, images). If the user has to ask the tool to "also add the empty state", "also add Arabic", "also add the error variant", "make these screens link", or "use the same button as the other section", the prompt was incomplete.
 
-Both greenfield prompts and update prompts are held to this bar.
-
-The bar includes how it feels. If the user has to come back and ask for "smoother transitions", "make the active state slide", "make it look less flat" or "add hover states", the prompt was incomplete in the same way as a missing empty state.
+The bar includes how it feels. If the result doesn't match the direction recorded in `01-DESIGN.md` (missing interaction states anywhere; or, where the direction selected them, an active state that jumps inside its component, panels that snap, a finish flatter than chosen), the prompt was incomplete in the same way as a missing empty state.
 
 ## A note on adaptability
 
-This skill works equally well for:
-- E-commerce platforms (storefronts + admin + payments)
-- B2B SaaS (dashboards + settings + onboarding)
-- Marketplaces (browse + transaction + dual-sided dashboards)
-- Content platforms (feed + editor + creator dashboard)
-- Internal tools (operator UI + admin)
-- Mobile apps (mobile screens + companion web)
-- Educational products (learner UI + instructor UI)
-- Healthcare / finance / regulated products (with audit + compliance surfaces)
-- Any other digital product with a UI
-
-The skill never imposes naming conventions, layout patterns, or feature lists from one project onto another. Discovery drives everything.
+This skill works for e-commerce, B2B SaaS, marketplaces, content platforms, internal tools, mobile apps, education, regulated products (healthcare, finance) and any other digital product with a UI, in any tool with an adapter. It never imposes naming conventions, layouts or features from one project onto another. Discovery drives everything.
 
 ## What this skill does not do
 
-- Generate the design itself — it writes the **prompts** you feed to Claude
-  Design (or another design tool), not the screens.
-- Implement the design in code — that's the code-quality family; `ship-ticket`
-  reads the resulting design set as its source of truth.
-- Impose one project's conventions on another — discovery drives every prompt.
+- Generate the design itself — it writes the **prompts** you feed to a design tool, not the screens.
+- Implement the design in code — that's the code-quality family; `ship-ticket` reads the resulting design set as its source of truth.
+- Impose one project's conventions on another.
 - Handle a one-off visual tweak that doesn't need a structured prompt.
 
 ## Success criteria
 
-Working when: greenfield mode yields a numbered, scope-bounded prompt set whose
-generated designs drop in needing only content swaps (per the Quality bar), and
-update mode changes exactly one feature without regenerating its siblings.
+Working when: greenfield mode yields a numbered, scope-bounded set whose output, in the chosen tool, passes G1 and G2 and needs only content swaps; and update mode changes exactly one feature in the existing container without regenerating its siblings.
 
 ## Troubleshooting
 
-- **Claude Design produced `X.dc.html` + `support.js`, or says "in this project every design has to be a Design Component":** the likely cause is the Claude Design *project* (Design Component mode, or created from a template), not the prompts: the same component-format prompts preview fine in a plain project. Run the rule 14 diagnosis, ask the user to check the project's mode and how it was created, and once that is confirmed, start a new plain project and paste the Master again. Don't rewrite the prompts to `.dc.html`, and don't add "forbid .dc.html" locks.
-- **Claude Design regenerates too much:** the prompt is missing its OUTPUT clause
-  — bound the scope explicitly.
-- **The feature lands in the wrong place:** the prompt omitted WHERE — name the
-  shell location and a sibling layout reference.
-- **More than 1–2 features to add:** switch that surface to greenfield mode
-  rather than stacking update prompts.
-- **Surfaces look like different products:** there is no Foundation prompt, or surface prompts don't say "copy tokens.css / styles.css / icons.jsx / components-core.jsx from Foundation unchanged".
-- **A 25-page surface came back thin or truncated:** split it into part 1 + part 2 (`references/split-surface-template.md`).
+- **Screens came back as separate projects, folders or canvases:** the prompts lacked the adapter header or Binding, or the set had no `02-APP-MAP.md`. Re-run the affected prompts with both, naming the existing container ([core-contract](references/core-contract.md) §4).
+- **A shared component exists twice:** the second brief listed it as new instead of under "Shared components used". Fix the binding and write one update prompt that replaces the copy with a reference to the owner's.
+- **Sections look like different products:** a brief restated or invented design-system values, or used a variant `01-DESIGN.md` doesn't define. Rewrite it to use names only.
+- **The tool used a different format than the prompts asked for:** run rule 14. On the Claude canvas, `.dc.html` artboards are the native format ([adapter-claude-canvas](references/adapter-claude-canvas.md)).
+- **The tool regenerates too much:** the prompt is missing its OUTPUT clause; bound the scope explicitly.
+- **The feature lands in the wrong place:** the prompt omitted WHERE; name the location and a sibling screen.
+- **A 25-screen section came back thin or truncated:** split it into part 1 + part 2 ([split-surface-template](references/split-surface-template.md)).
 - **Designs miss real fields, modals or states of an existing app:** the prompts were written from route names; run the codebase inventory first.
-- **The same page appears in two surfaces:** keep it where it shares components (e.g. all payment outcomes in Checkout) and leave a pointer line in the other prompt.
-- **Designs are complete but look flat, static or dated** (highlights jump, panels snap, boxes with one hard shadow, nothing reacts on hover): the prompts described content but not motion and finish. Add the `## Motion and finish` section to each surface prompt and the motion tokens to Foundation, per [motion-and-finish](references/motion-and-finish.md); for an existing project, write one update prompt per surface that applies only the motion and finish layer and changes nothing else.
-- **Arabic (or brand) typography looks wrong in Claude Design:** a self-hosted font wasn't uploaded to the project; list required uploads in the README.
+- **The same screen appears in two sections:** keep it where it shares components (e.g. all payment outcomes in Checkout); the other section links to it by screen key.
+- **Designs are complete but look flat, static or dated** (highlights jump inside a component, panels snap, one hard shadow, nothing reacts on hover): `01-DESIGN.md` has no direction or selected behaviours, or briefs don't name them. Re-check the inferred direction ([motion-and-finish](references/motion-and-finish.md) §0); for an existing design, one update prompt per section applies only the motion and finish layer and changes nothing else.
+- **Arabic (or brand) typography looks wrong:** a self-hosted font wasn't uploaded to the tool; list required uploads in the README.

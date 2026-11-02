@@ -1,40 +1,35 @@
-# Splitting a large surface into part 1 + part 2
+# Splitting a large section into part 1 + part 2
 
-Claude Design output degrades when one prompt carries more than ~15-18 pages or one page carries a giant tool (a scheduling calendar, a sales wizard). Split such a surface into two prompts that build ONE folder.
+Output degrades when one prompt carries more than ~15-18 screens or one screen carries a giant tool (a scheduling calendar, a sales wizard). Split such a section into two prompts that build into the **same container**, the same as every other prompt (core-contract.md §1, G2).
 
 ## Rules
 
-- **Split by the user's mental model**, not alphabetically: e.g. "Operations and schedule" vs "Money, programs and events"; "Oversight and catalog" vs "Sales, accounts and system". Put the shell and the heaviest daily page in part 1.
-- **Part 1 creates the folder and the whole shell**, including nav items for part-2 pages. Those routes render a `coming-soon` placeholder page. Part 1 must define the seams part 2 plugs into:
-  - `ComingSoonPage`, `NotFoundPage`, `NoAccessPage` in `pages-1.jsx`
-  - a marked placeholder block in `SHELL_PAGES` and a `PART2_KEYS` array
-  - `LAUNCHER_GROUPS` and `NAV_PARENT` as data (not hard-coded JSX)
-  - comment markers (`/* PART 2 DATA BELOW */`) at the end of `data.js` and **every** `i18n-{lang}.js`, and the four HTML insertion comments (DATA after `data.js`, LOCALES before `i18n.js`, COMPONENTS before the shell, PAGES before `App.jsx`) from the component-format skeleton
-  - nav badges read from data (`{PREFIX}.navBadges`) so part 2 can set them without touching the shell
-- **Part 2 is written update-style** (ALL CAPS scope discipline from Appendix H, but at surface size):
+- **Split by the user's mental model**, not alphabetically: e.g. "Operations and schedule" vs "Money, programs and events". Put the section's heaviest daily screen in part 1.
+- **Prompt 02 (app shell) already created every screen key as a placeholder**, so both parts replace placeholders; neither adds nav items or routes the map does not list.
+- **Part 1** owns its screen keys and creates any section-only components and data the part-2 screens will also use; it leaves the seams the adapter defines (for code: data and i18n markers, index insertion comments; for a canvas: the shared section components part 2 will mount).
+- **Part 2 is written update-style**, with the same Binding block (core-contract.md §4):
 
 ```markdown
-# Prompt {N} of {M} — {Surface}, Part 2: {Scope}
+# Prompt {N} of {M} — {Section}, part 2: {Scope}
 
-> Run AFTER prompt {N-1}. Extends the existing folder `{Project}-{Surface}/` created by
-> prompt {N-1}. This is an **update**: add the new files listed below and make only the
-> listed edits to existing files. Do not regenerate, restyle or rewrite any part-1 page,
-> component or file.
+> {Adapter header.} Run AFTER prompt {N-1}. Extends the existing {container}: this is an
+> update. Replace only the placeholders for the screen keys below and make only the listed
+> edits. Do not regenerate, restyle or rewrite any screen, component or file from part 1 or
+> from any other section, except the listed state additions to a shared journey artboard or file.
 
-## Recap {self-contained, 5-8 lines}
+## Binding
+{as in core-contract.md §4, owning only the part-2 screen keys}
 
-## New files
-{pages-12.jsx … pages-N.jsx with their page keys, styles-{surface}-2.css, data-2.js /
-i18n-{lang}-2.js for EVERY locale if data is large, components-{surface}-2.jsx}
+## Recap {task context, 3-5 lines}
+
+## New files / artboards
+{per the adapter: e.g. sections/{section}/pages-{section}-3.jsx … or {section}-{screen}.dc.html for each key}
 
 ## Exact edits to existing files
-- HTML: if part 2 creates `data-2.js`, add it immediately after `data.js` (before any `i18n` script) so its globals exist before any page reads them; add locale extensions at the LOCALES insertion point (before `i18n.js`), new component files at COMPONENTS, new pages at PAGES (before `App.jsx`), new stylesheets after the last `<link>`; list each tag in order …
-- App.jsx: add these keys to SHELL_PAGES / FULL_PAGES; empty PART2_KEYS; add launcher groups …
-- data.js and every i18n-{lang}.js: append after the marker (the same keys in every locale) …
-- components-shell.jsx: {only if unavoidable, list the exact change}
+{only what the adapter's seams require: data and locale extensions, route registration; list each edit}
 
-## Complete page list / Key page details / Mock data / Deliverable
-{as in any surface prompt}
+## Complete screen list / Key screen details / Mock data / Proposals / Deliverable
+{as in any section brief}
 ```
 
-- The next surface that needs the same pages (e.g. a super admin seeing orders across branches) should **copy the page components from the earlier folder** and add only the difference (a branch filter, a column). Say so explicitly, or Claude Design will redesign them thinly from scratch. List their dependencies too: the `components-{surface}.jsx` pieces they use, the `data.js` globals they read (alias the global prefix if it differs), the i18n keys, and any routes they link to; say for each whether it is copied, aliased, or replaced by the receiving surface's own.
+- **A later section that shows screens already designed elsewhere** (a super admin seeing orders across branches) **mounts or imports the existing screen components and adds only the difference** (a branch filter, a column), as a shared component listed in `02-APP-MAP.md`. It never copies them. If the difference is too large for a prop or a variant, it is a new screen that reuses the same shared parts, and the brief says which.
