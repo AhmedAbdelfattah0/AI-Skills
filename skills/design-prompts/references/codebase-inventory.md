@@ -1,6 +1,6 @@
 # Codebase inventory (redesigning an existing app)
 
-When the product already exists in a repo and the user wants "go through every page and component", do NOT write prompts from memory or from route names. Read the code first, in parallel, and write inventories. Prompts written from inventories carry the real columns, fields, statuses, modals and states, which is what makes Claude Design output need zero structural fixes.
+When the product already exists in a repo and the user wants "go through every page and component", do NOT write prompts from memory or from route names. Read the code first, in parallel, and write inventories. Prompts written from inventories carry the real columns, fields, statuses, modals and states, which is what makes the design tool's output need zero structural fixes.
 
 ## Step 1: enumerate
 
@@ -31,6 +31,7 @@ For EACH page (and each wizard step / major component), read the actual code and
   (expired, locked, conflict, declined, no permission…)
 - Language/RTL and phone notes
 - Current UI weaknesses and bugs you notice (brief)
+- Components this page shares with pages outside your scope (pickers, tables, dialogs), so the app map can name one owner
 
 Write markdown to {scratchpad}/inv-NN-{area}.md. Be thorough and concrete: precision
 about fields and states matters more than prose. Reply with the path and page count.
@@ -51,25 +52,25 @@ Write to {scratchpad}/inv-NN-design-system.md.
 
 > **Steps 1-2 are Phase 0.** Stop here, return to Discovery (Phase 1) and get the plan confirmed (Phase 2). Steps 3-6 run inside Phases 3-5.
 
-## Step 3: write Master + Foundation yourself (Phase 3)
+## Step 3: write 00, 01 and 02 yourself (Phase 3)
 
-You own `00-Master-Orientation.md` and `01-Foundation…md` (consistency lives there). Use the design-system inventory: keep LOCKED brand items, express them with more confidence, fix status-colour disagreements with one STATUS map, name the blandness causes so the redesign answers them.
+You own `00-Orientation.md`, `01-DESIGN.md` and `02-APP-MAP.md` (consistency and assembly live there). Use the design-system inventory: keep LOCKED brand items, express them with more confidence, fix status-colour disagreements with one STATUS map, name the blandness causes so the redesign answers them. Build the app map from Step 1's routes: every route becomes a screen key in one product, and every component shared across areas gets one owner.
 
 ## Step 4: fan out prompt writers with one shared brief (Phase 4)
 
-Write `{scratchpad}/WRITER-BRIEF.md` (template: [writer-brief](writer-brief.md)), then spawn one writer per 1-3 prompts, each pointed at: the brief, 00, 01, its inventory file(s), and the user's reference design folder if they gave one. Writers only write their assigned prompt files.
+Write `{scratchpad}/WRITER-BRIEF.md` (template: [writer-brief](writer-brief.md)), then spawn one writer per 1-3 prompts, each pointed at: the brief, 00, 01, 02, its inventory file(s), and the user's reference design if they gave one. Writers only write their assigned prompt files.
 
 ## Step 5: verify the set (you, not the writers; end of Phase 4)
 
-1. **Route coverage:** for every route from Step 1, grep the prompt set for its page key or path; list any with zero hits and place them.
-2. **Duplicates:** the same page designed in two prompts (e.g. pay-by-link in both Auth and Checkout). Keep it where it fits the shared component (all payment outcomes together) and remove it from the other, leaving a pointer line.
+1. **Route coverage:** every route from Step 1 is a screen key in `02-APP-MAP.md`, and every screen key is owned by exactly one brief; list any gap and place it.
+2. **Duplicates:** the same screen designed in two prompts (e.g. pay-by-link in both Auth and Checkout). Keep it where it fits the shared component (all payment outcomes together); the other prompt links to it by screen key.
 3. **Handshake chain:** every prompt's "After delivery, reply" names the next prompt; headers say "Run AFTER prompt N-1".
-4. **Master vs surfaces consistency:** review-tool rule (launcher vs demo strip), file tree, fonts.
-5. **Cross-surface reuse:** a later surface that shows pages already designed elsewhere must say "copy from {folder}".
+4. **Consistency with 00-02:** every brief has a Binding block, uses the adapter header, and restates no design-system values.
+5. **Cross-section reuse:** a section that shows screens or components owned elsewhere mounts or imports them by name and owner, never re-creates them ([verification-protocol](verification-protocol.md) §3).
 6. **Copy rules** from the project (e.g. no em dashes) grep-checked.
-7. **Writer-flagged proposals** collected into the README's "Decisions for the PO".
-8. **Assets Claude Design cannot fetch** (self-hosted fonts, logos): tell the user to upload them to the Claude Design project.
+7. **Writer-flagged proposals** collected into the README's "Decisions for the PO", and present in briefs only under Proposals.
+8. **Assets the tool cannot fetch** (self-hosted fonts, logos): tell the user to upload them to the container.
 
 ## Step 6: deliver (Phase 5)
 
-Save to the repo at `docs/design-prompts/` (or where the user says), with a `README.md`: how to run (paste 00, then in order; part-2 prompts extend part-1 folders in the same project), the prompt/folder/language table, design direction in bullets, "Decisions for the PO" grouped (brand and type · proposals that change behaviour · placeholder content · not built yet), and asset uploads needed. Mention bugs the inventory found as a short side list for the user; they are not part of the prompts.
+Save to the repo at `docs/design-prompts/` (or where the user says), with a `README.md`: how to run (open one container, paste 00, then in order into it; part-2 prompts extend part 1), or, with no adapter, that the set is a plan not yet ready to paste (SKILL.md Phase 5); the tool and adapter with its tested status, the prompt/section/language table, design direction in bullets, "Decisions for the PO" grouped (brand and type · proposals that change behaviour · placeholder content · not built yet), and asset uploads needed. Mention bugs the inventory found as a short side list for the user; they are not part of the prompts.

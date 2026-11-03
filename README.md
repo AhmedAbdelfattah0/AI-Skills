@@ -216,7 +216,7 @@ Claude-only.
 | backend-code-quality | `references/` |
 | code-quality | `references/` (per-stack rule sets) |
 | cost-reducer | — |
-| design-prompts | `references/` (component + HTML preview format, Foundation, part-2 split, codebase inventory, writer brief, depth standard) |
+| design-prompts | `references/` (core contract with the two gates and the binding, tool adapters for the Claude canvas and code generators, design-system template, motion and finish catalogue, part-2 split, codebase inventory, writer brief, depth standard, verification protocol) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | linkedin-content-coach | — |
 | marketing-video | `references/` + `scripts/` (factual product videos from real captures: claim-gated timeline, local Remotion render, measured QA, independent frame review, shot-preserving revisions; `.specs/marketing-video/`) |

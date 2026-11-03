@@ -1293,6 +1293,17 @@ function cmdValidate() {
 // `scope` limits each term to the skills that can legitimately be talking about
 // it, plus the repo guidance files. A term with no scope applies everywhere.
 const RETIRED_VOCABULARY = [
+  [/\bcopied unchanged\b/gi, 'design-prompts builds the design system once in the destination and references it; nothing is copied per section', ['design-prompts']],
+  [/\bcopy\b(?:(?!\.\s)[^\n]){0,200}?\bunchanged\b/gi, 'the design system is referenced from the one container, never copied into a section', ['design-prompts']],
+  [/\bfolder[- ]per[- ]surface\b/gi, 'design-prompts assembles every section into one container (core-contract G2)', ['design-prompts']],
+  [/\{Project\}-\{Surface\}/g, 'per-surface containers were replaced by one container per product', ['design-prompts']],
+  [/\{Project\}-Foundation\b/g, 'the design system is 01-DESIGN.md, built once in the destination', ['design-prompts']],
+  [/\bProduces ONE (?:folder|file)\b/g, 'prompts extend the one container named in their Binding block', ['design-prompts']],
+  [/\bHTML[- ]showcase\b/gi, 'one-file-per-surface output cannot pass G2 and was removed', ['design-prompts']],
+  [/\bMaster Orientation\b/g, 'prompt 00 is the Orientation', ['design-prompts']],
+  [/\btravel, scale and stagger\b/gi, 'reduced motion: only colour and opacity animate', ['design-prompts']],
+  [/\bdo not introduce new durations\b/gi, 'UPDATE adds only feature-scoped tokens as a scoped amendment to 01-DESIGN.md', ['design-prompts']],
+  [/Never "none"/g, 'motion level none is allowed with a stated reason; interactive screens default to at least subtle', ['design-prompts']],
   [/\bestimated (?:parallel )?(?:savings|saved time)\b/gi, 'ship-ticket reports measured concurrent overlap with timing limitations, not causal time savings', ['ship-ticket']],
   [/\boptional Codex opinion\b/gi, 'ship-ticket selects its optional counterpart from the host identity', ['ship-ticket']],
   [/\bCross-model plan critique\b/gi, 'ship-ticket PLAN uses bounded reciprocal debate and records convergence', ['ship-ticket']],
