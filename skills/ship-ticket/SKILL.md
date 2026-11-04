@@ -395,9 +395,10 @@ Read the plan and Design Contract from disk before writing.
   `groupPrefix`), `admit` each wave before dispatch, and dispatch external-CLI
   writers through `carrier.mjs run` so approval, billing, timeout and ownership
   are enforced; import its usage on the activity's end event with `--metrics-from`.
-  Copy each scheduled node's `risk` and `complexity` into its dispatch JSON: the
-  carrier routes the model tier only from those fields, so omitting them turns a
-  high-risk node's required `strong` tier into `inherit`.
+  Copy each scheduled node's `risk` and `complexity` into its dispatch JSON, and
+  its `model` (if any) as `modelTier`, the carrier's model-tier input: the
+  carrier routes the tier only from those fields, so omitting them turns a
+  high-risk node's required `strong` tier into `inherit` and drops a requested tier.
 - On full-stack work, after the Integration Contract is materialized and frozen,
   dispatch frontend and backend implementation workers concurrently. Neither
   waits for the other's implementation, tests, or review; both depend only on

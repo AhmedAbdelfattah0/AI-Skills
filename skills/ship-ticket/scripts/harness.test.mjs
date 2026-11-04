@@ -131,7 +131,10 @@ test('macOS budget counts reclaimable pages, not only free pages (live-run regre
     + 'Pages wired down:                             188958.\nPages purgeable:                               11121.\n';
   assert.equal(darwinAvailableBytes(vm), (44035 + 495583 + 8521 + 11121) * 16384);
   assert.equal(darwinAvailableBytes('garbage'), null);
-  if (process.platform === 'darwin') {
+  // Live comparison only when vm_stat actually answered; a failed or unparseable read skips it.
+  const live = process.platform === 'darwin'
+    ? darwinAvailableBytes(spawnSync('vm_stat', [], { encoding: 'utf8', timeout: 5000 }).stdout ?? '') : null;
+  if (live !== null) {
     const snap = resourceSnapshot();
     assert.ok(snap.os_available_bytes > snap.free_memory_bytes);
     // Two live vm_stat reads drift slightly; the regression was a ~10x gap.

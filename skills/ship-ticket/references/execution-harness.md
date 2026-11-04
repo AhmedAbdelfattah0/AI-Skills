@@ -208,6 +208,7 @@ headless agent CLI that this harness relies on.
 
 Each run appends one JSONL event to `usageLog`. The result's `run_log_metrics`
 holds `key=value` pairs that `run-log.mjs end --metrics-from <result.json>` imports
+(`<result.json>` is the carrier's stdout saved to disk, not `resultFile`)
 directly (see [observability.md](observability.md)).
 
 ```bash
