@@ -16,7 +16,7 @@ test('dispatches disjoint ready nodes in same wave', () => {
 test('serializes write/write and write/read collisions', () => {
   const result = run('BUILD', [node('a', { writes: ['src'] }), node('b', { writes: ['src/app'] }),
     node('c', { reads: ['src/file.ts'] })]);
-  assert.deepEqual(result.waves.map(w => w.nodes.map(n => n.id)), [['a'], ['b'], ['c']]);
+  assert.deepEqual(result.waves.map(w => w.nodes.map(n => n.id)), [['a'], ['b', 'c']]);
 });
 test('serializes exclusive runtime resources and honors width', () => {
   const result = run('PROVE', [node('a', { resources: ['db:integration'] }), node('b', { resources: ['db:integration'] }),
