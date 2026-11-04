@@ -17,7 +17,7 @@ jobs:
       - name: Run skill validator
         run: node scripts/cli.mjs validate
       - name: Test ship-ticket execution harness
-        run: node --test skills/ship-ticket/scripts/harness.test.mjs
+        run: node --test skills/ship-ticket/scripts/harness.test.mjs skills/ship-ticket/scripts/docker-lifecycle.test.mjs skills/ship-ticket/scripts/carrier-usage.test.mjs
       - name: Test ship-ticket telemetry
         run: node --test skills/ship-ticket/scripts/run-log.test.mjs
       - name: Test project-audit continuity
