@@ -98,6 +98,13 @@ their respective side's union as denominator; `frontend_backend_union_overlap_pc
 uses the combined union. Thus 100% of the shorter side is not 100% of BUILD.
 Check `timing_basis`, `carrier_timed_members` and `flags` before comparing waves.
 
+Writer nodes dispatched through the harness carrier return `run_log_metrics`
+(`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+`reasoning_tokens`, `reported_cost_usd`). Pass each one as `--metric` on that activity's
+end event. They are provider-reported counters only. An absent counter is unknown
+and is not recorded as zero. A Claude subscription cost is a list-price estimate,
+not a charge. Use the harness `parallel_group` (run-ID prefixed) as the wave ID.
+
 ### Execution identity and timing provenance
 
 Before each authorized REVIEW execution, allocate `review_execution=review-<opaque>`

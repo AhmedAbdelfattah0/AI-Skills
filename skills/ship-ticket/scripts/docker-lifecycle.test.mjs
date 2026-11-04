@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dockerArgs, ownedContainers, cleanupOwned } from './docker-lifecycle.mjs';
+import { dockerArgs, ownedContainers, cleanupOwned, orphanRuns, reusableContainers } from './docker-lifecycle.mjs';
 const id = 'abcdef123456';
 const fake = (calls) => (_bin, args) => {
   calls.push(args);
@@ -40,4 +40,28 @@ test('rejects label mismatch without deleting anything', () => {
 });
 test('invalid Docker output is never used for removal', () => {
   assert.throws(() => ownedContainers('owner', 'run', () => ({ status: 0, stdout: 'oops' })), /unexpected/);
+});
+
+test('orphan listing is read-only and groups by run label', () => {
+  const calls = [];
+  const r = orphanRuns('owner', (_b, args) => { calls.push(args); return { status: 0,
+    stdout: 'abcdef123456\trun-a\texited\t2026-11-01\n123456abcdef\t\trunning\t2026-11-02\n' }; });
+  assert.deepEqual(Object.keys(r.runs).sort(), ['(missing-run-label)', 'run-a']);
+  assert.equal(r.dry_run, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'ps');
+  assert.ok(calls[0].includes('label=ai-skills.ship-ticket.owner=owner'));
+  assert.throws(() => orphanRuns('owner', () => ({ status: 0, stdout: 'zzz\trun\tup\tx' })), /unexpected/);
+});
+
+test('reuse lists only running containers with both exact labels', () => {
+  let seen;
+  const ids = reusableContainers('owner', 'run', (_b, args) => { seen = args; return { status: 0, stdout: id }; });
+  assert.deepEqual(ids, [id]);
+  assert.ok(seen.includes('status=running'));
+  assert.ok(seen.includes('label=ai-skills.ship-ticket.run=run'));
+});
+
+test('docker failure is surfaced, never treated as an empty owned set', () => {
+  assert.throws(() => cleanupOwned('owner', 'run', { dryRun: false, spawn: () => ({ status: 1, stdout: '' }) }), /docker operation failed/);
 });

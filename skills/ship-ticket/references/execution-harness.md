@@ -1,144 +1,197 @@
-# Portable execution harness (opt-in v1)
+# Execution harness (BUILD, PROVE, SHIP; never PLAN)
 
-This is a **deterministic advisory helper**, bundled inside `ship-ticket/scripts/`
-so the existing cross-platform installer distributes it with the skill. Node >=18;
-no extra package, daemon, service, API key, or model-provider dependency.
+Bundled dependency-free Node helpers (Node >= 18) under `ship-ticket/scripts/`,
+distributed by the existing installer with the skill. They make the existing
+dependency-driven orchestration measurable and enforce its safety rules at the
+process boundary. They do not replace the DAG, approval, reviewer independence
+or security gates in `SKILL.md`.
 
-**PLAN is protected.** The harness refuses PLAN input and cannot change native
-Plan Mode, the strong-model planning choice, cross-model debate, human approval,
-or the approved Design Contract. Do not invoke it during native read-only Plan Mode.
+**PLAN is protected.** Every helper refuses PLAN. None of them selects a PLAN
+model, schedules PLAN work, shortens the debate or touches approval. Do not run
+them inside native Plan Mode. REVIEW keeps its own read-only relay
+([review.md](review.md)); the carrier refuses REVIEW.
 
-## Commands
+A missing or failing helper never blocks the ticket: report
+`harness degraded: <reason>` and continue under the ordinary `SKILL.md` rules.
+
+## Lifecycle integration
+
+| Phase | Helper use |
+|---|---|
+| UNDERSTAND | `harness.mjs resources` once, to record host capacity |
+| PLAN | none |
+| BUILD | `schedule` the approved DAG, `admit` each wave, `carrier.mjs run` each writer node, `docker-lifecycle.mjs labels` for any container |
+| PROVE | `schedule` checks with exclusive `port:`/`db:`/`docker:` locks; `docker-lifecycle.mjs reuse` before starting a service; carrier only for writer repairs |
+| REVIEW | `schedule` advice only; dispatch stays on the read-only relay |
+| SHIP | `usage.mjs summary` for the run; `docker-lifecycle.mjs cleanup` dry run, then `--apply` for this run's containers |
+
+Write every helper input and output outside the candidate (a scratch directory
+or the repository's Git metadata); never add them to the reviewed candidate.
+
+## Scheduling and admission
 
 ```bash
 node <SHIP_TICKET_SKILL>/scripts/harness.mjs resources
-node <SHIP_TICKET_SKILL>/scripts/harness.mjs schedule /absolute/path/to/wave-input.json
-node --test <SHIP_TICKET_SKILL>/scripts/harness.test.mjs
+node <SHIP_TICKET_SKILL>/scripts/harness.mjs schedule /abs/wave-input.json
+node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exit 3 = not admitted
 ```
 
-Example input (write it outside the candidate or under Git metadata; never add
-the file to the ticket's reviewed candidate):
+`schedule` input:
 
 ```json
 {
   "phase": "BUILD",
+  "groupPrefix": "<RUN_ID>",
   "maxConcurrency": 3,
-  "memoryBudgetMb": 12000,
+  "memoryBudgetMb": "auto",
   "nodes": [
-    {
-      "id": "frontend",
-      "deps": [],
-      "reads": ["contracts"],
-      "writes": ["apps/web"],
-      "resources": ["cache:frontend-build"],
-      "estimatedMemoryMb": 2500,
-      "complexity": "medium",
-      "risk": []
-    },
-    {
-      "id": "backend",
-      "deps": [],
-      "reads": ["contracts"],
-      "writes": ["apps/api"],
-      "resources": ["db:integration"],
-      "estimatedMemoryMb": 3500,
-      "complexity": "high",
-      "risk": ["auth"]
-    },
-    {
-      "id": "integration",
-      "deps": ["frontend", "backend"],
-      "reads": ["apps/web", "apps/api"],
-      "writes": ["tests/integration"],
-      "resources": ["db:integration"],
-      "complexity": "medium"
-    }
+    { "id": "frontend", "deps": [], "reads": ["contracts"], "writes": ["apps/web"],
+      "resources": ["cache:frontend-build"], "estimatedMemoryMb": 2500, "complexity": "medium" },
+    { "id": "backend", "deps": [], "reads": ["contracts"], "writes": ["apps/api"],
+      "resources": ["db:integration"], "estimatedMemoryMb": 3500, "complexity": "high", "risk": ["auth"] },
+    { "id": "integration", "deps": ["frontend", "backend"], "reads": ["apps/web", "apps/api"],
+      "writes": ["tests/integration"], "resources": ["db:integration"], "estimatedMemoryMb": 1500 }
   ]
 }
 ```
 
-The result contains ordered `waves`, each with a fresh `parallel_group` and
-`model_tier` recommendation. It **does not launch agents**, reserve resources,
-measure model tokens, detect subscription quotas, start/stop Docker, or enforce
-model selection. The orchestrator must verify actual carrier isolation, exclusive
-runtime ownership, available memory, context and reviewer independence before
-dispatch. A wave is a safe candidate grouping, not a command to run it blindly.\nOptional `memoryBudgetMb` is a caller-chosen **conservative** budget, and\n`estimatedMemoryMb` is a per-node estimate; the planner rejects nodes larger\nthan that budget and prevents concurrent estimates exceeding it. Neither is\nmeasured or enforced against OS memory, and unspecified estimates default to\nzero. For memory-sensitive dispatch, provide measured estimates for **every**\nnode or do not claim memory safety.
+- Paths are repository-relative. Writer/writer and writer/reader overlaps
+  (including ancestor/descendant) serialize. Named exclusive locks (`port:`,
+  `db:`, `cache:`, `docker:`, `fixture:`, `generator:`, `lock:`) serialize.
+  An undeclared lock cannot be detected.
+- `groupPrefix` (the run ID) makes every `parallel_group` unique across phases,
+  which `SKILL.md` requires; pass the wave's `parallel_group` to `run-log.mjs`.
+  Without a prefix the output says `group_ids_unique: false`.
+- `memoryBudgetMb: "auto"` takes the lower of OS free memory and Node's
+  cgroup-aware available/constrained memory, minus a reserve of 1 GiB or 15% of
+  total, whichever is larger. `memory_safety` is `estimated` only when a budget
+  applied and **every** node has `estimatedMemoryMb`; otherwise `unverified`.
+  On macOS, free memory excludes reclaimable cache, so the budget is conservative.
+- `admit` input `{ "phase", "estimatedMemoryMb", "members" }` re-reads live
+  memory immediately before a wave starts. A refusal shrinks or delays that wave,
+  never the plan. Neither command reserves memory.
+- Default `maxConcurrency` is `min(3, cpu_count)`.
 
-Paths are repository-relative and conflict when a writer owns a path or its
-ancestor/descendant; read/write collisions also serialize. Resources use named
-exclusive locks: `port:`, `db:`, `cache:`, `docker:`, `fixture:`,
-`generator:`, `lock:`. Every worker must declare its real exclusive resources.
-An omitted lock cannot be detected by this helper.
+### Model tiers
 
-Model tiers are `economy`, `balanced`, `strong`, `inherit`. These are
-provider-neutral labels, **not actual model IDs**. Security-sensitive nodes,
-high-complexity nodes and every REVIEW node receive `strong` advice. The host
-must map tiers to available provider models and retain all independent-review
-and elevated-security gates. If the host cannot safely select a model, use its
-existing model and report the optimization as unavailable; never downgrade
-correctness, planning or review.
+Tiers are `economy`, `balanced`, `strong` and `inherit`. They are labels the host
+maps to real model IDs, not model IDs themselves.
 
-`resources` reports a best-effort host-wide snapshot, not a cgroup-aware
-capacity limit or a memory reservation. Do not use it alone to promise that
-simultaneous builds fit in RAM. No automatic Docker deletion is implemented:
-safe cleanup needs owned-resource provenance and cannot prune unrelated images,
-volumes, databases or developer work.
+- REVIEW, any high-risk node (`security`, `auth`, `tenancy`, `payments`,
+  `migration`, `schema`, `shared-contract`) and `complexity: "high"` are always
+  `strong`. A requested cheaper tier cannot override that.
+- `complexity: "low"` or an explicit `model` request gets that tier.
+- Everything else is `inherit`: the host's own model. The harness never
+  introduces an implicit downgrade.
 
-## Rollout and safety
-
-- Default remains the existing skill DAG behavior; this helper is opt-in.
-- Never edit PLAN references or the approved Design Contract to fit a schedule.
-- Never treat a computed wave as approval to exceed the host's concurrency limit.
-- Do not record source code, prompts, credentials, full paths or token contents in
-  telemetry; existing `run-log.mjs` remains the run-time evidence source.
-- If this helper fails or is missing, report `harness advisory degraded` and
-  follow the existing `ship-ticket` scheduling rules.
-- Run `node --test skills/ship-ticket/scripts/harness.test.mjs` on changes.
-
-## Follow-on scope (not implemented in v1)
-
-Measured token/provider usage where host APIs expose it; cgroup-aware admission
-control; an owner-scoped Docker/database lease registry with TTL and verified
-cleanup; provider-specific dispatch adapters and integration tests on macOS and
-Windows. These require separate evidence and should not be presented as shipped.
-
-## Guarded provider dispatch, usage and Docker ownership
+## Writer carrier
 
 ```bash
-node <SHIP_TICKET_SKILL>/scripts/carrier.mjs inspect /absolute/path/to/dispatch.json
-node <SHIP_TICKET_SKILL>/scripts/carrier.mjs run /absolute/path/to/dispatch.json
-node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /absolute/path/to/usage-events.json
-node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs labels <owner> <run-id>
-node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs cleanup <owner> <run-id>
+node <SHIP_TICKET_SKILL>/scripts/carrier.mjs inspect /abs/dispatch.json   # validate + verify approval, no process
+node <SHIP_TICKET_SKILL>/scripts/carrier.mjs run /abs/dispatch.json       # exit 2 = node failed
+```
+
+```json
+{
+  "phase": "BUILD", "provider": "claude", "nodeId": "frontend",
+  "workdir": "/abs/worktree", "repoRoot": "/abs/worktree",
+  "approval": { "ticket": "<TICKET>", "runId": "<RUN_ID>", "approvedPlanDigest": "<DIGEST>" },
+  "ownership": { "writes": ["apps/web"], "othersOwned": ["apps/api"] },
+  "promptFile": "/abs/scratch/frontend.prompt.md",
+  "complexity": "medium", "risk": [], "modelMap": { "strong": "<model-id>", "economy": "<model-id>" },
+  "timeoutMs": 1800000,
+  "resultFile": "/abs/scratch/frontend.message.json",
+  "usageLog": "/abs/scratch/usage.jsonl"
+}
+```
+
+What it enforces:
+
+- **Phase:** BUILD, PROVE and SHIP only.
+- **Approval evidence:** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold
+  a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the
+  supplied digest. It reads the plan artifact and never writes it.
+- **Billing:** `billing` defaults to `subscription`. The child environment
+  drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches.
+  Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`. Gemini/Antigravity:
+  Google API-key and Vertex variables). The CLI's own status is then checked in
+  that environment: `claude auth status --json` must report
+  `authMethod: "claude.ai"` with `apiProvider: "firstParty"`, and
+  `codex login status` must report `Logged in using ChatGPT`. Any other answer
+  refuses dispatch before a process starts. `"billing": "api"` also needs
+  `"allowApiBilling": true`, which only the user can authorize.
+- **Verified adapters:** Claude and Codex arguments are built from flags checked
+  against Claude Code 2.1.318 and Codex CLI 0.166.0:
+  `claude -p --output-format json --no-session-persistence --permission-mode <acceptEdits|auto|dontAsk|manual> [--model <id>]`
+  and `codex exec --json --ephemeral -s <read-only|workspace-write> [-m <id>] -`.
+  Caller `args` are rejected, so `--model` cannot be smuggled in. `--model`/`-m`
+  is emitted only when `modelMap` maps the routed tier; otherwise the provider
+  default runs (`model: "provider-default"`). `bypassPermissions`, `plan` and
+  `danger-full-access` are refused. Hooks are not disabled (no `--bare`), so
+  PostToolUse guards such as nn-guard still run.
+- **Prompts** go on stdin, never on argv (process listings, Windows length limits).
+- **Process control:** async spawn in its own process group. A timeout or
+  cancellation (SIGINT/SIGTERM to the carrier, or an AbortSignal) kills the whole
+  tree: SIGTERM, then SIGKILL after 5 s on POSIX, `taskkill /T /F` on Windows.
+  The carrier captures up to 32 MiB of stdout; beyond that, usage is reported as unavailable.
+- **Ownership check:** Git dirty state is snapshotted before and after the run.
+  Changed paths outside `ownership.writes` and the declared concurrent
+  `othersOwned` fail the node (`ownership_check: "violated"`) and are listed.
+  If the directory isn't a Git work tree, the check reports `unavailable`.
+- **Output privacy:** stdout shows metadata only. The worker's final message goes
+  to a fresh `resultFile` (mode 0600, outside the candidate or under `.git`).
+- **Windows:** `.cmd`/`.bat` shims are resolved through `PATH`×`PATHEXT` and run
+  with a quoted shell only when every argument is a safe token.
+
+Gemini and Antigravity were not installed where this was built, so their flags
+are unverified. They run only from an explicit trusted `executable` + `args`
+template. They get no model injection (`model_applied: false`), no usage
+parsing, and `subscription_auth: "unverified"`. Antigravity has no documented
+headless agent CLI that this harness relies on.
+
+## Provider-reported usage
+
+Each run appends one JSONL event to `usageLog`; `run_log_metrics` gives
+`key=value` pairs for `run-log.mjs end --metric` (see
+[observability.md](observability.md)).
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /abs/scratch/usage.jsonl
+```
+
+- Claude `--output-format json` gives `input_tokens`, `output_tokens`,
+  `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` and
+  `reported_cost_usd`, plus its `cost_basis`. Under a subscription the basis is
+  `list`: a list-price estimate, **not a charge**.
+- Codex `exec --json` sums `turn.completed.usage` over all turns. Codex reports no
+  cost, so cost stays `null`.
+- Missing counters stay `null` and are never zero. `cache_hit_ratio` (cache reads
+  ÷ all prompt tokens) is the measured token-optimization signal.
+
+## Docker ownership
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs labels <owner> <run-id>     # --label args for docker run
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs reuse <owner> <run-id>      # running owned containers
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs orphans <owner>             # crash recovery, read-only
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs cleanup <owner> <run-id>    # dry run
 node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs cleanup <owner> <run-id> --apply
 ```
 
-Carrier input must include `phase` (BUILD/PROVE/SHIP only), `provider`
-(claude/codex/gemini/antigravity), `approved: true`, `approvedPlanId`,
-absolute `workdir`, `ownership.writes`, trusted `args` string array, and
-`timeoutMs`. Antigravity additionally requires an explicit executable because
-there is no assumed universal CLI. The harness **does not construct prompts,
-inject model flags, check authentication, or verify plan approval independently**;
-the orchestrator must supply and validate these. Claude subscription-only mode
-removes API-key environment variables from the child process, but the orchestrator
-must still verify actual OAuth subscription authentication and provider routing
-before dispatch. Never use carrier for PLAN or independent REVIEW. Avoid passing
-sensitive prompts or secrets through argument lists.
+Only containers with both exact labels (`ai-skills.ship-ticket.owner`,
+`ai-skills.ship-ticket.run`) are ever eligible. `--apply` re-inspects each
+container's labels immediately before `docker rm -f` and stops at the first
+mismatch. A Docker error fails the command; it is never read as "nothing owned".
+After a crash, `orphans` lists the owner's runs and removal still goes through
+the per-run `cleanup`. Images, volumes and networks are never removed, and there
+is no prune.
 
-Usage input is an array of provider-reported events with `provider`, safe
-`run_id`, and optional `input_tokens`, `output_tokens`,
-`cache_read_tokens`, `cache_write_tokens`, `reported_cost_usd`. It only
-aggregates provided numbers. Missing counters stay null; subscription quotas
-and model billing are not inferred.
+## Known limits
 
-Docker containers must be created with the two exact labels returned by
-`labels`: `ai-skills.ship-ticket.owner` and `ai-skills.ship-ticket.run`.
-Default cleanup is a dry run; `--apply` requires explicit authority and verifies
-the labels again for every container. The helper is not a shared resource lease
-manager and does not clean Docker networks, images or volumes. A container
-without both exact labels is never eligible.
-
-**Operational limits:** model IDs/CLI flags are version-specific and deliberately
-provided by the trusted host. Memory estimates are advisory. Real provider
-availability, token telemetry, and resource cleanup need host integration and
-appropriate permissions; do not report these as automatic or guaranteed.
+- Admission is advisory: it measures, it does not reserve memory.
+- Cross-process locks between two concurrent ship-ticket runs on one host are not
+  provided. Declare `port:`/`db:` locks within a run and use distinct ports per run.
+- Gemini/Antigravity adapters are template-only (above).
+- Windows behavior of the shims is covered by unit tests and the Windows CI job
+  with a fake CLI. Real Claude/Codex Windows installs were not exercised.

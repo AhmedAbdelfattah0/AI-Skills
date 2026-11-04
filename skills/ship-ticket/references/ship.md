@@ -80,6 +80,11 @@ Append SHIP_READY and the one predeclared ticket-keyed session-log entry. Those 
 recording writes are excluded from candidate identity. No code, test, comment,
 documentation, parity or VAPT evidence may change after REVIEW PASS.
 
+Outside the candidate, summarize the run's carrier usage log with `usage.mjs
+summary` and remove only this run's labelled containers with
+`docker-lifecycle.mjs cleanup <owner> <run-id>` (dry run first, then `--apply`).
+Neither step writes to the repository ([execution-harness.md](execution-harness.md)).
+
 ## One commit
 
 The commit contains:

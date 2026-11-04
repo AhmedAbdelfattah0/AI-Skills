@@ -94,18 +94,16 @@ Load a phase reference only when entering that phase:
 | REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 
-## Optional deterministic execution harness (outside PLAN)
+## Execution harness (outside PLAN)
 
-For UNDERSTAND, BUILD, PROVE, REVIEW or SHIP, the bundled
-[`scripts/harness.mjs`](scripts/harness.mjs) can propose dependency-safe
-execution waves and provider-neutral model tiers. Read
-[references/execution-harness.md](references/execution-harness.md) before use.
-After PLAN approval, use the harness during BUILD and PROVE to propose waves\nwhen a safe Node runtime is available; apply its carrier only with a trusted\nprovider-specific argument template and an approved ownership packet. Record\nprovider-reported token counters through the bundled usage helper when available.\nFor Docker resources, label containers with the exact owner and run IDs and\nperform dry-run cleanup before any explicitly authorized apply; never prune\nshared resources. For REVIEW, use only the existing independent read-only\nreview carrier and the harness's advisory scheduling, never its BUILD carrier.\nDuring UNDERSTAND and SHIP, use resource/usage telemetry where available.\n\nIt is advisory and opt-in: the existing DAG, approval, resource ownership,
-security gates and reviewer independence remain authoritative. Never use the
-harness to select a PLAN model, schedule PLAN work, shorten debate, or change
-human approval. The helper deliberately rejects PLAN. A missing helper must
-not block the ticket. Do not treat a proposed wave as proof of RAM availability
-or as authorization to run concurrent containers.
+Bundled Node helpers turn the orchestration rules below into checks at the
+process boundary: `scripts/harness.mjs` (wave schedule, live admission, model
+tiers), `scripts/carrier.mjs` (approved, subscription-safe writer dispatch with
+ownership checks and provider-reported usage), `scripts/usage.mjs` and
+`scripts/docker-lifecycle.mjs` (label-owned containers only). Read
+[references/execution-harness.md](references/execution-harness.md) before BUILD.
+Every helper refuses PLAN and the carrier refuses REVIEW. A missing or failing
+helper is a declared degradation, never a stop.
 
 ## Dependency-driven orchestration
 
@@ -389,6 +387,10 @@ Read the plan and Design Contract from disk before writing.
   **WAIT_FOR_USER** for the preserve-or-squash decision.
 - Schedule the execution DAG continuously: whenever a node finishes, dispatch
   every newly ready conflict-free node without waiting for unrelated siblings.
+  When Node is available, derive waves with the harness `schedule` (run ID as
+  `groupPrefix`), `admit` each wave before dispatch, and dispatch external-CLI
+  writers through `carrier.mjs run` so approval, billing, timeout and ownership
+  are enforced; record its `run_log_metrics` on the activity's end event.
 - On full-stack work, after the Integration Contract is materialized and frozen,
   dispatch frontend and backend implementation workers concurrently. Neither
   waits for the other's implementation, tests, or review; both depend only on

@@ -4,14 +4,24 @@
  * Never executes model calls, starts containers, or deletes resources.
  * PLAN is intentionally excluded from model routing and scheduling.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { cpus, freemem, totalmem } from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 export const PHASES = Object.freeze(['UNDERSTAND', 'BUILD', 'PROVE', 'REVIEW', 'SHIP']);
 const VALID_MODELS = new Set(['economy', 'balanced', 'strong', 'inherit']);
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const HIGH_RISK = new Set(['security', 'auth', 'tenancy', 'payments', 'migration', 'schema', 'shared-contract']);
 const RESOURCE_PREFIXES = ['port:', 'db:', 'cache:', 'docker:', 'fixture:', 'generator:', 'lock:'];
+
+/** True when `moduleUrl` is the script Node was asked to run (POSIX and Windows). */
+export function isEntrypoint(moduleUrl) {
+  const script = process.argv[1];
+  if (!script) return false;
+  let resolved = script;
+  try { resolved = realpathSync(script); } catch { /* fall back to the given path */ }
+  return pathToFileURL(resolved).href === moduleUrl || pathToFileURL(script).href === moduleUrl;
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -79,15 +89,47 @@ export function validateNodes(input) {
   return nodes;
 }
 
-/** Safe tier advice only; host/carrier selects an actual available model. */
+/**
+ * Safe tier advice only; the host maps a tier to a real model ID. Escalation
+ * (REVIEW, high risk, high complexity) always wins over a requested tier. A
+ * cheaper tier is advised only when the caller explicitly asks for it or marks
+ * the node low-complexity; otherwise the answer is `inherit` (the host's own
+ * model), so the harness never introduces an implicit downgrade.
+ */
 export function routeModel(phase, node) {
   assert(PHASES.includes(phase), 'PLAN model selection is immutable and unsupported');
   if (phase === 'REVIEW') return 'strong'; // preserve independent review quality
   if ((node.risk ?? []).some(r => HIGH_RISK.has(r))) return 'strong';
   if (node.complexity === 'high') return 'strong';
   if (node.model) return node.model;
-  if (phase === 'PROVE' || phase === 'SHIP') return 'economy';
-  return node.complexity === 'low' ? 'economy' : 'balanced';
+  return node.complexity === 'low' ? 'economy' : 'inherit';
+}
+
+const MB = 1024 * 1024;
+
+/** Memory the OS reports as available to this process, cgroup-aware when Node exposes it. */
+export function availableMemoryBytes(probe = {}) {
+  const free = (probe.freemem ?? freemem)();
+  const available = probe.availableMemory ?? (typeof process.availableMemory === 'function' ? () => process.availableMemory() : null);
+  const constrained = probe.constrainedMemory ?? (typeof process.constrainedMemory === 'function' ? () => process.constrainedMemory() : null);
+  const candidates = [free];
+  const a = available?.();
+  if (Number.isFinite(a) && a > 0) candidates.push(a);
+  const c = constrained?.();
+  // constrainedMemory() returns 0 or a huge sentinel when unconstrained.
+  if (Number.isFinite(c) && c > 0 && c < Number.MAX_SAFE_INTEGER) candidates.push(c);
+  return Math.min(...candidates);
+}
+
+/**
+ * Conservative automatic budget: the smaller of free/cgroup-available memory
+ * minus a reserve (max of 1 GiB and 15% of total) for the host and the
+ * orchestrator itself. Never negative.
+ */
+export function autoMemoryBudgetMb(probe = {}) {
+  const total = (probe.totalmem ?? totalmem)();
+  const reserve = Math.max(1024 * MB, Math.floor(total * 0.15));
+  return Math.max(0, Math.floor((availableMemoryBytes(probe) - reserve) / MB));
 }
 
 /**
@@ -96,11 +138,16 @@ export function routeModel(phase, node) {
  */
 export function schedule(input) {
   const nodes = validateNodes(input);
-  const width = input.maxConcurrency ?? 3;
+  const width = input.maxConcurrency ?? Math.max(1, Math.min(3, cpus().length));
   assert(Number.isInteger(width) && width >= 1 && width <= 32, 'maxConcurrency must be 1..32');
-  const budget = input.memoryBudgetMb ?? null;
-  assert(budget === null || (Number.isSafeInteger(budget) && budget > 0), 'memoryBudgetMb must be a positive integer');
+  const prefix = input.groupPrefix ?? null;
+  assert(prefix === null || (typeof prefix === 'string' && SAFE_ID.test(prefix) && prefix.length <= 96),
+    'groupPrefix must be a safe run-scoped ID');
+  const auto = input.memoryBudgetMb === 'auto';
+  const budget = auto ? autoMemoryBudgetMb(input.probe) : (input.memoryBudgetMb ?? null);
+  assert(auto || budget === null || (Number.isSafeInteger(budget) && budget > 0), 'memoryBudgetMb must be a positive integer or "auto"');
   if (budget !== null) for (const n of nodes) assert(n.estimatedMemoryMb <= budget, 'node exceeds memory budget: ' + n.id);
+  const estimated = input.nodes.every(n => n.estimatedMemoryMb !== undefined);
   const completed = new Set();
   const pending = new Map(nodes.map(n => [n.id, n]));
   const waves = [];
@@ -114,18 +161,45 @@ export function schedule(input) {
         && (budget === null || selected.reduce((sum, item) => sum + item.estimatedMemoryMb, n.estimatedMemoryMb) <= budget)) selected.push(n);
     }
     assert(selected.length > 0, 'no schedulable nodes');
-    waves.push({ parallel_group: 'harness-wave-' + (waves.length + 1),
+    waves.push({ parallel_group: (prefix ? prefix + '-' + input.phase.toLowerCase() : 'harness') + '-wave-' + (waves.length + 1),
+      estimated_memory_mb: selected.reduce((sum, item) => sum + item.estimatedMemoryMb, 0),
       nodes: selected.map(n => ({ id: n.id, model_tier: routeModel(input.phase, n) })) });
     for (const n of selected) { pending.delete(n.id); completed.add(n.id); }
   }
   return { schema: 'ship-ticket-harness-schedule-v1', phase: input.phase, advisory: true,
-    max_concurrency: width, memory_budget_mb: budget, waves };
+    max_concurrency: width, memory_budget_mb: budget, memory_budget_source: auto ? 'auto' : budget === null ? 'none' : 'caller',
+    // Memory safety can be claimed only when every node carries an estimate and a budget applied.
+    memory_safety: budget !== null && estimated ? 'estimated' : 'unverified',
+    group_ids_unique: prefix !== null, waves };
+}
+
+/**
+ * Admission control immediately before dispatching one wave: re-reads live
+ * memory and refuses when the wave's estimates no longer fit. Advisory, like
+ * the schedule — it cannot reserve memory — but it is fresh at dispatch time.
+ */
+export function admit(input, probe = {}) {
+  assert(input && typeof input === 'object' && !Array.isArray(input), 'admit input must be an object');
+  assert(PHASES.includes(input.phase), 'PLAN is protected: harness supports UNDERSTAND, BUILD, PROVE, REVIEW, SHIP only');
+  const estimate = input.estimatedMemoryMb;
+  assert(Number.isSafeInteger(estimate) && estimate >= 0, 'estimatedMemoryMb must be a nonnegative integer');
+  const members = input.members ?? 1;
+  assert(Number.isInteger(members) && members >= 1 && members <= 32, 'members must be 1..32');
+  const cpuCount = (probe.cpus ?? cpus)().length;
+  const budget = autoMemoryBudgetMb(probe);
+  const reasons = [];
+  if (estimate > budget) reasons.push('memory');
+  if (members > cpuCount) reasons.push('cpu');
+  return { schema: 'ship-ticket-harness-admission-v1', phase: input.phase, admitted: reasons.length === 0,
+    reasons, estimated_memory_mb: estimate, available_budget_mb: budget, members, cpu_count: cpuCount,
+    observed_at: new Date().toISOString(), advisory: true };
 }
 
 export function resourceSnapshot() {
   return { schema: 'ship-ticket-harness-resources-v1', observed_at: new Date().toISOString(),
     platform: process.platform, cpu_count: cpus().length, free_memory_bytes: freemem(),
-    total_memory_bytes: totalmem(), process_rss_bytes: process.memoryUsage().rss,
+    available_memory_bytes: availableMemoryBytes(), total_memory_bytes: totalmem(),
+    auto_memory_budget_mb: autoMemoryBudgetMb(), process_rss_bytes: process.memoryUsage().rss,
     note: 'Host-wide memory is not a container limit; verify actual capacity before dispatch.' };
 }
 
@@ -136,10 +210,16 @@ function main(argv) {
     assert(argv.length === 2, 'Usage: harness.mjs schedule <input.json>');
     return schedule(JSON.parse(readFileSync(argv[1], 'utf8')));
   }
-  throw new Error('Usage: harness.mjs resources | schedule <input.json>');
+  if (command === 'admit') {
+    assert(argv.length === 2, 'Usage: harness.mjs admit <input.json>');
+    const result = admit(JSON.parse(readFileSync(argv[1], 'utf8')));
+    if (!result.admitted) process.exitCode = 3;
+    return result;
+  }
+  throw new Error('Usage: harness.mjs resources | schedule <input.json> | admit <input.json>');
 }
 
-if (process.argv[1] && import.meta.url === new URL('file://' + process.argv[1]).href) {
+if (isEntrypoint(import.meta.url)) {
   try { process.stdout.write(JSON.stringify(main(process.argv.slice(2)), null, 2) + '\n'); }
   catch (error) { process.stderr.write('harness: ' + error.message + '\n'); process.exitCode = 1; }
 }

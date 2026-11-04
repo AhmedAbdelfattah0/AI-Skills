@@ -16,8 +16,6 @@ jobs:
       # Node validator is canonical and cross-platform (also runnable on Windows).
       - name: Run skill validator
         run: node scripts/cli.mjs validate
-      - name: Test ship-ticket execution harness
-        run: node --test skills/ship-ticket/scripts/harness.test.mjs skills/ship-ticket/scripts/docker-lifecycle.test.mjs skills/ship-ticket/scripts/carrier-usage.test.mjs
       - name: Test ship-ticket telemetry
         run: node --test skills/ship-ticket/scripts/run-log.test.mjs
       - name: Test project-audit continuity
@@ -26,3 +24,20 @@ jobs:
         run: node --test skills/marketing-video/scripts/gates.test.mjs skills/marketing-video/scripts/qa.test.mjs
       - name: Test vendored security-audit validators
         run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs
+
+  # The execution harness spawns and kills real child processes and resolves
+  # Windows .cmd shims, so it is exercised on every OS and on the minimum Node.
+  harness:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['18', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Test ship-ticket execution harness
+        run: node --test skills/ship-ticket/scripts/harness.test.mjs skills/ship-ticket/scripts/docker-lifecycle.test.mjs skills/ship-ticket/scripts/carrier-usage.test.mjs
