@@ -81,7 +81,7 @@ export function validateNodes(input) {
 export function routeModel(phase, node) {
   assert(PHASES.includes(phase), 'PLAN model selection is immutable and unsupported');
   if (phase === 'REVIEW') return 'strong'; // preserve independent review quality
-  if (node.risk.some(r => HIGH_RISK.has(r))) return 'strong';
+  if ((node.risk ?? []).some(r => HIGH_RISK.has(r))) return 'strong';
   if (node.complexity === 'high') return 'strong';
   if (node.model) return node.model;
   if (phase === 'PROVE' || phase === 'SHIP') return 'economy';
