@@ -11,8 +11,19 @@ model, schedules PLAN work, shortens the debate or touches approval. Do not run
 them inside native Plan Mode. REVIEW keeps its own read-only relay
 ([review.md](review.md)); the carrier refuses REVIEW.
 
-A missing or failing helper never blocks the ticket: report
-`harness degraded: <reason>` and continue under the ordinary `SKILL.md` rules.
+**Unavailable is not refused.** If a helper is *unavailable* (no Node, missing
+file, a provider with no adapter), report `harness degraded: <reason>` and
+continue under the ordinary `SKILL.md` rules, which keep the same approval and
+ownership controls. A *safety refusal* blocks and is never bypassed by falling
+back:
+
+| Refusal | Outcome |
+|---|---|
+| approval evidence missing or mismatched | return to approval; do not dispatch |
+| subscription auth not proven, unverified auth not acknowledged | **WAIT_FOR_USER**: the user decides billing |
+| unresolved `strong` model | **WAIT_FOR_USER** for a `modelMap.strong`, or run the node on the host itself |
+| `ownership_check: "violated"` | failed node; bounded repair of the listed paths |
+| `admit` not admitted | shrink or delay the wave |
 
 ## Lifecycle integration
 
@@ -59,13 +70,18 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   (including ancestor/descendant) serialize. Named exclusive locks (`port:`,
   `db:`, `cache:`, `docker:`, `fixture:`, `generator:`, `lock:`) serialize.
   An undeclared lock cannot be detected.
-- `groupPrefix` (the run ID) makes every `parallel_group` unique across phases,
-  which `SKILL.md` requires; pass the wave's `parallel_group` to `run-log.mjs`.
+- `groupPrefix` (the run ID) plus a fresh per-call `schedule_id` makes every
+  `parallel_group` unique, across phases and across repeated scheduling in one
+  phase, as `SKILL.md` requires. Pass the wave's `parallel_group` to `run-log.mjs`.
   Without a prefix the output says `group_ids_unique: false`.
-- `memoryBudgetMb: "auto"` takes the lower of OS free memory and Node's
-  cgroup-aware available/constrained memory, minus a reserve of 1 GiB or 15% of
-  total, whichever is larger. `memory_safety` is `estimated` only when a budget
-  applied and **every** node has `estimatedMemoryMb`; otherwise `unverified`.
+- `memoryBudgetMb: "auto"` takes OS free memory, capped by Node's cgroup-aware
+  `availableMemory()` (Node >= 22). On older Node it is capped by the cgroup
+  limit minus measured cgroup usage (`memory.current` / `memory.usage_in_bytes`).
+  A reserve of 1 GiB or 15% of total, whichever is larger, is subtracted. If a
+  cgroup limit exists but its usage is unreadable, the estimate is
+  `memory_verified: false`. `memory_safety` is `estimated` only when a verified
+  budget applied and **every** node has `estimatedMemoryMb`; otherwise it is
+  `unverified`.
   On macOS, free memory excludes reclaimable cache, so the budget is conservative.
 - `admit` input `{ "phase", "estimatedMemoryMb", "members" }` re-reads live
   memory immediately before a wave starts. A refusal shrinks or delays that wave,
@@ -81,8 +97,12 @@ maps to real model IDs, not model IDs themselves.
   `migration`, `schema`, `shared-contract`) and `complexity: "high"` are always
   `strong`. A requested cheaper tier cannot override that.
 - `complexity: "low"` or an explicit `model` request gets that tier.
-- Everything else is `inherit`: the host's own model. The harness never
-  introduces an implicit downgrade.
+- Everything else is `inherit`. On the carrier, `strong` requires
+  `modelMap.strong` on a verified adapter, or dispatch is refused: an unknown
+  provider default never satisfies a strong requirement. `inherit` applies
+  `modelMap.inherit` (pass the host's own model ID). Without it the CLI's
+  configured default runs, which may differ from the host's model, and the
+  result says `model_resolution: "provider-default"`. Report that as a degradation.
 
 ## Writer carrier
 
@@ -108,9 +128,13 @@ node <SHIP_TICKET_SKILL>/scripts/carrier.mjs run /abs/dispatch.json       # exit
 What it enforces:
 
 - **Phase:** BUILD, PROVE and SHIP only.
-- **Approval evidence:** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold
-  a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the
-  supplied digest. It reads the plan artifact and never writes it.
+- **Approval evidence (event binding, not content verification):**
+  `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START`
+  event for `runId` whose `approved_plan_digest` equals the supplied digest. Plan
+  content drift remains SHIP's approved-plan digest check, because the digest
+  algorithm belongs to PLAN. The carrier reads the plan artifact and never writes
+  it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker
+  cannot forge `START`.
 - **Billing:** `billing` defaults to `subscription`. The child environment
   drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches.
@@ -119,7 +143,8 @@ What it enforces:
   that environment: `claude auth status --json` must report
   `authMethod: "claude.ai"` with `apiProvider: "firstParty"`, and
   `codex login status` must report `Logged in using ChatGPT`. Any other answer
-  refuses dispatch before a process starts. `"billing": "api"` also needs
+  refuses dispatch before a process starts. Variable names are matched
+  case-insensitively (Windows). `"billing": "api"` also needs
   `"allowApiBilling": true`, which only the user can authorize.
 - **Verified adapters:** Claude and Codex arguments are built from flags checked
   against Claude Code 2.1.318 and Codex CLI 0.166.0:
@@ -131,23 +156,36 @@ What it enforces:
   `danger-full-access` are refused. Hooks are not disabled (no `--bare`), so
   PostToolUse guards such as nn-guard still run.
 - **Prompts** go on stdin, never on argv (process listings, Windows length limits).
-- **Process control:** async spawn in its own process group. A timeout or
-  cancellation (SIGINT/SIGTERM to the carrier, or an AbortSignal) kills the whole
-  tree: SIGTERM, then SIGKILL after 5 s on POSIX, `taskkill /T /F` on Windows.
+- **Process control:** the prompt is read and every check passes before
+  anything is spawned. An already-aborted signal never starts a worker. The worker
+  leads its own process group. On POSIX, the group is terminated on **every**
+  exit path (normal exit, timeout, cancellation via SIGINT/SIGTERM or an
+  AbortSignal), so background descendants are reaped: SIGTERM, then SIGKILL after
+  5 s, awaited before dispatch returns. Inherited pipes cannot hold it open. On
+  Windows, `taskkill /T /F` covers timeout and cancellation while the leader
+  lives. Descendants that outlive a normally exiting leader are not reachable
+  there.
   The carrier captures up to 32 MiB of stdout; beyond that, usage is reported as unavailable.
-- **Ownership check:** Git dirty state is snapshotted before and after the run.
-  Changed paths outside `ownership.writes` and the declared concurrent
-  `othersOwned` fail the node (`ownership_check: "violated"`) and are listed.
-  If the directory isn't a Git work tree, the check reports `unavailable`.
+- **Ownership check:** status, size, mtime, mode and content hash of every dirty
+  path at the Git top level are snapshotted before and after the run. Any path
+  whose state changed is a violation unless it is under `ownership.writes` or
+  the declared concurrent `othersOwned`; that includes pre-existing user changes
+  the worker reverted or deleted. A violation fails the node and the paths are
+  listed. Outside a Git work tree the check reports `unavailable`.
 - **Output privacy:** stdout shows metadata only. The worker's final message goes
-  to a fresh `resultFile` (mode 0600, outside the candidate or under `.git`).
+  to a fresh `resultFile` (mode 0600). Output paths are canonicalized through
+  symlinks and must be outside the repository work tree or inside its real Git
+  metadata directory. A failed result or usage write is reported in
+  `telemetry_degraded` and never discards the execution outcome.
 - **Windows:** `.cmd`/`.bat` shims are resolved through `PATH`×`PATHEXT` and run
   with a quoted shell only when every argument is a safe token.
 
 Gemini and Antigravity were not installed where this was built, so their flags
 are unverified. They run only from an explicit trusted `executable` + `args`
 template. They get no model injection (`model_applied: false`), no usage
-parsing, and `subscription_auth: "unverified"`. Antigravity has no documented
+parsing, and `subscription_auth: "unverified"`. Under subscription billing they
+also need `acknowledgeUnverifiedAuth: true`, set only on the user's explicit
+instruction and never inferred. They cannot satisfy a `strong` node. Antigravity has no documented
 headless agent CLI that this harness relies on.
 
 ## Provider-reported usage

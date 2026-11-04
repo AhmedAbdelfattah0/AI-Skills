@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -56,32 +56,56 @@ test('verified adapters build exact verified flags and reject smuggled arguments
   assert.throws(() => prepareDispatch(config(fx, { provider: 'codex', sandbox: 'danger-full-access' })), /sandbox/);
 });
 
-test('escalated tiers never fall back to a cheaper mapping', (t) => {
+test('strong routing is refused unless a strong model is mapped (CX-1)', (t) => {
   const fx = fixture(t);
-  const p = prepareDispatch(config(fx, { risk: ['auth'], modelTier: 'economy', modelMap: { economy: 'haiku' } }));
-  assert.equal(p.model_tier, 'strong');
-  assert.equal(p.model, 'provider-default');
-  assert.equal(p.args.includes('--model'), false);
-  const medium = prepareDispatch(config(fx, { modelMap: { economy: 'haiku', balanced: 'sonnet' } }));
-  assert.equal(medium.model_tier, 'inherit', 'medium complexity inherits the host model by default');
-  assert.equal(medium.args.includes('--model'), false);
+  assert.throws(() => prepareDispatch(config(fx, { risk: ['auth'], modelTier: 'economy', modelMap: { economy: 'haiku' } })), /strong tier requires/);
+  assert.throws(() => prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: [], acknowledgeUnverifiedAuth: true,
+    complexity: 'high', modelMap: { strong: 'x' } })), /verified adapter/);
+});
+
+test('inherit applies an explicit host-model mapping, else declares provider-default (CX-1)', (t) => {
+  const fx = fixture(t);
+  const mapped = prepareDispatch(config(fx, { modelMap: { inherit: 'claude-opus-5-5', economy: 'haiku' } }));
+  assert.equal(mapped.model_tier, 'inherit');
+  assert.deepEqual(mapped.args.slice(-2), ['--model', 'claude-opus-5-5']);
+  assert.equal(mapped.model_resolution, 'mapped');
+  const unmapped = prepareDispatch(config(fx, { modelMap: { economy: 'haiku' } }));
+  assert.equal(unmapped.model_resolution, 'provider-default');
+  assert.equal(unmapped.args.includes('--model'), false);
 });
 
 test('unverified providers need a trusted template and never receive a model flag', (t) => {
   const fx = fixture(t);
   assert.throws(() => prepareDispatch(config(fx, { provider: 'antigravity' })), /explicit trusted executable/);
-  const g = prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: ['--yolo'], modelMap: { inherit: 'x' } }));
+  assert.throws(() => prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: ['--yolo'] })), /acknowledgeUnverifiedAuth/);
+  const g = prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: ['--yolo'], modelMap: { inherit: 'x' },
+    acknowledgeUnverifiedAuth: true }));
   assert.equal(g.adapter, 'trusted-template');
   assert.equal(g.model_applied, false);
-  assert.throws(() => prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: ['do it; rm -rf /'] })), /safe tokens/);
+  assert.throws(() => prepareDispatch(config(fx, { provider: 'gemini', executable: 'gemini', args: ['do it; rm -rf /'], acknowledgeUnverifiedAuth: true })), /safe tokens/);
 });
 
 test('workdir must be absolute for the host platform and output files stay out of the candidate', (t) => {
   const fx = fixture(t);
   assert.throws(() => prepareDispatch(config(fx, { workdir: 'relative/path' })), /absolute workdir/);
-  assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.repo, 'src', 'out.json') })), /outside the worktree/);
+  assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.repo, 'src', 'out.json') })), /outside the repository/);
+  assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.repo, '.git', 'r.json') })), /outside the repository/,
+    'a ".git" path segment is not trusted when there is no real Git metadata');
+  spawnSync('git', ['init', '-q'], { cwd: fx.repo });
   assert.ok(prepareDispatch(config(fx, { resultFile: join(fx.repo, '.git', 'r.json') })).resultFile);
   assert.ok(prepareDispatch(config(fx, { resultFile: join(fx.root, 'r.json') })).resultFile);
+  mkdirSync(join(fx.repo, 'apps', 'web'), { recursive: true });
+  assert.throws(() => prepareDispatch(config(fx, { workdir: join(fx.repo, 'apps', 'web'), resultFile: join(fx.repo, 'apps', 'api.json') })),
+    /outside the repository/, 'checked against the repository, not just the workdir (CX-10)');
+  if (process.platform !== 'win32') {
+    symlinkSync(join(fx.repo, 'src'), join(fx.root, 'escape'));
+    assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.root, 'escape', 'x.json') })), /outside the repository/, 'symlink escape (CX-10)');
+  }
+  assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.specs'] } })), /plan artifact roots/, 'CL-4');
+  assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.spec/plans'] } })), /plan artifact roots/, 'CL-4');
+  assert.throws(() => prepareDispatch(config(fx, { promptFile: fx.root })), /regular file/, 'CX-8');
+  writeFileSync(join(fx.root, 'stale.json'), '{}');
+  assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.root, 'stale.json') })), /must not exist yet/);
 });
 
 test('subscription billing strips provider API credentials; API billing needs explicit authority', (t) => {
@@ -92,6 +116,8 @@ test('subscription billing strips provider API credentials; API billing needs ex
   assert.equal(env.PATH, '/bin');
   assert.equal(childEnv('codex', 'subscription', { OPENAI_API_KEY: 'k', CODEX_API_KEY: 'k' }).OPENAI_API_KEY, undefined);
   assert.equal(childEnv('claude', 'api', { ANTHROPIC_API_KEY: 'sk-x' }).ANTHROPIC_API_KEY, 'sk-x');
+  const mixed = childEnv('codex', 'subscription', { openai_api_key: 'k', Codex_Api_Key: 'k', Path: 'x' });
+  assert.deepEqual(Object.keys(mixed), ['Path'], 'case-insensitive stripping for Windows (CX-3)');
   for (const p of Object.keys(BILLING_ENV)) assert.ok(BILLING_ENV[p].length > 0);
   assert.throws(() => prepareDispatch(config(fx, { billing: 'api' })), /allowApiBilling/);
 });
@@ -105,6 +131,15 @@ test('subscription preflight discriminates real auth status output', () => {
   assert.equal(verifySubscription('codex', {}, fake('Logged in using ChatGPT')), true);
   assert.equal(verifySubscription('codex', {}, fake('Logged in using an API key')), false);
   assert.equal(verifySubscription('gemini', {}, fake('')), 'unverified');
+});
+
+test('an already-aborted signal never launches a worker (CX-7)', async (t) => {
+  const fx = fixture(t);
+  let spawned = false;
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(dispatch(config(fx), { signal: controller.signal, verifySubscription: () => true, spawn: () => { spawned = true; } }), /cancelled before start/);
+  assert.equal(spawned, false);
 });
 
 test('dispatch refuses before spawning when subscription auth is not proven', async (t) => {
@@ -162,6 +197,8 @@ test('ownership violations ignore owned, concurrently owned and pre-existing unc
   const after = new Map([['README.md', '1:1'], ['src/a.ts', '2:2'], ['api/x.ts', '3:3'], ['package.json', '4:4']]);
   assert.deepEqual(ownershipViolations(before, after, ['src'], ['api']), ['package.json']);
   assert.equal(ownershipViolations(null, after, ['src'], []), null);
+  assert.deepEqual(ownershipViolations(new Map([['user.txt', ' M:1']]), new Map(), ['src'], []), ['user.txt'],
+    'reverting or deleting a pre-existing user change is a violation (CX-4)');
 });
 
 // ---- Integration: a real child process through the real spawn/kill/stdin path. ----
@@ -245,4 +282,34 @@ test('integration: abort signal cancels a running node', async (t) => {
   assert.equal(result.cancelled, true);
   assert.equal(result.succeeded, false);
   assert.equal(existsSync(join(fx.repo, 'src', 'built.txt')), false);
+});
+
+test('integration: telemetry failure never discards the execution outcome (CX-11)', async (t) => {
+  const fx = fixture(t);
+  const env = fakeCli(t, fx, `process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(${JSON.stringify(CLAUDE_OUT)}));\n`);
+  const result = await dispatch(config(fx, { usageLog: join(fx.root, 'missing-dir', 'usage.jsonl') }),
+    { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.succeeded, true);
+  assert.deepEqual(result.telemetry_degraded, ['usage_log:ENOENT']);
+  assert.equal(result.usage.output_tokens, 4);
+});
+
+test('integration: a background descendant cannot hold dispatch open or outlive it (CX-5, CL-1)', { skip: process.platform === 'win32'
+  ? 'Windows: no process group survives the leader; documented limitation' : false }, async (t) => {
+  const fx = fixture(t);
+  const pidFile = join(fx.root, 'bg.pid');
+  const env = fakeCli(t, fx, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+const g = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 60000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
+process.exit(0);
+`);
+  const started = Date.now();
+  const result = await dispatch(config(fx, { timeoutMs: 30000 }), { env, verifySubscription: () => true, handleSignals: false });
+  assert.ok(Date.now() - started < 15000, 'did not wait for the inherited pipes or the timeout');
+  assert.equal(result.exit_code, 0);
+  const pid = Number(readFileSync(pidFile, 'utf8'));
+  let alive = true;
+  try { process.kill(pid, 0); } catch { alive = false; }
+  assert.equal(alive, false, 'SIGTERM-ignoring descendant was SIGKILLed before dispatch returned (CX-6)');
 });

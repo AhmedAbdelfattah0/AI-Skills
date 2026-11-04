@@ -102,8 +102,11 @@ tiers), `scripts/carrier.mjs` (approved, subscription-safe writer dispatch with
 ownership checks and provider-reported usage), `scripts/usage.mjs` and
 `scripts/docker-lifecycle.mjs` (label-owned containers only). Read
 [references/execution-harness.md](references/execution-harness.md) before BUILD.
-Every helper refuses PLAN and the carrier refuses REVIEW. A missing or failing
-helper is a declared degradation, never a stop.
+Every helper refuses PLAN and the carrier refuses REVIEW. An *unavailable*
+helper (no Node, missing file, unsupported provider) is a declared degradation.
+A *safety refusal* is not: missing approval evidence returns to approval,
+unproven subscription billing is **WAIT_FOR_USER** for the user's billing
+decision, and an ownership violation fails that node into bounded repair.
 
 ## Dependency-driven orchestration
 

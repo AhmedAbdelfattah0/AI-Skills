@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { schedule, routeModel, validateNodes, resourceSnapshot, admit, autoMemoryBudgetMb, availableMemoryBytes } from './harness.mjs';
+import { schedule, routeModel, validateNodes, resourceSnapshot, admit, autoMemoryBudgetMb, availableMemoryBytes, memoryEstimate } from './harness.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -73,7 +73,11 @@ const probe = (free, total = 16 * GB, extra = {}) => ({ freemem: () => free, tot
 test('auto budget reserves headroom and respects a cgroup limit', () => {
   assert.equal(autoMemoryBudgetMb(probe(8 * GB)), Math.floor((8 * GB - 0.15 * 16 * GB) / 1048576));
   assert.equal(autoMemoryBudgetMb(probe(512 * 1048576)), 0, 'never negative');
-  assert.equal(availableMemoryBytes(probe(8 * GB, 16 * GB, { constrainedMemory: () => 2 * GB })), 2 * GB);
+  assert.equal(availableMemoryBytes(probe(8 * GB, 16 * GB, { constrainedMemory: () => 2 * GB, cgroupUsage: () => 1.5 * GB })), 0.5 * GB,
+    'a cgroup limit counts only after subtracting its usage (CX-12)');
+  assert.deepEqual(memoryEstimate(probe(8 * GB, 16 * GB, { constrainedMemory: () => 2 * GB, cgroupUsage: () => null })),
+    { bytes: 8 * GB, verified: false });
+  assert.equal(admit({ phase: 'BUILD', estimatedMemoryMb: 1 }, probe(8 * GB, 16 * GB, { constrainedMemory: () => 2 * GB, cgroupUsage: () => null })).memory_verified, false);
   const r = schedule({ phase: 'BUILD', memoryBudgetMb: 'auto', probe: probe(8 * GB), maxConcurrency: 3,
     nodes: [node('a', { estimatedMemoryMb: 3000 }), node('b', { estimatedMemoryMb: 3000 })] });
   assert.equal(r.memory_budget_source, 'auto');
@@ -97,7 +101,9 @@ test('admission re-checks live memory and CPU at dispatch time', () => {
 test('group prefix makes wave IDs unique across phases of one run', () => {
   const b = schedule({ phase: 'BUILD', groupPrefix: 'run-1', nodes: [node('a')] });
   const p = schedule({ phase: 'PROVE', groupPrefix: 'run-1', nodes: [node('a')] });
+  const b2 = schedule({ phase: 'BUILD', groupPrefix: 'run-1', nodes: [node('a')] });
   assert.notEqual(b.waves[0].parallel_group, p.waves[0].parallel_group);
+  assert.notEqual(b.waves[0].parallel_group, b2.waves[0].parallel_group, 'repeated BUILD scheduling stays unique (CX-13)');
   assert.equal(b.group_ids_unique, true);
   assert.throws(() => schedule({ phase: 'BUILD', groupPrefix: 'bad prefix', nodes: [] }), /groupPrefix/);
 });
@@ -110,7 +116,7 @@ test('CLI entrypoint actually runs (portable detection, real subprocess)', (t) =
   const script = fileURLToPath(new URL('./harness.mjs', import.meta.url));
   const r = spawnSync(process.execPath, [script, 'schedule', input], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).waves[0].parallel_group, 'r1-build-wave-1');
+  assert.match(JSON.parse(r.stdout).waves[0].parallel_group, /^r1-build-[0-9a-f]{8}-wave-1$/);
   const planInput = join(dir, 'plan.json');
   writeFileSync(planInput, JSON.stringify({ phase: 'PLAN', nodes: [node('a')] }));
   const plan = spawnSync(process.execPath, [script, 'schedule', planInput], { encoding: 'utf8' });

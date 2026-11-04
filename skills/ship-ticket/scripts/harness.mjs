@@ -7,6 +7,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { cpus, freemem, totalmem } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 export const PHASES = Object.freeze(['UNDERSTAND', 'BUILD', 'PROVE', 'REVIEW', 'SHIP']);
 const VALID_MODELS = new Set(['economy', 'balanced', 'strong', 'inherit']);
@@ -107,18 +108,43 @@ export function routeModel(phase, node) {
 
 const MB = 1024 * 1024;
 
-/** Memory the OS reports as available to this process, cgroup-aware when Node exposes it. */
-export function availableMemoryBytes(probe = {}) {
+/** Linux cgroup memory currently in use (v2, then v1), or null when not readable. */
+function cgroupUsageBytes() {
+  for (const file of ['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory/memory.usage_in_bytes']) {
+    try { const v = Number(readFileSync(file, 'utf8').trim()); if (Number.isSafeInteger(v) && v >= 0) return v; } catch { /* absent */ }
+  }
+  return null;
+}
+
+/**
+ * Memory available to this process. process.availableMemory() (Node >= 22) is
+ * already cgroup-aware remaining capacity. constrainedMemory() is a LIMIT, not
+ * remaining capacity, so it only counts after subtracting measured cgroup
+ * usage; if usage cannot be read, the estimate is marked unverified.
+ */
+export function memoryEstimate(probe = {}) {
   const free = (probe.freemem ?? freemem)();
   const available = probe.availableMemory ?? (typeof process.availableMemory === 'function' ? () => process.availableMemory() : null);
   const constrained = probe.constrainedMemory ?? (typeof process.constrainedMemory === 'function' ? () => process.constrainedMemory() : null);
+  const usage = probe.cgroupUsage ?? cgroupUsageBytes;
   const candidates = [free];
+  let verified = true;
   const a = available?.();
   if (Number.isFinite(a) && a > 0) candidates.push(a);
-  const c = constrained?.();
-  // constrainedMemory() returns 0 or a huge sentinel when unconstrained.
-  if (Number.isFinite(c) && c > 0 && c < Number.MAX_SAFE_INTEGER) candidates.push(c);
-  return Math.min(...candidates);
+  else {
+    const c = constrained?.();
+    // constrainedMemory() returns 0 or a huge sentinel when unconstrained.
+    if (Number.isFinite(c) && c > 0 && c < Number.MAX_SAFE_INTEGER) {
+      const used = usage();
+      if (used === null) verified = false;
+      else candidates.push(Math.max(0, c - used));
+    }
+  }
+  return { bytes: Math.min(...candidates), verified };
+}
+
+export function availableMemoryBytes(probe = {}) {
+  return memoryEstimate(probe).bytes;
 }
 
 /**
@@ -130,6 +156,10 @@ export function autoMemoryBudgetMb(probe = {}) {
   const total = (probe.totalmem ?? totalmem)();
   const reserve = Math.max(1024 * MB, Math.floor(total * 0.15));
   return Math.max(0, Math.floor((availableMemoryBytes(probe) - reserve) / MB));
+}
+
+function memoryVerified(probe = {}) {
+  return memoryEstimate(probe).verified;
 }
 
 /**
@@ -148,6 +178,9 @@ export function schedule(input) {
   assert(auto || budget === null || (Number.isSafeInteger(budget) && budget > 0), 'memoryBudgetMb must be a positive integer or "auto"');
   if (budget !== null) for (const n of nodes) assert(n.estimatedMemoryMb <= budget, 'node exceeds memory budget: ' + n.id);
   const estimated = input.nodes.every(n => n.estimatedMemoryMb !== undefined);
+  // Fresh per call: repeated scheduling within one phase never reuses a parallel_group.
+  const scheduleId = input.scheduleId ?? randomBytes(4).toString('hex');
+  assert(typeof scheduleId === 'string' && /^[A-Za-z0-9]{1,16}$/.test(scheduleId), 'scheduleId must be 1..16 alphanumerics');
   const completed = new Set();
   const pending = new Map(nodes.map(n => [n.id, n]));
   const waves = [];
@@ -161,7 +194,7 @@ export function schedule(input) {
         && (budget === null || selected.reduce((sum, item) => sum + item.estimatedMemoryMb, n.estimatedMemoryMb) <= budget)) selected.push(n);
     }
     assert(selected.length > 0, 'no schedulable nodes');
-    waves.push({ parallel_group: (prefix ? prefix + '-' + input.phase.toLowerCase() : 'harness') + '-wave-' + (waves.length + 1),
+    waves.push({ parallel_group: (prefix ? prefix + '-' + input.phase.toLowerCase() + '-' + scheduleId : 'harness') + '-wave-' + (waves.length + 1),
       estimated_memory_mb: selected.reduce((sum, item) => sum + item.estimatedMemoryMb, 0),
       nodes: selected.map(n => ({ id: n.id, model_tier: routeModel(input.phase, n) })) });
     for (const n of selected) { pending.delete(n.id); completed.add(n.id); }
@@ -169,8 +202,8 @@ export function schedule(input) {
   return { schema: 'ship-ticket-harness-schedule-v1', phase: input.phase, advisory: true,
     max_concurrency: width, memory_budget_mb: budget, memory_budget_source: auto ? 'auto' : budget === null ? 'none' : 'caller',
     // Memory safety can be claimed only when every node carries an estimate and a budget applied.
-    memory_safety: budget !== null && estimated ? 'estimated' : 'unverified',
-    group_ids_unique: prefix !== null, waves };
+    memory_safety: budget !== null && estimated && (!auto || memoryVerified(input.probe)) ? 'estimated' : 'unverified',
+    schedule_id: scheduleId, group_ids_unique: prefix !== null, waves };
 }
 
 /**
@@ -191,7 +224,7 @@ export function admit(input, probe = {}) {
   if (estimate > budget) reasons.push('memory');
   if (members > cpuCount) reasons.push('cpu');
   return { schema: 'ship-ticket-harness-admission-v1', phase: input.phase, admitted: reasons.length === 0,
-    reasons, estimated_memory_mb: estimate, available_budget_mb: budget, members, cpu_count: cpuCount,
+    reasons, memory_verified: memoryVerified(probe), estimated_memory_mb: estimate, available_budget_mb: budget, members, cpu_count: cpuCount,
     observed_at: new Date().toISOString(), advisory: true };
 }
 
