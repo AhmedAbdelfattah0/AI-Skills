@@ -100,7 +100,7 @@ For UNDERSTAND, BUILD, PROVE, REVIEW or SHIP, the bundled
 [`scripts/harness.mjs`](scripts/harness.mjs) can propose dependency-safe
 execution waves and provider-neutral model tiers. Read
 [references/execution-harness.md](references/execution-harness.md) before use.
-It is advisory and opt-in: the existing DAG, approval, resource ownership,
+After PLAN approval, use the harness during BUILD and PROVE to propose waves\nwhen a safe Node runtime is available; apply its carrier only with a trusted\nprovider-specific argument template and an approved ownership packet. Record\nprovider-reported token counters through the bundled usage helper when available.\nFor Docker resources, label containers with the exact owner and run IDs and\nperform dry-run cleanup before any explicitly authorized apply; never prune\nshared resources. For REVIEW, use only the existing independent read-only\nreview carrier and the harness's advisory scheduling, never its BUILD carrier.\nDuring UNDERSTAND and SHIP, use resource/usage telemetry where available.\n\nIt is advisory and opt-in: the existing DAG, approval, resource ownership,
 security gates and reviewer independence remain authoritative. Never use the
 harness to select a PLAN model, schedule PLAN work, shorten debate, or change
 human approval. The helper deliberately rejects PLAN. A missing helper must
