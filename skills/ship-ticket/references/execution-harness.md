@@ -32,7 +32,6 @@ the file to the ticket's reviewed candidate):
       "writes": ["apps/web"],
       "resources": ["cache:frontend-build"],
       "estimatedMemoryMb": 2500,
-      "estimatedMemoryMb": 3000,
       "complexity": "medium",
       "risk": []
     },
