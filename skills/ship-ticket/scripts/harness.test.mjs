@@ -49,3 +49,12 @@ test('input is not mutated', () => {
   schedule(input);
   assert.deepEqual(input, { phase: 'BUILD', nodes: [node('a', { writes: ['src'] })] });
 });
+
+test('declared memory budget limits each concurrent wave without blocking independent tasks', () => {
+  const result = schedule({ phase: 'BUILD', memoryBudgetMb: 1000, maxConcurrency: 3,
+    nodes: [node('a', { estimatedMemoryMb: 700 }), node('b', { estimatedMemoryMb: 600 }),
+      node('c', { estimatedMemoryMb: 200 })] });
+  assert.deepEqual(result.waves.map(w => w.nodes.map(n => n.id)), [['a', 'c'], ['b']]);
+  assert.throws(() => schedule({ phase: 'BUILD', memoryBudgetMb: 100,
+    nodes: [node('a', { estimatedMemoryMb: 200 })] }), /exceeds memory budget/);
+});
