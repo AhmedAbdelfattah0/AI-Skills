@@ -16,9 +16,12 @@
  * run ID; prompts travel on stdin, never argv; raw model output is never printed.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+
+// Native realpath expands Windows 8.3 short names (C:\Users\RUNNER~1) the same way Git does.
+const realpathSync = (p) => realpathJs.native(p);
 import { routeModel, isEntrypoint } from './harness.mjs';
 import { extractUsage, COUNTERS } from './usage.mjs';
 
