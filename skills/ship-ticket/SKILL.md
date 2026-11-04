@@ -94,6 +94,19 @@ Load a phase reference only when entering that phase:
 | REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 
+## Optional deterministic execution harness (outside PLAN)
+
+For UNDERSTAND, BUILD, PROVE, REVIEW or SHIP, the bundled
+[`scripts/harness.mjs`](scripts/harness.mjs) can propose dependency-safe
+execution waves and provider-neutral model tiers. Read
+[references/execution-harness.md](references/execution-harness.md) before use.
+It is advisory and opt-in: the existing DAG, approval, resource ownership,
+security gates and reviewer independence remain authoritative. Never use the
+harness to select a PLAN model, schedule PLAN work, shorten debate, or change
+human approval. The helper deliberately rejects PLAN. A missing helper must
+not block the ticket. Do not treat a proposed wave as proof of RAM availability
+or as authorization to run concurrent containers.
+
 ## Dependency-driven orchestration
 
 Treat each phase as a directed acyclic graph, not a prose checklist. A node is
