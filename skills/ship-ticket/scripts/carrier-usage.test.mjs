@@ -103,6 +103,7 @@ test('workdir must be absolute for the host platform and output files stay out o
   }
   assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.specs'] } })), /plan artifact roots/, 'CL-4');
   assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.spec/plans'] } })), /plan artifact roots/, 'CL-4');
+  assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['src'], othersOwned: ['.specs'] } })), /plan artifact roots/, 'CL-4 via othersOwned');
   assert.throws(() => prepareDispatch(config(fx, { promptFile: fx.root })), /regular file/, 'CX-8');
   writeFileSync(join(fx.root, 'stale.json'), '{}');
   assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.root, 'stale.json') })), /must not exist yet/);
@@ -308,6 +309,7 @@ process.exit(0);
   const result = await dispatch(config(fx, { timeoutMs: 30000 }), { env, verifySubscription: () => true, handleSignals: false });
   assert.ok(Date.now() - started < 15000, 'did not wait for the inherited pipes or the timeout');
   assert.equal(result.exit_code, 0);
+  assert.equal(result.process_tree_terminated, true, 'termination verified, not just signalled (CX-6)');
   const pid = Number(readFileSync(pidFile, 'utf8'));
   let alive = true;
   try { process.kill(pid, 0); } catch { alive = false; }

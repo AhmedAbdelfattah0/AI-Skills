@@ -136,9 +136,10 @@ export function prepareDispatch(config) {
   if (!config.ownership || typeof config.ownership !== 'object') fail('explicit ownership required');
   const writes = repoRelative(config.ownership.writes, 'ownership.writes');
   if (!writes.length) fail('ownership.writes must name at least one path');
-  if (writes.some(p => PLAN_ROOTS.some(r => p === r || p.startsWith(r + '/'))))
-    fail('workers may not own the plan artifact roots (.specs/.spec)');
   const othersOwned = repoRelative(config.ownership.othersOwned ?? [], 'ownership.othersOwned');
+  // Neither this worker nor a declared concurrent worker may own the plan roots (no forged START, no exempted change).
+  if ([...writes, ...othersOwned].some(p => PLAN_ROOTS.some(r => p === r || p.startsWith(r + '/'))))
+    fail('workers may not own the plan artifact roots (.specs/.spec)');
   if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 3600000)
     fail('timeoutMs must be 1000..3600000');
   const billing = config.billing ?? 'subscription';
@@ -263,17 +264,21 @@ function groupAlive(pid) {
  * grace period, awaited. Windows: taskkill /T while the leader is alive.
  */
 async function terminateTree(child, platform = process.platform) {
-  if (!child.pid) return;
+  if (!child.pid) return true;
   if (platform === 'win32') {
     if (child.exitCode === null && child.signalCode === null)
       spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    return;
+    return null; // Windows: tree state after leader exit is not observable
   }
-  if (!groupAlive(child.pid)) return;
+  if (!groupAlive(child.pid)) return true;
   try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ }
   const deadline = Date.now() + KILL_GRACE_MS;
   while (Date.now() < deadline && groupAlive(child.pid)) await delay(100);
-  if (groupAlive(child.pid)) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } }
+  if (!groupAlive(child.pid)) return true;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ }
+  const hard = Date.now() + KILL_GRACE_MS;
+  while (Date.now() < hard && groupAlive(child.pid)) await delay(50);
+  return !groupAlive(child.pid);
 }
 
 function gitDirty(top) {
@@ -352,7 +357,7 @@ export async function dispatch(config, deps = {}) {
   let timer = null;
   const onCancel = () => { if (!cancelled) { cancelled = true; terminateTree(child); } };
   const signals = deps.handleSignals === false ? [] : ['SIGINT', 'SIGTERM'];
-  let code = null, signal = null, spawnError = null;
+  let code = null, signal = null, spawnError = null, treeTerminated = null;
   try {
     const closed = new Promise(done => child.on('close', done));
     const exited = new Promise(done => {
@@ -376,7 +381,7 @@ export async function dispatch(config, deps = {}) {
     await Promise.race([closed, delay(2000)]);
   } finally {
     clearTimeout(timer);
-    await terminateTree(child); // reap background descendants on every path, awaited
+    treeTerminated = await terminateTree(child); // reap background descendants on every path, awaited
     child.stdout?.destroy();
     child.stderr?.destroy();
     for (const s of signals) process.off(s, onCancel);
@@ -403,7 +408,7 @@ export async function dispatch(config, deps = {}) {
   }
   const violations = ownershipViolations(before, gitDirty(plan.repoRoot), plan.ownership.writes, plan.ownership.othersOwned);
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
-    && (violations === null || violations.length === 0);
+    && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {
     schema: 'ship-ticket-harness-dispatch-v2', provider: plan.provider, phase: plan.phase, node_id: plan.node_id,
     adapter: plan.adapter, model_tier: plan.model_tier, model: plan.model, model_resolution: plan.model_resolution,
@@ -411,7 +416,7 @@ export async function dispatch(config, deps = {}) {
     approval_verified: true, approval_binding: approval.binding, run_id: approval.run_id,
     started_at: new Date(started).toISOString(), ended_at: new Date(ended).toISOString(), duration_ms: ended - started,
     exit_code: code, signal: signal ?? null, spawn_error: spawnError?.code ?? null, timed_out: timedOut, cancelled,
-    succeeded, provider_reported_error: message.is_error,
+    succeeded, provider_reported_error: message.is_error, process_tree_terminated: treeTerminated,
     stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, output_truncated: truncated,
     usage, result_written: resultWritten, telemetry_degraded: telemetryDegraded,
     ownership_check: violations === null ? 'unavailable' : violations.length ? 'violated' : 'clean',

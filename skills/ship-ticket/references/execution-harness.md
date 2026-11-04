@@ -134,7 +134,8 @@ What it enforces:
   content drift remains SHIP's approved-plan digest check, because the digest
   algorithm belongs to PLAN. The carrier reads the plan artifact and never writes
   it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker
-  cannot forge `START`.
+  cannot forge `START`. The same applies to `ownership.othersOwned`, so a plan
+  change can never be exempted.
 - **Billing:** `billing` defaults to `subscription`. The child environment
   drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches.
@@ -161,7 +162,9 @@ What it enforces:
   leads its own process group. On POSIX, the group is terminated on **every**
   exit path (normal exit, timeout, cancellation via SIGINT/SIGTERM or an
   AbortSignal), so background descendants are reaped: SIGTERM, then SIGKILL after
-  5 s, awaited before dispatch returns. Inherited pipes cannot hold it open. On
+  5 s. Both steps are awaited, and the result reports `process_tree_terminated`
+  (a group that survives SIGKILL fails the node). Inherited pipes cannot hold
+  dispatch open. On
   Windows, `taskkill /T /F` covers timeout and cancellation while the leader
   lives. Descendants that outlive a normally exiting leader are not reachable
   there.
