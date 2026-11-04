@@ -78,7 +78,8 @@ Phases are ordered, but independent work inside every phase is dependency-driven
 and concurrent by default. At each scheduling point, dispatch every material
 ready node that has disjoint writes and no shared mutable runtime resource. Do
 not wait for an unrelated slow node. Serial execution needs a named dependency,
-write collision, exclusive resource, or unavailable concurrency capability.
+write collision, exclusive resource that cannot be duplicated, or unavailable
+concurrency capability.
 
 Load a phase reference only when entering that phase:
 
@@ -120,6 +121,17 @@ when:
 - they do not share an exclusive port, datastore, fixture set, generator output,
   lockfile, cache/output directory, or other mutable resource;
 - the available carrier can isolate their permissions and return results.
+
+A shared resource is a reason to isolate, never a reason to queue. When ready
+nodes — or parallel tickets in one wave — collide only on a resource that can be
+duplicated (a local database stack, a port, a fixture set, a cache or output
+directory), give each one its own instance: uniquely named, created for that
+run, and torn down on exit including failure. Then run them concurrently.
+Serialize only on a true dependency (overlapping write paths, a shared contract,
+merge order on overlapping code) or a resource that genuinely cannot be
+duplicated, and record which. If the isolation tooling does not exist yet,
+building it is the top-priority node and it must not wait behind the bottleneck
+it removes.
 
 When two or more material nodes satisfy those conditions and subagents or a
 workflow fan-out are available, dispatch them together. A missing concurrency
@@ -187,6 +199,11 @@ table, and an in-flight worker is not one of them.
   path is a material divergence and requires user approval.
 - Apply repository and code-quality rules while writing. REVIEW verifies work; it
   is not where routine engineering begins.
+- Never ship a feature switched off. A flag, env var or rollout fence that gates
+  the ticket's feature must default to on in every environment the human tests
+  in, unless the human explicitly asked for it to be off. If a fence seems
+  necessary, ask during PLAN; never add one silently. SHIP checks the diff for
+  any new or changed `false`/disabled feature switch and blocks on it.
 - Coverage is applicability-driven. Review redundancy is risk-driven. A standard
   ticket still checks every applicable rule, screen and trust boundary; elevated
   risk adds a second opinion rather than a second rule catalogue.
@@ -485,6 +502,49 @@ The review checks acceptance criteria, behavior, every applicable rule, UI parit
 when triggered and frozen runtime evidence when trust boundaries are triggered.
 It does not repeat deterministic commands or attacks unless a repair invalidates
 their inputs.
+
+**Token budget comes first.** Concurrency is capped by cost, not only by
+dependencies:
+
+- **Model.** Set `model` on every subagent call:
+  - `haiku` for lookups, survey sweeps, status checks and screenshot capture;
+  - `sonnet` for building, testing, review and the parity grade;
+  - `opus` only for designing money, auth or security logic, or for a review
+    that Sonnet already failed.
+
+  Never let a subagent inherit the main model by default.
+- **Concurrency.** Run at most 2–3 agents at once.
+- **Survey and planning.** Use one survey agent. Use the cross-model plan debate
+  and review only for money or auth tickets. Skip it, and record the skip, for
+  UI or low-risk work.
+- **Owner budget.** A human request to save tokens overrides this skill's
+  parallelism and redundancy defaults.
+
+**Keep review cheap.** These rules apply to every ticket, and to multi-ticket
+waves especially:
+
+- **One reviewer.** One agent does the code review and the UI-parity grade
+  together, and writes the parity artifact. Do not run a separate parity
+  grader as well.
+- **Minor findings** go into the one repair batch. They get no confirmation
+  round and never become a question to the human. Only a blocker or major
+  finding gets the targeted confirmation.
+- **Rebases.** A rebase onto a merged sibling that applies cleanly reruns the
+  automated gates only. It never triggers a new review. Re-check only lines
+  whose logic changed.
+- **Don't gate on merge order.** Review each ticket as soon as its own code is
+  final; a sibling's merge is not a reason to wait. A ticket built against
+  stand-ins for unmerged sibling code gets its stand-in swap re-checked, not a
+  second full review.
+- **Batch siblings that are still waiting.** When two or more wave tickets
+  are all unmerged, are waiting on the same base, and touch shared files
+  (registration files, migrations, grants lists), stack them on one branch.
+  Rebase once, run the gates once, do one review, and open one PR that
+  closes every ticket in the stack. Each ticket keeps its own GATE-4
+  artifact, and the guard runs once per ticket key.
+- **Evidence.** Screenshots cover owned screens at two widths in the primary
+  language, plus one shot in a second language. Add the full theme and
+  language matrix only when the ticket changes theme or i18n.
 
 ## SHIP
 
