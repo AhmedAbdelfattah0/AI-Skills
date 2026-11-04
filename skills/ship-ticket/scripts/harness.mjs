@@ -64,9 +64,11 @@ export function validateNodes(input) {
     const risk = node.risk ?? [];
     assert(Array.isArray(risk) && risk.every(x => typeof x === 'string'), 'risk must be an array');
     if (node.model !== undefined) assert(VALID_MODELS.has(node.model), 'invalid model tier');
+    assert(node.estimatedMemoryMb === undefined || (Number.isSafeInteger(node.estimatedMemoryMb) && node.estimatedMemoryMb >= 0),
+      'estimatedMemoryMb must be a nonnegative integer');
     return { id: node.id, deps, resources, reads: normalizedPaths(node.reads ?? [], 'reads'),
       writes: normalizedPaths(node.writes ?? [], 'writes'), risk, complexity: node.complexity ?? 'medium',
-      model: node.model };
+      model: node.model, estimatedMemoryMb: node.estimatedMemoryMb ?? 0 };
   });
   for (const n of nodes) {
     assert(!n.deps.includes(n.id), 'self dependency: ' + n.id);
@@ -96,6 +98,9 @@ export function schedule(input) {
   const nodes = validateNodes(input);
   const width = input.maxConcurrency ?? 3;
   assert(Number.isInteger(width) && width >= 1 && width <= 32, 'maxConcurrency must be 1..32');
+  const budget = input.memoryBudgetMb ?? null;
+  assert(budget === null || (Number.isSafeInteger(budget) && budget > 0), 'memoryBudgetMb must be a positive integer');
+  if (budget !== null) for (const n of nodes) assert(n.estimatedMemoryMb <= budget, 'node exceeds memory budget: ' + n.id);
   const completed = new Set();
   const pending = new Map(nodes.map(n => [n.id, n]));
   const waves = [];
@@ -105,7 +110,8 @@ export function schedule(input) {
     const selected = [];
     for (const n of ready) {
       if (selected.length >= width) break;
-      if (selected.every(other => !conflicts(n, other))) selected.push(n);
+      if (selected.every(other => !conflicts(n, other))
+        && (budget === null || selected.reduce((sum, item) => sum + item.estimatedMemoryMb, n.estimatedMemoryMb) <= budget)) selected.push(n);
     }
     assert(selected.length > 0, 'no schedulable nodes');
     waves.push({ parallel_group: 'harness-wave-' + (waves.length + 1),
@@ -113,7 +119,7 @@ export function schedule(input) {
     for (const n of selected) { pending.delete(n.id); completed.add(n.id); }
   }
   return { schema: 'ship-ticket-harness-schedule-v1', phase: input.phase, advisory: true,
-    max_concurrency: width, waves };
+    max_concurrency: width, memory_budget_mb: budget, waves };
 }
 
 export function resourceSnapshot() {
