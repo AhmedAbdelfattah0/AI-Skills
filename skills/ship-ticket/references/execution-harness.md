@@ -23,6 +23,7 @@ the file to the ticket's reviewed candidate):
 {
   "phase": "BUILD",
   "maxConcurrency": 3,
+  "memoryBudgetMb": 12000,
   "nodes": [
     {
       "id": "frontend",
@@ -30,6 +31,8 @@ the file to the ticket's reviewed candidate):
       "reads": ["contracts"],
       "writes": ["apps/web"],
       "resources": ["cache:frontend-build"],
+      "estimatedMemoryMb": 2500,
+      "estimatedMemoryMb": 3000,
       "complexity": "medium",
       "risk": []
     },
@@ -39,6 +42,7 @@ the file to the ticket's reviewed candidate):
       "reads": ["contracts"],
       "writes": ["apps/api"],
       "resources": ["db:integration"],
+      "estimatedMemoryMb": 3500,
       "complexity": "high",
       "risk": ["auth"]
     },
@@ -59,7 +63,7 @@ The result contains ordered `waves`, each with a fresh `parallel_group` and
 measure model tokens, detect subscription quotas, start/stop Docker, or enforce
 model selection. The orchestrator must verify actual carrier isolation, exclusive
 runtime ownership, available memory, context and reviewer independence before
-dispatch. A wave is a safe candidate grouping, not a command to run it blindly.
+dispatch. A wave is a safe candidate grouping, not a command to run it blindly.\nOptional `memoryBudgetMb` is a caller-chosen **conservative** budget, and\n`estimatedMemoryMb` is a per-node estimate; the planner rejects nodes larger\nthan that budget and prevents concurrent estimates exceeding it. Neither is\nmeasured or enforced against OS memory, and unspecified estimates default to\nzero. For memory-sensitive dispatch, provide measured estimates for **every**\nnode or do not claim memory safety.
 
 Paths are repository-relative and conflict when a writer owns a path or its
 ancestor/descendant; read/write collisions also serialize. Resources use named
