@@ -101,3 +101,44 @@ Measured token/provider usage where host APIs expose it; cgroup-aware admission
 control; an owner-scoped Docker/database lease registry with TTL and verified
 cleanup; provider-specific dispatch adapters and integration tests on macOS and
 Windows. These require separate evidence and should not be presented as shipped.
+
+## Guarded provider dispatch, usage and Docker ownership
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/carrier.mjs inspect /absolute/path/to/dispatch.json
+node <SHIP_TICKET_SKILL>/scripts/carrier.mjs run /absolute/path/to/dispatch.json
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /absolute/path/to/usage-events.json
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs labels <owner> <run-id>
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs cleanup <owner> <run-id>
+node <SHIP_TICKET_SKILL>/scripts/docker-lifecycle.mjs cleanup <owner> <run-id> --apply
+```
+
+Carrier input must include `phase` (BUILD/PROVE/SHIP only), `provider`
+(claude/codex/gemini/antigravity), `approved: true`, `approvedPlanId`,
+absolute `workdir`, `ownership.writes`, trusted `args` string array, and
+`timeoutMs`. Antigravity additionally requires an explicit executable because
+there is no assumed universal CLI. The harness **does not construct prompts,
+inject model flags, check authentication, or verify plan approval independently**;
+the orchestrator must supply and validate these. Claude subscription-only mode
+removes API-key environment variables from the child process, but the orchestrator
+must still verify actual OAuth subscription authentication and provider routing
+before dispatch. Never use carrier for PLAN or independent REVIEW. Avoid passing
+sensitive prompts or secrets through argument lists.
+
+Usage input is an array of provider-reported events with `provider`, safe
+`run_id`, and optional `input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_write_tokens`, `reported_cost_usd`. It only
+aggregates provided numbers. Missing counters stay null; subscription quotas
+and model billing are not inferred.
+
+Docker containers must be created with the two exact labels returned by
+`labels`: `ai-skills.ship-ticket.owner` and `ai-skills.ship-ticket.run`.
+Default cleanup is a dry run; `--apply` requires explicit authority and verifies
+the labels again for every container. The helper is not a shared resource lease
+manager and does not clean Docker networks, images or volumes. A container
+without both exact labels is never eligible.
+
+**Operational limits:** model IDs/CLI flags are version-specific and deliberately
+provided by the trusted host. Memory estimates are advisory. Real provider
+availability, token telemetry, and resource cleanup need host integration and
+appropriate permissions; do not report these as automatic or guaranteed.
