@@ -206,7 +206,10 @@ export function schedule(input) {
   const auto = input.memoryBudgetMb === 'auto';
   const budget = auto ? autoMemoryBudgetMb(input.probe) : (input.memoryBudgetMb ?? null);
   assert(auto || budget === null || (Number.isSafeInteger(budget) && budget > 0), 'memoryBudgetMb must be a positive integer or "auto"');
-  if (budget !== null) for (const n of nodes) assert(n.estimatedMemoryMb <= budget, 'node exceeds memory budget: ' + n.id);
+  // A caller budget is an assertion: an oversized node is an error. An auto budget is only a
+  // snapshot of memory *now*; an oversized node runs alone and must pass admission at dispatch.
+  if (budget !== null && !auto) for (const n of nodes) assert(n.estimatedMemoryMb <= budget, 'node exceeds memory budget: ' + n.id);
+  const oversized = (n) => auto && n.estimatedMemoryMb > budget;
   const estimated = input.nodes.every(n => n.estimatedMemoryMb !== undefined);
   // Fresh per call: repeated scheduling within one phase never reuses a parallel_group.
   const scheduleId = input.scheduleId ?? randomBytes(4).toString('hex');
@@ -220,19 +223,22 @@ export function schedule(input) {
     const selected = [];
     for (const n of ready) {
       if (selected.length >= width) break;
+      if (oversized(n)) { if (selected.length === 0) { selected.push(n); break; } continue; }
+      if (selected.some(oversized)) break;
       if (selected.every(other => !conflicts(n, other))
         && (budget === null || selected.reduce((sum, item) => sum + item.estimatedMemoryMb, n.estimatedMemoryMb) <= budget)) selected.push(n);
     }
     assert(selected.length > 0, 'no schedulable nodes');
     waves.push({ parallel_group: (prefix ? prefix + '-' + input.phase.toLowerCase() + '-' + scheduleId : 'harness') + '-wave-' + (waves.length + 1),
       estimated_memory_mb: selected.reduce((sum, item) => sum + item.estimatedMemoryMb, 0),
+      requires_admission: selected.some(oversized),
       nodes: selected.map(n => ({ id: n.id, model_tier: routeModel(input.phase, n) })) });
     for (const n of selected) { pending.delete(n.id); completed.add(n.id); }
   }
   return { schema: 'ship-ticket-harness-schedule-v1', phase: input.phase, advisory: true,
     max_concurrency: width, memory_budget_mb: budget, memory_budget_source: auto ? 'auto' : budget === null ? 'none' : 'caller',
     // Memory safety can be claimed only when every node carries an estimate and a budget applied.
-    memory_safety: budget !== null && estimated && (!auto || memoryVerified(input.probe)) ? 'estimated' : 'unverified',
+    memory_safety: budget !== null && estimated && !nodes.some(oversized) && (!auto || memoryVerified(input.probe)) ? 'estimated' : 'unverified',
     schedule_id: scheduleId, group_ids_unique: prefix !== null, waves };
 }
 

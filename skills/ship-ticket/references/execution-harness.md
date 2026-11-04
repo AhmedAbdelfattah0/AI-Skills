@@ -196,9 +196,9 @@ headless agent CLI that this harness relies on.
 
 ## Provider-reported usage
 
-Each run appends one JSONL event to `usageLog`; `run_log_metrics` gives
-`key=value` pairs for `run-log.mjs end --metric` (see
-[observability.md](observability.md)).
+Each run appends one JSONL event to `usageLog`. The result's `run_log_metrics`
+holds `key=value` pairs that `run-log.mjs end --metrics-from <result.json>` imports
+directly (see [observability.md](observability.md)).
 
 ```bash
 node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /abs/scratch/usage.jsonl

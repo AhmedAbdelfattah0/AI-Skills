@@ -139,3 +139,14 @@ test('macOS budget counts reclaimable pages, not only free pages (live-run regre
       'free-pages-only availableMemory() is not consulted off Linux');
   }
 });
+
+test('auto budget defers an oversized node to admission instead of failing the schedule (live-run regression)', () => {
+  const r = schedule({ phase: 'BUILD', memoryBudgetMb: 'auto', probe: probe(4 * GB), maxConcurrency: 3,
+    nodes: [node('a', { estimatedMemoryMb: 100 }), node('b', { estimatedMemoryMb: 100 }), node('big', { estimatedMemoryMb: 999999 })] });
+  const big = r.waves.find(w => w.nodes.some(n => n.id === 'big'));
+  assert.deepEqual(big.nodes.map(n => n.id), ['big'], 'oversized node runs alone');
+  assert.equal(big.requires_admission, true);
+  assert.equal(r.memory_safety, 'unverified');
+  assert.throws(() => schedule({ phase: 'BUILD', memoryBudgetMb: 1000, nodes: [node('big', { estimatedMemoryMb: 2000 })] }),
+    /exceeds memory budget/, 'an explicit caller budget still fails hard');
+});

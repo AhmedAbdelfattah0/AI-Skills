@@ -310,3 +310,18 @@ test('summary flags historical late or changed identities and never groups by th
   assert.deepEqual(r.review_executions.map((e) => e.review_execution), ['review-original']);
   assert.equal(f.cli('start', ...eventArgs).status, 1);
 });
+
+test('end imports provider usage from a carrier result without shell word-splitting (--metrics-from)', (t) => {
+  const f = fixture(t);
+  const args = ['--run-id', 'run-1', '--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1'];
+  assert.equal(f.cli('start', ...args).status, 0);
+  const result = join(f.repo, '..', `carrier-${Date.now()}.json`);
+  t.after(() => rmSync(result, { force: true }));
+  writeFileSync(result, JSON.stringify({ run_log_metrics: ['input_tokens=6', 'output_tokens=2003', 'reported_cost_usd=0.419237'] }));
+  const ended = f.cli('end', ...args, '--outcome', 'pass', '--metrics-from', result);
+  assert.equal(ended.status, 0, ended.stderr);
+  const last = readFileSync(f.path, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
+  assert.deepEqual(last.metrics, { input_tokens: 6, output_tokens: 2003, reported_cost_usd: 0.419237 });
+  writeFileSync(result, JSON.stringify({ usage: {} }));
+  assert.equal(f.cli('start', '--run-id', 'run-1', '--kind', 'activity', '--name', 'x', '--event-id', 'x-1', '--metrics-from', result).status, 1);
+});

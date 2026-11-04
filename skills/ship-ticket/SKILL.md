@@ -393,7 +393,7 @@ Read the plan and Design Contract from disk before writing.
   When Node is available, derive waves with the harness `schedule` (run ID as
   `groupPrefix`), `admit` each wave before dispatch, and dispatch external-CLI
   writers through `carrier.mjs run` so approval, billing, timeout and ownership
-  are enforced; record its `run_log_metrics` on the activity's end event.
+  are enforced; import its usage on the activity's end event with `--metrics-from`.
 - On full-stack work, after the Integration Contract is materialized and frozen,
   dispatch frontend and backend implementation workers concurrently. Neither
   waits for the other's implementation, tests, or review; both depend only on
