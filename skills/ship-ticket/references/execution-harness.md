@@ -82,7 +82,10 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   `memory_verified: false`. `memory_safety` is `estimated` only when a verified
   budget applied and **every** node has `estimatedMemoryMb`; otherwise it is
   `unverified`.
-  On macOS, free memory excludes reclaimable cache, so the budget is conservative.
+  Node's available/constrained probes are cgroup-aware only on Linux, so they
+  are consulted only there. On macOS, `os.freemem()` counts only free pages
+  (about 0.7 GB of 24 GB on the host where this was found), so the harness reads
+  `vm_stat` and counts free, inactive, speculative and purgeable pages instead.
 - `admit` input `{ "phase", "estimatedMemoryMb", "members" }` re-reads live
   memory immediately before a wave starts. A refusal shrinks or delays that wave,
   never the plan. Neither command reserves memory.

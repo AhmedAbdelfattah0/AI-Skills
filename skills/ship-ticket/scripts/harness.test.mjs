@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { schedule, routeModel, validateNodes, resourceSnapshot, admit, autoMemoryBudgetMb, availableMemoryBytes, memoryEstimate } from './harness.mjs';
+import { schedule, routeModel, validateNodes, resourceSnapshot, admit, autoMemoryBudgetMb, availableMemoryBytes, memoryEstimate, darwinAvailableBytes } from './harness.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -122,4 +122,20 @@ test('CLI entrypoint actually runs (portable detection, real subprocess)', (t) =
   const plan = spawnSync(process.execPath, [script, 'schedule', planInput], { encoding: 'utf8' });
   assert.equal(plan.status, 1);
   assert.match(plan.stderr, /PLAN is protected/);
+});
+
+test('macOS budget counts reclaimable pages, not only free pages (live-run regression)', () => {
+  const vm = 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                    44035.\n'
+    + 'Pages active:                                 504982.\nPages inactive:                               495583.\n'
+    + 'Pages speculative:                              8521.\nPages throttled:                                   0.\n'
+    + 'Pages wired down:                             188958.\nPages purgeable:                               11121.\n';
+  assert.equal(darwinAvailableBytes(vm), (44035 + 495583 + 8521 + 11121) * 16384);
+  assert.equal(darwinAvailableBytes('garbage'), null);
+  if (process.platform === 'darwin') {
+    const snap = resourceSnapshot();
+    assert.ok(snap.os_available_bytes > snap.free_memory_bytes);
+    // Two live vm_stat reads drift slightly; the regression was a ~10x gap.
+    assert.ok(Math.abs(snap.available_memory_bytes - snap.os_available_bytes) < snap.os_available_bytes * 0.1,
+      'free-pages-only availableMemory() is not consulted off Linux');
+  }
 });

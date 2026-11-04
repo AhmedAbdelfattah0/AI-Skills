@@ -8,6 +8,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { cpus, freemem, totalmem } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 export const PHASES = Object.freeze(['UNDERSTAND', 'BUILD', 'PROVE', 'REVIEW', 'SHIP']);
 const VALID_MODELS = new Set(['economy', 'balanced', 'strong', 'inherit']);
@@ -108,6 +109,32 @@ export function routeModel(phase, node) {
 
 const MB = 1024 * 1024;
 
+/**
+ * macOS reclaimable memory from vm_stat: free + inactive + speculative +
+ * purgeable pages. os.freemem() counts only "free" pages, which on macOS
+ * excludes the file cache and reports a fraction of what can be allocated.
+ */
+export function darwinAvailableBytes(vmStatText) {
+  const page = Number(/page size of (\d+) bytes/.exec(vmStatText)?.[1]);
+  if (!Number.isSafeInteger(page) || page <= 0) return null;
+  let pages = 0;
+  for (const name of ['free', 'inactive', 'speculative', 'purgeable']) {
+    const m = new RegExp('Pages ' + name + ':\\s+(\\d+)\\.').exec(vmStatText);
+    if (!m) return null;
+    pages += Number(m[1]);
+  }
+  return pages * page;
+}
+
+function osFreeBytes() {
+  if (process.platform === 'darwin') {
+    const r = spawnSync('vm_stat', [], { encoding: 'utf8', timeout: 5000 });
+    const bytes = r.status === 0 ? darwinAvailableBytes(r.stdout) : null;
+    if (bytes !== null) return bytes;
+  }
+  return freemem();
+}
+
 /** Linux cgroup memory currently in use (v2, then v1), or null when not readable. */
 function cgroupUsageBytes() {
   for (const file of ['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory/memory.usage_in_bytes']) {
@@ -123,9 +150,12 @@ function cgroupUsageBytes() {
  * usage; if usage cannot be read, the estimate is marked unverified.
  */
 export function memoryEstimate(probe = {}) {
-  const free = (probe.freemem ?? freemem)();
-  const available = probe.availableMemory ?? (typeof process.availableMemory === 'function' ? () => process.availableMemory() : null);
-  const constrained = probe.constrainedMemory ?? (typeof process.constrainedMemory === 'function' ? () => process.constrainedMemory() : null);
+  const free = (probe.freemem ?? osFreeBytes)();
+  // availableMemory()/constrainedMemory() are cgroup-aware only on Linux; elsewhere availableMemory()
+  // is plain free pages (on macOS a fraction of what is allocatable), so it is not consulted.
+  const linux = (probe.platform ?? process.platform) === 'linux';
+  const available = probe.availableMemory ?? (linux && typeof process.availableMemory === 'function' ? () => process.availableMemory() : null);
+  const constrained = probe.constrainedMemory ?? (linux && typeof process.constrainedMemory === 'function' ? () => process.constrainedMemory() : null);
   const usage = probe.cgroupUsage ?? cgroupUsageBytes;
   const candidates = [free];
   let verified = true;
@@ -230,7 +260,7 @@ export function admit(input, probe = {}) {
 
 export function resourceSnapshot() {
   return { schema: 'ship-ticket-harness-resources-v1', observed_at: new Date().toISOString(),
-    platform: process.platform, cpu_count: cpus().length, free_memory_bytes: freemem(),
+    platform: process.platform, cpu_count: cpus().length, free_memory_bytes: freemem(), os_available_bytes: osFreeBytes(),
     available_memory_bytes: availableMemoryBytes(), total_memory_bytes: totalmem(),
     auto_memory_budget_mb: autoMemoryBudgetMb(), process_rss_bytes: process.memoryUsage().rss,
     note: 'Host-wide memory is not a container limit; verify actual capacity before dispatch.' };
