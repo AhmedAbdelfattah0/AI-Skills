@@ -68,14 +68,17 @@ export function extractUsage(provider, stdout) {
   return null;
 }
 
-export function summarizeUsage(events) {
+export function summarizeUsage(events, runId = null) {
   if (!Array.isArray(events) || events.length > 100000) throw new Error('usage events must be an array of <=100000');
+  if (runId !== null && (typeof runId !== 'string' || !SAFE.test(runId))) throw new Error('invalid run_id filter');
   const byProvider = {};
   for (const e of events) {
     if (!e || !PROVIDERS.has(e.provider) || typeof e.run_id !== 'string' || !SAFE.test(e.run_id))
       throw new Error('invalid provider or run_id');
+    if (runId !== null && e.run_id !== runId) continue;
     const current = byProvider[e.provider] ??= { events: 0, events_without_usage: 0,
-      ...Object.fromEntries(COUNTERS.map(k => [k, null])), cost_bases: [] };
+      ...Object.fromEntries(COUNTERS.map(k => [k, null])),
+      counter_events: Object.fromEntries(COUNTERS.map(k => [k, 0])), cost_bases: [] };
     current.events++;
     let any = false;
     for (const key of COUNTERS) {
@@ -83,6 +86,7 @@ export function summarizeUsage(events) {
       if (typeof e[key] !== 'number' || !Number.isFinite(e[key]) || e[key] < 0
         || (key !== 'reported_cost_usd' && !Number.isSafeInteger(e[key]))) throw new Error('invalid usage counter: ' + key);
       current[key] = (current[key] ?? 0) + e[key];
+      current.counter_events[key]++;
       any = true;
     }
     if (!any) current.events_without_usage++;
@@ -95,8 +99,9 @@ export function summarizeUsage(events) {
     p.cache_hit_ratio = prompt.every(v => v !== null) && prompt.reduce((a, b) => a + b, 0) > 0
       ? Number((p.cache_read_tokens / prompt.reduce((a, b) => a + b, 0)).toFixed(4)) : null;
   }
-  return { schema: 'ship-ticket-harness-usage-v2', providers: byProvider,
-    note: 'Only provider-reported counters are summed; null means unavailable. reported_cost_usd is what the CLI '
+  return { schema: 'ship-ticket-harness-usage-v2', run_id: runId, providers: byProvider,
+    note: 'Only provider-reported counters are summed; null means unavailable. counter_events[k] is how many of '
+      + '`events` reported counter k; a total over fewer events than `events` is partial. reported_cost_usd is what the CLI '
       + 'reported; with cost_basis "list" under a subscription it is a list-price estimate, not a charge.' };
 }
 
@@ -110,7 +115,9 @@ export function readEvents(path) {
 
 if (isEntrypoint(import.meta.url)) {
   try {
-    if (process.argv[2] !== 'summary' || process.argv.length !== 4) throw new Error('Usage: usage.mjs summary <events.json|events.jsonl>');
-    process.stdout.write(JSON.stringify(summarizeUsage(readEvents(process.argv[3])), null, 2) + '\n');
+    const [cmd, file, flag, runId] = process.argv.slice(2);
+    const ok = cmd === 'summary' && file && (process.argv.length === 4 || (process.argv.length === 6 && flag === '--run-id'));
+    if (!ok) throw new Error('Usage: usage.mjs summary <events.json|events.jsonl> [--run-id <id>]');
+    process.stdout.write(JSON.stringify(summarizeUsage(readEvents(file), runId ?? null), null, 2) + '\n');
   } catch (e) { process.stderr.write('usage: ' + e.message + '\n'); process.exitCode = 1; }
 }

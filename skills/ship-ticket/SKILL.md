@@ -102,7 +102,8 @@ tiers), `scripts/carrier.mjs` (approved, subscription-safe writer dispatch with
 ownership checks and provider-reported usage), `scripts/usage.mjs` and
 `scripts/docker-lifecycle.mjs` (label-owned containers only). Read
 [references/execution-harness.md](references/execution-harness.md) before BUILD.
-Every helper refuses PLAN and the carrier refuses REVIEW. An *unavailable*
+The scheduler and carrier refuse PLAN (the usage and Docker helpers take no
+phase; never call them during PLAN), and the carrier refuses REVIEW. An *unavailable*
 helper (no Node, missing file, unsupported provider) is a declared degradation.
 A *safety refusal* is not: missing approval evidence returns to approval,
 unproven subscription billing is **WAIT_FOR_USER** for the user's billing
@@ -394,6 +395,9 @@ Read the plan and Design Contract from disk before writing.
   `groupPrefix`), `admit` each wave before dispatch, and dispatch external-CLI
   writers through `carrier.mjs run` so approval, billing, timeout and ownership
   are enforced; import its usage on the activity's end event with `--metrics-from`.
+  Copy each scheduled node's `risk` and `complexity` into its dispatch JSON: the
+  carrier routes the model tier only from those fields, so omitting them turns a
+  high-risk node's required `strong` tier into `inherit`.
 - On full-stack work, after the Integration Contract is materialized and frozen,
   dispatch frontend and backend implementation workers concurrently. Neither
   waits for the other's implementation, tests, or review; both depend only on
@@ -527,7 +531,11 @@ Use **FAIL** for:
 All other in-scope work is **CONTINUE** or **AUTO_FIX**.
 
 When yielding, preserve the branch and artifacts. State the phase, branch, what
-exists, what remains, and exactly one user action needed. Never make a progress
+exists, what remains, and exactly one user action needed. On **FAIL**, also run
+the run-scoped teardown that SHIP would have run: `usage.mjs summary` and
+`docker-lifecycle.mjs cleanup <owner> <run-id>` (dry run, then `--apply`), so
+no labelled container outlives the run. WAIT_FOR_USER keeps containers for the
+resume. Never make a progress
 message look like completion.
 
 ## Resume

@@ -6,8 +6,11 @@ dependency-driven orchestration measurable and enforce its safety rules at the
 process boundary. They do not replace the DAG, approval, reviewer independence
 or security gates in `SKILL.md`.
 
-**PLAN is protected.** Every helper refuses PLAN. None of them selects a PLAN
-model, schedules PLAN work, shortens the debate or touches approval. Do not run
+**PLAN is protected.** The phase-aware helpers (`harness.mjs` scheduling and
+routing, `carrier.mjs`) refuse PLAN. `usage.mjs summary` and `docker-lifecycle.mjs`
+take no phase and do not check one, so the rule for them is procedural: do not
+call them during PLAN. None of them selects a PLAN model, schedules PLAN work,
+shortens the debate or touches approval. Do not run
 them inside native Plan Mode. REVIEW keeps its own read-only relay
 ([review.md](review.md)); the carrier refuses REVIEW.
 
@@ -98,7 +101,10 @@ maps to real model IDs, not model IDs themselves.
 
 - REVIEW, any high-risk node (`security`, `auth`, `tenancy`, `payments`,
   `migration`, `schema`, `shared-contract`) and `complexity: "high"` are always
-  `strong`. A requested cheaper tier cannot override that.
+  `strong`. A requested cheaper tier cannot override that. `risk` is a closed
+  vocabulary: these seven labels are the only accepted values, and any other
+  label is refused rather than silently routed as low risk. Map a ticket's own
+  risk wording onto them; a node with no applicable label carries `risk: []`.
 - `complexity: "low"` or an explicit `model` request gets that tier.
 - Everything else is `inherit`. On the carrier, `strong` requires
   `modelMap.strong` on a verified adapter, or dispatch is refused: an unknown
@@ -178,6 +184,10 @@ What it enforces:
   the declared concurrent `othersOwned`; that includes pre-existing user changes
   the worker reverted or deleted. A violation fails the node and the paths are
   listed. Outside a Git work tree the check reports `unavailable`.
+  Git-ignored paths (build output, `node_modules`, local env files) are not in
+  `git status` and are **not covered**: `clean` means no tracked or untracked,
+  non-ignored path changed outside ownership. Keep worker outputs that matter
+  out of ignored locations, or check them separately.
 - **Output privacy:** stdout shows metadata only. The worker's final message goes
   to a fresh `resultFile` (mode 0600). Output paths are canonicalized through
   symlinks and must be outside the repository work tree or inside its real Git
@@ -201,8 +211,12 @@ holds `key=value` pairs that `run-log.mjs end --metrics-from <result.json>` impo
 directly (see [observability.md](observability.md)).
 
 ```bash
-node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /abs/scratch/usage.jsonl
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs summary /abs/scratch/usage.jsonl --run-id <RUN_ID>
 ```
+
+`--run-id` restricts the sum to one run when the log is shared; without it every
+run in the file is summed. `counter_events.<counter>` says how many of `events`
+reported that counter, so a total backed by fewer events than `events` is partial.
 
 - Claude `--output-format json` gives `input_tokens`, `output_tokens`,
   `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` and
@@ -228,7 +242,13 @@ Only containers with both exact labels (`ai-skills.ship-ticket.owner`,
 container's labels immediately before `docker rm -f` and stops at the first
 mismatch. A Docker error fails the command; it is never read as "nothing owned".
 After a crash, `orphans` lists the owner's runs and removal still goes through
-the per-run `cleanup`. Images, volumes and networks are never removed, and there
+the per-run `cleanup`.
+
+`reuse` returns every running container of the owner and run, across all of
+that run's environments. Treat each ID as a candidate only: before attaching,
+confirm with `docker inspect` that its published ports, datastore and image are
+the intended environment's. If none matches, start a new labelled container;
+never attach to the first ID returned. Images, volumes and networks are never removed, and there
 is no prune.
 
 ## Known limits

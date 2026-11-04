@@ -52,6 +52,9 @@ test('orphan listing is read-only and groups by run label', () => {
   assert.equal(calls[0][0], 'ps');
   assert.ok(calls[0].includes('label=ai-skills.ship-ticket.owner=owner'));
   assert.throws(() => orphanRuns('owner', () => ({ status: 0, stdout: 'zzz\trun\tup\tx' })), /unexpected/);
+  const proto = orphanRuns('owner', () => ({ status: 0, stdout: 'abcdef123456\tconstructor\trunning\tx\n123456abcdef\ttoString\texited\ty\n' }));
+  assert.deepEqual(Object.keys(proto.runs).sort(), ['constructor', 'toString'], 'prototype-named run labels are grouped, not thrown on');
+  assert.equal(proto.runs.constructor.length, 1);
 });
 
 test('reuse lists only running containers with both exact labels', () => {

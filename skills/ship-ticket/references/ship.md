@@ -84,6 +84,8 @@ Outside the candidate, summarize the run's carrier usage log with `usage.mjs
 summary` and remove only this run's labelled containers with
 `docker-lifecycle.mjs cleanup <owner> <run-id>` (dry run first, then `--apply`).
 Neither step writes to the repository ([execution-harness.md](execution-harness.md)).
+A run that ends in FAIL runs the same two steps (see "When execution may yield"
+in `SKILL.md`).
 
 ## One commit
 

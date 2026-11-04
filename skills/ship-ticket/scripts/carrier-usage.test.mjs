@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync, symlinkSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -104,6 +104,8 @@ test('workdir must be absolute for the host platform and output files stay out o
   assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.specs'] } })), /plan artifact roots/, 'CL-4');
   assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.spec/plans'] } })), /plan artifact roots/, 'CL-4');
   assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['src'], othersOwned: ['.specs'] } })), /plan artifact roots/, 'CL-4 via othersOwned');
+  assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['.SPECS'] } })), /plan artifact roots/, 'CL-4 case-insensitive');
+  assert.throws(() => prepareDispatch(config(fx, { ownership: { writes: ['src'], othersOwned: ['.Spec/plans/T.md'] } })), /plan artifact roots/, 'CL-4 case-insensitive othersOwned');
   assert.throws(() => prepareDispatch(config(fx, { promptFile: fx.root })), /regular file/, 'CX-8');
   writeFileSync(join(fx.root, 'stale.json'), '{}');
   assert.throws(() => prepareDispatch(config(fx, { resultFile: join(fx.root, 'stale.json') })), /must not exist yet/);
@@ -129,6 +131,7 @@ test('subscription preflight discriminates real auth status output', () => {
   assert.equal(verifySubscription('claude', {}, fake('{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}')), false);
   assert.equal(verifySubscription('claude', {}, fake('{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"bedrock"}')), false);
   assert.equal(verifySubscription('claude', {}, fake('not json')), false);
+  assert.equal(verifySubscription('claude', {}, fake('{"loggedIn":true,"authMethod":"claude.ai"}')), false, 'missing apiProvider fails closed');
   assert.equal(verifySubscription('codex', {}, fake('Logged in using ChatGPT')), true);
   assert.equal(verifySubscription('codex', {}, fake('Logged in using an API key')), false);
   assert.equal(verifySubscription('gemini', {}, fake('')), 'unverified');
@@ -191,6 +194,13 @@ test('usage summary preserves unknowns, reports cache ratio and rejects bad coun
   assert.equal(r.providers.claude.events_without_usage, 1);
   assert.deepEqual(r.providers.claude.cost_bases, ['list']);
   assert.throws(() => summarizeUsage([{ provider: 'claude', run_id: 'a', input_tokens: -1 }]), /invalid usage/);
+  assert.equal(r.providers.claude.counter_events.input_tokens, 1, 'coverage: 1 of 3 events reported input_tokens');
+  assert.equal(r.providers.claude.counter_events.output_tokens, 1);
+  const mixed = [{ provider: 'claude', run_id: 'a', output_tokens: 3 }, { provider: 'claude', run_id: 'b', output_tokens: 100 }];
+  assert.equal(summarizeUsage(mixed, 'a').providers.claude.output_tokens, 3, 'run filter excludes other runs');
+  assert.equal(summarizeUsage(mixed, 'a').run_id, 'a');
+  assert.equal(summarizeUsage(mixed).providers.claude.output_tokens, 103);
+  assert.throws(() => summarizeUsage(mixed, '../x'), /invalid run_id filter/);
 });
 
 test('ownership violations ignore owned, concurrently owned and pre-existing unchanged paths', () => {
@@ -226,6 +236,9 @@ writeFileSync('src/built.txt', 'ok');
 writeFileSync(${JSON.stringify(join(fx.root, 'child-env.json'))}, JSON.stringify({ key: process.env.ANTHROPIC_API_KEY ?? null, argv: process.argv.slice(2), prompt }));
 process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
 `);
+  // A pre-existing world-readable log must be tightened before the append (mode applies only on creation).
+  writeFileSync(join(fx.root, 'usage.jsonl'), '');
+  chmodSync(join(fx.root, 'usage.jsonl'), 0o644);
   const result = await dispatch(config(fx, { resultFile: join(fx.root, 'message.json'), usageLog: join(fx.root, 'usage.jsonl'),
     modelMap: { strong: 'opus' }, complexity: 'high' }),
     { env, verifySubscription: () => true, handleSignals: false });
@@ -241,6 +254,7 @@ process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
   assert.equal(JSON.stringify(result).includes('OK"'), false, 'raw output is not in the result');
   assert.equal(JSON.parse(readFileSync(join(fx.root, 'message.json'), 'utf8')).final_message, 'OK');
   assert.equal(summarizeUsage(readFileSync(join(fx.root, 'usage.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)).providers.claude.output_tokens, 4);
+  if (process.platform !== 'win32') assert.equal(statSync(join(fx.root, 'usage.jsonl')).mode & 0o777, 0o600, 'existing usage log restricted to 0600');
 });
 
 test('integration: writes outside ownership fail the node', async (t) => {

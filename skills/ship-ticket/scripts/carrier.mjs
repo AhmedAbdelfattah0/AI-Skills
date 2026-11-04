@@ -16,7 +16,7 @@
  * run ID; prompts travel on stdin, never argv; raw model output is never printed.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -141,7 +141,7 @@ export function prepareDispatch(config) {
   if (!writes.length) fail('ownership.writes must name at least one path');
   const othersOwned = repoRelative(config.ownership.othersOwned ?? [], 'ownership.othersOwned');
   // Neither this worker nor a declared concurrent worker may own the plan roots (no forged START, no exempted change).
-  if ([...writes, ...othersOwned].some(p => PLAN_ROOTS.some(r => p === r || p.startsWith(r + '/'))))
+  if ([...writes, ...othersOwned].some(p => { const l = p.toLowerCase(); return PLAN_ROOTS.some(r => l === r || l.startsWith(r + '/')); }))
     fail('workers may not own the plan artifact roots (.specs/.spec)');
   if (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 1000 || config.timeoutMs > 3600000)
     fail('timeoutMs must be 1000..3600000');
@@ -219,7 +219,7 @@ export function verifySubscription(provider, env, run = spawnSync) {
     const r = exec('claude', ['auth', 'status', '--json']);
     try {
       const s = JSON.parse(r.stdout ?? '');
-      return s.loggedIn === true && s.authMethod === 'claude.ai' && (s.apiProvider ?? 'firstParty') === 'firstParty';
+      return s.loggedIn === true && s.authMethod === 'claude.ai' && s.apiProvider === 'firstParty';
     } catch { return false; }
   }
   if (provider === 'codex') {
@@ -405,6 +405,8 @@ export async function dispatch(config, deps = {}) {
   }
   if (plan.usageLog) {
     try {
+      // `mode` applies only on creation; tighten an existing log before appending to it.
+      if (existsSync(plan.usageLog)) chmodSync(plan.usageLog, 0o600);
       appendFileSync(plan.usageLog, JSON.stringify({ provider: plan.provider, run_id: approval.run_id, node_id: plan.node_id,
         phase: plan.phase, model_tier: plan.model_tier, ...(usage ?? {}), timestamp: new Date(ended).toISOString() }) + '\n', { mode: 0o600 });
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }

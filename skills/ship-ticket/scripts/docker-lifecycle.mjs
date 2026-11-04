@@ -45,7 +45,7 @@ export function orphanRuns(owner, spawn = spawnSync) {
   if (!SAFE.test(owner)) throw new Error('owner must be a safe opaque ID');
   const output = runDocker(['ps', '-a', '--filter', 'label=' + LABEL + '=' + owner,
     '--format', '{{.ID}}\t{{.Label "' + RUN + '"}}\t{{.State}}\t{{.CreatedAt}}'], spawn);
-  const runs = {};
+  const runs = Object.create(null); // a run label such as `constructor` must not hit Object.prototype
   for (const line of output ? output.split(/\r?\n/) : []) {
     const [id, run, state, created] = line.split('\t');
     if (!/^[a-f0-9]{12,64}$/.test(id ?? '')) throw new Error('unexpected Docker container ID');

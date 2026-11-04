@@ -150,3 +150,30 @@ test('auto budget defers an oversized node to admission instead of failing the s
   assert.throws(() => schedule({ phase: 'BUILD', memoryBudgetMb: 1000, nodes: [node('big', { estimatedMemoryMb: 2000 })] }),
     /exceeds memory budget/, 'an explicit caller budget still fails hard');
 });
+
+test('CodeRabbit PR34: drive-qualified paths are rejected', () => {
+  assert.throws(() => run('BUILD', [node('a', { writes: ['C:/work/file.ts'] })]), /repository-relative/);
+  assert.throws(() => run('BUILD', [node('a', { reads: ['c:file.ts'] })]), /repository-relative/);
+});
+test('CodeRabbit PR34: write collisions are case-insensitive', () => {
+  const r = run('BUILD', [node('a', { writes: ['Src/file.ts'] }), node('b', { writes: ['src/file.ts'] })]);
+  assert.deepEqual(r.waves.map(w => w.nodes.map(n => n.id)), [['a'], ['b']]);
+  const r2 = run('BUILD', [node('a', { writes: ['SRC'] }), node('b', { reads: ['src/x.ts'] })]);
+  assert.equal(r2.waves.length, 2);
+});
+test('CodeRabbit PR34: risk vocabulary is closed and model tier validated in routeModel', () => {
+  assert.throws(() => run('BUILD', [node('a', { risk: ['credential-exposure'] })]), /unknown risk label/);
+  assert.throws(() => routeModel('BUILD', { id: 'a', complexity: 'low', risk: ['credential-exposure'] }), /unknown risk label/);
+  assert.equal(routeModel('BUILD', { id: 'a', complexity: 'low', risk: ['auth'] }), 'strong');
+  assert.throws(() => routeModel('BUILD', { id: 'a', model: 'premium', complexity: 'low' }), /invalid model tier/);
+  assert.equal(routeModel('BUILD', { id: 'a', model: 'balanced' }), 'balanced');
+});
+test('CodeRabbit PR34: groupPrefix accepts a 128-char run ID; scheduleId cannot be supplied', () => {
+  const id = 'r' + 'x'.repeat(127);
+  const r = schedule({ phase: 'BUILD', nodes: [node('a')], groupPrefix: id });
+  assert.ok(r.waves[0].parallel_group.startsWith(id + '-build-'));
+  assert.throws(() => schedule({ phase: 'BUILD', nodes: [node('a')], groupPrefix: 'run', scheduleId: 'fixed' }), /cannot be supplied/);
+  const a = schedule({ phase: 'BUILD', nodes: [node('a')], groupPrefix: 'run' });
+  const b = schedule({ phase: 'BUILD', nodes: [node('a')], groupPrefix: 'run' });
+  assert.notEqual(a.waves[0].parallel_group, b.waves[0].parallel_group);
+});

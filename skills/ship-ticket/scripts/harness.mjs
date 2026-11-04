@@ -38,14 +38,19 @@ function normalizedPaths(paths, label) {
   assert(Array.isArray(paths), label + ' must be an array');
   return paths.map(path => {
     nonemptyString(path, label + ' path');
-    assert(!path.startsWith('/') && !path.includes('\\') && !path.split('/').some(p => p === '..' || p === '.' || !p),
+    assert(!path.startsWith('/') && !/^[A-Za-z]:/.test(path) && !path.includes('\\') && !path.split('/').some(p => p === '..' || p === '.' || !p),
       label + ' paths must be repository-relative and normalized');
     return path.replace(/\/$/, '');
   });
 }
 
+// Case-folded: on a case-insensitive filesystem Src/x and src/x are one file, so
+// treat them as colliding (conservative: may serialize two distinct paths).
+// Symlink aliases are not resolved here; this helper is pure and repo-unaware.
 function pathCollision(a, b) {
-  return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x === y || x.startsWith(y + '/') || y.startsWith(x + '/');
 }
 
 function conflicts(a, b) {
@@ -75,6 +80,7 @@ export function validateNodes(input) {
     assert(new Set(resources).size === resources.length, 'duplicate resource');
     const risk = node.risk ?? [];
     assert(Array.isArray(risk) && risk.every(x => typeof x === 'string'), 'risk must be an array');
+    assert(risk.every(x => HIGH_RISK.has(x)), 'unknown risk label (allowed: ' + [...HIGH_RISK].join(', ') + ')');
     if (node.model !== undefined) assert(VALID_MODELS.has(node.model), 'invalid model tier');
     assert(node.estimatedMemoryMb === undefined || (Number.isSafeInteger(node.estimatedMemoryMb) && node.estimatedMemoryMb >= 0),
       'estimatedMemoryMb must be a nonnegative integer');
@@ -101,9 +107,14 @@ export function validateNodes(input) {
 export function routeModel(phase, node) {
   assert(PHASES.includes(phase), 'PLAN model selection is immutable and unsupported');
   if (phase === 'REVIEW') return 'strong'; // preserve independent review quality
-  if ((node.risk ?? []).some(r => HIGH_RISK.has(r))) return 'strong';
+  const risk = node.risk ?? [];
+  assert(Array.isArray(risk) && risk.every(r => HIGH_RISK.has(r)), 'unknown risk label (allowed: ' + [...HIGH_RISK].join(', ') + ')');
+  if (risk.length) return 'strong';
   if (node.complexity === 'high') return 'strong';
-  if (node.model) return node.model;
+  if (node.model) {
+    assert(VALID_MODELS.has(node.model), 'invalid model tier');
+    return node.model;
+  }
   return node.complexity === 'low' ? 'economy' : 'inherit';
 }
 
@@ -201,7 +212,7 @@ export function schedule(input) {
   const width = input.maxConcurrency ?? Math.max(1, Math.min(3, cpus().length));
   assert(Number.isInteger(width) && width >= 1 && width <= 32, 'maxConcurrency must be 1..32');
   const prefix = input.groupPrefix ?? null;
-  assert(prefix === null || (typeof prefix === 'string' && SAFE_ID.test(prefix) && prefix.length <= 96),
+  assert(prefix === null || (typeof prefix === 'string' && SAFE_ID.test(prefix) && prefix.length <= 128),
     'groupPrefix must be a safe run-scoped ID');
   const auto = input.memoryBudgetMb === 'auto';
   const budget = auto ? autoMemoryBudgetMb(input.probe) : (input.memoryBudgetMb ?? null);
@@ -212,8 +223,8 @@ export function schedule(input) {
   const oversized = (n) => auto && n.estimatedMemoryMb > budget;
   const estimated = input.nodes.every(n => n.estimatedMemoryMb !== undefined);
   // Fresh per call: repeated scheduling within one phase never reuses a parallel_group.
-  const scheduleId = input.scheduleId ?? randomBytes(4).toString('hex');
-  assert(typeof scheduleId === 'string' && /^[A-Za-z0-9]{1,16}$/.test(scheduleId), 'scheduleId must be 1..16 alphanumerics');
+  assert(input.scheduleId === undefined, 'scheduleId is generated per call and cannot be supplied');
+  const scheduleId = randomBytes(4).toString('hex');
   const completed = new Set();
   const pending = new Map(nodes.map(n => [n.id, n]));
   const waves = [];
