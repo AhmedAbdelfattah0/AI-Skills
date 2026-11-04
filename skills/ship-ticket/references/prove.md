@@ -173,6 +173,11 @@ fixtures and destructive state. They may overlap only when the repository alread
 supports proven-isolated instances with distinct ports, datastores, principals,
 credentials and no shared external state. Do not build extra infrastructure only
 to manufacture concurrency; uncertain isolation means serial execution.
+Declare each environment's port, datastore and container as exclusive harness
+locks (`port:`, `db:`, `docker:`), start containers with the owner/run labels
+from `docker-lifecycle.mjs labels`, and check `reuse` before starting another
+one. A `reuse` ID is a candidate: attach only after confirming its ports and
+datastore are this environment's ([execution-harness.md](execution-harness.md)).
 
 ### Fixes
 

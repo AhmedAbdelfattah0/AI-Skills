@@ -26,7 +26,7 @@ function fail(message) {
 function usage() {
   return `Usage:
   run-log.mjs start --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--metric key=value ...]
-  run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...]
+  run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>]
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
@@ -58,6 +58,20 @@ function parseArgs(argv) {
     if (key === 'metric') options.metric.push(value);
     else if (options[key] !== undefined) fail(`${token} may be supplied only once`);
     else options[key] = value;
+  }
+  if (options['metrics-from'] !== undefined) {
+    // A harness carrier result carries provider-reported counters as ready-made key=value
+    // pairs; importing them avoids shell word-splitting a metrics string (zsh does not).
+    if (command !== 'end') fail('--metrics-from is supported on end only');
+    let result;
+    try { result = JSON.parse(readFileSync(resolve(options['metrics-from']), 'utf8')); }
+    catch { fail('--metrics-from must name a readable carrier result JSON file'); }
+    const pairs = result?.run_log_metrics;
+    if (!Array.isArray(pairs) || !pairs.every((pair) => typeof pair === 'string')) {
+      fail('--metrics-from file has no run_log_metrics string array');
+    }
+    options.metric.push(...pairs);
+    delete options['metrics-from'];
   }
   return { command, options };
 }

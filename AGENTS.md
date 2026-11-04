@@ -555,7 +555,11 @@ matching pattern when extending them:
   file it references.
 - **`ship-ticket`** — *executes bundled cross-platform Node helpers in place*.
   `scripts/candidate-id.mjs` computes stable reviewed-candidate identity;
-  `scripts/run-log.mjs` appends local timing telemetry under Git metadata. Neither
+  `scripts/run-log.mjs` appends local timing telemetry under Git metadata. The
+  execution harness (`harness.mjs` schedule/admission, `carrier.mjs` guarded
+  writer dispatch, `usage.mjs`, `docker-lifecycle.mjs`) refuses PLAN, defaults to
+  subscription billing, and builds Claude/Codex arguments only from flags verified
+  against the installed CLIs; keep it that way when a CLI changes. None of these
   needs project-local setup, so symlink and copy installs behave the same.
 - **`project-audit`** — *executes its bundled dependency-free Node continuity
   checker in place*. It reads current/prior manifests without writing to the
