@@ -342,19 +342,49 @@ function gitDirty(top) {
 /** True when `path` equals or sits under one of `roots` (exact, case-sensitive; used for worker-declared ownership). */
 const under = (path, roots) => roots.some(r => path === r || path.startsWith(r + '/'));
 
-/** True only for the ticket's own plan file (`.specs/plans/<ticket>.md`, either root, any case): the RUN-STATE file the orchestrator appends to. */
+/** True only for the ticket's own plan file (`.specs/plans/<ticket>.md`, either root, any case). Callers pass a ticket only after {@link runStateAppendOnly} verified the change. */
 const isOwnPlanFile = (path, ticket) => {
   if (typeof ticket !== 'string' || !ticket) return false;
   const l = path.toLowerCase();
   return PLAN_ROOTS.some(r => l === `${r}/plans/${ticket.toLowerCase()}.md`);
 };
 
+const RUN_STATE_BEGIN = '<!-- RUN-STATE:BEGIN -->';
+const RUN_STATE_END = '<!-- RUN-STATE:END -->';
+const count = (text, needle) => text.split(needle).length - 1;
+
+/**
+ * True only when `after` equals `before` plus text inserted immediately before
+ * the single RUN-STATE END marker: the orchestrator appending events. Any edit
+ * outside the block, a rewrite of an existing event, a second block, a
+ * deletion or a creation returns false.
+ */
+export function runStateAppendOnly(before, after) {
+  if (typeof before !== 'string' || typeof after !== 'string') return false;
+  if (count(before, RUN_STATE_BEGIN) !== 1 || count(before, RUN_STATE_END) !== 1) return false;
+  if (count(after, RUN_STATE_BEGIN) !== 1 || count(after, RUN_STATE_END) !== 1) return false;
+  const b = before.indexOf(RUN_STATE_END);
+  const a = after.indexOf(RUN_STATE_END);
+  return a >= b && after.slice(0, b) === before.slice(0, b) && after.slice(a) === before.slice(b);
+}
+
+/** The ticket's plan file text, or null when it does not exist (first existing plan root). */
+function readPlanText(repoRoot, ticket) {
+  if (typeof ticket !== 'string' || !ticket) return null;
+  for (const root of PLAN_ROOTS) {
+    const path = join(repoRoot, root, 'plans', ticket + '.md');
+    try { return readFileSync(path, 'utf8'); } catch { /* try the next root */ }
+  }
+  return null;
+}
+
 /** Paths whose recorded state differs between two snapshots (added, removed or modified). */
 const changedPaths = (before, after) => [...new Set([...before.keys(), ...after.keys()])].filter(p => before.get(p) !== after.get(p));
 
 /**
- * The ticket's own plan file is orchestrator-owned: a change there is RUN-STATE
- * bookkeeping, reported but never a worker violation. Any other plan-root change is a violation.
+ * The ticket's own plan file is orchestrator-owned when its change is a verified
+ * RUN-STATE append (the caller passes `ticket` only then): reported, never a worker
+ * violation. Any other plan-root change is a violation.
  */
 export function orchestratorPathsChanged(before, after, ticket) {
   if (!before || !after) return [];
@@ -405,6 +435,7 @@ export async function dispatch(config, deps = {}) {
   if (auth === 'unverified' && !plan.unverified_auth_acknowledged) fail('unverified subscription authentication was not acknowledged');
   const prompt = readFileSync(plan.promptFile); // read before spawning: no unsupervised child on failure
   const before = gitDirty(plan.repoRoot);
+  const planBefore = readPlanText(plan.repoRoot, approval.ticket);
   const spec = (deps.spawnSpec ?? spawnSpec)(plan.executable, plan.args, process.platform, env);
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
 
@@ -469,8 +500,11 @@ export async function dispatch(config, deps = {}) {
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }
   }
   const afterState = gitDirty(plan.repoRoot);
-  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, approval.ticket);
-  const orchestratorPaths = orchestratorPathsChanged(before, afterState, approval.ticket);
+  // The plan file is exempt only when its change is an append inside RUN-STATE;
+  // a worker editing the approved plan, or deleting it, is a violation.
+  const exemptTicket = runStateAppendOnly(planBefore, readPlanText(plan.repoRoot, approval.ticket)) ? approval.ticket : null;
+  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, exemptTicket);
+  const orchestratorPaths = orchestratorPathsChanged(before, afterState, exemptTicket);
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
     && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {

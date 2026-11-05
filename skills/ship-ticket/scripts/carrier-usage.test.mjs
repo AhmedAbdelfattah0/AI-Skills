@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
+import { runStateAppendOnly, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
   ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
 
@@ -326,8 +326,8 @@ process.stdin.resume(); process.stdin.on('end', () => { writeFileSync('package.j
 
 test('integration: RUN-STATE edit during a REPAIR run is reported, not a violation', async (t) => {
   const fx = fixture(t);
-  const env = fakeCli(t, fx, `import { appendFileSync } from 'node:fs';
-process.stdin.resume(); process.stdin.on('end', () => { appendFileSync('.specs/plans/T-1.md', 'note'); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
+  const env = fakeCli(t, fx, `import { readFileSync, writeFileSync } from 'node:fs';
+process.stdin.resume(); process.stdin.on('end', () => { const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('<!-- RUN-STATE:END -->', '{"event":"NOTE"}\\n<!-- RUN-STATE:END -->')); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
 `);
   const logDir = join(fx.repo, '.git', 'ai-skills', 'ship-ticket');
   mkdirSync(logDir, { recursive: true });
@@ -416,3 +416,34 @@ process.exit(0);
   try { process.kill(pid, 0); } catch { alive = false; }
   assert.equal(alive, false, 'SIGTERM-ignoring descendant was SIGKILLed before dispatch returned (CX-6)');
 });
+
+test('runStateAppendOnly accepts only insertions inside the RUN-STATE block', () => {
+  const base = '# Plan\n\nscope\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n';
+  const appended = base.replace('<!-- RUN-STATE:END -->', '{"event":"NOTE"}\n<!-- RUN-STATE:END -->');
+  assert.equal(runStateAppendOnly(base, appended), true);
+  assert.equal(runStateAppendOnly(base, base), true, 'unchanged is fine');
+  assert.equal(runStateAppendOnly(base, appended.replace('scope', 'widened scope')), false, 'edit outside the block');
+  assert.equal(runStateAppendOnly(base, base.replace('{"event":"START"}', '{"event":"START","digest":"x"}')), false, 'rewrite of an existing event');
+  assert.equal(runStateAppendOnly(base, base + 'tail'), false, 'text after END');
+  assert.equal(runStateAppendOnly(base, base.replace('<!-- RUN-STATE:END -->', '<!-- RUN-STATE:END -->\n<!-- RUN-STATE:BEGIN -->\n<!-- RUN-STATE:END -->')), false, 'second block');
+  assert.equal(runStateAppendOnly(base, null), false, 'deleted');
+  assert.equal(runStateAppendOnly(null, base), false, 'created');
+  assert.equal(runStateAppendOnly('# no block\n', '# no block\nmore'), false, 'no markers');
+});
+
+for (const [name, script] of [
+  ['edits the approved plan outside RUN-STATE', `const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('# Plan', '# Plan (worker edit)'));`],
+  ['deletes the plan file', `rmSync('.specs/plans/T-1.md');`],
+]) {
+  test('integration: a worker that ' + name + ' is an ownership violation', async (t) => {
+    const fx = fixture(t);
+    const env = fakeCli(t, fx, `import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+process.stdin.resume(); process.stdin.on('end', () => { ${script} process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
+`);
+    const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false });
+    assert.equal(result.ownership_check, 'violated');
+    assert.deepEqual(result.writes_outside_ownership, ['.specs/plans/T-1.md']);
+    assert.deepEqual(result.orchestrator_paths_changed, []);
+    assert.equal(result.succeeded, false);
+  });
+}
