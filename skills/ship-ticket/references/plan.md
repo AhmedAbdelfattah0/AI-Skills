@@ -88,7 +88,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      plan_mode_carrier: codex|claude|headless
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|other|unavailable
-     plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED}
+     plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED|SKIPPED}
      worker_width: <available concurrent workers>
      parallelism_degradations: []
      approval_status: pending|approved   a human approval flips this, and only this
@@ -181,7 +181,7 @@ needed; or none>. Model agreement is advice, not approval.
 | parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
 | attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
 | rule coverage | <frontend/backend/shared families and specialist selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
-| optional second opinion | <profile reason or not triggered> | ELEVATED only, concurrent with the primary workflow |
+| second opinion (mandatory) | every ticket | host counterpart (CodeRabbit fallback), concurrent with the primary workflow when possible |
 
 <!-- RUN-STATE:BEGIN -->
 <!-- Append one compact JSON object per execution event; never edit or reorder

@@ -22,11 +22,13 @@ primary REVIEW workflow stays independent of all builders, even if it uses the
 host's family. Never reuse a PLAN or BUILD session for REVIEW.
 
 Record `host_agent`, `counterpart_agent`, CLI version, carrier and exact session
-ID. PLAN requires actual counterpart participation: unavailable capability or a
-failed dispatch is `WAIT_FOR_USER` after bounded recovery, unless the user
-explicitly authorizes solo planning. Record `DEGRADED` for diagnostics, but never
-treat that label as permission to skip the debate. The optional REVIEW opinion
-retains its separate fallback policy. Never substitute the same family and claim
+ID. The PLAN debate runs only for money or auth tickets (owner rule); for every
+other ticket it is skipped and recorded as `plan_debate.status: SKIPPED` with the
+reason. When the debate runs, it requires actual counterpart participation:
+unavailable capability or a failed dispatch is `WAIT_FOR_USER` after bounded
+recovery, unless the user explicitly authorizes solo planning. Record `DEGRADED`
+for diagnostics, but never treat that label as permission to skip a required
+debate. The mandatory REVIEW second opinion keeps its separate fallback policy. Never substitute the same family and claim
 cross-model agreement. STANDARD
 retains one primary workflow; an explicit request for two code reviewers selects
 ELEVATED. Human approval remains the PLAN gate.
