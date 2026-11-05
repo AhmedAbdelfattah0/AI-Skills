@@ -71,7 +71,7 @@ and execution continues; measurement must never become a new blocker.
 | **PLAN** | cross-model debated, human-approved plan and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
-| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (Codex, CodeRabbit fallback); at most one repair and targeted confirmation |
+| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (host counterpart, CodeRabbit fallback); at most one repair and targeted confirmation |
 | **SHIP** | one commit, one push, one PR, green CI and completed tracker item |
 
 Phases are ordered, but independent work inside every phase is dependency-driven
@@ -203,14 +203,19 @@ table, and an in-flight worker is not one of them.
   the ticket's feature must default to on in every environment the human tests
   in, unless the human explicitly asked for it to be off. If a fence seems
   necessary, ask during PLAN; never add one silently. SHIP checks the diff for
-  any new or changed `false`/disabled feature switch and blocks on it.
+  any new or changed `false`/disabled feature switch and blocks on it, unless
+  the human asked for that switch to be off (record the request in the plan).
 - Coverage is applicability-driven. Every ticket checks every applicable rule,
   screen and trust boundary, and every ticket gets the mandatory opposite-model
-  second opinion (Codex; CodeRabbit when Codex is unavailable or out of quota) —
+  second opinion (the host's counterpart — Codex for a Claude host, Claude for a
+  Codex host; CodeRabbit when it is unavailable or out of quota) —
   a second opinion, not a second rule catalogue.
 - Runtime attacks target only a local disposable instance. Never production or
   shared staging.
-- One ticket produces one branch, one final commit and one PR.
+- One ticket produces one branch, one final commit and one PR. The only
+  exception is the waiting-sibling stack in REVIEW ("Batch siblings that are
+  still waiting"), which follows the multi-ticket contract in
+  [references/ship.md](references/ship.md).
 - Preserve user work. Never reset, stash, overwrite or delete unrelated changes.
 - After REVIEW passes, candidate bytes do not change. The execution record and
   predeclared session-log entry may be appended before the commit because they are
@@ -528,15 +533,20 @@ dependencies:
 **Keep review cheap.** These rules apply to every ticket, and to multi-ticket
 waves especially:
 
-- **One reviewer.** One agent does the code review and the UI-parity grade
-  together, and writes the parity artifact. Do not run a separate parity
-  grader as well.
-- **Minor findings** go into the one repair batch. They get no confirmation
-  round and never become a question to the human. Only a blocker or major
-  finding gets the targeted confirmation.
+- **One reviewer.** When REVIEW does not partition a material full-stack diff,
+  one agent does the code review and the UI-parity grade together, and writes
+  the parity artifact. Do not run a separate parity grader as well. When REVIEW
+  partitions frontend, backend and shared-contract coverage, keep those
+  partitions; the frontend partition owns the parity grade and artifact.
+- **Minor findings** go into the one repair batch and never become a question
+  to the human. Every repair, minor included, is covered by the primary
+  reviewer's targeted confirmation before SHIP; keep that confirmation scoped to
+  the repaired findings rather than adding a round per finding.
 - **Rebases.** A rebase onto a merged sibling that applies cleanly reruns the
-  automated gates only. It never triggers a new review. Re-check only lines
-  whose logic changed.
+  automated gates only. It never triggers a full new review. Re-check lines
+  whose logic changed, and when the rebase delta changes a shared dependency
+  (a helper, type, contract or schema the ticket calls), run a targeted review
+  of the ticket's call sites of that dependency.
 - **Don't gate on merge order.** Review each ticket as soon as its own code is
   final; a sibling's merge is not a reason to wait. A ticket built against
   stand-ins for unmerged sibling code gets its stand-in swap re-checked, not a
@@ -545,11 +555,13 @@ waves especially:
   are all unmerged, are waiting on the same base, and touch shared files
   (registration files, migrations, grants lists), stack them on one branch.
   Rebase once, run the gates once, do one review, and open one PR that
-  closes every ticket in the stack. Each ticket keeps its own GATE-4
-  artifact, and the guard runs once per ticket key.
+  closes every ticket in the stack. Each ticket keeps its own plan and, when
+  UI is in scope for it, its own UI parity artifact. SHIP follows the
+  multi-ticket contract in [references/ship.md](references/ship.md).
 - **Evidence.** Screenshots cover owned screens at two widths in the primary
-  language, plus one shot in a second language. Add the full theme and
-  language matrix only when the ticket changes theme or i18n.
+  language, plus one shot in a second language when the project ships one. Add
+  the full theme and language matrix only when the ticket changes theme or
+  i18n.
 
 ## SHIP
 

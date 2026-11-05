@@ -208,15 +208,19 @@ It returns at most twelve actionable findings, at most three minors, each with
 `file:line`, quoted evidence, consequence and fix shape. Excess material findings
 set `overflow: true`.
 
-The 10-minute second-opinion budget includes one CodeRabbit fallback, used when
-Codex is unavailable, fails, or reports its usage limit. The second opinion is
-mandatory on every ticket: if the primary finishes first, wait for it within its
-budget; if neither Codex nor CodeRabbit can produce a result, `WAIT_FOR_USER`.
-Name CodeRabbit as a fallback, not as Claude/Codex agreement.
+The counterpart (Codex for a Claude host, Claude for a Codex host) gets a
+10-minute budget. The CodeRabbit fallback runs after it, on its own separate
+10-minute budget, when the counterpart is unavailable, fails, times out, or
+reports its usage limit. The second opinion is mandatory on every ticket: if the
+primary finishes first, wait for the counterpart within its budget; if neither
+the counterpart nor CodeRabbit can produce a result, `WAIT_FOR_USER`. Name
+CodeRabbit as a fallback, not as Claude/Codex agreement.
 
-Verify the cancellation route before launch. If the optional carrier cannot
-enforce the budget or be stopped when primary finishes, declare it unavailable
-and continue with primary coverage; an advisory prompt is not a watchdog.
+Verify the cancellation route before launch; an advisory prompt is not a
+watchdog. If the counterpart's carrier cannot enforce its budget or be stopped,
+treat the counterpart as unavailable and run the CodeRabbit fallback; if
+CodeRabbit cannot produce a result either, `WAIT_FOR_USER`. Never continue on
+primary coverage alone.
 
 Reconcile under [review.md](review.md). Planning debate does **not** apply to code
 review: retain one repair batch and one targeted primary confirmation. PR-side
