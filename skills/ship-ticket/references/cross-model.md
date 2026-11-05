@@ -1,6 +1,6 @@
 # Cross-model planning and review
 
-Load during UNDERSTAND for selection, PLAN for debate, and elevated REVIEW for
+Load during UNDERSTAND for selection, PLAN for debate, and REVIEW for
 the second opinion. [codex-cli.md](codex-cli.md) owns Codex transport details.
 
 ## Select from the host
@@ -8,7 +8,7 @@ the second opinion. [codex-cli.md](codex-cli.md) owns Codex transport details.
 Use the current orchestrator's known identity, not installed binaries or folder
 names. Record the selection once:
 
-| Orchestrator | PLAN counterpart | Elevated REVIEW second opinion |
+| Orchestrator | PLAN counterpart | REVIEW second opinion (mandatory) |
 |---|---|---|
 | Claude | Codex | fresh Codex session |
 | Codex | Claude | fresh Claude session |
@@ -208,12 +208,11 @@ It returns at most twelve actionable findings, at most three minors, each with
 `file:line`, quoted evidence, consequence and fix shape. Excess material findings
 set `overflow: true`.
 
-The existing 10-minute optional budget includes any one CodeRabbit fallback.
-Fallback runs only while the primary is still running and within the remaining
-budget; otherwise declare `DEGRADED`. If the primary finishes first, collect an
-already-completed counterpart result or cancel the optional process and declare
-incomplete coverage. Never add an optional serial tail. Name CodeRabbit as a
-fallback, not as Claude/Codex agreement.
+The 10-minute second-opinion budget includes one CodeRabbit fallback, used when
+Codex is unavailable, fails, or reports its usage limit. The second opinion is
+mandatory on every ticket: if the primary finishes first, wait for it within its
+budget; if neither Codex nor CodeRabbit can produce a result, `WAIT_FOR_USER`.
+Name CodeRabbit as a fallback, not as Claude/Codex agreement.
 
 Verify the cancellation route before launch. If the optional carrier cannot
 enforce the budget or be stopped when primary finishes, declare it unavailable

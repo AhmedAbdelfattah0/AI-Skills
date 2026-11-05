@@ -71,7 +71,7 @@ and execution continues; measurement must never become a new blocker.
 | **PLAN** | cross-model debated, human-approved plan and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
-| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one concurrent second opinion only for elevated risk; at most one repair and targeted confirmation |
+| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (Codex, CodeRabbit fallback); at most one repair and targeted confirmation |
 | **SHIP** | one commit, one push, one PR, green CI and completed tracker item |
 
 Phases are ordered, but independent work inside every phase is dependency-driven
@@ -204,9 +204,10 @@ table, and an in-flight worker is not one of them.
   in, unless the human explicitly asked for it to be off. If a fence seems
   necessary, ask during PLAN; never add one silently. SHIP checks the diff for
   any new or changed `false`/disabled feature switch and blocks on it.
-- Coverage is applicability-driven. Review redundancy is risk-driven. A standard
-  ticket still checks every applicable rule, screen and trust boundary; elevated
-  risk adds a second opinion rather than a second rule catalogue.
+- Coverage is applicability-driven. Every ticket checks every applicable rule,
+  screen and trust boundary, and every ticket gets the mandatory opposite-model
+  second opinion (Codex; CodeRabbit when Codex is unavailable or out of quota) —
+  a second opinion, not a second rule catalogue.
 - Runtime attacks target only a local disposable instance. Never production or
   shared staging.
 - One ticket produces one branch, one final commit and one PR.
@@ -224,11 +225,11 @@ Determine these during UNDERSTAND and record them in the plan:
 - host identity and the opposite-model counterpart: Claude host → Codex;
   Codex host → Claude, following [references/cross-model.md](references/cross-model.md);
 - whether that counterpart and its fallback are available;
-- whether the available orchestrator can dispatch that optional opinion
-  concurrently;
+- whether the orchestrator can run that mandatory second opinion concurrently
+  with the primary review;
 - the available concurrent worker width and whether the carrier safely supports
   simultaneous disjoint writes in the target worktree;
-- the primary, optional and confirmation time ceilings and a verified
+- the primary, second-opinion and confirmation time ceilings and a verified
   deadline/cancellation route, not merely a timed native wait.
 
 **ELEVATED** applies to auth, authorization, tenancy, billing, payments, secrets,
@@ -239,8 +240,9 @@ recorded uncertainty.
 
 If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
-begins. Missing optional counterpart or concurrency is a declared degradation; do not
-serialize optional work into the critical path.
+begins. A missing counterpart falls back to CodeRabbit; if both are missing, use
+**WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
+serializes the two reviews.
 
 ## Security sensitivity
 
@@ -316,9 +318,9 @@ critical.
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
 | selected counterpart or its PLAN carrier | bounded recovery, then **WAIT_FOR_USER** for restored CLI access or an explicit solo-planning waiver; never silently present solo work as a completed debate |
-| selected counterpart during elevated REVIEW | use CodeRabbit on the same candidate when available; otherwise declare the optional second opinion degraded and continue |
+| selected counterpart during REVIEW (unavailable, failed, or usage limit reached) | run CodeRabbit on the same candidate; if CodeRabbit is also unavailable, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
-| elevated concurrency | run only the required primary review and declare the optional opinion degraded |
+| review concurrency | run the primary review and the second opinion one after the other; both are still required |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
 | artifact-specific CI check | record its absence and rely on committed tests in the repository's existing CI; never wait for a nonexistent check |
 
@@ -508,15 +510,18 @@ dependencies:
 
 - **Model.** Set `model` on every subagent call:
   - `haiku` for lookups, survey sweeps, status checks and screenshot capture;
-  - `sonnet` for building, testing, review and the parity grade;
-  - `opus` only for designing money, auth or security logic, or for a review
-    that Sonnet already failed.
+  - `sonnet` for building and testing;
+  - `opus` for the one primary review (code review and the UI-parity grade
+    together) and for designing money, auth or security logic. A Sonnet primary
+    reviewer missed design and validation defects that a later Opus pass caught
+    (StoreCraft SCRUM-140/96, 2026-11-05); one strong review costs less than a
+    cheap one plus a fix ticket on merged code.
 
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
 - **Survey and planning.** Use one survey agent. Use the cross-model plan debate
-  and review only for money or auth tickets. Skip it, and record the skip, for
-  UI or low-risk work.
+  only for money or auth tickets. Skip it, and record the skip, for UI or
+  low-risk work. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 

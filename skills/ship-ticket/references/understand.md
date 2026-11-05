@@ -75,9 +75,9 @@ decision.
    with the deadline/cancellation capability required by [review.md](review.md).
    Select and preflight the opposite-model PLAN counterpart using
    [cross-model.md](cross-model.md): Claude host uses Codex; Codex host uses Claude.
-   For `ELEVATED`, also check its REVIEW carrier, CodeRabbit fallback and whether
-   the optional opinion can run concurrently. Missing primary capability is
-   `WAIT_FOR_USER`; missing optional capability is a recorded degradation.
+   For every ticket, also check its REVIEW carrier (Codex), the CodeRabbit
+   fallback and whether the second opinion can run concurrently. Missing primary
+   capability, or both Codex and CodeRabbit unavailable, is `WAIT_FOR_USER`.
 8. **A terminal decision here cancels concurrent work.** If triage cannot
    continue, cancel the design read rather than letting it finish into a run that
    will not happen.
