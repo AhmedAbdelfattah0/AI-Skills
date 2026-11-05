@@ -1,6 +1,6 @@
 # Cross-model planning and review
 
-Load during UNDERSTAND for selection, PLAN for debate, and elevated REVIEW for
+Load during UNDERSTAND for selection, PLAN for debate, and REVIEW for
 the second opinion. [codex-cli.md](codex-cli.md) owns Codex transport details.
 
 ## Select from the host
@@ -8,7 +8,7 @@ the second opinion. [codex-cli.md](codex-cli.md) owns Codex transport details.
 Use the current orchestrator's known identity, not installed binaries or folder
 names. Record the selection once:
 
-| Orchestrator | PLAN counterpart | Elevated REVIEW second opinion |
+| Orchestrator | PLAN counterpart | REVIEW second opinion (mandatory) |
 |---|---|---|
 | Claude | Codex | fresh Codex session |
 | Codex | Claude | fresh Claude session |
@@ -22,11 +22,13 @@ primary REVIEW workflow stays independent of all builders, even if it uses the
 host's family. Never reuse a PLAN or BUILD session for REVIEW.
 
 Record `host_agent`, `counterpart_agent`, CLI version, carrier and exact session
-ID. PLAN requires actual counterpart participation: unavailable capability or a
-failed dispatch is `WAIT_FOR_USER` after bounded recovery, unless the user
-explicitly authorizes solo planning. Record `DEGRADED` for diagnostics, but never
-treat that label as permission to skip the debate. The optional REVIEW opinion
-retains its separate fallback policy. Never substitute the same family and claim
+ID. The PLAN debate runs only for money or auth tickets (owner rule); for every
+other ticket it is skipped and recorded as `plan_debate.status: SKIPPED` with the
+reason. When the debate runs, it requires actual counterpart participation:
+unavailable capability or a failed dispatch is `WAIT_FOR_USER` after bounded
+recovery, unless the user explicitly authorizes solo planning. Record `DEGRADED`
+for diagnostics, but never treat that label as permission to skip a required
+debate. The mandatory REVIEW second opinion keeps its separate fallback policy. Never substitute the same family and claim
 cross-model agreement. STANDARD
 retains one primary workflow; an explicit request for two code reviewers selects
 ELEVATED. Human approval remains the PLAN gate.
@@ -208,16 +210,19 @@ It returns at most twelve actionable findings, at most three minors, each with
 `file:line`, quoted evidence, consequence and fix shape. Excess material findings
 set `overflow: true`.
 
-The existing 10-minute optional budget includes any one CodeRabbit fallback.
-Fallback runs only while the primary is still running and within the remaining
-budget; otherwise declare `DEGRADED`. If the primary finishes first, collect an
-already-completed counterpart result or cancel the optional process and declare
-incomplete coverage. Never add an optional serial tail. Name CodeRabbit as a
-fallback, not as Claude/Codex agreement.
+The counterpart (Codex for a Claude host, Claude for a Codex host) gets a
+10-minute budget. The CodeRabbit fallback runs after it, on its own separate
+10-minute budget, when the counterpart is unavailable, fails, times out, or
+reports its usage limit. The second opinion is mandatory on every ticket: if the
+primary finishes first, wait for the counterpart within its budget; if neither
+the counterpart nor CodeRabbit can produce a result, `WAIT_FOR_USER`. Name
+CodeRabbit as a fallback, not as Claude/Codex agreement.
 
-Verify the cancellation route before launch. If the optional carrier cannot
-enforce the budget or be stopped when primary finishes, declare it unavailable
-and continue with primary coverage; an advisory prompt is not a watchdog.
+Verify the cancellation route before launch; an advisory prompt is not a
+watchdog. If the counterpart's carrier cannot enforce its budget or be stopped,
+treat the counterpart as unavailable and run the CodeRabbit fallback; if
+CodeRabbit cannot produce a result either, `WAIT_FOR_USER`. Never continue on
+primary coverage alone.
 
 Reconcile under [review.md](review.md). Planning debate does **not** apply to code
 review: retain one repair batch and one targeted primary confirmation. PR-side

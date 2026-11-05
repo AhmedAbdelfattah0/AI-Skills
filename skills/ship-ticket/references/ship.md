@@ -105,6 +105,22 @@ Commit, push, PR, CI and tracker results do not exist before the commit. Report
 them to the user and tracker as an external completion projection keyed by run ID
 and candidate ID; do not write another repository commit to backfill them.
 
+## Multi-ticket stack
+
+Only the waiting-sibling stack in REVIEW may ship more than one ticket at once.
+It keeps one branch, one final commit and one PR, with these additions:
+
+- **Branch:** one branch named for the stack's tickets in key order, e.g.
+  `feat/<KEY-1>-<KEY-2>-<slug>`.
+- **Per-ticket records:** each ticket key keeps its own approved plan
+  (`.specs/plans/<KEY>.md`) with its own execution events, and its own UI parity
+  artifact when UI is in scope for that ticket. Shared review and gate results
+  may be recorded once and referenced from each plan.
+- **Commit and PR body:** list every ticket key, and include each tracker's
+  closing reference so the PR links and closes every ticket in the stack.
+- **Tracker:** after CI is green, transition every ticket in the stack and record
+  the same postcommit projection on each.
+
 ## Open and link the PR
 
 Use the repository's actual host. For Azure Repos use its repository tools; for

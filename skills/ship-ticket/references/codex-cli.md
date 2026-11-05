@@ -51,9 +51,11 @@ codex review -c model_reasoning_effort=high "<instructions including exact scope
 ```
 
 For bare binary commands, use the host's verified external watchdog within the
-optional budget; these commands have no relay timeout flag. A native timed wait
-is not such a watchdog. Without enforcement/cancellation, skip the optional
-opinion with a degradation; required primary handling is in [review.md](review.md).
+second-opinion budget; these commands have no relay timeout flag. A native timed wait
+is not such a watchdog. Without enforcement/cancellation, treat Codex as
+unavailable: run the CodeRabbit fallback, and `WAIT_FOR_USER` if CodeRabbit
+cannot produce a result. The second opinion is never skipped; required primary
+handling is in [review.md](review.md).
 Supply the exact merge-base-to-working-tree retrieval recipe,
 all untracked candidate files, candidate ID, ACs and exclusions. Start fresh,
 concurrently with the primary workflow. Result and fallback policy are shared

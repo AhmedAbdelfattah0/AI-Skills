@@ -13,7 +13,7 @@ own bookkeeping.
 ```text
 preflight     prove the candidate and required reviewers are ready
 review        one independent checklist-backed review
-elevated      optionally add one concurrent opposite-model opinion
+second        one mandatory opposite-model opinion (host counterpart; CodeRabbit fallback)
 clean         record PASS and continue to SHIP
 findings      reconcile once, then apply at most one repair batch
 confirmation  check only repaired findings and their affected closure
@@ -23,7 +23,8 @@ FAIL          end once with the exact evidence and required next decision
 
 A clean standard ticket has one primary workflow: one dispatch for a small or
 coupled diff, or one bounded concurrent coverage fan-out for a material full-stack
-diff. An elevated ticket adds at most one concurrent optional opinion. Only a
+diff, run by Opus. Every ticket also gets exactly one opposite-model second
+opinion, concurrently when possible. Only a
 candidate repair or material cross-review disagreement creates confirmation.
 There is no generic signing review after a clean result and no full review after
 a repair.
@@ -46,12 +47,18 @@ Finish these checks before announcing REVIEW or appending its start event:
 - formatters, generators, comments and ticket-produced docs are already current;
 - one independent primary-reviewer route can enforce its deadline and cancel
   unfinished work, including all partitions;
-- the review profile, time ceilings and optional-engine fallback are recorded.
+- the review profile, time ceilings and the second-opinion route (the host's
+  counterpart, else CodeRabbit) are recorded and preflighted.
 
 An unavailable primary reviewer is `WAIT_FOR_USER` here. Do not enter REVIEW and
 invalidate otherwise usable work merely to discover that required capability is
-missing. Missing optional counterpart or concurrency degrades the elevated second
-opinion; it does not block the primary review.
+missing. The second opinion is required too: the host's counterpart first (Codex
+for a Claude host, Claude for a Codex host); if it is unavailable or its usage
+limit is reached, CodeRabbit on the same candidate; if neither is available,
+`WAIT_FOR_USER`. Run CodeRabbit over the whole candidate, including untracked
+files (`coderabbit review --agent --include-untracked`, or the CLI's equivalent
+flag), and record the scope it reviewed. Missing concurrency only serializes the
+two reviews; it never removes one.
 
 A native timed wait only limits polling; it does not stop a reviewer. Verify the
 carrier's actual deadline/cancellation mechanism before dispatch. Prefer a native
@@ -123,13 +130,13 @@ profile.
 
 | Profile | Initial semantic review |
 |---|---|
-| `STANDARD` | one independent primary workflow |
-| `ELEVATED` | the primary workflow plus the selected counterpart, concurrently when available |
+| `STANDARD` | the Opus primary workflow plus the mandatory second opinion |
+| `ELEVATED` | the same, with partitioned primary coverage when the diff is material and the security outcome required |
 
-When elevated concurrency is unavailable, run the required primary workflow and
-record `second_opinion: DEGRADED — concurrent route unavailable`; do not serialize
-an optional review into the critical path. A missing or timed-out counterpart route uses
-its documented fallback, then degrades if the fallback is also unavailable.
+Both reviews run concurrently when possible, otherwise one after the other. A
+missing or timed-out counterpart route falls back to CodeRabbit on the same candidate;
+if CodeRabbit is also unavailable, `WAIT_FOR_USER`. Record which route ran
+(`second_opinion: codex | claude | coderabbit`).
 
 ## The primary review workflow
 
@@ -186,17 +193,20 @@ with at most three minors. More than twelve blockers/majors returns
 `overflow: true` and `outcome: FAIL`; it does not spend time narrating an
 unbounded catalogue.
 
-## The optional opposite-model opinion
+## The mandatory opposite-model opinion
 
-On `ELEVATED`, start Codex for a Claude host or Claude for a Codex host,
+On every ticket, start Codex for a Claude host or Claude for a Codex host,
 concurrently with the primary workflow in a fresh session. It is a free-form
-second opinion, not another rule pass or approver. Its 10-minute budget includes
-fallback. Follow [cross-model.md](cross-model.md) for carrier, cancellation and
+second opinion, not another rule pass or approver. The counterpart has a
+10-minute budget; the CodeRabbit fallback (used when the counterpart is
+unavailable, fails, times out or is out of quota) runs after it on its own
+10-minute budget. It is mandatory: when the primary finishes first, wait for it
+within its budget. Follow [cross-model.md](cross-model.md) for carrier, cancellation and
 fallback; do not import the PLAN debate into REVIEW.
 
 ## Output contract
 
-The primary workflow returns the complete schema below. The optional counterpart
+The primary workflow returns the complete schema below. The second-opinion counterpart
 returns identity, candidate ID, findings, overflow and an outcome; its free-form
 opinion does not claim the primary workflow's checklist coverage.
 
@@ -218,7 +228,10 @@ outcome: PASS | FAIL
 
 Allow one schema-only correction using the completed analysis. A correction does
 not reopen the repository or restart review. A still-unusable primary result is
-`WAIT_FOR_USER`; a still-unusable optional result is a declared degradation.
+`WAIT_FOR_USER`; a still-unusable second opinion falls back to CodeRabbit once,
+then `WAIT_FOR_USER`. A second opinion with `outcome: FAIL` and an empty
+`findings[]` is unusable: there is nothing to reconcile, so it follows the same
+single CodeRabbit fallback, then `WAIT_FOR_USER`.
 
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
@@ -236,7 +249,7 @@ Give every finding one disposition:
 | `not applicable` | a rule does not fire | named rule ID and applicability evidence |
 | `human waiver` | an `[NN]` invariant would bend | `WAIT_FOR_USER`; never self-approve |
 
-A rejected optional-review finding that could affect correctness, security or
+A rejected second-opinion finding that could affect correctness, security or
 parity must be included in the targeted confirmation even when no bytes change.
 **An in-scope minor is `fix`, not a follow-up.** A minor inside a Design Contract
 path that can be repaired without changing behavior (a false or stale comment, a
@@ -329,8 +342,9 @@ append `REPAIR` and `CONFIRM` events as well. Record identities, candidate IDs,
 review profile, findings, dispositions, command outcomes, degradations and final
 outcome; do not copy source bytes into the plan.
 
-- Clean primary PASS, with any optional findings reconciled → `COMPLETE` for this
-  phase and continue immediately to SHIP.
+- Clean primary PASS, with a usable second opinion whose findings are all
+  reconciled (its own `outcome` need not be PASS) → `COMPLETE` for this phase and
+  continue immediately to SHIP.
 - Confirmation PASS → continue immediately to SHIP.
 - Unusable required reviewer → `WAIT_FOR_USER` with the single capability needed.
 - Contract expansion or a needed explicit `[NN]` waiver → `WAIT_FOR_USER`, as in
