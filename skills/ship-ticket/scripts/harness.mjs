@@ -10,10 +10,10 @@ import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
-export const PHASES = Object.freeze(['UNDERSTAND', 'BUILD', 'PROVE', 'REVIEW', 'SHIP']);
+export const PHASES = Object.freeze(['UNDERSTAND', 'BUILD', 'PROVE', 'REVIEW', 'SHIP', 'REPAIR']);
 const VALID_MODELS = new Set(['economy', 'balanced', 'strong', 'inherit']);
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
-const HIGH_RISK = new Set(['security', 'auth', 'tenancy', 'payments', 'migration', 'schema', 'shared-contract']);
+const HIGH_RISK = new Set(['security', 'auth', 'tenancy', 'payments', 'migration', 'schema', 'shared-contract', 'concurrency']);
 const RESOURCE_PREFIXES = ['port:', 'db:', 'cache:', 'docker:', 'fixture:', 'generator:', 'lock:'];
 
 /** True when `moduleUrl` is the script Node was asked to run (POSIX and Windows). */
@@ -63,7 +63,7 @@ function conflicts(a, b) {
 
 export function validateNodes(input) {
   assert(input && typeof input === 'object' && !Array.isArray(input), 'input must be an object');
-  assert(PHASES.includes(input.phase), 'PLAN is protected: harness supports UNDERSTAND, BUILD, PROVE, REVIEW, SHIP only');
+  assert(PHASES.includes(input.phase), 'PLAN is protected: harness supports UNDERSTAND, BUILD, PROVE, REVIEW, SHIP, REPAIR only');
   assert(Array.isArray(input.nodes) && input.nodes.length <= 100, 'nodes must be an array of at most 100');
   const ids = new Set();
   const nodes = input.nodes.map(node => {
@@ -260,7 +260,7 @@ export function schedule(input) {
  */
 export function admit(input, probe = {}) {
   assert(input && typeof input === 'object' && !Array.isArray(input), 'admit input must be an object');
-  assert(PHASES.includes(input.phase), 'PLAN is protected: harness supports UNDERSTAND, BUILD, PROVE, REVIEW, SHIP only');
+  assert(PHASES.includes(input.phase), 'PLAN is protected: harness supports UNDERSTAND, BUILD, PROVE, REVIEW, SHIP, REPAIR only');
   const estimate = input.estimatedMemoryMb;
   assert(Number.isSafeInteger(estimate) && estimate >= 0, 'estimatedMemoryMb must be a nonnegative integer');
   const members = input.members ?? 1;

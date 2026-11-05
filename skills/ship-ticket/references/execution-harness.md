@@ -100,9 +100,11 @@ Tiers are `economy`, `balanced`, `strong` and `inherit`. They are labels the hos
 maps to real model IDs, not model IDs themselves.
 
 - REVIEW, any high-risk node (`security`, `auth`, `tenancy`, `payments`,
-  `migration`, `schema`, `shared-contract`) and `complexity: "high"` are always
-  `strong`. A requested cheaper tier cannot override that. `risk` is a closed
-  vocabulary: these seven labels are the only accepted values, and any other
+  `migration`, `schema`, `shared-contract`, `concurrency`) and `complexity: "high"`
+  are always `strong`. A requested cheaper tier cannot override that. `concurrency`
+  covers state machines, optimistic concurrency/CAS, request ordering and
+  client-side async state with races. `risk` is a closed
+  vocabulary: these eight labels are the only accepted values, and any other
   label is refused rather than silently routed as low risk. Map a ticket's own
   risk wording onto them; a node with no applicable label carries `risk: []`.
 - `complexity: "low"` or an explicit `model` request gets that tier.
@@ -136,7 +138,15 @@ node <SHIP_TICKET_SKILL>/scripts/carrier.mjs run /abs/dispatch.json       # exit
 
 What it enforces:
 
-- **Phase:** BUILD, PROVE and SHIP only.
+- **Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused.
+  `REPAIR` (a review repair writer) routes like BUILD, is recorded as
+  `phase: "REPAIR"` in results and usage, and requires `reviewExecution` (the
+  review round being repaired). It may declare `redSpecs` (repo-relative spec
+  paths); then `redEvidence` must be an absolute path to a non-empty file with
+  the failing-run output, written by the orchestrator, or dispatch is refused.
+- **Plan roots are orchestrator-owned.** A change under `.specs`/`.spec` during a
+  run is RUN-STATE bookkeeping: it is reported in `orchestrator_paths_changed`
+  and is not a `writes_outside_ownership` violation.
 - **Approval evidence (event binding, not content verification):**
   `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START`
   event for `runId` whose `approved_plan_digest` equals the supplied digest. Plan

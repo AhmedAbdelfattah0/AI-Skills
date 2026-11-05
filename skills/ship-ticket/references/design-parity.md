@@ -130,6 +130,18 @@ may have moved:
 This slice replaces a later complete comparison. If its boundary cannot be
 proved, confirmation parity is FAIL.
 
+## Deterministic parity probe
+
+Before the primary review, the evidence worker measures the reference-critical
+values in the browser with `getComputedStyle` and `getBoundingClientRect`: the
+gaps between named sections and the font sizes of named text for every project,
+plus the RTL anchoring side only when the project ships an RTL locale. It
+compares each to the value the reference's tokens imply. A mismatch that matches
+an accepted deviation recorded in the ticket's design-parity artifact is treated
+as accepted and is not routed back. Every other mismatch goes back to the builder
+before the Opus review; the reviewer is not the first to find a measurable
+difference.
+
 ## Targeted confirmation
 
 The primary review result directly covers the final candidate when REVIEW makes
@@ -142,7 +154,8 @@ touched by the repair and report any regression inside the slice.
 
 The final per-screen grade is derived from the initial result plus those targeted
 resolutions. The reviewer returns `parity_outcome: PASS | FAIL | NOT_TRIGGERED`
-inside its confirmation. There is no later parity dispatch.
+inside its confirmation. There is no later parity dispatch. Confirmation receives
+only the captures of screens the repair changed, not the full set.
 
 ## CI
 

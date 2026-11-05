@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Guarded writer carrier for BUILD/PROVE/SHIP nodes. PLAN and REVIEW are refused.
+ * Guarded writer carrier for BUILD/PROVE/SHIP/REPAIR nodes. PLAN and REVIEW are refused.
  *
  * Provider adapters use only flags verified against the installed CLIs
  * (Claude Code 2.1.318, Codex CLI 0.166.0, 2026-11-04):
@@ -121,10 +121,44 @@ export function verifyApproval(repoRoot, approval) {
   return { ticket, run_id: runId, approved_plan_digest: approvedPlanDigest, binding: 'start-event' };
 }
 
+/**
+ * A REPAIR dispatch must repair a review round that really happened: the run
+ * log (Git metadata, written by run-log.mjs) must hold a `start` row of kind
+ * `phase` named REVIEW in the same run with a matching `review_execution` metric.
+ */
+export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
+  const r = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
+  if (r.status !== 0) fail('REPAIR needs a Git repository with a run log');
+  const logFile = join(resolve(repoRoot, r.stdout.trim()), approval.ticket + '.jsonl');
+  let text = '';
+  try { text = readFileSync(logFile, 'utf8'); } catch { /* absent log: rejected below */ }
+  const found = text.split(/\r?\n/).some(line => {
+    if (!line.trim()) return false;
+    try {
+      const row = JSON.parse(line);
+      return row.event === 'start' && row.kind === 'phase' && row.name === 'REVIEW'
+        && row.run_id === approval.run_id && row.metrics?.review_execution === reviewExecution;
+    } catch { return false; }
+  });
+  if (!found) fail('REPAIR reviewExecution ' + reviewExecution + ' has no REVIEW phase start in run ' + approval.run_id + ' of the run log');
+}
+
 /** Validation and argument construction. No worker process is started (only read-only git rev-parse). */
 export function prepareDispatch(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) fail('invalid dispatch config');
-  if (!['BUILD', 'PROVE', 'SHIP'].includes(config.phase)) fail('PLAN and REVIEW cannot be dispatched through this adapter');
+  if (!['BUILD', 'PROVE', 'SHIP', 'REPAIR'].includes(config.phase)) fail('PLAN and REVIEW cannot be dispatched through this adapter');
+  if (config.phase === 'REPAIR') {
+    if (typeof config.reviewExecution !== 'string' || !SAFE_ID.test(config.reviewExecution))
+      fail('REPAIR requires a safe reviewExecution id (the review round being repaired)');
+    if (config.redSpecs !== undefined) {
+      const specs = repoRelative(config.redSpecs, 'redSpecs');
+      if (specs.length) {
+        if (typeof config.redEvidence !== 'string' || !isAbsolute(config.redEvidence) || !existsSync(config.redEvidence)
+          || !statSync(config.redEvidence).isFile() || statSync(config.redEvidence).size === 0)
+          fail('redSpecs declared: redEvidence must be an absolute path to a non-empty file holding the failing-run output');
+      }
+    }
+  }
   if (!PROVIDERS.has(config.provider)) fail('unsupported provider');
   if (typeof config.nodeId !== 'string' || !SAFE_ID.test(config.nodeId)) fail('safe nodeId required');
   if (typeof config.workdir !== 'string' || !isAbsolute(config.workdir)) fail('absolute workdir required');
@@ -284,6 +318,7 @@ async function terminateTree(child, platform = process.platform) {
   return !groupAlive(child.pid);
 }
 
+/** Snapshot every dirty path (path -> status/size/mtime/hash signature) via git status; null when git is unavailable. */
 function gitDirty(top) {
   const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: top, encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) return null;
@@ -304,19 +339,70 @@ function gitDirty(top) {
   return map;
 }
 
+/** True when `path` equals or sits under one of `roots` (exact, case-sensitive; used for worker-declared ownership). */
 const under = (path, roots) => roots.some(r => path === r || path.startsWith(r + '/'));
+
+/** True only for the ticket's own plan file (`.specs/plans/<ticket>.md`, either root, any case). Callers pass a ticket only after {@link runStateAppendOnly} verified the change. */
+const isOwnPlanFile = (path, ticket) => {
+  if (typeof ticket !== 'string' || !ticket) return false;
+  const l = path.toLowerCase();
+  return PLAN_ROOTS.some(r => l === `${r}/plans/${ticket.toLowerCase()}.md`);
+};
+
+const RUN_STATE_BEGIN = '<!-- RUN-STATE:BEGIN -->';
+const RUN_STATE_END = '<!-- RUN-STATE:END -->';
+const count = (text, needle) => text.split(needle).length - 1;
+
+/**
+ * True only when `after` equals `before` plus text inserted immediately before
+ * the single RUN-STATE END marker: the orchestrator appending events. Any edit
+ * outside the block, a rewrite of an existing event, a second block, a
+ * deletion or a creation returns false.
+ */
+export function runStateAppendOnly(before, after) {
+  if (typeof before !== 'string' || typeof after !== 'string') return false;
+  if (count(before, RUN_STATE_BEGIN) !== 1 || count(before, RUN_STATE_END) !== 1) return false;
+  if (count(after, RUN_STATE_BEGIN) !== 1 || count(after, RUN_STATE_END) !== 1) return false;
+  const b = before.indexOf(RUN_STATE_END);
+  const a = after.indexOf(RUN_STATE_END);
+  return a >= b && after.slice(0, b) === before.slice(0, b) && after.slice(a) === before.slice(b);
+}
+
+/** The ticket's plan file text, or null when it does not exist (first existing plan root). */
+function readPlanText(repoRoot, ticket) {
+  if (typeof ticket !== 'string' || !ticket) return null;
+  for (const root of PLAN_ROOTS) {
+    const path = join(repoRoot, root, 'plans', ticket + '.md');
+    try { return readFileSync(path, 'utf8'); } catch { /* try the next root */ }
+  }
+  return null;
+}
+
+/** Paths whose recorded state differs between two snapshots (added, removed or modified). */
+const changedPaths = (before, after) => [...new Set([...before.keys(), ...after.keys()])].filter(p => before.get(p) !== after.get(p));
+
+/**
+ * The ticket's own plan file is orchestrator-owned when its change is a verified
+ * RUN-STATE append (the caller passes `ticket` only then): reported, never a worker
+ * violation. Any other plan-root change is a violation.
+ */
+export function orchestratorPathsChanged(before, after, ticket) {
+  if (!before || !after) return [];
+  return changedPaths(before, after).filter(p => isOwnPlanFile(p, ticket)).sort();
+}
 
 /**
  * Paths whose state changed during the run — including pre-existing changes
  * that were reverted or deleted — and that neither this worker nor a declared
- * concurrent worker owns.
+ * concurrent worker owns. Only the ticket's own plan file is exempt; any other
+ * change under `.specs`/`.spec` is a violation (worker prompts forbid editing them).
  */
-export function ownershipViolations(before, after, writes, othersOwned) {
+export function ownershipViolations(before, after, writes, othersOwned, ticket) {
   if (!before || !after) return null;
-  const paths = new Set([...before.keys(), ...after.keys()]);
-  return [...paths].filter(p => before.get(p) !== after.get(p) && !under(p, writes) && !under(p, othersOwned)).sort();
+  return changedPaths(before, after).filter(p => !isOwnPlanFile(p, ticket) && !under(p, writes) && !under(p, othersOwned)).sort();
 }
 
+/** Extract the worker's final message text and error flag from provider output. */
 function finalMessage(provider, stdout) {
   if (provider === 'claude') {
     try { const r = JSON.parse(stdout); return { text: typeof r.result === 'string' ? r.result : null, is_error: r.is_error === true }; }
@@ -342,12 +428,14 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
+  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';
   if (auth === false) fail('subscription authentication not verified for ' + plan.provider + '; refusing to risk API billing');
   if (auth === 'unverified' && !plan.unverified_auth_acknowledged) fail('unverified subscription authentication was not acknowledged');
   const prompt = readFileSync(plan.promptFile); // read before spawning: no unsupervised child on failure
   const before = gitDirty(plan.repoRoot);
+  const planBefore = readPlanText(plan.repoRoot, approval.ticket);
   const spec = (deps.spawnSpec ?? spawnSpec)(plan.executable, plan.args, process.platform, env);
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
 
@@ -411,7 +499,12 @@ export async function dispatch(config, deps = {}) {
         phase: plan.phase, model_tier: plan.model_tier, ...(usage ?? {}), timestamp: new Date(ended).toISOString() }) + '\n', { mode: 0o600 });
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }
   }
-  const violations = ownershipViolations(before, gitDirty(plan.repoRoot), plan.ownership.writes, plan.ownership.othersOwned);
+  const afterState = gitDirty(plan.repoRoot);
+  // The plan file is exempt only when its change is an append inside RUN-STATE;
+  // a worker editing the approved plan, or deleting it, is a violation.
+  const exemptTicket = runStateAppendOnly(planBefore, readPlanText(plan.repoRoot, approval.ticket)) ? approval.ticket : null;
+  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, exemptTicket);
+  const orchestratorPaths = orchestratorPathsChanged(before, afterState, exemptTicket);
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
     && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {
@@ -426,6 +519,7 @@ export async function dispatch(config, deps = {}) {
     usage, result_written: resultWritten, telemetry_degraded: telemetryDegraded,
     ownership_check: violations === null ? 'unavailable' : violations.length ? 'violated' : 'clean',
     writes_outside_ownership: violations ?? [],
+    orchestrator_paths_changed: orchestratorPaths,
     run_log_metrics: usage ? COUNTERS.filter(k => usage[k] !== null).map(k => `${k}=${usage[k]}`) : [],
   };
 }
@@ -435,7 +529,9 @@ async function main(argv) {
   const config = JSON.parse(readFileSync(argv[1], 'utf8'));
   if (argv[0] === 'inspect') {
     const plan = prepareDispatch(config);
-    return { ...plan, approval: verifyApproval(plan.repoRoot, config.approval) };
+    const approval = verifyApproval(plan.repoRoot, config.approval);
+    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+    return { ...plan, approval };
   }
   return dispatch(config);
 }

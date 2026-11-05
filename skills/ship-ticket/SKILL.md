@@ -104,7 +104,7 @@ ownership checks and provider-reported usage), `scripts/usage.mjs` and
 `scripts/docker-lifecycle.mjs` (label-owned containers only). Read
 [references/execution-harness.md](references/execution-harness.md) before BUILD.
 The scheduler and carrier refuse PLAN (the usage and Docker helpers take no
-phase; never call them during PLAN), and the carrier refuses REVIEW. An *unavailable*
+phase; never call them during PLAN), and the carrier refuses REVIEW (it dispatches BUILD, PROVE, SHIP and REPAIR writers). An *unavailable*
 helper (no Node, missing file, unsupported provider) is a declared degradation.
 A *safety refusal* is not: missing approval evidence returns to approval,
 unproven subscription billing is **WAIT_FOR_USER** for the user's billing
@@ -529,6 +529,33 @@ dependencies:
   low-risk work. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
+- **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
+  fresh session and hand over through the plan file and its RUN-STATE, which
+  hold the state. Do not run several tickets plus unrelated work in one long
+  orchestrator session: cache reads of the growing context dominate cost.
+- **Orchestrator tier.** Mechanical orchestration (dispatching, logging, gates,
+  git, tracker) runs on the economy or balanced tier (for example Sonnet as the
+  session model). Planning, review and reconciliation run as `strong` (Opus)
+  subagents.
+- **Ship threshold.** The plan records up front which residual findings ship
+  with a follow-up ticket instead of another round. Default: display-only
+  stale-state or cosmetic issues of medium severity or lower, with server data
+  correct, ship with a follow-up; anything touching data integrity, security,
+  tenancy or money blocks. Reconciliation applies the recorded threshold
+  without asking the human.
+- **Concurrency routing.** A node that changes client or server async state
+  ordering (state machines, optimistic concurrency or CAS, request ordering,
+  client-side async state with races) carries the `concurrency` risk label and
+  routes `strong`. Its repair gets the second opinion from the host's counterpart
+  (Codex for a Claude host, Claude for a Codex host; CodeRabbit fallback) before
+  the primary confirmation, not after it; it returns `PASS` or `FAIL`.
+- **Repair briefs.** Dispatch repairs as phase `REPAIR`. A repair worker must
+  (a) verify assumptions about inherited or global styles by measuring, not
+  reading; (b) never override a shared component's internals (no `::ng-deep` or
+  negative-margin compensation): accept the shared value and record it; (c)
+  prefer the simplest design that removes the race over adding coordination
+  machinery; (d) record RED evidence per spec (`redSpecs` and `redEvidence` in
+  the dispatch).
 
 **Keep review cheap.** These rules apply to every ticket, and to multi-ticket
 waves especially:
@@ -541,7 +568,8 @@ waves especially:
 - **Minor findings** go into the one repair batch and never become a question
   to the human. Every repair, minor included, is covered by the primary
   reviewer's targeted confirmation before SHIP; keep that confirmation scoped to
-  the repaired findings rather than adding a round per finding.
+  the repaired findings rather than adding a round per finding. For UI repairs
+  it receives only the captures of the screens the repair changed, not the full set.
 - **Rebases.** A rebase onto a merged sibling that applies cleanly reruns the
   automated gates only. It never triggers a full new review. Re-check lines
   whose logic changed, and when the rebase delta changes a shared dependency
