@@ -48,6 +48,20 @@ read-only promise, and a model debate are not replacements for the host
 permission mode: Plan Mode mechanically restricts Claude to read-only
 exploration.
 
+Read-only Plan or Explore subagents are research tools used *inside* Plan Mode;
+they never replace it, and an approval typed in chat is not the `ExitPlanMode`
+approval. If you notice you drafted without entering Plan Mode, enter it now,
+present the plan through `ExitPlanMode`, and record the miss in the run state.
+
+**Waves.** For several tickets handed over together, enter Plan Mode once,
+draft every ticket's plan there (one section per ticket, each with its own
+scope, contract and risks), and present them in a single `ExitPlanMode` call.
+On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
+its own START event and digest. A ticket whose plan must wait for a sibling
+(money/auth debate, an unmerged dependency) goes through Plan Mode again when
+its turn comes; never start BUILD on a wave ticket whose plan was not in an
+approved `ExitPlanMode`.
+
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there, then invoke `ExitPlanMode` with the final plan.
 That tool presents the approval surface and exits only through the host's approval
