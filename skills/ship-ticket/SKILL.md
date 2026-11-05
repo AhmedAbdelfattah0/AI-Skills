@@ -546,8 +546,9 @@ dependencies:
 - **Concurrency routing.** A node that changes client or server async state
   ordering (state machines, optimistic concurrency or CAS, request ordering,
   client-side async state with races) carries the `concurrency` risk label and
-  routes `strong`. Its repair gets the Codex second opinion before the primary
-  confirmation, not after it.
+  routes `strong`. Its repair gets the second opinion from the host's counterpart
+  (Codex for a Claude host, Claude for a Codex host; CodeRabbit fallback) before
+  the primary confirmation, not after it; it returns `PASS` or `FAIL`.
 - **Repair briefs.** Dispatch repairs as phase `REPAIR`. A repair worker must
   (a) verify assumptions about inherited or global styles by measuring, not
   reading; (b) never override a shared component's internals (no `::ng-deep` or

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
-  ownershipViolations, orchestratorPathsChanged, BILLING_ENV } from './carrier.mjs';
+  ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
 
 // Real output shapes captured from Claude Code 2.1.318 and Codex CLI 0.166.0 (content trimmed).
@@ -235,12 +235,37 @@ test('ownership violations ignore owned, concurrently owned and pre-existing unc
     'reverting or deleting a pre-existing user change is a violation (CX-4)');
 });
 
-test('plan-root changes are orchestrator paths, not ownership violations', () => {
+test('only the ticket own plan file is an orchestrator path; other plan-root changes are violations', () => {
   const before = new Map();
   const after = new Map([['.specs/plans/T-1.md', '1'], ['.spec/x.md', '2'], ['src/a.ts', '3'], ['package.json', '4']]);
-  assert.deepEqual(ownershipViolations(before, after, ['src'], []), ['package.json']);
-  assert.deepEqual(orchestratorPathsChanged(before, after), ['.spec/x.md', '.specs/plans/T-1.md']);
-  assert.deepEqual(orchestratorPathsChanged(null, after), []);
+  assert.deepEqual(ownershipViolations(before, after, ['src'], [], 'T-1'), ['.spec/x.md', 'package.json']);
+  assert.deepEqual(orchestratorPathsChanged(before, after, 'T-1'), ['.specs/plans/T-1.md']);
+  assert.deepEqual(orchestratorPathsChanged(null, after, 'T-1'), []);
+  // Another ticket's plan, or no ticket at all, is never exempt.
+  assert.deepEqual(ownershipViolations(before, new Map([['.specs/plans/T-2.md', '1']]), ['src'], [], 'T-1'), ['.specs/plans/T-2.md']);
+  assert.deepEqual(ownershipViolations(before, new Map([['.specs/plans/T-1.md', '1']]), ['src'], []), ['.specs/plans/T-1.md']);
+});
+
+test('plan-file comparison is case-insensitive and returns the original path values', () => {
+  const before = new Map();
+  const after = new Map([['.SPECS/Plans/t-1.MD', '1'], ['.Spec/x.md', '2']]);
+  assert.deepEqual(orchestratorPathsChanged(before, after, 'T-1'), ['.SPECS/Plans/t-1.MD']);
+  assert.deepEqual(ownershipViolations(before, after, ['src'], [], 'T-1'), ['.Spec/x.md']);
+});
+
+test('REPAIR reviewExecution must have a REVIEW phase start in the same run log', (t) => {
+  const fx = fixture(t);
+  spawnSync('git', ['init', '-q'], { cwd: fx.repo });
+  const approval = { ticket: 'T-1', run_id: 'run-1' };
+  assert.throws(() => verifyReviewExecution(fx.repo, approval, 'review-1'), /no REVIEW phase start/);
+  const dir = join(fx.repo, '.git', 'ai-skills', 'ship-ticket');
+  mkdirSync(dir, { recursive: true });
+  const row = (o) => JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start', event_id: 'e', kind: 'phase',
+    name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' }, ...o }) + '\n';
+  writeFileSync(join(dir, 'T-1.jsonl'), row({ run_id: 'run-2' }) + row({ name: 'BUILD' }) + row({ kind: 'activity' }) + row({ event: 'end' }) + row({ metrics: { review_execution: 'review-9' } }));
+  assert.throws(() => verifyReviewExecution(fx.repo, approval, 'review-1'), /no REVIEW phase start/);
+  writeFileSync(join(dir, 'T-1.jsonl'), row({}));
+  verifyReviewExecution(fx.repo, approval, 'review-1');
 });
 
 // ---- Integration: a real child process through the real spawn/kill/stdin path. ----
@@ -304,6 +329,10 @@ test('integration: RUN-STATE edit during a REPAIR run is reported, not a violati
   const env = fakeCli(t, fx, `import { appendFileSync } from 'node:fs';
 process.stdin.resume(); process.stdin.on('end', () => { appendFileSync('.specs/plans/T-1.md', 'note'); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
 `);
+  const logDir = join(fx.repo, '.git', 'ai-skills', 'ship-ticket');
+  mkdirSync(logDir, { recursive: true });
+  writeFileSync(join(logDir, 'T-1.jsonl'), JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start',
+    event_id: 'e1', kind: 'phase', name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' } }) + '\n');
   const result = await dispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1', usageLog: join(fx.root, 'u.jsonl') }),
     { env, verifySubscription: () => true, handleSignals: false });
   assert.equal(result.phase, 'REPAIR');
@@ -312,6 +341,18 @@ process.stdin.resume(); process.stdin.on('end', () => { appendFileSync('.specs/p
   assert.deepEqual(result.orchestrator_paths_changed, ['.specs/plans/T-1.md']);
   assert.equal(result.succeeded, true);
   assert.equal(JSON.parse(readFileSync(join(fx.root, 'u.jsonl'), 'utf8')).phase, 'REPAIR');
+});
+
+test('integration: editing another plan file during a worker run is a violation', async (t) => {
+  const fx = fixture(t);
+  writeFileSync(join(fx.repo, '.specs', 'other.md'), 'x');
+  const env = fakeCli(t, fx, `import { appendFileSync } from 'node:fs';
+process.stdin.resume(); process.stdin.on('end', () => { appendFileSync('.specs/other.md', 'note'); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
+`);
+  const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.ownership_check, 'violated');
+  assert.deepEqual(result.writes_outside_ownership, ['.specs/other.md']);
+  assert.equal(result.succeeded, false);
 });
 
 test('integration: timeout kills the child process tree', async (t) => {

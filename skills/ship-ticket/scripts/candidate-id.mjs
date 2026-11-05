@@ -5,11 +5,13 @@ import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+/** Print a candidate-id error and exit non-zero. */
 function fail(message) {
   console.error(`candidate-id: ${message}`);
   process.exit(1);
 }
 
+/** Run git in `repo`; return stdout (Buffer when encoding is null) or fail with git's stderr. */
 function git(repo, args, encoding = 'utf8') {
   const result = spawnSync('git', ['-C', repo, ...args], {
     encoding: encoding === null ? undefined : encoding,
@@ -24,6 +26,7 @@ function git(repo, args, encoding = 'utf8') {
   return result.stdout;
 }
 
+/** Parse --repo, --base and repeatable --exclude; --base is required. */
 function parseArgs(argv) {
   let repo = process.cwd();
   let base;
@@ -42,6 +45,7 @@ function parseArgs(argv) {
   return { repo: resolve(repo), base, excludes };
 }
 
+/** Split a NUL-delimited git output Buffer into non-empty Buffers. */
 function splitNul(buffer) {
   const values = [];
   let start = 0;
@@ -54,6 +58,7 @@ function splitNul(buffer) {
   return values;
 }
 
+/** Normalize `input` to a POSIX repo-relative path; "" means the repo root, ".." forms are returned unchanged. */
 function toRepoPath(root, input) {
   const absolute = resolve(root, input);
   const rel = relative(root, absolute);
@@ -64,9 +69,17 @@ function toRepoPath(root, input) {
 const { repo, base, excludes: rawExcludes } = parseArgs(process.argv.slice(2));
 const root = git(repo, ['rev-parse', '--show-toplevel']).trim();
 const mergeBase = git(root, ['merge-base', 'HEAD', base]).trim();
-const excludes = new Set([...rawExcludes].map((item) => toRepoPath(root, item)));
+const excludes = new Set([...rawExcludes].map((item) => {
+  const repoPath = toRepoPath(root, item);
+  // An empty exclude (`""`, `.`, `./`) names the repo root: it would exclude the whole candidate and hash nothing.
+  if (!repoPath) fail(`--exclude ${JSON.stringify(item)} resolves to the repository root and would exclude the whole candidate`);
+  return repoPath;
+}));
 
-// An exclude names an exact file or a directory (everything under it).
+/**
+ * An exclude names an exact file or a directory (everything under it).
+ * Empty excludes are rejected above, so this never matches the whole candidate.
+ */
 const isExcluded = (repoPath) => [...excludes].some((e) => repoPath === e || repoPath.startsWith(e.replace(/\/$/, '') + '/'));
 
 const tracked = splitNul(git(root, [

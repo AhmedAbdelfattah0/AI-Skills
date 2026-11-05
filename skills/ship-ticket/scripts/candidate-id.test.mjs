@@ -45,3 +45,30 @@ test('--exclude <dir> excludes everything under the directory; exact files still
   writeFileSync(join(dir, '.specs', 'plans', 'T-1.md'), 'plan edited');
   assert.equal(run(dir, '--exclude', '.specs').candidate_id, dirExcluded.candidate_id, 'excluded edits do not change the id');
 });
+
+test('an exclude that normalizes to empty is rejected, not treated as exclude-everything', (t) => {
+  const dir = repo(t);
+  writeFileSync(join(dir, 'src.txt'), 'code');
+  for (const bad of ['', '.', './']) {
+    const r = spawnSync(process.execPath, [script, '--repo', dir, '--base', 'HEAD', '--exclude', bad], { encoding: 'utf8' });
+    assert.notEqual(r.status, 0, `exclude ${JSON.stringify(bad)} must fail`);
+    assert.match(r.stderr, /exclude.*(empty|whole|everything)/i);
+  }
+});
+
+test('tracked edits and deletions under an excluded dir are ignored with --exclude', (t) => {
+  const dir = repo(t);
+  const git = (...a) => spawnSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { encoding: 'utf8' });
+  mkdirSync(join(dir, '.specs', 'plans'), { recursive: true });
+  writeFileSync(join(dir, '.specs', 'plans', 'one.md'), 'one');
+  writeFileSync(join(dir, '.specs', 'plans', 'two.md'), 'two');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'specs');
+  const clean = run(dir, '--exclude', '.specs');
+  writeFileSync(join(dir, '.specs', 'plans', 'one.md'), 'one edited');
+  rmSync(join(dir, '.specs', 'plans', 'two.md'));
+  assert.deepEqual(names(run(dir)), ['.specs/plans/one.md', '.specs/plans/two.md']);
+  const excluded = run(dir, '--exclude', '.specs');
+  assert.deepEqual(names(excluded), []);
+  assert.equal(excluded.candidate_id, clean.candidate_id);
+});

@@ -121,6 +121,28 @@ export function verifyApproval(repoRoot, approval) {
   return { ticket, run_id: runId, approved_plan_digest: approvedPlanDigest, binding: 'start-event' };
 }
 
+/**
+ * A REPAIR dispatch must repair a review round that really happened: the run
+ * log (Git metadata, written by run-log.mjs) must hold a `start` row of kind
+ * `phase` named REVIEW in the same run with a matching `review_execution` metric.
+ */
+export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
+  const r = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
+  if (r.status !== 0) fail('REPAIR needs a Git repository with a run log');
+  const logFile = join(resolve(repoRoot, r.stdout.trim()), approval.ticket + '.jsonl');
+  let text = '';
+  try { text = readFileSync(logFile, 'utf8'); } catch { /* absent log: rejected below */ }
+  const found = text.split(/\r?\n/).some(line => {
+    if (!line.trim()) return false;
+    try {
+      const row = JSON.parse(line);
+      return row.event === 'start' && row.kind === 'phase' && row.name === 'REVIEW'
+        && row.run_id === approval.run_id && row.metrics?.review_execution === reviewExecution;
+    } catch { return false; }
+  });
+  if (!found) fail('REPAIR reviewExecution ' + reviewExecution + ' has no REVIEW phase start in run ' + approval.run_id + ' of the run log');
+}
+
 /** Validation and argument construction. No worker process is started (only read-only git rev-parse). */
 export function prepareDispatch(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) fail('invalid dispatch config');
@@ -296,6 +318,7 @@ async function terminateTree(child, platform = process.platform) {
   return !groupAlive(child.pid);
 }
 
+/** Snapshot every dirty path (path -> status/size/mtime/hash signature) via git status; null when git is unavailable. */
 function gitDirty(top) {
   const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: top, encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) return null;
@@ -316,25 +339,40 @@ function gitDirty(top) {
   return map;
 }
 
+/** True when `path` equals or sits under one of `roots` (exact, case-sensitive; used for worker-declared ownership). */
 const under = (path, roots) => roots.some(r => path === r || path.startsWith(r + '/'));
 
-/** Plan roots are orchestrator-owned: a change there is RUN-STATE bookkeeping, never a worker violation. */
+/** True only for the ticket's own plan file (`.specs/plans/<ticket>.md`, either root, any case): the RUN-STATE file the orchestrator appends to. */
+const isOwnPlanFile = (path, ticket) => {
+  if (typeof ticket !== 'string' || !ticket) return false;
+  const l = path.toLowerCase();
+  return PLAN_ROOTS.some(r => l === `${r}/plans/${ticket.toLowerCase()}.md`);
+};
+
+/** Paths whose recorded state differs between two snapshots (added, removed or modified). */
 const changedPaths = (before, after) => [...new Set([...before.keys(), ...after.keys()])].filter(p => before.get(p) !== after.get(p));
-export function orchestratorPathsChanged(before, after) {
+
+/**
+ * The ticket's own plan file is orchestrator-owned: a change there is RUN-STATE
+ * bookkeeping, reported but never a worker violation. Any other plan-root change is a violation.
+ */
+export function orchestratorPathsChanged(before, after, ticket) {
   if (!before || !after) return [];
-  return changedPaths(before, after).filter(p => under(p, PLAN_ROOTS)).sort();
+  return changedPaths(before, after).filter(p => isOwnPlanFile(p, ticket)).sort();
 }
 
 /**
  * Paths whose state changed during the run — including pre-existing changes
  * that were reverted or deleted — and that neither this worker nor a declared
- * concurrent worker owns.
+ * concurrent worker owns. Only the ticket's own plan file is exempt; any other
+ * change under `.specs`/`.spec` is a violation (worker prompts forbid editing them).
  */
-export function ownershipViolations(before, after, writes, othersOwned) {
+export function ownershipViolations(before, after, writes, othersOwned, ticket) {
   if (!before || !after) return null;
-  return changedPaths(before, after).filter(p => !under(p, PLAN_ROOTS) && !under(p, writes) && !under(p, othersOwned)).sort();
+  return changedPaths(before, after).filter(p => !isOwnPlanFile(p, ticket) && !under(p, writes) && !under(p, othersOwned)).sort();
 }
 
+/** Extract the worker's final message text and error flag from provider output. */
 function finalMessage(provider, stdout) {
   if (provider === 'claude') {
     try { const r = JSON.parse(stdout); return { text: typeof r.result === 'string' ? r.result : null, is_error: r.is_error === true }; }
@@ -360,6 +398,7 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
+  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';
   if (auth === false) fail('subscription authentication not verified for ' + plan.provider + '; refusing to risk API billing');
@@ -430,8 +469,8 @@ export async function dispatch(config, deps = {}) {
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }
   }
   const afterState = gitDirty(plan.repoRoot);
-  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned);
-  const orchestratorPaths = orchestratorPathsChanged(before, afterState);
+  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, approval.ticket);
+  const orchestratorPaths = orchestratorPathsChanged(before, afterState, approval.ticket);
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
     && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {
@@ -456,7 +495,9 @@ async function main(argv) {
   const config = JSON.parse(readFileSync(argv[1], 'utf8'));
   if (argv[0] === 'inspect') {
     const plan = prepareDispatch(config);
-    return { ...plan, approval: verifyApproval(plan.repoRoot, config.approval) };
+    const approval = verifyApproval(plan.repoRoot, config.approval);
+    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+    return { ...plan, approval };
   }
   return dispatch(config);
 }

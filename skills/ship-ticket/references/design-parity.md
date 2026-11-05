@@ -134,10 +134,13 @@ proved, confirmation parity is FAIL.
 
 Before the primary review, the evidence worker measures the reference-critical
 values in the browser with `getComputedStyle` and `getBoundingClientRect`: the
-gaps between named sections, the font sizes of named text, and the RTL anchoring
-side. It compares each to the value the reference's tokens imply. Any mismatch
-goes back to the builder before the Opus review; the reviewer is not the first
-to find a measurable difference.
+gaps between named sections and the font sizes of named text for every project,
+plus the RTL anchoring side only when the project ships an RTL locale. It
+compares each to the value the reference's tokens imply. A mismatch that matches
+an accepted deviation recorded in the ticket's design-parity artifact is treated
+as accepted and is not routed back. Every other mismatch goes back to the builder
+before the Opus review; the reviewer is not the first to find a measurable
+difference.
 
 ## Targeted confirmation
 
