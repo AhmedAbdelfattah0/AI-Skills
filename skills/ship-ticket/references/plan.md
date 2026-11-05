@@ -183,6 +183,8 @@ needed; or none>. Model agreement is advice, not approval.
 | rule coverage | <frontend/backend/shared families and specialist selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
 | second opinion (mandatory) | every ticket | host counterpart (CodeRabbit fallback), concurrent with the primary workflow when possible |
 
+**Ship threshold:** <which residual findings ship with a follow-up ticket instead of another round. Default: display-only stale-state or cosmetic issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. Reconciliation applies this without asking the human.>
+
 <!-- RUN-STATE:BEGIN -->
 <!-- Append one compact JSON object per execution event; never edit or reorder
      an existing entry. The event vocabulary is defined in ship.md. -->

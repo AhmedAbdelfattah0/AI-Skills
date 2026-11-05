@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Guarded writer carrier for BUILD/PROVE/SHIP nodes. PLAN and REVIEW are refused.
+ * Guarded writer carrier for BUILD/PROVE/SHIP/REPAIR nodes. PLAN and REVIEW are refused.
  *
  * Provider adapters use only flags verified against the installed CLIs
  * (Claude Code 2.1.318, Codex CLI 0.166.0, 2026-11-04):
@@ -124,7 +124,19 @@ export function verifyApproval(repoRoot, approval) {
 /** Validation and argument construction. No worker process is started (only read-only git rev-parse). */
 export function prepareDispatch(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) fail('invalid dispatch config');
-  if (!['BUILD', 'PROVE', 'SHIP'].includes(config.phase)) fail('PLAN and REVIEW cannot be dispatched through this adapter');
+  if (!['BUILD', 'PROVE', 'SHIP', 'REPAIR'].includes(config.phase)) fail('PLAN and REVIEW cannot be dispatched through this adapter');
+  if (config.phase === 'REPAIR') {
+    if (typeof config.reviewExecution !== 'string' || !SAFE_ID.test(config.reviewExecution))
+      fail('REPAIR requires a safe reviewExecution id (the review round being repaired)');
+    if (config.redSpecs !== undefined) {
+      const specs = repoRelative(config.redSpecs, 'redSpecs');
+      if (specs.length) {
+        if (typeof config.redEvidence !== 'string' || !isAbsolute(config.redEvidence) || !existsSync(config.redEvidence)
+          || !statSync(config.redEvidence).isFile() || statSync(config.redEvidence).size === 0)
+          fail('redSpecs declared: redEvidence must be an absolute path to a non-empty file holding the failing-run output');
+      }
+    }
+  }
   if (!PROVIDERS.has(config.provider)) fail('unsupported provider');
   if (typeof config.nodeId !== 'string' || !SAFE_ID.test(config.nodeId)) fail('safe nodeId required');
   if (typeof config.workdir !== 'string' || !isAbsolute(config.workdir)) fail('absolute workdir required');
@@ -306,6 +318,13 @@ function gitDirty(top) {
 
 const under = (path, roots) => roots.some(r => path === r || path.startsWith(r + '/'));
 
+/** Plan roots are orchestrator-owned: a change there is RUN-STATE bookkeeping, never a worker violation. */
+const changedPaths = (before, after) => [...new Set([...before.keys(), ...after.keys()])].filter(p => before.get(p) !== after.get(p));
+export function orchestratorPathsChanged(before, after) {
+  if (!before || !after) return [];
+  return changedPaths(before, after).filter(p => under(p, PLAN_ROOTS)).sort();
+}
+
 /**
  * Paths whose state changed during the run — including pre-existing changes
  * that were reverted or deleted — and that neither this worker nor a declared
@@ -313,8 +332,7 @@ const under = (path, roots) => roots.some(r => path === r || path.startsWith(r +
  */
 export function ownershipViolations(before, after, writes, othersOwned) {
   if (!before || !after) return null;
-  const paths = new Set([...before.keys(), ...after.keys()]);
-  return [...paths].filter(p => before.get(p) !== after.get(p) && !under(p, writes) && !under(p, othersOwned)).sort();
+  return changedPaths(before, after).filter(p => !under(p, PLAN_ROOTS) && !under(p, writes) && !under(p, othersOwned)).sort();
 }
 
 function finalMessage(provider, stdout) {
@@ -411,7 +429,9 @@ export async function dispatch(config, deps = {}) {
         phase: plan.phase, model_tier: plan.model_tier, ...(usage ?? {}), timestamp: new Date(ended).toISOString() }) + '\n', { mode: 0o600 });
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }
   }
-  const violations = ownershipViolations(before, gitDirty(plan.repoRoot), plan.ownership.writes, plan.ownership.othersOwned);
+  const afterState = gitDirty(plan.repoRoot);
+  const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned);
+  const orchestratorPaths = orchestratorPathsChanged(before, afterState);
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
     && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {
@@ -426,6 +446,7 @@ export async function dispatch(config, deps = {}) {
     usage, result_written: resultWritten, telemetry_degraded: telemetryDegraded,
     ownership_check: violations === null ? 'unavailable' : violations.length ? 'violated' : 'clean',
     writes_outside_ownership: violations ?? [],
+    orchestrator_paths_changed: orchestratorPaths,
     run_log_metrics: usage ? COUNTERS.filter(k => usage[k] !== null).map(k => `${k}=${usage[k]}`) : [],
   };
 }

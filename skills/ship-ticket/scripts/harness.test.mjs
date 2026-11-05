@@ -180,3 +180,10 @@ test('CodeRabbit PR34: groupPrefix accepts a 128-char run ID; scheduleId cannot 
   const b = schedule({ phase: 'BUILD', nodes: [node('a')], groupPrefix: 'run' });
   assert.notEqual(a.waves[0].parallel_group, b.waves[0].parallel_group);
 });
+
+test('concurrency risk routes to strong, including REPAIR; REPAIR routes like BUILD otherwise', () => {
+  assert.equal(routeModel('BUILD', { id: 'a', complexity: 'low', risk: ['concurrency'] }), 'strong');
+  assert.equal(routeModel('REPAIR', { id: 'a', complexity: 'low', risk: ['concurrency'] }), 'strong');
+  assert.equal(routeModel('REPAIR', { id: 'a', complexity: 'low' }), 'economy');
+  assert.equal(routeModel('REPAIR', { id: 'a' }), 'inherit');
+});

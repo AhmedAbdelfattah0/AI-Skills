@@ -324,7 +324,9 @@ reruns and UI slice. It checks only:
 - the affected closure has no regression;
 - changed rule rows and triggered sub-outcomes pass.
 
-Default ceiling: 6 minutes. It returns `PASS` or `FAIL` with evidence. It may not
+Pass it only the captures of screens the repair changed. When the repair
+touches a `concurrency`-labelled node, the Codex second opinion on the repair
+runs before this confirmation. Default ceiling: 6 minutes. It returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle.
 

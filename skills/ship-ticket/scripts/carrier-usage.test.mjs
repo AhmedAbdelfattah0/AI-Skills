@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
-  ownershipViolations, BILLING_ENV } from './carrier.mjs';
+  ownershipViolations, orchestratorPathsChanged, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
 
 // Real output shapes captured from Claude Code 2.1.318 and Codex CLI 0.166.0 (content trimmed).
@@ -43,6 +43,29 @@ test('carrier refuses PLAN and REVIEW', (t) => {
   const fx = fixture(t);
   assert.throws(() => prepareDispatch(config(fx, { phase: 'PLAN' })), /cannot be dispatched/);
   assert.throws(() => prepareDispatch(config(fx, { phase: 'REVIEW' })), /cannot be dispatched/);
+});
+
+test('REPAIR is an explicit writer phase: needs reviewExecution, recorded as REPAIR, REVIEW still refused', (t) => {
+  const fx = fixture(t);
+  assert.throws(() => prepareDispatch(config(fx, { phase: 'REPAIR' })), /reviewExecution/);
+  const c = prepareDispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1' }));
+  assert.equal(c.phase, 'REPAIR');
+  assert.equal(c.model_tier, 'inherit');
+  assert.equal(prepareDispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1', risk: ['concurrency'], modelMap: { strong: 'opus' } })).model_tier, 'strong');
+  assert.throws(() => prepareDispatch(config(fx, { phase: 'REVIEW', reviewExecution: 'review-1' })), /cannot be dispatched/);
+});
+
+test('REPAIR redSpecs require non-empty RED evidence before dispatch', (t) => {
+  const fx = fixture(t);
+  const base = { phase: 'REPAIR', reviewExecution: 'review-1', redSpecs: ['src/a.spec.ts'] };
+  assert.throws(() => prepareDispatch(config(fx, base)), /redEvidence/);
+  assert.throws(() => prepareDispatch(config(fx, { ...base, redEvidence: join(fx.root, 'missing.txt') })), /redEvidence/);
+  writeFileSync(join(fx.root, 'empty.txt'), '');
+  assert.throws(() => prepareDispatch(config(fx, { ...base, redEvidence: join(fx.root, 'empty.txt') })), /redEvidence/);
+  writeFileSync(join(fx.root, 'red.txt'), 'FAIL a.spec.ts');
+  assert.equal(prepareDispatch(config(fx, { ...base, redEvidence: join(fx.root, 'red.txt') })).phase, 'REPAIR');
+  assert.equal(prepareDispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1', redSpecs: [] })).phase, 'REPAIR');
+  assert.throws(() => prepareDispatch(config(fx, { ...base, redSpecs: ['../x'], redEvidence: join(fx.root, 'red.txt') })), /repository-relative/);
 });
 
 test('verified adapters build exact verified flags and reject smuggled arguments', (t) => {
@@ -212,6 +235,14 @@ test('ownership violations ignore owned, concurrently owned and pre-existing unc
     'reverting or deleting a pre-existing user change is a violation (CX-4)');
 });
 
+test('plan-root changes are orchestrator paths, not ownership violations', () => {
+  const before = new Map();
+  const after = new Map([['.specs/plans/T-1.md', '1'], ['.spec/x.md', '2'], ['src/a.ts', '3'], ['package.json', '4']]);
+  assert.deepEqual(ownershipViolations(before, after, ['src'], []), ['package.json']);
+  assert.deepEqual(orchestratorPathsChanged(before, after), ['.spec/x.md', '.specs/plans/T-1.md']);
+  assert.deepEqual(orchestratorPathsChanged(null, after), []);
+});
+
 // ---- Integration: a real child process through the real spawn/kill/stdin path. ----
 
 function fakeCli(t, fx, body) {
@@ -266,6 +297,21 @@ process.stdin.resume(); process.stdin.on('end', () => { writeFileSync('package.j
   assert.equal(result.ownership_check, 'violated');
   assert.deepEqual(result.writes_outside_ownership, ['package.json']);
   assert.equal(result.succeeded, false);
+});
+
+test('integration: RUN-STATE edit during a REPAIR run is reported, not a violation', async (t) => {
+  const fx = fixture(t);
+  const env = fakeCli(t, fx, `import { appendFileSync } from 'node:fs';
+process.stdin.resume(); process.stdin.on('end', () => { appendFileSync('.specs/plans/T-1.md', 'note'); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
+`);
+  const result = await dispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1', usageLog: join(fx.root, 'u.jsonl') }),
+    { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.phase, 'REPAIR');
+  assert.equal(result.ownership_check, 'clean');
+  assert.deepEqual(result.writes_outside_ownership, []);
+  assert.deepEqual(result.orchestrator_paths_changed, ['.specs/plans/T-1.md']);
+  assert.equal(result.succeeded, true);
+  assert.equal(JSON.parse(readFileSync(join(fx.root, 'u.jsonl'), 'utf8')).phase, 'REPAIR');
 });
 
 test('integration: timeout kills the child process tree', async (t) => {

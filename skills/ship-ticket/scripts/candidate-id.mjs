@@ -66,6 +66,9 @@ const root = git(repo, ['rev-parse', '--show-toplevel']).trim();
 const mergeBase = git(root, ['merge-base', 'HEAD', base]).trim();
 const excludes = new Set([...rawExcludes].map((item) => toRepoPath(root, item)));
 
+// An exclude names an exact file or a directory (everything under it).
+const isExcluded = (repoPath) => [...excludes].some((e) => repoPath === e || repoPath.startsWith(e.replace(/\/$/, '') + '/'));
+
 const tracked = splitNul(git(root, [
   'diff', '--name-only', '-z', '--no-renames', mergeBase, '--',
 ], null));
@@ -76,7 +79,7 @@ const untracked = splitNul(git(root, [
 const pathMap = new Map();
 for (const pathBuffer of [...tracked, ...untracked]) {
   const repoPath = pathBuffer.toString('utf8');
-  if (!excludes.has(repoPath)) pathMap.set(repoPath, pathBuffer);
+  if (!isExcluded(repoPath)) pathMap.set(repoPath, pathBuffer);
 }
 
 const entries = [...pathMap.entries()]
