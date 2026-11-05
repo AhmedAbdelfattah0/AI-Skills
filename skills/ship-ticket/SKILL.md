@@ -531,8 +531,12 @@ dependencies:
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
   fresh session and hand over through the plan file and its RUN-STATE, which
-  hold the state. Do not run several tickets plus unrelated work in one long
-  orchestrator session: cache reads of the growing context dominate cost.
+  hold the state. A wave the human hands over together runs in one session,
+  in parallel or stacked as the work allows; never refuse or split a requested
+  wave citing this rule. Compact between tickets of a wave when the context
+  has grown. What to avoid is unrelated work (other waves, skill changes,
+  deploys, long side discussions) in the same orchestrator session: cache
+  reads of the growing context dominate cost.
 - **Orchestrator tier.** Mechanical orchestration (dispatching, logging, gates,
   git, tracker) runs on the economy or balanced tier (for example Sonnet as the
   session model). Planning, review and reconciliation run as `strong` (Opus)
