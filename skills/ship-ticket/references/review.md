@@ -360,7 +360,8 @@ records it.
 
 - **When.** A unit is ready once `status.units.<u>.state` is `verified` (its
   checks passed) and nothing is live. `status.unit_reviews_pending` lists the
-  units without a current PASS. Units may be reviewed in any order and
+  units without a current PASS and is the authoritative signal: a `drive`
+  outcome of `done` does not include pending unit reviews. Units may be reviewed in any order and
   concurrently, within the same width and memory limits as other dispatches.
   Each record is serialized by the engine lock: retry a `lock_held` refusal.
 - **Who.** An Opus primary reviewer that is independent of every builder, under
@@ -369,9 +370,14 @@ records it.
   carries a risk label, or the ticket has `config.riskLabels`) also needs the
   host's counterpart second opinion (Codex for a Claude host), on its review and
   on its confirmation. If the counterpart is unavailable or its usage limit is
-  reached, run CodeRabbit on the unit's paths. If neither can run, stop and ask
-  (`WAIT_FOR_USER`); never record the risky unit without it. For a unit that is
-  not risky the second opinion is optional; when it is given, the gate validates it.
+  reached, run CodeRabbit on the unit's paths and record it as route `coderabbit`
+  with identity `coderabbit:<model>`. If neither can run, stop and ask
+  (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the
+  gate requires the second opinion to come from a different provider than the
+  primary (`reviewers_same_provider`) and records each reviewer's provider and
+  model. It does not check model names: assigning Opus as primary and Codex as
+  second is the orchestrator's duty under the owner rule. For a unit that is not
+  risky the second opinion is optional; when it is given, the gate validates it.
 - **Input.** Give the reviewer the unit's exact files and diff (its nodes'
   declared reads and writes), its acceptance ids, the contract versions it reads,
   its check results, the approved plan and the threat model. The artifact uses
@@ -393,20 +399,26 @@ records it.
   writes; anything outside is `repair_outside_unit`, so leave that finding to the
   final review. `drive` runs the repair only while the unit's evidence is still
   the one that was reviewed; otherwise it cancels the repair and the review goes
-  stale. Then `drive` re-checks the unit, and the same primary (plus the second
-  opinion when the unit is risky) gives one targeted confirmation on the repaired
+  stale. Then `drive` re-checks the unit. The re-checked evidence becomes the
+  repaired candidate only when the repair's own writes are the sole change; a node
+  rebuild, a dependency unit's re-check or any other change makes the review stale
+  instead, so a fresh review is due. The same primary (plus the second opinion
+  when the unit is risky) then gives one targeted confirmation on the repaired
   evidence (`kind: "confirmation"`). Each unit review execution gets one repair
   and one confirmation. The following are terminal for the unit
   (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with
-  nothing to fix, a failed repair, and any unit FAIL after the REVIEW freeze
+  nothing to fix, a failed repair, a FAIL the ceiling cannot carry, and any unit FAIL after the REVIEW freeze
   (after the freeze, only the final review's repair may change the candidate).
   Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues,
   never an automatic retry.
 - **Ceiling.** A re-review, a repair and a confirmation each spend the run-wide
   `config.unitRecheckCeiling`, the same allowance the unit re-checks spend.
-  Opening a repair reserves three: the repair, its re-check and its
-  confirmation. When the ceiling is spent, the result is `parent_ceiling` and the
-  owner decides.
+  Opening a repair needs three unheld slots: it spends one and holds two (its
+  re-check and its confirmation), which no other unit can take. The holds are
+  released when the cycle ends or is cancelled. A FAIL whose cycle the ceiling
+  cannot carry is still recorded, as terminal with no repair; a PASS re-review
+  the ceiling cannot carry is refused (`parent_ceiling`). Neither raises a
+  durable judgment, so already-accepted repairs still run. The owner decides.
 - **Final gate.** `gate review` (the original and the confirmation) and
   `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current
   PASS. A final-review repair that changes a unit makes that unit's review stale:

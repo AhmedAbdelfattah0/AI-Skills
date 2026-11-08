@@ -22,11 +22,11 @@ import * as io from './engine-io.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 import { note, judgment, normDigest, under } from './engine-dag.mjs';
 import { retryEvent } from './engine-authority.mjs';
-import { unitStates, spendCeiling, ceiling, dict } from './engine-units.mjs';
+import { unitStates, spendCeiling, ceiling, dict, releaseHold, releaseSlot, ceilingHolds } from './engine-units.mjs';
 
 const no = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
-/** Repair, its post-repair re-check and its confirmation: what opening a unit repair reserves. */
+/** Repair, its post-repair re-check and its confirmation: the unheld slots opening a unit repair needs (1 spent, 2 held). */
 const REPAIR_RESERVE = 3;
 
 /** Whether the run records unit reviews (the bound DAG set config.unitReview: true). */
@@ -75,7 +75,8 @@ export function reviewStates(S, states) {
       if (queued?.state === 'cancelled') out[u] = stale;
       else if (queued?.state === 'failed' || queued?.state === 'done') out[u] = terminal; // done without a record: no repaired candidate
       else out[u] = last.candidate_id === now ? { ...base, state: 'fail', awaiting: 'repair' } : stale;
-    } else if (rec.new_candidate === null) out[u] = { ...base, state: 'fail', awaiting: 'recheck' };
+    } else if (rec.unbound) out[u] = { ...stale, unbound: rec.unbound };
+    else if (rec.new_candidate === null) out[u] = { ...base, state: 'fail', awaiting: 'recheck' };
     else out[u] = rec.new_candidate === now ? { ...base, state: 'fail', awaiting: 'confirmation', repaired_evidence: rec.new_candidate } : stale;
   }
   return out;
@@ -107,6 +108,29 @@ export function withReviews(S, projection, states) {
 /** Units whose review is not a current PASS, for `status.unit_reviews_pending` (the orchestrator's next relays). */
 export const pendingReviews = (S, states) => Object.entries(reviewStates(S, states)).filter(([, r]) => r.state !== 'pass').map(([u]) => u);
 
+/** '<provider>:<model>' split (identity independence stays gate.mjs's; this is the cross-model rule). */
+const providerOf = (id) => String(id).split(':')[0];
+const modelOf = (id) => String(id).split(':').slice(1).join(':') || null;
+
+/**
+ * A risky unit's second opinion must come from a different provider than its primary (cross-model;
+ * a CodeRabbit fallback is recorded as provider `coderabbit`, and only it may use route
+ * `coderabbit`). Which model holds which role (Opus primary, Codex second) is the orchestrator's
+ * duty under the owner rule; the engine records provider and model and enforces only this.
+ */
+function crossModel(p, so, risky) {
+  if (!risky || !so) return null;
+  if ((so.route === 'coderabbit') !== (providerOf(so.reviewer_identity) === 'coderabbit')) {
+    return no('second_opinion_unusable', [`a CodeRabbit second opinion is route coderabbit with identity coderabbit:<model> (got route ${so.route}, ${so.reviewer_identity})`]);
+  }
+  if (providerOf(p.reviewer_identity) === providerOf(so.reviewer_identity)) {
+    return no('reviewers_same_provider', [`a risky unit needs a cross-model second opinion: primary ${p.reviewer_identity} and second ${so.reviewer_identity} share provider ${providerOf(p.reviewer_identity)}`]);
+  }
+  return null;
+}
+const roles = (p, so) => ({ primary_provider: providerOf(p.reviewer_identity), primary_model: modelOf(p.reviewer_identity),
+  second_opinion_provider: so ? providerOf(so.reviewer_identity) : null, second_opinion_model: so ? modelOf(so.reviewer_identity) : null });
+
 /** Whether review execution `rx` is already used by the final chain or another unit's chain. */
 const usedElsewhere = (S, rx, u) => (S.review_chain ?? []).some(r => r.review_execution === rx)
   || Object.entries(S.unit_reviews).some(([v, R]) => v !== u && R.chain.some(r => r.review_execution === rx));
@@ -116,7 +140,8 @@ export const unitExecution = (S, rx) => unitReviewOn(S) && Object.values(S.unit_
 
 /**
  * `gate unit-review`: validate and record one unit review step (an original review or the targeted
- * confirmation of its repair). Refusals record nothing (a spent ceiling records its judgment).
+ * confirmation of its repair). Refusals record nothing and raise no durable judgment; a FAIL the
+ * ceiling cannot carry is recorded as terminal.
  */
 export function unitReviewGate(E, input, candidate) {
   const { S } = E;
@@ -143,6 +168,11 @@ export function unitReviewGate(E, input, candidate) {
   const v = gateReview({ ...review, state: { builders: S.builders, frozen_candidate: ev.id, review_chain: R.chain } }, policy);
   const bind = { unit: u, evidence_id: ev.id, tree_candidate: ev.candidate_id, base_commit: ev.binding.base_commit,
     approved_plan_digest: S.plan_digest, dag_digest: S.dag_digest, risky: risk.risky, risk_labels: risk.labels };
+  if (v.ok) {
+    const cross = crossModel(input.primary, input.second_opinion ?? null, risk.risky);
+    if (cross) return cross;
+    Object.assign(bind, roles(input.primary, input.second_opinion ?? null));
+  }
   return input.kind === 'confirmation' ? confirmation(E, input, u, rv, v, bind) : original(E, input, u, rv, v, bind, candidate);
 }
 
@@ -169,36 +199,47 @@ function original(E, input, u, rv, v, bind, candidate) {
   const brief = input.repair_prompt_file;
   if (opens && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) return no('repair_prompt_missing', ['an accepted unit FAIL opens a repair: repair_prompt_file must be the absolute path of its brief']);
   const rereview = R.chain.some(r => r.kind === 'original');
-  const { limit, used } = ceiling(S), need = (rereview ? 1 : 0) + (opens ? REPAIR_RESERVE : 0);
-  if (need && used + need > limit) {
-    spendCeiling(S, u, opens ? 'unit_repair' : 'unit_rereview', null, need); // raises parent_ceiling, spends nothing
-    return no('parent_ceiling', [`unit ${u} needs ${need} of the run's unit allowance (${opens ? 'a repair reserves its re-check and confirmation' : 're-review'}); `
-      + `${used} of ${limit} are spent (config.unitRecheckCeiling): the owner decides`], { judgment_point: true });
+  // Decide the spend before any mutation. A repair holds its whole cycle (repair spent now; its
+  // re-check and confirmation held for it). A FAIL the ceiling cannot carry is recorded, terminal.
+  const { limit, used, reserved = 0 } = ceiling(S), room = limit - used - reserved;
+  const reCost = rereview ? 1 : 0, affordReview = reCost <= room;
+  if (!affordReview && v.record.outcome === 'PASS') {
+    return no('parent_ceiling', [`unit ${u}'s re-review needs one of the run's unit allowance; ${used} spent and ${reserved} held of ${limit} `
+      + '(config.unitRecheckCeiling): the owner decides'], { judgment_point: true });
   }
+  const opensNow = opens && affordReview && room - reCost >= REPAIR_RESERVE;
+  const ceilingRefused = (opens && !opensNow) || !affordReview;
   if (retry) {
     R.chain.push({ review_execution: rx, kind: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by });
     note(S, 'UNIT_REVIEW_RETRY', { unit: u, review_execution: rx, predecessor: retry.predecessor, authorized_by: retry.authorized_by });
   }
-  for (const r of S.repairs) if (r.unit === u && r.state === 'pending') { r.state = 'cancelled'; r.reason = `superseded by unit review ${rx}`; }
-  if (rereview) spendCeiling(S, u, 'unit_rereview', retry ? { cause: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by }
+  for (const r of S.repairs) if (r.unit === u && r.state === 'pending') {
+    r.state = 'cancelled'; r.reason = `superseded by unit review ${rx}`; releaseHold(S, r.review_execution, 'superseded');
+  }
+  if (rereview && affordReview) spendCeiling(S, u, 'unit_rereview', retry ? { cause: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by }
     : { cause: 'stale', predecessor: rv.review_execution, from_evidence: rv.reviewed_evidence, to_evidence: bind.evidence_id,
       invalidations: (S.unit_checks[u].causes ?? []).filter(c => c.evidence === rv.reviewed_evidence).map(c => c.cause) });
+  const ev = S.unit_checks[u].evidence;
   const record = { ...v.record, ...bind, second_opinion_identity: input.second_opinion?.reviewer_identity ?? null,
-    repair_opened: opens, seq: S.seq };
+    repair_opened: opensNow, ...(ceilingRefused ? { ceiling_refused: true } : {}), seq: S.seq,
+    ...(opensNow ? { binding: structuredClone(ev.binding) } : {}) };
   R.chain.push(record);
   note(S, 'UNIT_REVIEWED', { unit: u, review_execution: rx, kind: 'original', outcome: record.outcome, evidence: bind.evidence_id });
-  if (opens) {
-    spendCeiling(S, u, 'unit_repair', { cause: 'fail', review_execution: rx, findings: [...v.record.fix_findings] });
+  if (opensNow) {
+    spendCeiling(S, u, 'unit_repair', { cause: 'fail', review_execution: rx, findings: [...v.record.fix_findings] },
+      { reserve: REPAIR_RESERVE, hold: { review_execution: rx, slots: ['recheck', 'confirmation'] } });
     S.repairs.push({ id: `repair-${rx}`, kind: 'unit-review', unit: u, review_execution: rx, writes: [...write_set], promptFile: brief,
       state: 'pending', old_candidate: candidate, evidence_id: bind.evidence_id });
     note(S, 'UNIT_REPAIR_ENQUEUED', { unit: u, review_execution: rx });
   }
-  if (record.outcome === 'FAIL' && !opens) {
+  if (record.outcome === 'FAIL' && !opensNow) {
     return { ok: true, code: 'unit_review_terminal', judgment_point: true, record, reasons: [v.record.overflow ? 'overflow FAIL: no repair opens'
-      : S.freeze ? 'a unit FAIL after the REVIEW freeze opens no repair' : 'FAIL with no finding to fix: no repair opens',
-      'continuing needs an owner RETRY linked to this execution'] };
+      : S.freeze ? 'a unit FAIL after the REVIEW freeze opens no repair'
+      : ceilingRefused ? `the run's unit allowance cannot carry this FAIL's cycle (${used} spent and ${reserved} held of ${limit}; a repair needs `
+        + `${REPAIR_RESERVE}${reCost ? ' after the re-review' : ''}): recorded, no repair opens`
+      : 'FAIL with no finding to fix: no repair opens', 'continuing needs an owner RETRY linked to this execution'] };
   }
-  return { ok: true, code: 'unit_review_accepted', judgment_point: false, reasons: [], record, ...(opens ? { repair: { id: `repair-${rx}`, write_set: [...write_set] } } : {}) };
+  return { ok: true, code: 'unit_review_accepted', judgment_point: false, reasons: [], record, ...(opensNow ? { repair: { id: `repair-${rx}`, write_set: [...write_set] } } : {}) };
 }
 
 function confirmation(E, input, u, rv, v, bind) {
@@ -209,8 +250,8 @@ function confirmation(E, input, u, rv, v, bind) {
   }
   if (!v.ok) return { judgment_point: false, ...v };
   const { limit, used } = ceiling(S);
-  if (!spendCeiling(S, u, 'unit_confirmation', { cause: 'repair', review_execution: rx })) {
-    return no('parent_ceiling', [`unit ${u}'s confirmation needs one of the run's unit allowance; ${used} of ${limit} are spent: the owner decides`], { judgment_point: true });
+  if (!spendCeiling(S, u, 'unit_confirmation', { cause: 'repair', review_execution: rx }, { slot: 'confirmation' })) {
+    return no('parent_ceiling', [`unit ${u}'s confirmation has no held slot and the run's unheld allowance is spent (${used} of ${limit}): the owner decides`], { judgment_point: true });
   }
   const record = { ...v.record, ...bind, seq: S.seq };
   R.chain.push(record);
@@ -233,11 +274,12 @@ export function unitRepairCurrent(E, r) {
   const st = unitStates(E.S, E.ctx.repoRoot, {})[r.unit];
   if (st?.state === 'verified' && E.S.unit_checks[r.unit].evidence.id === r.evidence_id) return true;
   r.state = 'cancelled'; r.reason = `unit ${r.unit} evidence changed since review ${r.review_execution} (${st?.state ?? 'unknown'}); a fresh unit review is due`;
+  releaseHold(E.S, r.review_execution, 'cancelled');
   note(E.S, 'UNIT_REPAIR_CANCELLED', { unit: r.unit, review_execution: r.review_execution, reason: r.reason });
   return false;
 }
 
-/** After a unit repair: its record in the unit chain; the repaired evidence is bound once the unit is verified again (bindRepairs). */
+/** After a unit repair: its record in the unit chain; the repaired evidence is bound once the unit is verified again (reconcileReviews). */
 export function recordUnitRepair(E, repair, a) {
   const { S } = E;
   const c = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
@@ -247,17 +289,52 @@ export function recordUnitRepair(E, repair, a) {
 }
 
 /**
- * At the end of a drive (after the post-repair re-check): a repaired unit that is verified again
- * binds that evidence as the candidate its targeted confirmation must review (`new_candidate`).
+ * Whether the unit's current evidence is the repair's own result: against the binding the FAIL
+ * reviewed, only fingerprints of paths inside the repair write set may differ (no node re-run, no
+ * dependency unit's or upstream node's change, no base move). Returns null when it is, else why not.
  */
-export function bindRepairs(E) {
+function unbound(fail, rec, ev) {
+  const was = fail.binding, now = ev.binding;
+  if (!was) return 'the FAIL record carries no binding';
+  const diff = (a = {}, b = {}) => Object.keys({ ...a, ...b }).filter(k => a[k] !== b[k]);
+  const why = [
+    ...diff(was.fps, now.fps).filter(p => !under(p, rec.write_set)).map(p => `changed outside the repair: ${p}`),
+    ...diff(was.attempts, now.attempts).map(n => `node re-run: ${n}`),
+    ...diff(was.deps, now.deps).map(d => `dependency unit re-checked: ${d}`),
+    ...diff(was.upstream, now.upstream).map(n => `upstream node re-run: ${n}`),
+    ...diff(was.upstream_fps, now.upstream_fps).map(p => `upstream changed: ${p}`),
+    ...(was.base_commit !== now.base_commit ? ['base moved'] : [])];
+  return why.length ? why.join('; ') : null;
+}
+
+/**
+ * Idempotent unit review bookkeeping, run on every drive, resume, status and gate before anything
+ * reads the review state (a crash between a re-check and its binding is recovered here). A repaired
+ * unit that is verified again binds that evidence as the candidate of its one targeted confirmation
+ * (`new_candidate`) only when the evidence is the repair's own result (see unbound); otherwise the
+ * repair record is marked `unbound` and the review is stale (a fresh review is due). Then the
+ * ceiling holds of cycles that ended (stale, cancelled, terminal, passed) are released, and a
+ * repair that needed no re-check releases that slot.
+ */
+export function reconcileReviews(E) {
   const { S } = E;
   if (!unitReviewOn(S)) return;
   const states = unitStates(S, E.ctx.repoRoot, {});
   for (const [u, R] of Object.entries(S.unit_reviews)) {
-    for (const rec of R.chain) if (rec.kind === 'repair' && rec.new_candidate === null && states[u].state === 'verified') {
-      rec.new_candidate = S.unit_checks[u].evidence.id;
-      note(S, 'UNIT_REPAIR_BOUND', { unit: u, review_execution: rec.review_execution, evidence: rec.new_candidate });
+    if (states[u].state !== 'verified') continue;
+    const ev = S.unit_checks[u].evidence;
+    for (const rec of R.chain) if (rec.kind === 'repair' && rec.new_candidate === null && !rec.unbound) {
+      const fail = R.chain.find(r => r.kind === 'original' && r.review_execution === rec.review_execution);
+      const why = unbound(fail, rec, ev);
+      if (why) { rec.unbound = { evidence: ev.id, reason: why }; note(S, 'UNIT_REPAIR_UNBOUND', { unit: u, review_execution: rec.review_execution, evidence: ev.id, reason: why }); }
+      else { rec.new_candidate = ev.id; note(S, 'UNIT_REPAIR_BOUND', { unit: u, review_execution: rec.review_execution, evidence: rec.new_candidate }); }
     }
+  }
+  const rs = reviewStates(S, states);
+  for (const h of [...ceilingHolds(S)]) {
+    const r = rs[h.unit];
+    const open = r && r.review_execution === h.review_execution && r.state === 'fail' && !r.terminal;
+    if (!open) releaseHold(S, h.review_execution, r ? (r.terminal ? 'terminal' : r.state) : 'unknown');
+    else if (r.awaiting === 'confirmation') releaseSlot(S, h.review_execution, 'recheck');
   }
 }

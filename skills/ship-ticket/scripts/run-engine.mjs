@@ -31,7 +31,7 @@ import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.m
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
-import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, bindRepairs } from './engine-unit-review.mjs';
+import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -235,6 +235,7 @@ export async function init(ctx) {
 export async function status(ctx) {
   const E = open(ctx);
   E.load();
+  reconcileReviews(E); // in memory only: status writes nothing
   return view(E, drift(E, { mutate: false }));
 }
 
@@ -248,6 +249,7 @@ export async function resume(ctx) {
     const cleared = clearSpent(E.S);
     const transient = drift(E);
     unitDrift(E);
+    reconcileReviews(E);
     note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled',
       ...(cleared.length ? { cleared_judgments: cleared } : {}) });
     await E.commit();
@@ -264,6 +266,7 @@ export async function drive(ctx) {
     const live = await reconcile(E, 0);
     transient.push(...drift(E));
     unitDrift(E);
+    reconcileReviews(E); // idempotent: also recovers a crash between a unit re-check and its binding
     const work = Object.values(E.S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || E.S.repairs.some(r => r.state === 'pending') || unitWork(E);
     if (!live && !transient.length && !E.S.judgments.length && work) await refreshRed(E, transient); // may replace E.S
     const S = E.S;
@@ -275,7 +278,7 @@ export async function drive(ctx) {
         try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
         await runRepairs(E, transient);
         if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E); } // a repair's fingerprint refresh is never renewed evidence
-        bindRepairs(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
+        reconcileReviews(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }
     }
@@ -355,6 +358,7 @@ export async function gate(ctx) {
       const unbound = verifyBinding(E);
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       await deliver(E);
+      reconcileReviews(E);
       const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
       const v = c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });

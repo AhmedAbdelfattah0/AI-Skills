@@ -338,7 +338,7 @@ node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
 `ADMISSION_REFUSED`, `RED_INVALIDATED`; with units also `UNIT_CHECKED`, `UNIT_INVALIDATED`,
 `UNIT_CHECK_RETRY`, `UNIT_RECHECK`, `UNIT_CLEARED`; with unit reviews also `UNIT_REVIEWED`,
 `UNIT_REVIEW_CYCLE`, `UNIT_REVIEW_RETRY`, `UNIT_REPAIR_ENQUEUED`, `UNIT_REPAIR_RECORDED`,
-`UNIT_REPAIR_BOUND`, `UNIT_REPAIR_CANCELLED`) and an outbox for the run-log and RUN-STATE
+`UNIT_REPAIR_BOUND`, `UNIT_REPAIR_UNBOUND`, `UNIT_REPAIR_CANCELLED`, `UNIT_CEILING_RELEASED`) and an outbox for the run-log and RUN-STATE
 sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
 `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and
 `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state
@@ -492,8 +492,9 @@ also not through unit-less nodes.
   is spent, the next re-check raises the durable judgment `parent_ceiling` instead (no automatic
   retry; neither `mark`, `resume` nor `clear-unit` clears it: the owner decides, and continuing
   means a re-`init` under a new owner-approved START). The storm guard is evaluated first.
-  `status.unit_ceiling` shows `{limit, used}`. With unit reviews, the same allowance is also spent
-  by every unit re-review, unit repair and unit confirmation (below).
+  `status.unit_ceiling` shows `{limit, used}`, plus `reserved` while an open unit repair holds slots.
+  With unit reviews, the same allowance is also spent by every unit re-review, unit repair and unit
+  confirmation (below), and held slots count as spent for every other unit's re-check.
 - **Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a
   unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own
   independent review chain. The engine never dispatches a reviewer: the orchestrator relays it
@@ -508,10 +509,13 @@ also not through unit-less nodes.
   `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`,
   `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain),
   `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`,
-  `repair_prompt_missing`, `parent_ceiling`, and every `gateReview` refusal. A unit is risky when a
-  member node carries a risk label or the ticket has `config.riskLabels`; its review and its
-  confirmation then need the second opinion (`missing_second_opinion`), otherwise one is optional
-  and validated when given. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG
+  `repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and
+  every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket
+  has `config.riskLabels`. Its review and its confirmation then need a second opinion
+  (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`;
+  a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a
+  second opinion is optional and validated when given. The record carries each reviewer's provider
+  and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG
   digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`),
   the reviewers, findings and outcome. The review state is recomputed at every read against the
   current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh
@@ -520,17 +524,26 @@ also not through unit-less nodes.
   `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the
   unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's
   declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else
-  `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing, re-checks the unit and
-  binds the new evidence as the candidate the one targeted confirmation reviews. A failed
-  confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair and any FAIL after the
-  freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's
-  last execution>, authorized_by}` admits a new original. A re-review, a repair (reserving its
-  re-check and confirmation, 3) and a confirmation spend the parent-wide ceiling
+  `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit.
+  The new evidence becomes the candidate of the one targeted confirmation only when, against the
+  binding the FAIL reviewed, nothing but fingerprints inside the repair write set changed
+  (`UNIT_REPAIR_BOUND`). A node re-run, a dependency unit's re-check, an upstream change or a base
+  move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This
+  bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash
+  between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL
+  with nothing to fix, a failed repair, a FAIL whose cycle the ceiling cannot carry
+  (`ceiling_refused`, recorded with `repair_opened: false`) and any FAIL after the freeze are
+  terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's
+  last execution>, authorized_by}` admits a new original. A re-review, a repair and a confirmation
+  spend the parent-wide ceiling. Opening a repair needs 3 unheld slots: it spends 1 and holds its
+  re-check and confirmation for the unit until the cycle ends or is cancelled
+  (`UNIT_CEILING_RELEASED`). The spends are recorded
   (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger:
   stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair).
   `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing`
-  until every unit has a current PASS. The carrier's REPAIR authorization also reads the unit
-  chains.
+  until every unit has a current PASS. The `drive` outcome `done` does not cover pending unit
+  reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also
+  reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).
 - **Evidence.** The stored check result is bound, as it stands after the checks ran, to the
   fingerprints of the unit's reads and writes, the resolved `config.base` commit, each node's
   attempt count, each dependency unit's evidence, and the attempt count and state of every

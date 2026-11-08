@@ -182,49 +182,91 @@ export const unitWork = (E) => hasUnits(E.S) && readyUnits(E, unitStates(E.S, E.
 /** The launcher's truncation flag (B12) carried onto an attempt envelope; empty when output fit. */
 export const truncation = (r) => (r?.truncated === true ? { truncated: true, stdout_bytes: r.stdout_bytes } : {});
 
-/** The parent-wide re-check ceiling of this run: { limit, used }. */
-export const ceiling = (S) => ({ limit: S.config.unitRecheckCeiling ?? DEFAULT_UNIT_RECHECK_CEILING, used: S.unit_ceiling?.used ?? 0 });
+/**
+ * Held slots of the parent-wide ceiling (Wave 2b-ii): an open unit repair holds its re-check and
+ * its confirmation, so no other unit's re-check or review cycle can consume them. Present only
+ * while a hold exists.
+ */
+const holdsOf = (S) => S.unit_ceiling?.holds ?? [];
+const heldOf = (S) => holdsOf(S).reduce((t, h) => t + h.slots.length, 0);
+
+/** The parent-wide re-check ceiling of this run: { limit, used } (+ `reserved` while an open unit repair holds slots). */
+export const ceiling = (S) => {
+  const reserved = heldOf(S);
+  return { limit: S.config.unitRecheckCeiling ?? DEFAULT_UNIT_RECHECK_CEILING, used: S.unit_ceiling?.used ?? 0, ...(reserved ? { reserved } : {}) };
+};
+
+/** Spend one slot of the ceiling (record `entry`), keeping the holds; with `slot`, it comes out of unit `entry.unit`'s hold. */
+function spendOne(S, entry, slot) {
+  const used = (S.unit_ceiling?.used ?? 0) + 1;
+  let holds = holdsOf(S);
+  if (slot) holds = holds.map(h => (h.unit === entry.unit && h.slots.includes(slot) ? { ...h, slots: h.slots.filter(x => x !== slot) } : h)).filter(h => h.slots.length);
+  S.unit_ceiling = { used, rechecks: [...(S.unit_ceiling?.rechecks ?? []), entry].slice(-50), ...(holds.length ? { holds } : {}) };
+  return used;
+}
+
+/** Whether unit `u` holds `slot` (an open unit repair's re-check or confirmation). */
+const holds = (S, u, slot) => holdsOf(S).some(h => h.unit === u && h.slots.includes(slot));
 
 /**
  * Before unit `u`'s checks run: a first check is free; a re-check (the unit already completed a
  * check round in this run, whatever later reset its evidence) spends one of the run's re-checks,
- * recorded with its kind. Once the run's ceiling is spent, a durable `parent_ceiling` judgment is
- * raised instead (no automatic retry; nothing clears it in this run). Returns whether it was raised.
+ * recorded with its kind (out of the unit's own repair hold when it has one). Once the unheld
+ * allowance is spent, a durable `parent_ceiling` judgment is raised instead (no automatic retry;
+ * nothing clears it in this run). Returns whether it was raised.
  */
 function ceilingReached(E, u) {
   const { S } = E, rec = S.unit_checks[u];
   if (!(rec.rounds > 0)) return false;
-  const { limit, used } = ceiling(S);
-  if (used >= limit) {
+  const { limit, used } = ceiling(S), held = holds(S, u, 'recheck');
+  if (!held && used + heldOf(S) >= limit) {
     pushJudgment(S, 'parent_ceiling', u, `unit ${u} needs a re-check, but this run already spent its ${limit} unit re-check(s) `
       + `(config.unitRecheckCeiling, across all units): the owner decides (decomposition, contract churn or a flaky check)`);
     return true;
   }
   const kind = rec.cleared ? 'cleared' : rec.evidence?.state === 'failed' ? 'rerun' : 'invalidation';
-  S.unit_ceiling = { used: used + 1, rechecks: [...(S.unit_ceiling?.rechecks ?? []), { unit: u, kind, seq: S.seq }].slice(-50) };
+  const n = spendOne(S, { unit: u, kind, seq: S.seq, ...(held ? { reserved: true } : {}) }, held ? 'recheck' : null);
   delete rec.cleared;
-  note(S, 'UNIT_RECHECK', { unit: u, kind, used: used + 1, limit });
+  note(S, 'UNIT_RECHECK', { unit: u, kind, used: n, limit, ...(held ? { reserved: true } : {}) });
   return false;
 }
 
 /**
  * A unit review cycle (Wave 2b-ii: a re-review, a unit repair, a targeted confirmation) spends one
- * of the SAME run-wide allowance the re-checks spend, recorded with its kind and trigger. It needs
- * `reserve` (>= 1) unspent: opening a repair reserves the repair, its re-check and its
- * confirmation. Otherwise the durable `parent_ceiling` judgment is raised and nothing is spent.
- * Returns whether it was spent.
+ * of the SAME run-wide allowance the re-checks spend, recorded with its kind and trigger. With
+ * `slot` it comes out of the unit's hold; otherwise it needs `reserve` (>= 1) unheld slots, and
+ * `hold` slots are then held for the unit (an opened repair holds its re-check and confirmation).
+ * Never raises a judgment: the gate decides. Returns whether it was spent.
  */
-export function spendCeiling(S, u, kind, trigger, reserve = 1) {
-  const { limit, used } = ceiling(S);
-  if (used + reserve > limit) {
-    pushJudgment(S, 'parent_ceiling', u, `unit ${u} needs a ${kind} (${reserve} of the run's allowance), but this run already spent ${used} of its `
-      + `${limit} unit re-check(s) and review cycle(s) (config.unitRecheckCeiling, across all units): the owner decides`);
-    return false;
-  }
-  S.unit_ceiling = { used: used + 1, rechecks: [...(S.unit_ceiling?.rechecks ?? []), { unit: u, kind, seq: S.seq, trigger }].slice(-50) };
-  note(S, 'UNIT_REVIEW_CYCLE', { unit: u, kind, trigger, used: used + 1, limit });
+export function spendCeiling(S, u, kind, trigger, { reserve = 1, slot = null, hold = null } = {}) {
+  const { limit, used } = ceiling(S), held = slot && holds(S, u, slot);
+  if (!held && used + heldOf(S) + reserve > limit) return false;
+  const n = spendOne(S, { unit: u, kind, seq: S.seq, trigger, ...(held ? { reserved: true } : {}) }, held ? slot : null);
+  if (hold) S.unit_ceiling.holds = [...holdsOf(S), { unit: u, review_execution: hold.review_execution, slots: [...hold.slots] }];
+  note(S, 'UNIT_REVIEW_CYCLE', { unit: u, kind, trigger, used: n, limit, ...(held ? { reserved: true } : {}) });
   return true;
 }
+
+/** Release the unused slots held for unit review execution `rx` (its cycle ended or was cancelled). */
+export function releaseHold(S, rx, why) {
+  const h = holdsOf(S).find(x => x.review_execution === rx);
+  if (!h) return;
+  const rest = holdsOf(S).filter(x => x !== h);
+  if (rest.length) S.unit_ceiling.holds = rest; else delete S.unit_ceiling.holds;
+  note(S, 'UNIT_CEILING_RELEASED', { unit: h.unit, review_execution: rx, slots: h.slots, why });
+}
+
+/** Release one held slot of `rx` (a repair that needed no re-check). */
+export function releaseSlot(S, rx, slot) {
+  const h = holdsOf(S).find(x => x.review_execution === rx && x.slots.includes(slot));
+  if (!h) return;
+  h.slots = h.slots.filter(x => x !== slot);
+  if (!h.slots.length) return releaseHold(S, rx, 'spent');
+  note(S, 'UNIT_CEILING_RELEASED', { unit: h.unit, review_execution: rx, slots: [slot], why: 'not needed' });
+}
+
+/** The holds of the run (engine-unit-review.mjs reconciles them). */
+export const ceilingHolds = (S) => holdsOf(S);
 
 /** One check through the runner protocol; `{ refusal }` when its group's quiescence is not proven (nothing recorded). */
 async function runCheck(E, u, name, resources) {
@@ -306,6 +348,7 @@ export async function runUnitChecks(E) {
     rec.stale = false;
     if (!passed && !E.S.freeze) for (const id of U.nodes) Object.assign(E.S.nodes[id], { state: 'failed', reason: `unit ${u} ${reason}`, unit_check_failed: true });
     await E.commit();
+    await io.boundary(E.ctx.hooks, 'unit-checked', { unit: u, evidence: rec.evidence.id }); // evidence durable, nothing derived from it yet
     if (passed) progressed = true;
   }
 }

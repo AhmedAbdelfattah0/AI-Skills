@@ -31,9 +31,17 @@
  *   re-checks the unit and binds the new evidence as the confirmation's candidate. One repair and one
  *   confirmation per unit review execution. A failed confirmation, an overflow FAIL, a FAIL with
  *   nothing to fix and a FAIL after the freeze are terminal (owner RETRY only).
- * Ceiling: a re-review, a unit repair (which reserves its re-check and confirmation: 3) and a
- *   confirmation spend the run-wide config.unitRecheckCeiling, recorded in UNIT_REVIEW_CYCLE with
- *   kind unit_rereview|unit_repair|unit_confirmation and its trigger.
+ * Ceiling: a re-review, a unit repair and a confirmation spend the run-wide
+ *   config.unitRecheckCeiling, recorded in UNIT_REVIEW_CYCLE with kind
+ *   unit_rereview|unit_repair|unit_confirmation and its trigger. Opening a repair needs 3 unheld
+ *   slots: it spends 1 and holds its re-check and confirmation (status.unit_ceiling.reserved) that
+ *   no other unit can take, released when the cycle ends or is cancelled. A FAIL the ceiling cannot
+ *   carry is recorded terminal (repair_opened false, ceiling_refused); no durable judgment.
+ * Repair REPAIR batch (2b-ii): a re-checked unit binds as the repaired candidate only when nothing
+ *   but fingerprints inside the repair write set changed since the FAIL (else `unbound`, stale);
+ *   binding is idempotent on every drive/resume/status/gate (crash recovery). A risky unit's second
+ *   opinion is from another provider (reviewers_same_provider). The carrier authorizes only repairs
+ *   the engine opened (repair_opened). `drive` `done` excludes pending unit reviews.
  * =========================================================================================
  */
 import test from 'node:test';
@@ -45,6 +53,11 @@ import { validateEngineDag } from './engine-dag.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
+import { drive } from './run-engine.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const CARRIER_CLI = fileURLToPath(new URL('./carrier.mjs', import.meta.url));
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;
@@ -123,11 +136,15 @@ test('record: units reviewed in any order; risky needs the second opinion; build
   refused(fx.gate('unit-review', unitReview(fx, 'u-web', 'urx-web', { input: { dag_digest: 'sha256:' + '0'.repeat(64) } })), 'binding_mismatch');
   refused(fx.gate('unit-review', unitReview(fx, 'u-web', 'urx-web', { input: { base_commit: '0'.repeat(40) } })), 'stale_base');
   refused(fx.gate('unit-review', { ...unitReview(fx, 'u-web', 'urx-x'), unit: 'nope' }), 'unknown_unit');
+  refused(fx.gate('unit-review', unitReview(fx, 'u-api', 'urx-api', { second: true, so: { reviewer_identity: 'opus:second' } })), 'reviewers_same_provider');
+  refused(fx.gate('unit-review', unitReview(fx, 'u-api', 'urx-api', { second: true, so: { route: 'coderabbit' } })), 'second_opinion_unusable');
   const api = fx.gate('unit-review', unitReview(fx, 'u-api', 'urx-api', { second: true }));
   ok(api, 'risky unit with its second opinion');
   assert.equal(api.out.code, 'unit_review_accepted');
   assert.deepEqual([api.out.record.unit, api.out.record.risky, api.out.record.second_opinion_route, api.out.record.second_opinion_identity],
     ['u-api', true, 'codex', 'codex:gpt']);
+  assert.deepEqual([api.out.record.primary_provider, api.out.record.primary_model, api.out.record.second_opinion_provider, api.out.record.second_opinion_model],
+    ['opus', 'review', 'codex', 'gpt']);
   assert.equal(api.out.record.evidence_id, s.units['u-api'].evidence.id);
   assert.equal(api.out.record.tree_candidate, s.units['u-api'].evidence.candidate_id);
   refused(fx.gate('unit-review', unitReview(fx, 'u-web', 'urx-api')), 'chain_broken');
@@ -220,14 +237,15 @@ test('repair: a risky unit FAIL opens a unit-scoped repair; drive repairs and re
   assert.deepEqual([s.units.api.review.state, s.units.api.review.awaiting, s.units.cli.review.state], ['fail', 'confirmation', 'pass']);
   assert.notEqual(s.units.api.evidence.id, before);
   assert.equal(s.units.api.review.repaired_evidence, s.units.api.evidence.id);
-  assert.deepEqual(s.unit_ceiling, { limit: 4, used: 2 }, 'the repair and its re-check');
+  assert.deepEqual(s.unit_ceiling, { limit: 4, used: 2, reserved: 1 }, 'the repair and its re-check spent; the confirmation held');
   refused(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1')), 'missing_second_opinion');
   refused(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1', { second: true, id: before })), 'stale_evidence');
   const c = fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1', { second: true }));
   ok(c);
   assert.deepEqual([c.out.record.kind, c.out.record.outcome, c.out.record.second_opinion_identity], ['confirmation', 'PASS', 'codex:gpt']);
   assert.equal(fx.cli('status').out.units.api.review.state, 'pass');
-  assert.deepEqual(cycles(fx).map(e => [e.kind, e.trigger.cause]), [['unit_repair', 'fail'], ['unit_confirmation', 'repair']]);
+  assert.deepEqual(cycles(fx).map(e => [e.kind, e.trigger.cause, e.reserved ?? false]), [['unit_repair', 'fail', false], ['unit_confirmation', 'repair', true]]);
+  assert.deepEqual(fx.cli('status').out.unit_ceiling, { limit: 4, used: 3 }, 'the whole cycle spent, nothing left held');
   assert.deepEqual(cycles(fx)[0].trigger.findings, ['F1']);
   refused(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1', { second: true })), 'unit_review_open');
   ok(fx.gate('review', passReview('rx-1', fx.candidate())));
@@ -251,7 +269,7 @@ test('repair: a pending unit repair whose evidence changed is cancelled, never d
 
 // ------------------------------------------------------------------ terminal, RETRY and the parent ceiling
 
-test('ceiling: a failed confirmation is terminal (no automatic retry); only an owner RETRY re-reviews, and the shared ceiling then refuses another repair', { skip: WIN_SKIP }, (t) => {
+test('ceiling: a failed confirmation is terminal (no automatic retry); a FAIL the ceiling cannot carry is recorded terminal, and a later PASS does not satisfy the final gates', { skip: WIN_SKIP }, (t) => {
   const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('a', { unit: 'api' })],
     behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
@@ -270,25 +288,133 @@ test('ceiling: a failed confirmation is terminal (no automatic retry); only an o
   refused(fx.gate('unit-review', unitReview(fx, 'api', 'urx-2', { fail: 'src/a.txt' })), 'retry_unauthorized');
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'urx-2', predecessor: 'urx-1', authorized_by: 'owner' });
   const again = fx.gate('unit-review', unitReview(fx, 'api', 'urx-2', { fail: 'src/a.txt' }));
-  refused(again, 'parent_ceiling');
-  assert.equal(again.out.judgment_point, true);
+  assert.equal(again.status, 2, again.stdout);
+  assert.deepEqual([again.out.ok, again.out.code, again.out.record.repair_opened, again.out.record.ceiling_refused], [true, 'unit_review_terminal', false, true]);
+  assert.match(again.out.reasons[0], /cannot carry this FAIL's cycle/);
   const after = fx.cli('status').out;
-  assert.ok(after.judgments.some(j => j.code === 'parent_ceiling' && j.node === 'api' && /unitRecheckCeiling/.test(j.reason)), J(after.judgments));
-  assert.deepEqual(after.unit_ceiling, { limit: 4, used: 3 }, 'a refusal spends nothing');
+  assert.equal(after.judgments.some(j => j.code === 'parent_ceiling'), false, 'a ceiling refusal is not a durable judgment');
+  assert.deepEqual([after.units.api.review.review_execution, after.units.api.review.terminal], ['urx-2', true], 'the FAIL is recorded');
+  assert.deepEqual(after.unit_ceiling, { limit: 4, used: 4 }, 'the re-review was spent; no repair opened');
   assert.equal(after.repairs.length, 1);
-  assert.equal(fx.cli('drive').status, 2, 'parent_ceiling is durable');
+  refused(fx.gate('unit-review', unitReview(fx, 'api', 'urx-3')), 'retry_unauthorized');
+  fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'urx-3', predecessor: 'urx-2', authorized_by: 'owner' });
+  refused(fx.gate('unit-review', unitReview(fx, 'api', 'urx-3')), 'parent_ceiling');
+  refused(fx.gate('review', passReview('rx-1', fx.candidate())), 'unit_reviews_missing');
+  refused(fx.gate('ship-ready', {}), 'unit_reviews_missing');
   assert.equal(fx.runs('fix').length, 1);
 });
 
-test('ceiling: a second unit gets no fresh allowance (unit count cannot multiply repairs)', { skip: WIN_SKIP }, (t) => {
+test('ceiling: an opened repair holds its whole cycle; a second unit\'s FAIL is recorded terminal and cannot strand it; the carrier authorizes only opened repairs', { skip: WIN_SKIP }, (t) => {
   const fx = fixture(t, { commit: true, config: { unitReview: true, unitRecheckCeiling: 3, testCommands: { ok: PASS } },
-    nodes: [node('a', { unit: 'u1' }), node('b', { unit: 'u2' })], behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } } } });
+    nodes: [node('a', { unit: 'u1' }), node('b', { unit: 'u2' })],
+    behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
-  ok(fx.gate('unit-review', unitReview(fx, 'u1', 'urx-1', { fail: 'src/a.txt' })), 'the first repair reserves 3 of 3');
+  ok(fx.gate('unit-review', unitReview(fx, 'u1', 'urx-1', { fail: 'src/a.txt' })), 'the first repair takes 1 and holds 2 of 3');
+  assert.deepEqual(fx.cli('status').out.unit_ceiling, { limit: 3, used: 1, reserved: 2 });
   const second = fx.gate('unit-review', unitReview(fx, 'u2', 'urx-2', { fail: 'src/b.txt' }));
-  refused(second, 'parent_ceiling');
-  assert.match(second.out.reasons[0], /needs 3 of the run's unit allowance.*1 of 3 are spent/);
-  assert.deepEqual(fx.cli('status').out.units.u2.review.state, 'unreviewed', 'nothing recorded');
+  assert.equal(second.status, 2, second.stdout);
+  assert.deepEqual([second.out.code, second.out.record.repair_opened, second.out.record.ceiling_refused], ['unit_review_terminal', false, true]);
+  assert.deepEqual(second.out.record.write_set, ['src/b.txt']);
+  const approval = { ticket: 'T-1', run_id: 'run-1' };
+  assert.equal(verifyReviewExecution(fx.repo, approval, 'urx-1'), 'engine');
+  assert.throws(() => verifyReviewExecution(fx.repo, approval, 'urx-2'), /no accepted FAIL/, 'a terminal FAIL authorizes no repair');
+  const inspect = (rx) => {
+    const f = join(fx.root, `carrier-${rx}.json`);
+    writeFileSync(f, J({ phase: 'REPAIR', provider: 'claude', nodeId: `repair-${rx}`, workdir: fx.repo, ownership: { writes: ['src'] }, timeoutMs: 10000,
+      promptFile: fx.prompt('fix'), reviewExecution: rx, approval: { ticket: 'T-1', runId: 'run-1', approvedPlanDigest: fx.readState().plan_digest } }));
+    return spawnSync(process.execPath, [CARRIER_CLI, 'inspect', f], { encoding: 'utf8', env: fx.env });
+  };
+  assert.equal(inspect('urx-1').status, 0, inspect('urx-1').stderr);
+  const bad = inspect('urx-2');
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /no accepted FAIL/);
+  const d = fx.cli('drive');
+  assert.equal(fx.runs('fix').length, 1, 'the accepted repair still runs (no durable judgment blocks it)');
+  assert.equal(d.out.judgments.some(j => j.code === 'parent_ceiling'), false, J(d.out.judgments));
+  assert.deepEqual(d.out.unit_ceiling, { limit: 3, used: 2, reserved: 1 }, 'its re-check came out of its hold');
+  ok(fx.gate('unit-review', unitConfirm(fx, 'u1', 'urx-1')), 'its confirmation is never stranded');
+  assert.deepEqual(fx.cli('status').out.unit_ceiling, { limit: 3, used: 3 });
+  refused(fx.gate('ship-ready', {}), 'unit_reviews_missing');
+});
+
+test('ceiling: a cancelled repair releases its held slots', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('a', { unit: 'api', reads: ['docs/in.txt'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-1', { fail: 'src/a.txt' })));
+  writeFileSync(`${fx.repo}/docs/in.txt`, 'contract v2');
+  ok(fx.cli('drive'));
+  const s = fx.cli('status').out;
+  assert.deepEqual(s.repairs, [{ id: 'repair-urx-1', state: 'cancelled' }]);
+  assert.deepEqual(s.unit_ceiling, { limit: 4, used: 2 }, 'repair 1 + an unheld re-check 1; the held confirmation released');
+  assert.ok(fx.readState().events.some(e => e.type === 'UNIT_CEILING_RELEASED' && e.review_execution === 'urx-1'));
+});
+
+// ------------------------------------------------------------------ binding integrity and crash recovery
+
+/** ua <- ub (ub depends on ua but reads none of its files), each with its own FAIL. */
+function chained(t) {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, unitRecheckCeiling: 8, testCommands: { ok: PASS } },
+    nodes: [node('ua', { unit: 'u-a' }), node('ub', { deps: ['ua'], unit: 'u-b' })],
+    behaviour: { ua: { write: { 'src/ua.txt': 'a' } }, ub: { write: { 'src/ub.txt': 'b' } }, fix: { write: { 'src/ua.txt': 'a fixed', 'src/ub.txt': 'b fixed' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  return fx;
+}
+const failWith = (fx, u, rx, path, prompt) => ({ ...unitReview(fx, u, rx, { fail: path }), repair_prompt_file: fx.prompt(prompt) });
+
+for (const order of [['u-b', 'u-a'], ['u-a', 'u-b']]) {
+  test(`binding: a dependent unit never absorbs an upstream repair it did not review (FAIL ${order.join(' then ')})`, { skip: WIN_SKIP }, (t) => {
+    const fx = chained(t);
+    fx.behave({ fixa: { write: { 'src/ua.txt': 'a fixed' } }, fixb: { write: { 'src/ub.txt': 'b fixed' } } });
+    for (const u of order) ok(fx.gate('unit-review', failWith(fx, u, `urx-${u}`, u === 'u-a' ? 'src/ua.txt' : 'src/ub.txt', u === 'u-a' ? 'fixa' : 'fixb')), u);
+    ok(fx.cli('drive'));
+    const s = fx.cli('status').out;
+    assert.deepEqual([s.units['u-a'].review.state, s.units['u-a'].review.awaiting], ['fail', 'confirmation']);
+    assert.equal(s.units['u-b'].review.state, 'stale', J(s.units['u-b'].review));
+    // u-b's own repair either ran and is unbound (its evidence moved with u-a's re-check), or was
+    // cancelled before dispatch (u-a's repair had already made u-b's evidence stale): never bound.
+    const ubRepair = s.repairs.find(r => r.id === 'repair-urx-u-b');
+    if (ubRepair.state === 'done') assert.match(s.units['u-b'].review.unbound.reason, /dependency unit re-checked: u-a/);
+    else assert.equal(ubRepair.state, 'cancelled');
+    assert.equal(fx.readState().unit_reviews['u-b'].chain.some(r => r.kind === 'repair' && r.new_candidate), false);
+    refused(fx.gate('unit-review', unitConfirm(fx, 'u-b', 'urx-u-b')), 'unit_review_open');
+    ok(fx.gate('unit-review', unitConfirm(fx, 'u-a', 'urx-u-a')));
+    ok(fx.gate('unit-review', unitReview(fx, 'u-b', 'urx-u-b-2')), 'a fresh review of the dependent unit');
+  });
+}
+
+test('binding: a pre-freeze rebuild after a failed post-repair re-check is never bound as the repaired candidate', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { good: { cmd: process.execPath, args: ['-e',
+    "process.exit(require('fs').readFileSync('src/a.txt','utf8').startsWith('a')?0:1)"] } } },
+    nodes: [node('a', { unit: 'api', checks: ['good'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'broken' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-1', { fail: 'src/a.txt' })));
+  assert.equal(fx.cli('drive').status, 2, 'the repaired unit fails its check');
+  fx.behave({ a: { write: { 'src/a.txt': 'a2' } } });
+  ok(fx.cli('mark', { node: 'a', transition: 'failed->pending', reason: 'rebuild' }));
+  ok(fx.cli('drive'));
+  const r = fx.cli('status').out.units.api.review;
+  assert.equal(r.state, 'stale', J(r));
+  assert.match(r.unbound.reason, /node re-run: a/);
+  refused(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1')), 'unit_review_open');
+  ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-2')));
+});
+
+test('crash: the engine dies after the post-repair re-check is durable but before binding; resume binds and the confirmation is accepted', { skip: WIN_SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('a', { unit: 'api' })],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-1', { fail: 'src/a.txt' })));
+  const hooks = { boundary: async (name) => { if (name === 'unit-checked') throw new Error('simulated crash after the re-check'); } };
+  await assert.rejects(drive(fx.ctx({ hooks })), /simulated crash/);
+  const st = fx.readState();
+  assert.equal(st.unit_reviews.api.chain.find(r => r.kind === 'repair').new_candidate, null, 'crashed before the binding');
+  assert.equal(st.unit_checks.api.evidence.state, 'verified');
+  ok(fx.cli('resume'));
+  assert.equal(fx.readState().unit_reviews.api.chain.find(r => r.kind === 'repair').new_candidate, st.unit_checks.api.evidence.id);
+  assert.equal(fx.cli('status').out.units.api.review.awaiting, 'confirmation');
+  ok(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1')));
 });
 
 // ------------------------------------------------------------------ resume
