@@ -11,9 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { spawnSpec } from './carrier.mjs';
 import { gateRed, gateReview, gateShipReady } from './gate.mjs';
 import * as io from './engine-io.mjs';
-import { retire } from './engine-quiesce.mjs';
+import { retire, leaderStart } from './engine-quiesce.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout } from './engine-dag.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
+import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -37,10 +38,59 @@ async function redGate(E, input, candidate) {
   const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
     specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources] }, runnerDeps(E));
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
-  if (v.ok) Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit });
+  if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit }); delete E.S.gates.red_invalid?.[node.id]; }
   const { state: _s, ...out } = v;
   return out;
 }
+
+/** RED-bearing nodes whose barrier a ready pending/stale node, or a pending repair, waits on. */
+function barrierNeeded(S) {
+  const ids = new Set();
+  for (const n of Object.values(S.nodes)) if (['pending', 'stale'].includes(n.state) && n.deps.every(d => S.nodes[d].state === 'done')) n.deps.forEach(d => ids.add(d));
+  for (const r of S.repairs) if (r.state === 'pending') {
+    for (const n of Object.values(S.nodes)) if (n.writes.some(w => r.writes.some(p => overlap(w, p)))) n.deps.forEach(d => ids.add(d));
+  }
+  return [...ids].filter(d => S.nodes[d].redSpecs.length);
+}
+
+/**
+ * Before a drive dispatches: RED evidence a waiting node or repair needs that no longer binds (a
+ * spec or config.base changed) is invalidated and RED is re-run by the engine with the recorded
+ * runner and specs, once per invalidation (RED_RERUN). An accepted re-run is reported as a
+ * red_invalidated naming it (the drive stops; the next one dispatches). A refused re-run stays in
+ * `S.gates.red_invalid` and `view` reports it on every drive and status until RED is accepted again
+ * (`gate red`), or the spec and base are restored to the old evidence's bytes (RED_RESTORED).
+ */
+export async function refreshRed(E, transient) {
+  for (const d of barrierNeeded(E.S)) {
+    const ev = E.S.gates.red[d];
+    const what = ev && redChanges(E, ev);
+    if (what) invalidateRed(E, d, what);
+    const inv = E.S.gates.red_invalid?.[d];
+    if (!inv) continue;
+    if (inv.rerun) {
+      if (!redChanges(E, inv.evidence)) { E.S.gates.red[d] = inv.evidence; delete E.S.gates.red_invalid[d]; note(E.S, 'RED_RESTORED', { node: d }); }
+      continue;
+    }
+    const before = E.S.attempts.length;
+    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
+      : gateNo('candidate_unavailable', [c.reason]);
+    const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
+    note(E.S, 'RED_RERUN', { node: d, attempt_id, ok: v.ok, code: v.code });
+    const rerun = { attempt_id, ok: v.ok, code: v.code, reasons: v.reasons ?? [] };
+    if (v.ok) transient.push(judgment('red_invalidated', d, `${invalidCause(d, inv)}; the engine re-ran RED (attempt ${attempt_id}): `
+      + 'red_accepted; dependents dispatch on the next drive'));
+    else E.S.gates.red_invalid[d] = { ...E.S.gates.red_invalid[d], rerun };
+    await E.commit();
+  }
+}
+
+/** red_invalidated judgments for every refused engine re-run of RED (they stay until RED binds again). */
+export const redInvalidJudgments = (S) => Object.entries(S.gates?.red_invalid ?? {}).filter(([, inv]) => inv.rerun && !inv.rerun.ok)
+  .map(([d, inv]) => judgment('red_invalidated', d, `${invalidCause(d, inv)}; the engine re-ran RED (attempt ${inv.rerun.attempt_id}): `
+    + `${inv.rerun.code}${inv.rerun.reasons[0] ? ` (${inv.rerun.reasons[0]})` : ''}. Once dependents implement the specs RED cannot be `
+    + 're-established: restore the spec file(s) and config.base to the evidence bytes, or the owner decides'));
 
 /**
  * The trusted RETRY authorizing original review `rx` after `predecessor` (engine-authority.mjs:
@@ -109,7 +159,7 @@ async function runProof(E) {
     let result;
     try {
       const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs) });
-      Object.assign(a, { pid: launch.pid, pgid: launch.pgid, status: 'running' });
+      Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
       await E.commit();
       launch.release();
       result = await launch.done;
@@ -136,7 +186,7 @@ const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.
 async function shipReadyGate(E, input, candidate) {
   const S = E.S;
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
-  if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence);
+  if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence, io.evidenceExists(E.ctx.repoRoot));
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };
   let v = gateShipReady({ state: S, current });
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {

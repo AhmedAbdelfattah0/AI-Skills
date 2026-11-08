@@ -96,7 +96,8 @@
  *
  * gateShipReady({ state, current }) -> { ok, code, reasons:[code], missing:[kind], event? }
  *   state: { ticket, pinned_exclusions, review_chain, local_proof:{candidate_id,
- *     commands:[{cmd,result}]}, risk_labels, risk_evidence:[{kind,path,red_accepted?}],
+ *     commands:[{cmd,result}]}, risk_labels, risk_evidence:[{kind,path,red_accepted?,exists?}]
+ *     (exists: false, bound by the engine, refuses a non-spec kind),
  *     config?:{riskLabels}, nodes?:{[id]:{risk}} }  (labels = union of all three)
  *   current: { candidate_id, exclusions, artifact_digests:{parity?} }
  *   reasons: 'candidate_mismatch' | 'exclusions_altered' | 'artifact_changed' |

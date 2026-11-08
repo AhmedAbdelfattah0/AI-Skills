@@ -25,8 +25,8 @@ import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
   BEGIN, END } from './engine-dag.mjs';
-import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending } from './engine-attempts.mjs';
-import { GATES, gateNo } from './engine-gates.mjs';
+import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
+import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
 
@@ -57,7 +57,7 @@ function locate(ctx) {
  */
 function approvedPlan(ctx, P, S = null) {
   const text = io.readIfExists(P.plan);
-  if (text === null || text.indexOf(BEGIN) < 0 || text.indexOf(END) < text.indexOf(BEGIN)) throw coded('approval_mismatch', `${P.plan} is missing or has no RUN-STATE block`);
+  if (text === null || text.indexOf(BEGIN) < 0) throw coded('approval_mismatch', `${P.plan} is missing or has no RUN-STATE block`);
   const malformed = malformedRunState(text);
   if (malformed.length) throw coded('run_state_malformed', malformed[0].reason);
   const digest = planNarrativeDigest(text);
@@ -155,7 +155,7 @@ function view(E, transient = []) {
   return { schema: STATUS_SCHEMA, ticket: S.ticket, run_id: S.run_id,
     nodes: Object.fromEntries(Object.entries(S.nodes).map(([id, n]) => [id, { state: n.state, attempts: n.attempts, retries: n.retries }])),
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
-    judgments: [...S.judgments, ...transient, ...failed],
+    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S)],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
@@ -225,15 +225,17 @@ export async function status(ctx) {
   return view(E, drift(E, { mutate: false }));
 }
 
-/** Reconcile attempts, the outbox and staleness after a crash or restart (refused when the binding drifted). */
+/** Reconcile attempts, the outbox, spent judgments and staleness after a crash or restart (refused when the binding drifted). */
 export async function resume(ctx) {
   return locked(ctx, async (E) => {
     const unbound = verifyBinding(E);
     if (unbound.length) return view(E, unbound);
     await deliver(E);
     const live = await reconcile(E, 1000);
+    const cleared = clearSpent(E.S);
     const transient = drift(E);
-    note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled' });
+    note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled',
+      ...(cleared.length ? { cleared_judgments: cleared } : {}) });
     await E.commit();
     return view(E, transient);
   });
@@ -242,13 +244,14 @@ export async function resume(ctx) {
 /** Re-verify the binding, reconcile, then dispatch ready nodes and authorized repairs until done or a judgment point. */
 export async function drive(ctx) {
   return locked(ctx, async (E) => {
-    const S = E.S;
     const transient = verifyBinding(E);
     if (transient.length) return { ...view(E, transient), outcome: 'judgment' };
     await deliver(E);
     const live = await reconcile(E, 0);
     transient.push(...drift(E));
-    const work = Object.values(S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || S.repairs.some(r => r.state === 'pending');
+    const work = Object.values(E.S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || E.S.repairs.some(r => r.state === 'pending');
+    if (!live && !transient.length && !E.S.judgments.length && work) await refreshRed(E, transient); // may replace E.S
+    const S = E.S;
     if (!live && !transient.length && !S.judgments.length && work) {
       const auth = S.config.billing === 'subscription'
         ? (ctx.verifySubscription ?? cliSubscription)(S.config.provider, childEnv(S.config.provider, 'subscription', ctx.env ?? process.env)) : true;
@@ -269,8 +272,9 @@ export async function drive(ctx) {
 
 /**
  * Restricted manual transition: only failed->pending (capped retry) and pending->cancelled, with a
- * reason. Clearing a node's judgments records them as `cleared_judgments` on the MARK event (the
- * reason is the recorded authorization).
+ * reason. failed->pending clears the node's judgments and every spent one (engine-attempts.mjs
+ * clearSpent) and records them as `cleared_judgments` [{ code, node }] on the MARK event (the
+ * reason is the recorded authorization). `resume` clears spent judgments the same way.
  */
 export async function mark(ctx) {
   const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && !['node', 'transition', 'reason'].includes(k));
@@ -287,8 +291,9 @@ export async function mark(ctx) {
     if (ctx.transition === 'failed->pending') {
       if ((n.retries ?? 0) >= MAX_RETRIES) throw coded('retry_cap', `node ${ctx.node} already used its retry`);
       n.retries = (n.retries ?? 0) + 1;
-      cleared = S.judgments.filter(j => j.node === ctx.node).map(j => j.code);
+      cleared = S.judgments.filter(j => j.node === ctx.node).map(j => ({ code: j.code, node: j.node }));
       S.judgments = S.judgments.filter(j => j.node !== ctx.node);
+      cleared.push(...clearSpent(S));
     }
     n.state = to;
     const ev = { run_id: S.run_id, event: 'MARK', event_id: 'mark-' + randomUUID(), node: ctx.node, transition: ctx.transition,
@@ -333,7 +338,7 @@ async function main(argv) {
   const gateKind = cmd === 'gate' ? rest.shift() : undefined;
   const flags = {};
   for (let i = 0; i < rest.length; i += 2) {
-    if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i])) throw new Error('bad or repeated flag: ' + rest[i]);
+    if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input'];

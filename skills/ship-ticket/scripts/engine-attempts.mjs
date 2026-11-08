@@ -13,7 +13,7 @@ import { schedule, admit } from './harness.mjs';
 import { prepareDispatch, childEnv, spawnSpec, workerRunStateAppend } from './carrier.mjs';
 import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
-import { retire } from './engine-quiesce.mjs';
+import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
@@ -67,24 +67,45 @@ function budgetOk(E, transient, phase) {
 
 // ---- RED barrier ------------------------------------------------------------------------------
 
-/**
- * Whether the accepted RED evidence of RED-bearing node `d` is still valid: every spec file digest
- * and the resolved config.base commit are unchanged. Invalid evidence is dropped (RED_INVALIDATED,
- * which also resets gateRed's dispatched-before-RED ordering) and reported as `red_invalidated`.
- * A dependent's own writes never invalidate it.
- */
-function redValid(E, d, transient) {
+/** What changed since RED evidence `ev` was accepted ({ changed, moved }), or null when it still binds. */
+export function redChanges(E, ev) {
   const { S, ctx } = E;
-  const ev = S.gates.red[d];
-  if (!ev) return false;
   E.baseCommit ??= io.resolveCommit(ctx.repoRoot, S.config.base ?? 'HEAD');
   const changed = Object.entries(ev.spec_digests ?? {}).filter(([f, digest]) => io.repoFileDigest(ctx.repoRoot, f) !== digest).map(([f]) => f);
   const moved = ev.base_commit !== undefined && ev.base_commit !== E.baseCommit;
-  if (!changed.length && !moved) return true;
+  return changed.length || moved ? { changed, moved } : null;
+}
+
+/** What invalidated RED of `d` (the text every red_invalidated reason starts with). */
+export const invalidCause = (d, inv) => (inv.base_moved ? `config.base moved since RED of ${d}`
+  : `spec file(s) changed since RED of ${d}: ${inv.changed.join(', ')}`);
+
+/**
+ * Drop the RED evidence of `d` (RED_INVALIDATED, which also resets gateRed's dispatched-before-RED
+ * ordering) into `S.gates.red_invalid[d]` with the old evidence, so the next drive re-runs RED
+ * (engine-gates.mjs refreshRed) and restored bytes can restore it. Never silent.
+ */
+export function invalidateRed(E, d, { changed, moved }) {
+  const { S } = E;
+  const ev = S.gates.red[d];
   delete S.gates.red[d];
   note(S, 'RED_INVALIDATED', { node: d, changed, base_moved: moved });
-  transientOnce(transient, 'red_invalidated', d, moved ? `config.base moved since RED of ${d}; re-run gate red`
-    : `spec file(s) changed since RED of ${d}: ${changed.join(', ')}; re-run gate red`);
+  (S.gates.red_invalid ??= {})[d] = { changed, base_moved: moved, seq: S.seq, command: ev.command, evidence: ev, rerun: null };
+}
+
+/**
+ * Whether the accepted RED evidence of RED-bearing node `d` is still valid: every spec file digest
+ * and the resolved config.base commit are unchanged. A drive re-runs invalid RED before it
+ * dispatches (refreshRed); a change seen mid-dispatch is invalidated here and re-run next drive.
+ * A dependent's own writes never invalidate it.
+ */
+function redValid(E, d, transient) {
+  const ev = E.S.gates.red[d];
+  if (!ev) return false;
+  const what = redChanges(E, ev);
+  if (!what) return true;
+  invalidateRed(E, d, what);
+  transientOnce(transient, 'red_invalidated', d, `${invalidCause(d, E.S.gates.red_invalid[d])}; the next drive re-runs RED`);
   return false;
 }
 
@@ -226,6 +247,21 @@ async function settleRunner(E, a) {
   }
 }
 
+/**
+ * Remove and return ({ code, node }[]) the SPENT judgments of `S`: a quiescence_unknown whose every
+ * attempt has since been retired (its group proven gone), so the hazard it reported is over. A
+ * worker's node stays failed (only mark retries it); a runner's gate can simply run again.
+ */
+export function clearSpent(S) {
+  const spent = (j) => {
+    const mine = S.attempts.filter(a => a.node === j.node);
+    return j.code === 'quiescence_unknown' && mine.length > 0 && mine.every(a => !LIVE.includes(a.status) && a.quiesced === true);
+  };
+  const cleared = S.judgments.filter(spent).map(j => ({ code: j.code, node: j.node }));
+  S.judgments = S.judgments.filter(j => !spent(j));
+  return cleared;
+}
+
 /** Settle every unfinished attempt left by an earlier engine or gate process (workers and runners). */
 export async function reconcile(E, wait) {
   let live = false;
@@ -289,7 +325,7 @@ async function runAttempt(E, job) {
     child.stdin.on('error', () => {});
     await io.boundary(ctx.hooks, 'after-spawn', { attempt_id: id });
     if (!child.pid) { await exited; await settleSpawnFailure(E, a, item); return true; }
-    a.pid = child.pid; a.pgid = platform === 'win32' ? null : child.pid; a.status = 'launched';
+    a.pid = child.pid; a.pgid = platform === 'win32' ? null : child.pid; a.leader_start = leaderStart(a.pgid); a.status = 'launched';
     await E.commit();
     await io.boundary(ctx.hooks, 'after-pid', { attempt_id: id, pid: a.pid, pgid: a.pgid });
     await new Promise(r => child.stdin.end(io.RELEASE, r));

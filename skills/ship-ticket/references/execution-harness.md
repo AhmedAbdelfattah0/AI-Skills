@@ -287,7 +287,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition failed->pending|pending->cancelled --reason <text>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -362,7 +363,9 @@ next command or `resume` replays it.
 pre_snapshot_digest}` is committed; a launcher is spawned in its own process
 group and blocks on a release byte; `{pid, pgid}` is committed; only then is the
 byte sent. If the engine dies first the launcher's stdin closes and the worker
-never runs. On exit the completion envelope is written atomically. An attempt is
+never runs. Once the provider exits the completion envelope is written atomically (after its
+stdout closes, or after a 1 s drain when a descendant still holds stdout open, so a lingering
+descendant cannot hold the attempt until its timeout). An attempt is
 recorded only after its **whole process group** is gone: surviving descendants are
 killed and awaited first; quiescence that cannot be proven (always on Windows) is
 `quiescence_unknown` and the node is not done. `resume` and `drive` reconcile each
@@ -375,7 +378,10 @@ point. Quiescence means the whole group is gone (POSIX `kill(-pgid, 0)` returns
 every path (exit, timeout, crash, exception, reconcile): it kills and awaits the group, or
 accepts an attempt that never recorded a pid (never released); otherwise the attempt stays
 `unknown` with its locks, and reconcile reports it live (no dispatch, so a node marked
-`failed->pending` never runs beside it) until `retire()` proves its group gone. The state
+`failed->pending` never runs beside it) until `retire()` proves its group gone. A group is
+signalled only while its recorded leader is gone or still has the start time recorded at launch
+(`leader_start`); a leader pid that is alive with another start time was reused by an unrelated
+process, so it is never signalled and the attempt stays `unknown`. The state
 commit refuses (`unquiesced_exit`) to persist a terminal attempt that did not pass through it;
 a state file written before that rule is refused at load (`legacy_state`: confirm nothing of
 the run still runs, delete the state file, re-run `init`). Retries cover only spawn failures and provider errors with proven
@@ -392,7 +398,14 @@ dispatches alike). Every RUN-STATE reader, engine and carrier, goes through `run
 which splits lines on every break a common reader honours (Python `str.splitlines`: lone CR,
 U+2028, U+2029, NEL, VT, FF, FS/GS/RS). A block holding one of those (other than `\r\n`), or a
 `{` line that is not JSON, is `run_state_malformed`: every mutating command refuses until the
-owner normalizes the plan file. Lines first seen in a block whose already-observed bytes were
+owner normalizes the plan file. So is any marker count other than exactly one BEGIN followed by
+exactly one END (a duplicate or stray END, a second BEGIN, a missing END, a marker inside an
+event's JSON); the carrier's `verifyApproval` refuses the same blocks. Authority lines are read
+from the first BEGIN to the **last** END (to the end of the file without one), so a line planted
+beside a stray marker is classified, as untrusted, and stays untrusted once the marker is cleaned
+up. The refusal says how to repair the block: in a separate edit, deleting a non-JSON `{` line
+rather than editing it into JSON, then re-appending any owner event as a new, distinct line once
+nothing is live. Lines first seen in a block whose already-observed bytes were
 rewritten are untrusted, so no later rewrite can turn hidden bytes into owner authority. `RETRY` and `DAG_BOUND` authority stays the orchestrator's RUN-STATE write,
 as without the engine, and the engine honours an authority line only from
 `state.authority.trusted` (`engine-authority.mjs`). At the start and end of every locked
@@ -444,14 +457,17 @@ within the round it already holds. Counters are never reset.
 **`mark`** accepts only `failed->pending` (counts as a retry, capped at 1) and
 `pending->cancelled`, with a reason. It cannot mark nodes done, create gate
 evidence, change ownership, enable API billing or reset a counter; any other
-transition or extra key is `mark_refused`. When `failed->pending` clears a
-node's judgments (for example `quiescence_unknown`), the MARK event records them as
-`cleared_judgments`, with the reason as the authorization.
+transition or extra key is `mark_refused`. `failed->pending` clears the node's judgments
+and every **spent** judgment: a `quiescence_unknown` whose every attempt has since been retired
+(its group proven gone), such as a RED or proof runner's. The MARK event records them as
+`cleared_judgments` (`[{code, node}]`), with the reason as the authorization. `resume` clears
+spent judgments the same way and records them on its RESUME event, so a spent runner judgment on
+a run with no failed node is not a dead end. The retry cap is unchanged.
 
 **Judgment points** (`status.judgments[].code`) stop the engine and go back to
 the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`,
 `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants
-can outlive the leader, so every finished attempt there needs a human),
+can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
 `red_invalidated`, `red_required` and `candidate_unavailable`. The gate adds
@@ -495,10 +511,16 @@ file; timing logs stay best effort and never block.
   is a judgment point and the manual flow applies, marked degraded. Evidence is
   bound to the spec files' content digests, the baseline candidate and the resolved
   `config.base` commit, ordered by event sequence, and is refused if recorded after a
-  dependent production dispatch. Before a dependent (or repair) is dispatched, a
-  changed spec digest or a moved `config.base` drops the evidence
-  (`red_invalidated`; re-run `gate red`, which then ignores dispatches before the
-  invalidation). A dependent's own writes never invalidate it.
+  dependent production dispatch. Before a drive dispatches a dependent (or repair) that
+  needs it, a changed spec digest or a moved `config.base` drops the evidence
+  (`RED_INVALIDATED`, kept in `gates.red_invalid` with the old evidence) and the engine re-runs
+  RED itself with the recorded runner and specs, once per invalidation (`RED_RERUN`; it ignores
+  dispatches before the invalidation). The `red_invalidated` judgment names the re-run's attempt
+  and outcome. Accepted: that drive stops, the next one dispatches. Refused (typically
+  `spec_not_failing`, because dependents already implement the specs): every later `drive` and
+  `status` reports it until `gate red` is accepted, or the spec files and `config.base` are
+  restored to the old evidence's bytes (`RED_RESTORED`); otherwise the owner decides. A
+  dependent's own writes never invalidate it.
 - **`gateReview`** accepts a review only when bound together: the complete primary
   artifact (the `references/review.md` output contract), a reviewer identity
   distinct from every builder, the frozen candidate ID, coverage, parity and
@@ -528,7 +550,9 @@ file; timing logs stay best effort and never block.
   match, the review chain is accepted, every required node is done or cancelled,
   no attempt is live, no repair is open, no judgment is unresolved
   (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local
-  proof is bound to that candidate, and every required risk evidence is present.
+  proof is bound to that candidate, and every required risk evidence is present (a `-spec`
+  kind needs accepted RED on that file; any other kind must name an existing file inside the
+  repository, checked by the engine).
   Local proof is produced by the engine running every `config.testCommands` entry
   (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage
   error. A proof command that changes the work tree is refused as
@@ -591,8 +615,12 @@ is no prune.
 - Cross-process locks between two concurrent ship-ticket runs on one host are not
   provided. Declare `port:`/`db:` locks within a run and use distinct ports per run.
 - Gemini/Antigravity adapters are template-only (above).
-- Windows process-group quiescence cannot be proven, so a crashed attempt there
-  is a judgment point rather than an automatic re-queue.
+- **N7, Windows (not a supported engine target).** Process-group quiescence cannot be proven on
+  Windows, so every engine attempt ends in `quiescence_unknown` and its node `failed`: no node
+  reaches `done` and no Windows run completes through the engine. `mark failed->pending` cannot
+  change that. The Windows CI job runs the harness tests that do not need a node to reach
+  `done`; the ones that do are skipped with an N7 reason. The carrier's own dispatch and shim
+  resolution are exercised there.
 - Worker worktree isolation and join are deferred: ownership checks plus content
   fingerprints cover today's failure modes.
 - Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready

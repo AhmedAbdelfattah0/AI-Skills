@@ -7,7 +7,7 @@
  * is the comment block at the top of gate.test.mjs.
  */
 import { requiredEvidence } from './harness.mjs';
-import { retire } from './engine-quiesce.mjs';
+import { retire, leaderStart } from './engine-quiesce.mjs';
 
 export { requiredEvidence };
 
@@ -203,7 +203,7 @@ export async function gateRed(input, deps) {
   let run;
   try {
     const launch = await deps.spawnRunner({ attempt_id: attempt.attempt_id, command, timeoutMs, resources: [...resources] });
-    attempt.pid = launch.pid; attempt.pgid = launch.pgid; attempt.status = 'running';
+    attempt.pid = launch.pid; attempt.pgid = launch.pgid; attempt.leader_start = leaderStart(launch.pgid); attempt.status = 'running';
     await deps.commit(snapshot());
     launch.release();
     run = await launch.done;
@@ -438,7 +438,8 @@ export function gateShipReady({ state = {}, current = {} } = {}) {
 
   const missing = [];
   for (const kind of requiredEvidence(riskLabels(state))) {
-    const ok = (state.risk_evidence ?? []).some((e) => e?.kind === kind && nonEmpty(e.path) && (!kind.endsWith('-spec') || e.red_accepted === true));
+    // spec kinds need accepted RED; other kinds an existing artifact (the engine binds `exists`; false is refused)
+    const ok = (state.risk_evidence ?? []).some((e) => e?.kind === kind && nonEmpty(e.path) && (kind.endsWith('-spec') ? e.red_accepted === true : e.exists !== false));
     if (!ok) missing.push(kind);
   }
   if (missing.length) add('missing_risk_evidence');

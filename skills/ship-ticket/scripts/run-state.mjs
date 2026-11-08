@@ -26,22 +26,50 @@ export const hasHiddenBreak = (text) => HIDDEN.test(text);
 export const eventLine = (event) => JSON.stringify(event).replace(HIDDEN_ALL, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 const sha = (s) => 'sha256:' + createHash('sha256').update(s).digest('hex');
 
+const count = (text, needle) => text.split(needle).length - 1;
+
 /**
- * The block of `text` (BEGIN marker included, END excluded; first markers), or null without one.
+ * The block of `text`, or null without a BEGIN marker. The span runs from the first BEGIN to the
+ * LAST END after it (to the end of the text without one), so a line planted beside a stray or
+ * removed marker is still read and classified (BEGIN included, the last END excluded). A
+ * well-formed block (exactly one BEGIN, then exactly one END) is the same bytes either way.
  * `events` are the brace lines that parse, `unparsed` those that do not, `hidden` flags a hidden
- * line break anywhere in the block, `digest`/`length` fingerprint the block bytes.
+ * line break anywhere in the span, `markers` describes a marker count other than one BEGIN then one
+ * END (null when well formed), `digest`/`length` fingerprint the span bytes.
  */
 export function parseRunState(text) {
-  const b = text.indexOf(BEGIN), e = text.indexOf(END);
-  if (b < 0 || e < b) return null;
-  const block = text.slice(b, e);
+  const b = text.indexOf(BEGIN);
+  if (b < 0) return null;
+  const last = text.lastIndexOf(END);
+  const block = text.slice(b, last > b ? last : text.length);
+  const begins = count(text, BEGIN), ends = count(text, END);
+  const markers = begins === 1 && ends === 1 && text.indexOf(END) > b ? null
+    : `found ${begins} BEGIN and ${ends} END marker(s)${ends && text.indexOf(END) < b ? ', an END before BEGIN' : ''}`;
   const events = [], unparsed = [];
   for (const l of splitLines(block)) {
     if (!l.trim().startsWith('{')) continue;
     try { const v = JSON.parse(l); if (v && typeof v === 'object' && !Array.isArray(v)) events.push(v); else unparsed.push(l); }
     catch { unparsed.push(l); }
   }
-  return { block, events, unparsed, hidden: hasHiddenBreak(block), length: block.length, digest: sha(block) };
+  return { block, events, unparsed, markers, hidden: hasHiddenBreak(block), length: block.length, digest: sha(block) };
+}
+
+const AFTER = 'in a separate edit, and any owner event (START, DAG_BOUND, RETRY) first seen in this block is untrusted: '
+  + 'once status shows nothing live, re-append it as a new, distinct line (e.g. with a timestamp)';
+
+/**
+ * Why the RUN-STATE block `R` (a parseRunState result) is malformed, or null when it is well formed
+ * or absent. The one verdict every reader applies (the engine and carrier verifyApproval).
+ */
+export function malformedReason(R) {
+  if (!R) return null;
+  if (R.markers) return `RUN-STATE must hold exactly one BEGIN marker followed by exactly one END marker (${R.markers}); `
+    + `restore one pair (delete a stray marker line, or re-add a missing END) ${AFTER}`;
+  if (R.hidden) return 'RUN-STATE holds a line break other than \\n or \\r\\n (a lone CR, U+2028, U+2029, ...); '
+    + `normalize the plan file ${AFTER}`;
+  if (R.unparsed.length) return `RUN-STATE holds a line starting with { that is not JSON (${JSON.stringify(R.unparsed[0].slice(0, 80))}); `
+    + `delete that whole line (never edit it into JSON) ${AFTER}`;
+  return null;
 }
 
 /** Parsed events of the RUN-STATE block of `text` ([] without one). */
@@ -49,8 +77,6 @@ export const runStateEvents = (text) => parseRunState(text)?.events ?? [];
 
 /** Whether the block of `now` still begins with the exact bytes `before` ({ length, digest }) fingerprinted. */
 export const blockExtends = (before, now) => now.length >= before.length && sha(now.block.slice(0, before.length)) === before.digest;
-
-const count = (text, needle) => text.split(needle).length - 1;
 
 /**
  * True only when `after` equals `before` plus text inserted immediately before

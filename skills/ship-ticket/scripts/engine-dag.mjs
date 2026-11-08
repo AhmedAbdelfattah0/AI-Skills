@@ -187,6 +187,10 @@ export function redRunner(config, name) {
   return hit ? { name: hit[0], ...hit[1] } : null;
 }
 
-/** Risk evidence with `red_accepted` derived from accepted RED gates in engine state, never from input. */
-export const boundRiskEvidence = (S, list) => list.map(e => ({ ...e,
-  red_accepted: Object.values(S.gates?.red ?? {}).some(ev => (ev.specs ?? []).some(s => s.file === e.path)) }));
+/**
+ * Risk evidence with `red_accepted` derived from accepted RED gates in engine state and `exists`
+ * from the `exists(path)` probe (engine-io.mjs evidenceExists), never from input.
+ */
+export const boundRiskEvidence = (S, list, exists) => list.map(e => ({ ...e,
+  red_accepted: Object.values(S.gates?.red ?? {}).some(ev => (ev.specs ?? []).some(s => s.file === e.path)),
+  exists: typeof e.path === 'string' && e.path.length > 0 && exists(e.path) }));

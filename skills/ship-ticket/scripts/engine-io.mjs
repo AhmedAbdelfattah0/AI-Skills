@@ -14,10 +14,10 @@ import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { launcherArgs, RELEASE_BYTE } from './launcher.mjs';
 import { sha, coded } from './engine-dag.mjs';
-import { END, runStateEvents, eventLine } from './run-state.mjs';
-import { killGroup, quiesce } from './engine-quiesce.mjs';
+import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs';
+import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
 
-export { sha, killGroup, quiesce };
+export { sha, killGroup, quiesce, processInfo };
 
 export const delay = (ms) => new Promise(r => setTimeout(r, ms));
 /** Await the `boundary` hook, if any; a throw there aborts the caller at exactly that point. */
@@ -33,11 +33,11 @@ export function gitPath(repoRoot, rel) {
 /**
  * Atomically persist `state` as JSON: temp write, fsync, rename, directory fsync,
  * each preceded by its hook boundary. On win32 a rename EPERM/EBUSY is retried
- * up to 10 attempts; elsewhere it is thrown at once. A failure before the rename
- * removes the temp file, so the old state stays complete.
+ * up to 10 attempts; elsewhere it is thrown at once. A short write, or any failure before the
+ * rename, removes the temp file, so the old state stays complete.
  */
 export async function writeStateAtomic(file, state, { hooks, fs = {}, platform = process.platform } = {}) {
-  const rename = fs.renameSync ?? renameSync;
+  const rename = fs.renameSync ?? renameSync, write = fs.writeSync ?? writeSync;
   const dir = dirname(file);
   mkdirSync(dir, { recursive: true });
   const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
@@ -45,7 +45,8 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
   try {
     await boundary(hooks, 'temp-write', { file });
     fd = openSync(tmp, 'wx', 0o600);
-    writeSync(fd, JSON.stringify(state, null, 1) + '\n');
+    const data = Buffer.from(JSON.stringify(state, null, 1) + '\n');
+    if (write(fd, data) !== data.length) throw new Error(`short write of ${file}`);
     await boundary(hooks, 'temp-fsync', { file });
     fsyncSync(fd);
     closeSync(fd); fd = null;
@@ -66,15 +67,6 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
     if (fd !== null) closeSync(fd);
     if (!renamed) try { unlinkSync(tmp); } catch { /* never created */ }
   }
-}
-
-/** Real process liveness and start time (POSIX `ps lstart`; null where unavailable). */
-export function processInfo(pid) {
-  let alive;
-  try { process.kill(pid, 0); alive = true; } catch (e) { alive = e.code === 'EPERM'; }
-  if (!alive || process.platform === 'win32') return { alive, startTime: null };
-  const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000 });
-  return { alive, startTime: r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null };
 }
 
 /** POSIX: whether any process of group `pgid` exists (`kill(-pgid, 0)`); null (unknown) on Windows. */
@@ -148,7 +140,7 @@ export function fingerprint(root, rel) {
 /** Fingerprints of `paths` keyed by path. */
 export const fingerprints = (root, paths) => Object.fromEntries([...new Set(paths)].map(p => [p, fingerprint(root, p)]));
 
-/** Map of every dirty or untracked path (minus `exclude`) to its fingerprint; null without git. */
+/** Map of every dirty or untracked path (minus `exclude`) to its fingerprint; null without git. A rename records both paths. */
 export function snapshot(root, exclude = []) {
   const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: root, encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) return null;
@@ -157,9 +149,9 @@ export function snapshot(root, exclude = []) {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     if (e.length < 4) continue;
-    if (e[0] === 'R' || e[0] === 'C') i++;
-    const p = e.slice(3);
-    if (!exclude.includes(p)) out[p] = fingerprint(root, p);
+    const paths = [e.slice(3)];
+    if (e[0] === 'R' || e[0] === 'C') { i++; if (e[0] === 'R') paths.push(entries[i]); } // a rename's source is gone; a copy's is unchanged
+    for (const p of paths) if (!exclude.includes(p)) out[p] = fingerprint(root, p);
   }
   return out;
 }
@@ -176,12 +168,18 @@ export function appendLogOnce(file, event) {
   appendFileSync(file, (text && !text.endsWith('\n') ? '\n' : '') + JSON.stringify(event) + '\n', { mode: 0o600 });
 }
 
-/** Insert `event` just before the RUN-STATE END marker (atomic replace) unless its event_id is already recorded. */
+/**
+ * Insert `event` just before the RUN-STATE END marker (atomic replace) unless its event_id is
+ * already recorded. A malformed block is never written into (the owner repairs it first).
+ */
 export function appendRunStateOnce(planFile, event) {
   const text = readFileSync(planFile, 'utf8');
-  if (runStateEvents(text).some(e => e.event_id === event.event_id)) return;
+  const R = parseRunState(text);
+  if (!R) throw coded('plan_invalid', 'plan has no RUN-STATE block');
+  if (R.events.some(e => e.event_id === event.event_id)) return;
+  const bad = malformedReason(R);
+  if (bad) throw coded('run_state_malformed', bad);
   const i = text.indexOf(END);
-  if (i < 0) throw coded('plan_invalid', 'plan has no RUN-STATE block');
   const tmp = `${planFile}.${process.pid}.tmp`;
   writeFileSync(tmp, text.slice(0, i) + (text[i - 1] === '\n' ? '' : '\n') + eventLine(event) + '\n' + text.slice(i));
   renameSync(tmp, planFile);
@@ -232,6 +230,9 @@ export function repoFileDigest(repoRoot, rel) {
   const text = readIfExistsBytes(join(repoRoot, n));
   return text === null ? 'missing' : sha(text);
 }
+
+/** Probe for risk evidence: whether `rel` names an existing file inside `repoRoot` (an escaping path never does). */
+export const evidenceExists = (repoRoot) => (rel) => { try { return repoFileDigest(repoRoot, rel) !== 'missing'; } catch { return false; } };
 
 /** `gateRed` deps for the engine: durable commits, repo file digests, group liveness, the binding re-check and the RED runner. */
 export function gateRedDeps({ commit, alive, platform, repoRoot, verifyBinding, ...runner }) {

@@ -14,7 +14,7 @@
  *   reasoning_output_tokens}. Codex reports no cost.
  * Gemini and Antigravity output was not available to verify; they are not parsed.
  */
-import { readFileSync, readdirSync, existsSync, appendFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, appendFileSync, writeFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { isEntrypoint } from './harness.mjs';
 
@@ -322,12 +322,23 @@ function parseFlags(argv, allowed) {
   return out;
 }
 
-/** Append only non-refused records to `out` (JSONL, 0600 on creation); an all-refused import leaves the file untouched. */
+/**
+ * Append only non-refused records to `out` (JSONL, 0600 on creation); an all-refused import leaves
+ * the file untouched. An existing JSON array, or JSONL without a final newline, is first rewritten
+ * as JSONL (temp file + rename), so the appended records never join an earlier line.
+ */
 function importInto(out, incoming) {
-  const existing = existsSync(out) ? readEvents(out) : [];
+  const raw = existsSync(out) ? readFileSync(out, 'utf8') : '';
+  const existing = raw.trim() ? readEvents(out) : [];
   const { records, refused } = addUsageRecords(existing, incoming);
   const added = records.slice(existing.length);
-  if (added.length) appendFileSync(out, added.map(r => JSON.stringify(r)).join('\n') + '\n', { mode: 0o600 });
+  if (!added.length) return { added: 0, refused };
+  const lines = (rs) => rs.map(r => JSON.stringify(r)).join('\n') + '\n';
+  if (raw.trim() && (raw.trimStart().startsWith('[') || !raw.endsWith('\n'))) {
+    const tmp = `${out}.${process.pid}.tmp`;
+    writeFileSync(tmp, lines(records), { mode: 0o600 });
+    renameSync(tmp, out);
+  } else appendFileSync(out, lines(added), { mode: 0o600 });
   return { added: added.length, refused };
 }
 

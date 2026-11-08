@@ -35,8 +35,8 @@
  *   increase only when the dispatch is actually launched.
  * RED barrier: a node (or a repair, through the nodes whose writes it overlaps) whose dependency
  *   has redSpecs waits for accepted RED evidence that is still valid: spec digests unchanged and
- *   the resolved config.base commit unchanged; otherwise the evidence is dropped and the
- *   judgment 'red_invalidated' is reported.
+ *   the resolved config.base commit unchanged; otherwise the evidence is dropped, the engine
+ *   re-runs RED and the judgment 'red_invalidated' names the re-run (run-engine-wave0.test.mjs N2).
  * Quiescence: an attempt is recorded only after its whole process group is gone (killed and
  *   awaited after the launcher exits). Unknown quiescence (Windows) -> 'quiescence_unknown',
  *   never done.
@@ -51,7 +51,7 @@
  *   Engine usage records carry role and source 'engine'.
  * Telemetry: a failing run-log or RUN-STATE sink never fails a command: the event stays in the
  *   outbox and status.telemetry_degraded lists it; resume replays it.
- * mark failed->pending that clears a judgment records cleared_judgments on its MARK event.
+ * mark failed->pending that clears a judgment records cleared_judgments [{ code, node }] on its MARK event.
  * =========================================================================================
  */
 import test from 'node:test';
@@ -234,12 +234,13 @@ test('R5 barrier: RED evidence is invalidated when a spec file changes; re-runni
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   ok(fx.gate('red', { node: 'r', command: 'unit' }));
+  const first = fx.readState().gates.red.r.attempt_id;
   writeFileSync(join(fx.repo, 'spec', 'red.test.mjs'), FAILING_SPEC + '// edited after RED\n');
   const r = fx.cli('drive');
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.ok(codes(r.out).includes('red_invalidated'), JSON.stringify(r.out.judgments));
   assert.equal(fx.runs('p').length, 0);
-  assert.equal(fx.readState().gates.red.r, undefined, 'stale evidence is dropped');
+  assert.notEqual(fx.readState().gates.red.r.attempt_id, first, 'stale evidence is dropped and the engine re-ran RED (wave0 N2)');
   ok(fx.gate('red', { node: 'r', command: 'unit' }));
   assert.equal(fx.cli('drive').out.nodes.p.state, 'done');
 });
@@ -609,7 +610,7 @@ test('X mark failed->pending that clears quiescence_unknown records the authoriz
   assert.ok(codes(judged).includes('quiescence_unknown'));
   ok(fx.cli('mark', { node: 'a', transition: 'failed->pending', reason: 'owner confirmed the worker tree is gone' }));
   const ev = runStateEvents(fx.planFile).find(e => e.event === 'MARK');
-  assert.deepEqual(ev.cleared_judgments, ['quiescence_unknown']);
+  assert.deepEqual(ev.cleared_judgments, [{ code: 'quiescence_unknown', node: 'a' }]);
   assert.equal(ev.reason, 'owner confirmed the worker tree is gone');
 });
 

@@ -35,7 +35,8 @@ export function gitPath(repo, rel) {
  *   (inserts that event inside RUN-STATE), appendRaw <text> (inserts those exact bytes), appendLate {event} (the same, just before the worker
  *   finishes, e.g. after waitFor), editPlan (edits the
  *   narrative), breakGit (makes `git status` fail), sleeper <pidfile> (leaves a background
- *   child in the process group), killGroup, exit <code>, hang, waitFor <file>.
+ *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open),
+ *   killGroup, exit <code>, hang, waitFor <file>.
  */
 export const FAKE_CLI = (root) => `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -60,6 +61,10 @@ if (b.breakGit) { rmSync('.git/index', { force: true }); mkdirSync('.git/index')
 if (b.sleeper) {
   const s = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   writeFileSync(b.sleeper, String(s.pid)); s.unref();
+}
+if (b.holdStdout) {
+  const h = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: ['ignore', 'inherit', 'ignore'] });
+  writeFileSync(b.holdStdout, String(h.pid)); h.unref();
 }
 function finish() {
   if (b.appendLate) writeFileSync(PLAN, readFileSync(PLAN, 'utf8').replace('${END}', JSON.stringify(b.appendLate) + '\\n${END}'));

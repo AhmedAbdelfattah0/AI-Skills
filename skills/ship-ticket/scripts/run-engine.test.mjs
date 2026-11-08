@@ -119,6 +119,8 @@ import { POSIX, BEGIN, END, narrativeDigest, delay, codes, fixture, spawnSpy, ru
 const ENGINE_URL = new URL('./run-engine.mjs', import.meta.url).href;
 /** Windows cannot prove process-group quiescence, so a finished attempt there is a judgment, never done (R2). */
 const POSIX_ONLY = POSIX ? false : 'POSIX process groups: on Windows every attempt ends in quiescence_unknown';
+/** The same limit, for a test that needs a node to reach done (known limit N7, references/execution-harness.md). */
+const N7_SKIP = POSIX ? false : 'known Windows quiescence limit N7: a node never reaches done, so this path cannot run on Windows';
 const injected = () => Object.assign(new Error('injected fault'), { code: 'injected' });
 
 /**
@@ -249,7 +251,7 @@ test('AC1 mark allows only pending->cancelled and failed->pending, and nothing e
   await assert.rejects(async () => mark(fx.ctx({ node: 'c', transition: 'cancelled->pending', reason: 'r' })), { code: 'mark_refused' });
 });
 
-test('AC1 failed->pending counts as an attempt and is capped at one retry', async (t) => {
+test('AC1 failed->pending counts as an attempt and is capped at one retry', { skip: N7_SKIP }, async (t) => {
   const fx = fixture(t, { config: { timeoutMs: HANG_TIMEOUT_MS }, behaviour: { a: { hang: true } } });
   await init(fx.ctx());
   const first = await drive(fx.ctx());
@@ -736,7 +738,7 @@ const gateFixture = (t, opts = {}) => {
   return fx;
 };
 
-test('gate CLI: red runs the DAG-bound command and persists accepted RED; a passing spec is refused', async (t) => {
+test('gate CLI: red runs the DAG-bound command and persists accepted RED; a passing spec is refused', { skip: N7_SKIP }, async (t) => {
   const fx = gateFixture(t, { config: { testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', 'red.test.mjs'], format: 'tap' } } },
     nodes: [{ id: 'r', writes: ['src/r.txt'], redSpecs: [{ file: 'red.test.mjs', name: 'fails on assertion' }] },
       { id: 'g', writes: ['src/g.txt'], redSpecs: [{ file: 'red.test.mjs', name: 'already passes' }] }] });

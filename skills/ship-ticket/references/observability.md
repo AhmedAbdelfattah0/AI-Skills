@@ -23,8 +23,8 @@ events (`MARK`, resume and retry events) to a sibling file,
 `<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
 log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
 
-Usage events (`usage.mjs`, carrier `usageLog`) carry `source` (`carrier`,
-`session` or `codex`; one source per execution, never double-counted) and `role`
+Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`carrier`,
+`engine`, `session` or `codex`; one source per execution, never double-counted) and `role`
 (`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`). Per-role totals and
 the orchestrator share come from `eval.mjs report`.
 

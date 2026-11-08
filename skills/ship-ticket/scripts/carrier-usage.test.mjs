@@ -364,7 +364,8 @@ writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
 setTimeout(() => {}, 60000);
 `);
   const started = Date.now();
-  const result = await dispatch(config(fx, { timeoutMs: 1500 }), { env, verifySubscription: () => true, handleSignals: false });
+  // 5 s, not 1.5 s: under a loaded full-suite run the fake CLI can need over 1.5 s to start and write its pid file.
+  const result = await dispatch(config(fx, { timeoutMs: 5000 }), { env, verifySubscription: () => true, handleSignals: false });
   assert.equal(result.timed_out, true);
   assert.equal(result.succeeded, false);
   assert.ok(Date.now() - started < 20000);

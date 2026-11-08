@@ -422,7 +422,11 @@ Read the plan and Design Contract from disk before writing.
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
   which the next `drive` dispatches. Judgment points (`status.judgments`) come back to you or the
   user. The manual flow below is the documented fallback when the engine or gate
-  module is unavailable (record `harness degraded`).
+  module is unavailable (record `harness degraded`). A run that falls back after
+  `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`
+  it again, since its ledger no longer reflects the work. While that state file
+  exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does
+  not authorize is **WAIT_FOR_USER**, never a hand-edit of the state file.
 - Schedule the execution DAG continuously: whenever a node finishes, dispatch
   every newly ready conflict-free node without waiting for unrelated siblings.
   When Node is available, derive waves with the harness `schedule` (run ID as

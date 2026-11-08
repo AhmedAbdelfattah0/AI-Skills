@@ -31,7 +31,11 @@ const realpathSync = (p) => realpathJs.native(p);
 import { routeModel, isEntrypoint } from './harness.mjs';
 import { extractUsage, COUNTERS } from './usage.mjs';
 import { RELEASE_BYTE, launcherArgs } from './launcher.mjs';
-import { parseRunState, workerRunStateAppend } from './run-state.mjs';
+import { parseRunState, malformedReason, workerRunStateAppend } from './run-state.mjs';
+import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
+import { finalMessage, parseWorkerReport } from './worker-report.mjs';
+
+export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
 const PROVIDERS = new Set(['claude', 'codex', 'gemini', 'antigravity']);
 const VERIFIED = new Set(['claude', 'codex']);
@@ -46,15 +50,6 @@ const KILL_GRACE_MS = 5000;
 const ROLES = new Set(['builder', 'repair', 'evidence']);
 /** Default usage role per phase when `config.role` is absent. */
 const DEFAULT_ROLE = Object.freeze({ BUILD: 'builder', REPAIR: 'repair', PROVE: 'evidence', SHIP: 'builder' });
-
-/** Environment variables that route a provider CLI to metered API billing. */
-export const BILLING_ENV = Object.freeze({
-  claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK',
-    'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'],
-  codex: ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'],
-  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS'],
-  antigravity: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS'],
-});
 
 function fail(message) { throw new Error(message); }
 
@@ -122,7 +117,8 @@ export function verifyApproval(repoRoot, approval) {
   if (!planPath) fail('approved plan artifact not found for ticket ' + ticket);
   const block = parseRunState(readFileSync(planPath, 'utf8'));
   if (!block) fail('plan artifact has no RUN-STATE block');
-  if (block.hidden) fail('plan RUN-STATE block holds a line break other than \\n or \\r\\n; normalize the file first');
+  const malformed = malformedReason(block);
+  if (malformed) fail('plan ' + malformed);
   const start = block.events.find(e => e.event === 'START' && e.run_id === runId);
   if (!start) fail('no START event for run ' + runId + '; approval is not executable');
   if (start.approved_plan_digest !== approvedPlanDigest) fail('approved-plan digest mismatch');
@@ -259,62 +255,6 @@ export function prepareDispatch(config) {
   };
 }
 
-/** Child environment: provider billing variables removed (case-insensitively) unless API billing is authorized. */
-export function childEnv(provider, billing, base = process.env) {
-  const env = { ...base };
-  if (billing !== 'subscription') return env;
-  const deny = new Set(BILLING_ENV[provider].map(k => k.toUpperCase()));
-  for (const key of Object.keys(env)) if (deny.has(key.toUpperCase())) delete env[key];
-  return env;
-}
-
-/**
- * Ask the provider CLI, in the stripped environment, how it is authenticated.
- * Returns true (subscription proven), false (refuse) or 'unverified'
- * (no verified status interface for this provider).
- */
-export function verifySubscription(provider, env, run = spawnSync) {
-  const opts = { env, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] };
-  const exec = (cmd, args) => { const s = spawnSpec(cmd, args, process.platform, env); return run(s.file, s.args, { ...opts, shell: s.shell }); };
-  if (provider === 'claude') {
-    const r = exec('claude', ['auth', 'status', '--json']);
-    try {
-      const s = JSON.parse(r.stdout ?? '');
-      return s.loggedIn === true && s.authMethod === 'claude.ai' && s.apiProvider === 'firstParty';
-    } catch { return false; }
-  }
-  if (provider === 'codex') {
-    const r = exec('codex', ['login', 'status']);
-    return r.status === 0 && /Logged in using ChatGPT/.test(`${r.stdout ?? ''}\n${r.stderr ?? ''}`);
-  }
-  return 'unverified';
-}
-
-/** Resolve a bare command on Windows through PATH x PATHEXT so .cmd shims can be detected. */
-export function resolveWindowsCommand(command, env = process.env, exists = existsSync) {
-  if (/[\\/]/.test(command)) return command;
-  const get = (name) => Object.entries(env).find(([k]) => k.toUpperCase() === name)?.[1];
-  const exts = (get('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
-  for (const dir of (get('PATH') ?? '').split(';').filter(Boolean)) {
-    for (const ext of exts) {
-      const candidate = join(dir, command + ext);
-      if (exists(candidate)) return candidate;
-    }
-  }
-  return command;
-}
-
-/** Spawn spec that works for real executables and Windows .cmd/.bat shims without unsafe shell interpolation. */
-export function spawnSpec(executable, args, platform = process.platform, env = process.env, exists = existsSync) {
-  if (platform !== 'win32') return { file: executable, args, shell: false };
-  const resolved = resolveWindowsCommand(executable, env, exists);
-  if (/\.(cmd|bat)$/i.test(resolved)) {
-    if (!args.every(a => SAFE_ARG.test(a))) fail('unsafe argument for a Windows batch shim');
-    return { file: `"${resolved}"`, args, shell: true };
-  }
-  return { file: resolved, args, shell: false };
-}
-
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
 function groupAlive(pid) {
@@ -345,8 +285,8 @@ async function terminateTree(child, platform = process.platform) {
   return !groupAlive(child.pid);
 }
 
-/** Snapshot every dirty path (path -> status/size/mtime/hash signature) via git status; null when git is unavailable. */
-function gitDirty(top) {
+/** Snapshot every dirty path (path -> status/size/mtime/hash signature; both paths of a rename) via git status; null when git is unavailable. */
+export function gitDirty(top) {
   const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: top, encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) return null;
   const map = new Map();
@@ -354,14 +294,16 @@ function gitDirty(top) {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     if (e.length < 4) continue;
-    const path = e.slice(3);
-    if (e[0] === 'R' || e[0] === 'C') i++; // rename source follows
-    let sig = e.slice(0, 2) + ':deleted';
-    try {
-      const s = statSync(join(top, path));
-      sig = `${e.slice(0, 2)}:${s.size}:${s.mtimeMs}:${s.mode}:` + (s.isFile() ? createHash('sha256').update(readFileSync(join(top, path))).digest('hex') : 'dir');
-    } catch { /* deleted */ }
-    map.set(path, sig);
+    const paths = [e.slice(3)];
+    if (e[0] === 'R' || e[0] === 'C') { i++; if (e[0] === 'R') paths.push(entries[i]); } // a rename's source is gone; a copy's is unchanged
+    for (const path of paths) {
+      let sig = e.slice(0, 2) + ':deleted';
+      try {
+        const s = statSync(join(top, path));
+        sig = `${e.slice(0, 2)}:${s.size}:${s.mtimeMs}:${s.mode}:` + (s.isFile() ? createHash('sha256').update(readFileSync(join(top, path))).digest('hex') : 'dir');
+      } catch { /* deleted */ }
+      map.set(path, sig);
+    }
   }
   return map;
 }
@@ -411,51 +353,6 @@ export function orchestratorPathsChanged(before, after, ticket) {
 export function ownershipViolations(before, after, writes, othersOwned, ticket) {
   if (!before || !after) return null;
   return changedPaths(before, after).filter(p => !isOwnPlanFile(p, ticket) && !under(p, writes) && !under(p, othersOwned)).sort();
-}
-
-/** Extract the worker's final message text and error flag from provider output. */
-function finalMessage(provider, stdout) {
-  if (provider === 'claude') {
-    try { const r = JSON.parse(stdout); return { text: typeof r.result === 'string' ? r.result : null, is_error: r.is_error === true }; }
-    catch { return { text: null, is_error: true }; }
-  }
-  if (provider === 'codex') {
-    let text = null;
-    for (const line of stdout.split(/\r?\n/)) {
-      if (!line.startsWith('{')) continue;
-      try { const e = JSON.parse(line); if (e.type === 'item.completed' && e.item?.type === 'agent_message') text = e.item.text; } catch { /* skip */ }
-    }
-    return { text, is_error: text === null };
-  }
-  return { text: null, is_error: false };
-}
-
-const REPORT_FENCE = /```ship-ticket-report[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
-const REPORT_KEYS = ['tests', 'red_seen', 'blockers', 'needs_outside_ownership'];
-const stringList = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
-
-/**
- * Parse and validate the LAST fenced `ship-ticket-report` block of a worker's
- * final message: `{tests:[{cmd, result:'pass'|'fail'}], red_seen:[], blockers:[],
- * needs_outside_ownership:[]}` (exactly these keys). Returns
- * `{status:'structured', report}` or `{status:'unstructured', failure}`; never throws.
- */
-export function parseWorkerReport(text) {
-  if (typeof text !== 'string') return { status: 'unstructured', failure: 'no final message' };
-  const blocks = [...text.matchAll(REPORT_FENCE)];
-  if (!blocks.length) return { status: 'unstructured', failure: 'no ship-ticket-report block' };
-  let report;
-  try { report = JSON.parse(blocks[blocks.length - 1][1]); } catch (e) { return { status: 'unstructured', failure: 'invalid JSON: ' + e.message }; }
-  if (!report || typeof report !== 'object' || Array.isArray(report)) return { status: 'unstructured', failure: 'report is not an object' };
-  const keys = Object.keys(report);
-  const extra = keys.filter(k => !REPORT_KEYS.includes(k));
-  const missing = REPORT_KEYS.filter(k => !keys.includes(k));
-  if (extra.length || missing.length) return { status: 'unstructured', failure: 'report keys: missing [' + missing + '] unexpected [' + extra + ']' };
-  if (!Array.isArray(report.tests) || !report.tests.every(t => t && typeof t === 'object' && !Array.isArray(t)
-    && typeof t.cmd === 'string' && t.cmd.length > 0 && (t.result === 'pass' || t.result === 'fail')))
-    return { status: 'unstructured', failure: 'tests must be [{cmd, result:"pass"|"fail"}]' };
-  for (const k of REPORT_KEYS.slice(1)) if (!stringList(report[k])) return { status: 'unstructured', failure: k + ' must be an array of strings' };
-  return { status: 'structured', report };
 }
 
 export { RELEASE_BYTE, launcherArgs } from './launcher.mjs';

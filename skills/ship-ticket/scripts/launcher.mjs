@@ -5,6 +5,8 @@
 
 /** Byte the carrier (and the run engine) writes to the launcher's stdin to let the provider CLI start. */
 export const RELEASE_BYTE = Buffer.from([0x06]);
+/** Durable mode: how long the launcher drains stdout after the provider exits before it completes. */
+const DRAIN_MS = 1000;
 
 /**
  * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
@@ -13,9 +15,11 @@ export const RELEASE_BYTE = Buffer.from([0x06]);
  * running the worker. Then it spawns the provider in its own process group (inherited).
  * - Carrier mode: forwards the rest of stdin, inherits stdout/stderr and mirrors the provider's
  *   exit code or signal; a provider spawn failure exits 127.
- * - Durable mode (engine): the prompt comes from promptFile, stdout is captured to outFile, and on
- *   close the completion envelope is written atomically (fsync + rename), so an orphaned worker's
- *   outcome survives the engine.
+ * - Durable mode (engine): the prompt comes from promptFile, stdout is captured to outFile, and
+ *   once the provider exits (after its stdout closes, or a DRAIN_MS drain when a descendant keeps
+ *   stdout open) the completion envelope is written atomically (fsync + rename), so an orphaned
+ *   worker's outcome survives the engine. The engine then retires the whole group, killing any
+ *   descendant that is still alive (engine-quiesce.mjs).
  */
 const LAUNCHER = `'use strict';
 const { spawn } = require('node:child_process');
@@ -58,7 +62,9 @@ process.stdin.once('data', (chunk) => {
   cli.stdin.on('error', () => {});
   if (durable) {
     cli.stdout.on('data', (c) => { size += c.length; if (size <= 33554432) out.push(c); });
-    cli.on('close', (code, signal) => finish(code, signal, null));
+    let exited = null;
+    cli.on('exit', (code, signal) => { exited = [code, signal]; setTimeout(() => finish(code, signal, null), ${DRAIN_MS}); });
+    cli.on('close', (code, signal) => finish(exited ? exited[0] : code, exited ? exited[1] : signal, null));
     cli.stdin.end(fs.readFileSync(spec.promptFile));
     return;
   }

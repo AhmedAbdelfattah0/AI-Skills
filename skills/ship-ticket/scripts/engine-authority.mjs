@@ -8,12 +8,13 @@
  * quiescent observation (`through` = the attempt count then). Every dispatch path records a durable
  * attempt before it releases any code (the launch protocol), so a line that appears while
  * dispatched code could have run lands in `untrusted` whichever path ran it. The block is read only
- * through run-state.mjs. A malformed block (a hidden line break, a brace line that is not JSON) or
+ * through run-state.mjs. A malformed block (a hidden line break, a brace line that is not JSON, a
+ * marker count other than one BEGIN then one END) or
  * one whose already-observed bytes were rewritten also taints the lines first seen with it: a
  * rewrite can reveal a line that dispatched code planted where no reader saw it. Pure: callers pass
  * the plan text and the group-liveness probe.
  */
-import { AUTHORITY_EVENTS, parseRunState, blockExtends } from './run-state.mjs';
+import { AUTHORITY_EVENTS, parseRunState, blockExtends, malformedReason } from './run-state.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 
 /** Whether attempt `a` may still be running code ('unknown' is re-probed on its group). */
@@ -29,7 +30,7 @@ export function observeAuthority(S, planText, isAlive) {
   const A = (S.authority ??= { through: 0, trusted: [], untrusted: [] });
   const R = parseRunState(planText ?? '');
   const rewritten = Boolean(R && A.block && !blockExtends(A.block, R));
-  const tainted = (S.attempts ?? []).length > A.through || rewritten || Boolean(R && (R.hidden || R.unparsed.length));
+  const tainted = (S.attempts ?? []).length > A.through || rewritten || malformedReason(R) !== null;
   for (const e of R?.events ?? []) {
     if (!AUTHORITY_EVENTS.includes(e.event)) continue;
     const line = JSON.stringify(e);
@@ -44,11 +45,8 @@ export function observeAuthority(S, planText, isAlive) {
 
 /** Judgments for a malformed RUN-STATE block in `planText` (empty when well formed or absent). */
 export function malformedRunState(planText) {
-  const R = parseRunState(planText ?? '');
-  if (!R || !(R.hidden || R.unparsed.length)) return [];
-  return [{ code: 'run_state_malformed', reason: R.hidden
-    ? 'RUN-STATE holds a line break other than \\n or \\r\\n (a lone CR, U+2028, U+2029, ...); normalize the plan file, then re-append any owner event'
-    : `RUN-STATE holds a line starting with { that is not JSON (${JSON.stringify(R.unparsed[0].slice(0, 80))}); fix or remove it` }];
+  const reason = malformedReason(parseRunState(planText ?? ''));
+  return reason ? [{ code: 'run_state_malformed', reason }] : [];
 }
 
 /** Trusted authority events of `kind` (parsed), in observation order. */

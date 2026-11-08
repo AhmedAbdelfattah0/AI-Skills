@@ -44,7 +44,11 @@ Finish these checks before announcing REVIEW or appending its start event:
   When an engine state file exists, the RED event is `gate.mjs` `gateRed`
   evidence (runner-produced by the DAG-bound `config.testCommands` runner, bound to
   the spec digests and the baseline), not hand-written; unsupported runner output
-  falls back to the manual event, marked degraded;
+  falls back to the manual event, marked degraded. The engine cannot release its RED
+  barrier on a manual event, so `drive` keeps every dependent of that node blocked:
+  either fix the runner format and re-run `gate red`, or continue the rest of the
+  ticket in the manual workflow (record `harness degraded`, stop calling `drive`
+  for it) and never present the engine's blocked state as a pass;
 - test-quality, docs-accuracy, applicable static security rows and runtime attack
   work are complete or carry a named degradation;
 - UI metadata and the parity artifact are complete when UI is in scope;
