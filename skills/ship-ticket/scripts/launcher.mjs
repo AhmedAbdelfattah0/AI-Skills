@@ -46,7 +46,7 @@ process.stdin.once('data', (chunk) => {
   const sample = () => {
     if (sm.ps || done) return;
     try {
-      const ps = require('node:child_process').execFile('ps', ['-A', '-o', 'pid=,pgid=,rss=,pcpu='], { timeout: 2000, maxBuffer: 8388608 }, (err, so) => {
+      const ps = require('node:child_process').execFile('ps', ['-A', '-o', 'pid=,pgid=,rss=,pcpu='], { timeout: 2000, maxBuffer: 8388608, env: Object.assign({}, process.env, { LC_ALL: 'C' }) }, (err, so) => {
         sm.ps = null;
         if (err || done) return;
         try {

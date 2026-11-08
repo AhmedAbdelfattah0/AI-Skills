@@ -179,15 +179,15 @@ function git(repo, args) {
   return r.stdout.trim();
 }
 
-const readJsonl = (path, strict = false) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
-  try { return [JSON.parse(line)]; } catch { return strict ? fail(`usage file has a malformed JSONL line: ${path}`) : []; }
+const readJsonl = (path) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
+  try { return [JSON.parse(line)]; } catch { return []; }
 });
 
 function readUsage(path) {
   if (!existsSync(path)) fail(`usage file not found: ${path}`);
   const text = readFileSync(path, 'utf8').trim();
   if (!text) return [];
-  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path, true); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
+  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
 }
 
 function report(options) {

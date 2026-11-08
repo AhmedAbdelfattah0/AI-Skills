@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { launcherArgs, RELEASE_BYTE } from './launcher.mjs';
 
 const WIN_SKIP = process.platform === 'win32' ? 'N7: the sampler is POSIX-only (peak is unknown on Windows)' : false;
@@ -59,4 +59,11 @@ test('sampler: nothing outlives the attempt (no process left in the launcher gro
   const { pid } = await runLauncher(t, 'setTimeout(() => {}, 1250)');
   await new Promise((r) => setTimeout(r, 300));
   assert.throws(() => process.kill(-pid, 0), { code: 'ESRCH' }, 'the launcher group is empty: no ps or timer survived');
+});
+
+test('sampler: a comma-decimal parent locale (de_DE) still yields a numeric peak', { skip: WIN_SKIP }, async (t) => {
+  const de = spawnSync('ps', ['-A', '-o', 'pcpu='], { env: { ...process.env, LC_ALL: 'de_DE.UTF-8' }, encoding: 'utf8' });
+  if (!/\d,\d/.test(de.stdout || '')) return t.skip('de_DE.UTF-8 is not installed or ps does not localize %cpu here');
+  const { env } = await runLauncher(t, HOG, { env: { ...process.env, LC_ALL: 'de_DE.UTF-8', LANG: 'de_DE.UTF-8' } });
+  assert.equal(typeof env.peak_rss_mb, 'number', JSON.stringify(env));
 });

@@ -64,14 +64,15 @@ test('attachUsage: one usage record with unknown counters makes the orchestrator
   assert.equal(partial.usage.orchestrator_share_pct, 'unknown');
 });
 
-test('eval CLI: a malformed line in a usage JSONL file rejects the file', (t) => {
+test('eval CLI: a crash-truncated trailing line in a usage JSONL file is skipped and the report still prints', (t) => {
   const repo = mkdtempSync(join(tmpdir(), 'wave1-eval-'));
   t.after(() => rmSync(repo, { recursive: true, force: true }));
   spawnSync('git', ['init', '-q', repo]);
   mkdirSync(join(repo, '.git', 'ai-skills', 'ship-ticket'), { recursive: true });
   const usage = join(repo, 'u.jsonl');
-  writeFileSync(usage, '{"run_id":"r1"}\n{not json\n');
+  writeFileSync(usage, '{"run_id":"r1","role":"builder","input_tokens":1,"output_tokens":1}\n{"run_id":"r1","role":"buil');
   const r = spawnSync(process.execPath, [fileURLToPath(new URL('./eval.mjs', import.meta.url)), 'report', '--repo', repo, '--all', '--usage', usage], { encoding: 'utf8' });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /malformed JSONL line/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /malformed|not JSON/);
+  assert.match(r.stdout, /orchestrator_share_pct|runs/, `the report prints: ${r.stdout}`);
 });

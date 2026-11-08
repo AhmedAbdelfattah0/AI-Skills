@@ -53,7 +53,7 @@ Ship threshold: suite green twice on POSIX, Windows green via skips, `cli.mjs va
 
 ## Acceptance criteria
 - W0: items above pass; CodeRabbit disposition table committed; ship threshold met.
-- W1: eval prints new metrics, `unknown` where no data; sampler overhead <2% of wall on bench fixture (measured).
+- W1: eval prints new metrics, `unknown` where no data; sampler overhead <2% of wall measured with a real durable launcher running a CPU-bound worker; engine-bench measures engine overhead only.
 - W2: (i) v1 DAG without new fields yields identical state/events (golden); (ii) failing `checks` blocks `done`; (iii) editing a contract a unit reads invalidates its check evidence + closure only; (iv) unmapped plan AC id is `dag_invalid` at init when any node has `acceptance`; (v) status shows per unit nodes, fingerprints, check evidence, candidate, state; (vi) unit count cannot multiply retry allowance.
 - W3: `gateReview` refuses a review omitting a mapped AC id; `cli.mjs validate` passes.
 
