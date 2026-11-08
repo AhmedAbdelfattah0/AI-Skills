@@ -7,6 +7,8 @@
 export const RELEASE_BYTE = Buffer.from([0x06]);
 /** Durable mode: how long the launcher drains stdout after the provider exits before it completes. */
 const DRAIN_MS = 1000;
+/** Resource sampler cadence (see the launcher). */
+const SAMPLE_MS = 1000, FIRST_SAMPLE_MS = 100;
 
 /**
  * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
@@ -35,12 +37,44 @@ process.stdin.once('data', (chunk) => {
   process.stdin.pause();
   const out = [];
   let size = 0;
+  // Resource sampler (durable mode, POSIX): every ${SAMPLE_MS} ms (first sample after ${FIRST_SAMPLE_MS} ms) one async \`ps\` of the
+  // launcher's own process group, minus the launcher and the ps itself. Keeps the max summed RSS (KiB) and the max summed
+  // ps %cpu (a per-process lifetime average, so an estimate). Observation only: timers are unref'd, any failure
+  // leaves n = 0 (reported as 'unknown', never 0), and stopSampler() kills an in-flight ps before the envelope.
+  const sm = { n: 0, rss: 0, cpu: 0, ps: null, timers: [] };
+  const sampling = durable && spec.sample !== false && process.platform !== 'win32';
+  const sample = () => {
+    if (sm.ps || done) return;
+    try {
+      const ps = require('node:child_process').execFile('ps', ['-A', '-o', 'pid=,pgid=,rss=,pcpu='], { timeout: 2000, maxBuffer: 8388608 }, (err, so) => {
+        sm.ps = null;
+        if (err || done) return;
+        try {
+          const rows = String(so).split('\\n').map((l) => l.trim().split(/\\s+/).map(Number)).filter((r) => r.length === 4 && r.every(Number.isFinite));
+          const me = rows.find((r) => r[0] === process.pid);
+          if (!me) return;
+          let rss = 0, cpu = 0, any = false;
+          for (const r of rows) if (r[1] === me[1] && r[0] !== process.pid && r[0] !== ps.pid) { rss += r[2]; cpu += r[3]; any = true; }
+          if (!any) return;
+          sm.n++; sm.rss = Math.max(sm.rss, rss); sm.cpu = Math.max(sm.cpu, cpu);
+        } catch {}
+      });
+      sm.ps = ps;
+      ps.on('error', () => {});
+    } catch {}
+  };
+  const stopSampler = () => {
+    for (const t of sm.timers) { clearTimeout(t); clearInterval(t); }
+    try { if (sm.ps) sm.ps.kill('SIGKILL'); } catch {}
+  };
   const envelope = (code, signal, error) => {
+    stopSampler();
     fs.writeFileSync(spec.outFile, Buffer.concat(out), { mode: 0o600 });
     const tmp = spec.envelopeFile + '.tmp';
     const fd = fs.openSync(tmp, 'w', 0o600);
     fs.writeSync(fd, JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
-      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString() }));
+      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString(),
+      peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n }));
     fs.fsyncSync(fd); fs.closeSync(fd);
     fs.renameSync(tmp, spec.envelopeFile);
     process.exit(code === 0 ? 0 : 1);
@@ -60,6 +94,10 @@ process.stdin.once('data', (chunk) => {
   catch (e) { return finish(null, null, e.code || 'spawn_error'); }
   cli.on('error', (e) => finish(null, null, e.code || 'spawn_error'));
   cli.stdin.on('error', () => {});
+  if (sampling) {
+    const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
+    first.unref(); every.unref(); sm.timers.push(first, every);
+  }
   if (durable) {
     cli.stdout.on('data', (c) => { size += c.length; if (size <= 33554432) out.push(c); });
     let exited = null;
@@ -75,10 +113,12 @@ process.stdin.once('data', (chunk) => {
 `;
 
 const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
 /** Arguments that run the launcher for a resolved provider spawn spec (durable mode when `spec.envelopeFile` is set). */
 export function launcherArgs(spec) {
   const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
-  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable })];
+  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable,
+    ...(spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {}) })];
 }
 

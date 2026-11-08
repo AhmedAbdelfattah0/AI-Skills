@@ -28,6 +28,30 @@ Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`
 (`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`). Per-role totals and
 the orchestrator share come from `eval.mjs report`.
 
+### Resource and cost metrics (`eval.mjs report`)
+
+Read-only; each prints `unknown` where its source lacks data, never 0, and none is a gate.
+
+- `peak_rss_mb` (max over attempts) and `peak_cpu_pct`: the durable launcher samples its
+  process group with `ps` (first sample at 0.1 s, then every 1 s) and writes the peak to the
+  attempt envelope (`peak_rss_mb`, `peak_cpu_pct`, `resource_samples`). The launcher and the
+  `ps` itself are excluded. Limits: sampled peaks, so a spike between ticks is missed and a
+  worker shorter than 0.1 s has no sample; RSS double-counts shared pages; `peak_cpu_pct` sums
+  `ps` %cpu, a per-process lifetime average, so it is an estimate; the group is the
+  launcher's, so a descendant that left it is not counted. Windows (no process groups), a
+  missing `ps` or a disabled sampler (`SHIP_TICKET_SAMPLER_OFF=1`) give `unknown`.
+- `parallel_efficiency`: sum of engine attempt durations (attempt start to envelope end) /
+  (wall x `config.width`), wall being first attempt start to last attempt end. 1 means every
+  slot was busy; overlap is not causal time saved. Needs the run's engine state.
+- `terminal_review_outcomes`: original reviews recorded with `overflow` (a terminal FAIL).
+  `retries_authorized`: RETRY authorizations consumed by a new original review. Both come from
+  the engine state's review chain; `unknown` without it.
+- `cost_per_accepted_ticket`: reported cost of a complete run, kept per `cost_basis` (bases are
+  never added; subscription estimates are not charges). `unknown` for an incomplete run or one
+  with no reported cost. `cross_run` keeps the per-basis averages.
+- `orchestrator_share_pct` is `unknown` when any usage record of the run lacks counters, and a
+  usage file with a malformed JSONL line is rejected whole.
+
 Logging is best effort. If the helper is absent or one call fails, announce
 `timing telemetry degraded`, record the reason in the execution summary when
 possible, and continue the ticket. A telemetry failure never changes a workflow

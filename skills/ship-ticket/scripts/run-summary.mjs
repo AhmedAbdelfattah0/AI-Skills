@@ -247,10 +247,11 @@ export function attachUsage(run, records) {
   const totals = Object.values(roles).map((r) => r.processed_tokens).filter(known);
   const total = totals.length ? totals.reduce((a, b) => a + b, 0) : null;
   const orchestrator = roles.orchestrator?.processed_tokens;
+  const anyUnknown = mine.some((r) => processed(r) === null); // one record without counters makes the share unknowable
   return { ...run, usage: {
     tokens_by_role: mine.length ? roles : UNKNOWN,
     processed_tokens_total: total ?? UNKNOWN,
-    orchestrator_share_pct: known(orchestrator) && total > 0 ? Math.round(orchestrator / total * 1000) / 10 : UNKNOWN,
+    orchestrator_share_pct: known(orchestrator) && !anyUnknown && total > 0 ? Math.round(orchestrator / total * 1000) / 10 : UNKNOWN,
     cost_by_basis: cost,
   } };
 }
@@ -282,4 +283,24 @@ export function aggregateUsage(runs) {
   for (const b of Object.values(bases)) b.per_accepted_ticket = Math.round(b.reported_cost_usd_total / b.accepted_tickets_with_cost * 1e6) / 1e6;
   return { accepted_tickets: accepted.length, cost_per_accepted_ticket_by_basis: bases,
     note: 'Partitioned by cost_basis; bases are never added together.' };
+}
+
+/**
+ * Resource and parallelism metrics from an engine state's attempts (Wave 1 instrumentation).
+ * Only attempts with a launcher envelope count. Every value is `unknown` when its source is missing,
+ * never 0: `peak_rss_mb` / `peak_cpu_pct` are the max over attempts of the launcher's sampled
+ * process-group peaks (an attempt whose sampler recorded `unknown` contributes nothing, and no
+ * numeric peak at all is `unknown`); `parallel_efficiency` = sum of attempt durations (started_at ..
+ * envelope.ended_at) / (wall x width), wall being first start to last end of those attempts.
+ * @param {object|null} state
+ */
+export function engineResources(state) {
+  const attempts = (Array.isArray(state?.attempts) ? state.attempts : []).filter((a) => a?.envelope);
+  const maxOf = (key) => { const v = attempts.map((a) => a.envelope[key]).filter(known); return v.length ? Math.max(...v) : UNKNOWN; };
+  const spans = attempts.map((a) => [Date.parse(a.started_at), Date.parse(a.envelope.ended_at)]).filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e >= s);
+  const width = state?.config?.width ?? 1;
+  const wall = spans.length ? Math.max(...spans.map((x) => x[1])) - Math.min(...spans.map((x) => x[0])) : 0;
+  const busy = spans.reduce((a, [s, e]) => a + (e - s), 0);
+  return { peak_rss_mb: maxOf('peak_rss_mb'), peak_cpu_pct: maxOf('peak_cpu_pct'),
+    parallel_efficiency: wall > 0 && known(width) && width > 0 ? Math.round(busy / (wall * width) * 1000) / 1000 : UNKNOWN };
 }

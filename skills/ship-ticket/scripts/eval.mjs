@@ -25,7 +25,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { aggregateUsage, attachUsage, buildRun } from './run-summary.mjs';
+import { aggregateUsage, attachUsage, buildRun, engineResources } from './run-summary.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -57,6 +57,13 @@ function findingsBySeverity(chain) {
   return counts;
 }
 
+/** Reported cost of an accepted (complete) run per cost basis, never summed across bases; `unknown` otherwise. */
+function acceptedCost(run) {
+  const bases = Object.entries(run.usage?.cost_by_basis ?? {});
+  if (run.outcome !== 'complete' || !bases.length) return UNKNOWN;
+  return Object.fromEntries(bases.map(([b, c]) => [b, c.reported_cost_usd]));
+}
+
 /**
  * Metrics for one run. `run` is a `buildRun` result, optionally passed through
  * `attachUsage`; `state` is the ticket's engine state, if any.
@@ -77,6 +84,10 @@ export function evaluateRun(run, { state } = {}) {
     orchestrator_share_pct: run.usage?.orchestrator_share_pct ?? UNKNOWN,
     wall_ms_by_phase: wall,
     review_executions: run.review_executions.length,
+    ...(matched ? engineResources(matched) : { peak_rss_mb: UNKNOWN, peak_cpu_pct: UNKNOWN, parallel_efficiency: UNKNOWN }),
+    terminal_review_outcomes: chain ? chain.filter((r) => r?.kind === 'original' && r.overflow === true).length : UNKNOWN,
+    retries_authorized: chain ? chain.filter((r) => r?.kind === 'retry').length : UNKNOWN,
+    cost_per_accepted_ticket: acceptedCost(run),
     review_repairs: chain ? chain.filter((r) => r?.kind === 'repair').length : logged('repair_batches'),
     confirmations: chain ? chain.filter((r) => r?.kind === 'confirmation').length : logged('confirmations'),
     findings_by_severity: chain ? findingsBySeverity(chain) : UNKNOWN,
@@ -130,7 +141,9 @@ export function evaluate({ runs, states = {}, records = [] }) {
   for (const s of metrics.flatMap((m) => m.suggestions)) fired[s.rule] = (fired[s.rule] ?? 0) + 1;
   return { schema: EVAL_SCHEMA, runs: metrics,
     cross_run: { runs: metrics.length, orchestrator_share_pct_median: median(metrics.map((m) => m.orchestrator_share_pct)),
-      review_repairs_median: median(metrics.map((m) => m.review_repairs)), suggestions_fired: fired,
+      review_repairs_median: median(metrics.map((m) => m.review_repairs)),
+      peak_rss_mb_max: metrics.map((m) => m.peak_rss_mb).filter(known).reduce((a, b) => Math.max(a, b), -1) >= 0
+        ? Math.max(...metrics.map((m) => m.peak_rss_mb).filter(known)) : UNKNOWN, suggestions_fired: fired,
       ...aggregateUsage(joined) },
     note: 'Read-only. unknown means the source did not carry the value. Suggestions are never applied.' };
 }
@@ -166,15 +179,15 @@ function git(repo, args) {
   return r.stdout.trim();
 }
 
-const readJsonl = (path) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
-  try { return [JSON.parse(line)]; } catch { return []; }
+const readJsonl = (path, strict = false) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
+  try { return [JSON.parse(line)]; } catch { return strict ? fail(`usage file has a malformed JSONL line: ${path}`) : []; }
 });
 
 function readUsage(path) {
   if (!existsSync(path)) fail(`usage file not found: ${path}`);
   const text = readFileSync(path, 'utf8').trim();
   if (!text) return [];
-  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
+  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path, true); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
 }
 
 function report(options) {
