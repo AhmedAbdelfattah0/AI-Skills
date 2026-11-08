@@ -83,3 +83,8 @@ Decided: CodeRabbit in Wave 0 = fix `launcher.mjs:61` only; reject `engine-io.mj
 ## Wave 4 pool (owner decision 2026-11-08)
 - SCRUM-307 (API keys + read-only public API v1) is the first test ticket. Arm: **baseline = current harness, unit fields absent**, assigned before its PLAN. Run it in its own fresh Sonnet session after Wave 1 lands (so peak RSS/CPU and the new eval metrics are recorded) and before Wave 2 is enabled. Description size not yet verified; confirm it is large at PLAN time (planner's split rationale applies).
 - Remaining pool candidates (arms assigned later, before each PLAN): SCRUM-195, 192, 156, 158, 75. Never Returns & Refunds (SCRUM-74, 401-404) or any running ticket.
+
+## CodeRabbit owner decisions (2026-11-08, "go with your leans")
+- I12 (RED/proof runners get the unstripped environment): leave as is; they run the repo's own test commands. Documented, no code change.
+- B12 (output past 32 MiB dropped silently): flag `truncated` in the envelope and carry on; do not fail the attempt. Scheduled with the Wave 2 work on the launcher/envelope.
+- I7 (imported usage has no phase): add an optional `--phase` on import; absent means `phase unknown`, counted against the ticket budget only. Scheduled with Wave 2.
