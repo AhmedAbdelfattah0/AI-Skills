@@ -11,7 +11,7 @@ names. Record the selection once:
 | Orchestrator | PLAN counterpart | REVIEW second opinion (mandatory) |
 |---|---|---|
 | Claude | Codex | fresh Codex session |
-| Codex | Claude | fresh Claude session |
+| Codex | Claude | fresh Claude session (but a gate-recorded second opinion must come from a provider other than the primary's: with the Opus primary use Codex, else CodeRabbit) |
 | another known host | available different model family, preferring Codex | fresh session of that family |
 | unknown | explicitly configured counterpart, otherwise declare identity unavailable | do not claim cross-model independence |
 

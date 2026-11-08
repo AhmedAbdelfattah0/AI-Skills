@@ -18,6 +18,48 @@ is not pushed. Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 
+The run engine ([execution-harness.md](execution-harness.md)) writes its own
+events (`MARK`, resume and retry events) to a sibling file,
+`<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
+log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
+
+Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`carrier`,
+`engine`, `session` or `codex`; one source per execution, never double-counted) and `role`
+(`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`). Per-role totals and
+the orchestrator share come from `eval.mjs report`.
+
+### Resource and cost metrics (`eval.mjs report`)
+
+Read-only; each prints `unknown` where its source lacks data, never 0, and none is a gate.
+
+- `peak_rss_mb` (max over attempts) and `peak_cpu_pct`: the durable launcher samples its
+  process group with `ps` (first sample at 0.1 s, then every 1 s; `ps` runs with `LC_ALL=C` so
+  %cpu parses under any locale) and writes the peak to the attempt envelope (`peak_rss_mb`,
+  `peak_cpu_pct`, `resource_samples`). The launcher and the `ps` itself are excluded. They cover
+  WORKER attempts only: the RED and proof runner processes are not launched through the
+  launcher, so their peaks are not recorded. Limits: sampled peaks, so a spike between ticks is
+  missed and a worker shorter than 0.1 s has no sample; RSS double-counts shared pages;
+  `peak_cpu_pct` sums `ps` %cpu, a per-process average whose window differs by OS (Linux: average
+  over the process lifetime; macOS: decaying recent average), so it is an estimate and not
+  comparable across OSes; the group is the launcher's, so a descendant that left it is not
+  counted. Windows (no process groups), a missing `ps` or a disabled sampler
+  (`SHIP_TICKET_SAMPLER_OFF=1`) give `unknown`.
+- `parallel_efficiency`: sum of engine attempt durations (attempt start to envelope end) /
+  (wall x `config.width`), wall being first attempt start to last attempt end. 1 means every
+  slot was busy; overlap is not causal time saved. Needs the run's engine state.
+- `terminal_review_outcomes`: original reviews recorded with `overflow` (a terminal FAIL).
+  `retries_authorized`: RETRY authorizations consumed by a new original review. Both come from
+  the engine state's review chain; `unknown` without it.
+- `cost_per_accepted_ticket`: reported cost of a complete run, kept per `cost_basis` (bases are
+  never added; subscription estimates are not charges). `unknown` for an incomplete run or one
+  with no reported cost. `cross_run` keeps the per-basis averages.
+- `tokens_by_phase`: processed tokens per usage phase; records without a phase (imports without
+  `--phase`) are the `phase unknown` bucket, counted against the ticket budget only.
+- `truncated_outputs` (present only when any): attempts whose launcher output passed the 32 MiB
+  capture cap (`{attempt_id, kind, node, stdout_bytes}`); a flag, never a changed outcome.
+- `orchestrator_share_pct` is `unknown` when any usage record of the run lacks counters; a
+  usage file's malformed (e.g. crash-truncated) JSONL lines are skipped, as before Wave 1.
+
 Logging is best effort. If the helper is absent or one call fails, announce
 `timing telemetry degraded`, record the reason in the execution summary when
 possible, and continue the ticket. A telemetry failure never changes a workflow
@@ -74,10 +116,15 @@ they explain most variance:
 |---|---|
 | UNDERSTAND | `tracker_fetch`, `repository_recon`, `review_preflight` |
 | PLAN | `native_plan_mode` (its end metrics carry provider/consumer contract outcomes) |
-| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join` |
+| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join`, `unit_review`, `unit_review_repair`, `unit_review_confirmation` |
 | PROVE | `frontend_proof`, `backend_proof`, `shared_proof`, `runtime_attacks`, `ui_evidence` |
 | REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
 | SHIP | `commit_push_pr`, `ci_wait`, `tracker_completion` |
+
+The `unit_review*` activities occur only with `config.unitReview` ([review.md](review.md), Unit
+review): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`. The engine state
+keeps the authoritative record (`status.units.<u>.review`, `UNIT_REVIEW_CYCLE` events with each
+cycle's kind and trigger).
 
 Use a unique event ID for every occurrence, for example
 `prove-repository-checks-1`. Do not create an interval for every shell command or

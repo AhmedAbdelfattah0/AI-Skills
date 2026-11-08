@@ -40,4 +40,48 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Test ship-ticket execution harness
-        run: node --test skills/ship-ticket/scripts/harness.test.mjs skills/ship-ticket/scripts/docker-lifecycle.test.mjs skills/ship-ticket/scripts/carrier-usage.test.mjs
+        run: >-
+          node --test
+          skills/ship-ticket/scripts/harness.test.mjs
+          skills/ship-ticket/scripts/docker-lifecycle.test.mjs
+          skills/ship-ticket/scripts/carrier-usage.test.mjs
+          skills/ship-ticket/scripts/candidate-id.test.mjs
+          skills/ship-ticket/scripts/usage.test.mjs
+          skills/ship-ticket/scripts/gate.test.mjs
+          skills/ship-ticket/scripts/run-engine.test.mjs
+          skills/ship-ticket/scripts/run-engine-repair.test.mjs
+          skills/ship-ticket/scripts/run-engine-review3.test.mjs
+          skills/ship-ticket/scripts/run-engine-review4.test.mjs
+          skills/ship-ticket/scripts/run-engine-review5.test.mjs
+          skills/ship-ticket/scripts/run-engine-wave0.test.mjs
+          skills/ship-ticket/scripts/run-engine-units.test.mjs
+          skills/ship-ticket/scripts/run-engine-unit-review.test.mjs
+          skills/ship-ticket/scripts/run-engine-wave3.test.mjs
+          skills/ship-ticket/scripts/run-engine-cr38.test.mjs
+          skills/ship-ticket/scripts/eval.test.mjs
+          skills/ship-ticket/scripts/engine-bench.test.mjs
+          skills/ship-ticket/scripts/launcher-sampler.test.mjs
+          skills/ship-ticket/scripts/wave1-metrics.test.mjs
+          skills/ship-ticket/scripts/engine-explore.test.mjs
+          skills/ship-ticket/scripts/engine-crash.test.mjs
+
+  # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
+  # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
+  # (each engine guard patched out in a temp copy must fail the property harness). POSIX only;
+  # one test file at a time, since both spawn many real engine and worker processes.
+  engine-properties:
+    runs-on: ubuntu-latest
+    # Above the mutation test's own 30-minute ceiling (each harness run is killed after 10 minutes).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Seeded CLI layer and mutation check
+        env:
+          ENGINE_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-seeded.test.mjs
+          skills/ship-ticket/scripts/engine-mutation.test.mjs

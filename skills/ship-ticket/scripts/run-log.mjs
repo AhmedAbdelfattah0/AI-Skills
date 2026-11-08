@@ -86,6 +86,8 @@ function validateId(label, value) {
   if (!SAFE_ID.test(value)) {
     fail(`${label} must match ${SAFE_ID} and be at most 128 characters`);
   }
+  // <ticket>.engine.jsonl is the run engine's event file: ticket X.engine's timing log would be ticket X's.
+  if (label === 'ticket' && value.endsWith('.engine')) fail('ticket must not end in .engine (reserved for the run engine event file)');
   return value;
 }
 
@@ -341,7 +343,8 @@ function summary(options) {
     tickets = [validateId('ticket', options.ticket)];
   } else if (existsSync(directory)) {
     tickets = readdirSync(directory)
-      .filter((name) => name.endsWith('.jsonl'))
+      // <ticket>.engine.jsonl is the run engine's own event file, not a timing log.
+      .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.engine.jsonl'))
       .map((name) => name.slice(0, -'.jsonl'.length))
       .filter((name) => SAFE_ID.test(name))
       .sort();

@@ -14,16 +14,28 @@
  * from the child and the CLI's own auth status must prove a subscription login);
  * the approved plan's RUN-STATE START event must match the supplied digest and
  * run ID; prompts travel on stdin, never argv; raw model output is never printed.
+ *
+ * Launch handshake: the carrier starts a tiny Node launcher (its own process
+ * group on POSIX) that holds the provider CLI back until it reads a release
+ * byte on stdin. `deps.onSpawn({attempt_id, pid, pgid})` runs in between, so a
+ * host can durably record the process group before any worker code runs. If
+ * stdin closes without the release byte the launcher exits and the worker never starts.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // Native realpath expands Windows 8.3 short names (C:\Users\RUNNER~1) the same way Git does.
 const realpathSync = (p) => realpathJs.native(p);
 import { routeModel, isEntrypoint } from './harness.mjs';
 import { extractUsage, COUNTERS } from './usage.mjs';
+import { RELEASE_BYTE, launcherArgs } from './launcher.mjs';
+import { parseRunState, malformedReason, workerRunStateAppend } from './run-state.mjs';
+import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
+import { finalMessage, parseWorkerReport } from './worker-report.mjs';
+
+export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
 const PROVIDERS = new Set(['claude', 'codex', 'gemini', 'antigravity']);
 const VERIFIED = new Set(['claude', 'codex']);
@@ -35,15 +47,9 @@ const CLAUDE_MODES = new Set(['acceptEdits', 'auto', 'dontAsk', 'manual']); // n
 const CODEX_SANDBOXES = new Set(['read-only', 'workspace-write']); // never danger-full-access
 const MAX_CAPTURE = 32 * 1024 * 1024;
 const KILL_GRACE_MS = 5000;
-
-/** Environment variables that route a provider CLI to metered API billing. */
-export const BILLING_ENV = Object.freeze({
-  claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK',
-    'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'],
-  codex: ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'],
-  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS'],
-  antigravity: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS'],
-});
+const ROLES = new Set(['builder', 'repair', 'evidence']);
+/** Default usage role per phase when `config.role` is absent. */
+const DEFAULT_ROLE = Object.freeze({ BUILD: 'builder', REPAIR: 'repair', PROVE: 'evidence', SHIP: 'builder' });
 
 function fail(message) { throw new Error(message); }
 
@@ -109,27 +115,51 @@ export function verifyApproval(repoRoot, approval) {
   const candidates = PLAN_ROOTS.map(root => join(repoRoot, root, 'plans', ticket + '.md'));
   const planPath = candidates.find(p => existsSync(p));
   if (!planPath) fail('approved plan artifact not found for ticket ' + ticket);
-  const text = readFileSync(planPath, 'utf8');
-  const begin = text.lastIndexOf('<!-- RUN-STATE:BEGIN -->');
-  const end = text.lastIndexOf('<!-- RUN-STATE:END -->');
-  if (begin < 0 || end < begin) fail('plan artifact has no RUN-STATE block');
-  const start = text.slice(begin, end).split(/\r?\n/).filter(l => l.trim().startsWith('{')).map(l => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).find(e => e?.event === 'START' && e.run_id === runId);
+  const block = parseRunState(readFileSync(planPath, 'utf8'));
+  if (!block) fail('plan artifact has no RUN-STATE block');
+  const malformed = malformedReason(block);
+  if (malformed) fail('plan ' + malformed);
+  const start = block.events.find(e => e.event === 'START' && e.run_id === runId);
   if (!start) fail('no START event for run ' + runId + '; approval is not executable');
   if (start.approved_plan_digest !== approvedPlanDigest) fail('approved-plan digest mismatch');
   return { ticket, run_id: runId, approved_plan_digest: approvedPlanDigest, binding: 'start-event' };
 }
 
 /**
- * A REPAIR dispatch must repair a review round that really happened: the run
- * log (Git metadata, written by run-log.mjs) must hold a `start` row of kind
- * `phase` named REVIEW in the same run with a matching `review_execution` metric.
+ * A REPAIR dispatch must repair a review round that really happened. When the run engine's state
+ * file exists (git-path ai-skills/ship-ticket/<ticket>.state.json) it is the only authority: its
+ * review chain must hold an accepted original FAIL for `reviewExecution` in the same run that opened
+ * a finding-bound write set. Only without engine state does the run log (written by run-log.mjs)
+ * decide: a `start` row of kind `phase` named REVIEW in the same run with a matching
+ * `review_execution` metric. With engine state and `writes` (the dispatch's ownership.writes), every
+ * write must also lie within that FAIL's write set, and the execution must not have its repair
+ * recorded already (one repair per review execution). Returns the authority used ('engine' | 'run-log').
  */
-export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
+export function verifyReviewExecution(repoRoot, approval, reviewExecution, writes) {
   const r = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
-  if (r.status !== 0) fail('REPAIR needs a Git repository with a run log');
-  const logFile = join(resolve(repoRoot, r.stdout.trim()), approval.ticket + '.jsonl');
+  if (r.status !== 0) fail('REPAIR needs a Git repository with engine state or a run log');
+  const dir = resolve(repoRoot, r.stdout.trim());
+  const stateFile = join(dir, approval.ticket + '.state.json');
+  if (existsSync(stateFile)) {
+    let state;
+    try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { fail('engine state ' + stateFile + ' is unreadable; REPAIR is not authorized'); }
+    if (state?.run_id !== approval.run_id) fail('engine state belongs to run ' + state?.run_id + ', not ' + approval.run_id + '; REPAIR is not authorized');
+    // The final review chain, and with config.unitReview each unit's review chain (engine-unit-review.mjs).
+    // A unit FAIL authorizes only the repair the engine opened for it (repair_opened), never a terminal FAIL.
+    const chains = [...(state.review_chain ?? []), ...Object.values(state.unit_reviews ?? {})
+      .flatMap(u => (Array.isArray(u?.chain) ? u.chain : [])).filter(e => e?.repair_opened === true)];
+    const failed = chains.find(e => e?.review_execution === reviewExecution && e.kind === 'original'
+      && e.outcome === 'FAIL' && Array.isArray(e.write_set) && e.write_set.length > 0);
+    if (!failed) fail('REPAIR reviewExecution ' + reviewExecution + ' has no accepted FAIL review in the engine state of run ' + approval.run_id);
+    const allChains = [...(state.review_chain ?? []), ...Object.values(state.unit_reviews ?? {}).flatMap(u => (Array.isArray(u?.chain) ? u.chain : []))];
+    if (allChains.some(e => e?.review_execution === reviewExecution && e.kind === 'repair')) {
+      fail('REPAIR reviewExecution ' + reviewExecution + ' already had its repair (one repair per review execution)');
+    }
+    const outside = (writes ?? []).filter(w => !under(w, failed.write_set));
+    if (outside.length) fail('REPAIR ownership.writes ' + outside.join(', ') + ' exceed the write set of FAIL review ' + reviewExecution);
+    return 'engine';
+  }
+  const logFile = join(dir, approval.ticket + '.jsonl');
   let text = '';
   try { text = readFileSync(logFile, 'utf8'); } catch { /* absent log: rejected below */ }
   const found = text.split(/\r?\n/).some(line => {
@@ -141,6 +171,7 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
     } catch { return false; }
   });
   if (!found) fail('REPAIR reviewExecution ' + reviewExecution + ' has no REVIEW phase start in run ' + approval.run_id + ' of the run log');
+  return 'run-log';
 }
 
 /** Validation and argument construction. No worker process is started (only read-only git rev-parse). */
@@ -159,6 +190,9 @@ export function prepareDispatch(config) {
       }
     }
   }
+  if (config.role !== undefined && !ROLES.has(config.role)) fail('role must be builder, repair or evidence');
+  if (config.attemptId !== undefined && (typeof config.attemptId !== 'string' || !SAFE_ID.test(config.attemptId)))
+    fail('attemptId must be a safe id');
   if (!PROVIDERS.has(config.provider)) fail('unsupported provider');
   if (typeof config.nodeId !== 'string' || !SAFE_ID.test(config.nodeId)) fail('safe nodeId required');
   if (typeof config.workdir !== 'string' || !isAbsolute(config.workdir)) fail('absolute workdir required');
@@ -223,6 +257,7 @@ export function prepareDispatch(config) {
   }
   return {
     provider: config.provider, phase: config.phase, node_id: config.nodeId, executable, args, workdir, repoRoot,
+    attempt_id: config.attemptId ?? 'att-' + randomUUID(), role: config.role ?? DEFAULT_ROLE[config.phase],
     timeoutMs: config.timeoutMs, billing, model_tier: tier, model: model ?? 'provider-default',
     model_resolution: modelResolution, model_applied: model !== null,
     adapter: verified ? 'verified' : 'trusted-template', unverified_auth_acknowledged: !verified && billing === 'subscription',
@@ -230,62 +265,6 @@ export function prepareDispatch(config) {
     resultFile: config.resultFile === undefined ? null : safeOutputPath(config.resultFile, effectiveLayout, 'resultFile', true),
     usageLog: config.usageLog === undefined ? null : safeOutputPath(config.usageLog, effectiveLayout, 'usageLog'),
   };
-}
-
-/** Child environment: provider billing variables removed (case-insensitively) unless API billing is authorized. */
-export function childEnv(provider, billing, base = process.env) {
-  const env = { ...base };
-  if (billing !== 'subscription') return env;
-  const deny = new Set(BILLING_ENV[provider].map(k => k.toUpperCase()));
-  for (const key of Object.keys(env)) if (deny.has(key.toUpperCase())) delete env[key];
-  return env;
-}
-
-/**
- * Ask the provider CLI, in the stripped environment, how it is authenticated.
- * Returns true (subscription proven), false (refuse) or 'unverified'
- * (no verified status interface for this provider).
- */
-export function verifySubscription(provider, env, run = spawnSync) {
-  const opts = { env, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] };
-  const exec = (cmd, args) => { const s = spawnSpec(cmd, args, process.platform, env); return run(s.file, s.args, { ...opts, shell: s.shell }); };
-  if (provider === 'claude') {
-    const r = exec('claude', ['auth', 'status', '--json']);
-    try {
-      const s = JSON.parse(r.stdout ?? '');
-      return s.loggedIn === true && s.authMethod === 'claude.ai' && s.apiProvider === 'firstParty';
-    } catch { return false; }
-  }
-  if (provider === 'codex') {
-    const r = exec('codex', ['login', 'status']);
-    return r.status === 0 && /Logged in using ChatGPT/.test(`${r.stdout ?? ''}\n${r.stderr ?? ''}`);
-  }
-  return 'unverified';
-}
-
-/** Resolve a bare command on Windows through PATH x PATHEXT so .cmd shims can be detected. */
-export function resolveWindowsCommand(command, env = process.env, exists = existsSync) {
-  if (/[\\/]/.test(command)) return command;
-  const get = (name) => Object.entries(env).find(([k]) => k.toUpperCase() === name)?.[1];
-  const exts = (get('PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
-  for (const dir of (get('PATH') ?? '').split(';').filter(Boolean)) {
-    for (const ext of exts) {
-      const candidate = join(dir, command + ext);
-      if (exists(candidate)) return candidate;
-    }
-  }
-  return command;
-}
-
-/** Spawn spec that works for real executables and Windows .cmd/.bat shims without unsafe shell interpolation. */
-export function spawnSpec(executable, args, platform = process.platform, env = process.env, exists = existsSync) {
-  if (platform !== 'win32') return { file: executable, args, shell: false };
-  const resolved = resolveWindowsCommand(executable, env, exists);
-  if (/\.(cmd|bat)$/i.test(resolved)) {
-    if (!args.every(a => SAFE_ARG.test(a))) fail('unsafe argument for a Windows batch shim');
-    return { file: `"${resolved}"`, args, shell: true };
-  }
-  return { file: resolved, args, shell: false };
 }
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -318,8 +297,8 @@ async function terminateTree(child, platform = process.platform) {
   return !groupAlive(child.pid);
 }
 
-/** Snapshot every dirty path (path -> status/size/mtime/hash signature) via git status; null when git is unavailable. */
-function gitDirty(top) {
+/** Snapshot every dirty path (path -> status/size/mtime/hash signature; both paths of a rename) via git status; null when git is unavailable. */
+export function gitDirty(top) {
   const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: top, encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) return null;
   const map = new Map();
@@ -327,14 +306,19 @@ function gitDirty(top) {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     if (e.length < 4) continue;
-    const path = e.slice(3);
-    if (e[0] === 'R' || e[0] === 'C') i++; // rename source follows
-    let sig = e.slice(0, 2) + ':deleted';
-    try {
-      const s = statSync(join(top, path));
-      sig = `${e.slice(0, 2)}:${s.size}:${s.mtimeMs}:${s.mode}:` + (s.isFile() ? createHash('sha256').update(readFileSync(join(top, path))).digest('hex') : 'dir');
-    } catch { /* deleted */ }
-    map.set(path, sig);
+    const paths = [e.slice(3)];
+    // A rename or copy in either column (index, or work tree: e.g. after `git add -N`) is followed by its source:
+    // a rename's source is gone, a copy's is unchanged.
+    const rc = [e[0], e[1]].find((c) => c === 'R' || c === 'C');
+    if (rc) { i++; if (rc === 'R') paths.push(entries[i]); }
+    for (const path of paths) {
+      let sig = e.slice(0, 2) + ':deleted';
+      try {
+        const s = statSync(join(top, path));
+        sig = `${e.slice(0, 2)}:${s.size}:${s.mtimeMs}:${s.mode}:` + (s.isFile() ? createHash('sha256').update(readFileSync(join(top, path))).digest('hex') : 'dir');
+      } catch { /* deleted */ }
+      map.set(path, sig);
+    }
   }
   return map;
 }
@@ -349,24 +333,8 @@ const isOwnPlanFile = (path, ticket) => {
   return PLAN_ROOTS.some(r => l === `${r}/plans/${ticket.toLowerCase()}.md`);
 };
 
-const RUN_STATE_BEGIN = '<!-- RUN-STATE:BEGIN -->';
-const RUN_STATE_END = '<!-- RUN-STATE:END -->';
-const count = (text, needle) => text.split(needle).length - 1;
-
-/**
- * True only when `after` equals `before` plus text inserted immediately before
- * the single RUN-STATE END marker: the orchestrator appending events. Any edit
- * outside the block, a rewrite of an existing event, a second block, a
- * deletion or a creation returns false.
- */
-export function runStateAppendOnly(before, after) {
-  if (typeof before !== 'string' || typeof after !== 'string') return false;
-  if (count(before, RUN_STATE_BEGIN) !== 1 || count(before, RUN_STATE_END) !== 1) return false;
-  if (count(after, RUN_STATE_BEGIN) !== 1 || count(after, RUN_STATE_END) !== 1) return false;
-  const b = before.indexOf(RUN_STATE_END);
-  const a = after.indexOf(RUN_STATE_END);
-  return a >= b && after.slice(0, b) === before.slice(0, b) && after.slice(a) === before.slice(b);
-}
+// RUN-STATE parsing and the worker-append exemption live in run-state.mjs (the one RUN-STATE reader).
+export { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS } from './run-state.mjs';
 
 /** The ticket's plan file text, or null when it does not exist (first existing plan root). */
 function readPlanText(repoRoot, ticket) {
@@ -402,22 +370,7 @@ export function ownershipViolations(before, after, writes, othersOwned, ticket) 
   return changedPaths(before, after).filter(p => !isOwnPlanFile(p, ticket) && !under(p, writes) && !under(p, othersOwned)).sort();
 }
 
-/** Extract the worker's final message text and error flag from provider output. */
-function finalMessage(provider, stdout) {
-  if (provider === 'claude') {
-    try { const r = JSON.parse(stdout); return { text: typeof r.result === 'string' ? r.result : null, is_error: r.is_error === true }; }
-    catch { return { text: null, is_error: true }; }
-  }
-  if (provider === 'codex') {
-    let text = null;
-    for (const line of stdout.split(/\r?\n/)) {
-      if (!line.startsWith('{')) continue;
-      try { const e = JSON.parse(line); if (e.type === 'item.completed' && e.item?.type === 'agent_message') text = e.item.text; } catch { /* skip */ }
-    }
-    return { text, is_error: text === null };
-  }
-  return { text: null, is_error: false };
-}
+export { RELEASE_BYTE, launcherArgs } from './launcher.mjs';
 
 /**
  * Run one approved writer node. Resolves with metadata only; raw output is
@@ -428,7 +381,7 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
-  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';
   if (auth === false) fail('subscription authentication not verified for ' + plan.provider + '; refusing to risk API billing');
@@ -440,15 +393,16 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
 
   const started = Date.now();
-  const child = (deps.spawn ?? spawn)(spec.file, spec.args, {
-    cwd: plan.workdir, env, shell: spec.shell, windowsHide: true,
+  // The launcher is a real executable (no shell); it applies spec.shell to the provider itself.
+  const child = (deps.spawn ?? spawn)(process.execPath, launcherArgs(spec), {
+    cwd: plan.workdir, env, shell: false, windowsHide: true,
     detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '', stdoutBytes = 0, stderrBytes = 0, truncated = false, timedOut = false, cancelled = false;
   let timer = null;
   const onCancel = () => { if (!cancelled) { cancelled = true; terminateTree(child); } };
   const signals = deps.handleSignals === false ? [] : ['SIGINT', 'SIGTERM'];
-  let code = null, signal = null, spawnError = null, treeTerminated = null;
+  let code = null, signal = null, spawnError = null, treeTerminated = null, hookError = null;
   try {
     const closed = new Promise(done => child.on('close', done));
     const exited = new Promise(done => {
@@ -466,7 +420,13 @@ export async function dispatch(config, deps = {}) {
     deps.signal?.addEventListener('abort', onCancel, { once: true });
     if (deps.signal?.aborted) onCancel();
     for (const s of signals) process.on(s, onCancel);
-    child.stdin.end(prompt);
+    // Handshake: the host records the process group before the worker is released.
+    if (deps.onSpawn && child.pid) {
+      try { await deps.onSpawn({ attempt_id: plan.attempt_id, pid: child.pid, pgid: process.platform === 'win32' ? null : child.pid }); }
+      catch (e) { hookError = e; }
+    }
+    if (hookError || cancelled || timedOut) child.stdin.end(); // no release byte: the worker never starts
+    else child.stdin.end(Buffer.concat([RELEASE_BYTE, prompt]));
     [code, signal, spawnError] = await exited;
     // The leader is gone; descendants may still hold the pipes or keep running.
     await Promise.race([closed, delay(2000)]);
@@ -478,16 +438,20 @@ export async function dispatch(config, deps = {}) {
     for (const s of signals) process.off(s, onCancel);
     deps.signal?.removeEventListener('abort', onCancel);
   }
+  if (hookError) throw new Error('onSpawn failed; worker was not released: ' + (hookError?.message ?? hookError));
   const ended = Date.now();
 
   const usage = truncated ? null : extractUsage(plan.provider, stdout);
   const message = finalMessage(plan.provider, truncated ? '' : stdout);
+  const report = parseWorkerReport(message.text);
   const telemetryDegraded = [];
   let resultWritten = false;
   if (plan.resultFile && message.text !== null) {
     try {
       writeFileSync(plan.resultFile, JSON.stringify({ schema: 'ship-ticket-carrier-message-v1', provider: plan.provider,
-        node_id: plan.node_id, final_message: message.text }) + '\n', { flag: 'wx', mode: 0o600 });
+        node_id: plan.node_id, attempt_id: plan.attempt_id, final_message: message.text,
+        ...(report.status === 'structured' ? { report: report.report } : { report: 'unstructured', report_failure: report.failure }),
+      }) + '\n', { flag: 'wx', mode: 0o600 });
       resultWritten = true;
     } catch (e) { telemetryDegraded.push('result_file:' + (e.code ?? 'error')); }
   }
@@ -496,19 +460,24 @@ export async function dispatch(config, deps = {}) {
       // `mode` applies only on creation; tighten an existing log before appending to it.
       if (existsSync(plan.usageLog)) chmodSync(plan.usageLog, 0o600);
       appendFileSync(plan.usageLog, JSON.stringify({ provider: plan.provider, run_id: approval.run_id, node_id: plan.node_id,
-        phase: plan.phase, model_tier: plan.model_tier, ...(usage ?? {}), timestamp: new Date(ended).toISOString() }) + '\n', { mode: 0o600 });
+        phase: plan.phase, role: plan.role, attempt_id: plan.attempt_id, source: 'carrier', source_execution_id: plan.attempt_id,
+        model_tier: plan.model_tier, ...(usage ?? {}), timestamp: new Date(ended).toISOString() }) + '\n', { mode: 0o600 });
     } catch (e) { telemetryDegraded.push('usage_log:' + (e.code ?? 'error')); }
   }
   const afterState = gitDirty(plan.repoRoot);
-  // The plan file is exempt only when its change is an append inside RUN-STATE;
-  // a worker editing the approved plan, or deleting it, is a violation.
-  const exemptTicket = runStateAppendOnly(planBefore, readPlanText(plan.repoRoot, approval.ticket)) ? approval.ticket : null;
+  // The plan file is exempt only when its change is an append inside RUN-STATE carrying no
+  // authority event; a worker editing the approved plan, deleting it, or appending START,
+  // DAG_BOUND, RETRY or UNIT_CLEAR is a violation.
+  const exemptTicket = workerRunStateAppend(planBefore, readPlanText(plan.repoRoot, approval.ticket)) ? approval.ticket : null;
   const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, exemptTicket);
   const orchestratorPaths = orchestratorPathsChanged(before, afterState, exemptTicket);
+  // Net change observed by the carrier itself (not the worker's word), minus concurrent siblings' paths.
+  const netChanged = before && afterState ? changedPaths(before, afterState).filter(p => !under(p, plan.ownership.othersOwned)).sort() : null;
   const succeeded = !spawnError && !timedOut && !cancelled && code === 0 && !message.is_error
     && (violations === null || violations.length === 0) && treeTerminated !== false;
   return {
     schema: 'ship-ticket-harness-dispatch-v2', provider: plan.provider, phase: plan.phase, node_id: plan.node_id,
+    attempt_id: plan.attempt_id, role: plan.role,
     adapter: plan.adapter, model_tier: plan.model_tier, model: plan.model, model_resolution: plan.model_resolution,
     model_applied: plan.model_applied, billing: plan.billing, subscription_auth: auth,
     approval_verified: true, approval_binding: approval.binding, run_id: approval.run_id,
@@ -517,6 +486,8 @@ export async function dispatch(config, deps = {}) {
     succeeded, provider_reported_error: message.is_error, process_tree_terminated: treeTerminated,
     stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, output_truncated: truncated,
     usage, result_written: resultWritten, telemetry_degraded: telemetryDegraded,
+    report_status: report.status, report_failure: report.status === 'structured' ? null : report.failure,
+    changed_paths: netChanged,
     ownership_check: violations === null ? 'unavailable' : violations.length ? 'violated' : 'clean',
     writes_outside_ownership: violations ?? [],
     orchestrator_paths_changed: orchestratorPaths,
@@ -530,7 +501,7 @@ async function main(argv) {
   if (argv[0] === 'inspect') {
     const plan = prepareDispatch(config);
     const approval = verifyApproval(plan.repoRoot, config.approval);
-    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
     return { ...plan, approval };
   }
   return dispatch(config);
