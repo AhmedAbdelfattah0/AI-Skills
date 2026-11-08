@@ -222,7 +222,7 @@ function original(E, input, u, rv, v, bind, candidate) {
   const ev = S.unit_checks[u].evidence;
   const record = { ...v.record, ...bind, second_opinion_identity: input.second_opinion?.reviewer_identity ?? null,
     repair_opened: opensNow, ...(ceilingRefused ? { ceiling_refused: true } : {}), seq: S.seq,
-    ...(opensNow ? { binding: structuredClone(ev.binding) } : {}) };
+    ...(opensNow ? { binding: structuredClone(ev.binding), trees: dirTrees(E.ctx.repoRoot, ev.binding.fps) } : {}) };
   R.chain.push(record);
   note(S, 'UNIT_REVIEWED', { unit: u, review_execution: rx, kind: 'original', outcome: record.outcome, evidence: bind.evidence_id });
   if (opensNow) {
@@ -290,15 +290,41 @@ export function recordUnitRepair(E, repair, a) {
 
 /**
  * Whether the unit's current evidence is the repair's own result: against the binding the FAIL
- * reviewed, only fingerprints of paths inside the repair write set may differ (no node re-run, no
+ * reviewed, only files inside the repair write set may differ (declared directories compared file
+ * by file: outsideRepair), and no node re-run, no
  * dependency unit's or upstream node's change, no base move). Returns null when it is, else why not.
  */
-function unbound(fail, rec, ev) {
+/** The per-entry fingerprints, at the FAIL, of every declared path that is a directory (file-accurate repair binding). */
+const dirTrees = (root, fps) => Object.fromEntries(Object.entries(fps).filter(([, f]) => f.startsWith('d:')).map(([p]) => [p, io.treeFingerprints(root, p)]));
+
+/**
+ * Paths changed outside the repair write set `ws` since the FAIL. A changed declared directory is
+ * compared entry by entry against its tree at the FAIL: a changed, added or removed file is the
+ * repair's when it is under `ws`; a directory entry also when it contains a `ws` path (the repair
+ * created or emptied it). A changed path with no recorded tree counts whole.
+ */
+function outsideRepair(root, fail, was, now, ws) {
+  const diff = (a = {}, b = {}) => Object.keys({ ...a, ...b }).filter(k => a[k] !== b[k]);
+  const out = [];
+  for (const p of diff(was.fps, now.fps)) {
+    if (under(p, ws)) continue;
+    const before = fail.trees?.[p];
+    if (!before) { out.push(p); continue; }
+    const after = io.treeFingerprints(root, p);
+    for (const q of diff(before, after)) {
+      const dir = (before[q] ?? after[q]).startsWith('d:');
+      if (!under(q, ws) && !(dir && ws.some(w => under(w, [q])))) out.push(q);
+    }
+  }
+  return [...new Set(out)].sort();
+}
+
+function unbound(root, fail, rec, ev) {
   const was = fail.binding, now = ev.binding;
   if (!was) return 'the FAIL record carries no binding';
   const diff = (a = {}, b = {}) => Object.keys({ ...a, ...b }).filter(k => a[k] !== b[k]);
   const why = [
-    ...diff(was.fps, now.fps).filter(p => !under(p, rec.write_set)).map(p => `changed outside the repair: ${p}`),
+    ...outsideRepair(root, fail, was, now, rec.write_set).map(p => `changed outside the repair: ${p}`),
     ...diff(was.attempts, now.attempts).map(n => `node re-run: ${n}`),
     ...diff(was.deps, now.deps).map(d => `dependency unit re-checked: ${d}`),
     ...diff(was.upstream, now.upstream).map(n => `upstream node re-run: ${n}`),
@@ -325,7 +351,7 @@ export function reconcileReviews(E) {
     const ev = S.unit_checks[u].evidence;
     for (const rec of R.chain) if (rec.kind === 'repair' && rec.new_candidate === null && !rec.unbound) {
       const fail = R.chain.find(r => r.kind === 'original' && r.review_execution === rec.review_execution);
-      const why = unbound(fail, rec, ev);
+      const why = unbound(E.ctx.repoRoot, fail, rec, ev);
       if (why) { rec.unbound = { evidence: ev.id, reason: why }; note(S, 'UNIT_REPAIR_UNBOUND', { unit: u, review_execution: rec.review_execution, evidence: ev.id, reason: why }); }
       else { rec.new_candidate = ev.id; note(S, 'UNIT_REPAIR_BOUND', { unit: u, review_execution: rec.review_execution, evidence: rec.new_candidate }); }
     }

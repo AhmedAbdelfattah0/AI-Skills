@@ -401,6 +401,63 @@ test('binding: a pre-freeze rebuild after a failed post-repair re-check is never
   ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-2')));
 });
 
+// ------------------------------------------------------------------ directory declarations
+
+/** One unit `api` whose node declares the directory `src`, FAIL F1 on `path` (plus `ownership`), repaired by `fix`. */
+function dirUnit(t, files, fix, path, ownership) {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('a', { unit: 'api', writes: ['src'] })],
+    behaviour: { a: { write: files }, fix } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  const f = unitReview(fx, 'api', 'urx-1', { fail: path, ...(ownership ? { input: { repair_ownership: ownership } } : {}) });
+  ok(fx.gate('unit-review', f));
+  return fx;
+}
+const confirmable = (fx) => {
+  const r = fx.cli('status').out.units.api.review;
+  assert.deepEqual([r.state, r.awaiting, r.unbound], ['fail', 'confirmation', undefined], J(r));
+  ok(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1')));
+  assert.equal(fx.cli('status').out.units.api.review.state, 'pass');
+};
+
+test('directory: a repair writing a file inside a declared directory binds, and its confirmation is accepted', { skip: WIN_SKIP }, (t) => {
+  const fx = dirUnit(t, { 'src/a.txt': 'a1', 'src/b.txt': 'b1' }, { write: { 'src/a.txt': 'fixed' } }, 'src/a.txt');
+  ok(fx.cli('drive'));
+  confirmable(fx);
+});
+
+test('directory: nested directories, a created sub-directory, a deletion and a rename inside the write set bind', { skip: WIN_SKIP }, (t) => {
+  const nested = dirUnit(t, { 'src/sub/a.txt': 'a1', 'src/b.txt': 'b1' }, { write: { 'src/sub/a.txt': 'fixed', 'src/sub/new/x.txt': 'x' } },
+    'src/sub/a.txt', ['src/sub/new']);
+  ok(nested.cli('drive'));
+  confirmable(nested);
+  const deleted = dirUnit(t, { 'src/a.txt': 'a1', 'src/b.txt': 'b1' }, { remove: ['src/a.txt'] }, 'src/a.txt');
+  ok(deleted.cli('drive'));
+  confirmable(deleted);
+  const renamed = dirUnit(t, { 'src/a.txt': 'a1', 'src/b.txt': 'b1' }, { remove: ['src/a.txt'], write: { 'src/a2.txt': 'a1' } }, 'src/a.txt', ['src/a2.txt']);
+  ok(renamed.cli('drive'));
+  confirmable(renamed);
+});
+
+test('directory: a repair that also touches src/b.txt outside its write set is never bound', { skip: WIN_SKIP }, async (t) => {
+  const fx = dirUnit(t, { 'src/a.txt': 'a1', 'src/b.txt': 'b1' }, { write: { 'src/a.txt': 'fixed', 'src/b.txt': 'b touched' } }, 'src/a.txt');
+  const d = fx.cli('drive');
+  assert.equal(d.status, 2, d.stdout);
+  assert.ok(d.out.judgments.some(j => j.code === 'repair_outside_findings' && /src\/b\.txt/.test(j.reason)), J(d.out.judgments));
+  assert.equal(fx.readState().unit_reviews.api.chain.some(r => r.kind === 'repair'), false, 'no repair record, nothing to bind');
+  assert.equal(d.out.units.api.review.terminal, true);
+  // The comparison itself, file by file: stop after the re-check of a clean repair, and let the FAIL's
+  // recorded tree of `src` disagree on src/sub/c.txt only (a change outside the write set).
+  const fy = dirUnit(t, { 'src/a.txt': 'a1', 'src/sub/c.txt': 'c1' }, { write: { 'src/a.txt': 'fixed' } }, 'src/a.txt');
+  const hooks = { boundary: async (name) => { if (name === 'unit-checked') throw new Error('stop after the re-check'); } };
+  await assert.rejects(drive(fy.ctx({ hooks })), /stop after the re-check/);
+  fy.editState((st) => { st.unit_reviews.api.chain.find(r => r.kind === 'original').trees.src['src/sub/c.txt'] = 'f:644:sha256:older'; });
+  ok(fy.cli('resume'));
+  const r = fy.cli('status').out.units.api.review;
+  assert.equal(r.state, 'stale', J(r));
+  assert.equal(r.unbound.reason, 'changed outside the repair: src/sub/c.txt', 'only the outside file is a cause, not src/a.txt or the directory');
+  refused(fy.gate('unit-review', unitConfirm(fy, 'api', 'urx-1')), 'unit_review_open');
+});
+
 test('crash: the engine dies after the post-repair re-check is durable but before binding; resume binds and the confirmation is accepted', { skip: WIN_SKIP }, async (t) => {
   const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('a', { unit: 'api' })],
     behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });

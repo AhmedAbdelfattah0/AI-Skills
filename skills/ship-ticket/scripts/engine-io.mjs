@@ -137,6 +137,20 @@ export function fingerprint(root, rel) {
   return `f:${mode}:${sha(readFileSync(abs))}`;
 }
 
+/**
+ * Per-entry fingerprints of everything under `rel` (repo-relative): each directory as `d:<mode>`,
+ * every other entry as its fingerprint(); a missing path adds nothing. Used to tell which files
+ * inside a declared directory changed.
+ */
+export function treeFingerprints(root, rel, out = {}) {
+  let st;
+  try { st = lstatSync(join(root, rel)); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return out; throw e; }
+  if (!st.isDirectory()) { out[rel] = fingerprint(root, rel); return out; }
+  out[rel] = `d:${(st.mode & 0o777).toString(8)}`;
+  for (const k of readdirSync(join(root, rel)).sort()) treeFingerprints(root, `${rel}/${k}`, out);
+  return out;
+}
+
 /** Fingerprints of `paths` keyed by path. */
 export const fingerprints = (root, paths) => Object.fromEntries([...new Set(paths)].map(p => [p, fingerprint(root, p)]));
 

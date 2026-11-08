@@ -31,7 +31,7 @@ export function gitPath(repo, rel) {
 /**
  * Fake provider CLI: `claude auth status` reports a subscription login; otherwise it reads
  * NODE=<id> from the prompt, logs the run and applies behaviour.json[<id>]:
- *   write {path: text}, appendRunState (inserts a NOTE inside RUN-STATE), appendEvent {event}
+ *   write {path: text}, remove [path] (deletes them first), appendRunState (inserts a NOTE inside RUN-STATE), appendEvent {event}
  *   (inserts that event inside RUN-STATE), appendRaw <text> (inserts those exact bytes), appendLate {event} (the same, just before the worker
  *   finishes, e.g. after waitFor), editPlan (edits the
  *   narrative), breakGit (makes `git status` fail), sleeper <pidfile> (leaves a background
@@ -51,6 +51,7 @@ const node = /NODE=(\\S+)/.exec(prompt)?.[1] ?? 'unknown';
 appendFileSync(join(ROOT, 'runs.log'), node + '\\n');
 let b = {};
 try { b = JSON.parse(readFileSync(join(ROOT, 'behaviour.json'), 'utf8'))[node] ?? {}; } catch {}
+for (const p of b.remove ?? []) rmSync(p, { recursive: true, force: true });
 for (const [p, c] of Object.entries(b.write ?? {})) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); }
 const PLAN = '.specs/plans/T-1.md';
 if (b.appendRunState) writeFileSync(PLAN, readFileSync(PLAN, 'utf8').replace('${END}', '{"event":"NOTE","note":"worker"}\\n${END}'));

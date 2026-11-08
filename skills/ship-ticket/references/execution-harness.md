@@ -526,8 +526,10 @@ also not through unit-less nodes.
   declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else
   `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit.
   The new evidence becomes the candidate of the one targeted confirmation only when, against the
-  binding the FAIL reviewed, nothing but fingerprints inside the repair write set changed
-  (`UNIT_REPAIR_BOUND`). A node re-run, a dependency unit's re-check, an upstream change or a base
+  binding the FAIL reviewed, nothing but files inside the repair write set changed
+  (`UNIT_REPAIR_BOUND`). A declared directory is compared file by file against its tree recorded
+  at the FAIL, so a repair writing `src/a.txt` inside a declared `src` binds, while any other
+  changed, added or removed entry inside it is outside the repair. A node re-run, a dependency unit's re-check, an upstream change or a base
   move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This
   bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash
   between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL
