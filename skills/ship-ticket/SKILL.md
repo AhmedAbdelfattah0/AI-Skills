@@ -420,7 +420,9 @@ Read the plan and Design Contract from disk before writing.
   `status`. Record RED, review and ship-ready with `run-engine.mjs gate
   red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>`
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
-  which the next `drive` dispatches. Judgment points (`status.judgments`) come back to you or the
+  which the next `drive` dispatches. With `config.unitReview`, record each unit's
+  independent review with `gate unit-review` first
+  ([review.md](references/review.md), Unit review). Judgment points (`status.judgments`) come back to you or the
   user. The manual flow below is the documented fallback when the engine or gate
   module is unavailable (record `harness degraded`). A run that falls back after
   `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`

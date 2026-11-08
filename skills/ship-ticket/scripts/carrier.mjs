@@ -142,7 +142,9 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
     let state;
     try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { fail('engine state ' + stateFile + ' is unreadable; REPAIR is not authorized'); }
     if (state?.run_id !== approval.run_id) fail('engine state belongs to run ' + state?.run_id + ', not ' + approval.run_id + '; REPAIR is not authorized');
-    const failed = (state.review_chain ?? []).some(e => e?.review_execution === reviewExecution && e.kind === 'original'
+    // The final review chain, and with config.unitReview each unit's review chain (engine-unit-review.mjs).
+    const chains = [...(state.review_chain ?? []), ...Object.values(state.unit_reviews ?? {}).flatMap(u => (Array.isArray(u?.chain) ? u.chain : []))];
+    const failed = chains.some(e => e?.review_execution === reviewExecution && e.kind === 'original'
       && e.outcome === 'FAIL' && Array.isArray(e.write_set) && e.write_set.length > 0);
     if (!failed) fail('REPAIR reviewExecution ' + reviewExecution + ' has no accepted FAIL review in the engine state of run ' + approval.run_id);
     return 'engine';

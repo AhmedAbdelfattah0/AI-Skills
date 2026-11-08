@@ -13,7 +13,7 @@
  *
  * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
- *      run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>
+ *      run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  */
@@ -31,6 +31,7 @@ import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.m
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
+import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, bindRepairs } from './engine-unit-review.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -158,13 +159,15 @@ function view(E, transient = []) {
   return { schema: STATUS_SCHEMA, ticket: S.ticket, run_id: S.run_id,
     nodes: Object.fromEntries(Object.entries(S.nodes).map(([id, n]) => [id, { state: n.state, attempts: n.attempts, retries: n.retries }])),
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
-    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : [])],
+    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []),
+      ...(unitReviewOn(S) ? unitReviewJudgments(S, units) : [])],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
       ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
     telemetry_degraded: structuredClone(S.telemetry_degraded),
-    ...(units ? { units: unitProjection(S, E.ctx.repoRoot, cache), unit_ceiling: ceiling(S) } : {}),
+    ...(units ? { units: withReviews(S, unitProjection(S, E.ctx.repoRoot, cache), units), unit_ceiling: ceiling(S) } : {}),
+    ...(unitReviewOn(S) ? { unit_reviews_pending: pendingReviews(S, units) } : {}),
     ...(truncatedOutputs(S).length ? { truncated_outputs: truncatedOutputs(S) } : {}) };
 }
 
@@ -219,7 +222,9 @@ export async function init(ctx) {
       attempts: [], events: [], judgments: [], outbox: [], usage: [], freeze: null, review_chain: [], repairs: [], builders: [],
       rounds: { prove_repair_batches: 0, review_repairs: {} }, confirmation: null, gates: { red: {} }, locks: {}, telemetry_degraded: [],
       ...(dag.nodes.some(n => n.unit !== undefined) ? { unit_checks: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
-        .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}) };
+        .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
+      ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
+        .map(u => [u, { chain: [] }])) } : {}) };
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -270,6 +275,7 @@ export async function drive(ctx) {
         try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
         await runRepairs(E, transient);
         if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E); } // a repair's fingerprint refresh is never renewed evidence
+        bindRepairs(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }
     }
@@ -376,13 +382,17 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
+      if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
+        if (gateKind !== 'unit-review' || (input?.unit !== undefined && input.unit !== flags.unit)) throw new Error('--unit is for gate unit-review and must equal the input unit');
+        input = { ...input, unit: flags.unit };
+      }
       return gate({ ...ctx, gate: gateKind, input }); } };
   if (!Object.hasOwn(commands, cmd)) throw new Error('unknown command ' + cmd);
   return commands[cmd](ctx);

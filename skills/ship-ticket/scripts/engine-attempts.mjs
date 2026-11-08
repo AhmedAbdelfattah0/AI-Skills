@@ -16,6 +16,7 @@ import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
+import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -183,6 +184,7 @@ function completeRepair(E, repair, a, paths) {
   const hit = Object.entries(S.nodes).filter(([, n]) => [...n.reads, ...n.writes].some(p => paths.some(q => overlap(p, q)))).map(([id]) => id);
   const ids = closure(S, hit);
   for (const id of ids) if (S.nodes[id].fps) S.nodes[id].fps = io.fingerprints(ctx.repoRoot, Object.keys(S.nodes[id].fps));
+  if (repair.kind === 'unit-review') return recordUnitRepair(E, repair, a); // pre-freeze: no freeze, no final confirmation
   if (repair.kind !== 'review') return;
   S.confirmation = { review_execution: repair.review_execution, closure: ids };
   const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
@@ -404,16 +406,22 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
   if (failure) throw failure;
 }
 
-/** REPAIR authorization from engine state alone: the gate review chain and the round counters. */
+/** The round counters of a review repair: the final review's, or (lazily created) the unit reviews'. */
+const repairRounds = (S, r) => (r.kind === 'review' ? S.rounds.review_repairs : (S.rounds.unit_review_repairs ??= {}));
+
+/**
+ * REPAIR authorization from engine state alone: the gate review chain and the round counters. A
+ * 'unit-review' repair goes through the same path with its unit's review chain (engine-unit-review.mjs).
+ */
 function authorize(S, r, batchOpen) {
-  if (r.kind === 'review') {
+  if (r.kind === 'review' || r.kind === 'unit-review') {
     const rx = r.review_execution;
     // Canonical gate.mjs gateReview record only: { kind:'original', outcome, findings: [{ id, severity, paths }], write_set }.
-    const fail = (S.review_chain ?? []).find(e => e.review_execution === rx && e.outcome === 'FAIL'
+    const fail = (r.kind === 'review' ? S.review_chain ?? [] : unitChain(S, r)).find(e => e.review_execution === rx && e.outcome === 'FAIL'
       && Array.isArray(e.write_set) && Array.isArray(e.findings) && e.findings.every(f => Array.isArray(f?.paths)));
     if (!fail) return { code: 'repair_unauthorized', reason: `no canonical FAIL review record ${rx} in engine state` };
     // A repair already holding its round (re-queued by an automatic infra retry) re-dispatches within it.
-    if ((S.rounds.review_repairs[rx] ?? 0) >= MAX_REVIEW_REPAIRS && !r.round_held) return { code: 'round_limit', reason: `review ${rx} already had its repair` };
+    if ((repairRounds(S, r)[rx] ?? 0) >= MAX_REVIEW_REPAIRS && !r.round_held) return { code: 'round_limit', reason: `review ${rx} already had its repair` };
     if (!r.writes?.length || !r.writes.every(p => under(p, fail.write_set))) return { code: 'repair_unauthorized', reason: 'repair writes exceed the finding paths' };
     return { allowed: r.writes, phase: 'REPAIR' };
   }
@@ -448,10 +456,12 @@ export async function runRepairs(E, transient) {
     if (auth.code) { transient.push(judgment(auth.code, r.id, auth.reason)); continue; }
     if (!repairRedReady(E, r, transient)) continue;
     if (r.kind === 'review' && !startsFromFreeze(E, r, transient)) continue;
+    if (r.kind === 'unit-review' && !unitRepairCurrent(E, r)) continue;
     if (!budgetOk(E, transient, auth.phase)) break;
     const onLaunch = () => {
-      if (r.kind === 'review') {
-        if (!r.round_held) S.rounds.review_repairs[r.review_execution] = (S.rounds.review_repairs[r.review_execution] ?? 0) + 1;
+      if (r.kind === 'review' || r.kind === 'unit-review') {
+        const rounds = repairRounds(S, r);
+        if (!r.round_held) rounds[r.review_execution] = (rounds[r.review_execution] ?? 0) + 1;
         r.round_held = true;
       } else if (!batchOpen) { S.rounds.prove_repair_batches += 1; batchOpen = true; }
     };

@@ -207,6 +207,25 @@ function ceilingReached(E, u) {
   return false;
 }
 
+/**
+ * A unit review cycle (Wave 2b-ii: a re-review, a unit repair, a targeted confirmation) spends one
+ * of the SAME run-wide allowance the re-checks spend, recorded with its kind and trigger. It needs
+ * `reserve` (>= 1) unspent: opening a repair reserves the repair, its re-check and its
+ * confirmation. Otherwise the durable `parent_ceiling` judgment is raised and nothing is spent.
+ * Returns whether it was spent.
+ */
+export function spendCeiling(S, u, kind, trigger, reserve = 1) {
+  const { limit, used } = ceiling(S);
+  if (used + reserve > limit) {
+    pushJudgment(S, 'parent_ceiling', u, `unit ${u} needs a ${kind} (${reserve} of the run's allowance), but this run already spent ${used} of its `
+      + `${limit} unit re-check(s) and review cycle(s) (config.unitRecheckCeiling, across all units): the owner decides`);
+    return false;
+  }
+  S.unit_ceiling = { used: used + 1, rechecks: [...(S.unit_ceiling?.rechecks ?? []), { unit: u, kind, seq: S.seq, trigger }].slice(-50) };
+  note(S, 'UNIT_REVIEW_CYCLE', { unit: u, kind, trigger, used: used + 1, limit });
+  return true;
+}
+
 /** One check through the runner protocol; `{ refusal }` when its group's quiescence is not proven (nothing recorded). */
 async function runCheck(E, u, name, resources) {
   const c = E.S.config.testCommands[name];

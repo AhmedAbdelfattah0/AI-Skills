@@ -258,6 +258,9 @@ are present, a unit's checks must pass before another unit's nodes depending on 
 start and before REVIEW; the rules are in
 [execution-harness.md](execution-harness.md) (Run engine, **Units**). Whether to
 split a ticket into units is the planner's recorded judgment, approved with the plan.
+Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each
+unit need its own independent review before the final review
+([review.md](review.md), Unit review).
 
 ### Full-stack: the frontend does not wait for the backend
 

@@ -347,6 +347,71 @@ When the affected closure spans independent frontend/backend partitions, their
 targeted checks may run concurrently; the seam coordinator still emits one
 confirmation after both return.
 
+## Unit review (opt-in: `config.unitReview`)
+
+When the approved DAG splits the ticket into units and sets `config.unitReview: true`,
+per-unit independent review is the main code inspection. The final review in
+this file is still mandatory on the exact assembled candidate, with the same Opus
+primary, the mandatory second opinion and the same repair, confirmation and RETRY
+policy. Only how it is scoped changes later (risk-focused, consuming unit
+evidence); in this release it runs unchanged. The engine never dispatches a
+reviewer: the orchestrator relays each unit review, and the engine validates and
+records it.
+
+- **When.** A unit is ready once `status.units.<u>.state` is `verified` (its
+  checks passed) and nothing is live. `status.unit_reviews_pending` lists the
+  units without a current PASS. Units may be reviewed in any order and
+  concurrently, within the same width and memory limits as other dispatches.
+  Each record is serialized by the engine lock: retry a `lock_held` refusal.
+- **Who.** An Opus primary reviewer that is independent of every builder, under
+  the rules in this file. The gate refuses a reviewer whose identity equals a
+  builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node
+  carries a risk label, or the ticket has `config.riskLabels`) also needs the
+  host's counterpart second opinion (Codex for a Claude host), on its review and
+  on its confirmation. If the counterpart is unavailable or its usage limit is
+  reached, run CodeRabbit on the unit's paths. If neither can run, stop and ask
+  (`WAIT_FOR_USER`); never record the risky unit without it. For a unit that is
+  not risky the second opinion is optional; when it is given, the gate validates it.
+- **Input.** Give the reviewer the unit's exact files and diff (its nodes'
+  declared reads and writes), its acceptance ids, the contract versions it reads,
+  its check results, the approved plan and the threat model. The artifact uses
+  the output contract above, with `candidate_id` set to
+  `status.units.<u>.evidence.id`. The gate input adds `unit`,
+  `approved_plan_digest`, `dag_digest` and `base_commit`
+  (`status.units.<u>.evidence.base_commit`). Record it with
+  `run-engine.mjs gate unit-review --input <file>`. Use a unique
+  `review_execution` for each unit review (`review-<opaque>`); the final review
+  may not reuse it.
+- **Staleness.** The engine recomputes each unit review's validity on every
+  read. Anything that invalidates the unit's evidence (its inputs, a contract it
+  reads, a dependency unit, the base commit) makes the review `stale`, and a
+  fresh unit review is due. The gate refuses a review that names an old evidence
+  id. An unrelated unit keeps its review.
+- **FAIL and repair.** Reconcile as above. An accepted FAIL with `fix` findings
+  needs `repair_prompt_file` and opens one repair. Its write set (the fixed
+  findings' paths plus `repair_ownership`) must lie inside the unit's declared
+  writes; anything outside is `repair_outside_unit`, so leave that finding to the
+  final review. `drive` runs the repair only while the unit's evidence is still
+  the one that was reviewed; otherwise it cancels the repair and the review goes
+  stale. Then `drive` re-checks the unit, and the same primary (plus the second
+  opinion when the unit is risky) gives one targeted confirmation on the repaired
+  evidence (`kind: "confirmation"`). Each unit review execution gets one repair
+  and one confirmation. The following are terminal for the unit
+  (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with
+  nothing to fix, a failed repair, and any unit FAIL after the REVIEW freeze
+  (after the freeze, only the final review's repair may change the candidate).
+  Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues,
+  never an automatic retry.
+- **Ceiling.** A re-review, a repair and a confirmation each spend the run-wide
+  `config.unitRecheckCeiling`, the same allowance the unit re-checks spend.
+  Opening a repair reserves three: the repair, its re-check and its
+  confirmation. When the ceiling is spent, the result is `parent_ceiling` and the
+  owner decides.
+- **Final gate.** `gate review` (the original and the confirmation) and
+  `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current
+  PASS. A final-review repair that changes a unit makes that unit's review stale:
+  re-review the unit before the final confirmation.
+
 ## Record and transition
 
 Append one compact `REVIEW` event to the plan's execution block. When repair ran,
@@ -356,7 +421,8 @@ outcome; do not copy source bytes into the plan.
 
 With the run engine, also evaluate each review artifact through `gate.mjs`
 (`gateReview` for the original and the confirmation, `gateShipReady` before
-SHIP), recorded with `run-engine.mjs gate review|ship-ready`. They bind the artifact
+SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews:
+`gate unit-review`, above). They bind the artifact
 chain, reviewer identity, candidate ID and second opinion, and refuse an incomplete or
 stale record; a refusal is a failed review step, not something to patch by hand.
 Write `reviewer_identity` as `<provider>:<model>` (a suffix may follow): the gate

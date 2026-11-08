@@ -1,5 +1,6 @@
 /**
- * Gate decisions recorded by `run-engine.mjs gate red|review|ship-ready` under the engine lock.
+ * Gate decisions recorded by `run-engine.mjs gate red|review|ship-ready|unit-review` under the engine lock
+ * (unit-review: engine-unit-review.mjs).
  * The engine derives everything that binds: the candidate (pinned exclusions), the RED runner,
  * its format and resources (from the bound DAG), the frozen candidate and retry authorization (a
  * RUN-STATE RETRY event), the builder roster, the repair it enqueues, and the local proof (it runs
@@ -11,18 +12,24 @@ import { randomUUID } from 'node:crypto';
 import { gateRed, gateReview, gateShipReady } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
-import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
+import { retryEvent } from './engine-authority.mjs';
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
+import { unitReviewGate, reviewsMissing, unitExecution } from './engine-unit-review.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
 
-/** Opt-in units: a review or ship-ready decision waits until every unit's checks pass on the current binding. */
+/**
+ * Opt-in units: a review or ship-ready decision waits until every unit's checks pass on the current
+ * binding and, with config.unitReview, until every unit has a current PASS unit review (recomputed).
+ */
 function unitsRefusal(E) {
   const open = unverified(E);
-  return open.length ? gateNo('units_unverified', [`unit check evidence is not verified: ${open.join(', ')} (drive runs the checks)`]) : null;
+  if (open.length) return gateNo('units_unverified', [`unit check evidence is not verified: ${open.join(', ')} (drive runs the checks)`]);
+  const missing = reviewsMissing(E.S, E.ctx.repoRoot);
+  return missing.length ? gateNo('unit_reviews_missing', [`every unit needs a current PASS unit review (gate unit-review): ${missing.join(', ')}`]) : null;
 }
 
 /** RED: the node's pinned specs, the DAG runner the input names, the node's resources; baseline = the computed candidate. */
@@ -92,15 +99,6 @@ export const redInvalidJudgments = (S) => Object.entries(S.gates?.red_invalid ??
     + 're-established: restore the spec file(s) and config.base to the evidence bytes, or the owner decides'));
 
 /**
- * The trusted RETRY authorizing original review `rx` after `predecessor` (engine-authority.mjs:
- * observed while nothing dispatched could run), or null; `forged` counts untrusted matches.
- */
-function retryEvent(E, rx, predecessor) {
-  const match = (e) => e.run_id === E.S.run_id && e.review_execution === rx && e.predecessor === predecessor && nonEmpty(e.authorized_by);
-  return { retry: trustedEvents(E.S, 'RETRY').find(match) ?? null, forged: untrustedEvents(E.S, 'RETRY').filter(match).length };
-}
-
-/**
  * Review: the frozen candidate is the stored one (set by the first original review, a repair, or an
  * authorized retry). A new original after any earlier original needs a RETRY linked to its
  * predecessor. An accepted FAIL enqueues the finding-bound repair from its write set.
@@ -109,11 +107,12 @@ function reviewGate(E, input, candidate) {
   const S = E.S;
   const units = unitsRefusal(E);
   if (units) return units;
+  if (unitExecution(S, input.review_execution)) return gateNo('chain_broken', [`review_execution ${input.review_execution} belongs to a unit review chain`]);
   const originals = S.review_chain.filter(r => r.kind === 'original');
   let retry = null;
   if (input.kind === 'original' && originals.length) {
     const predecessor = originals.at(-1).review_execution;
-    const found = retryEvent(E, input.review_execution, predecessor);
+    const found = retryEvent(E.S, input.review_execution, predecessor);
     retry = found.retry;
     if (!retry && found.forged) return gateNo('retry_unauthorized', [`a RETRY for ${input.review_execution} appeared while dispatched work could run, `
       + 'so it is not owner authority; once status shows nothing live, the owner re-appends a distinct RETRY (e.g. with a timestamp)'], { judgment_point: true });
@@ -216,4 +215,4 @@ async function shipReadyGate(E, input, candidate) {
   return { judgment_point: false, ...v };
 }
 
-export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate };
+export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate };

@@ -16,7 +16,8 @@
  * - `events[]`: `{type: 'RESUME', outcome?}`, `{type: 'INFRA_RETRY'}` and
  *   `{type: 'ADMISSION_REFUSED'}` (written by run-engine.mjs).
  * - `unit_checks` (opt-in units only): the per-unit projection (engine-units.mjs), recomputed
- *   against the work tree of `--repo`; printed as `units` only when the state has units.
+ *   against the work tree of `--repo`; printed as `units` only when the state has units, with each
+ *   unit's computed `review` state when the run records unit reviews (config.unitReview).
  * - `attempts[].envelope.truncated` (launcher output past 32 MiB): printed as `truncated_outputs`
  *   only when any exists. Usage records without a `phase` are the `phase unknown` bucket of
  *   `tokens_by_phase`.
@@ -31,7 +32,8 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { aggregateUsage, attachUsage, buildRun, engineResources, truncatedOutputs } from './run-summary.mjs';
-import { unitProjection } from './engine-units.mjs';
+import { unitProjection, unitStates } from './engine-units.mjs';
+import { withReviews } from './engine-unit-review.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -103,7 +105,7 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
     admission_refusals: countEvents(matched, 'ADMISSION_REFUSED'),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
-    ...(matched?.unit_checks ? { units: unitProjection(matched, repoRoot) } : {}),
+    ...(matched?.unit_checks ? { units: withReviews(matched, unitProjection(matched, repoRoot), repoRoot ? unitStates(matched, repoRoot) : null) } : {}),
     ...(truncatedOutputs(matched).length ? { truncated_outputs: truncatedOutputs(matched) } : {}),
   };
 }

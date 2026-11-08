@@ -38,7 +38,7 @@ export function planNarrativeDigest(text) {
 
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
-  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling'];
+  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview'];
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
 const NODE_PHASES = ['BUILD', 'PROVE', 'REPAIR', 'SHIP'];
@@ -107,6 +107,9 @@ export const unitVertex = (n) => (n.unit !== undefined ? `u:${n.unit}` : `n:${n.
  * (also through unit-less nodes), or a unit's checks could wait on its own dependents.
  * `config.unitRecheckCeiling` (Wave 2b-i, needs a unit) is the run-wide unit re-check ceiling
  * (engine-units.mjs DEFAULT_UNIT_RECHECK_CEILING when absent; never defaulted into the config).
+ * `config.unitReview` (Wave 2b-ii, boolean, needs a unit; never defaulted, so the DAG digest covers
+ * it only when set): `true` makes every unit need an accepted, current unit review chain
+ * (engine-unit-review.mjs) before `gate review` and `gate ship-ready`.
  */
 function validateUnits(nodes, c, bad) {
   const ids = new Set(nodes.map(n => n.id)), cmds = Object.keys(c.testCommands ?? {});
@@ -124,6 +127,8 @@ function validateUnits(nodes, c, bad) {
   const cap = c.unitRecheckCeiling;
   if (cap !== undefined && !(Number.isInteger(cap) && cap >= 0 && cap <= 100)) bad('config.unitRecheckCeiling must be an integer 0..100');
   if (cap !== undefined && !nodes.some(n => n.unit !== undefined)) bad('config.unitRecheckCeiling needs a node with a unit');
+  if (c.unitReview !== undefined && typeof c.unitReview !== 'boolean') bad('config.unitReview must be a boolean');
+  if (c.unitReview !== undefined && !nodes.some(n => n.unit !== undefined)) bad('config.unitReview needs a node with a unit');
   const acc = c.acceptanceIds;
   if (acc !== undefined && !(strings(acc) && acc.length && acc.every(Boolean) && new Set(acc).size === acc.length))
     bad('config.acceptanceIds must be unique non-empty strings');
@@ -188,6 +193,8 @@ const GATE_FIELDS = {
   red: ['node', 'command', 'specs'],
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file'],
   'ship-ready': ['risk_evidence', 'artifacts', 'exclusions', 'candidate_id'],
+  'unit-review': ['unit', 'review_execution', 'kind', 'approved_plan_digest', 'dag_digest', 'base_commit', 'primary', 'second_opinion',
+    'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file'],
 };
 
 /**
@@ -197,7 +204,7 @@ const GATE_FIELDS = {
  */
 export function gateInput(kind, doc) {
   const bad = (m) => { throw coded('bad_input', `gate ${kind}: ${m}`); };
-  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review or ship-ready');
+  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review, ship-ready or unit-review');
   if (!isObj(doc)) bad('input must be a JSON object');
   const extra = Object.keys(doc).filter(k => !GATE_FIELDS[kind].includes(k));
   if (extra.length) bad(`unknown input field(s): ${extra.join(', ')} (commands, formats, resources and local proof come from the bound DAG)`);
@@ -207,7 +214,11 @@ export function gateInput(kind, doc) {
     if (doc.specs !== undefined && !(Array.isArray(doc.specs) && doc.specs.every(x => isObj(x) && typeof x.file === 'string' && typeof x.name === 'string')))
       bad('specs must be [{ file, name }]');
   }
-  if (kind === 'review' && doc.repair_prompt_file !== undefined && typeof doc.repair_prompt_file !== 'string') bad('repair_prompt_file must be a path');
+  if (['review', 'unit-review'].includes(kind) && doc.repair_prompt_file !== undefined && typeof doc.repair_prompt_file !== 'string') bad('repair_prompt_file must be a path');
+  if (kind === 'unit-review') {
+    for (const k of ['unit', 'approved_plan_digest', 'dag_digest', 'base_commit']) if (typeof doc[k] !== 'string' || !doc[k]) bad(`${k} is a required string`);
+    if (doc.repair_ownership !== undefined && !strings(doc.repair_ownership)) bad('repair_ownership must be paths');
+  }
   if (kind === 'ship-ready') {
     if (doc.exclusions !== undefined && !strings(doc.exclusions)) bad('exclusions must be strings');
     if (doc.candidate_id !== undefined && typeof doc.candidate_id !== 'string') bad('candidate_id must be a string');

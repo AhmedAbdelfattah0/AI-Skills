@@ -57,3 +57,13 @@ export const trustedEvents = (S, kind) => (S.authority?.trusted ?? []).map(l => 
 
 /** Untrusted authority events of `kind` (parsed). */
 export const untrustedEvents = (S, kind) => (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)).filter(e => e.event === kind);
+
+/**
+ * The trusted RETRY of this run authorizing original review `rx` after `predecessor` (a final or a
+ * unit review execution), or null; `forged` counts untrusted matches.
+ */
+export function retryEvent(S, rx, predecessor) {
+  const match = (e) => e.run_id === S.run_id && e.review_execution === rx && e.predecessor === predecessor
+    && typeof e.authorized_by === 'string' && e.authorized_by.length > 0;
+  return { retry: trustedEvents(S, 'RETRY').find(match) ?? null, forged: untrustedEvents(S, 'RETRY').filter(match).length };
+}

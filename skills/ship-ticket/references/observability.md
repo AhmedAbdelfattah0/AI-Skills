@@ -116,10 +116,15 @@ they explain most variance:
 |---|---|
 | UNDERSTAND | `tracker_fetch`, `repository_recon`, `review_preflight` |
 | PLAN | `native_plan_mode` (its end metrics carry provider/consumer contract outcomes) |
-| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join` |
+| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join`, `unit_review`, `unit_review_repair`, `unit_review_confirmation` |
 | PROVE | `frontend_proof`, `backend_proof`, `shared_proof`, `runtime_attacks`, `ui_evidence` |
 | REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
 | SHIP | `commit_push_pr`, `ci_wait`, `tracker_completion` |
+
+The `unit_review*` activities occur only with `config.unitReview` ([review.md](review.md), Unit
+review): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`. The engine state
+keeps the authoritative record (`status.units.<u>.review`, `UNIT_REVIEW_CYCLE` events with each
+cycle's kind and trigger).
 
 Use a unique event ID for every occurrence, for example
 `prove-repository-checks-1`. Do not create an interval for every shell command or

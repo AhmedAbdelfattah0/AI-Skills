@@ -64,7 +64,12 @@
  *               baseline_candidate, spec_digests:{[file]:digest}, specs }
  *   A timeout is never re-run automatically.
  *
- * gateReview(input) -> { ok, code, reasons, record?, repair? }
+ * gateReview(input, policy?) -> { ok, code, reasons, record?, repair? }
+ *   policy (engine-set, never from an input; default the final review's): { secondOpinion:
+ *     'required' | 'optional', confirmationSecondOpinion: 'none' | 'optional' | 'required' }.
+ *     'optional' validates a second opinion only when present (record.second_opinion_route null
+ *     without one); a confirmation second opinion has the confirmation shape plus `route`, and the
+ *     record's outcome is PASS only when both are (engine-unit-review.mjs unit reviews).
  *   input (kind 'original'): { state, review_execution, kind, primary (the full
  *     review.md output contract), second_opinion:{route,reviewer_identity,
  *     candidate_id,findings,overflow,outcome}, reconciliation:{dispositions:

@@ -301,13 +301,18 @@ const builderOf = (state, identity) => (state.builders ?? []).find((b) => sameId
   || (nonEmpty(identity) && nonEmpty(b?.identity) && b.identity.endsWith(DEFAULT_MODEL)
     && identity.startsWith(b.identity.slice(0, -DEFAULT_MODEL.length) + ':')));
 
-/** Accept an original review (primary + second opinion + reconciliation) or a confirmation of its repair. */
-export function gateReview(input) {
+/**
+ * Accept an original review (primary + second opinion + reconciliation) or a confirmation of its repair.
+ * `policy` is set by the engine, never by an input: `secondOpinion` 'required' (default) or 'optional'
+ * (validated when present: a unit review of a unit that is not risky), and `confirmationSecondOpinion`
+ * 'none' (default: not read), 'optional' or 'required' (a risky unit's targeted confirmation).
+ */
+export function gateReview(input, policy = {}) {
   const state = input?.state ?? {};
   const rx = input?.review_execution;
   const chain = state.review_chain ?? [];
   if (!nonEmpty(rx)) return no('incomplete_contract', ['missing review_execution']);
-  if (input.kind === 'confirmation') return confirm(input, state, rx, chain);
+  if (input.kind === 'confirmation') return confirm(input, state, rx, chain, policy.confirmationSecondOpinion ?? 'none');
   if (input.kind !== 'original') return no('incomplete_contract', [`unknown review kind: ${String(input.kind)}`]);
 
   const p = input.primary;
@@ -322,23 +327,26 @@ export function gateReview(input) {
   if (p.candidate_id !== state.frozen_candidate) return no('stale_candidate', [`primary reviewed ${p.candidate_id}, frozen is ${state.frozen_candidate}`]);
 
   const so = input.second_opinion;
-  if (so === undefined || so === null) return no('missing_second_opinion', ['no second-opinion artifact']);
-  const soOk = isObj(so) && nonEmpty(so.route) && nonEmpty(so.reviewer_identity) && nonEmpty(so.candidate_id) && Array.isArray(so.findings)
-    && so.findings.every((f) => isObj(f) && nonEmpty(f.id)) && typeof so.overflow === 'boolean' && OUTCOMES.has(so.outcome)
-    && !(so.outcome === 'FAIL' && !so.findings.length) && !(so.outcome === 'PASS' && so.overflow);
-  if (!soOk) return no('second_opinion_unusable', ['second opinion must carry route, reviewer_identity, candidate_id, findings, overflow and a consistent outcome']);
-  const sb = builderOf(state, so.reviewer_identity);
-  if (sb) return no('reviewer_is_builder', [`second opinion ${so.reviewer_identity} built ${sb.node}`]);
-  if (sameIdentity(p.reviewer_identity, so.reviewer_identity)) {
-    return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
+  const hasSo = so !== undefined && so !== null;
+  if (!hasSo && policy.secondOpinion !== 'optional') return no('missing_second_opinion', ['no second-opinion artifact']);
+  if (hasSo) {
+    const soOk = isObj(so) && nonEmpty(so.route) && nonEmpty(so.reviewer_identity) && nonEmpty(so.candidate_id) && Array.isArray(so.findings)
+      && so.findings.every((f) => isObj(f) && nonEmpty(f.id)) && typeof so.overflow === 'boolean' && OUTCOMES.has(so.outcome)
+      && !(so.outcome === 'FAIL' && !so.findings.length) && !(so.outcome === 'PASS' && so.overflow);
+    if (!soOk) return no('second_opinion_unusable', ['second opinion must carry route, reviewer_identity, candidate_id, findings, overflow and a consistent outcome']);
+    const sb = builderOf(state, so.reviewer_identity);
+    if (sb) return no('reviewer_is_builder', [`second opinion ${so.reviewer_identity} built ${sb.node}`]);
+    if (sameIdentity(p.reviewer_identity, so.reviewer_identity)) {
+      return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
+    }
+    if (so.candidate_id !== state.frozen_candidate) return no('stale_candidate', [`second opinion reviewed ${so.candidate_id}, frozen is ${state.frozen_candidate}`]);
   }
-  if (so.candidate_id !== state.frozen_candidate) return no('stale_candidate', [`second opinion reviewed ${so.candidate_id}, frozen is ${state.frozen_candidate}`]);
 
   const dispositions = input.reconciliation?.dispositions;
   if (!Array.isArray(dispositions)) return no('missing_reconciliation', ['no reconciliation record']);
   const dispOf = (id, fromPrimary) => dispositions.find((d) => isObj(d) && d.finding_id === id
     && (fromPrimary ? d.source === 'primary' : d.source !== 'primary') && nonEmpty(d.disposition));
-  const all = [...p.findings.map((f) => [f, true]), ...so.findings.map((f) => [f, false])];
+  const all = [...p.findings.map((f) => [f, true]), ...(hasSo ? so.findings : []).map((f) => [f, false])];
   const undisposed = all.filter(([f, pr]) => !dispOf(f.id, pr)).map(([f, pr]) => `${pr ? 'primary' : so.route}:${f.id}`);
   if (undisposed.length) return no('missing_reconciliation', undisposed.map((x) => `no disposition for ${x}`));
   const fixes = all.filter(([f, pr]) => dispOf(f.id, pr).disposition === 'fix').map(([f]) => f);
@@ -347,7 +355,7 @@ export function gateReview(input) {
     ...['coverage_partitions', 'acceptance_criteria', 'rule_rows'].flatMap((k) => p[k].map((row, i) => [`${k}[${i}]`, row?.outcome]))]
     .filter(([, o]) => o === 'FAIL').map(([k]) => k);
   // Overflow (either reviewer) means unlisted material findings: the review cannot PASS, and a FAIL is terminal.
-  const overflow = p.overflow || so.overflow;
+  const overflow = p.overflow || (hasSo && so.overflow);
   if (p.outcome === 'PASS' && (failed.length || overflow || fixes.length)) {
     return no('outcome_inconsistent', [...failed.map((k) => `PASS with ${k} FAIL`), ...(overflow ? ['PASS with overflow'] : []), ...(fixes.length ? ['PASS with findings to fix'] : [])]);
   }
@@ -361,7 +369,7 @@ export function gateReview(input) {
   const findings = all.map(([f, pr]) => ({ id: f.id, source: pr ? 'primary' : so.route, severity: nonEmpty(f.severity) ? f.severity : 'unknown',
     paths: [...pathsOf(f)], disposition: dispOf(f.id, pr).disposition }));
   const record = { review_execution: rx, kind: 'original', outcome: p.outcome, candidate_id: p.candidate_id, reviewer_identity: p.reviewer_identity,
-    second_opinion_route: so.route, graded_artifacts: { ...(input.graded_artifacts ?? {}) }, fix_findings: fixes.map((f) => f.id), findings, write_set, overflow };
+    second_opinion_route: hasSo ? so.route : null, graded_artifacts: { ...(input.graded_artifacts ?? {}) }, fix_findings: fixes.map((f) => f.id), findings, write_set, overflow };
   if (overflow) {
     return { ok: true, code: 'review_terminal', judgment_point: true, terminal: true, record,
       reasons: ['overflow FAIL is terminal: no repair opens; continuing needs an explicitly authorized retry (RUN-STATE RETRY linked to this execution)'] };
@@ -371,11 +379,18 @@ export function gateReview(input) {
   return out;
 }
 
-/** Targeted confirmation of a repair within the same review_execution. */
-function confirm(input, state, rx, chain) {
+const confirmationOk = (c) => isObj(c) && nonEmpty(c.reviewer_identity) && nonEmpty(c.candidate_id) && Array.isArray(c.checked_findings)
+  && OUTCOMES.has(c.outcome) && nonEmpty(c.evidence);
+
+/**
+ * Targeted confirmation of a repair within the same review_execution. With `secondOpinion`
+ * 'required' (or 'optional' and present) a second confirmation of the same shape plus `route`, by a
+ * different non-builder reviewer on the same candidate, is validated too; the record's outcome is
+ * PASS only when both are.
+ */
+function confirm(input, state, rx, chain, secondOpinion = 'none') {
   const p = input.primary;
-  if (!isObj(p) || !nonEmpty(p.reviewer_identity) || !nonEmpty(p.candidate_id) || !Array.isArray(p.checked_findings)
-    || !OUTCOMES.has(p.outcome) || !nonEmpty(p.evidence)) {
+  if (!confirmationOk(p)) {
     return no('incomplete_contract', ['confirmation needs reviewer_identity, candidate_id, checked_findings, outcome and evidence']);
   }
   const mine = chain.filter((r) => r.review_execution === rx);
@@ -390,8 +405,22 @@ function confirm(input, state, rx, chain) {
   if (p.candidate_id !== state.frozen_candidate || p.candidate_id !== repair.new_candidate) {
     return no('stale_candidate', [`confirmation reviewed ${p.candidate_id}; repaired candidate is ${repair.new_candidate}, frozen is ${state.frozen_candidate}`]);
   }
+  const so = input.second_opinion;
+  const hasSo = secondOpinion !== 'none' && so !== undefined && so !== null;
+  if (secondOpinion === 'required' && !hasSo) return no('missing_second_opinion', ['this confirmation needs a second-opinion confirmation']);
+  if (hasSo) {
+    if (!confirmationOk(so) || !nonEmpty(so.route)) return no('second_opinion_unusable', ['second-opinion confirmation needs route, reviewer_identity, candidate_id, checked_findings, outcome and evidence']);
+    const sUnchecked = (original.fix_findings ?? []).filter((id) => !so.checked_findings.includes(id));
+    if (sUnchecked.length) return no('incomplete_contract', [`second-opinion confirmation must check every fixed finding: ${sUnchecked.join(', ')}`]);
+    const sb = builderOf(state, so.reviewer_identity);
+    if (sb) return no('reviewer_is_builder', [`second opinion ${so.reviewer_identity} built ${sb.node}`]);
+    if (sameIdentity(p.reviewer_identity, so.reviewer_identity)) return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
+    if (so.candidate_id !== p.candidate_id) return no('stale_candidate', [`second-opinion confirmation reviewed ${so.candidate_id}, the primary ${p.candidate_id}`]);
+  }
   const record = { review_execution: rx, kind: 'confirmation', outcome: p.outcome, candidate_id: p.candidate_id,
     reviewer_identity: p.reviewer_identity, checked_findings: [...p.checked_findings] };
+  if (hasSo) Object.assign(record, { outcome: p.outcome === 'PASS' && so.outcome === 'PASS' ? 'PASS' : 'FAIL',
+    second_opinion_route: so.route, second_opinion_identity: so.reviewer_identity, second_opinion_outcome: so.outcome });
   return { ok: true, code: 'review_accepted', reasons: [], record };
 }
 

@@ -295,6 +295,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -321,7 +322,7 @@ are refused, never dropped.
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
   runs every entry as the local proof), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
-  node `risk` for `gate ship-ready`), `acceptanceIds` and `unitRecheckCeiling` (opt-in, below). Billing is
+  node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in, below). Billing is
   `subscription` unless the user authorized `allowApiBilling`.
 - node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`,
   `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
@@ -335,11 +336,14 @@ failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repa
 node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
 `telemetry_degraded`, `events[]` (sequenced; includes `RESUME`, `INFRA_RETRY`,
 `ADMISSION_REFUSED`, `RED_INVALIDATED`; with units also `UNIT_CHECKED`, `UNIT_INVALIDATED`,
-`UNIT_CHECK_RETRY`, `UNIT_RECHECK`, `UNIT_CLEARED`) and an outbox for the run-log and RUN-STATE
+`UNIT_CHECK_RETRY`, `UNIT_RECHECK`, `UNIT_CLEARED`; with unit reviews also `UNIT_REVIEWED`,
+`UNIT_REVIEW_CYCLE`, `UNIT_REVIEW_RETRY`, `UNIT_REPAIR_ENQUEUED`, `UNIT_REPAIR_RECORDED`,
+`UNIT_REPAIR_BOUND`, `UNIT_REPAIR_CANCELLED`) and an outbox for the run-log and RUN-STATE
 sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
 `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and
 `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state
-likewise), and `truncated_outputs` only when an attempt's output passed the capture cap (below).
+likewise), `unit_reviews_pending` only with `config.unitReview` (`unit_reviews` in state likewise),
+and `truncated_outputs` only when an attempt's output passed the capture cap (below).
 
 **Approval binding.** `init` recomputes the plan narrative digest (the plan
 file with the text between the RUN-STATE markers removed) and requires it to
@@ -488,7 +492,45 @@ also not through unit-less nodes.
   is spent, the next re-check raises the durable judgment `parent_ceiling` instead (no automatic
   retry; neither `mark`, `resume` nor `clear-unit` clears it: the owner decides, and continuing
   means a re-`init` under a new owner-approved START). The storm guard is evaluated first.
-  `status.unit_ceiling` shows `{limit, used}`.
+  `status.unit_ceiling` shows `{limit, used}`. With unit reviews, the same allowance is also spent
+  by every unit re-review, unit repair and unit confirmation (below).
+- **Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a
+  unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own
+  independent review chain. The engine never dispatches a reviewer: the orchestrator relays it
+  ([review.md](review.md), Unit review) and `gate unit-review` validates and records it under the
+  lock, reusing `gate.mjs` `gateReview` (contract, enums, dispositions, builder roster, distinct
+  reviewers). The input is `{unit, review_execution, kind: original|confirmation,
+  approved_plan_digest, dag_digest, base_commit, primary, second_opinion?, reconciliation,
+  graded_artifacts?, repair_ownership?, repair_prompt_file?}`, where the reviewers' `candidate_id`
+  is the unit's evidence id (`status.units.<u>.evidence.id`); `--unit` may name the unit instead. It
+  is accepted only when the unit is `verified`, nothing is live, the digests are the bound ones and
+  the evidence id and base commit are the current evidence's. Refusals record nothing:
+  `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`,
+  `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain),
+  `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`,
+  `repair_prompt_missing`, `parent_ceiling`, and every `gateReview` refusal. A unit is risky when a
+  member node carries a risk label or the ticket has `config.riskLabels`; its review and its
+  confirmation then need the second opinion (`missing_second_opinion`), otherwise one is optional
+  and validated when given. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG
+  digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`),
+  the reviewers, findings and outcome. The review state is recomputed at every read against the
+  current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh
+  original is due), `fail` awaiting `repair|recheck|confirmation`, or `fail` terminal (computed
+  judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues
+  `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the
+  unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's
+  declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else
+  `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing, re-checks the unit and
+  binds the new evidence as the candidate the one targeted confirmation reviews. A failed
+  confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair and any FAIL after the
+  freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's
+  last execution>, authorized_by}` admits a new original. A re-review, a repair (reserving its
+  re-check and confirmation, 3) and a confirmation spend the parent-wide ceiling
+  (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger:
+  stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair).
+  `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing`
+  until every unit has a current PASS. The carrier's REPAIR authorization also reads the unit
+  chains.
 - **Evidence.** The stored check result is bound, as it stands after the checks ran, to the
   fingerprints of the unit's reads and writes, the resolved `config.base` commit, each node's
   attempt count, each dependency unit's evidence, and the attempt count and state of every
@@ -506,7 +548,9 @@ also not through unit-less nodes.
 - **Projection.** `status.units` and the `eval` report's `units` list per unit `state`
   (`verified|stale|failed|pending`), `nodes`, `deps`, `acceptance`, `checks`, current
   `fingerprints`, `evidence` (`id`, `state`, `candidate_id`, `base_commit`, per-check results),
-  `stale_cause`, `invalidations` and their `causes`, and `clears` once the owner cleared it. It is computed, never authority.
+  `stale_cause`, `invalidations` and their `causes`, `clears` once the owner cleared it, and with
+  unit reviews its `review` (`state`, `awaiting`, `terminal`, `review_execution`, `evidence_id`,
+  `reviewed_evidence`, `risky`, `risk_labels`, `records`). It is computed, never authority.
 
 **REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
 records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
@@ -532,7 +576,8 @@ admission like a node.
 
 **Round counters** follow `SKILL.md`: at most two consolidated PROVE repair
 batches per ticket in total; one REVIEW repair and one confirmation per
-authorized review execution (`rounds.review_repairs[<review_execution>]`).
+authorized review execution (`rounds.review_repairs[<review_execution>]`; a unit review execution:
+`rounds.unit_review_repairs[<review_execution>]`, present once one ran).
 Beyond them, or after a terminal failure, is `round_limit`: it needs an
 explicitly authorized retry. A counter moves only when the dispatch is actually
 launched, never on a refused one; an automatic infra retry of a review repair re-dispatches
@@ -555,10 +600,12 @@ can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
 `red_invalidated`, `red_required` and `candidate_unavailable`; with units also
-`unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`. The gate adds
+`unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews
+`unit_review_terminal`. The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
 (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2); its
-`units_unverified` refusal is not a judgment point (`drive` runs the checks).
+`units_unverified` and `unit_reviews_missing` refusals are not judgment points (`drive` runs the
+checks; the orchestrator relays the unit reviews).
 
 **Budgets.** `config.budget` holds dispatch thresholds: a warning at 80%, and at
 100% no new dispatch (`budget_stop`, a judgment point). Before every node **and
@@ -711,7 +758,7 @@ is no prune.
   resolution are exercised there.
 - Worker worktree isolation and join are deferred: ownership checks plus content
   fingerprints cover today's failure modes.
-- Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready
+- Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready|unit-review
   --repo <dir> --ticket <key> --run-id <id> --input <json-file>`: under the engine
   lock it computes the candidate itself (pinned exclusions), calls `gate.mjs`,
   commits the result and, on ship-ready, appends `SHIP_READY` to RUN-STATE once.
