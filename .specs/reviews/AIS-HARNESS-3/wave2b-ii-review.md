@@ -1,0 +1,7 @@
+# Wave 2b-ii review (977c12a + repair dba96a4), threat model: accidental/buggy workers only
+
+- Round 1 (977c12a): Opus FAIL (2 majors: dependent unit's confirmation absorbs an unreviewed upstream repair; ceiling-refused FAIL left no trace). Codex FAIL (4 majors: reservation not real, crash strands binding, carrier authorizes terminal FAILs, reviewer roles unenforced). Repaired in one batch dba96a4 (368/368 twice).
+- Confirmation (dba96a4): Opus PASS (all six fixed; held-slot behaviour is documented and ends at an owner decision, not a deadlock). Codex FAIL: (a) held-slot: an unrelated unit's re-check can raise a durable parent_ceiling while another unit holds slots, halting all dispatch including that unit's own repair; (b) NEW major: a unit declaring a directory (`src`) whose repair writes `src/a.txt` is wrongly marked unbound (engine-unit-review.mjs:301, `under('src',['src/a.txt'])` false).
+- Policy: repair + confirmation used. Owner decision (2026-11-08): authorize ONE small RETRY for (b) only; (a) disclosed as a known limit (mitigation: raise config.unitRecheckCeiling for multi-unit tickets), to be reconsidered with A/B data.
+
+Open minors: crash while a unit repair worker runs releases its hold early and the repair ends unbound (safe, existing crash handling); ceilingReached message says "already spent" for held slots; re-review FAIL refused for lack of room records without spending a slot (terminal).
