@@ -8,16 +8,25 @@
  * result counts. The stored check evidence is bound to the current fingerprints of the unit's
  * reads and writes, the resolved config.base commit, each node's attempt count and each dependency
  * unit's evidence; its validity is recomputed at every use (the projection is never authority).
+ * Wave 2b-i adds the run-wide re-check ceiling (`parent_ceiling`) and the owner clearing path
+ * (`clearUnit`, authorized by a trusted RUN-STATE UNIT_CLEAR).
  * `E` is run-engine.mjs's command context.
  */
 import { randomUUID } from 'node:crypto';
 import { spawnSpec } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
-import { note, judgment, closure, clampTimeout } from './engine-dag.mjs';
+import { note, judgment, closure, clampTimeout, coded } from './engine-dag.mjs';
+import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
 
 /** Verified evidence invalidated more often than this in one run is an invalidation storm. */
 export const MAX_UNIT_INVALIDATIONS = 2;
+/**
+ * Default of `config.unitRecheckCeiling`: unit check re-runs (a unit checked again after a failed,
+ * stale or cleared result) allowed per run across ALL units together. A constant: neither the unit
+ * count nor the node count scales it.
+ */
+export const DEFAULT_UNIT_RECHECK_CEILING = 4;
 const J = JSON.stringify;
 
 /** Whether the run has units (the DAG tagged at least one node). */
@@ -170,6 +179,34 @@ const readyUnits = (E, states) => checkReady(E.S, states).filter(u => (E.S.unit_
 /** Whether a drive has unit checks to run (dispatch then holds new nodes until they ran). */
 export const unitWork = (E) => hasUnits(E.S) && readyUnits(E, unitStates(E.S, E.ctx.repoRoot, E.unitCache ??= {})).length > 0;
 
+/** The launcher's truncation flag (B12) carried onto an attempt envelope; empty when output fit. */
+export const truncation = (r) => (r?.truncated === true ? { truncated: true, stdout_bytes: r.stdout_bytes } : {});
+
+/** The parent-wide re-check ceiling of this run: { limit, used }. */
+export const ceiling = (S) => ({ limit: S.config.unitRecheckCeiling ?? DEFAULT_UNIT_RECHECK_CEILING, used: S.unit_ceiling?.used ?? 0 });
+
+/**
+ * Before unit `u`'s checks run: a first check is free; a re-check (the unit already completed a
+ * check round in this run, whatever later reset its evidence) spends one of the run's re-checks,
+ * recorded with its kind. Once the run's ceiling is spent, a durable `parent_ceiling` judgment is
+ * raised instead (no automatic retry; nothing clears it in this run). Returns whether it was raised.
+ */
+function ceilingReached(E, u) {
+  const { S } = E, rec = S.unit_checks[u];
+  if (!(rec.rounds > 0)) return false;
+  const { limit, used } = ceiling(S);
+  if (used >= limit) {
+    pushJudgment(S, 'parent_ceiling', u, `unit ${u} needs a re-check, but this run already spent its ${limit} unit re-check(s) `
+      + `(config.unitRecheckCeiling, across all units): the owner decides (decomposition, contract churn or a flaky check)`);
+    return true;
+  }
+  const kind = rec.cleared ? 'cleared' : rec.evidence?.state === 'failed' ? 'rerun' : 'invalidation';
+  S.unit_ceiling = { used: used + 1, rechecks: [...(S.unit_ceiling?.rechecks ?? []), { unit: u, kind, seq: S.seq }].slice(-50) };
+  delete rec.cleared;
+  note(S, 'UNIT_RECHECK', { unit: u, kind, used: used + 1, limit });
+  return false;
+}
+
 /** One check through the runner protocol; `{ refusal }` when its group's quiescence is not proven (nothing recorded). */
 async function runCheck(E, u, name, resources) {
   const c = E.S.config.testCommands[name];
@@ -192,19 +229,20 @@ async function runCheck(E, u, name, resources) {
     await E.commit();
     return { refusal: true };
   }
-  a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut };
+  a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
   return { name, exit_code: result.exitCode, result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) };
 }
 
 /**
  * Run the checks of every ready unit (nothing live, no durable judgment), in dependency order,
  * each unit at most once per engine command. Before each pick, stale evidence is recorded as an
- * invalidation (unitDrift), so a re-check inside one drive counts toward the storm guard. A check
- * whose runner failed to start is retried once (UNIT_CHECK_RETRY); a failing exit is never
- * retried. Checks that change the declared paths of ANY unit fail with those paths as the cause.
- * Evidence is bound to the binding taken after the checks, so a failure stays bound (never re-run
- * by itself). A failure before the freeze marks the unit's nodes failed. Returns whether a unit
- * became verified (dependents may now be ready).
+ * invalidation (unitDrift), so a re-check inside one drive counts toward the storm guard, and every
+ * re-check spends the run's parent-wide ceiling (ceilingReached). A check whose runner failed to
+ * start is retried once (UNIT_CHECK_RETRY, an infra retry: it spends no re-check); a failing exit
+ * is never retried. Checks that change the declared paths of ANY node (unit-less upstream
+ * generators included) or move the config.base commit fail with that cause. Evidence is bound to
+ * the binding taken after the checks, so a failure stays bound (never re-run by itself). A failure
+ * before the freeze marks the unit's nodes failed. Returns whether a unit became verified.
  */
 export async function runUnitChecks(E) {
   if (!hasUnits(E.S)) return false;
@@ -219,8 +257,12 @@ export async function runUnitChecks(E) {
     const states = unitStates(S, E.ctx.repoRoot, E.unitCache);
     const u = readyUnits(E, states)[0];
     if (!u) return progressed;
+    const all = units(S), U = all[u];
+    if (ceilingReached(E, u)) { await E.commit(); return progressed; }
     E.unitChecked.add(u);
-    const all = units(S), U = all[u], watched = [...new Set(Object.values(all).flatMap(x => x.paths))].sort();
+    // Every node's declared paths (unit-less upstream generators included) and the base commit.
+    const watched = [...new Set(Object.values(S.nodes).flatMap(n => [...n.reads, ...n.writes]))].sort();
+    const preBase = io.resolveCommit(E.ctx.repoRoot, S.config.base ?? 'HEAD');
     const pre = io.fingerprints(E.ctx.repoRoot, watched), results = [];
     for (const name of U.checks) {
       let r = await runCheck(E, u, name, U.resources);
@@ -230,12 +272,15 @@ export async function runUnitChecks(E) {
     }
     const post = io.fingerprints(E.ctx.repoRoot, watched);
     const touched = watched.filter(p => post[p] !== pre[p]);
-    const passed = !touched.length && results.every(r => r.result === 'pass');
+    const moved = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD') !== preBase;
+    const passed = !touched.length && !moved && results.every(r => r.result === 'pass');
     const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
     note(E.S, 'UNIT_CHECKED', { unit: u, state: passed ? 'verified' : 'failed', checks: results.map(r => ({ name: r.name, result: r.result })) });
-    const reason = passed ? null : touched.length ? `checks changed declared unit files: ${touched.join(', ')}`
+    const reason = passed ? null : touched.length ? `checks changed declared files: ${touched.join(', ')}`
+      : moved ? 'checks moved the config.base commit'
       : `check(s) failed: ${results.filter(r => r.result !== 'pass').map(r => `${r.name} (exit ${r.exit_code}${r.error ? `, ${r.error}` : ''})`).join(', ')}`;
     const rec = E.S.unit_checks[u];
+    rec.rounds = (rec.rounds ?? 0) + 1;
     E.unitCache = {};
     rec.evidence = { id: `${u}@${E.S.seq}`, state: passed ? 'verified' : 'failed', results, binding: binding(E.S, E.ctx.repoRoot, u, U, E.unitCache), candidate_id: c.candidate_id ?? null,
       seq: E.S.seq, ...(reason ? { reason } : {}) };
@@ -254,6 +299,40 @@ export const unitJudgments = (S, states) => Object.keys(states).filter(u => S.un
 export function unverified(E) {
   if (!hasUnits(E.S)) return [];
   return Object.entries(unitStates(E.S, E.ctx.repoRoot, {})).filter(([, s]) => s.state !== 'verified').map(([u, s]) => `${u}: ${s.state}`);
+}
+
+/**
+ * The owner clearing path for a unit's two dead ends: a post-freeze `unit_check_failed` and a
+ * `unit_invalidation_storm`. It requires a trusted RUN-STATE `UNIT_CLEAR` (engine-authority.mjs,
+ * the RETRY model: observed while nothing dispatched could run) of this run naming the unit, the
+ * unit's current evidence id as `predecessor`, `authorized_by` and `reason`; an untrusted match is
+ * `unit_clear_unauthorized`, none is `unit_clear_refused`. It removes that unit's storm judgment and
+ * resets only that unit's evidence and invalidation counter, so the next drive re-checks it. That
+ * re-check still spends the run's parent-wide ceiling: the ceiling, its counter, a `parent_ceiling`
+ * judgment and the unit's completed rounds are never reset. Returns the UNIT_CLEARED record.
+ */
+export function clearUnit(E, u) {
+  const { S } = E;
+  if (!hasUnits(S) || !Object.hasOwn(S.unit_checks, u)) throw coded('unit_clear_refused', `no unit ${u} in the bound DAG`);
+  const rec = S.unit_checks[u];
+  const storm = S.judgments.some(j => j.code === 'unit_invalidation_storm' && j.node === u);
+  const failed = rec.evidence?.state === 'failed';
+  if (!storm && !(failed && S.freeze)) throw coded('unit_clear_refused', `unit ${u} is not at a dead end (a post-freeze unit_check_failed or a `
+    + `unit_invalidation_storm)${failed ? '; before the freeze, mark failed->pending one of its nodes' : ''}`);
+  const predecessor = rec.evidence.id;
+  const match = (e) => e.run_id === S.run_id && e.unit === u && e.predecessor === predecessor
+    && typeof e.authorized_by === 'string' && e.authorized_by.trim() && typeof e.reason === 'string' && e.reason.trim();
+  const clear = trustedEvents(S, 'UNIT_CLEAR').find(match);
+  if (!clear && untrustedEvents(S, 'UNIT_CLEAR').some(match)) throw coded('unit_clear_unauthorized', `a UNIT_CLEAR for ${u} appeared while `
+    + 'dispatched work could run, so it is not owner authority; once status shows nothing live, the owner re-appends a distinct UNIT_CLEAR (e.g. with a timestamp)');
+  if (!clear) throw coded('unit_clear_unauthorized', `clearing unit ${u} needs a RUN-STATE UNIT_CLEAR { run_id: ${S.run_id}, unit: ${u}, `
+    + `predecessor: ${predecessor}, authorized_by, reason } appended by the owner while nothing is live`);
+  const cleared = storm ? ['unit_invalidation_storm'] : ['unit_check_failed'];
+  S.judgments = S.judgments.filter(j => !(j.code === 'unit_invalidation_storm' && j.node === u));
+  const entry = { seq: S.seq, predecessor, cleared, authorized_by: clear.authorized_by, reason: clear.reason };
+  Object.assign(rec, { evidence: null, stale: false, invalidations: 0, cleared: true, clears: [...(rec.clears ?? []), entry] });
+  note(S, 'UNIT_CLEARED', { unit: u, predecessor, cleared, authorized_by: clear.authorized_by });
+  return entry;
 }
 
 /**
@@ -284,7 +363,7 @@ export function unitProjection(S, root, cache = {}) {
       evidence: ev ? { id: ev.id, state: ev.state, candidate_id: ev.candidate_id, base_commit: ev.binding.base_commit,
         results: ev.results.map(r => ({ name: r.name, result: r.result, exit_code: r.exit_code })), ...(ev.reason ? { reason: ev.reason } : {}) } : null,
       ...(states?.[u].cause ? { stale_cause: states[u].cause } : {}),
-      invalidations: rec.invalidations ?? 0, causes: rec.causes ?? [] }];
+      invalidations: rec.invalidations ?? 0, causes: rec.causes ?? [], ...(rec.clears ? { clears: rec.clears } : {}) }];
   }));
 }
 

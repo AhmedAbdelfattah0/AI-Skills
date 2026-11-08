@@ -11,8 +11,8 @@ import { createHash } from 'node:crypto';
 
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
 export const END = '<!-- RUN-STATE:END -->';
-/** RUN-STATE events that carry owner authority (approval, DAG binding, review retry): never a worker's to append. */
-export const AUTHORITY_EVENTS = ['START', 'DAG_BOUND', 'RETRY'];
+/** RUN-STATE events that carry owner authority (approval, DAG binding, review retry, unit clear): never a worker's to append. */
+export const AUTHORITY_EVENTS = ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR'];
 
 const BREAK = /\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
 const HIDDEN = /\r(?!\n)|[\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
@@ -54,7 +54,7 @@ export function parseRunState(text) {
   return { block, events, unparsed, markers, hidden: hasHiddenBreak(block), length: block.length, digest: sha(block) };
 }
 
-const AFTER = 'in a separate edit, and any owner event (START, DAG_BOUND, RETRY) first seen in this block is untrusted: '
+const AFTER = 'in a separate edit, and any owner event (START, DAG_BOUND, RETRY, UNIT_CLEAR) first seen in this block is untrusted: '
   + 'once status shows nothing live, re-append it as a new, distinct line (e.g. with a timestamp)';
 
 /**

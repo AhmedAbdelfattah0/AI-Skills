@@ -210,6 +210,8 @@ export function aggregate(runs) {
 
 const TOKEN_KEYS = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'];
 const UNKNOWN = 'unknown';
+/** Bucket of usage records that carry no phase (usage.mjs imports without --phase): ticket budget only. */
+const PHASE_UNKNOWN = 'phase unknown';
 const known = (v) => typeof v === 'number' && Number.isFinite(v);
 
 /** Processed tokens of one usage record, or null when it reports no token counter. */
@@ -230,26 +232,30 @@ function processed(record) {
 export function attachUsage(run, records) {
   const mine = (Array.isArray(records) ? records : []).filter((r) => r && r.run_id === run.run_id);
   const roles = {};
+  const phases = {};
   const cost = {};
   for (const r of mine) {
+    const phase = phases[typeof r.phase === 'string' && r.phase ? r.phase : PHASE_UNKNOWN] ??= { events: 0, processed_tokens: null };
+    phase.events++;
     const role = typeof r.role === 'string' && r.role ? r.role : UNKNOWN;
     const slot = roles[role] ??= { events: 0, processed_tokens: null };
     slot.events++;
     const p = processed(r);
-    if (p !== null) slot.processed_tokens = (slot.processed_tokens ?? 0) + p;
+    if (p !== null) { slot.processed_tokens = (slot.processed_tokens ?? 0) + p; phase.processed_tokens = (phase.processed_tokens ?? 0) + p; }
     if (known(r.reported_cost_usd)) {
       const basis = typeof r.cost_basis === 'string' && /^[a-z_]{1,32}$/.test(r.cost_basis) ? r.cost_basis : UNKNOWN;
       const slotCost = cost[basis] ??= { reported_cost_usd: 0 };
       slotCost.reported_cost_usd += r.reported_cost_usd;
     }
   }
-  for (const slot of Object.values(roles)) slot.processed_tokens ??= UNKNOWN;
+  for (const slot of [...Object.values(roles), ...Object.values(phases)]) slot.processed_tokens ??= UNKNOWN;
   const totals = Object.values(roles).map((r) => r.processed_tokens).filter(known);
   const total = totals.length ? totals.reduce((a, b) => a + b, 0) : null;
   const orchestrator = roles.orchestrator?.processed_tokens;
   const anyUnknown = mine.some((r) => processed(r) === null); // one record without counters makes the share unknowable
   return { ...run, usage: {
     tokens_by_role: mine.length ? roles : UNKNOWN,
+    tokens_by_phase: mine.length ? phases : UNKNOWN,
     processed_tokens_total: total ?? UNKNOWN,
     orchestrator_share_pct: known(orchestrator) && !anyUnknown && total > 0 ? Math.round(orchestrator / total * 1000) / 10 : UNKNOWN,
     cost_by_basis: cost,
@@ -284,6 +290,15 @@ export function aggregateUsage(runs) {
   return { accepted_tickets: accepted.length, cost_per_accepted_ticket_by_basis: bases,
     note: 'Partitioned by cost_basis; bases are never added together.' };
 }
+
+/**
+ * Attempts whose launcher output passed the 32 MiB capture cap (B12): `[{attempt_id, kind, node,
+ * stdout_bytes}]`, empty when none. A flag only: the attempt's outcome was decided as without it.
+ * @param {object|null} state
+ */
+export const truncatedOutputs = (state) => (Array.isArray(state?.attempts) ? state.attempts : [])
+  .filter((a) => a?.envelope?.truncated === true)
+  .map((a) => ({ attempt_id: a.attempt_id, kind: a.kind, node: a.node, stdout_bytes: a.envelope.stdout_bytes ?? UNKNOWN }));
 
 /**
  * Resource and parallelism metrics from an engine state's attempts (Wave 1 instrumentation).

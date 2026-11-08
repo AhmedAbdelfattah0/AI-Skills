@@ -11,8 +11,8 @@
  * is never dispatched. The API contract is the comment blocks at the top of run-engine.test.mjs
  * and run-engine-repair.test.mjs.
  *
- * CLI: run-engine.mjs init|status|drive|resume|mark --repo <dir> --ticket <key> --run-id <id>
- *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>]
+ * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id>
+ *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
@@ -21,6 +21,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
+import { truncatedOutputs } from './run-summary.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
@@ -29,7 +30,7 @@ import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearS
 import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
-import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed } from './engine-units.mjs';
+import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -159,9 +160,12 @@ function view(E, transient = []) {
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
     judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : [])],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
-    budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags },
+    budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
+      ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
-    telemetry_degraded: structuredClone(S.telemetry_degraded), ...(units ? { units: unitProjection(S, E.ctx.repoRoot, cache) } : {}) };
+    telemetry_degraded: structuredClone(S.telemetry_degraded),
+    ...(units ? { units: unitProjection(S, E.ctx.repoRoot, cache), unit_ceiling: ceiling(S) } : {}),
+    ...(truncatedOutputs(S).length ? { truncated_outputs: truncatedOutputs(S) } : {}) };
 }
 
 /** Record a sink failure as telemetry degradation (never a command failure). */
@@ -314,6 +318,27 @@ export async function mark(ctx) {
   });
 }
 
+/**
+ * Owner clearing of a unit dead end (engine-units.mjs clearUnit): authorized only by a trusted
+ * RUN-STATE UNIT_CLEAR linked to the unit's current evidence. The UNIT_CLEARED event (with the
+ * owner's reason) reaches RUN-STATE like MARK. Refusals throw (CLI exit 1).
+ */
+export async function clearUnitCmd(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && k !== 'unit');
+  if (extra.length || typeof ctx.unit !== 'string' || !ctx.unit) throw coded('unit_clear_refused', `clear-unit takes --unit and no other fields${extra.length ? ` (got ${extra})` : ''}`);
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));
+    let entry;
+    try { entry = clearUnit(E, ctx.unit); } catch (e) { await E.commit(); throw e; } // the authority observation stays recorded
+    E.S.outbox.push({ run_id: E.S.run_id, event: 'UNIT_CLEARED', event_id: 'unit-clear-' + randomUUID(), unit: ctx.unit, ...entry,
+      timestamp: new Date().toISOString() });
+    await E.commit();
+    await deliver(E);
+    return view(E);
+  });
+}
+
 const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state']);
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
@@ -349,13 +374,14 @@ async function main(argv) {
     if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>]\n       run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
+    'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       return gate({ ...ctx, gate: gateKind, input }); } };
   if (!Object.hasOwn(commands, cmd)) throw new Error('unknown command ' + cmd);

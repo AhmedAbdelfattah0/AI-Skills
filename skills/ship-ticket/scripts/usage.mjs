@@ -117,6 +117,8 @@ export function readEvents(path) {
 
 const TOKEN_COUNTERS = Object.freeze(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']);
 const IMPORT_ROLES = new Set(['orchestrator', 'reviewer']);
+/** Phases an imported record may name (`--phase`); without one its phase is unknown: ticket budget only. */
+export const IMPORT_PHASES = Object.freeze(['PLAN', 'BUILD', 'PROVE', 'REVIEW', 'REPAIR', 'SHIP']);
 const METRICS = Object.freeze({
   processed_tokens: ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'],
   output_tokens: ['output_tokens'],
@@ -165,6 +167,13 @@ function checkRole(role, label) {
   if (!IMPORT_ROLES.has(role)) throw new Error(label + ' must be orchestrator or reviewer');
 }
 
+/** `{ phase }` for an imported record when `phase` is given (one of IMPORT_PHASES), else `{}` (phase unknown); throws otherwise. */
+function phaseField(phase) {
+  if (phase === undefined || phase === null) return {};
+  if (!IMPORT_PHASES.includes(phase)) throw new Error('phase must be ' + IMPORT_PHASES.join('|'));
+  return { phase };
+}
+
 /** Optional ISO window bound to epoch ms; null when absent, throws when unparseable. */
 function parseWindow(value, label) {
   if (value === undefined || value === null) return null;
@@ -178,10 +187,11 @@ function parseWindow(value, label) {
  * in-process subagents `<dir>/<sid>/subagents/*.jsonl` (role `subagentRole`).
  * Assistant lines inside the inclusive [since, until] window are kept; a
  * message id that repeats (streaming revisions) keeps only its last revision.
- * Returns one record per message with `source:'session'`.
+ * Returns one record per message with `source:'session'`, carrying `phase` only when given.
  */
-export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator', subagentRole = 'reviewer', since, until } = {}) {
+export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator', subagentRole = 'reviewer', since, until, phase } = {}) {
   if (typeof runId !== 'string' || !SAFE.test(runId)) throw new Error('import-session needs a safe run_id');
+  const tag = phaseField(phase);
   checkRole(role, 'role');
   checkRole(subagentRole, 'subagentRole');
   const from = parseWindow(since, 'since');
@@ -208,7 +218,7 @@ export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator',
         cache_read_tokens: count(u.cache_read_input_tokens), cache_write_tokens: count(u.cache_creation_input_tokens) };
       if (Object.values(counters).every(v => v === null)) continue;
       last.delete(ev.message.id); // re-insert so order follows the last revision
-      last.set(ev.message.id, { provider: 'claude', run_id: runId, role: fileRole, source: 'session',
+      last.set(ev.message.id, { provider: 'claude', run_id: runId, role: fileRole, ...tag, source: 'session',
         source_execution_id: `${name}:${ev.message.id}`, ...counters, reasoning_tokens: null, reported_cost_usd: null,
         cost_basis: null, timestamp: typeof ev.timestamp === 'string' ? ev.timestamp : null });
     }
@@ -219,10 +229,12 @@ export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator',
 
 /**
  * Import a Codex relay result `{execution_id, usage?}`. Without reported usage
- * every counter is null and `usage_status` is 'unknown' — never an invented number.
+ * every counter is null and `usage_status` is 'unknown' — never an invented number. `phase` is
+ * carried only when given.
  */
-export function importCodexRelay(resultJson, { runId, role = 'reviewer' } = {}) {
+export function importCodexRelay(resultJson, { runId, role = 'reviewer', phase } = {}) {
   if (typeof runId !== 'string' || !SAFE.test(runId)) throw new Error('import-codex needs a safe run_id');
+  const tag = phaseField(phase);
   checkRole(role, 'role');
   const r = JSON.parse(readFileSync(resultJson, 'utf8'));
   if (typeof r?.execution_id !== 'string' || !SAFE.test(r.execution_id)) throw new Error('relay result needs a safe execution_id');
@@ -233,7 +245,7 @@ export function importCodexRelay(resultJson, { runId, role = 'reviewer' } = {}) 
     reasoning_tokens: u ? count(u.reasoning_output_tokens) : null, reported_cost_usd: null,
   };
   const known = Object.values(counters).some(v => v !== null);
-  return { provider: 'codex', run_id: runId, role, source: 'codex', source_execution_id: r.execution_id, ...counters,
+  return { provider: 'codex', run_id: runId, role, ...tag, source: 'codex', source_execution_id: r.execution_id, ...counters,
     cost_basis: null, usage_status: known ? 'reported' : 'unknown' };
 }
 
@@ -280,7 +292,8 @@ function checkLimit(v, label) {
  * never treated as within budget). In-flight records count toward `used`;
  * `overshoot` reports how far the ticket budget was exceeded and by how much
  * in-flight work. A budget that is not set has state null; `phase` is null
- * unless both `phase_tokens` and `opts.phase` are given.
+ * unless both `phase_tokens` and `opts.phase` are given. Records without a `phase` count against the
+ * ticket budget only and are summed in `phase_unknown` ({ records, tokens }).
  */
 export function evaluateBudget(records, budget = {}, { metric = 'processed_tokens', phase } = {}) {
   if (!Object.hasOwn(METRICS, metric)) throw new Error('unsupported budget metric: ' + metric);
@@ -289,7 +302,7 @@ export function evaluateBudget(records, budget = {}, { metric = 'processed_token
   const tokens = (e) => keys.reduce((a, k) => a + (typeof e[k] === 'number' ? e[k] : 0), 0);
   const ticketLimit = checkLimit(budget?.ticket_tokens, 'ticket_tokens');
   const phaseLimit = checkLimit(budget?.phase_tokens, 'phase_tokens');
-  let used = 0, inFlight = 0, unknown = false, phaseUsed = 0, phaseUnknown = false;
+  let used = 0, inFlight = 0, unknown = false, phaseUsed = 0, phaseUnknown = false, noPhase = 0, noPhaseTokens = 0;
   for (const e of records) {
     checkRecord(e);
     const known = hasKnownUsage(e);
@@ -298,6 +311,7 @@ export function evaluateBudget(records, budget = {}, { metric = 'processed_token
     used += n;
     if (e.in_flight === true) inFlight += n;
     if (phase !== undefined && e.phase === phase) { phaseUsed += n; if (!known) phaseUnknown = true; }
+    if (typeof e.phase !== 'string') { noPhase++; noPhaseTokens += n; }
   }
   const ticket = { limit: ticketLimit, used, state: budgetState(used, ticketLimit, unknown) };
   const phaseResult = phaseLimit !== null && phase !== undefined
@@ -307,6 +321,7 @@ export function evaluateBudget(records, budget = {}, { metric = 'processed_token
     dispatch_allowed: ticket.state !== 'stop_dispatch' && phaseResult?.state !== 'stop_dispatch',
     flags: unknown ? ['budget_unenforceable'] : [],
     overshoot: { tokens: ticketLimit === null ? 0 : Math.max(0, used - ticketLimit), in_flight_tokens: inFlight },
+    phase_unknown: { records: noPhase, tokens: noPhaseTokens },
   };
 }
 
@@ -343,8 +358,8 @@ function importInto(out, incoming) {
 }
 
 const USAGE_TEXT = 'Usage: usage.mjs summary <events.json|events.jsonl> [--run-id <id>]\n'
-  + '       usage.mjs import-session <session.jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer]\n'
-  + '       usage.mjs import-codex <relay-result.json> --run-id <id> --out <usage.jsonl> [--role reviewer]';
+  + '       usage.mjs import-session <session.jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer] [--phase <PHASE>]\n'
+  + '       usage.mjs import-codex <relay-result.json> --run-id <id> --out <usage.jsonl> [--role reviewer] [--phase <PHASE>]';
 
 /** CLI entry: summary, import-session, import-codex. */
 function main(argv) {
@@ -356,10 +371,10 @@ function main(argv) {
   }
   if (cmd === 'import-session' || cmd === 'import-codex') {
     const f = parseFlags(rest, cmd === 'import-session'
-      ? ['--run-id', '--out', '--since', '--until', '--role'] : ['--run-id', '--out', '--role']);
+      ? ['--run-id', '--out', '--since', '--until', '--role', '--phase'] : ['--run-id', '--out', '--role', '--phase']);
     if (!f['--run-id'] || !f['--out']) throw new Error(USAGE_TEXT);
     if (cmd === 'import-codex' && f['--role'] !== undefined && f['--role'] !== 'reviewer') throw new Error('import-codex role must be reviewer');
-    const opts = { runId: f['--run-id'], ...(f['--role'] ? { role: f['--role'] } : {}) };
+    const opts = { runId: f['--run-id'], ...(f['--role'] ? { role: f['--role'] } : {}), ...(f['--phase'] ? { phase: f['--phase'] } : {}) };
     const incoming = cmd === 'import-session'
       ? importSessionUsage(file, { ...opts, since: f['--since'], until: f['--until'] })
       : [importCodexRelay(file, opts)];

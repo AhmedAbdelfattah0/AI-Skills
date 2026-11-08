@@ -212,7 +212,8 @@ export async function gateRed(input, deps) {
     await deps.commit(snapshot());
     return refuse(state, 'runner_failed', [`gate runner failed to launch or complete: ${err?.message ?? err}`], { judgment_point: true });
   }
-  if (run?.quiescent !== true || !(await finish({ exitCode: run.exitCode ?? null, timedOut: Boolean(run.timedOut) }))) return unquiet();
+  if (run?.quiescent !== true || !(await finish({ exitCode: run.exitCode ?? null, timedOut: Boolean(run.timedOut),
+    ...(run.truncated === true ? { truncated: true, stdout_bytes: run.stdout_bytes } : {}) }))) return unquiet();
 
   // The runner ran repository code: the approval binding must still hold before any evidence is committed.
   const drift = (await deps.verifyBinding?.()) ?? [];

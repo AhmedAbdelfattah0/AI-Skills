@@ -53,6 +53,10 @@ Read-only; each prints `unknown` where its source lacks data, never 0, and none 
 - `cost_per_accepted_ticket`: reported cost of a complete run, kept per `cost_basis` (bases are
   never added; subscription estimates are not charges). `unknown` for an incomplete run or one
   with no reported cost. `cross_run` keeps the per-basis averages.
+- `tokens_by_phase`: processed tokens per usage phase; records without a phase (imports without
+  `--phase`) are the `phase unknown` bucket, counted against the ticket budget only.
+- `truncated_outputs` (present only when any): attempts whose launcher output passed the 32 MiB
+  capture cap (`{attempt_id, kind, node, stdout_bytes}`); a flag, never a changed outcome.
 - `orchestrator_share_pct` is `unknown` when any usage record of the run lacks counters; a
   usage file's malformed (e.g. crash-truncated) JSONL lines are skipped, as before Wave 1.
 

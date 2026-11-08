@@ -452,7 +452,7 @@ export async function dispatch(config, deps = {}) {
   const afterState = gitDirty(plan.repoRoot);
   // The plan file is exempt only when its change is an append inside RUN-STATE carrying no
   // authority event; a worker editing the approved plan, deleting it, or appending START,
-  // DAG_BOUND or RETRY is a violation.
+  // DAG_BOUND, RETRY or UNIT_CLEAR is a violation.
   const exemptTicket = workerRunStateAppend(planBefore, readPlanText(plan.repoRoot, approval.ticket)) ? approval.ticket : null;
   const violations = ownershipViolations(before, afterState, plan.ownership.writes, plan.ownership.othersOwned, exemptTicket);
   const orchestratorPaths = orchestratorPathsChanged(before, afterState, exemptTicket);

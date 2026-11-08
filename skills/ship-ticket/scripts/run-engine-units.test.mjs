@@ -34,6 +34,23 @@
  *   acceptance ids, checks, current fingerprints and the evidence state verified|stale|failed|pending
  *   with its candidate id and invalidation causes. `gate review` and `gate ship-ready` refuse
  *   `units_unverified` while a unit is not verified.
+ * ============================ CONTRACT ADDITIONS (Wave 2b-i) ==========================
+ * Mutation: a check that changes the declared reads/writes of ANY node (unit-less upstream
+ *   generators included) or moves the config.base commit fails its unit with that cause.
+ * Ceiling: config.unitRecheckCeiling (0..100, needs a unit; default 4, never defaulted into the
+ *   bound config) caps unit re-checks per run across all units: a check round of a unit that already
+ *   completed one spends one (UNIT_RECHECK kind rerun|invalidation|cleared); the next one past the
+ *   ceiling raises the durable judgment `parent_ceiling` instead. status.unit_ceiling = {limit, used}.
+ * Clear: `run-engine.mjs clear-unit --unit <u>` clears a post-freeze unit_check_failed or a
+ *   unit_invalidation_storm only with a trusted RUN-STATE UNIT_CLEAR {run_id, unit, predecessor:
+ *   <current evidence id>, authorized_by, reason} (an authority event, the RETRY model); otherwise
+ *   unit_clear_unauthorized / unit_clear_refused (exit 1). It resets that unit's evidence and
+ *   invalidation counter, records UNIT_CLEARED (state, RUN-STATE, status.units.<u>.clears) and never
+ *   resets the ceiling.
+ * B12: launcher output past 32 MiB sets envelope { truncated: true, stdout_bytes }; the outcome is
+ *   unchanged; status/eval list `truncated_outputs` only when any exists.
+ * I7: usage.mjs import-* take an optional --phase; without it a record is phase unknown: ticket
+ *   budget only, status.budget.phase_unknown {records, tokens}, eval tokens_by_phase['phase unknown'].
  * =========================================================================================
  */
 import test from 'node:test';
@@ -130,7 +147,8 @@ import { validateEngineDag } from './engine-dag.mjs';
 import { schedule } from './harness.mjs';
 import { resume } from './run-engine.mjs';
 import { evaluateRun } from './eval.mjs';
-import { buildRun } from './run-summary.mjs';
+import { buildRun, attachUsage } from './run-summary.mjs';
+import { spawnSync } from 'node:child_process';
 import { waitUntil } from './engine-test-fixture.mjs';
 
 const dagOf = (nodes, config = {}) => ({ schema: 'ship-ticket-engine-dag-v1',
@@ -431,6 +449,200 @@ test('repair: a stale or failed unit-less dependency leaves the dependent unit u
   assert.equal(failed.out.nodes.gen.state, 'failed');
   assert.notEqual(failed.out.units['u-b'].state, 'verified');
   assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+});
+
+// ------------------------------------------------------------------ Wave 2b-i
+
+/** A check that rewrites `rel` (repo-relative) with fresh bytes. */
+const rewrites = (rel) => ({ cmd: process.execPath, args: ['-e', `require('fs').writeFileSync(${J(rel)},'rewritten '+process.hrtime.bigint())`] });
+
+test('2b: a check that edits the contract a unit-less upstream generator reads fails the unit (Codex repro)', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { edit: rewrites('docs/in.txt') } },
+    nodes: [node('gen', { reads: ['docs/in.txt'] }), node('b', { deps: ['gen'], unit: 'u-b', checks: ['edit'] })],
+    behaviour: { gen: { write: { 'src/gen.txt': 'g' } }, b: { write: { 'src/b.txt': 'b' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const r = fx.cli('drive');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const j = r.out.judgments.find(x => x.code === 'unit_check_failed' && x.node === 'u-b');
+  assert.ok(j && /docs\/in.txt/.test(j.reason), J(r.out.judgments));
+  assert.notEqual(r.out.units['u-b'].state, 'verified');
+  assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+});
+
+test('2b ceiling: k nodes in one unit cannot give k re-checks (marking each node in turn hits parent_ceiling)', { skip: WIN_SKIP }, (t) => {
+  const FAIL = { cmd: process.execPath, args: ['-e', 'process.exit(1)'] };
+  const fx = fixture(t, { commit: true, config: { unitRecheckCeiling: 1, testCommands: { bad: FAIL } },
+    nodes: ['n1', 'n2', 'n3'].map(id => node(id, { unit: 'u', checks: ['bad'] })),
+    behaviour: Object.fromEntries(['n1', 'n2', 'n3'].map(id => [id, { write: { [`src/${id}.txt`]: id } }])) });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  assert.equal(fx.cli('drive').status, 2);
+  assert.equal(checkRuns(fx, 'u').length, 1, 'the first check is free');
+  ok(fx.cli('mark', { node: 'n1', transition: 'failed->pending', reason: 'retry 1' }));
+  const second = fx.cli('drive');
+  assert.equal(second.status, 2);
+  assert.equal(checkRuns(fx, 'u').length, 2, 'one re-check within the ceiling');
+  assert.deepEqual(second.out.unit_ceiling, { limit: 1, used: 1 });
+  ok(fx.cli('mark', { node: 'n2', transition: 'failed->pending', reason: 'retry 2' }));
+  const third = fx.cli('drive');
+  assert.equal(third.status, 2, third.stdout + third.stderr);
+  const j = third.out.judgments.find(x => x.code === 'parent_ceiling');
+  assert.ok(j && j.node === 'u' && /unitRecheckCeiling/.test(j.reason), J(third.out.judgments));
+  assert.equal(checkRuns(fx, 'u').length, 2, 'the second node\'s retry gets no fresh re-check');
+  assert.deepEqual(unitEvents(fx, 'UNIT_RECHECK').map(e => [e.unit, e.kind, e.used]), [['u', 'rerun', 1]]);
+  assert.equal(fx.cli('mark', { node: 'n3', transition: 'failed->pending', reason: 'retry 3' }).status, 1, 'n3 returned to done when n2 was marked: nothing to mark');
+  assert.equal(fx.cli('drive').status, 2, 'parent_ceiling is durable: no automatic retry');
+  assert.equal(checkRuns(fx, 'u').length, 2);
+});
+
+test('2b ceiling: a second unit does not get a fresh allowance; the default is a run-wide constant', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { unitRecheckCeiling: 1, testCommands: { ok: PASS } },
+    nodes: [node('a', { unit: 'u1', reads: ['docs/in.txt'], checks: ['ok'] }), node('b', { unit: 'u2', reads: ['docs/c2.txt'], checks: ['ok'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } } } });
+  writeFileSync(`${fx.repo}/docs/c2.txt`, 'c2 v1');
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive'));
+  writeFileSync(`${fx.repo}/docs/in.txt`, 'v2');
+  const one = fx.cli('drive');
+  ok(one);
+  assert.deepEqual(one.out.unit_ceiling, { limit: 1, used: 1 });
+  writeFileSync(`${fx.repo}/docs/c2.txt`, 'c2 v2');
+  const two = fx.cli('drive');
+  assert.equal(two.status, 2, two.stdout + two.stderr);
+  assert.ok(two.out.judgments.some(x => x.code === 'parent_ceiling' && x.node === 'u2'), J(two.out.judgments));
+  assert.deepEqual([checkRuns(fx, 'u1').length, checkRuns(fx, 'u2').length], [2, 1]);
+  assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+  invalid(dagOf([{ id: 'a', unit: 'u' }], { unitRecheckCeiling: -1 }), /unitRecheckCeiling must be an integer/);
+  invalid(dagOf([{ id: 'a' }], { unitRecheckCeiling: 2 }), /needs a node with a unit/);
+  assert.equal('unitRecheckCeiling' in validateEngineDag(dagOf([{ id: 'a', unit: 'u' }]), { ticket: 'T-1' }).config, false, 'never defaulted into the bound config');
+});
+
+/** A unit `u` whose contract docs/in.txt is edited until unit_invalidation_storm (2 re-checks spent). */
+function stormed(t, config = {}) {
+  const fx = fixture(t, { commit: true, config: { testCommands: { ok: PASS }, ...config },
+    nodes: [node('n', { unit: 'u', reads: ['docs/in.txt'], checks: ['ok'] })], behaviour: { n: { write: { 'src/n.txt': 'n' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  for (const v of ['v2', 'v3']) { writeFileSync(`${fx.repo}/docs/in.txt`, v); ok(fx.cli('drive'), v); }
+  writeFileSync(`${fx.repo}/docs/in.txt`, 'v4');
+  const r = fx.cli('drive');
+  assert.ok(r.out.judgments.some(j => j.code === 'unit_invalidation_storm'), J(r.out.judgments));
+  return { fx, predecessor: r.out.units.u.evidence.id };
+}
+const unitClear = (unit, predecessor, extra = {}) => ({ run_id: 'run-1', event: 'UNIT_CLEAR', unit, predecessor, authorized_by: 'owner',
+  reason: 'contract churn understood; re-check once', ...extra });
+
+test('2b clear: a storm is cleared only by a trusted owner UNIT_CLEAR linked to its evidence; the next drive re-checks', { skip: WIN_SKIP }, (t) => {
+  const { fx, predecessor } = stormed(t);
+  const none = fx.cli('clear-unit', { unit: 'u' });
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, new RegExp(`unit_clear_unauthorized: .*predecessor: ${predecessor}`));
+  fx.appendRunState(unitClear('u', 'u@1'));
+  assert.match(fx.cli('clear-unit', { unit: 'u' }).stderr, /unit_clear_unauthorized/, 'a UNIT_CLEAR linked to other evidence is refused');
+  fx.appendRunState(unitClear('u', predecessor, { authorized_by: '' }));
+  assert.match(fx.cli('clear-unit', { unit: 'u' }).stderr, /unit_clear_unauthorized/, 'authorized_by is required');
+  assert.match(fx.cli('clear-unit', { unit: 'nope' }).stderr, /unit_clear_refused: no unit nope/);
+  fx.appendRunState(unitClear('u', predecessor));
+  const c = fx.cli('clear-unit', { unit: 'u' });
+  ok(c, 'owner clear');
+  assert.equal(c.out.judgments.some(j => j.code === 'unit_invalidation_storm'), false);
+  assert.equal(c.out.units.u.state, 'pending');
+  assert.equal(c.out.units.u.invalidations, 0);
+  assert.deepEqual(c.out.units.u.clears.map(x => [x.predecessor, x.cleared, x.authorized_by, x.reason]),
+    [[predecessor, ['unit_invalidation_storm'], 'owner', 'contract churn understood; re-check once']]);
+  assert.ok(runStateEvents(fx.planFile).some(e => e.event === 'UNIT_CLEARED' && e.unit === 'u' && e.reason === 'contract churn understood; re-check once'));
+  assert.equal(c.out.units.u.causes.length, 3, 'the invalidation history is kept');
+  const d = fx.cli('drive');
+  ok(d);
+  assert.equal(d.out.outcome, 'done');
+  assert.equal(d.out.units.u.state, 'verified');
+  assert.equal(checkRuns(fx, 'u').length, 4, 'one re-check after the clear');
+  assert.deepEqual(unitEvents(fx, 'UNIT_RECHECK').map(e => e.kind), ['invalidation', 'invalidation', 'cleared']);
+  assert.deepEqual(d.out.unit_ceiling, { limit: 4, used: 3 }, 'the re-check after a clear spends the parent ceiling');
+  assert.match(fx.cli('clear-unit', { unit: 'u' }).stderr, /unit_clear_refused: unit u is not at a dead end/, 'a verified unit has nothing to clear');
+});
+
+test('2b clear: a post-freeze unit_check_failed is clearable, but the clear never lifts the parent ceiling', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { unitRecheckCeiling: 1, testCommands: { good: holds('a.txt', 'a1') } },
+    nodes: [node('a', { unit: 'api', checks: ['good'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'broken by repair' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+  const r = fx.cli('drive');
+  assert.ok(r.out.judgments.some(j => j.code === 'unit_check_failed' && j.node === 'api'), J(r.out.judgments));
+  assert.deepEqual(r.out.unit_ceiling, { limit: 1, used: 1 });
+  fx.appendRunState(unitClear('api', r.out.units.api.evidence.id, { reason: 'flaky runner fixed' }));
+  const c = fx.cli('clear-unit', { unit: 'api' });
+  ok(c);
+  assert.equal(c.out.judgments.some(j => j.code === 'unit_check_failed'), false, 'the failed evidence is gone');
+  assert.deepEqual(c.out.units.api.clears.map(x => x.cleared), [['unit_check_failed']]);
+  const d = fx.cli('drive');
+  assert.equal(d.status, 2, d.stdout + d.stderr);
+  assert.ok(d.out.judgments.some(j => j.code === 'parent_ceiling' && j.node === 'api'), J(d.out.judgments));
+  assert.equal(checkRuns(fx, 'api').length, 2, 'no re-check beyond the ceiling');
+  assert.equal(fx.gate('review', confirmReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+});
+
+test('2b clear: before the freeze a failed unit is refused (mark is its path); a UNIT_CLEAR seen while a runner may run is untrusted', { skip: WIN_SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { good: holds('a.txt', 'good') } },
+    nodes: [node('a', { unit: 'api', checks: ['good'] })], behaviour: { a: { write: { 'src/a.txt': 'bad' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const r = fx.cli('drive');
+  fx.appendRunState(unitClear('api', r.out.units.api.evidence.id));
+  assert.match(fx.cli('clear-unit', { unit: 'api' }).stderr, /unit_clear_refused: .*mark failed->pending/);
+  const s = stormed(t);
+  // A runner group whose quiescence cannot be proven ('unknown', the probe says alive): a line first
+  // observed now may come from dispatched code (engine-authority.mjs), so it is never authority.
+  s.fx.editState((st) => st.attempts.push({ attempt_id: 'att-unknown', kind: 'unit-check', node: 'u', status: 'unknown', pgid: 2 ** 22 + 7 }));
+  s.fx.appendRunState(unitClear('u', s.predecessor));
+  const { clearUnitCmd } = await import('./run-engine.mjs');
+  await assert.rejects(clearUnitCmd(s.fx.ctx({ unit: 'u', groupAlive: () => true })), /unit_clear_unauthorized: a UNIT_CLEAR for u appeared while dispatched work could run/);
+  assert.ok(s.fx.readState().authority.untrusted.some(u => JSON.parse(u.line).event === 'UNIT_CLEAR'));
+});
+
+test('2b B12: output past the 32 MiB cap is flagged truncated with its byte count; the outcome is unchanged', { skip: WIN_SKIP }, (t) => {
+  const BYTES = 32 * 1024 * 1024 + 4096;
+  const loud = { cmd: process.execPath, args: ['-e', `process.stdout.write(Buffer.alloc(${BYTES}, 97))`] };
+  const fx = fixture(t, { commit: true, config: { testCommands: { loud, ok: PASS } },
+    nodes: [node('a', { unit: 'api', checks: ['loud'] }), node('b', { unit: 'web', checks: ['ok'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const d = fx.cli('drive', {}, { timeout: 60000 });
+  ok(d);
+  assert.equal(d.out.outcome, 'done');
+  assert.equal(d.out.units.api.state, 'verified', 'a passing check stays a pass when its output was truncated');
+  const loudRun = checkRuns(fx, 'api')[0];
+  assert.deepEqual(d.out.truncated_outputs, [{ attempt_id: loudRun.attempt_id, kind: 'unit-check', node: 'api', stdout_bytes: BYTES }]);
+  const env = JSON.parse(readFileSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'T-1.attempts', `${loudRun.attempt_id}.envelope.json`), 'utf8'));
+  assert.deepEqual([env.truncated, env.stdout_bytes, env.exit_code], [true, BYTES, 0]);
+  assert.equal(JSON.parse(readFileSync(join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'T-1.attempts', `${checkRuns(fx, 'web')[0].attempt_id}.envelope.json`), 'utf8')).truncated,
+    undefined, 'output under the cap carries no flag');
+  assert.deepEqual(fx.cli('status').out.truncated_outputs, d.out.truncated_outputs);
+  const m = evaluateRun(buildRun('T-1', 'run-1', []), { state: fx.readState(), repoRoot: fx.repo });
+  assert.deepEqual(m.truncated_outputs, d.out.truncated_outputs);
+  assert.equal('truncated_outputs' in evaluateRun(buildRun('T-1', 'run-1', []), { state: { ...fx.readState(), attempts: [] } }), false);
+});
+
+test('2b I7: imported usage without --phase is phase unknown in status and eval and spends the ticket budget only', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { budget: { ticket_tokens: 1000, phase_tokens: 100 } },
+    nodes: [node('a'), node('b'), node('c')], behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } }, c: { write: { 'src/c.txt': 'c' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive', { until: 'a' }));
+  const USAGE_CLI = fileURLToPath(new URL('./usage.mjs', import.meta.url));
+  const relay = (id, tokens) => { const f = join(fx.root, `${id}.json`); writeFileSync(f, J({ execution_id: id, usage: { input_tokens: tokens, output_tokens: 0 } })); return f; };
+  const imp = (...args) => { const r = spawnSync(process.execPath, [USAGE_CLI, 'import-codex', ...args, '--run-id', 'run-1', '--out', fx.usageFile()], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
+  imp(relay('cx-1', 500));
+  const s = fx.cli('status').out;
+  assert.deepEqual(s.budget.phase_unknown, { records: 1, tokens: 500 });
+  assert.equal(s.budget.ticket.used, 506);
+  ok(fx.cli('drive', { until: 'b' }), 'the BUILD phase budget is not spent by phase-unknown usage');
+  assert.equal(fx.runs('b').length, 1);
+  imp(relay('cx-2', 200), '--phase', 'BUILD');
+  const stop = fx.cli('drive');
+  assert.equal(stop.status, 2);
+  assert.ok(stop.out.judgments.some(j => j.code === 'budget_stop' && /BUILD phase budget/.test(j.reason)), J(stop.out.judgments));
+  assert.equal(fx.runs('c').length, 0);
+  const records = readFileSync(fx.usageFile(), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  const m = evaluateRun(attachUsage(buildRun('T-1', 'run-1', []), [...fx.readState().usage, ...records]), { state: fx.readState() });
+  assert.deepEqual(Object.fromEntries(Object.entries(m.tokens_by_phase).map(([p, v]) => [p, v.processed_tokens])), { BUILD: 6 + 6 + 200, 'phase unknown': 500 });
 });
 
 test('repair: unit ids such as constructor and toString work through init, drive and status; __proto__ is refused', { skip: WIN_SKIP }, (t) => {

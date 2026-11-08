@@ -1,5 +1,5 @@
 /**
- * Owner authority in the plan's RUN-STATE (START, DAG_BOUND, RETRY) for the durable run engine.
+ * Owner authority in the plan's RUN-STATE (START, DAG_BOUND, RETRY, UNIT_CLEAR) for the durable run engine.
  * The plan file is writable by any dispatched code (a worker, a RED spec, a proof command), so a
  * line's content is never authority on its own: the engine honours only lines in
  * `state.authority.trusted`, and `observeAuthority` is the one place that fills it.
@@ -17,13 +17,16 @@
 import { AUTHORITY_EVENTS, parseRunState, blockExtends, malformedReason } from './run-state.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 
+/** Events a state from before the authority record may trust (re-checked against bound digests). */
+const BOUND_ON_INIT = ['START', 'DAG_BOUND'];
+
 /** Whether attempt `a` may still be running code ('unknown' is re-probed on its group). */
 const mayRun = (a, isAlive) => (a.status === 'unknown' ? isAlive(a.pgid) !== false : LIVE.includes(a.status));
 
 /**
  * Classify every authority line of `planText` not seen before (trusted or untrusted), then advance
  * `through` when no attempt may still run. A state from before this record trusts only its
- * START/DAG_BOUND lines (both are re-checked against bound digests anyway); a RETRY is re-appended.
+ * START/DAG_BOUND lines (both are re-checked against bound digests anyway); a RETRY or UNIT_CLEAR is re-appended.
  */
 export function observeAuthority(S, planText, isAlive) {
   const fresh = !S.authority;
@@ -35,7 +38,7 @@ export function observeAuthority(S, planText, isAlive) {
     if (!AUTHORITY_EVENTS.includes(e.event)) continue;
     const line = JSON.stringify(e);
     if (A.trusted.includes(line) || A.untrusted.some(u => u.line === line)) continue;
-    if (tainted && !(fresh && e.event !== 'RETRY')) A.untrusted.push({ line, seq: S.seq ?? 0 });
+    if (tainted && !(fresh && BOUND_ON_INIT.includes(e.event))) A.untrusted.push({ line, seq: S.seq ?? 0 });
     else A.trusted.push(line);
   }
   if (rewritten) A.rewrites = (A.rewrites ?? 0) + 1;

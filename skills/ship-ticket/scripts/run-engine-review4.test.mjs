@@ -5,7 +5,7 @@
  * seam (hooks, groupAlive). No test hand-edits the engine state file.
  *
  * ============================ CONTRACT ADDITIONS (review-4) ============================
- * Authority (H): START, DAG_BOUND and RETRY lines in RUN-STATE are honoured only from
+ * Authority (H): START, DAG_BOUND, RETRY and UNIT_CLEAR lines in RUN-STATE are honoured only from
  *   state.authority.trusted. A line is trusted only when the engine first observes it with no
  *   attempt (worker, RED runner or proof runner) started since its last quiescent observation;
  *   otherwise it goes to state.authority.untrusted. Observation happens at the start and the end of

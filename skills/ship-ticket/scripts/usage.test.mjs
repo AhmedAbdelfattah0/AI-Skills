@@ -37,7 +37,8 @@ const USAGE_CLI = join(dirname(fileURLToPath(import.meta.url)), 'usage.mjs');
  *     record (the aggregate) wins. Duplicates inside `incoming` are also refused after the first.
  *
  * evaluateBudget(records, budget:{ticket_tokens?, phase_tokens?}, { metric = 'processed_tokens', phase } = {}) ->
- *   { metric, used, ticket:{limit, used, state}, phase:{limit, used, state}|null, dispatch_allowed, flags:[], overshoot }
+ *   { metric, used, ticket:{limit, used, state}, phase:{limit, used, state}|null, dispatch_allowed, flags:[], overshoot,
+ *     phase_unknown:{records, tokens} }   (records without a `phase`: ticket budget only)
  *   - metric 'processed_tokens' = input+output+cache_read+cache_write; 'output_tokens' = output only.
  *     (null counters count 0 inside a record that reports at least one counter.)
  *   - state: 'ok' (<80%), 'warn' (>=80% and <100%), 'stop_dispatch' (>=100%), 'unknown'.
@@ -48,8 +49,9 @@ const USAGE_CLI = join(dirname(fileURLToPath(import.meta.url)), 'usage.mjs');
  *   - if ANY record has no known counter (usage unknown), flags includes 'budget_unenforceable' and the
  *     affected budget state is 'unknown' (never 'ok') unless it is already 'stop_dispatch'.
  *
- * CLI: usage.mjs import-session <jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer]
- *      usage.mjs import-codex <result.json> --run-id <id> --out <usage.jsonl> [--role reviewer]
+ * CLI: usage.mjs import-session <jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer] [--phase <PHASE>]
+ *      usage.mjs import-codex <result.json> --run-id <id> --out <usage.jsonl> [--role reviewer] [--phase <PHASE>]
+ *   - --phase (PLAN|BUILD|PROVE|REVIEW|REPAIR|SHIP) sets record.phase; without it the record has no phase.
  *   - appends only non-refused records (JSONL) to --out, prints JSON {added:n, refused:[ids]}; exit 1 on bad args/role.
  */
 
@@ -257,4 +259,29 @@ test('RED usage: processed_tokens is input+output+cache_read+cache_write; config
   assert.equal(out.used, 10);
   assert.equal(out.ticket.state, 'ok');
   assert.throws(() => evaluateBudget(records, { ticket_tokens: 100 }, { metric: 'bogus' }), /metric/);
+});
+
+// ---- AIS-HARNESS-3 Wave 2b-i, I7: optional --phase on import; absent = phase unknown (ticket budget only)
+
+test('I7 usage: --phase tags imported records; without it the record has no phase and counts against the ticket budget only', (t) => {
+  const root = session(t);
+  writeFileSync(join(root, 'relay.json'), JSON.stringify({ execution_id: 'cx-9', usage: { input_tokens: 300, output_tokens: 0 } }));
+  const out = join(root, 'u.jsonl');
+  const cli = (...args) => spawnSync(process.execPath, [USAGE_CLI, ...args], { encoding: 'utf8' });
+  const s = cli('import-session', join(root, 'sess-1.jsonl'), '--run-id', 'run-1', '--out', out, '--since', WINDOW.since, '--until', WINDOW.until, '--phase', 'REVIEW');
+  assert.equal(s.status, 0, s.stderr);
+  const c = cli('import-codex', join(root, 'relay.json'), '--run-id', 'run-1', '--out', out);
+  assert.equal(c.status, 0, c.stderr);
+  const records = readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(records.map(r => r.phase ?? null), ['REVIEW', 'REVIEW', 'REVIEW', null]);
+  assert.equal('phase' in records[3], false, 'absent means unknown, never a guessed phase');
+  assert.notEqual(cli('import-codex', join(root, 'relay.json'), '--run-id', 'run-1', '--out', out, '--phase', 'review').status, 0, 'phase must be a known phase');
+  assert.throws(() => fn('importCodexRelay')(join(root, 'relay.json'), { runId: 'run-1', phase: 'NOPE' }), /phase must be/);
+  const evaluateBudget = fn('evaluateBudget');
+  const withBuild = [...records, rec({ source: 'carrier', source_execution_id: 'b1', phase: 'BUILD', input_tokens: 50, output_tokens: 0 })];
+  const v = evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'BUILD' });
+  assert.equal(v.phase.used, 50, 'records carrying a phase keep their phase-budget semantics');
+  assert.equal(v.ticket.used, 50 + 300 + records.slice(0, 3).reduce((a, r) => a + r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens, 0));
+  assert.deepEqual(v.phase_unknown, { records: 1, tokens: 300 });
+  assert.equal(evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'REVIEW' }).phase.state, 'stop_dispatch');
 });

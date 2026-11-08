@@ -38,7 +38,7 @@ export function planNarrativeDigest(text) {
 
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
-  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds'];
+  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling'];
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
 const NODE_PHASES = ['BUILD', 'PROVE', 'REPAIR', 'SHIP'];
@@ -105,6 +105,8 @@ export const unitVertex = (n) => (n.unit !== undefined ? `u:${n.unit}` : `n:${n.
  * config.acceptanceIds, the approved plan's acceptance criteria). Once any node has `acceptance`,
  * every id of config.acceptanceIds must be mapped to at least one node. Units may not form a cycle
  * (also through unit-less nodes), or a unit's checks could wait on its own dependents.
+ * `config.unitRecheckCeiling` (Wave 2b-i, needs a unit) is the run-wide unit re-check ceiling
+ * (engine-units.mjs DEFAULT_UNIT_RECHECK_CEILING when absent; never defaulted into the config).
  */
 function validateUnits(nodes, c, bad) {
   const ids = new Set(nodes.map(n => n.id)), cmds = Object.keys(c.testCommands ?? {});
@@ -119,6 +121,9 @@ function validateUnits(nodes, c, bad) {
     }
     if (n.acceptance !== undefined && !strings(n.acceptance)) bad(`node ${n.id}: acceptance must be acceptance criterion ids`);
   }
+  const cap = c.unitRecheckCeiling;
+  if (cap !== undefined && !(Number.isInteger(cap) && cap >= 0 && cap <= 100)) bad('config.unitRecheckCeiling must be an integer 0..100');
+  if (cap !== undefined && !nodes.some(n => n.unit !== undefined)) bad('config.unitRecheckCeiling needs a node with a unit');
   const acc = c.acceptanceIds;
   if (acc !== undefined && !(strings(acc) && acc.length && acc.every(Boolean) && new Set(acc).size === acc.length))
     bad('config.acceptanceIds must be unique non-empty strings');

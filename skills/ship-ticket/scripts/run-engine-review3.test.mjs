@@ -21,7 +21,7 @@
  *   only a RUN-STATE RETRY linked to it continues. A PASS with a second-opinion overflow is
  *   'outcome_inconsistent'.
  * Worker appends: a worker's verified RUN-STATE append is recorded (PLAN_APPENDED); a worker
- *   append of START, DAG_BOUND or RETRY is an ownership violation, and gate review never honours
+ *   append of START, DAG_BOUND, RETRY or UNIT_CLEAR is an ownership violation, and gate review never honours
  *   a RETRY that a worker appended (review-4 generalizes this to every dispatched path: only
  *   state.authority.trusted lines count; see run-engine-review4.test.mjs).
  * Round counters: an automatic infra retry of a review repair re-dispatches within the round it

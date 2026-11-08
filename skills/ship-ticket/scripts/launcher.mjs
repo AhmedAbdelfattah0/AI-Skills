@@ -9,6 +9,8 @@ export const RELEASE_BYTE = Buffer.from([0x06]);
 const DRAIN_MS = 1000;
 /** Resource sampler cadence (see the launcher). */
 const SAMPLE_MS = 1000, FIRST_SAMPLE_MS = 100;
+/** Durable mode keeps at most this much stdout; beyond it the envelope carries `truncated` (B12: flagged, never a failure). */
+export const STDOUT_CAP = 32 * 1024 * 1024;
 
 /**
  * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
@@ -17,7 +19,9 @@ const SAMPLE_MS = 1000, FIRST_SAMPLE_MS = 100;
  * running the worker. Then it spawns the provider in its own process group (inherited).
  * - Carrier mode: forwards the rest of stdin, inherits stdout/stderr and mirrors the provider's
  *   exit code or signal; a provider spawn failure exits 127.
- * - Durable mode (engine): the prompt comes from promptFile, stdout is captured to outFile, and
+ * - Durable mode (engine): the prompt comes from promptFile, stdout is captured to outFile (the
+ *   chunks that fit in STDOUT_CAP bytes; past it the envelope adds `truncated: true` and the full
+ *   `stdout_bytes`, and the attempt outcome is decided exactly as without the flag), and
  *   once the provider exits (after its stdout closes, or a DRAIN_MS drain when a descendant keeps
  *   stdout open) the completion envelope is written atomically (fsync + rename), so an orphaned
  *   worker's outcome survives the engine. The engine then retires the whole group, killing any
@@ -74,7 +78,8 @@ process.stdin.once('data', (chunk) => {
     const fd = fs.openSync(tmp, 'w', 0o600);
     fs.writeSync(fd, JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
       exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString(),
-      peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n }));
+      peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n,
+      ...(size > ${STDOUT_CAP} ? { truncated: true, stdout_bytes: size } : {}) }));
     fs.fsyncSync(fd); fs.closeSync(fd);
     fs.renameSync(tmp, spec.envelopeFile);
     process.exit(code === 0 ? 0 : 1);
@@ -99,7 +104,7 @@ process.stdin.once('data', (chunk) => {
     first.unref(); every.unref(); sm.timers.push(first, every);
   }
   if (durable) {
-    cli.stdout.on('data', (c) => { size += c.length; if (size <= 33554432) out.push(c); });
+    cli.stdout.on('data', (c) => { size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); });
     let exited = null;
     cli.on('exit', (code, signal) => { exited = [code, signal]; setTimeout(() => finish(code, signal, null), ${DRAIN_MS}); });
     cli.on('close', (code, signal) => finish(exited ? exited[0] : code, exited ? exited[1] : signal, null));

@@ -274,7 +274,8 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
       const quiescent = (pgid ? await quiesce(pgid, alive) : null) === false;
       const envelope = readJson(envelopeFile);
       if (quiescent && envelope?.spawn_error) throw Object.assign(new Error(`command failed to start (${envelope.spawn_error})`), { quiescent });
-      return { exitCode: envelope?.exit_code ?? null, stdout: readIfExists(outFile) ?? '', stderr: '', timedOut, quiescent };
+      return { exitCode: envelope?.exit_code ?? null, stdout: readIfExists(outFile) ?? '', stderr: '', timedOut, quiescent,
+        ...(envelope?.truncated === true ? { truncated: true, stdout_bytes: envelope.stdout_bytes } : {}) };
     })();
     done.catch(() => {});
     return { pid: child.pid, pgid, release: () => child.stdin.end(RELEASE), done };

@@ -267,14 +267,19 @@ reported that counter, so a total backed by fewer events than `events` is partia
 Imports and budgets:
 
 ```bash
-node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-session <session.jsonl> --run-id <ID> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer]
-node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-codex <relay-result.json> --run-id <ID> --out <usage.jsonl>
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-session <session.jsonl> --run-id <ID> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer] [--phase <PHASE>]
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-codex <relay-result.json> --run-id <ID> --out <usage.jsonl> [--phase <PHASE>]
 ```
 
 `import-session` reads the main session and its `subagents/*.jsonl`, keeps the
 last revision per message id, and assigns `role` to the main file and `reviewer`
 to subagent files. `import-codex` records `usage_status: "unknown"` with null
-counters when the relay reports no usage; nothing is invented. The budget metric
+counters when the relay reports no usage; nothing is invented. `--phase`
+(`PLAN|BUILD|PROVE|REVIEW|REPAIR|SHIP`) tags every imported record with that phase; without it
+the record carries no phase: it is **phase unknown**, counted against the ticket budget only (never
+against a phase budget), summed in `status.budget.phase_unknown` (`{records, tokens}`, present when
+any exists) and in the `eval` report's `tokens_by_phase` under `phase unknown`. Records that carry a
+phase keep their phase-budget semantics unchanged. The budget metric
 is `processed_tokens = input + output + cache_read + cache_write` (or
 `output_tokens`); see Budgets above. With the run engine, import into
 `git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.usage.jsonl`: the engine reads
@@ -289,6 +294,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -315,7 +321,7 @@ are refused, never dropped.
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
   runs every entry as the local proof), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
-  node `risk` for `gate ship-ready`), `acceptanceIds` (opt-in, below). Billing is
+  node `risk` for `gate ship-ready`), `acceptanceIds` and `unitRecheckCeiling` (opt-in, below). Billing is
   `subscription` unless the user authorized `allowApiBilling`.
 - node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`,
   `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
@@ -329,10 +335,11 @@ failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repa
 node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
 `telemetry_degraded`, `events[]` (sequenced; includes `RESUME`, `INFRA_RETRY`,
 `ADMISSION_REFUSED`, `RED_INVALIDATED`; with units also `UNIT_CHECKED`, `UNIT_INVALIDATED`,
-`UNIT_CHECK_RETRY`) and an outbox for the run-log and RUN-STATE
+`UNIT_CHECK_RETRY`, `UNIT_RECHECK`, `UNIT_CLEARED`) and an outbox for the run-log and RUN-STATE
 sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
 `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and
-`units` only when the DAG has units (`unit_checks` in state likewise).
+`units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state
+likewise), and `truncated_outputs` only when an attempt's output passed the capture cap (below).
 
 **Approval binding.** `init` recomputes the plan narrative digest (the plan
 file with the text between the RUN-STATE markers removed) and requires it to
@@ -367,7 +374,11 @@ group and blocks on a release byte; `{pid, pgid}` is committed; only then is the
 byte sent. If the engine dies first the launcher's stdin closes and the worker
 never runs. Once the provider exits the completion envelope is written atomically (after its
 stdout closes, or after a 1 s drain when a descendant still holds stdout open, so a lingering
-descendant cannot hold the attempt until its timeout). An attempt is
+descendant cannot hold the attempt until its timeout). The launcher keeps at most 32 MiB of
+stdout; past it the envelope records `truncated: true` and the full `stdout_bytes` (CodeRabbit
+B12, owner decision: flag, do not fail). The attempt's outcome is decided exactly as without the
+flag; workers, RED, proof and unit-check runners carry it on their attempt envelope, and
+`status`/`eval` list them as `truncated_outputs` (`{attempt_id, kind, node, stdout_bytes}`). An attempt is
 recorded only after its **whole process group** is gone: surviving descendants are
 killed and awaited first; quiescence that cannot be proven (always on Windows) is
 `quiescence_unknown` and the node is not done. `resume` and `drive` reconcile each
@@ -393,8 +404,8 @@ tree-kill alone never retries.
 **Ownership.** Worker snapshots include the ticket plan file; its only allowed change
 is a verified RUN-STATE append (`run-state.mjs` `runStateAppendOnly`), so a worker that
 edits the narrative is an `ownership_violation`. A worker's verified append is kept
-auditable as a `PLAN_APPENDED` engine event; a worker append of `START`, `DAG_BOUND` or
-`RETRY`, of a line starting with `{` that is not JSON, or of any line break other than `\n` /
+auditable as a `PLAN_APPENDED` engine event; a worker append of `START`, `DAG_BOUND`,
+`RETRY` or `UNIT_CLEAR`, of a line starting with `{` that is not JSON, or of any line break other than `\n` /
 `\r\n` is an ownership violation (`run-state.mjs` `workerRunStateAppend`, for engine and carrier
 dispatches alike). Every RUN-STATE reader, engine and carrier, goes through `run-state.mjs`,
 which splits lines on every break a common reader honours (Python `str.splitlines`: lone CR,
@@ -408,10 +419,10 @@ beside a stray marker is classified, as untrusted, and stays untrusted once the 
 up. The refusal says how to repair the block: in a separate edit, deleting a non-JSON `{` line
 rather than editing it into JSON, then re-appending any owner event as a new, distinct line once
 nothing is live. Lines first seen in a block whose already-observed bytes were
-rewritten are untrusted, so no later rewrite can turn hidden bytes into owner authority. `RETRY` and `DAG_BOUND` authority stays the orchestrator's RUN-STATE write,
+rewritten are untrusted, so no later rewrite can turn hidden bytes into owner authority. `RETRY`, `UNIT_CLEAR` and `DAG_BOUND` authority stays the orchestrator's RUN-STATE write,
 as without the engine, and the engine honours an authority line only from
 `state.authority.trusted` (`engine-authority.mjs`). At the start and end of every locked
-command it classifies each new `START`/`DAG_BOUND`/`RETRY` line: trusted only when no attempt
+command it classifies each new `START`/`DAG_BOUND`/`RETRY`/`UNIT_CLEAR` line: trusted only when no attempt
 (worker, RED runner or proof runner) was started since its last quiescent observation,
 otherwise `untrusted` (listed in `status.authority_untrusted`). Any dispatched code (a worker,
 a RED spec, a proof command) that appends one is therefore never honoured; an owner line
@@ -443,8 +454,9 @@ also not through unit-less nodes.
   it like a RED runner). Each unit is checked at most once per engine command, and `--until` does
   not limit which units are checked. A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
   exit never is. The unit is `verified` only when every check exits 0 and the checks left the
-  declared files of every unit unchanged; a check that changes any of them fails with those paths
-  as the cause. A unit with no `checks` is verified vacuously once its nodes are done (its evidence
+  declared `reads` and `writes` of every node (unit-less upstream generators included) and the
+  `config.base` commit unchanged; a check that changes any of them fails with that cause, so a
+  dependent unit is never verified while a generator stays `done` on inputs its check rewrote. A unit with no `checks` is verified vacuously once its nodes are done (its evidence
   still binds, for invalidation). A node of another unit, or a unit-less node, counts a dependency as done
   only once that dependency's unit is verified. A failure before the freeze marks the unit's nodes
   `failed` (`node_failed`) and reports `unit_check_failed`: `mark failed->pending` of one node
@@ -452,9 +464,31 @@ also not through unit-less nodes.
   to `done` without re-running, and the checks run again. After the freeze the nodes stay `done`
   and `unit_check_failed` goes to the owner. `gate review` and `gate ship-ready` refuse
   `units_unverified` while any unit is not verified.
-- **Dead ends (owner actions until Wave 2b).** A post-freeze `unit_check_failed` and a
-  `unit_invalidation_storm` have no clearing command in this run: the owner decides, and continuing
-  means a re-`init` under a new owner-approved START. Wave 2b adds the unit repair and clearing path.
+- **Dead ends and the owner clearing path.** A post-freeze `unit_check_failed` and a
+  `unit_invalidation_storm` are cleared only by `run-engine.mjs clear-unit --unit <u>`, which
+  requires a trusted RUN-STATE authority event `{"run_id", "event": "UNIT_CLEAR", "unit",
+  "predecessor": <the unit's current evidence id, status.units.<u>.evidence.id>, "authorized_by",
+  "reason"}`. It follows the RETRY authority model: honoured only when the engine first observed the
+  line with nothing dispatched able to run (a worker that appends one is an ownership violation; a
+  line seen while something may run is untrusted, `unit_clear_unauthorized`, and the owner re-appends
+  a distinct line once `status` shows nothing live). No matching event, or one linked to other
+  evidence, is `unit_clear_unauthorized`; a unit not at a dead end is `unit_clear_refused` (before
+  the freeze a failed unit takes `mark failed->pending`). Refusals exit 1. The clear removes that
+  unit's storm judgment, resets only that unit's evidence and invalidation counter (its causes stay)
+  and records why: `UNIT_CLEARED` (engine event and RUN-STATE line, with `authorized_by` and
+  `reason`) and `status.units.<u>.clears`. The next drive re-checks the unit, and that re-check
+  spends the parent ceiling: a clear never lifts it.
+- **Parent-wide ceiling.** `config.unitRecheckCeiling` (integer 0..100, needs a unit; default 4,
+  applied at use and never written into the bound config, so it is covered by the DAG digest only
+  when set) caps unit re-checks per run across ALL units together: every check round of a unit that
+  already completed one in this run (after a failed result and a `mark`, an invalidation, or a
+  clear) spends one (`UNIT_RECHECK`, with its kind `rerun|invalidation|cleared`); a first check and
+  a `UNIT_CHECK_RETRY` infra retry spend none. Neither the unit count nor the node count scales it,
+  so marking each of k nodes of a unit in turn, or a second unit, gets no fresh allowance. Once it
+  is spent, the next re-check raises the durable judgment `parent_ceiling` instead (no automatic
+  retry; neither `mark`, `resume` nor `clear-unit` clears it: the owner decides, and continuing
+  means a re-`init` under a new owner-approved START). The storm guard is evaluated first.
+  `status.unit_ceiling` shows `{limit, used}`.
 - **Evidence.** The stored check result is bound, as it stands after the checks ran, to the
   fingerprints of the unit's reads and writes, the resolved `config.base` commit, each node's
   attempt count, each dependency unit's evidence, and the attempt count and state of every
@@ -472,7 +506,7 @@ also not through unit-less nodes.
 - **Projection.** `status.units` and the `eval` report's `units` list per unit `state`
   (`verified|stale|failed|pending`), `nodes`, `deps`, `acceptance`, `checks`, current
   `fingerprints`, `evidence` (`id`, `state`, `candidate_id`, `base_commit`, per-check results),
-  `stale_cause`, `invalidations` and their `causes`. It is computed, never authority.
+  `stale_cause`, `invalidations` and their `causes`, and `clears` once the owner cleared it. It is computed, never authority.
 
 **REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
 records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
@@ -521,7 +555,7 @@ can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
 `red_invalidated`, `red_required` and `candidate_unavailable`; with units also
-`unit_check_failed` and `unit_invalidation_storm`. The gate adds
+`unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`. The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
 (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2); its
 `units_unverified` refusal is not a judgment point (`drive` runs the checks).
@@ -534,7 +568,7 @@ dispatching item's phase. Work in flight can overshoot, and that is reported.
 Unknown usage (including a malformed import line) sets the `budget_unenforceable`
 flag rather than counting as within budget; the engine does not stop on it.
 `status.budget` shows the ticket and phase state (`ok|warn|stop_dispatch|unknown`)
-and the flags. Budgets never change review or model policy.
+and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage carries no phase. Budgets never change review or model policy.
 
 ## Gate verifier
 
@@ -630,10 +664,11 @@ node <SHIP_TICKET_SKILL>/scripts/eval.mjs report --repo <R> (--ticket <T> | --al
 
 Read-only (`ship-ticket-eval-v1`). Reads the run log, the engine state and usage
 files; anything a source does not carry is `unknown`, never zero. Metrics: tokens
-by role and the orchestrator share, wall clock per phase, review and repair
+by role and by phase (`phase unknown` for records without one) and the orchestrator share, wall clock per phase, review and repair
 rounds, pre-ship findings by severity (from `gate review` records), resume
-attempts and outcomes, infra retries, admission refusals, and `units` (the per-unit
-projection above) when the run has units. Exactly three
+attempts and outcomes, infra retries, admission refusals, `units` (the per-unit
+projection above) when the run has units, and `truncated_outputs` when an attempt's output passed
+the capture cap. Exactly three
 suggestions exist and are printed, never applied: orchestrator share above 50% →
 split the session; review/build above 1.2 on a UI ticket → run the parity probe
 first; more than one REVIEW repair → the brief was too weak.

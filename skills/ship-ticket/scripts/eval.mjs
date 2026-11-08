@@ -17,6 +17,9 @@
  *   `{type: 'ADMISSION_REFUSED'}` (written by run-engine.mjs).
  * - `unit_checks` (opt-in units only): the per-unit projection (engine-units.mjs), recomputed
  *   against the work tree of `--repo`; printed as `units` only when the state has units.
+ * - `attempts[].envelope.truncated` (launcher output past 32 MiB): printed as `truncated_outputs`
+ *   only when any exists. Usage records without a `phase` are the `phase unknown` bucket of
+ *   `tokens_by_phase`.
  * The engine's own event file `<ticket>.engine.jsonl` is never read as a ticket.
  *
  * Run-log marker: any interval with the metric `ui_ticket=true` marks a UI ticket.
@@ -27,7 +30,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { aggregateUsage, attachUsage, buildRun, engineResources } from './run-summary.mjs';
+import { aggregateUsage, attachUsage, buildRun, engineResources, truncatedOutputs } from './run-summary.mjs';
 import { unitProjection } from './engine-units.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
@@ -84,6 +87,7 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
   return {
     ticket: run.ticket, run_id: run.run_id, outcome: run.outcome,
     tokens_by_role: run.usage?.tokens_by_role ?? UNKNOWN,
+    tokens_by_phase: run.usage?.tokens_by_phase ?? UNKNOWN,
     orchestrator_share_pct: run.usage?.orchestrator_share_pct ?? UNKNOWN,
     wall_ms_by_phase: wall,
     review_executions: run.review_executions.length,
@@ -100,6 +104,7 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
     ...(matched?.unit_checks ? { units: unitProjection(matched, repoRoot) } : {}),
+    ...(truncatedOutputs(matched).length ? { truncated_outputs: truncatedOutputs(matched) } : {}),
   };
 }
 

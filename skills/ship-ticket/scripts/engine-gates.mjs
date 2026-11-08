@@ -14,7 +14,7 @@ import { retire, leaderStart } from './engine-quiesce.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
-import { runnerDeps, unverified } from './engine-units.mjs';
+import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -172,7 +172,7 @@ async function runProof(E) {
       await E.commit();
       return { refusal: gateNo('quiescence_unknown', [reason], { judgment_point: true }) };
     }
-    a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut };
+    a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
     commands.push({ name, cmd: c.cmd, args: [...(c.args ?? [])], exit_code: result.exitCode,
       result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) });
   }

@@ -432,11 +432,11 @@ test('runStateAppendOnly accepts only insertions inside the RUN-STATE block', ()
   assert.equal(runStateAppendOnly('# no block\n', '# no block\nmore'), false, 'no markers');
 });
 
-test('workerRunStateAppend: an append-only change is exempt only when it inserts no START, DAG_BOUND or RETRY', () => {
+test('workerRunStateAppend: an append-only change is exempt only when it inserts no START, DAG_BOUND, RETRY or UNIT_CLEAR', () => {
   const base = '# Plan\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n';
   const add = (line) => base.replace('<!-- RUN-STATE:END -->', line + '\n<!-- RUN-STATE:END -->');
   assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}')), true);
-  assert.deepEqual(AUTHORITY_EVENTS, ['START', 'DAG_BOUND', 'RETRY']);
+  assert.deepEqual(AUTHORITY_EVENTS, ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR']);
   for (const ev of AUTHORITY_EVENTS) assert.equal(workerRunStateAppend(base, add(`{"event":"NOTE"}\n  {"event":"${ev}"}`)), false, ev);
   assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}').replace('# Plan', '# Plan!')), false, 'still append-only first');
 });
@@ -444,7 +444,7 @@ test('workerRunStateAppend: an append-only change is exempt only when it inserts
 for (const [name, script] of [
   ['edits the approved plan outside RUN-STATE', `const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('# Plan', '# Plan (worker edit)'));`],
   ['deletes the plan file', `rmSync('.specs/plans/T-1.md');`],
-  ...['START', 'DAG_BOUND', 'RETRY'].map(ev => [`appends a ${ev} authority event inside RUN-STATE`,
+  ...['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR'].map(ev => [`appends a ${ev} authority event inside RUN-STATE`,
     `const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('<!-- RUN-STATE:END -->', '{"event":"${ev}","run_id":"run-1","authorized_by":"owner"}\\n<!-- RUN-STATE:END -->'));`]),
 ]) {
   test('integration: a worker that ' + name + ' is an ownership violation', async (t) => {
