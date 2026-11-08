@@ -49,7 +49,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { POSIX, fixture, passReview, failReview, confirmReview, waitUntil } from './engine-test-fixture.mjs';
+import { POSIX, fixture as baseFixture, passReview, failReview, confirmReview, waitUntil } from './engine-test-fixture.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { evaluateRun } from './eval.mjs';
@@ -59,6 +59,14 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const CARRIER_CLI = fileURLToPath(new URL('./carrier.mjs', import.meta.url));
+
+/**
+ * Wave 3: config.unitReview needs config.acceptanceIds. Rows that do not test acceptance get the
+ * fixture's one criterion AC1 (the fixture review grades AC1) mapped to their first node.
+ */
+const fixture = (t, o) => (o.config?.unitReview && !o.config.acceptanceIds
+  ? baseFixture(t, { ...o, config: { ...o.config, acceptanceIds: ['AC1'] }, nodes: o.nodes.map((n, i) => (i === 0 ? { acceptance: ['AC1'], ...n } : n)) })
+  : baseFixture(t, o));
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;
@@ -102,7 +110,8 @@ test('DAG: config.unitReview is an optional boolean that needs a unit and is nev
   const bad = (doc, re) => assert.throws(() => validateEngineDag(doc, { ticket: 'T-1' }), (e) => e.code === 'dag_invalid' && re.test(e.message));
   bad(dagOf([{ id: 'a' }], { unitReview: true }), /unitReview needs a node with a unit/);
   bad(dagOf([{ id: 'a', unit: 'u' }], { unitReview: 'yes' }), /unitReview must be a boolean/);
-  assert.equal(validateEngineDag(dagOf([{ id: 'a', unit: 'u' }], { unitReview: true }), { ticket: 'T-1' }).config.unitReview, true);
+  bad(dagOf([{ id: 'a', unit: 'u' }], { unitReview: true }), /unitReview needs config\.acceptanceIds/);
+  assert.equal(validateEngineDag(dagOf([{ id: 'a', unit: 'u', acceptance: ['AC1'] }], { unitReview: true, acceptanceIds: ['AC1'] }), { ticket: 'T-1' }).config.unitReview, true);
   assert.equal('unitReview' in validateEngineDag(dagOf([{ id: 'a', unit: 'u' }]), { ticket: 'T-1' }).config, false);
 });
 

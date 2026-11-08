@@ -477,7 +477,8 @@ never accepted in its place.
   evidence id. The engine checks the same: the gate input names
   `units_consumed: [{unit, evidence_id}]`, each unit once with
   `status.units.<u>.evidence.id`, and `gate review` refuses a missing, unknown,
-  duplicated or old entry (`units_consumed_stale`). If a unit is stale, re-review
+  duplicated or old entry (`units_consumed_stale`); `gate ship-ready` re-checks the
+  record that authorizes ship the same way. If a unit is stale, re-review
   that unit first; never reuse its old record.
 - **Every mapped acceptance id is covered.** Each id in `config.acceptanceIds` is
   the `criterion` (or `id`) of one `acceptance_criteria` row, so the end-to-end

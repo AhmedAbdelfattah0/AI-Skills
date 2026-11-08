@@ -130,6 +130,8 @@ function validateUnits(nodes, c, bad) {
   if (c.unitReview !== undefined && typeof c.unitReview !== 'boolean') bad('config.unitReview must be a boolean');
   if (c.unitReview !== undefined && !nodes.some(n => n.unit !== undefined)) bad('config.unitReview needs a node with a unit');
   const acc = c.acceptanceIds;
+  // Wave 3: the final review must cover every mapped acceptance id; without ids that would pass vacuously.
+  if (c.unitReview === true && acc === undefined) bad('config.unitReview needs config.acceptanceIds (the approved plan\'s acceptance criterion ids, each mapped to a node)');
   if (acc !== undefined && !(strings(acc) && acc.length && acc.every(Boolean) && new Set(acc).size === acc.length))
     bad('config.acceptanceIds must be unique non-empty strings');
   if (acc === undefined && nodes.some(n => n.acceptance !== undefined)) bad('node acceptance needs config.acceptanceIds (the approved plan\'s acceptance criterion ids)');

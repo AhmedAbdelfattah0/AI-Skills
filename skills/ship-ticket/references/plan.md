@@ -305,7 +305,9 @@ Then decide:
 (for example `AC1`..`ACn`, as written in the plan), and map each to at least one
 node through `acceptance`. With unit reviews the final review must grade every id
 by name (`acceptance_uncovered` otherwise; [review.md](review.md), Final review on
-unit evidence).
+unit evidence). `config.unitReview` therefore requires `config.acceptanceIds`: `init`
+refuses a DAG that sets it without them (`dag_invalid`), since coverage of no ids
+would pass vacuously.
 
 **Set `config.unitRecheckCeiling` for the unit count.** It is one run-wide
 allowance (default 4) shared by every unit re-check, unit re-review, unit repair

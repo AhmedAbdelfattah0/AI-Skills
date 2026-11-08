@@ -554,8 +554,13 @@ also not through unit-less nodes.
   and `units_consumed_stale` when an original or a confirmation does not name, in the input field
   `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified
   evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is
-  refused. The accepted record carries `units_consumed`. Without `config.unitReview` neither check
-  runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.
+  refused. The accepted record carries `units_consumed`, and `gate ship-ready` re-checks the record
+  that authorizes ship (the last accepted original or confirmation) by the same rule, refusing
+  `units_consumed_stale` when a unit's evidence moved since (for example the resolved base moved
+  and the units were re-checked and re-reviewed on a byte-identical candidate). `init` refuses
+  (`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without
+  `config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the
+  final review is unchanged.
 - **Known over-review cost (measured in AIS-HARNESS-3 Wave 4, not fixed).** Unit evidence binds a dependency
   unit's evidence id, not the bytes of the contract it shares. When an upstream unit is re-checked
   (after its repair, a rebuild or an input change), every dependent unit's evidence and unit review

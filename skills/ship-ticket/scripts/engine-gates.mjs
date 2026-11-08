@@ -47,7 +47,12 @@ function finalReviewRefusal(S, input) {
     if (missing.length) return gateNo('acceptance_uncovered', [`the final review's acceptance_criteria must cover every mapped acceptance id `
       + `(a row whose criterion or id is the id): missing ${missing.join(', ')}`]);
   }
-  const list = input.units_consumed, units = Object.keys(S.unit_reviews).sort();
+  return consumedRefusal(S, input.units_consumed, 'the final review');
+}
+
+/** `units_consumed_stale` unless `list` names every unit exactly once with its current verified evidence id (else null). */
+function consumedRefusal(S, list, who) {
+  const units = Object.keys(S.unit_reviews).sort();
   const why = [];
   if (!Array.isArray(list)) why.push('units_consumed must be [{ unit, evidence_id }] naming every unit');
   else {
@@ -59,7 +64,7 @@ function finalReviewRefusal(S, input) {
       else if (mine[0].evidence_id !== now) why.push(`${u}: consumed evidence ${mine[0].evidence_id} is stale, current is ${now}`);
     }
   }
-  return why.length ? gateNo('units_consumed_stale', [`the final review must consume every unit's current verified evidence (status.units.<u>.evidence.id): ${why.join('; ')}`]) : null;
+  return why.length ? gateNo('units_consumed_stale', [`${who} must consume every unit's current verified evidence (status.units.<u>.evidence.id): ${why.join('; ')}`]) : null;
 }
 
 /** RED: the node's pinned specs, the DAG runner the input names, the node's resources; baseline = the computed candidate. */
@@ -223,6 +228,13 @@ async function shipReadyGate(E, input, candidate) {
   const S = E.S;
   const units = unitsRefusal(E);
   if (units) return units;
+  // With unit reviews, the final record that authorizes ship (the last accepted original or
+  // confirmation) must still have consumed every unit's current evidence (Wave 3 repair).
+  const last = S.review_chain.at(-1);
+  if (unitReviewOn(S) && last && ['original', 'confirmation'].includes(last.kind)) {
+    const stale = consumedRefusal(S, last.units_consumed, `final review ${last.review_execution} (${last.kind}), which authorizes ship,`);
+    if (stale) return stale;
+  }
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
   if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence, io.evidenceExists(E.ctx.repoRoot));
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };

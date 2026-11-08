@@ -14,11 +14,18 @@
  *   entry is refused. Accepted records carry `units_consumed`.
  * Both run after the existing refusals (units_unverified, unit_reviews_missing) and the gate.mjs
  * contract checks; they only refuse more, never accept more.
+ * - `gate ship-ready` re-checks the authorizing final record (the last accepted original or
+ *   confirmation) the same way: its `units_consumed` must still name every unit once with its
+ *   current evidence id, else `units_consumed_stale` (e.g. the base moved and the units were
+ *   re-checked and re-reviewed on a byte-identical candidate).
+ * - `init` refuses `dag_invalid` when config.unitReview is true and config.acceptanceIds is
+ *   absent (acceptance coverage would pass vacuously).
  * =========================================================================================
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
@@ -109,6 +116,7 @@ test('confirmation: after a final-review repair the confirmation must consume th
   const c = fx.gate('review', { ...confirmReview('rx-1', fx.candidate()), units_consumed: consumed(fx) });
   ok(c);
   assert.deepEqual(c.out.record.units_consumed, consumed(fx));
+  ok(fx.gate('ship-ready', {}), 'the confirmation that authorizes ship consumed the current evidence');
 });
 
 test('disabled: units with acceptance but without config.unitReview keep gate review unchanged (no coverage or units_consumed demand)', { skip: WIN_SKIP }, (t) => {
@@ -121,4 +129,36 @@ test('disabled: units with acceptance but without config.unitReview keep gate re
   ok(v, 'the fixture review covers only AC1 and names no units');
   assert.equal('units_consumed' in v.out.record, false);
   assert.equal('units_consumed' in fx.readState().review_chain[0], false);
+});
+
+test('ship-ready: a final PASS whose units_consumed went stale (base moved, units re-checked and re-reviewed, same candidate) is refused', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedUnits(t);
+  const cand = fx.candidate(), before = consumed(fx);
+  ok(fx.gate('review', finalPass(fx, 'rx-1', ['AC1', 'AC2'])));
+  const g = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'move base'], { cwd: fx.repo, encoding: 'utf8' });
+  assert.equal(g.status, 0, g.stderr);
+  ok(fx.cli('drive'));
+  ok(fx.gate('unit-review', unitPass(fx, 'u-api', 'urx-api-2')));
+  ok(fx.gate('unit-review', unitPass(fx, 'u-web', 'urx-web-2')));
+  const after = consumed(fx);
+  assert.equal(fx.candidate(), cand, 'the candidate is byte-identical');
+  assert.notDeepEqual(after, before, 'every unit was re-checked on the new base');
+  const r = fx.gate('ship-ready', {});
+  refused(r, 'units_consumed_stale');
+  assert.match(r.out.reasons.join(' '), /rx-1/);
+  assert.equal(fx.readState().ship_ready, undefined);
+});
+
+test('ship-ready: a final PASS that consumed the current evidence is accepted', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedUnits(t);
+  ok(fx.gate('review', finalPass(fx, 'rx-1', ['AC1', 'AC2'])));
+  ok(fx.gate('ship-ready', {}));
+});
+
+test('init: config.unitReview without config.acceptanceIds is dag_invalid (coverage would be vacuous)', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { unitReview: true, testCommands: { ok: PASS } }, nodes: [node('api', { unit: 'u-api' })] });
+  const r = fx.cli('init', { dag: fx.dagFile });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /dag_invalid: config\.unitReview needs config\.acceptanceIds/);
+  assert.equal(existsSync(fx.stateFile()), false, 'nothing is initialized');
 });
