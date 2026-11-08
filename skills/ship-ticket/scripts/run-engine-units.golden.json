@@ -377,7 +377,7 @@
    "riskLabels": [],
    "testCommands": {
     "proof": {
-     "cmd": "/Users/ahmedabdelfatah/.nvm/versions/node/v22.23.1/bin/node",
+     "cmd": "<node>",
      "args": [
       "-e",
       ""
@@ -1096,7 +1096,7 @@
    "commands": [
     {
      "name": "proof",
-     "cmd": "/Users/ahmedabdelfatah/.nvm/versions/node/v22.23.1/bin/node",
+     "cmd": "<node>",
      "args": [
       "-e",
       ""

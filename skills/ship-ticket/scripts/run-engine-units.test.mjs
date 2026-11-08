@@ -75,7 +75,7 @@ const GOLDEN = fileURLToPath(new URL('./run-engine-units.golden.json', import.me
 function normalizer(root) {
   const maps = { sha: new Map(), hex: new Map(), uuid: new Map() };
   const tag = (kind, v) => { const m = maps[kind]; if (!m.has(v)) m.set(v, `<${kind}#${m.size + 1}>`); return m.get(v); };
-  const str = (s) => s.split(root).join('<root>')
+  const str = (s) => s.split(root).join('<root>').split(process.execPath).join('<node>') // the node binary path is per-machine
     .replace(/sha256[:-][0-9a-f]{64}/g, (m) => tag('sha', m.slice(7)))
     .replace(/\b[0-9a-f]{64}\b/g, (m) => tag('sha', m))
     .replace(/\b[0-9a-f]{40}\b/g, (m) => tag('hex', m))
