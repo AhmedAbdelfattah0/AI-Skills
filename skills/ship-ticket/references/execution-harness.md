@@ -440,24 +440,35 @@ also not through unit-less nodes.
   is live, and runs the union of the unit's `checks` under the runner protocol (attempt kind
   `unit-check`, the unit's `resources` as durable locks, `retire()` before a result counts, a
   surviving or unknowable group is `quiescence_unknown` with nothing recorded; `resume` reconciles
-  it like a RED runner). A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
+  it like a RED runner). Each unit is checked at most once per engine command, and `--until` does
+  not limit which units are checked. A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
   exit never is. The unit is `verified` only when every check exits 0 and the checks left the
-  unit's files unchanged. A node of another unit, or a unit-less node, counts a dependency as done
+  declared files of every unit unchanged; a check that changes any of them fails with those paths
+  as the cause. A unit with no `checks` is verified vacuously once its nodes are done (its evidence
+  still binds, for invalidation). A node of another unit, or a unit-less node, counts a dependency as done
   only once that dependency's unit is verified. A failure before the freeze marks the unit's nodes
   `failed` (`node_failed`) and reports `unit_check_failed`: `mark failed->pending` of one node
   spends that node's retry and re-runs it, the unit's other nodes failed only by the check return
   to `done` without re-running, and the checks run again. After the freeze the nodes stay `done`
   and `unit_check_failed` goes to the owner. `gate review` and `gate ship-ready` refuse
   `units_unverified` while any unit is not verified.
-- **Evidence.** The stored check result is bound to the fingerprints of the unit's reads and
-  writes, the resolved `config.base` commit, each node's attempt count and each dependency unit's
-  evidence; the candidate id is recorded with it but does not bind it, because another unit's
+- **Dead ends (owner actions until Wave 2b).** A post-freeze `unit_check_failed` and a
+  `unit_invalidation_storm` have no clearing command in this run: the owner decides, and continuing
+  means a re-`init` under a new owner-approved START. Wave 2b adds the unit repair and clearing path.
+- **Evidence.** The stored check result is bound, as it stands after the checks ran, to the
+  fingerprints of the unit's reads and writes, the resolved `config.base` commit, each node's
+  attempt count, each dependency unit's evidence, and the attempt count and state of every
+  transitive dependency node outside the unit, unit-less ones included (with their declared paths'
+  fingerprints): a stale or failed upstream node leaves the unit unverified. Only declared `reads`
+  and `writes` are bound; undeclared inputs (test files, lockfiles, config) are not, so declare what
+  a check depends on. The candidate id is recorded with it but does not bind it, because another unit's
   writes change the candidate. Validity is recomputed at every use. Any change makes the evidence
   `stale`, together with the units of its dependent closure only (`UNIT_INVALIDATED`, with the
   cause: changed paths, base moved, nodes re-run or a dependency), and the checks run again; a
-  fingerprint refresh after a repair is never renewed evidence. Verified evidence invalidated more
+  fingerprint refresh after a repair is never renewed evidence. Every stale-to-re-check transition is
+  recorded as an invalidation first, also between checks inside one drive. Verified evidence invalidated more
   than twice in one run raises `unit_invalidation_storm` (durable) instead of another re-run; the
-  owner decides (the decomposition or the contract churns), and no command clears it in this run.
+  owner decides (the decomposition or the contract churns); see the dead ends above.
 - **Projection.** `status.units` and the `eval` report's `units` list per unit `state`
   (`verified|stale|failed|pending`), `nodes`, `deps`, `acceptance`, `checks`, current
   `fingerprints`, `evidence` (`id`, `state`, `candidate_id`, `base_commit`, per-check results),

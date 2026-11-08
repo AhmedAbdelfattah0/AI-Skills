@@ -109,7 +109,7 @@ export const unitVertex = (n) => (n.unit !== undefined ? `u:${n.unit}` : `n:${n.
 function validateUnits(nodes, c, bad) {
   const ids = new Set(nodes.map(n => n.id)), cmds = Object.keys(c.testCommands ?? {});
   for (const n of nodes) {
-    if (n.unit !== undefined && !(typeof n.unit === 'string' && SAFE_NAME.test(n.unit))) bad(`node ${n.id}: unit must be a safe id`);
+    if (n.unit !== undefined && !(typeof n.unit === 'string' && SAFE_NAME.test(n.unit) && n.unit !== '__proto__')) bad(`node ${n.id}: unit must be a safe id`);
     if (n.unit !== undefined && (ids.has(n.unit) || cmds.includes(n.unit))) bad(`node ${n.id}: unit ${n.unit} collides with a node id or testCommands name`);
     if (n.checks !== undefined) {
       if (!strings(n.checks)) bad(`node ${n.id}: checks must be testCommands names`);

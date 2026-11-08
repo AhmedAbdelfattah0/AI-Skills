@@ -22,7 +22,10 @@
  *   `unit_check_failed`; `mark failed->pending` of one node re-runs that node (its retry), the
  *   other nodes failed only by the check return to done, and the checks run again.
  * Evidence: bound to the current fingerprints of the unit's reads and writes, the resolved
- *   config.base commit, every node's attempt count and every dependency unit's evidence; the
+ *   config.base commit, every node's attempt count, every dependency unit's evidence and every
+ *   transitive dependency node outside the unit (unit-less included: stale or failed = unverified),
+ *   taken after the checks; a check changing any unit's declared files fails. Each unit is checked
+ *   at most once per command, and every re-check counts as an invalidation first; the
  *   candidate id is recorded. Any change makes it stale (UNIT_INVALIDATED with a cause) together
  *   with the units of its dependent closure only, and the checks are re-run (a fingerprint refresh
  *   is never renewed evidence). A unit whose verified evidence is invalidated more than 2 times in
@@ -243,7 +246,7 @@ test('evidence: editing the contract a unit reads re-checks that unit and its de
   assert.deepEqual(['u-api', 'u-web', 'u-other'].map(u => checkRuns(fx, u).length), [2, 2, 1]);
   assert.deepEqual(['api', 'web', 'other'].map(id => fx.runs(id).length), [2, 2, 1]);
   const inv = unitEvents(fx, 'UNIT_INVALIDATED');
-  assert.deepEqual(inv.map(e => [e.unit, e.cause]), [['u-api', { changed: ['docs/in.txt'] }], ['u-web', { dependency: 'u-api' }]]);
+  assert.deepEqual(inv.map(e => [e.unit, e.cause]), [['u-api', { changed: ['docs/in.txt'], rerun: ['api'] }], ['u-web', { dependency: 'u-api' }]]);
   const after = second.out.units;
   assert.ok(Object.values(after).every(u => u.state === 'verified'));
   assert.equal(after['u-other'].invalidations, 0);
@@ -370,4 +373,78 @@ test('conflicts: nodes of different units with overlapping writes are never sche
   const plain = (id, writes) => ({ id, deps: [], reads: [], writes, resources: [], risk: [], complexity: 'low', model: 'inherit', estimatedMemoryMb: 0 });
   const s = schedule({ phase: 'BUILD', nodes: [plain('x', ['src/shared.txt']), plain('y', ['src/shared.txt'])], maxConcurrency: 2, memoryBudgetMb: null });
   assert.deepEqual(s.waves.map(w => w.nodes.map(n => n.id ?? n)), [['x'], ['y']]);
+});
+
+// ------------------------------------------------------------------ Wave 2a repair (review findings)
+
+/** A check that rewrites src/<file> with fresh bytes (only once ../<flag> exists, when given). */
+const clobbers = (file, flag) => ({ cmd: process.execPath, args: ['-e', `const fs=require('fs');`
+  + `if(${flag ? `fs.existsSync('../${flag}')` : 'true'})fs.writeFileSync('src/${file}','clobbered '+process.hrtime.bigint())`] });
+
+test('repair: a check that writes another unit\'s file fails with the cause and the drive terminates (no re-check loop)', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { ok: PASS, clobber: clobbers('ua.txt') } },
+    nodes: [node('ua', { unit: 'u-a', checks: ['ok'] }), node('ub', { deps: ['ua'], unit: 'u-b', checks: ['clobber'] })],
+    behaviour: { ua: { write: { 'src/ua.txt': 'a' } }, ub: { write: { 'src/ub.txt': 'b' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const r = fx.cli('drive', {}, { timeout: 30000 });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const j = r.out.judgments.find(x => x.code === 'unit_check_failed' && x.node === 'u-b');
+  assert.ok(j && /src\/ua.txt/.test(j.reason), J(r.out.judgments));
+  assert.equal(checkRuns(fx, 'u-b').length, 1);
+  assert.ok(checkRuns(fx, 'u-a').length <= 1, 'each unit is checked at most once per command');
+});
+
+test('repair: after the freeze a check that rewrites its own unit\'s files fails once and the drive terminates', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { self: clobbers('a.txt', 'flag') } },
+    nodes: [node('a', { unit: 'api', checks: ['self'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+  writeFileSync(join(fx.root, 'flag'), '');
+  const r = fx.cli('drive', {}, { timeout: 30000 });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.ok(r.out.judgments.some(x => x.code === 'unit_check_failed' && /changed/.test(x.reason)), J(r.out.judgments));
+  assert.equal(checkRuns(fx, 'api').length, 2);
+  const again = fx.cli('drive', {}, { timeout: 30000 });
+  assert.equal(again.status, 2);
+  assert.equal(checkRuns(fx, 'api').length, 2, 'failed evidence bound to the post-check bytes is not re-run');
+});
+
+test('repair: a stale or failed unit-less dependency leaves the dependent unit unverified', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { ok: PASS } },
+    nodes: [node('gen', { reads: ['docs/in.txt'] }), node('b', { deps: ['gen'], unit: 'u-b', checks: ['ok'] })],
+    behaviour: { gen: { write: { 'src/gen.txt': 'g' } }, b: { write: { 'src/b.txt': 'b' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const first = fx.cli('drive');
+  ok(first);
+  assert.equal(first.out.units['u-b'].state, 'verified');
+  writeFileSync(`${fx.repo}/docs/in.txt`, 'contract v2');
+  assert.equal(fx.cli('status').out.units['u-b'].state, 'stale', 'an upstream input change is seen before any rebuild');
+  ok(fx.cli('resume'));
+  const st = fx.cli('status').out.units['u-b'];
+  assert.equal(st.state, 'stale');
+  assert.ok(st.stale_cause.upstream?.includes('gen'), J(st.stale_cause));
+  assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+  fx.behave({ gen: { exit: 1 }, b: { write: { 'src/b.txt': 'b' } } });
+  const failed = fx.cli('drive');
+  assert.equal(failed.status, 2, failed.stdout + failed.stderr);
+  assert.equal(failed.out.nodes.gen.state, 'failed');
+  assert.notEqual(failed.out.units['u-b'].state, 'verified');
+  assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out?.code, 'units_unverified');
+});
+
+test('repair: unit ids such as constructor and toString work through init, drive and status; __proto__ is refused', { skip: WIN_SKIP }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { ok: PASS } },
+    nodes: [node('a', { unit: 'constructor', checks: ['ok'] }), node('b', { deps: ['a'], unit: 'toString', checks: ['ok'] })],
+    behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const d = fx.cli('drive');
+  ok(d);
+  assert.equal(d.out.outcome, 'done');
+  const s = fx.cli('status');
+  ok(s);
+  assert.deepEqual(Object.keys(s.out.units).sort(), ['constructor', 'toString']);
+  assert.deepEqual(s.out.units.toString.deps, ['constructor']);
+  assert.ok(Object.values(s.out.units).every(u => u.state === 'verified'));
+  invalid(dagOf([{ id: 'a', unit: '__proto__' }]), /unit/);
 });
