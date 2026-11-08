@@ -232,3 +232,25 @@ test('P12 (seeded seed 20): ship-ready is refused while a done node\'s declared 
   assert.equal(ship.status, 2, ship.stdout);
   assert.equal(ship.out.code, 'post_freeze_drift');
 });
+
+test('P12 (PR #38 4505924540): a proof command that changes the tree every run never proves a tree, even after an owner RETRY review of the new one', { skip: WIN_SKIP }, async (t) => {
+  const gen = { cmd: process.execPath, args: ['-e', "require('fs').writeFileSync('gen.txt', String(process.hrtime.bigint()))"] };
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, testCommands: { ok: PASS_CMD, zgen: gen } });
+  // The oracle's P12 check fails a ship step whose proof changed the tree yet was bound to a candidate.
+  const [, , , , ship1, , ship2] = await steps(d, [{ kind: 'drive' }, { kind: 'upass', unit: 'uA' }, { kind: 'upass', unit: 'uB' }, { kind: 'final' },
+    { kind: 'ship' }, { kind: 'final' }, { kind: 'ship' }]);
+  for (const s of [ship1, ship2]) { assert.equal(s.status, 2, s.stdout); assert.equal(s.out.code, 'candidate_mismatch'); }
+  assert.equal(d.raw().local_proof.candidate_id, null);
+  assert.equal(d.raw().ship_ready ?? null, null, 'no SHIP_READY');
+});
+
+test('P11 (PR #38 4505924571): a failed final-review repair is a judgment, never drive outcome done', { skip: WIN_SKIP }, async (t) => {
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, timeoutMs: 2000 });
+  await steps(d, [{ kind: 'drive' }, { kind: 'upass', unit: 'uA' }, { kind: 'upass', unit: 'uB' }, { kind: 'finalFail' }]);
+  d.setBehaviour('ffix', { hang: true }); // the repair worker times out without writing: a timeout is never retried
+  const [last] = await steps(d, [{ kind: 'drive' }]); // the oracle's P11 check fails a drive reporting done here
+  assert.equal(last.out.repairs[0].state, 'failed', last.stdout);
+  assert.equal(last.status, 2, last.stdout);
+  assert.equal(last.out.outcome, 'judgment');
+  assert.ok(last.out.judgments.some(j => j.code === 'repair_failed'), J(last.out.judgments));
+});

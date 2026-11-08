@@ -334,10 +334,16 @@ reruns and UI slice. It checks only:
 
 Pass it only the captures of screens the repair changed. When the repair
 touches a `concurrency`-labelled node, or repairs a security or architecture
-finding (Repair routing, below), the second opinion on the repair (the
-host's counterpart: Codex for a Claude host, Claude for a Codex host; CodeRabbit
-if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL`
-with evidence. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
+finding (Repair routing, below), the second opinion on the repair (from a provider
+other than the primary's: Codex for the Opus primary; CodeRabbit if it is
+unavailable) runs before this confirmation and returns `PASS` or `FAIL`
+with evidence. Record it as the confirmation's `second_opinion` (`route`,
+`reviewer_identity`, `candidate_id`, `checked_findings`, `outcome`, `evidence`): the
+gate counts a supplied one (the confirmation is PASS only when both are), and
+requires it (`missing_second_opinion`) when the repair's write set overlaps a node
+labelled `concurrency` or `security`. A security or architecture finding on a node
+without such a label is not detectable by the gate: supplying the second opinion
+there stays the orchestrator's duty. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle.
 
@@ -369,9 +375,10 @@ records it.
 - **Who.** An Opus primary reviewer that is independent of every builder, under
   the rules in this file. The gate refuses a reviewer whose identity equals a
   builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node
-  carries a risk label, or the ticket has `config.riskLabels`) also needs the
-  host's counterpart second opinion (Codex for a Claude host), on its review and
-  on its confirmation. If the counterpart is unavailable or its usage limit is
+  carries a risk label, or the ticket has `config.riskLabels`) also needs a
+  second opinion from a provider other than the primary's (Codex for the Opus
+  primary, whatever the host: on a Codex host the counterpart Claude would share
+  the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is
   reached, run CodeRabbit on the unit's paths and record it as route `coderabbit`
   with identity `coderabbit:<model>`. If neither can run, stop and ask
   (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the
@@ -399,7 +406,11 @@ records it.
   needs `repair_prompt_file` and opens one repair. Its write set (the fixed
   findings' paths plus `repair_ownership`) must lie inside the unit's declared
   writes; anything outside is `repair_outside_unit`, so leave that finding to the
-  final review. `drive` runs the repair only while the unit's evidence is still
+  final review: record the unit review with that finding dispositioned to the
+  final review (for example `final-review`, never `fix`) and its rows judged on
+  the unit alone, so the unit can PASS (a unit FAIL with nothing to fix is
+  terminal), then carry the finding into the final review as a primary finding
+  to `fix`, whose one repair may cross units. `drive` runs the repair only while the unit's evidence is still
   the one that was reviewed; otherwise it cancels the repair and the review goes
   stale. Then `drive` re-checks the unit. The re-checked evidence becomes the
   repaired candidate only when the repair's own writes are the sole change; a node
@@ -439,7 +450,9 @@ it. The write set of the repair and what must be reviewed again follow the class
 | Security or architecture | the full affected closure, through the final review's repair | the full closure, plus the opposite-model second opinion on the repair before the confirmation |
 
 A finding whose write set leaves the unit is `repair_outside_unit` at the unit
-gate: leave it to the final review, whose one repair batch may cross units. Every
+gate: leave it to the final review, whose one repair batch may cross units (record
+it in the unit review dispositioned to the final review, not `fix`; see FAIL and
+repair above). Every
 repair still spends the run's ceilings; routing never adds a repair round.
 
 ## Final review on unit evidence
@@ -481,7 +494,7 @@ never accepted in its place.
   record that authorizes ship the same way. If a unit is stale, re-review
   that unit first; never reuse its old record.
 - **Every mapped acceptance id is covered.** Each id in `config.acceptanceIds` is
-  the `criterion` (or `id`) of one `acceptance_criteria` row, so the end-to-end
+  the `id` (or, when the row's `id` is not an acceptance id, the `criterion`) of one `acceptance_criteria` row (one row covers one id), so the end-to-end
   outcome of every criterion is graded on the assembled candidate. A row may cite
   unit evidence for a criterion verified inside one unit, but it still gets a row.
   `gate review` refuses an original that omits one (`acceptance_uncovered`).
@@ -504,7 +517,10 @@ chain, reviewer identity, candidate ID and second opinion, and refuse an incompl
 stale record; a refusal is a failed review step, not something to patch by hand.
 Write `reviewer_identity` as `<provider>:<model>` (a suffix may follow): the gate
 refuses a reviewer equal to any builder the engine dispatched and a second opinion
-equal to the primary. An accepted FAIL needs `repair_prompt_file` (the repair brief);
+equal to the primary (also when only the suffix differs). A builder recorded as
+`<provider>:provider-default` ran the CLI's unresolved default model, so it counts
+as every model of that provider: a reviewer of that provider is `reviewer_is_builder`
+(choose a reviewer of another provider, or map the builders' tiers in `modelMap`). An accepted FAIL needs `repair_prompt_file` (the repair brief);
 the engine then enqueues and dispatches the finding-bound repair, records it, and the
 confirmation reviews the repaired candidate. A new original review after a FAIL needs
 the owner's RUN-STATE `RETRY` event naming its predecessor execution, appended while nothing

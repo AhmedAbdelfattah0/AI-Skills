@@ -303,9 +303,12 @@ async function runCheck(E, u, name, resources) {
  * is never retried. Checks that change the declared paths of ANY node (unit-less upstream
  * generators included) or move the config.base commit fail with that cause. Evidence is bound to
  * the binding taken after the checks, so a failure stays bound (never re-run by itself). A failure
- * before the freeze marks the unit's nodes failed. Returns whether a unit became verified.
+ * before the freeze marks the unit's nodes failed. Checks ran repository code: when they drifted the
+ * approval binding (plan narrative, DAG bytes) nothing is recorded (UNIT_CHECK_DROPPED, the drift
+ * judgments go to `transient`), so no dependent dispatches on that evidence. Returns whether a
+ * unit became verified.
  */
-export async function runUnitChecks(E) {
+export async function runUnitChecks(E, transient = []) {
   if (!hasUnits(E.S)) return false;
   let progressed = false;
   E.unitChecked ??= new Set();
@@ -330,6 +333,13 @@ export async function runUnitChecks(E) {
       if (!r.refusal && r.error) { note(E.S, 'UNIT_CHECK_RETRY', { unit: u, check: name, cause: r.error }); r = await runCheck(E, u, name, U.resources); }
       if (r.refusal) return progressed;
       results.push(r);
+    }
+    const unbound = E.verifyBinding();
+    if (unbound.length) {
+      note(E.S, 'UNIT_CHECK_DROPPED', { unit: u, binding: unbound.map(j => j.code) });
+      for (const j of unbound) if (!transient.some(x => x.code === j.code)) transient.push(j);
+      await E.commit();
+      return progressed;
     }
     const post = io.fingerprints(E.ctx.repoRoot, watched);
     const touched = watched.filter(p => post[p] !== pre[p]);

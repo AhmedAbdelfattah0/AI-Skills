@@ -97,7 +97,7 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
     terminal_review_outcomes: chain ? chain.filter((r) => r?.kind === 'original' && r.overflow === true).length : UNKNOWN,
     retries_authorized: chain ? chain.filter((r) => r?.kind === 'retry').length : UNKNOWN,
     cost_per_accepted_ticket: acceptedCost(run),
-    review_repairs: chain ? chain.filter((r) => r?.kind === 'repair').length : logged('repair_batches'),
+    review_repairs: chain ? reviewRepairs(matched, chain) : logged('repair_batches'),
     confirmations: chain ? chain.filter((r) => r?.kind === 'confirmation').length : logged('confirmations'),
     findings_by_severity: chain ? findingsBySeverity(chain) : UNKNOWN,
     resumes: resumes(matched),
@@ -111,17 +111,43 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
 }
 
 /**
+ * Final-review repairs that ran: the chain's repair records, plus done review repairs whose record is
+ * missing (completeRepair could not compute the repaired candidate: candidate_unavailable).
+ */
+function reviewRepairs(state, chain) {
+  const recorded = new Set(chain.filter((r) => r?.kind === 'repair').map((r) => r.review_execution));
+  const unrecorded = (Array.isArray(state?.repairs) ? state.repairs : [])
+    .filter((r) => r?.kind === 'review' && r.state === 'done' && !recorded.has(r.review_execution)).length;
+  return chain.filter((r) => r?.kind === 'repair').length + unrecorded;
+}
+
+/**
+ * Unrounded inputs of the suggestion thresholds (the metrics round for display: 1.2004 and 50.04
+ * must still fire). `run` is the `attachUsage` result the metrics came from.
+ */
+function rawValues(run) {
+  const { build_ms: b, review_ms: v } = run.durations ?? {};
+  const roles = run.usage?.tokens_by_role;
+  const total = roles && typeof roles === 'object' ? Object.values(roles).map((r) => r?.processed_tokens).filter(known).reduce((a, n) => a + n, 0) : 0;
+  return { review_to_build_ratio: known(v) && known(b) && b > 0 ? v / b : UNKNOWN,
+    orchestrator_share_pct: known(run.usage?.orchestrator_share_pct) && total > 0 ? roles.orchestrator.processed_tokens / total * 100 : UNKNOWN };
+}
+
+/**
  * The three evidence-backed rules. Each fires only on its own condition and
  * never on unknown data. Returns `[{rule, message, evidence}]`; nothing is edited.
  * @param {object} metrics an `evaluateRun` result
+ * @param {object} [raw] unrounded `orchestrator_share_pct` and `review_to_build_ratio` (thresholds compare these)
  */
-export function suggest(metrics) {
+export function suggest(metrics, raw = {}) {
   const out = [];
-  if (known(metrics.orchestrator_share_pct) && metrics.orchestrator_share_pct > 50) {
+  const share = raw.orchestrator_share_pct ?? metrics.orchestrator_share_pct;
+  const ratio = raw.review_to_build_ratio ?? metrics.review_to_build_ratio;
+  if (known(metrics.orchestrator_share_pct) && known(share) && share > 50) {
     out.push({ rule: 'split_session', message: 'The orchestrator used more than half of the tokens: split the session (one fresh session per ticket or wave).',
       evidence: { orchestrator_share_pct: metrics.orchestrator_share_pct } });
   }
-  if (metrics.ui_ticket === true && known(metrics.review_to_build_ratio) && metrics.review_to_build_ratio > 1.2) {
+  if (metrics.ui_ticket === true && known(metrics.review_to_build_ratio) && known(ratio) && ratio > 1.2) {
     out.push({ rule: 'parity_probe_first', message: 'Review took more than 1.2x the build on a UI ticket: run the parity probe first.',
       evidence: { review_to_build_ratio: metrics.review_to_build_ratio } });
   }
@@ -146,7 +172,7 @@ export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   const joined = runs.map((r) => attachUsage(r, records));
   const metrics = joined.map((r) => {
     const m = evaluateRun(r, { state: states[r.ticket], repoRoot });
-    return { ...m, suggestions: suggest(m) };
+    return { ...m, suggestions: suggest(m, rawValues(r)) };
   });
   const fired = {};
   for (const s of metrics.flatMap((m) => m.suggestions)) fired[s.rule] = (fired[s.rule] ?? 0) + 1;
@@ -190,15 +216,31 @@ function git(repo, args) {
   return r.stdout.trim();
 }
 
-const readJsonl = (path) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
-  try { return [JSON.parse(line)]; } catch { return []; }
+/** JSONL rows; a line that is not JSON is skipped and counted in `skipped.lines` (when given). */
+const readJsonl = (path, skipped = null) => readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
+  try { return [JSON.parse(line)]; } catch { if (skipped) skipped.lines += 1; return []; }
 });
 
-function readUsage(path) {
+/**
+ * Usage records of several --usage files, one per source_execution_id (overlapping files would
+ * double-count): the record with the most tokens wins, the first on a tie. Records without an id are kept.
+ */
+function dedupeUsage(records) {
+  const tokens = (r) => ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'].reduce((a, k) => a + (known(r?.[k]) ? r[k] : 0), 0);
+  const out = [], at = new Map();
+  for (const r of records) {
+    const id = r?.source_execution_id;
+    if (typeof id !== 'string' || !id) { out.push(r); continue; }
+    if (!at.has(id)) { at.set(id, out.length); out.push(r); } else if (tokens(r) > tokens(out[at.get(id)])) out[at.get(id)] = r;
+  }
+  return out;
+}
+
+function readUsage(path, skipped) {
   if (!existsSync(path)) fail(`usage file not found: ${path}`);
   const text = readFileSync(path, 'utf8').trim();
   if (!text) return [];
-  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
+  try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path, skipped); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
 }
 
 function report(options) {
@@ -213,8 +255,9 @@ function report(options) {
     tickets = [options.ticket];
   } else {
     // `<ticket>.engine.jsonl` is the run engine's event file, not a timing log.
-    tickets = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl')).map((n) => n.slice(0, -6))
-      .filter((n) => SAFE_ID.test(n)).sort() : [];
+    // A run whose timing log failed (telemetry degraded) is still found through its engine state.
+    tickets = existsSync(dir) ? [...new Set(readdirSync(dir).flatMap((n) => (n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') ? [n.slice(0, -6)]
+      : n.endsWith('.state.json') ? [n.slice(0, -11)] : [])))].filter((n) => SAFE_ID.test(n)).sort() : [];
   }
   const runs = [];
   const states = {};
@@ -222,15 +265,21 @@ function report(options) {
     const log = join(dir, `${ticket}.jsonl`);
     const byRun = new Map();
     for (const row of existsSync(log) ? readJsonl(log) : []) {
-      if (typeof row?.run_id !== 'string') continue;
+      // buildRun reads row.metrics: a parseable row without them is not a timing row.
+      if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
     }
     for (const [runId, rows] of byRun) runs.push(buildRun(ticket, runId, rows));
     const statePath = join(dir, `${ticket}.state.json`);
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }
+    const stateRun = states[ticket]?.run_id;
+    if (typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
   }
-  const records = options.usage.flatMap(readUsage);
-  process.stdout.write(`${JSON.stringify(evaluate({ runs, states, records, repoRoot: root }), null, 2)}\n`);
+  const skipped = { lines: 0 };
+  const records = dedupeUsage(options.usage.flatMap((f) => readUsage(f, skipped)));
+  if (skipped.lines) process.stderr.write(`eval: skipped ${skipped.lines} malformed usage line(s); usage shares and costs exclude them\n`);
+  const result = evaluate({ runs, states, records, repoRoot: root });
+  process.stdout.write(`${JSON.stringify(skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result, null, 2)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

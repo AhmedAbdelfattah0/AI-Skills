@@ -332,7 +332,7 @@ test('ceiling: an opened repair holds its whole cycle; a second unit\'s FAIL is 
   assert.throws(() => verifyReviewExecution(fx.repo, approval, 'urx-2'), /no accepted FAIL/, 'a terminal FAIL authorizes no repair');
   const inspect = (rx) => {
     const f = join(fx.root, `carrier-${rx}.json`);
-    writeFileSync(f, J({ phase: 'REPAIR', provider: 'claude', nodeId: `repair-${rx}`, workdir: fx.repo, ownership: { writes: ['src'] }, timeoutMs: 10000,
+    writeFileSync(f, J({ phase: 'REPAIR', provider: 'claude', nodeId: `repair-${rx}`, workdir: fx.repo, ownership: { writes: [rx === 'urx-1' ? 'src/a.txt' : 'src/b.txt'] }, timeoutMs: 10000,
       promptFile: fx.prompt('fix'), reviewExecution: rx, approval: { ticket: 'T-1', runId: 'run-1', approvedPlanDigest: fx.readState().plan_digest } }));
     return spawnSync(process.execPath, [CARRIER_CLI, 'inspect', f], { encoding: 'utf8', env: fx.env });
   };

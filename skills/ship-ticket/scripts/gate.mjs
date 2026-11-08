@@ -129,9 +129,17 @@ const sameFile = (resultFile, specFile) => {
   return r === s || r.endsWith(`/${s}`);
 };
 
-/** Classify one named spec against parsed results: null when it is an assertion failure. */
+/**
+ * Classify one named spec against parsed results: null when it is an assertion failure. A result
+ * without a file counts only when no other result shares its name and, if it failed, no other
+ * failure carries a location (node's TAP locates every failure, not every pass): a same-named
+ * failure of another file never satisfies RED.
+ */
 function specVerdict(spec, results) {
-  const hit = results.find((r) => r.name === spec.name && (sameFile(r.file, spec.file) || !r.file));
+  const named = results.filter((r) => r.name === spec.name);
+  const locatedFailure = results.some((r) => r.file && r.status === 'fail');
+  const hit = named.find((r) => sameFile(r.file, spec.file))
+    ?? (named.length === 1 && !named[0].file && !(named[0].status === 'fail' && locatedFailure) ? named[0] : undefined);
   const load = results.find((r) => r.failure_kind === 'load' && sameFile(r.file, spec.file));
   if (!hit) return load ? ['non_assertion_failure', `${spec.file}: failed to load (${spec.name})`] : ['spec_missing', `${spec.file}: no result named "${spec.name}"`];
   if (hit.status !== 'fail') return ['spec_not_failing', `${spec.name}: ${hit.status}`];
@@ -200,6 +208,9 @@ export async function gateRed(input, deps) {
     await deps.commit(snapshot());
     return refuse(state, 'quiescence_unknown', [`cannot prove runner group ${attempt.pgid ?? attempt.pid} of ${attempt.attempt_id} has exited; nothing recorded`], { judgment_point: true });
   };
+  // Spec bytes before the runner: a runner that rewrites a spec (a snapshot update) never makes it RED.
+  const spec_digests = {};
+  for (const s of specs) spec_digests[s.file] ??= await deps.digestFile(s.file);
   let run;
   try {
     const launch = await deps.spawnRunner({ attempt_id: attempt.attempt_id, command, timeoutMs, resources: [...resources] });
@@ -225,8 +236,11 @@ export async function gateRed(input, deps) {
   }
 
   let verdict;
+  const rewritten = [];
+  for (const f of Object.keys(spec_digests)) if ((await deps.digestFile(f)) !== spec_digests[f]) rewritten.push(f);
   const parsed = run.timedOut ? null : parseRunnerOutput(format, run.stdout ?? '');
-  if (run.timedOut) verdict = refuse(state, 'runner_timeout', [`runner exceeded ${timeoutMs} ms; a timeout is never re-run automatically`], { judgment_point: true });
+  if (rewritten.length) verdict = refuse(state, 'spec_rewritten', [`the RED runner changed spec file(s) ${rewritten.join(', ')}: a spec that never failed is not RED`]);
+  else if (run.timedOut) verdict = refuse(state, 'runner_timeout', [`runner exceeded ${timeoutMs} ms; a timeout is never re-run automatically`], { judgment_point: true });
   else if (!parsed.supported) verdict = refuse(state, 'unsupported_output', [parsed.reason, 'RED cannot be established; use the documented manual flow (degraded)'], { judgment_point: true, degraded: true });
   else {
     const failures = specs.map((s) => specVerdict(s, parsed.results)).filter(Boolean);
@@ -235,8 +249,6 @@ export async function gateRed(input, deps) {
   state.seq = Math.max(state.seq ?? 0, ...state.events.map((e) => e.seq ?? 0)) + 1;
   state.events.push({ seq: state.seq, type: verdict ? 'RED_REFUSED' : 'RED_ACCEPTED', node, attempt_id: attempt.attempt_id });
   if (!verdict) {
-    const spec_digests = {};
-    for (const s of specs) spec_digests[s.file] ??= await deps.digestFile(s.file);
     const evidence = { node, attempt_id: attempt.attempt_id, seq: state.seq, format, baseline_candidate: baselineCandidate, spec_digests, specs: structuredClone(specs) };
     state.gates.red[node] = evidence;
     verdict = { ok: true, code: 'red_accepted', judgment_point: false, degraded: false, reasons: [], evidence, state };
@@ -291,6 +303,11 @@ function contractGaps(p) {
  * identity that equals a builder identity or extends it with ':<suffix>' is that builder.
  */
 const sameIdentity = (a, b) => nonEmpty(a) && nonEmpty(b) && (a === b || a.startsWith(b + ':') || b.startsWith(a + ':'));
+/**
+ * Two reviewers are one when their identities are the same or share '<provider>:<model>' (a role
+ * suffix such as ':primary' and ':second' does not make the same model a second reviewer).
+ */
+const sameReviewer = (a, b) => sameIdentity(a, b) || (nonEmpty(a) && nonEmpty(b) && a.split(':').slice(0, 2).join(':') === b.split(':').slice(0, 2).join(':'));
 const DEFAULT_MODEL = ':provider-default';
 /**
  * The builder `identity` names, if any. A builder recorded as '<provider>:provider-default' ran the
@@ -336,7 +353,7 @@ export function gateReview(input, policy = {}) {
     if (!soOk) return no('second_opinion_unusable', ['second opinion must carry route, reviewer_identity, candidate_id, findings, overflow and a consistent outcome']);
     const sb = builderOf(state, so.reviewer_identity);
     if (sb) return no('reviewer_is_builder', [`second opinion ${so.reviewer_identity} built ${sb.node}`]);
-    if (sameIdentity(p.reviewer_identity, so.reviewer_identity)) {
+    if (sameReviewer(p.reviewer_identity, so.reviewer_identity)) {
       return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
     }
     if (so.candidate_id !== state.frozen_candidate) return no('stale_candidate', [`second opinion reviewed ${so.candidate_id}, frozen is ${state.frozen_candidate}`]);
@@ -414,7 +431,7 @@ function confirm(input, state, rx, chain, secondOpinion = 'none') {
     if (sUnchecked.length) return no('incomplete_contract', [`second-opinion confirmation must check every fixed finding: ${sUnchecked.join(', ')}`]);
     const sb = builderOf(state, so.reviewer_identity);
     if (sb) return no('reviewer_is_builder', [`second opinion ${so.reviewer_identity} built ${sb.node}`]);
-    if (sameIdentity(p.reviewer_identity, so.reviewer_identity)) return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
+    if (sameReviewer(p.reviewer_identity, so.reviewer_identity)) return no('reviewers_not_distinct', [`primary and second opinion are the same reviewer (${p.reviewer_identity})`]);
     if (so.candidate_id !== p.candidate_id) return no('stale_candidate', [`second-opinion confirmation reviewed ${so.candidate_id}, the primary ${p.candidate_id}`]);
   }
   const record = { review_execution: rx, kind: 'confirmation', outcome: p.outcome, candidate_id: p.candidate_id,

@@ -6,7 +6,7 @@
  * ============================ CONTRACT ADDITIONS (Wave 3) =============================
  * Only with DAG `config.unitReview: true` (absent: `gate review` is byte-for-byte unchanged):
  * - `gate review` kind original refuses `acceptance_uncovered` unless every acceptance id mapped
- *   on a node (`nodes[].acceptance`, i.e. config.acceptanceIds) is the `criterion` (or `id`) of a
+ *   on a node (`nodes[].acceptance`, i.e. config.acceptanceIds) is the `id` (when an acceptance id; else the `criterion`; one row, one id) of a
  *   row of `primary.acceptance_criteria`.
  * - `gate review` (original and confirmation) refuses `units_consumed_stale` unless the input's
  *   `units_consumed: [{ unit, evidence_id }]` names every unit exactly once with its CURRENT
@@ -71,6 +71,12 @@ test('acceptance: with unitReview the final review must cover every mapped accep
   refused(fx.gate('review', finalPass(fx, 'rx-1', ['AC1', 'covers AC2 in prose'])), 'acceptance_uncovered');
   const byId = passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx), primary: primaryReview(fx.candidate(),
     { acceptance_criteria: [...ROWS('AC1'), { id: 'AC2', criterion: 'the web unit works', outcome: 'PASS', evidence: 'e2e' }] }) });
+  // PR #38 4507607912/4507607949: one row covers one id; criterion AC1 with id AC2 covers AC2 only.
+  const both = passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx), primary: primaryReview(fx.candidate(),
+    { acceptance_criteria: [{ criterion: 'AC1', id: 'AC2', outcome: 'PASS', evidence: 'e2e' }] }) });
+  const one = fx.gate('review', both);
+  refused(one, 'acceptance_uncovered');
+  assert.match(one.out.reasons[0], /missing AC1$/);
   const v = fx.gate('review', byId);
   ok(v, 'a row may name the id in `id` instead of `criterion`');
   assert.deepEqual(v.out.record.units_consumed, consumed(fx));

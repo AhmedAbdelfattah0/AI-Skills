@@ -569,7 +569,9 @@ dependencies:
   client-side async state with races) carries the `concurrency` risk label and
   routes `strong`. Its repair gets the second opinion from the host's counterpart
   (Codex for a Claude host, Claude for a Codex host; CodeRabbit fallback) before
-  the primary confirmation, not after it; it returns `PASS` or `FAIL`.
+  the primary confirmation, not after it; it returns `PASS` or `FAIL`. Record it as
+  the confirmation's `second_opinion`: `gate review` requires it when the repair
+  overlaps a `concurrency`- or `security`-labelled node, and counts it whenever supplied.
 - **Repair briefs.** Dispatch repairs as phase `REPAIR`. A repair worker must
   (a) verify assumptions about inherited or global styles by measuring, not
   reading; (b) never override a shared component's internals (no `::ng-deep` or

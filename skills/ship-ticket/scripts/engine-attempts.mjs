@@ -225,6 +225,10 @@ async function settle(E, a, { timedOut = false, wait = 0 } = {}) {
   }
   if (!(await retire(S, a, E.alive, 'exited'))) return unquiet(S, a, item);
   if (env) return record(E, a, item, env);
+  // Released and ran, but left no envelope (timeout, crash): its usage is unknown, never zero, so the
+  // budget is flagged unenforceable instead of admitting a redispatch against an under-count.
+  S.usage.push({ provider: a.provider, run_id: S.run_id, node_id: a.node, phase: a.phase, role: a.role, attempt_id: a.attempt_id,
+    source: 'engine', source_execution_id: a.attempt_id });
   if (timedOut) { a.status = 'timed_out'; item.state = 'failed'; item.reason = 'timeout (never retried automatically)'; return; }
   const changed = changes(E, a);
   if (changed === null) {
@@ -295,8 +299,8 @@ async function runAttempt(E, job) {
   try {
     plan = prepareDispatch({ phase: job.phase, provider: cfg.provider, nodeId: item.id, workdir: ctx.repoRoot, repoRoot: ctx.repoRoot,
       ownership: { writes: job.writes, othersOwned: job.othersOwned }, timeoutMs, billing: cfg.billing, allowApiBilling: ctx.allowApiBilling === true,
-      promptFile: job.promptFile, permissionMode: cfg.permissionMode, modelMap: cfg.modelMap, risk: item.risk ?? [],
-      complexity: item.complexity ?? 'medium', modelTier: item.modelTier, reviewExecution: job.reviewExecution, role: item.role });
+      promptFile: job.promptFile, permissionMode: cfg.permissionMode, modelMap: cfg.modelMap, risk: job.risk ?? item.risk ?? [],
+      complexity: job.complexity ?? item.complexity ?? 'medium', modelTier: item.modelTier, reviewExecution: job.reviewExecution, role: item.role });
   } catch (e) { item.state = 'failed'; item.reason = 'dispatch refused: ' + e.message; await E.commit(); return false; }
   const env = childEnv(cfg.provider, plan.billing, ctx.env ?? process.env);
   const spec = spawnSpec(plan.executable, plan.args, platform, env);
@@ -465,7 +469,11 @@ export async function runRepairs(E, transient) {
         r.round_held = true;
       } else if (!batchOpen) { S.rounds.prove_repair_batches += 1; batchOpen = true; }
     };
+    // Routed like the nodes it repairs: their risk labels, and high complexity if any is high (never weaker than the default).
+    const affected = Object.values(S.nodes).filter(n => n.writes.some(w => r.writes.some(p => overlap(w, p))));
+    const risk = [...new Set(affected.flatMap(n => n.risk ?? []))].sort();
+    const complexity = affected.some(n => n.complexity === 'high') ? 'high' : undefined;
     await runAttempt(E, { kind: 'repair', item: r, phase: auth.phase, writes: r.writes, othersOwned: [], allowed: auth.allowed,
-      promptFile: r.promptFile, reviewExecution: r.review_execution, onLaunch });
+      promptFile: r.promptFile, reviewExecution: r.review_execution, onLaunch, risk, complexity });
   }
 }

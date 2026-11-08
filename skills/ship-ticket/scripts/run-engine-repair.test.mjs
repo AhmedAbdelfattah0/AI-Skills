@@ -240,7 +240,12 @@ test('R5 barrier: RED evidence is invalidated when a spec file changes; re-runni
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.ok(codes(r.out).includes('red_invalidated'), JSON.stringify(r.out.judgments));
   assert.equal(fx.runs('p').length, 0);
-  assert.notEqual(fx.readState().gates.red.r.attempt_id, first, 'stale evidence is dropped and the engine re-ran RED (wave0 N2)');
+  const rerun = fx.readState();
+  const now = rerun.gates.red.r?.attempt_id;
+  assert.notEqual(now, first, 'stale evidence is dropped and the engine re-ran RED (wave0 N2)');
+  // PR #38 4507604554: the new evidence is a completed gate-red attempt the engine accepted, not an absent id.
+  assert.ok(rerun.attempts.some(a => a.attempt_id === now && a.kind === 'gate-red' && a.status === 'exited'), JSON.stringify(rerun.attempts));
+  assert.ok(rerun.events.some(e => e.type === 'RED_ACCEPTED' && e.attempt_id === now));
   ok(fx.gate('red', { node: 'r', command: 'unit' }));
   assert.equal(fx.cli('drive').out.nodes.p.state, 'done');
 });
@@ -422,7 +427,7 @@ test('R10 a proof command that changes the work tree is refused; SHIP_READY is n
   ok(fx.gate('review', passReview('rx-1', fx.candidate())));
   refused(fx.gate('ship-ready', {}), 'candidate_mismatch');
   assert.deepEqual(runStateEvents(fx.planFile).filter(e => e.event === 'SHIP_READY'), []);
-  assert.equal(fx.readState().local_proof.candidate_id, fx.candidate(), 'the proof record names the tree it actually left');
+  assert.equal(fx.readState().local_proof.candidate_id, null, 'a proof that changed the tree is bound to no tree (PR #38 4505924540)');
 });
 
 // ------------------------------------------------------------------ R11 budgets

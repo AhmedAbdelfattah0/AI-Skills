@@ -6,7 +6,7 @@
  * Node built-ins only. Pure helpers live in engine-dag.mjs.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync,
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, statSync,
   renameSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,7 +129,13 @@ export function fingerprint(root, rel) {
   let st;
   try { st = lstatSync(abs); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return 'missing'; throw e; }
   const mode = (st.mode & 0o777).toString(8);
-  if (st.isSymbolicLink()) return `l:${readlinkSync(abs)}`;
+  // A symlink is its link text plus what it resolves to now (a file by its bytes): a declared read
+  // whose target changes is stale. A directory target is not walked (no cycles): link text and type only.
+  if (st.isSymbolicLink()) {
+    let to = 'missing';
+    try { const t = statSync(abs); to = t.isFile() ? `f:${sha(readFileSync(abs))}` : t.isDirectory() ? 'd' : 'o'; } catch { /* dangling */ }
+    return `l:${readlinkSync(abs)}:${to}`;
+  }
   if (st.isDirectory()) {
     const kids = readdirSync(abs).sort().map(k => `${k}=${fingerprint(root, rel + '/' + k)}`);
     return `d:${mode}:${sha(kids.join('\n'))}`;
@@ -164,7 +170,10 @@ export function snapshot(root, exclude = []) {
     const e = entries[i];
     if (e.length < 4) continue;
     const paths = [e.slice(3)];
-    if (e[0] === 'R' || e[0] === 'C') { i++; if (e[0] === 'R') paths.push(entries[i]); } // a rename's source is gone; a copy's is unchanged
+    // A rename or copy in either column (index, or work tree: e.g. after `git add -N`) is followed by its source:
+    // a rename's source is gone, a copy's is unchanged.
+    const rc = [e[0], e[1]].find((c) => c === 'R' || c === 'C');
+    if (rc) { i++; if (rc === 'R') paths.push(entries[i]); }
     for (const p of paths) if (!exclude.includes(p)) out[p] = fingerprint(root, p);
   }
   return out;

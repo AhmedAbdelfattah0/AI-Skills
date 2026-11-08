@@ -250,24 +250,35 @@ export function importCodexRelay(resultJson, { runId, role = 'reviewer', phase }
 }
 
 /**
- * Merge `incoming` into `existing`, refusing any record whose
- * `source_execution_id` is already present from any source (the existing
- * aggregate wins) or repeats inside `incoming`. Incoming records must carry
+ * Whether `next` is a later reading of the same execution as `prev`: same source, every token counter
+ * `prev` reported is reported by `next` and not smaller, and at least one is larger or newly reported
+ * (a session imported mid-stream and imported again).
+ */
+const grew = (prev, next) => prev?.source === next.source
+  && TOKEN_COUNTERS.every(k => typeof prev[k] !== 'number' || (typeof next[k] === 'number' && next[k] >= prev[k]))
+  && TOKEN_COUNTERS.some(k => typeof next[k] === 'number' && (typeof prev[k] !== 'number' || next[k] > prev[k]));
+
+/**
+ * Merge `incoming` into `existing`. A record whose `source_execution_id` is already present is
+ * refused (the existing aggregate wins), unless it is a later reading of the same execution from
+ * the same source with strictly larger counters (grew): then it replaces that record in place
+ * (`replaced`), so a re-import never keeps the lower counters. Incoming records must carry
  * `source` and `source_execution_id`; existing legacy records without an id are kept as-is.
  */
 export function addUsageRecords(existing, incoming) {
   if (!Array.isArray(existing) || !Array.isArray(incoming)) throw new Error('usage records must be arrays');
-  const seen = new Set(existing.map(e => e?.source_execution_id).filter(id => typeof id === 'string'));
-  const accepted = [], refused = [];
+  const records = [...existing];
+  const at = new Map(records.map((e, i) => [e?.source_execution_id, i]).filter(([id]) => typeof id === 'string'));
+  const refused = [], replaced = [];
   for (const r of incoming) {
     checkRecord(r);
     if (typeof r.source !== 'string' || typeof r.source_execution_id !== 'string' || !r.source_execution_id)
       throw new Error('usage records need source and source_execution_id');
-    if (seen.has(r.source_execution_id)) { refused.push(r.source_execution_id); continue; }
-    seen.add(r.source_execution_id);
-    accepted.push(r);
+    const i = at.get(r.source_execution_id);
+    if (i === undefined) { at.set(r.source_execution_id, records.length); records.push(r); continue; }
+    if (grew(records[i], r)) { records[i] = r; replaced.push(r.source_execution_id); } else refused.push(r.source_execution_id);
   }
-  return { records: [...existing, ...accepted], refused };
+  return { records, refused, replaced };
 }
 
 /** Budget state for `used` against `limit`; null when no limit is set. A known overage stops even when some usage is unknown. */
@@ -345,16 +356,16 @@ function parseFlags(argv, allowed) {
 function importInto(out, incoming) {
   const raw = existsSync(out) ? readFileSync(out, 'utf8') : '';
   const existing = raw.trim() ? readEvents(out) : [];
-  const { records, refused } = addUsageRecords(existing, incoming);
+  const { records, refused, replaced } = addUsageRecords(existing, incoming);
   const added = records.slice(existing.length);
-  if (!added.length) return { added: 0, refused };
+  if (!added.length && !replaced.length) return { added: 0, refused };
   const lines = (rs) => rs.map(r => JSON.stringify(r)).join('\n') + '\n';
-  if (raw.trim() && (raw.trimStart().startsWith('[') || !raw.endsWith('\n'))) {
+  if (replaced.length || (raw.trim() && (raw.trimStart().startsWith('[') || !raw.endsWith('\n')))) {
     const tmp = `${out}.${process.pid}.tmp`;
     writeFileSync(tmp, lines(records), { mode: 0o600 });
     renameSync(tmp, out);
   } else appendFileSync(out, lines(added), { mode: 0o600 });
-  return { added: added.length, refused };
+  return { added: added.length, refused, ...(replaced.length ? { replaced } : {}) };
 }
 
 const USAGE_TEXT = 'Usage: usage.mjs summary <events.json|events.jsonl> [--run-id <id>]\n'

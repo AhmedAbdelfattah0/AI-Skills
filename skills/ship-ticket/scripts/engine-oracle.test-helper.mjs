@@ -217,7 +217,8 @@ export class Oracle {
     const after = (() => { try { return readFileSync(this.fx.stateFile(), 'utf8'); } catch { return null; } })();
     if (after !== post.stateText) bad('P11', 'status changed the state file');
     this.lastStatus = st.out;
-    if (!S) return v;
+    // A state file that existed before the command and is gone or unparsable after it is lost progress (PR #38 4507604542).
+    if (!S) { if (P) bad('P11', 'the state file existed before the command and is missing or unparsable after it'); return v; }
     this.livePgids = S.attempts.filter(a => LIVE.includes(a.status) && a.pgid).map(a => a.pgid); // for the caller's cleanup
     const status = st.out;
     this.lastStatus = status;
@@ -240,6 +241,10 @@ export class Oracle {
           // A stale or pending unit is the next drive's check (Wave 2a minor: each unit is checked at most once per command).
           const unitsOpen = Object.values(res.out.units ?? {}).some(p => p.state !== 'verified');
           if (!liveNow && !(res.out.unit_reviews_pending?.length || res.out.red_pending?.length || unitsOpen)) bad('P11', `drive waiting on nothing: ${J({ nodes: res.out.nodes, units: Object.fromEntries(Object.entries(res.out.units ?? {}).map(([u, p]) => [u, p.state])) })}`);
+        }
+        // A failed final-review repair is terminal for its execution: `done` would be a false completion (PR #38 4505924571).
+        if (cmd === 'drive' && res.out?.outcome === 'done' && S.repairs.some(r => r.state === 'failed' && r.kind !== 'unit-review')) {
+          bad('P11', `drive reported done with a failed repair: ${J(S.repairs.filter(r => r.state === 'failed').map(r => r.id))}`);
         }
       } else if (res.status === 1) {
         const m = /^run-engine: ([a-z_]+): /.exec(res.stderr);
@@ -271,7 +276,9 @@ export class Oracle {
     const keyOf = (a) => this.promptKey(a.kind === 'repair' ? S.repairs.find(r => r.id === a.node)?.promptFile : S.nodes[a.node]?.promptFile);
     const dispatched = {};
     for (const a of S.attempts) if (['node', 'repair'].includes(a.kind) && a.pid) { const k = keyOf(a); dispatched[k] = (dispatched[k] ?? 0) + 1; }
-    for (const [k, n] of Object.entries(post.runs)) {
+    // Every key either side knows (PR #38 4507604550): under strictRuns a released dispatch that never ran is a violation too.
+    for (const k of new Set([...Object.keys(post.runs), ...Object.keys(dispatched)])) {
+      const n = post.runs[k] ?? 0;
       if (n > (dispatched[k] ?? 0)) bad('P3', `${k} ran ${n} times for ${dispatched[k] ?? 0} released dispatch(es)`);
       else if (this.strictRuns && !action.crashed && n !== (dispatched[k] ?? 0)) bad('P3', `${k} ran ${n} times for ${dispatched[k]} released dispatch(es)`);
     }
@@ -457,6 +464,11 @@ export class Oracle {
       }
     }
     if (gateKind === 'review' && ok && code === 'review_accepted' && res.out.record?.outcome === 'PASS') M.finalAccepted = { step: M.step, files: post.files };
+    // A local proof recorded by a ship-ready whose commands changed the tree proves no tree (PR #38 4505924540).
+    if (gateKind === 'ship-ready' && S.local_proof && S.local_proof.seq !== P?.local_proof?.seq && S.local_proof.candidate_id !== null
+      && Object.keys({ ...pre.files, ...post.files }).some(p => pre.files[p] !== post.files[p])) {
+      bad('P12', `local proof bound to ${S.local_proof.candidate_id} although its commands changed the work tree`);
+    }
     if (gateKind === 'ship-ready' && ok) {
       this.observed.ship_ready += 1;
       const why = [];

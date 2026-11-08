@@ -41,7 +41,8 @@ const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'wid
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview'];
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
-const NODE_PHASES = ['BUILD', 'PROVE', 'REPAIR', 'SHIP'];
+// REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
+const NODE_PHASES = ['BUILD', 'PROVE', 'SHIP'];
 const PINNED_PLAN = /^\.specs\/plans\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
 
 /**
@@ -66,7 +67,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (ex !== undefined && !(strings(ex) && (ticket ? exactExclusions(ex, ticket)
     : ex.length === 2 && new Set(ex).size === 2 && ex.includes('session-log.md') && ex.some(x => PINNED_PLAN.test(x)))))
     bad(`config.candidateExclusions must be exactly ['.specs/plans/${ticket ?? '<ticket>'}.md', 'session-log.md'] (no directories, no extras)`);
-  if (!Array.isArray(c.riskLabels ?? []) || !(c.riskLabels ?? []).every(l => typeof l === 'string' && Object.hasOwn(RISK_EVIDENCE, l)))
+  if ((c.riskLabels !== undefined && !Array.isArray(c.riskLabels)) || !(c.riskLabels ?? []).every(l => typeof l === 'string' && Object.hasOwn(RISK_EVIDENCE, l)))
     bad(`config.riskLabels must be an array of ${Object.keys(RISK_EVIDENCE).join('|')}`);
   if (!isObj(c.testCommands ?? {})) bad('config.testCommands must map name -> { cmd, args, format? }');
   for (const [name, e] of Object.entries(c.testCommands ?? {})) {
@@ -79,9 +80,9 @@ export function validateEngineDag(doc, { ticket } = {}) {
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
     only(n, NODE_FIELDS, `node ${n.id}`);
-    if (!NODE_PHASES.includes(n.phase ?? 'BUILD')) bad(`node ${n.id}: phase must be ${NODE_PHASES.join('|')} (REVIEW is never dispatched)`);
+    if (!NODE_PHASES.includes(n.phase ?? 'BUILD')) bad(`node ${n.id}: phase must be ${NODE_PHASES.join('|')} (REVIEW is never dispatched; REPAIR only from a review record)`);
     if (typeof n.promptFile !== 'string') bad(`node ${n.id}: promptFile required`);
-    for (const k of ['othersOwned', 'evidence', 'redSpecs']) if (!Array.isArray(n[k] ?? [])) bad(`node ${n.id}: ${k} must be an array`);
+    for (const k of ['othersOwned', 'evidence', 'redSpecs']) if (n[k] !== undefined && !Array.isArray(n[k])) bad(`node ${n.id}: ${k} must be an array`);
     return { deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'medium', modelTier: 'inherit',
       estimatedMemoryMb: 0, phase: 'BUILD', evidence: [], redSpecs: [], ...n };
   });
@@ -168,12 +169,20 @@ export function closure(S, ids) {
   return [...out].sort();
 }
 
-/** Ancestors of `until` (inclusive), or null for no limit. */
+/**
+ * Ancestors of `until` (inclusive), or null for no limit. A dependency in another unit counts as done
+ * only once its whole unit is verified (engine-units.mjs depDone), so every member of such a unit
+ * (and its ancestors) is in scope too.
+ */
 export function scope(S, until) {
   if (!until) return null;
   if (!S.nodes[until]) throw coded('bad_context', `unknown node ${until}`);
   const out = new Set([until]);
-  for (const id of out) for (const d of S.nodes[id].deps) out.add(d);
+  for (const id of out) for (const d of S.nodes[id].deps) {
+    out.add(d);
+    const u = S.nodes[d].unit;
+    if (u !== undefined && u !== S.nodes[id].unit) for (const m of Object.values(S.nodes)) if (m.unit === u) out.add(m.id);
+  }
   return out;
 }
 
@@ -218,9 +227,9 @@ export function gateInput(kind, doc) {
       bad('specs must be [{ file, name }]');
   }
   if (['review', 'unit-review'].includes(kind) && doc.repair_prompt_file !== undefined && typeof doc.repair_prompt_file !== 'string') bad('repair_prompt_file must be a path');
+  if (['review', 'unit-review'].includes(kind) && doc.repair_ownership !== undefined && !strings(doc.repair_ownership)) bad('repair_ownership must be paths');
   if (kind === 'unit-review') {
     for (const k of ['unit', 'approved_plan_digest', 'dag_digest', 'base_commit']) if (typeof doc[k] !== 'string' || !doc[k]) bad(`${k} is a required string`);
-    if (doc.repair_ownership !== undefined && !strings(doc.repair_ownership)) bad('repair_ownership must be paths');
   }
   if (kind === 'ship-ready') {
     if (doc.exclusions !== undefined && !strings(doc.exclusions)) bad('exclusions must be strings');

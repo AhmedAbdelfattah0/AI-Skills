@@ -154,12 +154,16 @@ function view(E, transient = []) {
   const S = E.S;
   const failed = Object.entries(S.nodes).filter(([, n]) => n.state === 'failed')
     .map(([id, n]) => judgment('node_failed', id, n.reason ?? 'terminal failure; an explicit mark failed->pending is required'));
+  // A failed final-review (or PROVE) repair is terminal for its execution: only an owner RETRY of the
+  // review continues (it cancels the repair). A failed unit repair is unit_review_terminal already.
+  const failedRepairs = S.repairs.filter(r => r.state === 'failed' && r.kind !== 'unit-review')
+    .map(r => judgment('repair_failed', r.id, `${r.reason ?? 'terminal failure'}; continuing needs a RUN-STATE RETRY linked to review ${r.review_execution}`));
   const budget = budgetVerdict(E);
   const cache = {}, units = hasUnits(S) ? unitStates(S, E.ctx.repoRoot, cache) : null;
   return { schema: STATUS_SCHEMA, ticket: S.ticket, run_id: S.run_id,
     nodes: Object.fromEntries(Object.entries(S.nodes).map(([id, n]) => [id, { state: n.state, attempts: n.attempts, retries: n.retries }])),
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
-    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []),
+    judgments: [...S.judgments, ...transient, ...failed, ...failedRepairs, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []),
       ...(unitReviewOn(S) ? unitReviewJudgments(S, units) : [])],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
@@ -275,9 +279,9 @@ export async function drive(ctx) {
         ? (ctx.verifySubscription ?? cliSubscription)(S.config.provider, childEnv(S.config.provider, 'subscription', ctx.env ?? process.env)) : true;
       if (auth !== true) transient.push(judgment('billing_unverified', null, 'subscription login not proven; refusing to risk API billing'));
       else {
-        try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
+        try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E, transient), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
         await runRepairs(E, transient);
-        if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E); } // a repair's fingerprint refresh is never renewed evidence
+        if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E, transient); } // a repair's fingerprint refresh is never renewed evidence
         reconcileReviews(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }

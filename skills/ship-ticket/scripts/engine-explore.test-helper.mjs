@@ -359,7 +359,9 @@ export async function explore(t, world, config, { depth = 10, budget = 60, roots
   const queue = [{ snap: base, enabled: d.enabled(), progress: d.progress(), depth: 0, order: 0 }];
   let transitions = 1, order = 0, maxDepth = 0, expanded = 0;
   // Directed prefixes into the interactions the contract is about (each step oracle-checked); their end states start queued.
+  // The prefixes spend the same budget (PR #38 4507604538): a budget below their cost stops them, and a partly applied one is not queued.
   for (const prefix of roots) {
+    if (transitions + prefix.length > budget) break;
     d.restore(base);
     for (const a of prefix) { await d.apply(a); transitions += 1; seen.add(d.key()); }
     queue.push({ snap: d.snapshot(), enabled: d.enabled(), progress: d.progress(), depth: prefix.length, order: ++order, pinned: true });

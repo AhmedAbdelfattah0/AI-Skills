@@ -131,9 +131,11 @@ export function verifyApproval(repoRoot, approval) {
  * review chain must hold an accepted original FAIL for `reviewExecution` in the same run that opened
  * a finding-bound write set. Only without engine state does the run log (written by run-log.mjs)
  * decide: a `start` row of kind `phase` named REVIEW in the same run with a matching
- * `review_execution` metric. Returns the authority used ('engine' | 'run-log').
+ * `review_execution` metric. With engine state and `writes` (the dispatch's ownership.writes), every
+ * write must also lie within that FAIL's write set, and the execution must not have its repair
+ * recorded already (one repair per review execution). Returns the authority used ('engine' | 'run-log').
  */
-export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
+export function verifyReviewExecution(repoRoot, approval, reviewExecution, writes) {
   const r = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
   if (r.status !== 0) fail('REPAIR needs a Git repository with engine state or a run log');
   const dir = resolve(repoRoot, r.stdout.trim());
@@ -146,9 +148,15 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution) {
     // A unit FAIL authorizes only the repair the engine opened for it (repair_opened), never a terminal FAIL.
     const chains = [...(state.review_chain ?? []), ...Object.values(state.unit_reviews ?? {})
       .flatMap(u => (Array.isArray(u?.chain) ? u.chain : [])).filter(e => e?.repair_opened === true)];
-    const failed = chains.some(e => e?.review_execution === reviewExecution && e.kind === 'original'
+    const failed = chains.find(e => e?.review_execution === reviewExecution && e.kind === 'original'
       && e.outcome === 'FAIL' && Array.isArray(e.write_set) && e.write_set.length > 0);
     if (!failed) fail('REPAIR reviewExecution ' + reviewExecution + ' has no accepted FAIL review in the engine state of run ' + approval.run_id);
+    const allChains = [...(state.review_chain ?? []), ...Object.values(state.unit_reviews ?? {}).flatMap(u => (Array.isArray(u?.chain) ? u.chain : []))];
+    if (allChains.some(e => e?.review_execution === reviewExecution && e.kind === 'repair')) {
+      fail('REPAIR reviewExecution ' + reviewExecution + ' already had its repair (one repair per review execution)');
+    }
+    const outside = (writes ?? []).filter(w => !under(w, failed.write_set));
+    if (outside.length) fail('REPAIR ownership.writes ' + outside.join(', ') + ' exceed the write set of FAIL review ' + reviewExecution);
     return 'engine';
   }
   const logFile = join(dir, approval.ticket + '.jsonl');
@@ -299,7 +307,10 @@ export function gitDirty(top) {
     const e = entries[i];
     if (e.length < 4) continue;
     const paths = [e.slice(3)];
-    if (e[0] === 'R' || e[0] === 'C') { i++; if (e[0] === 'R') paths.push(entries[i]); } // a rename's source is gone; a copy's is unchanged
+    // A rename or copy in either column (index, or work tree: e.g. after `git add -N`) is followed by its source:
+    // a rename's source is gone, a copy's is unchanged.
+    const rc = [e[0], e[1]].find((c) => c === 'R' || c === 'C');
+    if (rc) { i++; if (rc === 'R') paths.push(entries[i]); }
     for (const path of paths) {
       let sig = e.slice(0, 2) + ':deleted';
       try {
@@ -370,7 +381,7 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
-  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+  if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';
   if (auth === false) fail('subscription authentication not verified for ' + plan.provider + '; refusing to risk API billing');
@@ -490,7 +501,7 @@ async function main(argv) {
   if (argv[0] === 'inspect') {
     const plan = prepareDispatch(config);
     const approval = verifyApproval(plan.repoRoot, config.approval);
-    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution);
+    if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
     return { ...plan, approval };
   }
   return dispatch(config);

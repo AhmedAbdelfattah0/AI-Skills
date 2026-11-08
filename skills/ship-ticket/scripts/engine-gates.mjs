@@ -35,17 +35,20 @@ function unitsRefusal(E) {
 /**
  * The final review on top of unit reviews (AIS-HARNESS-3 Wave 3; only with config.unitReview, after
  * unitsRefusal, so every unit is verified with a current PASS): an original must cover every
- * acceptance id mapped on a node with a primary acceptance_criteria row (`criterion` or `id`), and
+ * acceptance id mapped on a node with a primary acceptance_criteria row (its `id` when that is an
+ * acceptance id, else its `criterion`: one row covers one id), and
  * every review step must name in `units_consumed` each unit exactly once with its current evidence
  * id. Stricter only: it refuses, it never accepts what gateReview would refuse.
  */
 function finalReviewRefusal(S, input) {
   if (input.kind === 'original') {
     const rows = Array.isArray(input.primary?.acceptance_criteria) ? input.primary.acceptance_criteria : [];
-    const covered = new Set(rows.flatMap(r => [r?.criterion, r?.id]).filter(nonEmpty));
+    // One row covers one id: its `id` when that is an acceptance id, else its `criterion` (never both).
+    const ids = new Set(S.config.acceptanceIds ?? []);
+    const covered = new Set(rows.map(r => (ids.has(r?.id) ? r.id : r?.criterion)).filter(nonEmpty));
     const missing = [...new Set(Object.values(S.nodes).flatMap(n => n.acceptance ?? []))].sort().filter(id => !covered.has(id));
     if (missing.length) return gateNo('acceptance_uncovered', [`the final review's acceptance_criteria must cover every mapped acceptance id `
-      + `(a row whose criterion or id is the id): missing ${missing.join(', ')}`]);
+      + `(a row whose id, or else criterion, is the id; one row covers one id): missing ${missing.join(', ')}`]);
   }
   return consumedRefusal(S, input.units_consumed, 'the final review');
 }
@@ -133,6 +136,21 @@ export const redInvalidJudgments = (S) => Object.entries(S.gates?.red_invalid ??
     + `${inv.rerun.code}${inv.rerun.reasons[0] ? ` (${inv.rerun.reasons[0]})` : ''}. Once dependents implement the specs RED cannot be `
     + 're-established: restore the spec file(s) and config.base to the evidence bytes, or the owner decides'));
 
+/** Node risk labels whose repair needs the second opinion before its targeted confirmation (review.md Targeted confirmation). */
+const CONFIRM_SECOND_OPINION = ['concurrency', 'security'];
+
+/**
+ * The second-opinion policy of a final-review confirmation of `rx`: 'required' when its repair's
+ * write set overlaps a node labelled concurrency or security, else 'optional' (a supplied second
+ * opinion is validated and counted, never ignored).
+ */
+function confirmationPolicy(S, rx) {
+  const ws = S.review_chain.findLast(r => r.review_execution === rx && r.kind === 'repair')?.write_set ?? [];
+  const risky = Object.values(S.nodes).some(n => (n.risk ?? []).some(l => CONFIRM_SECOND_OPINION.includes(l))
+    && [...n.reads, ...n.writes].some(p => ws.some(q => overlap(p, q))));
+  return risky ? 'required' : 'optional';
+}
+
 /**
  * Review: the frozen candidate is the stored one (set by the first original review, a repair, or an
  * authorized retry). A new original after any earlier original needs a RETRY linked to its
@@ -159,7 +177,8 @@ function reviewGate(E, input, candidate) {
   }
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
   const { units_consumed: consumedUnits, ...review } = input;
-  const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } });
+  const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } },
+    input.kind === 'confirmation' ? { confirmationSecondOpinion: confirmationPolicy(S, input.review_execution) } : {});
   if (!v.ok) return { judgment_point: false, ...v };
   if (unitReviewOn(S)) {
     const stale = finalReviewRefusal(S, input);
@@ -172,7 +191,7 @@ function reviewGate(E, input, candidate) {
   }
   if (retry) {
     S.review_chain.push({ review_execution: input.review_execution, kind: 'retry', predecessor: retry.predecessor, authorized_by: retry.authorized_by });
-    for (const r of S.repairs) if (r.review_execution === retry.predecessor && r.state === 'pending') { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
+    for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
@@ -244,7 +263,13 @@ async function shipReadyGate(E, input, candidate) {
   const units = unitShipRefusal(E);
   if (units) return units;
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
-  if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence, io.evidenceExists(E.ctx.repoRoot));
+  // Derived on every call (and again after the proof): red_accepted from the current RED gates (RED can
+  // be invalidated between calls) and exists from the work tree (a git-ignored evidence file can go).
+  const rebind = () => {
+    const list = input.risk_evidence ?? S.risk_evidence;
+    if (list !== undefined) S.risk_evidence = boundRiskEvidence(S, list.map(({ kind, path }) => ({ kind, path })), io.evidenceExists(E.ctx.repoRoot));
+  };
+  rebind();
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };
   let v = gateShipReady({ state: S, current });
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {
@@ -264,9 +289,17 @@ async function shipReadyGate(E, input, candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [stale.code] };
       return gateNo(stale.code, [`local proof made the unit evidence stale: ${stale.reasons.join('; ')}`]);
     }
+    // ...and the tree must be the one the commands ran on: a proof that changed it (codegen, --fix)
+    // tested neither tree, so it is bound to none (a RETRY review of the new tree needs a new proof).
     const after = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
-    S.local_proof = { candidate_id: after.candidate_id ?? null, commands, seq: S.seq }; // names the tree the proof actually left
-    if (after.candidate_id !== candidate) return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
+    if (after.candidate_id !== candidate) {
+      S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
+      return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
+    }
+    S.local_proof = { candidate_id: candidate, commands, seq: S.seq };
+    // Git-ignored artifacts and evidence are outside the candidate id: re-derive them from what the proof left.
+    rebind();
+    current.artifact_digests = io.artifactDigests(E.ctx.repoRoot, input.artifacts);
     note(S, 'LOCAL_PROOF', { candidate_id: candidate, passed: commands.length > 0 && commands.every(c => c.result === 'pass') });
     v = gateShipReady({ state: E.S, current });
   }

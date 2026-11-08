@@ -73,6 +73,9 @@ test('eval CLI: a crash-truncated trailing line in a usage JSONL file is skipped
   writeFileSync(usage, '{"run_id":"r1","role":"builder","input_tokens":1,"output_tokens":1}\n{"run_id":"r1","role":"buil');
   const r = spawnSync(process.execPath, [fileURLToPath(new URL('./eval.mjs', import.meta.url)), 'report', '--repo', repo, '--all', '--usage', usage], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.doesNotMatch(r.stderr, /malformed|not JSON/);
+  assert.doesNotMatch(r.stderr, /not JSON/);
   assert.match(r.stdout, /orchestrator_share_pct|runs/, `the report prints: ${r.stdout}`);
+  // PR #38 4505920983: the skipped line is reported, never silently dropped (exit contract unchanged).
+  assert.equal(JSON.parse(r.stdout).skipped_usage_lines, 1);
+  assert.match(r.stderr, /skipped 1 malformed usage line/);
 });

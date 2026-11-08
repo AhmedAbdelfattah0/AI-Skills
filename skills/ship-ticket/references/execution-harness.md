@@ -258,7 +258,9 @@ reported that counter, so a total backed by fewer events than `events` is partia
   record) are the only source for worker processes (one aggregate per
   `attempt_id`); session import covers only the host session and its in-process
   subagents; Codex relay usage is its own source. Importing an execution already
-  present from any source is refused (the aggregate wins).
+  present from any source is refused (the aggregate wins), except a later reading of the same
+  execution from the same source with strictly larger counters (a session imported mid-stream and
+  again later): it replaces the earlier record (`replaced`), so the budget never keeps the lower count.
 - Totals are partitioned by `cost_basis`; different bases are never summed
   (`totalsByBasis`).
 - Missing counters stay `null` and are never zero. `cache_hit_ratio` (cache reads
@@ -323,10 +325,13 @@ are refused, never dropped.
   runs every entry as the local proof), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
   node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in, below). Billing is
-  `subscription` unless the user authorized `allowApiBilling`.
+  `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
+  `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
+  `allowApiBilling` exists only for a library caller the user authorized.
 - node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`,
   `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
-  `phase` (`BUILD|PROVE|REPAIR|SHIP`), `role` (`builder|repair|evidence`),
+  `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review
+  records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`),
   `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see **Units**).
 
 **State** (`ship-ticket-engine-state-v1`): `nodes` (state `pending|running|done|
@@ -336,7 +341,7 @@ failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repa
 node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
 `telemetry_degraded`, `events[]` (sequenced; includes `RESUME`, `INFRA_RETRY`,
 `ADMISSION_REFUSED`, `RED_INVALIDATED`; with units also `UNIT_CHECKED`, `UNIT_INVALIDATED`,
-`UNIT_CHECK_RETRY`, `UNIT_RECHECK`, `UNIT_CLEARED`; with unit reviews also `UNIT_REVIEWED`,
+`UNIT_CHECK_RETRY`, `UNIT_CHECK_DROPPED`, `UNIT_RECHECK`, `UNIT_CLEARED`; with unit reviews also `UNIT_REVIEWED`,
 `UNIT_REVIEW_CYCLE`, `UNIT_REVIEW_RETRY`, `UNIT_REPAIR_ENQUEUED`, `UNIT_REPAIR_RECORDED`,
 `UNIT_REPAIR_BOUND`, `UNIT_REPAIR_UNBOUND`, `UNIT_REPAIR_CANCELLED`, `UNIT_CEILING_RELEASED`) and an outbox for the run-log and RUN-STATE
 sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
@@ -456,11 +461,14 @@ also not through unit-less nodes.
   `unit-check`, the unit's `resources` as durable locks, `retire()` before a result counts, a
   surviving or unknowable group is `quiescence_unknown` with nothing recorded; `resume` reconciles
   it like a RED runner). Each unit is checked at most once per engine command, and `--until` does
-  not limit which units are checked. A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
+  not limit which units are checked (its scope includes every member of a unit an in-scope node
+  depends on, since that dependency counts as done only once its whole unit is verified). A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
   exit never is. The unit is `verified` only when every check exits 0 and the checks left the
   declared `reads` and `writes` of every node (unit-less upstream generators included) and the
   `config.base` commit unchanged; a check that changes any of them fails with that cause, so a
-  dependent unit is never verified while a generator stays `done` on inputs its check rewrote. A unit with no `checks` is verified vacuously once its nodes are done (its evidence
+  dependent unit is never verified while a generator stays `done` on inputs its check rewrote.
+  Checks that drift the approval binding (plan narrative or DAG bytes) record no evidence
+  (`UNIT_CHECK_DROPPED`) and the drive returns the binding judgment, so no dependent dispatches. A unit with no `checks` is verified vacuously once its nodes are done (its evidence
   still binds, for invalidation). A node of another unit, or a unit-less node, counts a dependency as done
   only once that dependency's unit is verified. A failure before the freeze marks the unit's nodes
   `failed` (`node_failed`) and reports `unit_check_failed`: `mark failed->pending` of one node
@@ -491,7 +499,14 @@ also not through unit-less nodes.
   so marking each of k nodes of a unit in turn, or a second unit, gets no fresh allowance. Once it
   is spent, the next re-check raises the durable judgment `parent_ceiling` instead (no automatic
   retry; neither `mark`, `resume` nor `clear-unit` clears it: the owner decides, and continuing
-  means a re-`init` under a new owner-approved START). The storm guard is evaluated first.
+  means a re-`init` under a new owner-approved START). The ceiling is part of the bound DAG, so it
+  can only be raised for that new run (a changed DAG under the old run is `dag_mismatch`). `init`
+  refuses `state_exists` while the old ledger is there, and with engine state the carrier keeps
+  reading it as REPAIR authority, so the owner retires it first: confirm `status` shows nothing live
+  (no `intent|launched|running|unknown` attempt) and no worker of the run is still running, move
+  `<TICKET>.state.json` aside (kept as evidence, e.g. renamed with the old run id, outside
+  `ai-skills/ship-ticket/`), append the new START (and DAG_BOUND) with a new `run_id`, then `init`
+  with that run id. The storm guard is evaluated first.
   `status.unit_ceiling` shows `{limit, used}`, plus `reserved` while an open unit repair holds slots.
   With unit reviews, the same allowance is also spent by every unit re-review, unit repair and unit
   confirmation (below), and held slots count as spent for every other unit's re-check.
@@ -550,7 +565,7 @@ also not through unit-less nodes.
   reviews do not replace the final review ([review.md](review.md), Final review on unit evidence).
   After the refusals above, `gate review` also refuses, recording nothing:
   `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose
-  `criterion` (or `id`) is an acceptance id mapped on a node (every id of `config.acceptanceIds`),
+  `id` (when that is an acceptance id; else its `criterion`: one row covers one id) is an acceptance id mapped on a node (every id of `config.acceptanceIds`),
   and `units_consumed_stale` when an original or a confirmation does not name, in the input field
   `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified
   evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is
@@ -647,7 +662,9 @@ the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`,
 can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
-`red_invalidated`, `red_required` and `candidate_unavailable`; with units also
+`red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review
+repair that failed; it is terminal for its review execution, and an owner RETRY of that review
+cancels it as `superseded by retry`); with units also
 `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews
 `unit_review_terminal`. The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
@@ -660,7 +677,8 @@ checks; the orchestrator relays the unit reviews).
 repair** dispatch the engine re-reads its own records plus `<TICKET>.usage.jsonl`,
 deduplicated by `source_execution_id`, and evaluates `phase_tokens` with the
 dispatching item's phase. Work in flight can overshoot, and that is reported.
-Unknown usage (including a malformed import line) sets the `budget_unenforceable`
+Unknown usage (including a malformed import line, and an attempt that ran but settled without an
+envelope: a timeout or a crash) sets the `budget_unenforceable`
 flag rather than counting as within budget; the engine does not stop on it.
 `status.budget` shows the ticket and phase state (`ok|warn|stop_dispatch|unknown`)
 and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage carries no phase. Budgets never change review or model policy.
@@ -685,10 +703,16 @@ file; timing logs stay best effort and never block.
   changes the approval binding (plan narrative or DAG bytes), its result is dropped
   (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is
   re-verified before RED evidence or local proof is committed, so drifted evidence never
-  reaches disk. Runner adapters (`parseRunnerOutput`):
+  reaches disk. Runners (RED, proof and unit checks) run repository commands with the engine's
+  own, unmodified environment, API keys included: the billing strip above applies to provider
+  workers only. Runner adapters (`parseRunnerOutput`):
   `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs
   every named spec to report an **assertion** failure; import, compile and
-  collection errors do not count. Unsupported output cannot establish RED: that
+  collection errors do not count. A spec matches a result by name and file; a result without a
+  file counts only when no other result has that name and, if it failed, no other failure carries
+  a location (so another file's same-named failure never makes RED). A runner that rewrites a named
+  spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before
+  the runner starts. Unsupported output cannot establish RED: that
   is a judgment point and the manual flow applies, marked degraded. Evidence is
   bound to the spec files' content digests, the baseline candidate and the resolved
   `config.base` commit, ordered by event sequence, and is refused if recorded after a
@@ -713,7 +737,8 @@ file; timing logs stay best effort and never block.
   builder identity the engine recorded is `reviewer_is_builder`, and a builder recorded as
   `<provider>:provider-default` (no `modelMap` entry, so the CLI's unknown default) matches
   every reviewer of that provider, and the primary and
-  second opinion must differ (`reviewers_not_distinct`). It tracks the original →
+  second opinion must differ (`reviewers_not_distinct`, also when they share
+  `<provider>:<model>` and differ only in a suffix). It tracks the original →
   repair → confirmation chain by `review_execution`. Counts or a route name alone
   are never accepted. An accepted FAIL returns the finding-bound `repair` write set.
   Through `run-engine.mjs gate review`, the reviewed candidate is the frozen one: a
@@ -721,6 +746,13 @@ file; timing logs stay best effort and never block.
   RUN-STATE `{event: "RETRY", run_id, review_execution, predecessor, authorized_by}`
   naming the previous execution and trusted by the engine (`retry_unauthorized`
   otherwise; a fresh id alone is refused; a matching but untrusted line is a judgment point), and an accepted FAIL needs `repair_prompt_file` (`repair_prompt_missing`).
+  `repair_ownership` must be a list of paths (a usage error otherwise). A targeted confirmation
+  may carry a `second_opinion` confirmation (`{route, reviewer_identity, candidate_id,
+  checked_findings, outcome, evidence}`): when supplied it is validated and counted (the record is
+  PASS only when both are), and it is required (`missing_second_opinion`) when the repair's write
+  set overlaps a node labelled `concurrency` or `security` (review.md, Targeted confirmation).
+  A repair dispatch is routed like the nodes whose writes it overlaps (their risk labels, and high
+  complexity if any is high), so a repair of a risk-labelled node gets the strong tier.
 - **Candidate integrity.** The exclusion list is pinned: exactly the ticket plan
   file and `session-log.md`, order-insensitive; directories or extra entries are
   refused. Parity and VAPT evidence stay inside the candidate and are finalized
@@ -737,7 +769,9 @@ file; timing logs stay best effort and never block.
   Local proof is produced by the engine running every `config.testCommands` entry
   (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage
   error. A proof command that changes the work tree is refused as
-  `candidate_mismatch`, and one that changes the approval binding (the excluded plan
+  `candidate_mismatch` and its proof is bound to no tree (`local_proof.candidate_id: null`,
+  `dropped: ["candidate_mismatch"]`), so a RETRY review of the tree it left still needs a proof of
+  that tree; one that changes the approval binding (the excluded plan
   narrative or the DAG bytes) is refused with that binding code and its proof dropped; no
   `SHIP_READY` is recorded. With units, the unit conjuncts are re-checked after the proof
   ran: a proof command that leaves the tree but makes unit evidence stale (for example an
@@ -754,7 +788,10 @@ file; timing logs stay best effort and never block.
   `failure-path-spec`, `idempotency-spec`; migration, schema → `replay-check`,
   `rollback-compat-check`; ui → `parity-measurements`. Each needs a path, and
   kinds ending in `-spec` also need accepted RED. Presence is checked in code;
-  the reviewer judges adequacy.
+  the reviewer judges adequacy. `red_accepted` and `exists` are re-derived on every
+  `gate ship-ready` (the stored list too, when the input names none) and again after the proof
+  ran, as are the graded artifact digests: a git-ignored evidence file or artifact is outside the
+  candidate id, so a deleted or regenerated one is seen only this way.
 
 ## Eval report
 
@@ -771,7 +808,13 @@ projection above) when the run has units, and `truncated_outputs` when an attemp
 the capture cap. Exactly three
 suggestions exist and are printed, never applied: orchestrator share above 50% →
 split the session; review/build above 1.2 on a UI ticket → run the parity probe
-first; more than one REVIEW repair → the brief was too weak.
+first; more than one REVIEW repair → the brief was too weak. The thresholds compare the unrounded
+values (the printed metrics are rounded). `--all` also finds a run through its
+`<TICKET>.state.json` when its timing log is missing; a timing row without `metrics` is skipped;
+the same `source_execution_id` in several `--usage` files counts once (the record with the most
+tokens); a usage line that is not JSON is skipped and counted in `skipped_usage_lines` (with a
+warning on stderr; the exit code is unchanged). `run-log.mjs` refuses a ticket id ending in
+`.engine` (its timing log would be that ticket's engine event file).
 
 ## Docker ownership
 
