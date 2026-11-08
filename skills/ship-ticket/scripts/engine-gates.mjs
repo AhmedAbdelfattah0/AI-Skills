@@ -223,18 +223,26 @@ async function runProof(E) {
 const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
   && S.local_proof.commands.every(c => c.result === 'pass');
 
+/**
+ * Ship-ready's unit conjuncts: every unit verified with a current PASS review and, with unit
+ * reviews, the final record that authorizes ship (the last accepted original or confirmation)
+ * still consuming every unit's current evidence (Wave 3 repair). Null when they hold.
+ */
+function unitShipRefusal(E) {
+  const S = E.S, last = S.review_chain.at(-1);
+  const units = unitsRefusal(E);
+  if (units) return units;
+  if (unitReviewOn(S) && last && ['original', 'confirmation'].includes(last.kind)) {
+    return consumedRefusal(S, last.units_consumed, `final review ${last.review_execution} (${last.kind}), which authorizes ship,`);
+  }
+  return null;
+}
+
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
   const S = E.S;
-  const units = unitsRefusal(E);
+  const units = unitShipRefusal(E);
   if (units) return units;
-  // With unit reviews, the final record that authorizes ship (the last accepted original or
-  // confirmation) must still have consumed every unit's current evidence (Wave 3 repair).
-  const last = S.review_chain.at(-1);
-  if (unitReviewOn(S) && last && ['original', 'confirmation'].includes(last.kind)) {
-    const stale = consumedRefusal(S, last.units_consumed, `final review ${last.review_execution} (${last.kind}), which authorizes ship,`);
-    if (stale) return stale;
-  }
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
   if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence, io.evidenceExists(E.ctx.repoRoot));
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };
@@ -248,6 +256,13 @@ async function shipReadyGate(E, input, candidate) {
     if (unbound.length) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: unbound.map(j => j.code) };
       return gateNo(unbound[0].code, [`local proof drifted the approval binding: ${unbound.map(j => j.reason).join('; ')}`], { judgment_point: true });
+    }
+    // ...and the unit evidence must still be fresh: a proof command that moves config.base (e.g. an
+    // empty commit) leaves the candidate unchanged but every unit's evidence stale (P5/P12).
+    const stale = unitShipRefusal(E);
+    if (stale) {
+      S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [stale.code] };
+      return gateNo(stale.code, [`local proof made the unit evidence stale: ${stale.reasons.join('; ')}`]);
     }
     const after = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
     S.local_proof = { candidate_id: after.candidate_id ?? null, commands, seq: S.seq }; // names the tree the proof actually left

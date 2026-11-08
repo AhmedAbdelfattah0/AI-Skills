@@ -156,9 +156,13 @@ async function killBase(t, family) {
 
 test('SIGKILL at after-release of a unit repair, resume while the worker runs: never duplicated; the run ends in the disclosed safe refusal D5', { skip: WIN_SKIP }, async (t) => {
   const d = await killBase(t, 'drive');
-  const go = join(d.fx.root, 'go-fix');
-  d.setBehaviour('fixuA', { ...d.behaviour().fixuA, waitFor: go });
+  const go = join(d.fx.root, 'go-fix'), ready = join(d.fx.root, 'ready-fix');
+  // The worker writes its fix and then this readiness marker (outside the repo) before it waits for
+  // `go`: resume must not run before the worker's in-flight write exists (no timing dependence).
+  const fix = d.behaviour().fixuA;
+  d.setBehaviour('fixuA', { ...fix, write: { ...fix.write, [ready]: 'written' }, waitFor: go });
   await killedAt(d, 'drive', 'after-release', 1);
+  assert.ok(await waitUntil(() => existsSync(ready), 20000), 'the released repair worker wrote its fix');
   const live = await d.apply({ kind: 'resume' });
   assert.equal(live.status, 0, live.stdout);
   assert.ok(d.raw().attempts.some(a => a.kind === 'repair' && LIVE.includes(a.status)), 'the repair worker is still live and owned');

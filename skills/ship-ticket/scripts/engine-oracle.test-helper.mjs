@@ -202,7 +202,7 @@ export class Oracle {
   }
 
   /**
-   * Check every property after one command. `action` = { kind, cmd, unit?, rx?, input?, crashed? };
+   * Check the oracle's share of the properties after one command (PROPERTIES.md, "Oracle check" column; not everything a property means). `action` = { kind, cmd, unit?, rx?, input?, crashed? };
    * `res` = cli result; `pre` = facts() before the command. Runs `status` itself (the engine's
    * claims) and checks it writes nothing. Returns violations.
    */
@@ -351,6 +351,8 @@ export class Oracle {
     for (const e of newSpends) {
       if (e.type === 'UNIT_RECHECK' && cmd !== 'drive') bad('P8', `recheck spent by ${cmd}`);
       if (e.type === 'UNIT_REVIEW_CYCLE' && gateKind !== 'unit-review') bad('P8', `review cycle spent by ${cmd}`);
+      // A confirmation spends its cycle's held slot (Opus N3).
+      if (e.type === 'UNIT_REVIEW_CYCLE' && e.kind === 'unit_confirmation' && e.reserved !== true) bad('P8', `unit_confirmation of ${e.unit} (seq ${e.seq}) spent without a held slot`);
     }
     if (gateKind === 'unit-review' && res.out?.record) {
       const kinds = newSpends.map(e => e.kind);
@@ -437,11 +439,29 @@ export class Oracle {
     }
 
     // ---- P12 SHIP conjunction ----------------------------------------------------------------
+    // Node-level freshness, implied by "done" (seeded seed 20): every done node's declared reads and
+    // writes still hash (own sha256) to the fingerprints recorded when it became done. A path the
+    // node's fps lack counts as drifted; a non-file fingerprint is unknowable (skipped).
+    const drifted = Object.entries(S.nodes).filter(([, n]) => n.state === 'done' && n.fps).filter(([id, n]) => {
+      const N = this.model.byId[id];
+      return [...N.reads, ...N.writes].some(p => {
+        if (!(p in n.fps)) return true;
+        const want = fpHash(n.fps[p]);
+        return want !== null && (post.files[p] ?? 'missing') !== want;
+      });
+    }).map(([id]) => id);
+    if (gateKind === 'review' && ok && code === 'review_accepted') {
+      // The review freezes the candidate: a done node drifted before it must surface as post_freeze_drift (it blocks ship).
+      for (const id of drifted) if (!(status?.judgments ?? []).some(j => j.code === 'post_freeze_drift' && j.node === id)) {
+        bad('P12', `final review accepted while done node ${id}'s declared paths drifted, and status reports no post_freeze_drift for it`);
+      }
+    }
     if (gateKind === 'review' && ok && code === 'review_accepted' && res.out.record?.outcome === 'PASS') M.finalAccepted = { step: M.step, files: post.files };
     if (gateKind === 'ship-ready' && ok) {
       this.observed.ship_ready += 1;
       const why = [];
       if (Object.values(S.nodes).some(n => !['done', 'cancelled'].includes(n.state))) why.push('a node is unfinished');
+      for (const id of drifted) why.push(`done node ${id}'s declared paths drifted since it was done`);
       if (S.attempts.some(a => LIVE.includes(a.status))) why.push('an attempt is live');
       if (S.repairs.some(r => ['pending', 'running'].includes(r.state))) why.push('a repair is open');
       if (S.judgments.length || status?.judgments?.length) why.push(`judgments ${J([...S.judgments, ...(status?.judgments ?? [])].map(j => j.code))}`);

@@ -594,6 +594,14 @@ records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
 `gate ship-ready` refuses with it too (exit 2, a judgment point) while any done node's declared
 input or output differs from the fingerprints it was built with, including an input edited after
 the last `drive` and before the final review froze the candidate (AIS-HARNESS-3 Wave 3.5).
+Recovery from `post_freeze_drift` (the reason text is unchanged): revert the drifted path to the
+bytes the node was built with, and the judgment clears on the next command. When the drift came
+after the freeze, the work tree is then the frozen candidate again and the run continues. When it
+came before the final review (the review froze the drifted tree), the reverted tree is no longer
+the reviewed candidate, so ship-ready refuses `candidate_mismatch`: the owner appends a RUN-STATE
+`RETRY` and a new original final review is recorded on the reverted tree. A final review FAIL does
+not recover it: while the judgment stands `drive` dispatches nothing, the repair included
+(reproduced in Wave 3.5 repair; the owner decides whether that should change).
 The authorized exception is one REPAIR opened by a `gate review` FAIL: the gate
 enqueues `repair-<review_execution>` with the finding-bound write set (the paths its
 findings name plus the declared repair ownership) and the brief named by
@@ -731,7 +739,12 @@ file; timing logs stay best effort and never block.
   error. A proof command that changes the work tree is refused as
   `candidate_mismatch`, and one that changes the approval binding (the excluded plan
   narrative or the DAG bytes) is refused with that binding code and its proof dropped; no
-  `SHIP_READY` is recorded. A proof runner without proven quiescence records no proof
+  `SHIP_READY` is recorded. With units, the unit conjuncts are re-checked after the proof
+  ran: a proof command that leaves the tree but makes unit evidence stale (for example an
+  empty commit moving `config.base`) is refused with the existing code (`units_unverified`,
+  `unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive`
+  re-checks the units (spending rechecks), and the proof command must be fixed or it moves the
+  base again on the next ship-ready. A proof runner without proven quiescence records no proof
   and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS
   `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful
   closure is ever synthesized.

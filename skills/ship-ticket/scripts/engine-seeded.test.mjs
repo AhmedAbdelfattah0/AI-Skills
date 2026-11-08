@@ -9,8 +9,13 @@
  * from the enabled actions with weights biased toward reachable repair states (unit FAIL, repair
  * drive, confirmation, final review, ship), plus input edits and worker failures.
  *
- *   ENGINE_SEEDED_SEEDS     comma list or range (default 1,2,3,4), e.g. "1-200" for a nightly run
- *   ENGINE_SEEDED_COMMANDS  commands per seed (default 25: about 100 commands per PR run)
+ *   ENGINE_SEEDED_SEEDS     comma list or range (default 1,2,3,4,5,9,20: seed 5 reaches a unit
+ *                           confirmation, seed 9 a ship-ready, seed 20 found the post_freeze_drift
+ *                           SHIP bug), e.g. "1-200" for a nightly run
+ *   ENGINE_SEEDED_COMMANDS  commands per seed (default 25: about 175 commands per PR run)
+ *
+ * On the default seeds and command count the run must also show positive signals: at least one
+ * accepted ship-ready and one accepted unit confirmation across the seeds (the oracle's counters).
  *
  * A violation fails with the seed, the world and the command trace (reduced by dropping commands
  * that are not needed to reproduce it); re-run it with ENGINE_SEEDED_SEEDS=<seed>. A green run
@@ -23,9 +28,10 @@ import { Driver } from './engine-explore.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown (known limit D4)';
 const J = JSON.stringify;
+const DEFAULT_SEEDS = '1,2,3,4,5,9,20';
 
 function seeds() {
-  const spec = process.env.ENGINE_SEEDED_SEEDS ?? '1,2,3,4';
+  const spec = process.env.ENGINE_SEEDED_SEEDS ?? DEFAULT_SEEDS;
   return spec.split(',').flatMap(p => { const [a, b] = p.split('-').map(Number); return b ? Array.from({ length: b - a + 1 }, (_, i) => a + i) : [a]; });
 }
 const COMMANDS = Number(process.env.ENGINE_SEEDED_COMMANDS ?? 25);
@@ -109,7 +115,7 @@ async function play(t, seed, { trace = null, commands = COMMANDS } = {}) {
     states.add(d.key());
     if (d.violations.length) break;
   }
-  return { actions, violations: d.violations, states: states.size, world: w };
+  return { actions, violations: d.violations, states: states.size, world: w, observed: d.oracle.observed };
 }
 
 /** Drop commands not needed to reproduce the first violation's property (bounded number of replays). */
@@ -132,7 +138,10 @@ test(`seeded: ${seeds().length} seed(s) x ${COMMANDS} commands of random worlds 
   const commands = results.reduce((n, r) => n + r.actions.length, 0);
   const kinds = {};
   for (const r of results) for (const a of r.actions) kinds[a.kind] = (kinds[a.kind] ?? 0) + 1;
-  t.diagnostic(J({ seeds: list.length, commands, distinct_states: results.reduce((n, r) => n + r.states, 0), ms: Date.now() - started, kinds }));
+  const observed = (k) => results.reduce((n, r) => n + r.observed[k], 0);
+  t.diagnostic(J({ seeds: list.length, commands, distinct_states: results.reduce((n, r) => n + r.states, 0), ms: Date.now() - started, kinds,
+    ship_ready: observed('ship_ready'), confirmations: observed('confirmations') }));
+  for (const r of results) t.diagnostic(J({ seed: r.seed, states: r.states, ship_ready: r.observed.ship_ready, confirmations: r.observed.confirmations }));
   const bad = results.filter(x => x.violations.length);
   for (const r of bad) t.diagnostic(`seed ${r.seed} after ${r.actions.length} commands: ${r.violations[0].property} ${r.violations[0].detail}`);
   for (const r of bad) {
@@ -142,4 +151,8 @@ test(`seeded: ${seeds().length} seed(s) x ${COMMANDS} commands of random worlds 
       + `reduced trace (${reduced.length} of ${r.actions.length}): ${reduced.map(a => J(a)).join(' > ')}\nreproduce: ENGINE_SEEDED_SEEDS=${r.seed} ENGINE_SEEDED_COMMANDS=${COMMANDS} node --test skills/ship-ticket/scripts/engine-seeded.test.mjs`);
   }
   assert.equal(commands, list.length * COMMANDS, 'every seed ran its whole stream');
+  if (process.env.ENGINE_SEEDED_SEEDS === undefined && process.env.ENGINE_SEEDED_COMMANDS === undefined) {
+    assert.ok(observed('ship_ready') > 0, 'the default seeds reach an accepted ship-ready');
+    assert.ok(observed('confirmations') > 0, 'the default seeds reach an accepted unit confirmation');
+  }
 });

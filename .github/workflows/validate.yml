@@ -70,6 +70,8 @@ jobs:
   # one test file at a time, since both spawn many real engine and worker processes.
   engine-properties:
     runs-on: ubuntu-latest
+    # Above the mutation test's own 30-minute ceiling (each harness run is killed after 10 minutes).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

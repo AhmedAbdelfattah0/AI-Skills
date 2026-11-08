@@ -14,7 +14,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { POSIX } from './engine-test-fixture.mjs';
-import { Driver, explore, twoUnitWorld, twoUnitRoots } from './engine-explore.test-helper.mjs';
+import { Driver, explore, twoUnitWorld, twoUnitRoots, PASS_CMD } from './engine-explore.test-helper.mjs';
 import { drive } from './run-engine.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown (known limit D4)';
@@ -176,6 +176,48 @@ test('P1: a narrative edit stops dispatch and gates until it is restored', { ski
   writeFileSync(d.fx.planFile, plan);
   const [ok] = await steps(d, [{ kind: 'drive' }]);
   assert.equal(ok.status, 0, ok.stdout);
+});
+
+test('P5/P12: a local-proof command that moves the base commit (an empty commit, same tree) makes ship-ready refuse on the now-stale unit evidence', { skip: WIN_SKIP }, async (t) => {
+  // A buggy proof command: `git commit --allow-empty` with config.base HEAD. The candidate id (tree
+  // bytes) is unchanged and no node's bytes drift, but every unit's evidence binds the old base.
+  const proofCommits = { cmd: 'git', args: ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'proof moved base'] };
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, testCommands: { ok: PASS_CMD, zcommit: proofCommits } });
+  await steps(d, [{ kind: 'drive' }, { kind: 'upass', unit: 'uA' }, { kind: 'upass', unit: 'uB' }, { kind: 'final' }]);
+  const before = d.oracle.facts(), candidate = d.oracle.candidate();
+  const [ship] = await steps(d, [{ kind: 'ship' }]); // the oracle's P5/P12 check fails this step if ship-ready is accepted
+  const after = d.oracle.facts();
+  assert.notEqual(after.head, before.head, 'the proof command moved HEAD (config.base)');
+  assert.equal(d.oracle.candidate(), candidate, 'the candidate id is unchanged: only the base moved');
+  assert.equal(ship.status, 2, ship.stdout);
+  assert.equal(ship.out.code, 'units_unverified', ship.stdout);
+  assert.match(ship.out.reasons.join(' '), /local proof made the unit evidence stale/);
+  const S = d.raw();
+  assert.equal(S.ship_ready ?? null, null, 'no SHIP_READY');
+  assert.equal(S.local_proof.candidate_id, null, 'the proof is recorded unbound');
+  assert.deepEqual(S.local_proof.dropped, ['units_unverified']);
+});
+
+test('P8 (Codex trace): a cycle whose hold was released while stale, then restored, cannot confirm out of a slot another unit took', { skip: WIN_SKIP }, async (t) => {
+  // Ceiling 3. uA's FAIL spends 1 and holds 2; its repair's re-check spends a held slot (used 2, the
+  // confirmation slot still held). Editing uA's input makes the cycle stale and the next command that
+  // reconciles (here a refused `gate ship-ready`, which spends nothing) releases the hold. Reverting
+  // the input makes uA verified on the same evidence again, awaiting its confirmation, with no hold.
+  // An unrelated uB re-check takes the freed slot (used 3). uA's confirmation then reaches
+  // spendCeiling() with no hold at used 3: the room guard must refuse it (parent_ceiling).
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 3 });
+  await steps(d, [{ kind: 'drive' }, { kind: 'ufail', unit: 'uA' }, { kind: 'drive' }]);
+  assert.deepEqual([d.raw().unit_ceiling.used, d.raw().unit_ceiling.holds.map(h => h.slots)], [2, [['confirmation']]]);
+  await steps(d, [{ kind: 'edit', path: 'docs/in.txt' }, { kind: 'ship' }]);
+  assert.equal(d.raw().unit_ceiling.holds, undefined, 'the stale cycle released its hold');
+  await steps(d, [{ kind: 'revert', path: 'docs/in.txt' }]);
+  assert.equal(d.lastStatus.units.uA.review.awaiting, 'confirmation', 'restored: awaiting its confirmation again, with no hold');
+  await steps(d, [{ kind: 'edit', path: 'docs/in-b.txt' }, { kind: 'drive' }]);
+  assert.equal(d.raw().unit_ceiling.used, 3, 'the uB re-check took the freed slot');
+  const [conf] = await steps(d, [{ kind: 'uconf', unit: 'uA' }]); // the oracle's P8 inequality fails this step if it spends
+  assert.equal(conf.status, 2, conf.stdout);
+  assert.equal(conf.out.code, 'parent_ceiling');
+  assert.equal(d.raw().unit_ceiling.used, 3, 'nothing spent');
 });
 
 test('P12 (seeded seed 20): ship-ready is refused while a done node\'s declared input drifted (status reports post_freeze_drift)', { skip: WIN_SKIP }, async (t) => {
