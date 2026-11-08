@@ -191,7 +191,8 @@ export function providerOk(provider, out) {
 
 const GATE_FIELDS = {
   red: ['node', 'command', 'specs'],
-  review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file'],
+  review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',
+    'units_consumed'],
   'ship-ready': ['risk_evidence', 'artifacts', 'exclusions', 'candidate_id'],
   'unit-review': ['unit', 'review_execution', 'kind', 'approved_plan_digest', 'dag_digest', 'base_commit', 'primary', 'second_opinion',
     'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file'],

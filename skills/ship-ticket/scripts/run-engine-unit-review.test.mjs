@@ -24,7 +24,8 @@
  *   repair|recheck|confirmation, or terminal: computed judgment unit_review_terminal), recomputed
  *   against the current evidence at every read; status.unit_reviews_pending lists units without a
  *   current PASS. `gate review` (original and confirmation) and `gate ship-ready` refuse
- *   unit_reviews_missing until every unit has a current PASS.
+ *   unit_reviews_missing until every unit has a current PASS; from Wave 3 the final review also
+ *   names units_consumed (run-engine-wave3.test.mjs).
  * Repair: an accepted unit FAIL (before the freeze, with findings to fix) enqueues repair
  *   `repair-<rx>` (kind unit-review) through the review-repair authorization; drive dispatches it only
  *   while the unit's evidence is the reviewed one (else it is cancelled and the review is stale),
@@ -67,6 +68,8 @@ const PASS = { cmd: process.execPath, args: ['-e', ''] };
 const node = (id, extra = {}) => ({ id, writes: [`src/${id}.txt`], checks: ['ok'], ...extra });
 const cycles = (fx) => fx.readState().events.filter(e => e.type === 'UNIT_REVIEW_CYCLE');
 const reviewOf = (fx, u) => fx.cli('status').out.units[u].review;
+/** Wave 3: the final review names every unit's current evidence id (units_consumed). */
+const consumed = (fx) => Object.entries(fx.cli('status').out.units).map(([unit, p]) => ({ unit, evidence_id: p.evidence.id }));
 
 /** The binding a unit review names: digests from engine state, base and evidence id from status. */
 function bound(fx, u) {
@@ -166,7 +169,7 @@ test('record: units reviewed in any order; risky needs the second opinion; build
   assert.deepEqual(after.unit_ceiling, { limit: 4, used: 0 }, 'first reviews are free');
   refused(fx.gate('review', passReview('rx-urx', fx.candidate(), { review_execution: 'urx-web' })), 'chain_broken');
   refused(fx.gate('review', { ...passReview('rx-1', fx.candidate()), second_opinion: undefined }), 'missing_second_opinion');
-  ok(fx.gate('review', passReview('rx-1', fx.candidate())), 'the final review on the assembled candidate');
+  ok(fx.gate('review', passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx) })), 'the final review on the assembled candidate');
   ok(fx.gate('ship-ready', {}));
   const m = evaluateRun(buildRun('T-1', 'run-1', []), { state: fx.readState(), repoRoot: fx.repo });
   assert.deepEqual([m.units['u-api'].review.state, m.units['u-web'].review.state], ['pass', 'pass']);
@@ -204,7 +207,7 @@ test('stale: a shared-contract change makes only the reading unit and its depend
   assert.deepEqual(c.map(e => [e.unit, e.kind, e.trigger.cause]), [['u-api', 'unit_rereview', 'stale'], ['u-web', 'unit_rereview', 'stale']]);
   assert.deepEqual([c[0].trigger.predecessor, c[0].trigger.from_evidence, c[0].trigger.to_evidence], ['urx-u-api', old['u-api'], after.units['u-api'].evidence.id]);
   assert.deepEqual(c[0].trigger.invalidations, [{ changed: ['docs/in.txt'], rerun: ['api'] }]);
-  ok(fx.gate('review', passReview('rx-1', fx.candidate())));
+  ok(fx.gate('review', passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx) })));
 });
 
 // ------------------------------------------------------------------ unit-scoped repair
@@ -248,7 +251,7 @@ test('repair: a risky unit FAIL opens a unit-scoped repair; drive repairs and re
   assert.deepEqual(fx.cli('status').out.unit_ceiling, { limit: 4, used: 3 }, 'the whole cycle spent, nothing left held');
   assert.deepEqual(cycles(fx)[0].trigger.findings, ['F1']);
   refused(fx.gate('unit-review', unitConfirm(fx, 'api', 'urx-1', { second: true })), 'unit_review_open');
-  ok(fx.gate('review', passReview('rx-1', fx.candidate())));
+  ok(fx.gate('review', passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx) })));
   ok(fx.gate('ship-ready', {}));
 });
 
@@ -501,7 +504,7 @@ test('resume: units reviewed before a crash keep their reviews; a review waits f
   assert.deepEqual([d.out.units.u1.evidence.id, d.out.units.u2.evidence.id], [ids.u1, ids.u2], 'resume and drive kept the reviewed evidence');
   assert.deepEqual(d.out.unit_reviews_pending, ['u3']);
   ok(fx.gate('unit-review', unitReview(fx, 'u3', 'urx-3'), {}), 'unit u3 (built after the crash)');
-  ok(fx.gate('review', passReview('rx-1', fx.candidate())));
+  ok(fx.gate('review', passReview('rx-1', fx.candidate(), { units_consumed: consumed(fx) })));
 });
 
 // ------------------------------------------------------------------ after the freeze
@@ -511,7 +514,7 @@ test('freeze: a final-review repair stales the unit review; a unit FAIL after th
     behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
   ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-1')));
-  ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+  ok(fx.gate('review', { ...failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix')), units_consumed: consumed(fx) }));
   ok(fx.cli('drive'));
   assert.equal(fx.cli('status').out.units.api.review.state, 'stale');
   refused(fx.gate('review', confirmReview('rx-1', fx.candidate())), 'unit_reviews_missing');
@@ -523,6 +526,6 @@ test('freeze: a final-review repair stales the unit review; a unit FAIL after th
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'urx-3', predecessor: 'urx-2', authorized_by: 'owner' });
   ok(fx.gate('unit-review', unitReview(fx, 'api', 'urx-3')));
   assert.deepEqual(cycles(fx).map(e => [e.kind, e.trigger.cause]), [['unit_rereview', 'stale'], ['unit_rereview', 'retry']]);
-  ok(fx.gate('review', confirmReview('rx-1', fx.candidate())));
+  ok(fx.gate('review', { ...confirmReview('rx-1', fx.candidate()), units_consumed: consumed(fx) }));
   ok(fx.gate('ship-ready', {}));
 });

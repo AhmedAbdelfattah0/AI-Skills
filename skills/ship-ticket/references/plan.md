@@ -159,6 +159,12 @@ no producer/consumer boundary changes.>
 | frontend | frontend worker | Build consumer and consumer tests | <real paths> | contract | <output dir/none> |
 | integration | orchestrator | Join and verify the real integration | <real paths> | backend, frontend | local app + datastore |
 
+**Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
+rationale: <independent boundaries · shared contracts · acceptance criteria per
+unit · file ownership · expected size and risk · overhead vs value>. <If split:
+`config.acceptanceIds`, `config.unitRecheckCeiling` and its reasoning, and whether
+`config.unitReview` is on.>
+
 ## 3. Risks & unknowns
 | Risk / unknown | Why it matters | What I'll do |
 |---|---|---|
@@ -261,6 +267,64 @@ split a ticket into units is the planner's recorded judgment, approved with the 
 Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each
 unit need its own independent review before the final review
 ([review.md](review.md), Unit review).
+
+### Decomposition: split or not
+
+Every plan records a **split/no-split rationale** in the template's
+`Decomposition` line, and the human approves it with the plan. There is no
+numeric size threshold: the planner judges. Changed lines, file counts and seam
+counts are reported as signals, never as triggers. Weigh, and write down:
+
+- **Independent boundaries.** Could a unit be built, checked and reviewed without
+  reading another unit's code beyond a declared contract?
+- **Shared contracts.** Name each contract the units share (schema, API shape,
+  event, generated client) and which unit owns it.
+- **Acceptance criteria per unit.** Which criteria each unit can prove on its own;
+  criteria that only hold end to end belong to the final review and an
+  integration node.
+- **File ownership.** Every file has one owning unit; a file several units must
+  write is a reason to merge them or to give it to an orchestrator node.
+- **Expected size and risk.** Rough size, risk labels, and where review effort
+  would concentrate.
+- **Overhead vs value.** Each unit adds checks, a unit review (two reviewers when
+  risky) and ceiling spend; split only where that buys smaller, independent
+  reviews.
+
+Then decide:
+
+- **One unit** (leave the unit fields out) for a small ticket or tightly coupled
+  work where every change reads every other. The run is then exactly today's.
+- **Split at contract seams and acceptance-criterion boundaries**: producer and
+  consumer of an approved contract, or areas that each own their own criteria.
+  Never split inside a tightly coupled module just to make units smaller.
+- Units are opt-in through the DAG fields (`unit`, `checks`, `acceptance`,
+  `config.acceptanceIds`, `config.unitRecheckCeiling`, `config.unitReview`);
+  they are fixed at approval and never re-decomposed at run time.
+
+**Declare `config.acceptanceIds`** as the plan's own acceptance-criterion ids
+(for example `AC1`..`ACn`, as written in the plan), and map each to at least one
+node through `acceptance`. With unit reviews the final review must grade every id
+by name (`acceptance_uncovered` otherwise; [review.md](review.md), Final review on
+unit evidence).
+
+**Set `config.unitRecheckCeiling` for the unit count.** It is one run-wide
+allowance (default 4) shared by every unit re-check, unit re-review, unit repair
+and unit confirmation; the unit count never multiplies it. A unit repair cycle
+needs 3 unheld slots (the repair, its re-check, its confirmation), and a stale
+upstream unit costs each dependent a re-check and a re-review. Size it for the
+cycles you expect (roughly 3 per unit that may need a repair plus 2 per dependent
+of a churning contract) and record that reasoning in the plan. Disclosed limit
+(held slots): while one unit's open repair holds its two slots, another unit's
+re-check can exhaust the rest and raise a durable `parent_ceiling` that halts all
+dispatch, that repair included, until the owner decides. A higher ceiling for a
+multi-unit ticket is the mitigation; it is still a fixed, approved bound.
+
+**Known over-review cost.** A dependent unit binds its upstream unit's evidence,
+not the bytes of the contract they share. When the upstream unit is re-checked,
+every dependent's evidence and unit review go stale and are redone, even if the
+shared contract did not change. It is safe but costs ceiling and reviewer time;
+AIS-HARNESS-3 Wave 4 measures it before any finer binding is built
+([execution-harness.md](execution-harness.md), Units).
 
 ### Full-stack: the frontend does not wait for the backend
 

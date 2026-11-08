@@ -333,7 +333,8 @@ reruns and UI slice. It checks only:
 - changed rule rows and triggered sub-outcomes pass.
 
 Pass it only the captures of screens the repair changed. When the repair
-touches a `concurrency`-labelled node, the second opinion on the repair (the
+touches a `concurrency`-labelled node, or repairs a security or architecture
+finding (Repair routing, below), the second opinion on the repair (the
 host's counterpart: Codex for a Claude host, Claude for a Codex host; CodeRabbit
 if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL`
 with evidence. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
@@ -350,11 +351,12 @@ confirmation after both return.
 ## Unit review (opt-in: `config.unitReview`)
 
 When the approved DAG splits the ticket into units and sets `config.unitReview: true`,
-per-unit independent review is the main code inspection. The final review in
-this file is still mandatory on the exact assembled candidate, with the same Opus
-primary, the mandatory second opinion and the same repair, confirmation and RETRY
-policy. Only how it is scoped changes later (risk-focused, consuming unit
-evidence); in this release it runs unchanged. The engine never dispatches a
+per-unit independent review is the main code inspection. **Unit reviews do not
+replace the final review.** The final review in this file is still mandatory on
+the exact assembled candidate, with the same Opus primary, the mandatory second
+opinion and the same repair, confirmation and RETRY policy. Only its scope
+changes: it is risk-focused and consumes the verified unit evidence (Final review
+on unit evidence, below). The engine never dispatches a
 reviewer: the orchestrator relays each unit review, and the engine validates and
 records it.
 
@@ -423,6 +425,68 @@ records it.
   `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current
   PASS. A final-review repair that changes a unit makes that unit's review stale:
   re-review the unit before the final confirmation.
+
+## Repair routing (units)
+
+Route each accepted finding by where its defect lives, not by which reviewer found
+it. The write set of the repair and what must be reviewed again follow the class.
+
+| Defect class | Repair writes | Re-check and re-review |
+|---|---|---|
+| Local defect inside one unit | that unit's declared writes (a unit FAIL: `gate unit-review`) | that unit's checks and its one targeted confirmation |
+| Shared contract (schema, API shape, event, generated client) | the contract's owner node plus the readers' closure (inside one unit: a unit repair; across units: the final review's repair) | the contract unit and every unit that reads it (their evidence goes stale), then their unit reviews |
+| Integration defect (the units are each right, the join is wrong) | the integration node and the affected tests (the final review's repair) | the integration node's checks and the final review's targeted confirmation |
+| Security or architecture | the full affected closure, through the final review's repair | the full closure, plus the opposite-model second opinion on the repair before the confirmation |
+
+A finding whose write set leaves the unit is `repair_outside_unit` at the unit
+gate: leave it to the final review, whose one repair batch may cross units. Every
+repair still spends the run's ceilings; routing never adds a repair round.
+
+## Final review on unit evidence
+
+When unit reviews exist (`config.unitReview`), the final review in this file is
+mandatory and runs on the exact assembled candidate, with the same Opus primary,
+the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit
+if it is unavailable or out of quota; if none can run, stop and ask with
+`WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
+owner-RETRY policy. Unit reviews do not replace it, and aggregated unit PASSes are
+never accepted in its place.
+
+**Brief.** Give the final reviewers:
+
+- the valid unit records: per unit its id, current evidence id, the PASS review
+  execution, the findings and dispositions, its acceptance ids and check results
+  (`status.units.<u>`);
+- the threat model, the approved plan and the assembled diff;
+- the scope: the risks that cannot be verified inside one unit:
+  - cross-module behaviour and the end-to-end acceptance criteria;
+  - security and authorization, tenancy isolation;
+  - state and concurrency (request ordering, optimistic concurrency, client async state);
+  - payment and refund idempotency;
+  - database consistency (migrations, constraints, transactions across units);
+  - contracts between units (producer and consumer agree on the materialized artifact);
+  - drift from the approved plan and assembly regressions (a unit change that broke another unit's behaviour).
+
+**Rules.**
+
+- The final review **still inspects code** in the high-risk areas above on the
+  assembled candidate. Unit evidence narrows where it reads, it does not replace
+  reading.
+- It **refuses stale unit evidence**. Before it starts, read `status.units` and
+  check that every unit is `verified` with a review state `pass` on its current
+  evidence id. The engine checks the same: the gate input names
+  `units_consumed: [{unit, evidence_id}]`, each unit once with
+  `status.units.<u>.evidence.id`, and `gate review` refuses a missing, unknown,
+  duplicated or old entry (`units_consumed_stale`). If a unit is stale, re-review
+  that unit first; never reuse its old record.
+- **Every mapped acceptance id is covered.** Each id in `config.acceptanceIds` is
+  the `criterion` (or `id`) of one `acceptance_criteria` row, so the end-to-end
+  outcome of every criterion is graded on the assembled candidate. A row may cite
+  unit evidence for a criterion verified inside one unit, but it still gets a row.
+  `gate review` refuses an original that omits one (`acceptance_uncovered`).
+- A final-review repair that changes a unit makes that unit's evidence and review
+  stale: re-check and re-review the unit, then give the targeted confirmation a
+  `units_consumed` list with the new evidence ids.
 
 ## Record and transition
 

@@ -16,7 +16,7 @@ import { retryEvent } from './engine-authority.mjs';
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
-import { unitReviewGate, reviewsMissing, unitExecution } from './engine-unit-review.mjs';
+import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -30,6 +30,36 @@ function unitsRefusal(E) {
   if (open.length) return gateNo('units_unverified', [`unit check evidence is not verified: ${open.join(', ')} (drive runs the checks)`]);
   const missing = reviewsMissing(E.S, E.ctx.repoRoot);
   return missing.length ? gateNo('unit_reviews_missing', [`every unit needs a current PASS unit review (gate unit-review): ${missing.join(', ')}`]) : null;
+}
+
+/**
+ * The final review on top of unit reviews (AIS-HARNESS-3 Wave 3; only with config.unitReview, after
+ * unitsRefusal, so every unit is verified with a current PASS): an original must cover every
+ * acceptance id mapped on a node with a primary acceptance_criteria row (`criterion` or `id`), and
+ * every review step must name in `units_consumed` each unit exactly once with its current evidence
+ * id. Stricter only: it refuses, it never accepts what gateReview would refuse.
+ */
+function finalReviewRefusal(S, input) {
+  if (input.kind === 'original') {
+    const rows = Array.isArray(input.primary?.acceptance_criteria) ? input.primary.acceptance_criteria : [];
+    const covered = new Set(rows.flatMap(r => [r?.criterion, r?.id]).filter(nonEmpty));
+    const missing = [...new Set(Object.values(S.nodes).flatMap(n => n.acceptance ?? []))].sort().filter(id => !covered.has(id));
+    if (missing.length) return gateNo('acceptance_uncovered', [`the final review's acceptance_criteria must cover every mapped acceptance id `
+      + `(a row whose criterion or id is the id): missing ${missing.join(', ')}`]);
+  }
+  const list = input.units_consumed, units = Object.keys(S.unit_reviews).sort();
+  const why = [];
+  if (!Array.isArray(list)) why.push('units_consumed must be [{ unit, evidence_id }] naming every unit');
+  else {
+    for (const c of list) if (!units.includes(c?.unit)) why.push(`unknown unit ${c?.unit}`);
+    for (const u of units) {
+      const mine = list.filter(c => c?.unit === u), now = S.unit_checks[u].evidence.id;
+      if (!mine.length) why.push(`${u}: not consumed (current evidence ${now})`);
+      else if (mine.length > 1) why.push(`${u}: named ${mine.length} times`);
+      else if (mine[0].evidence_id !== now) why.push(`${u}: consumed evidence ${mine[0].evidence_id} is stale, current is ${now}`);
+    }
+  }
+  return why.length ? gateNo('units_consumed_stale', [`the final review must consume every unit's current verified evidence (status.units.<u>.evidence.id): ${why.join('; ')}`]) : null;
 }
 
 /** RED: the node's pinned specs, the DAG runner the input names, the node's resources; baseline = the computed candidate. */
@@ -123,8 +153,14 @@ function reviewGate(E, input, candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
-  const v = gateReview({ ...input, state: { ...S, frozen_candidate: frozen, builders: S.builders } });
+  const { units_consumed: consumedUnits, ...review } = input;
+  const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } });
   if (!v.ok) return { judgment_point: false, ...v };
+  if (unitReviewOn(S)) {
+    const stale = finalReviewRefusal(S, input);
+    if (stale) return stale;
+    v.record.units_consumed = consumedUnits.map(c => ({ unit: c.unit, evidence_id: c.evidence_id }));
+  }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
     return gateNo('repair_prompt_missing', ['an accepted FAIL opens a repair: repair_prompt_file must be the absolute path of its brief']);

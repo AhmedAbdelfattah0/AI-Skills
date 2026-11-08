@@ -543,9 +543,26 @@ also not through unit-less nodes.
   (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger:
   stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair).
   `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing`
-  until every unit has a current PASS. The `drive` outcome `done` does not cover pending unit
+  until every unit has a current PASS (and `gate review` the two Wave 3 refusals below). The `drive` outcome `done` does not cover pending unit
   reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also
   reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).
+- **Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit
+  reviews do not replace the final review ([review.md](review.md), Final review on unit evidence).
+  After the refusals above, `gate review` also refuses, recording nothing:
+  `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose
+  `criterion` (or `id`) is an acceptance id mapped on a node (every id of `config.acceptanceIds`),
+  and `units_consumed_stale` when an original or a confirmation does not name, in the input field
+  `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified
+  evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is
+  refused. The accepted record carries `units_consumed`. Without `config.unitReview` neither check
+  runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.
+- **Known over-review cost (measured in AIS-HARNESS-3 Wave 4, not fixed).** Unit evidence binds a dependency
+  unit's evidence id, not the bytes of the contract it shares. When an upstream unit is re-checked
+  (after its repair, a rebuild or an input change), every dependent unit's evidence and unit review
+  go stale and are re-checked and re-reviewed, even when the shared contract bytes did not change.
+  This is safe (it never reuses stale evidence) but spends the parent-wide ceiling and reviewer
+  time. A finer binding to the shared contract's fingerprints is deferred until Wave 4 measures the
+  cost.
 - **Evidence.** The stored check result is bound, as it stands after the checks ran, to the
   fingerprints of the unit's reads and writes, the resolved `config.base` commit, each node's
   attempt count, each dependency unit's evidence, and the attempt count and state of every
