@@ -38,9 +38,9 @@ export function planNarrativeDigest(text) {
 
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
-  'candidateExclusions', 'testCommands', 'base', 'riskLabels'];
+  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds'];
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
-  'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs'];
+  'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
 const NODE_PHASES = ['BUILD', 'PROVE', 'REPAIR', 'SHIP'];
 const PINNED_PLAN = /^\.specs\/plans\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
 
@@ -91,8 +91,59 @@ export function validateEngineDag(doc, { ticket } = {}) {
     validateNodes({ phase: 'BUILD', nodes: plain });
     schedule({ phase: 'BUILD', nodes: plain, maxConcurrency: c.width ?? 1, memoryBudgetMb: c.memoryBudgetMb ?? null }); // cycles, budget
   } catch (e) { bad(e.message); }
+  validateUnits(nodes, c, bad);
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
+}
+
+/** A unit tagged node collapses into its unit; any other node is its own vertex (for unit cycles and order). */
+export const unitVertex = (n) => (n.unit !== undefined ? `u:${n.unit}` : `n:${n.id}`);
+
+/**
+ * The opt-in Wave 2a fields (absent by default): `unit` (a safe id distinct from every node id and
+ * testCommands name), `checks` (testCommands names; needs `unit`), `acceptance` (ids from
+ * config.acceptanceIds, the approved plan's acceptance criteria). Once any node has `acceptance`,
+ * every id of config.acceptanceIds must be mapped to at least one node. Units may not form a cycle
+ * (also through unit-less nodes), or a unit's checks could wait on its own dependents.
+ */
+function validateUnits(nodes, c, bad) {
+  const ids = new Set(nodes.map(n => n.id)), cmds = Object.keys(c.testCommands ?? {});
+  for (const n of nodes) {
+    if (n.unit !== undefined && !(typeof n.unit === 'string' && SAFE_NAME.test(n.unit))) bad(`node ${n.id}: unit must be a safe id`);
+    if (n.unit !== undefined && (ids.has(n.unit) || cmds.includes(n.unit))) bad(`node ${n.id}: unit ${n.unit} collides with a node id or testCommands name`);
+    if (n.checks !== undefined) {
+      if (!strings(n.checks)) bad(`node ${n.id}: checks must be testCommands names`);
+      if (n.unit === undefined) bad(`node ${n.id}: checks need a unit`);
+      const unknown = n.checks.filter(x => !cmds.includes(x));
+      if (unknown.length) bad(`node ${n.id}: unknown check(s) ${unknown} (not in config.testCommands)`);
+    }
+    if (n.acceptance !== undefined && !strings(n.acceptance)) bad(`node ${n.id}: acceptance must be acceptance criterion ids`);
+  }
+  const acc = c.acceptanceIds;
+  if (acc !== undefined && !(strings(acc) && acc.length && acc.every(Boolean) && new Set(acc).size === acc.length))
+    bad('config.acceptanceIds must be unique non-empty strings');
+  if (acc === undefined && nodes.some(n => n.acceptance !== undefined)) bad('node acceptance needs config.acceptanceIds (the approved plan\'s acceptance criterion ids)');
+  if (acc !== undefined) {
+    const unknown = [...new Set(nodes.flatMap(n => n.acceptance ?? []))].filter(x => !acc.includes(x));
+    if (unknown.length) bad(`acceptance id(s) ${unknown} are not in config.acceptanceIds`);
+    const unmapped = acc.filter(id => !nodes.some(n => (n.acceptance ?? []).includes(id)));
+    if (unmapped.length) bad(`acceptance criteria mapped to no node: ${unmapped}`);
+  }
+  if (!nodes.some(n => n.unit !== undefined)) return;
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n])), edges = new Map();
+  for (const n of nodes) for (const d of n.deps) {
+    const from = unitVertex(byId[d]), to = unitVertex(n);
+    if (from !== to) edges.set(from, new Set([...(edges.get(from) ?? []), to]));
+  }
+  const state = new Map();
+  const visit = (v, path) => {
+    if (state.get(v) === 'done') return;
+    if (state.get(v) === 'open') bad(`units form a cycle: ${[...path, v].join(' -> ')}`);
+    state.set(v, 'open');
+    for (const w of edges.get(v) ?? []) visit(w, [...path, v]);
+    state.set(v, 'done');
+  };
+  for (const n of nodes) visit(unitVertex(n), []);
 }
 
 /** Transitive dependents of `ids`, including `ids`. */

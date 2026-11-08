@@ -315,12 +315,12 @@ are refused, never dropped.
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
   runs every entry as the local proof), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
-  node `risk` for `gate ship-ready`). Billing is `subscription` unless the user
-  authorized `allowApiBilling`.
+  node `risk` for `gate ship-ready`), `acceptanceIds` (opt-in, below). Billing is
+  `subscription` unless the user authorized `allowApiBilling`.
 - node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`,
   `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
   `phase` (`BUILD|PROVE|REPAIR|SHIP`), `role` (`builder|repair|evidence`),
-  `evidence`, `redSpecs`.
+  `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see **Units**).
 
 **State** (`ship-ticket-engine-state-v1`): `nodes` (state `pending|running|done|
 failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repairs`,
@@ -328,9 +328,11 @@ failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repa
 `local_proof`, `locks` (durable resource holders), `builders` (`{provider, model,
 node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
 `telemetry_degraded`, `events[]` (sequenced; includes `RESUME`, `INFRA_RETRY`,
-`ADMISSION_REFUSED`, `RED_INVALIDATED`) and an outbox for the run-log and RUN-STATE
+`ADMISSION_REFUSED`, `RED_INVALIDATED`; with units also `UNIT_CHECKED`, `UNIT_INVALIDATED`,
+`UNIT_CHECK_RETRY`) and an outbox for the run-log and RUN-STATE
 sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
-`red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`.
+`red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and
+`units` only when the DAG has units (`unit_checks` in state likewise).
 
 **Approval binding.** `init` recomputes the plan narrative digest (the plan
 file with the text between the RUN-STATE markers removed) and requires it to
@@ -424,6 +426,43 @@ writes (existence, type, mode, content hash; never mtime). On `drive` or
 `resume`, a changed input or output marks the node and its dependency closure
 `stale`; stale nodes re-run automatically only before the REVIEW freeze.
 
+**Units (opt-in; AIS-HARNESS-3 Wave 2a).** Absent fields change nothing: a DAG without them
+produces the same state, events and output as before (pinned by the golden test in
+`run-engine-units.test.mjs`); there is no schema bump. A node may carry `unit` (a safe id,
+distinct from every node id and `testCommands` name), `checks` (names of `config.testCommands`
+entries; needs `unit`) and `acceptance` (acceptance criterion ids). The plan template carries no
+machine-readable criteria, so the ids come from `config.acceptanceIds`, which the approved plan
+binds with the DAG digest. `init` refuses (`dag_invalid`) an unknown check, a check without a
+unit, an acceptance id outside `config.acceptanceIds`, `acceptance` without it, and, once any node
+has `acceptance`, an id of `config.acceptanceIds` mapped to no node. Units may not form a cycle,
+also not through unit-less nodes.
+- **Checks.** Once every node of a unit is done, the engine holds new dispatch, waits until nothing
+  is live, and runs the union of the unit's `checks` under the runner protocol (attempt kind
+  `unit-check`, the unit's `resources` as durable locks, `retire()` before a result counts, a
+  surviving or unknowable group is `quiescence_unknown` with nothing recorded; `resume` reconciles
+  it like a RED runner). A runner that cannot start is retried once (`UNIT_CHECK_RETRY`); a failing
+  exit never is. The unit is `verified` only when every check exits 0 and the checks left the
+  unit's files unchanged. A node of another unit, or a unit-less node, counts a dependency as done
+  only once that dependency's unit is verified. A failure before the freeze marks the unit's nodes
+  `failed` (`node_failed`) and reports `unit_check_failed`: `mark failed->pending` of one node
+  spends that node's retry and re-runs it, the unit's other nodes failed only by the check return
+  to `done` without re-running, and the checks run again. After the freeze the nodes stay `done`
+  and `unit_check_failed` goes to the owner. `gate review` and `gate ship-ready` refuse
+  `units_unverified` while any unit is not verified.
+- **Evidence.** The stored check result is bound to the fingerprints of the unit's reads and
+  writes, the resolved `config.base` commit, each node's attempt count and each dependency unit's
+  evidence; the candidate id is recorded with it but does not bind it, because another unit's
+  writes change the candidate. Validity is recomputed at every use. Any change makes the evidence
+  `stale`, together with the units of its dependent closure only (`UNIT_INVALIDATED`, with the
+  cause: changed paths, base moved, nodes re-run or a dependency), and the checks run again; a
+  fingerprint refresh after a repair is never renewed evidence. Verified evidence invalidated more
+  than twice in one run raises `unit_invalidation_storm` (durable) instead of another re-run; the
+  owner decides (the decomposition or the contract churns), and no command clears it in this run.
+- **Projection.** `status.units` and the `eval` report's `units` list per unit `state`
+  (`verified|stale|failed|pending`), `nodes`, `deps`, `acceptance`, `checks`, current
+  `fingerprints`, `evidence` (`id`, `state`, `candidate_id`, `base_commit`, per-check results),
+  `stale_cause`, `invalidations` and their `causes`. It is computed, never authority.
+
 **REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
 records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
 The authorized exception is one REPAIR opened by a `gate review` FAIL: the gate
@@ -470,9 +509,11 @@ the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`,
 can outlive the leader: known limit N7 below),
 `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
 `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
-`red_invalidated`, `red_required` and `candidate_unavailable`. The gate adds
+`red_invalidated`, `red_required` and `candidate_unavailable`; with units also
+`unit_check_failed` and `unit_invalidation_storm`. The gate adds
 unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
-(`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).
+(`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2); its
+`units_unverified` refusal is not a judgment point (`drive` runs the checks).
 
 **Budgets.** `config.budget` holds dispatch thresholds: a warning at 80%, and at
 100% no new dispatch (`budget_stop`, a judgment point). Before every node **and
@@ -580,7 +621,8 @@ Read-only (`ship-ticket-eval-v1`). Reads the run log, the engine state and usage
 files; anything a source does not carry is `unknown`, never zero. Metrics: tokens
 by role and the orchestrator share, wall clock per phase, review and repair
 rounds, pre-ship findings by severity (from `gate review` records), resume
-attempts and outcomes, infra retries, admission refusals. Exactly three
+attempts and outcomes, infra retries, admission refusals, and `units` (the per-unit
+projection above) when the run has units. Exactly three
 suggestions exist and are printed, never applied: orchestrator share above 50% →
 split the session; review/build above 1.2 on a UI ticket → run the parity probe
 first; more than one REVIEW repair → the brief was too weak.

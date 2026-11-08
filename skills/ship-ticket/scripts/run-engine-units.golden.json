@@ -1,0 +1,1169 @@
+{
+ "outputs": [
+  {
+   "name": "init",
+   "status": 0,
+   "out": {
+    "state_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.state.json",
+    "run_id": "run-1",
+    "plan_digest": "<sha#1>",
+    "dag_digest": "<sha#2>",
+    "binding": "plan"
+   }
+  },
+  {
+   "name": "drive-1",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": [],
+    "outcome": "done"
+   }
+  },
+  {
+   "name": "status-1",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+   }
+  },
+  {
+   "name": "drive-stale",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {}
+    },
+    "confirmation": null,
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": [],
+    "outcome": "done"
+   }
+  },
+  {
+   "name": "review-fail",
+   "status": 0,
+   "out": {
+    "gate": "review",
+    "candidate_id": "<sha#3>",
+    "judgment_point": false,
+    "ok": true,
+    "code": "review_accepted",
+    "reasons": [],
+    "record": {
+     "review_execution": "rx-1",
+     "kind": "original",
+     "outcome": "FAIL",
+     "candidate_id": "<sha#3>",
+     "reviewer_identity": "opus:review",
+     "second_opinion_route": "codex",
+     "graded_artifacts": {},
+     "fix_findings": [
+      "F1"
+     ],
+     "findings": [
+      {
+       "id": "F1",
+       "source": "primary",
+       "severity": "major",
+       "paths": [
+        "src/a.txt"
+       ],
+       "disposition": "fix"
+      }
+     ],
+     "write_set": [
+      "src/a.txt"
+     ],
+     "overflow": false
+    },
+    "repair": {
+     "review_execution": "rx-1",
+     "write_set": [
+      "src/a.txt"
+     ]
+    }
+   }
+  },
+  {
+   "name": "drive-repair",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [
+     {
+      "id": "repair-rx-1",
+      "state": "done"
+     }
+    ],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {
+      "rx-1": 1
+     }
+    },
+    "confirmation": {
+     "review_execution": "rx-1",
+     "closure": [
+      "a",
+      "b"
+     ]
+    },
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": [],
+    "outcome": "done"
+   }
+  },
+  {
+   "name": "confirm",
+   "status": 0,
+   "out": {
+    "gate": "review",
+    "candidate_id": "<sha#4>",
+    "judgment_point": false,
+    "ok": true,
+    "code": "review_accepted",
+    "reasons": [],
+    "record": {
+     "review_execution": "rx-1",
+     "kind": "confirmation",
+     "outcome": "PASS",
+     "candidate_id": "<sha#4>",
+     "reviewer_identity": "opus:review",
+     "checked_findings": [
+      "F1"
+     ]
+    }
+   }
+  },
+  {
+   "name": "ship-ready",
+   "status": 0,
+   "out": {
+    "gate": "ship-ready",
+    "candidate_id": "<sha#4>",
+    "judgment_point": false,
+    "ok": true,
+    "code": "ship_ready",
+    "reasons": [],
+    "missing": [],
+    "event": {
+     "type": "SHIP_READY",
+     "candidate_id": "<sha#4>"
+    }
+   }
+  },
+  {
+   "name": "resume",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [
+     {
+      "id": "repair-rx-1",
+      "state": "done"
+     }
+    ],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {
+      "rx-1": 1
+     }
+    },
+    "confirmation": {
+     "review_execution": "rx-1",
+     "closure": [
+      "a",
+      "b"
+     ]
+    },
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+   }
+  },
+  {
+   "name": "status-2",
+   "status": 0,
+   "out": {
+    "schema": "ship-ticket-engine-status-v1",
+    "ticket": "T-1",
+    "run_id": "run-1",
+    "nodes": {
+     "a": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "b": {
+      "state": "done",
+      "attempts": 2,
+      "retries": 0
+     },
+     "c": {
+      "state": "done",
+      "attempts": 1,
+      "retries": 0
+     }
+    },
+    "repairs": [
+     {
+      "id": "repair-rx-1",
+      "state": "done"
+     }
+    ],
+    "judgments": [],
+    "rounds": {
+     "prove_repair_batches": 0,
+     "review_repairs": {
+      "rx-1": 1
+     }
+    },
+    "confirmation": {
+     "review_execution": "rx-1",
+     "closure": [
+      "a",
+      "b"
+     ]
+    },
+    "red_pending": [],
+    "budget": null,
+    "authority_untrusted": [],
+    "telemetry_degraded": []
+   }
+  }
+ ],
+ "state": {
+  "schema": "ship-ticket-engine-state-v1",
+  "ticket": "T-1",
+  "run_id": "run-1",
+  "plan_digest": "<sha#1>",
+  "dag_digest": "<sha#2>",
+  "binding": "plan",
+  "dag_file": "<root>/dag.json",
+  "created_at": "<ts>",
+  "seq": 14,
+  "config": {
+   "billing": "subscription",
+   "width": 1,
+   "modelMap": {},
+   "riskLabels": [],
+   "testCommands": {
+    "proof": {
+     "cmd": "/Users/ahmedabdelfatah/.nvm/versions/node/v22.23.1/bin/node",
+     "args": [
+      "-e",
+      ""
+     ]
+    }
+   },
+   "provider": "claude",
+   "permissionMode": "acceptEdits",
+   "memoryBudgetMb": 4096,
+   "timeoutMs": 10000,
+   "budget": null,
+   "candidateExclusions": [
+    ".specs/plans/T-1.md",
+    "session-log.md"
+   ],
+   "base": "HEAD"
+  },
+  "pinned_exclusions": [
+   ".specs/plans/T-1.md",
+   "session-log.md"
+  ],
+  "risk_labels": [],
+  "nodes": {
+   "a": {
+    "deps": [],
+    "reads": [
+     "docs/in.txt"
+    ],
+    "writes": [
+     "src/a.txt"
+    ],
+    "othersOwned": [],
+    "resources": [],
+    "risk": [],
+    "complexity": "low",
+    "modelTier": "inherit",
+    "estimatedMemoryMb": 64,
+    "phase": "BUILD",
+    "evidence": [],
+    "redSpecs": [],
+    "promptFile": "<root>/prompt-a.txt",
+    "role": "builder",
+    "id": "a",
+    "state": "done",
+    "attempts": 2,
+    "retries": 0,
+    "fps": {
+     "docs/in.txt": "f:644:<sha#5>",
+     "src/a.txt": "f:644:<sha#6>"
+    },
+    "reason": null
+   },
+   "b": {
+    "deps": [
+     "a"
+    ],
+    "reads": [
+     "src/a.txt"
+    ],
+    "writes": [
+     "src/b.txt"
+    ],
+    "othersOwned": [],
+    "resources": [],
+    "risk": [],
+    "complexity": "low",
+    "modelTier": "inherit",
+    "estimatedMemoryMb": 64,
+    "phase": "BUILD",
+    "evidence": [],
+    "redSpecs": [],
+    "promptFile": "<root>/prompt-b.txt",
+    "role": "builder",
+    "id": "b",
+    "state": "done",
+    "attempts": 2,
+    "retries": 0,
+    "fps": {
+     "src/a.txt": "f:644:<sha#6>",
+     "src/b.txt": "f:644:<sha#7>"
+    },
+    "reason": null
+   },
+   "c": {
+    "deps": [],
+    "reads": [],
+    "writes": [
+     "src/c.txt"
+    ],
+    "othersOwned": [],
+    "resources": [],
+    "risk": [],
+    "complexity": "low",
+    "modelTier": "inherit",
+    "estimatedMemoryMb": 64,
+    "phase": "BUILD",
+    "evidence": [],
+    "redSpecs": [],
+    "promptFile": "<root>/prompt-c.txt",
+    "role": "builder",
+    "id": "c",
+    "state": "done",
+    "attempts": 1,
+    "retries": 0,
+    "fps": {
+     "src/c.txt": "f:644:<sha#8>"
+    },
+    "reason": null
+   }
+  },
+  "attempts": [
+   {
+    "attempt_id": "att-<uuid#1>",
+    "kind": "node",
+    "node": "a",
+    "phase": "BUILD",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "builder",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#10>"
+    },
+    "pre_snapshot_digest": "<sha#11>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#1>.plan-before",
+    "allowed": [
+     "src/a.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#1>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#1>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/a.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#2>",
+    "kind": "node",
+    "node": "b",
+    "phase": "BUILD",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "builder",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#10>",
+     "src/a.txt": "f:644:<sha#12>"
+    },
+    "pre_snapshot_digest": "<sha#13>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#2>.plan-before",
+    "allowed": [
+     "src/b.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#2>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#2>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/b.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#3>",
+    "kind": "node",
+    "node": "c",
+    "phase": "BUILD",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "builder",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#10>",
+     "src/a.txt": "f:644:<sha#12>",
+     "src/b.txt": "f:644:<sha#7>"
+    },
+    "pre_snapshot_digest": "<sha#14>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#3>.plan-before",
+    "allowed": [
+     "src/c.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#3>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#3>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/c.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#4>",
+    "kind": "node",
+    "node": "a",
+    "phase": "BUILD",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "builder",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#5>",
+     "src/a.txt": "f:644:<sha#12>",
+     "src/b.txt": "f:644:<sha#7>",
+     "src/c.txt": "f:644:<sha#8>"
+    },
+    "pre_snapshot_digest": "<sha#15>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#4>.plan-before",
+    "allowed": [
+     "src/a.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#4>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#4>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/a.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#5>",
+    "kind": "node",
+    "node": "b",
+    "phase": "BUILD",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "builder",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#5>",
+     "src/a.txt": "f:644:<sha#12>",
+     "src/b.txt": "f:644:<sha#7>",
+     "src/c.txt": "f:644:<sha#8>"
+    },
+    "pre_snapshot_digest": "<sha#15>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#5>.plan-before",
+    "allowed": [
+     "src/b.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#5>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#5>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/b.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#6>",
+    "kind": "repair",
+    "node": "repair-rx-1",
+    "phase": "REPAIR",
+    "provider": "claude",
+    "model": "provider-default",
+    "role": "repair",
+    "status": "exited",
+    "resources": [],
+    "pre_snapshot": {
+     ".specs/plans/T-1.md": "f:644:<sha#9>",
+     "docs/in.txt": "f:644:<sha#5>",
+     "src/a.txt": "f:644:<sha#12>",
+     "src/b.txt": "f:644:<sha#7>",
+     "src/c.txt": "f:644:<sha#8>"
+    },
+    "pre_snapshot_digest": "<sha#15>",
+    "plan_before_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#6>.plan-before",
+    "allowed": [
+     "src/a.txt"
+    ],
+    "excluded": [],
+    "envelope_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#6>.envelope.json",
+    "out_file": "<root>/repo/.git/ai-skills/ship-ticket/T-1.attempts/att-<uuid#6>.out",
+    "started_at": "<ts>",
+    "writes": [
+     "src/a.txt"
+    ],
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "attempt_id",
+     "ended_at",
+     "exit_code",
+     "peak_cpu_pct",
+     "peak_rss_mb",
+     "resource_samples",
+     "schema",
+     "signal",
+     "spawn_error",
+     "stdout_file"
+    ]
+   },
+   {
+    "attempt_id": "att-<uuid#7>",
+    "kind": "proof",
+    "node": "proof",
+    "status": "exited",
+    "pid": "<pid>",
+    "pgid": "<pgid>",
+    "leader_start": "<leader_start>",
+    "quiesced": true,
+    "envelope": [
+     "exitCode",
+     "timedOut"
+    ]
+   }
+  ],
+  "events": [
+   {
+    "seq": 1,
+    "type": "DISPATCH",
+    "node": "a",
+    "attempt_id": "att-<uuid#1>"
+   },
+   {
+    "seq": 2,
+    "type": "DISPATCH",
+    "node": "b",
+    "attempt_id": "att-<uuid#2>"
+   },
+   {
+    "seq": 3,
+    "type": "DISPATCH",
+    "node": "c",
+    "attempt_id": "att-<uuid#3>"
+   },
+   {
+    "seq": 4,
+    "type": "DISPATCH",
+    "node": "a",
+    "attempt_id": "att-<uuid#4>"
+   },
+   {
+    "seq": 5,
+    "type": "DISPATCH",
+    "node": "b",
+    "attempt_id": "att-<uuid#5>"
+   },
+   {
+    "seq": 6,
+    "type": "REPAIR_ENQUEUED",
+    "review_execution": "rx-1"
+   },
+   {
+    "seq": 7,
+    "type": "GATE",
+    "gate": "review",
+    "ok": true,
+    "code": "review_accepted"
+   },
+   {
+    "seq": 8,
+    "type": "DISPATCH",
+    "node": "repair-rx-1",
+    "attempt_id": "att-<uuid#6>"
+   },
+   {
+    "seq": 9,
+    "type": "REPAIR_RECORDED",
+    "review_execution": "rx-1",
+    "new_candidate": "<sha#4>"
+   },
+   {
+    "seq": 10,
+    "type": "GATE",
+    "gate": "review",
+    "ok": true,
+    "code": "review_accepted"
+   },
+   {
+    "seq": 11,
+    "type": "LOCAL_PROOF",
+    "candidate_id": "<sha#4>",
+    "passed": true
+   },
+   {
+    "seq": 12,
+    "type": "SHIP_READY",
+    "candidate_id": "<sha#4>"
+   },
+   {
+    "seq": 13,
+    "type": "GATE",
+    "gate": "ship-ready",
+    "ok": true,
+    "code": "ship_ready"
+   },
+   {
+    "seq": 14,
+    "type": "RESUME",
+    "outcome": "reconciled"
+   }
+  ],
+  "judgments": [],
+  "outbox": [],
+  "usage": [
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "a",
+    "phase": "BUILD",
+    "role": "builder",
+    "attempt_id": "att-<uuid#1>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#1>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   },
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "b",
+    "phase": "BUILD",
+    "role": "builder",
+    "attempt_id": "att-<uuid#2>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#2>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   },
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "c",
+    "phase": "BUILD",
+    "role": "builder",
+    "attempt_id": "att-<uuid#3>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#3>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   },
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "a",
+    "phase": "BUILD",
+    "role": "builder",
+    "attempt_id": "att-<uuid#4>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#4>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   },
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "b",
+    "phase": "BUILD",
+    "role": "builder",
+    "attempt_id": "att-<uuid#5>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#5>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   },
+   {
+    "provider": "claude",
+    "run_id": "run-1",
+    "node_id": "repair-rx-1",
+    "phase": "REPAIR",
+    "role": "repair",
+    "attempt_id": "att-<uuid#6>",
+    "source": "engine",
+    "source_execution_id": "att-<uuid#6>",
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": null,
+    "reported_cost_usd": null,
+    "cost_basis": null
+   }
+  ],
+  "freeze": {
+   "candidate": "<sha#4>",
+   "seq": 9
+  },
+  "review_chain": [
+   {
+    "review_execution": "rx-1",
+    "kind": "original",
+    "outcome": "FAIL",
+    "candidate_id": "<sha#3>",
+    "reviewer_identity": "opus:review",
+    "second_opinion_route": "codex",
+    "graded_artifacts": {},
+    "fix_findings": [
+     "F1"
+    ],
+    "findings": [
+     {
+      "id": "F1",
+      "source": "primary",
+      "severity": "major",
+      "paths": [
+       "src/a.txt"
+      ],
+      "disposition": "fix"
+     }
+    ],
+    "write_set": [
+     "src/a.txt"
+    ],
+    "overflow": false
+   },
+   {
+    "review_execution": "rx-1",
+    "kind": "repair",
+    "old_candidate": "<sha#3>",
+    "new_candidate": "<sha#4>",
+    "write_set": [
+     "src/a.txt"
+    ],
+    "attempt_id": "att-<uuid#6>"
+   },
+   {
+    "review_execution": "rx-1",
+    "kind": "confirmation",
+    "outcome": "PASS",
+    "candidate_id": "<sha#4>",
+    "reviewer_identity": "opus:review",
+    "checked_findings": [
+     "F1"
+    ]
+   }
+  ],
+  "repairs": [
+   {
+    "id": "repair-rx-1",
+    "kind": "review",
+    "review_execution": "rx-1",
+    "writes": [
+     "src/a.txt"
+    ],
+    "promptFile": "<root>/prompt-fix.txt",
+    "state": "done",
+    "old_candidate": "<sha#3>",
+    "attempts": 1,
+    "round_held": true,
+    "reason": null
+   }
+  ],
+  "builders": [
+   {
+    "provider": "claude",
+    "model": "provider-default",
+    "node": "a",
+    "identity": "claude:provider-default"
+   },
+   {
+    "provider": "claude",
+    "model": "provider-default",
+    "node": "b",
+    "identity": "claude:provider-default"
+   },
+   {
+    "provider": "claude",
+    "model": "provider-default",
+    "node": "c",
+    "identity": "claude:provider-default"
+   },
+   {
+    "provider": "claude",
+    "model": "provider-default",
+    "node": "repair-rx-1",
+    "identity": "claude:provider-default"
+   }
+  ],
+  "rounds": {
+   "prove_repair_batches": 0,
+   "review_repairs": {
+    "rx-1": 1
+   }
+  },
+  "confirmation": {
+   "review_execution": "rx-1",
+   "closure": [
+    "a",
+    "b"
+   ]
+  },
+  "gates": {
+   "red": {}
+  },
+  "locks": {},
+  "telemetry_degraded": [],
+  "authority": {
+   "through": 7,
+   "trusted": [
+    "{\"run_id\":\"run-1\",\"event\":\"START\",\"timestamp\":\"<ts>\",\"approved_plan_digest\":\"<sha#1>\"}"
+   ],
+   "untrusted": [],
+   "block": {
+    "length": 442,
+    "digest": "<sha#16>"
+   }
+  },
+  "frozen_candidate": "<sha#4>",
+  "local_proof": {
+   "candidate_id": "<sha#4>",
+   "commands": [
+    {
+     "name": "proof",
+     "cmd": "/Users/ahmedabdelfatah/.nvm/versions/node/v22.23.1/bin/node",
+     "args": [
+      "-e",
+      ""
+     ],
+     "exit_code": 0,
+     "result": "pass"
+    }
+   ],
+   "seq": 10
+  },
+  "ship_ready": {
+   "candidate_id": "<sha#4>",
+   "seq": 12
+  }
+ },
+ "engine_log": [
+  {
+   "run_id": "run-1",
+   "event": "GATE",
+   "event_id": "gate-run-1-7",
+   "gate": "review",
+   "ok": true,
+   "code": "review_accepted",
+   "candidate_id": "<sha#3>",
+   "timestamp": "<ts>"
+  },
+  {
+   "run_id": "run-1",
+   "event": "GATE",
+   "event_id": "gate-run-1-10",
+   "gate": "review",
+   "ok": true,
+   "code": "review_accepted",
+   "candidate_id": "<sha#4>",
+   "timestamp": "<ts>"
+  },
+  {
+   "run_id": "run-1",
+   "event": "SHIP_READY",
+   "event_id": "ship-ready-<sha#4>",
+   "candidate_id": "<sha#4>",
+   "timestamp": "<ts>"
+  },
+  {
+   "run_id": "run-1",
+   "event": "GATE",
+   "event_id": "gate-run-1-13",
+   "gate": "ship-ready",
+   "ok": true,
+   "code": "ship_ready",
+   "candidate_id": "<sha#4>",
+   "timestamp": "<ts>"
+  }
+ ],
+ "run_state": [
+  {
+   "run_id": "run-1",
+   "event": "START",
+   "timestamp": "<ts>",
+   "approved_plan_digest": "<sha#1>"
+  },
+  {
+   "run_id": "run-1",
+   "event": "SHIP_READY",
+   "event_id": "ship-ready-<sha#4>",
+   "candidate_id": "<sha#4>",
+   "timestamp": "<ts>"
+  }
+ ]
+}

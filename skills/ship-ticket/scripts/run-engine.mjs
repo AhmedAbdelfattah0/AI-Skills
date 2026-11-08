@@ -29,6 +29,7 @@ import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearS
 import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
+import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed } from './engine-units.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -152,14 +153,15 @@ function view(E, transient = []) {
   const failed = Object.entries(S.nodes).filter(([, n]) => n.state === 'failed')
     .map(([id, n]) => judgment('node_failed', id, n.reason ?? 'terminal failure; an explicit mark failed->pending is required'));
   const budget = budgetVerdict(E);
+  const cache = {}, units = hasUnits(S) ? unitStates(S, E.ctx.repoRoot, cache) : null;
   return { schema: STATUS_SCHEMA, ticket: S.ticket, run_id: S.run_id,
     nodes: Object.fromEntries(Object.entries(S.nodes).map(([id, n]) => [id, { state: n.state, attempts: n.attempts, retries: n.retries }])),
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
-    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S)],
+    judgments: [...S.judgments, ...transient, ...failed, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : [])],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags },
     authority_untrusted: (S.authority?.untrusted ?? []).map(u => JSON.parse(u.line)),
-    telemetry_degraded: structuredClone(S.telemetry_degraded) };
+    telemetry_degraded: structuredClone(S.telemetry_degraded), ...(units ? { units: unitProjection(S, E.ctx.repoRoot, cache) } : {}) };
 }
 
 /** Record a sink failure as telemetry degradation (never a command failure). */
@@ -211,7 +213,9 @@ export async function init(ctx) {
       pinned_exclusions: [...dag.config.candidateExclusions], risk_labels: [...new Set([...dag.config.riskLabels, ...dag.nodes.flatMap(n => n.risk)])],
       nodes: Object.fromEntries(dag.nodes.map(n => [n.id, { ...n, state: 'pending', attempts: 0, retries: 0, fps: null }])),
       attempts: [], events: [], judgments: [], outbox: [], usage: [], freeze: null, review_chain: [], repairs: [], builders: [],
-      rounds: { prove_repair_batches: 0, review_repairs: {} }, confirmation: null, gates: { red: {} }, locks: {}, telemetry_degraded: [] };
+      rounds: { prove_repair_batches: 0, review_repairs: {} }, confirmation: null, gates: { red: {} }, locks: {}, telemetry_degraded: [],
+      ...(dag.nodes.some(n => n.unit !== undefined) ? { unit_checks: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
+        .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}) };
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -234,6 +238,7 @@ export async function resume(ctx) {
     const live = await reconcile(E, 1000);
     const cleared = clearSpent(E.S);
     const transient = drift(E);
+    unitDrift(E);
     note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled',
       ...(cleared.length ? { cleared_judgments: cleared } : {}) });
     await E.commit();
@@ -249,7 +254,8 @@ export async function drive(ctx) {
     await deliver(E);
     const live = await reconcile(E, 0);
     transient.push(...drift(E));
-    const work = Object.values(E.S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || E.S.repairs.some(r => r.state === 'pending');
+    unitDrift(E);
+    const work = Object.values(E.S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || E.S.repairs.some(r => r.state === 'pending') || unitWork(E);
     if (!live && !transient.length && !E.S.judgments.length && work) await refreshRed(E, transient); // may replace E.S
     const S = E.S;
     if (!live && !transient.length && !S.judgments.length && work) {
@@ -257,15 +263,16 @@ export async function drive(ctx) {
         ? (ctx.verifySubscription ?? cliSubscription)(S.config.provider, childEnv(S.config.provider, 'subscription', ctx.env ?? process.env)) : true;
       if (auth !== true) transient.push(judgment('billing_unverified', null, 'subscription login not proven; refusing to risk API billing'));
       else {
-        try { await dispatchNodes(E, transient); } finally { await E.commit(); }
+        try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
         await runRepairs(E, transient);
+        if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E); } // a repair's fingerprint refresh is never renewed evidence
         for (const j of drift(E, { mutate: false })) transient.push(j);
       }
     }
     await E.commit();
     const out = view(E, transient);
     const finished = Object.values(S.nodes).every(n => ['done', 'cancelled'].includes(n.state))
-      && S.repairs.every(r => !['pending', 'running'].includes(r.state));
+      && S.repairs.every(r => !['pending', 'running'].includes(r.state)) && (!out.units || Object.values(out.units).every(u => u.state === 'verified'));
     return { ...out, outcome: out.judgments.length ? 'judgment' : finished && !live ? 'done' : 'waiting' };
   });
 }
@@ -294,6 +301,7 @@ export async function mark(ctx) {
       cleared = S.judgments.filter(j => j.node === ctx.node).map(j => ({ code: j.code, node: j.node }));
       S.judgments = S.judgments.filter(j => j.node !== ctx.node);
       cleared.push(...clearSpent(S));
+      restoreCheckFailed(S, ctx.node);
     }
     n.state = to;
     const ev = { run_id: S.run_id, event: 'MARK', event_id: 'mark-' + randomUUID(), node: ctx.node, transition: ctx.transition,

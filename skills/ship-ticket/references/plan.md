@@ -250,6 +250,15 @@ one dedicated owner. A worker that discovers an unlisted dependency reports it;
 it does not widen its ownership. If concurrency is unavailable, preserve the DAG,
 run ready nodes serially and record the performance degradation and reason.
 
+**Units are opt-in.** The bound engine DAG may tag nodes with `unit`, `checks`
+(names of its `testCommands`) and `acceptance` (criterion ids listed in
+`config.acceptanceIds`, which must then be the ticket's acceptance criteria, each
+mapped to at least one node). Leave them out and the run is unchanged. When they
+are present, a unit's checks must pass before another unit's nodes depending on it
+start and before REVIEW; the rules are in
+[execution-harness.md](execution-harness.md) (Run engine, **Units**). Whether to
+split a ticket into units is the planner's recorded judgment, approved with the plan.
+
 ### Full-stack: the frontend does not wait for the backend
 
 What the frontend depends on is the **API contract — the request and response

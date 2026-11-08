@@ -8,22 +8,21 @@
 import { existsSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { spawnSpec } from './carrier.mjs';
 import { gateRed, gateReview, gateShipReady } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
 import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
+import { runnerDeps, unverified } from './engine-units.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
 
-function runnerDeps(E) {
-  const { ctx } = E, platform = ctx.platform ?? process.platform, env = ctx.env ?? process.env;
-  return io.gateRedDeps({ repoRoot: ctx.repoRoot, dir: E.P.attempts, platform, env, alive: E.alive, spawnFn: ctx.spawn,
-    commit: async (snap) => { E.S = snap; await E.commit(); }, toSpec: (cmd, args) => spawnSpec(cmd, args, platform, env),
-    verifyBinding: () => E.verifyBinding() });
+/** Opt-in units: a review or ship-ready decision waits until every unit's checks pass on the current binding. */
+function unitsRefusal(E) {
+  const open = unverified(E);
+  return open.length ? gateNo('units_unverified', [`unit check evidence is not verified: ${open.join(', ')} (drive runs the checks)`]) : null;
 }
 
 /** RED: the node's pinned specs, the DAG runner the input names, the node's resources; baseline = the computed candidate. */
@@ -108,6 +107,8 @@ function retryEvent(E, rx, predecessor) {
  */
 function reviewGate(E, input, candidate) {
   const S = E.S;
+  const units = unitsRefusal(E);
+  if (units) return units;
   const originals = S.review_chain.filter(r => r.kind === 'original');
   let retry = null;
   if (input.kind === 'original' && originals.length) {
@@ -185,6 +186,8 @@ const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
   const S = E.S;
+  const units = unitsRefusal(E);
+  if (units) return units;
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
   if (input.risk_evidence !== undefined) S.risk_evidence = boundRiskEvidence(S, input.risk_evidence, io.evidenceExists(E.ctx.repoRoot));
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };

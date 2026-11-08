@@ -15,10 +15,11 @@ import { extractUsage, evaluateBudget, addUsageRecords } from './usage.mjs';
 import * as io from './engine-io.mjs';
 import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
+import { depDone, stateMemo } from './engine-units.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
-const RUNNER_KINDS = ['gate-red', 'proof'];
+const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check'];
 const itemOf = (S, a) => (a.kind === 'repair' ? S.repairs.find(r => r.id === a.node) : S.nodes[a.node]);
 const pushJudgment = (S, code, node, reason) => { if (!S.judgments.some(j => j.code === code && j.node === node)) S.judgments.push(judgment(code, node, reason)); };
 const transientOnce = (list, code, node, reason) => { if (!list.some(j => j.code === code && j.node === node)) list.push(judgment(code, node, reason)); };
@@ -370,20 +371,24 @@ function fits(E, n, running) {
 }
 
 /**
- * Continuous dispatch of ready nodes (deps done, valid RED for RED-bearing deps, budget admitted)
- * until nothing more can start. Every launched attempt is awaited (allSettled) before this returns
- * or rethrows, so the caller's lock is never released while a sibling can still commit.
+ * Continuous dispatch of ready nodes (deps done, a dependency of another unit verified, valid RED
+ * for RED-bearing deps, budget admitted) until nothing more can start. While `hold()` (unit checks
+ * are ready) no new node starts; once nothing runs, `onIdle` (the unit checks) runs, and when it
+ * reports progress dispatch continues, so checks are never starved by continuous dispatch. Every launched
+ * attempt is awaited (allSettled) before this returns or rethrows, so the caller's lock is never
+ * released while a sibling can still commit.
  */
-export async function dispatchNodes(E, transient) {
+export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
   const { S } = E;
   const limit = scope(S, E.ctx.until);
   const running = new Map();
   let failure = null, stop = false;
   try {
     for (;;) {
-      if (!failure && !stop && !S.judgments.length) {
+      if (!failure && !stop && !S.judgments.length && !hold?.()) {
+        const states = stateMemo(E);
         const ready = Object.values(S.nodes).filter(n => ['pending', 'stale'].includes(n.state) && !running.has(n.id)
-          && (!limit || limit.has(n.id)) && n.deps.every(d => S.nodes[d].state === 'done') && redReady(E, n, transient));
+          && (!limit || limit.has(n.id)) && n.deps.every(d => depDone(E, n, d, states)) && redReady(E, n, transient));
         for (const n of ready) {
           if (!budgetOk(E, transient, n.phase)) { stop = true; break; }
           if (!fits(E, n, running.keys())) continue;
@@ -392,7 +397,7 @@ export async function dispatchNodes(E, transient) {
             .catch(e => { failure ??= e; }).finally(() => running.delete(n.id)));
         }
       }
-      if (!running.size) break;
+      if (!running.size) { if (!failure && !stop && onIdle && await onIdle()) continue; break; }
       await Promise.race(running.values());
     }
   } finally { await Promise.allSettled(running.values()); }

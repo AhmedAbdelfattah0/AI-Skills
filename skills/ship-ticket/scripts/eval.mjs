@@ -15,6 +15,8 @@
  *   `findings: [{severity}]` feeds the pre-ship severity counts.
  * - `events[]`: `{type: 'RESUME', outcome?}`, `{type: 'INFRA_RETRY'}` and
  *   `{type: 'ADMISSION_REFUSED'}` (written by run-engine.mjs).
+ * - `unit_checks` (opt-in units only): the per-unit projection (engine-units.mjs), recomputed
+ *   against the work tree of `--repo`; printed as `units` only when the state has units.
  * The engine's own event file `<ticket>.engine.jsonl` is never read as a ticket.
  *
  * Run-log marker: any interval with the metric `ui_ticket=true` marks a UI ticket.
@@ -26,6 +28,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { aggregateUsage, attachUsage, buildRun, engineResources } from './run-summary.mjs';
+import { unitProjection } from './engine-units.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -70,7 +73,7 @@ function acceptedCost(run) {
  * @param {object} run
  * @param {{state?: object}} [sources]
  */
-export function evaluateRun(run, { state } = {}) {
+export function evaluateRun(run, { state, repoRoot = null } = {}) {
   const matched = state && state.run_id === run.run_id ? state : null;
   const chain = Array.isArray(matched?.review_chain) ? matched.review_chain : null;
   const hasReview = run.intervals.some((i) => i.kind === 'phase' && i.name === 'REVIEW');
@@ -96,6 +99,7 @@ export function evaluateRun(run, { state } = {}) {
     admission_refusals: countEvents(matched, 'ADMISSION_REFUSED'),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
+    ...(matched?.unit_checks ? { units: unitProjection(matched, repoRoot) } : {}),
   };
 }
 
@@ -131,10 +135,10 @@ const median = (values) => {
  * @param {{runs: object[], states?: Record<string, object>, records?: object[]}} input
  *   `runs` are `buildRun` results; `states` maps ticket → engine state.
  */
-export function evaluate({ runs, states = {}, records = [] }) {
+export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   const joined = runs.map((r) => attachUsage(r, records));
   const metrics = joined.map((r) => {
-    const m = evaluateRun(r, { state: states[r.ticket] });
+    const m = evaluateRun(r, { state: states[r.ticket], repoRoot });
     return { ...m, suggestions: suggest(m) };
   });
   const fired = {};
@@ -219,7 +223,7 @@ function report(options) {
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }
   }
   const records = options.usage.flatMap(readUsage);
-  process.stdout.write(`${JSON.stringify(evaluate({ runs, states, records }), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(evaluate({ runs, states, records, repoRoot: root }), null, 2)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
