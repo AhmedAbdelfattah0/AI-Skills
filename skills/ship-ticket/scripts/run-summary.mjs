@@ -207,3 +207,79 @@ export function aggregate(runs) {
     frontend_backend_union_overlap_pct_median: median(groups.map((g) => g.frontend_backend_union_overlap_pct)),
   };
 }
+
+const TOKEN_KEYS = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'];
+const UNKNOWN = 'unknown';
+const known = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/** Processed tokens of one usage record, or null when it reports no token counter. */
+function processed(record) {
+  const present = TOKEN_KEYS.filter((k) => known(record[k]));
+  return present.length ? present.reduce((n, k) => n + record[k], 0) : null;
+}
+
+/**
+ * Joins provider-reported usage records into a run summary by `run_id`.
+ * Returns a copy of `run` with `usage`: tokens by role (processed = input +
+ * output + cache read + cache write; `'unknown'` when no record of the role
+ * reports a counter), the total, the orchestrator share in percent, and
+ * reported cost partitioned by `cost_basis` (bases are never added together).
+ * @param {object} run a `buildRun` result
+ * @param {object[]} records usage records (any run; others are ignored)
+ */
+export function attachUsage(run, records) {
+  const mine = (Array.isArray(records) ? records : []).filter((r) => r && r.run_id === run.run_id);
+  const roles = {};
+  const cost = {};
+  for (const r of mine) {
+    const role = typeof r.role === 'string' && r.role ? r.role : UNKNOWN;
+    const slot = roles[role] ??= { events: 0, processed_tokens: null };
+    slot.events++;
+    const p = processed(r);
+    if (p !== null) slot.processed_tokens = (slot.processed_tokens ?? 0) + p;
+    if (known(r.reported_cost_usd)) {
+      const basis = typeof r.cost_basis === 'string' && /^[a-z_]{1,32}$/.test(r.cost_basis) ? r.cost_basis : UNKNOWN;
+      const slotCost = cost[basis] ??= { reported_cost_usd: 0 };
+      slotCost.reported_cost_usd += r.reported_cost_usd;
+    }
+  }
+  for (const slot of Object.values(roles)) slot.processed_tokens ??= UNKNOWN;
+  const totals = Object.values(roles).map((r) => r.processed_tokens).filter(known);
+  const total = totals.length ? totals.reduce((a, b) => a + b, 0) : null;
+  const orchestrator = roles.orchestrator?.processed_tokens;
+  return { ...run, usage: {
+    tokens_by_role: mine.length ? roles : UNKNOWN,
+    processed_tokens_total: total ?? UNKNOWN,
+    orchestrator_share_pct: known(orchestrator) && total > 0 ? Math.round(orchestrator / total * 1000) / 10 : UNKNOWN,
+    cost_by_basis: cost,
+  } };
+}
+
+/**
+ * Cost per accepted ticket, partitioned by cost basis. A ticket is accepted
+ * when any of its runs completed. Per basis the divisor is the number of
+ * accepted tickets that reported cost in that basis; no cross-basis figure
+ * exists. Runs without `usage` (not joined) are skipped.
+ * @param {object[]} runs `attachUsage` results
+ */
+export function aggregateUsage(runs) {
+  const tickets = new Map();
+  for (const r of runs) {
+    const t = tickets.get(r.ticket) ?? { accepted: false, cost: {} };
+    tickets.set(r.ticket, t);
+    if (r.outcome === 'complete') t.accepted = true;
+    for (const [basis, c] of Object.entries(r.usage?.cost_by_basis ?? {})) t.cost[basis] = (t.cost[basis] ?? 0) + c.reported_cost_usd;
+  }
+  const accepted = [...tickets.values()].filter((t) => t.accepted);
+  const bases = {};
+  for (const t of accepted) {
+    for (const [basis, usd] of Object.entries(t.cost)) {
+      const b = bases[basis] ??= { accepted_tickets_with_cost: 0, reported_cost_usd_total: 0 };
+      b.accepted_tickets_with_cost++;
+      b.reported_cost_usd_total += usd;
+    }
+  }
+  for (const b of Object.values(bases)) b.per_accepted_ticket = Math.round(b.reported_cost_usd_total / b.accepted_tickets_with_cost * 1e6) / 1e6;
+  return { accepted_tickets: accepted.length, cost_per_accepted_ticket_by_basis: bases,
+    note: 'Partitioned by cost_basis; bases are never added together.' };
+}

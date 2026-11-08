@@ -325,3 +325,15 @@ test('end imports provider usage from a carrier result without shell word-splitt
   writeFileSync(result, JSON.stringify({ usage: {} }));
   assert.equal(f.cli('start', '--run-id', 'run-1', '--kind', 'activity', '--name', 'x', '--event-id', 'x-1', '--metrics-from', result).status, 1);
 });
+
+test('summary --all skips the engine event file <ticket>.engine.jsonl', (t) => {
+  const f = fixture(t, pair('wf', 'workflow', 'ticket', 0, 100));
+  // The run engine's own event rows are not run-log rows and must not become a ticket "T1.engine".
+  writeFileSync(join(dirname(f.path), 'T1.engine.jsonl'),
+    JSON.stringify({ run_id: 'run-1', event: 'MARK', event_id: 'mark-1', node: 'a' }) + '\n');
+  const result = spawnSync(process.execPath, [script, 'summary', '--all', '--repo', f.repo], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const s = JSON.parse(result.stdout);
+  assert.deepEqual(s.runs.map((r) => r.ticket), ['T1']);
+  assert.deepEqual(s.integrity_warnings, []);
+});

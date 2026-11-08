@@ -18,6 +18,16 @@ is not pushed. Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 
+The run engine ([execution-harness.md](execution-harness.md)) writes its own
+events (`MARK`, resume and retry events) to a sibling file,
+`<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
+log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
+
+Usage events (`usage.mjs`, carrier `usageLog`) carry `source` (`carrier`,
+`session` or `codex`; one source per execution, never double-counted) and `role`
+(`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`). Per-role totals and
+the orchestrator share come from `eval.mjs report`.
+
 Logging is best effort. If the helper is absent or one call fails, announce
 `timing telemetry degraded`, record the reason in the execution summary when
 possible, and continue the ticket. A telemetry failure never changes a workflow

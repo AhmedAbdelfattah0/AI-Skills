@@ -1,0 +1,78 @@
+/**
+ * The one worker launcher of ship-ticket, shared by carrier.mjs (dispatch) and the run engine
+ * (engine-io.mjs: workers, RED runners and proof runners). Node built-ins only.
+ */
+
+/** Byte the carrier (and the run engine) writes to the launcher's stdin to let the provider CLI start. */
+export const RELEASE_BYTE = Buffer.from([0x06]);
+
+/**
+ * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
+ * JSON `{file, args, shell}` plus, in durable mode, `{promptFile, outFile, envelopeFile, attemptId}`.
+ * It waits for the release byte; stdin closing first, or a wrong first byte, exits 125 without
+ * running the worker. Then it spawns the provider in its own process group (inherited).
+ * - Carrier mode: forwards the rest of stdin, inherits stdout/stderr and mirrors the provider's
+ *   exit code or signal; a provider spawn failure exits 127.
+ * - Durable mode (engine): the prompt comes from promptFile, stdout is captured to outFile, and on
+ *   close the completion envelope is written atomically (fsync + rename), so an orphaned worker's
+ *   outcome survives the engine.
+ */
+const LAUNCHER = `'use strict';
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const spec = JSON.parse(process.argv[1]);
+const durable = typeof spec.envelopeFile === 'string';
+let started = false, done = false;
+process.stdin.on('end', () => { if (!started) process.exit(125); });
+process.stdin.on('error', () => { if (!started) process.exit(125); });
+process.stdin.once('data', (chunk) => {
+  if (chunk[0] !== ${RELEASE_BYTE[0]}) process.exit(125);
+  started = true;
+  process.stdin.pause();
+  const out = [];
+  let size = 0;
+  const envelope = (code, signal, error) => {
+    fs.writeFileSync(spec.outFile, Buffer.concat(out), { mode: 0o600 });
+    const tmp = spec.envelopeFile + '.tmp';
+    const fd = fs.openSync(tmp, 'w', 0o600);
+    fs.writeSync(fd, JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
+      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString() }));
+    fs.fsyncSync(fd); fs.closeSync(fd);
+    fs.renameSync(tmp, spec.envelopeFile);
+    process.exit(code === 0 ? 0 : 1);
+  };
+  const finish = (code, signal, error) => {
+    if (done) return; done = true;
+    if (durable) return envelope(code, signal, error);
+    if (error) { process.stderr.write('launcher: ' + error + '\\n'); process.exit(127); }
+    if (signal) {
+      process.removeAllListeners(signal);
+      try { process.kill(process.pid, signal); setTimeout(() => process.exit(1), 1000); return; } catch {}
+    }
+    process.exit(code === null ? 1 : code);
+  };
+  let cli;
+  try { cli = spawn(spec.file, spec.args, { shell: spec.shell, windowsHide: true, stdio: ['pipe', durable ? 'pipe' : 'inherit', durable ? 'ignore' : 'inherit'] }); }
+  catch (e) { return finish(null, null, e.code || 'spawn_error'); }
+  cli.on('error', (e) => finish(null, null, e.code || 'spawn_error'));
+  cli.stdin.on('error', () => {});
+  if (durable) {
+    cli.stdout.on('data', (c) => { size += c.length; if (size <= 33554432) out.push(c); });
+    cli.on('close', (code, signal) => finish(code, signal, null));
+    cli.stdin.end(fs.readFileSync(spec.promptFile));
+    return;
+  }
+  cli.on('exit', (code, signal) => finish(code, signal, null));
+  if (chunk.length > 1) cli.stdin.write(chunk.subarray(1));
+  process.stdin.pipe(cli.stdin);
+});
+`;
+
+const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+
+/** Arguments that run the launcher for a resolved provider spawn spec (durable mode when `spec.envelopeFile` is set). */
+export function launcherArgs(spec) {
+  const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
+  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable })];
+}
+

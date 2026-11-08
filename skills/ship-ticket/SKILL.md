@@ -101,8 +101,10 @@ Bundled Node helpers turn the orchestration rules below into checks at the
 process boundary: `scripts/harness.mjs` (wave schedule, live admission, model
 tiers), `scripts/carrier.mjs` (approved, subscription-safe writer dispatch with
 ownership checks and provider-reported usage), `scripts/usage.mjs` and
-`scripts/docker-lifecycle.mjs` (label-owned containers only). Read
-[references/execution-harness.md](references/execution-harness.md) before BUILD.
+`scripts/docker-lifecycle.mjs` (label-owned containers only). On top of them,
+`scripts/run-engine.mjs` drives the approved DAG and keeps durable, resumable
+state, and `scripts/gate.mjs` verifies the RED, review and ship-ready gates.
+Read [references/execution-harness.md](references/execution-harness.md) before BUILD.
 The scheduler and carrier refuse PLAN (the usage and Docker helpers take no
 phase; never call them during PLAN), and the carrier refuses REVIEW (it dispatches BUILD, PROVE, SHIP and REPAIR writers). An *unavailable*
 helper (no Node, missing file, unsupported provider) is a declared degradation.
@@ -413,6 +415,14 @@ Read the plan and Design Contract from disk before writing.
 
 - Reuse an existing ticket branch. If it contains unknown WIP commits, use
   **WAIT_FOR_USER** for the preserve-or-squash decision.
+- With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the
+  approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only
+  `status`. Record RED, review and ship-ready with `run-engine.mjs gate
+  red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>`
+  rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
+  which the next `drive` dispatches. Judgment points (`status.judgments`) come back to you or the
+  user. The manual flow below is the documented fallback when the engine or gate
+  module is unavailable (record `harness degraded`).
 - Schedule the execution DAG continuously: whenever a node finishes, dispatch
   every newly ready conflict-free node without waiting for unrelated siblings.
   When Node is available, derive waves with the harness `schedule` (run ID as
@@ -651,7 +661,9 @@ message look like completion.
 ## Resume
 
 - Approved plan, no review result: recheck ticket ownership and resume the phase
-  that stopped. Do not repeat the planning debate.
+  that stopped. Do not repeat the planning debate. When an engine state file
+  exists, run `run-engine.mjs resume`: it reconciles attempts, staleness and
+  pending events, and never starts a second writer.
 - Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution with a new `review_execution` ID and predecessor under

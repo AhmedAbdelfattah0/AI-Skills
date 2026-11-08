@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { runStateAppendOnly, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
+import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
   ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
 
@@ -431,9 +431,20 @@ test('runStateAppendOnly accepts only insertions inside the RUN-STATE block', ()
   assert.equal(runStateAppendOnly('# no block\n', '# no block\nmore'), false, 'no markers');
 });
 
+test('workerRunStateAppend: an append-only change is exempt only when it inserts no START, DAG_BOUND or RETRY', () => {
+  const base = '# Plan\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n';
+  const add = (line) => base.replace('<!-- RUN-STATE:END -->', line + '\n<!-- RUN-STATE:END -->');
+  assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}')), true);
+  assert.deepEqual(AUTHORITY_EVENTS, ['START', 'DAG_BOUND', 'RETRY']);
+  for (const ev of AUTHORITY_EVENTS) assert.equal(workerRunStateAppend(base, add(`{"event":"NOTE"}\n  {"event":"${ev}"}`)), false, ev);
+  assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}').replace('# Plan', '# Plan!')), false, 'still append-only first');
+});
+
 for (const [name, script] of [
   ['edits the approved plan outside RUN-STATE', `const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('# Plan', '# Plan (worker edit)'));`],
   ['deletes the plan file', `rmSync('.specs/plans/T-1.md');`],
+  ...['START', 'DAG_BOUND', 'RETRY'].map(ev => [`appends a ${ev} authority event inside RUN-STATE`,
+    `const p = '.specs/plans/T-1.md'; writeFileSync(p, readFileSync(p, 'utf8').replace('<!-- RUN-STATE:END -->', '{"event":"${ev}","run_id":"run-1","authorized_by":"owner"}\\n<!-- RUN-STATE:END -->'));`]),
 ]) {
   test('integration: a worker that ' + name + ' is an ownership violation', async (t) => {
     const fx = fixture(t);
@@ -447,3 +458,127 @@ process.stdin.resume(); process.stdin.on('end', () => { ${script} process.stdout
     assert.equal(result.succeeded, false);
   });
 }
+
+// ---- P0-3 (RED): changed_paths, structured report, onSpawn/attempt_id, usage role. ----
+//
+// New carrier API contract (implemented by the `carrier` builder; these tests define it):
+// - dispatch result gains `changed_paths`: sorted array of repo-relative paths whose git-dirty
+//   fingerprint changed during the run (net change vs the pre-run snapshot, like ownershipViolations)
+//   EXCLUDING paths under ownership.othersOwned. Writes outside ownership are still listed.
+//   Pre-existing unchanged dirt is not listed. `null` when git state is unavailable.
+// - The worker's final message may end with a fenced block ```ship-ticket-report {json} ``` holding
+//   {tests:[{cmd,result:'pass'|'fail'}], red_seen:[string], blockers:[string], needs_outside_ownership:[string]}.
+//   The carrier parses + validates it. The message file (resultFile) then has `report: <object>`
+//   and the result has `report_status: 'structured'`. Invalid JSON, wrong shape, or a missing block =>
+//   message file `report: "unstructured"` + `report_failure: <non-empty string>` (message text kept in
+//   `final_message`), result `report_status: 'unstructured'`, and the dispatch is NOT failed because of it
+//   (`succeeded` unaffected).
+// - config.attemptId (optional, SAFE id) else generated. Result, message file and usage-log event all
+//   carry `attempt_id`. Usage event also carries `source:'carrier'`, `source_execution_id: attempt_id`.
+// - deps.onSpawn({attempt_id, pid, pgid}) is called (and awaited if it returns a promise) AFTER the child is
+//   spawned but BEFORE the prompt is released on its stdin. pgid === pid on POSIX (detached group leader),
+//   null on win32.
+// - config.role: 'builder'|'repair'|'evidence' (optional; default builder for BUILD, repair for REPAIR).
+//   Anything else throws /role/ from prepareDispatch. The usage-log event carries `role`; result carries `role`.
+
+const REPORT = { tests: [{ cmd: 'node --test a.test.mjs', result: 'pass' }], red_seen: ['a spec'], blockers: [], needs_outside_ownership: [] };
+const claudeOut = (text) => JSON.stringify({ ...JSON.parse(CLAUDE_OUT), result: text });
+const stdinThen = (fx, body, out = CLAUDE_OUT) => `import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+process.stdin.resume(); process.stdin.on('end', () => { ${body}
+process.stdout.write(${JSON.stringify(out)}); });
+`;
+
+test('RED carrier: dispatch exposes changed_paths excluding concurrent siblings, including outside writes', async (t) => {
+  const fx = fixture(t);
+  mkdirSync(join(fx.repo, 'api'), { recursive: true });
+  writeFileSync(join(fx.repo, 'README.md'), 'pre-existing');
+  const env = fakeCli(t, fx, stdinThen(fx, `writeFileSync('src/a.txt','1'); writeFileSync('api/sibling.txt','2'); writeFileSync('package.json','{}');`));
+  const result = await dispatch(config(fx, { ownership: { writes: ['src'], othersOwned: ['api'] } }),
+    { env, verifySubscription: () => true, handleSignals: false });
+  assert.deepEqual(result.changed_paths, ['package.json', 'src/a.txt']);
+  assert.deepEqual(result.writes_outside_ownership, ['package.json'], 'existing ownership semantics unchanged');
+});
+
+test('RED carrier: a valid ship-ticket-report block is validated into the message file', async (t) => {
+  const fx = fixture(t);
+  const text = 'Done.\n\n```ship-ticket-report\n' + JSON.stringify(REPORT) + '\n```\n';
+  const env = fakeCli(t, fx, stdinThen(fx, '', claudeOut(text)));
+  const result = await dispatch(config(fx, { resultFile: join(fx.root, 'm.json') }), { env, verifySubscription: () => true, handleSignals: false });
+  const msg = JSON.parse(readFileSync(join(fx.root, 'm.json'), 'utf8'));
+  assert.deepEqual(msg.report, REPORT);
+  assert.equal(result.report_status, 'structured');
+  assert.equal(result.succeeded, true);
+});
+
+test('RED carrier: invalid JSON, wrong shape or a missing block is unstructured, recorded, never fatal', async (t) => {
+  const cases = {
+    badjson: 'Done.\n```ship-ticket-report\n{not json\n```\n',
+    badshape: 'Done.\n```ship-ticket-report\n' + JSON.stringify({ tests: 'nope', red_seen: [], blockers: [], needs_outside_ownership: [] }) + '\n```\n',
+    missing: 'Done, no report at all.',
+  };
+  for (const [name, text] of Object.entries(cases)) {
+    const fx = fixture(t);
+    const env = fakeCli(t, fx, stdinThen(fx, '', claudeOut(text)));
+    const result = await dispatch(config(fx, { resultFile: join(fx.root, 'm.json') }), { env, verifySubscription: () => true, handleSignals: false });
+    const msg = JSON.parse(readFileSync(join(fx.root, 'm.json'), 'utf8'));
+    assert.equal(msg.report, 'unstructured', name);
+    assert.equal(typeof msg.report_failure, 'string', name);
+    assert.ok(msg.report_failure.length > 0, name);
+    assert.equal(msg.final_message, text, name + ': free text kept');
+    assert.equal(result.report_status, 'unstructured', name);
+    assert.equal(result.succeeded, true, name + ': not fatal');
+  }
+});
+
+test('RED carrier: onSpawn gets {attempt_id,pid,pgid} before the prompt is released; attempt_id is on result, message and usage event', async (t) => {
+  const fx = fixture(t);
+  const marker = join(fx.root, 'child-read-stdin.txt');
+  const env = fakeCli(t, fx, stdinThen(fx, `writeFileSync(${JSON.stringify(marker)}, String(Date.now()));`));
+  let seen = null, hookDone = 0, markerExistedAtHook = null, alive = null;
+  const onSpawn = async (info) => {
+    seen = info;
+    markerExistedAtHook = existsSync(marker);
+    try { process.kill(info.pid, 0); alive = true; } catch { alive = false; }
+    await new Promise(r => setTimeout(r, 300));
+    hookDone = Date.now();
+  };
+  const result = await dispatch(config(fx, { attemptId: 'att-1', resultFile: join(fx.root, 'm.json'), usageLog: join(fx.root, 'u.jsonl') }),
+    { env, verifySubscription: () => true, handleSignals: false, onSpawn });
+  assert.ok(seen, 'onSpawn called');
+  assert.equal(seen.attempt_id, 'att-1');
+  assert.ok(Number.isInteger(seen.pid) && seen.pid > 0);
+  if (process.platform !== 'win32') assert.equal(seen.pgid, seen.pid); else assert.equal(seen.pgid, null);
+  assert.equal(alive, true, 'child alive when hook runs');
+  assert.equal(markerExistedAtHook, false, 'child had not yet received the prompt');
+  assert.ok(Number(readFileSync(marker, 'utf8')) >= hookDone, 'prompt released only after the awaited hook finished');
+  assert.equal(result.attempt_id, 'att-1');
+  assert.equal(JSON.parse(readFileSync(join(fx.root, 'm.json'), 'utf8')).attempt_id, 'att-1');
+  const ev = JSON.parse(readFileSync(join(fx.root, 'u.jsonl'), 'utf8').trim());
+  assert.equal(ev.attempt_id, 'att-1');
+  assert.equal(ev.source, 'carrier');
+  assert.equal(ev.source_execution_id, 'att-1');
+});
+
+test('RED carrier: attempt_id is generated when not configured', async (t) => {
+  const fx = fixture(t);
+  const env = fakeCli(t, fx, stdinThen(fx, ''));
+  const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(typeof result.attempt_id, 'string');
+  assert.match(result.attempt_id,/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/);
+});
+
+test('RED carrier: usage events carry role from config; invalid role is refused', async (t) => {
+  const fx = fixture(t);
+  assert.throws(() => prepareDispatch(config(fx, { role: 'orchestrator' })), /role/);
+  assert.throws(() => prepareDispatch(config(fx, { role: 'root' })), /role/);
+  const env = fakeCli(t, fx, stdinThen(fx, ''));
+  for (const role of ['builder', 'repair', 'evidence']) {
+    const log = join(fx.root, role + '.jsonl');
+    const result = await dispatch(config(fx, { role, usageLog: log }), { env, verifySubscription: () => true, handleSignals: false });
+    assert.equal(JSON.parse(readFileSync(log, 'utf8').trim()).role, role);
+    assert.equal(result.role, role);
+  }
+  const def = join(fx.root, 'def.jsonl');
+  await dispatch(config(fx, { usageLog: def }), { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(JSON.parse(readFileSync(def, 'utf8').trim()).role, 'builder', 'BUILD defaults to builder');
+});

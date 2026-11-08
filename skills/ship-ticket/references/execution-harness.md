@@ -34,10 +34,14 @@ back:
 |---|---|
 | UNDERSTAND | `harness.mjs resources` once, to record host capacity |
 | PLAN | none |
-| BUILD | `schedule` the approved DAG, `admit` each wave, `carrier.mjs run` each writer node, `docker-lifecycle.mjs labels` for any container |
-| PROVE | `schedule` checks with exclusive `port:`/`db:`/`docker:` locks; `docker-lifecycle.mjs reuse` before starting a service; carrier only for writer repairs |
-| REVIEW | `schedule` advice only; dispatch stays on the read-only relay |
-| SHIP | `usage.mjs summary` for the run; `docker-lifecycle.mjs cleanup` dry run, then `--apply` for this run's containers |
+| BUILD | `run-engine.mjs drive` the bound DAG (it schedules, admits and dispatches through the carrier); `gate` RED before production nodes; `docker-lifecycle.mjs labels` for any container |
+| PROVE | `run-engine.mjs drive` for writer repairs; `schedule` checks with exclusive `port:`/`db:`/`docker:` locks; `docker-lifecycle.mjs reuse` before starting a service |
+| REVIEW | `schedule` advice only; dispatch stays on the read-only relay (the engine never dispatches REVIEW); record its artifacts with `gate` |
+| SHIP | `gate` ship-ready, then `usage.mjs summary` and `eval.mjs report`; `docker-lifecycle.mjs cleanup` dry run, then `--apply` for this run's containers |
+
+The hand-run flow (`schedule` → `admit` → `carrier.mjs run`, gates recorded in
+the plan's RUN-STATE) stays valid and is the documented fallback whenever the
+engine or gate module is unavailable. It is a declared degradation, not a bypass.
 
 Write every helper input and output outside the candidate (a scratch directory
 or the repository's Git metadata); never add them to the reviewed candidate.
@@ -141,7 +145,9 @@ What it enforces:
 - **Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused.
   `REPAIR` (a review repair writer) routes like BUILD, is recorded as
   `phase: "REPAIR"` in results and usage, and requires `reviewExecution` (the
-  review round being repaired). It may declare `redSpecs` (repo-relative spec
+  review round being repaired). When the run engine's state file exists, that
+  execution must be an accepted FAIL with a finding-bound write set in its review
+  chain; only without engine state does the run log's REVIEW `start` row decide. It may declare `redSpecs` (repo-relative spec
   paths); then `redEvidence` must be an absolute path to a non-empty file with
   the failing-run output, written by the orchestrator, or dispatch is refused.
 - **Plan roots are orchestrator-owned.** A change under `.specs`/`.spec` during a
@@ -203,6 +209,17 @@ What it enforces:
   symlinks and must be outside the repository work tree or inside its real Git
   metadata directory. A failed result or usage write is reported in
   `telemetry_degraded` and never discards the execution outcome.
+- **Structured completion:** the result carries `changed_paths` (the net change
+  from the carrier's own snapshot, not the worker's word), `attempt_id` and
+  `role` (`builder|repair|evidence`, default by phase). Worker prompts end with a
+  fenced `ship-ticket-report` JSON block
+  `{"tests":[{"cmd","result"}],"red_seen":[],"blockers":[],"needs_outside_ownership":[]}`;
+  the last block is validated into the message file. A missing or invalid block
+  is not fatal: the result says `report: "unstructured"` with the failure reason.
+- **Attempt envelope:** `deps.onSpawn({attempt_id, pid, pgid})` runs after spawn
+  and before the worker is released; if it throws, the worker never runs. The
+  engine uses it to persist `{pid, pgid}`; a completion envelope with the
+  `attempt_id` is written when the run ends.
 - **Windows:** `.cmd`/`.bat` shims are resolved through `PATH`×`PATHEXT` and run
   with a quoted shell only when every argument is a safe token.
 
@@ -235,8 +252,314 @@ reported that counter, so a total backed by fewer events than `events` is partia
   `list`: a list-price estimate, **not a charge**.
 - Codex `exec --json` sums `turn.completed.usage` over all turns. Codex reports no
   cost, so cost stays `null`.
+- Every usage record carries `source` (`carrier|engine|session|codex`),
+  `source_execution_id` and `role` (`builder|repair|evidence|orchestrator|reviewer`).
+  Carrier events (or, for engine-run workers, the engine's own `source: "engine"`
+  record) are the only source for worker processes (one aggregate per
+  `attempt_id`); session import covers only the host session and its in-process
+  subagents; Codex relay usage is its own source. Importing an execution already
+  present from any source is refused (the aggregate wins).
+- Totals are partitioned by `cost_basis`; different bases are never summed
+  (`totalsByBasis`).
 - Missing counters stay `null` and are never zero. `cache_hit_ratio` (cache reads
   ÷ all prompt tokens) is the measured token-optimization signal.
+
+Imports and budgets:
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-session <session.jsonl> --run-id <ID> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer]
+node <SHIP_TICKET_SKILL>/scripts/usage.mjs import-codex <relay-result.json> --run-id <ID> --out <usage.jsonl>
+```
+
+`import-session` reads the main session and its `subagents/*.jsonl`, keeps the
+last revision per message id, and assigns `role` to the main file and `reviewer`
+to subagent files. `import-codex` records `usage_status: "unknown"` with null
+counters when the relay reports no usage; nothing is invented. The budget metric
+is `processed_tokens = input + output + cache_read + cache_write` (or
+`output_tokens`); see Budgets above. With the run engine, import into
+`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.usage.jsonl`: the engine reads
+that file before every dispatch.
+
+## Run engine
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition failed->pending|pending->cancelled --reason <text>
+```
+
+The engine runs the process (dispatch, retries, staleness, resume) and leaves
+judgments to the orchestrator and the user. It adds no policy: approval,
+reviewer independence, billing and ownership checks are the carrier's and
+`SKILL.md`'s. `drive` exits 2 on a judgment point; any other failure exits 1.
+
+**Files**, all under `git rev-parse --git-path ai-skills/ship-ticket/` and never
+committed: `<TICKET>.state.json` (the ledger), `<TICKET>.engine.jsonl` (the
+engine's event file), `<TICKET>.lock`, `<TICKET>.attempts/` (per-attempt
+envelopes) and `<TICKET>.usage.jsonl` (imported orchestrator/reviewer usage, read by
+budgets). The timing log `<TICKET>.jsonl` stays owned by `run-log.mjs`. Workers, RED
+runners and proof runners all start through the one launcher in `scripts/launcher.mjs`,
+the same one `carrier.mjs` uses.
+
+**DAG** (`ship-ticket-engine-dag-v1`, `{schema, config, nodes}`). Unknown fields
+are refused, never dropped.
+
+- `config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`,
+  `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the
+  timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly
+  `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is
+  `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry
+  with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
+  runs every entry as the local proof), `base`, `riskLabels`
+  (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
+  node `risk` for `gate ship-ready`). Billing is `subscription` unless the user
+  authorized `allowApiBilling`.
+- node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`,
+  `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`,
+  `phase` (`BUILD|PROVE|REPAIR|SHIP`), `role` (`builder|repair|evidence`),
+  `evidence`, `redSpecs`.
+
+**State** (`ship-ticket-engine-state-v1`): `nodes` (state `pending|running|done|
+failed|cancelled|stale`, `attempts`, `retries`, fingerprints), `attempts`, `repairs`,
+`rounds`, `judgments`, `gates` (`red`), `freeze`, `review_chain`, `risk_labels`,
+`local_proof`, `locks` (durable resource holders), `builders` (`{provider, model,
+node, identity: "<provider>:<model>"}` from every real dispatch), `usage`,
+`telemetry_degraded`, `events[]` (sequenced; includes `RESUME`, `INFRA_RETRY`,
+`ADMISSION_REFUSED`, `RED_INVALIDATED`) and an outbox for the run-log and RUN-STATE
+sinks. `status` prints the compact `ship-ticket-engine-status-v1` view, including
+`red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`.
+
+**Approval binding.** `init` recomputes the plan narrative digest (the plan
+file with the text between the RUN-STATE markers removed) and requires it to
+equal `approved_plan_digest` of this run's START event. The DAG file's digest
+must be listed in the approved plan or recorded by exactly one `DAG_BOUND`
+RUN-STATE event of the run, written at approval time before the first dispatch.
+`DAG_BOUND` is never rewritten or superseded; rebinding needs a new approved
+START. Digests are written `sha256:<hex>` (the skill's form); the legacy
+`sha256-<hex>` spelling is normalized. Every mutating command (`drive`, `resume`,
+`mark` and every `gate`) first re-verifies that the state belongs to `--run-id`
+(`run_mismatch`) and both digests (`approval_mismatch`, `dag_mismatch`); a mismatch
+mutates nothing.
+
+**Lock and persistence.** Every mutating command takes one lock file created
+with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and
+releases it on every exit path. `drive` keeps it until every launched attempt has
+settled, even when one attempt fails. Only the same host may recover it, and only when
+the PID is dead or alive with a different known start time (PID reuse); a live holder
+whose start time cannot be read stays `lock_held`. A foreign-host
+or malformed lock is refused with a recovery instruction, and concurrent
+recovery is decided by an `O_EXCL` recovery marker. State is written to a temp
+file, `fsync`ed, renamed, then the directory is `fsync`ed (Windows retries
+`EPERM`/`EBUSY` a bounded number of times). The state commit comes first; the
+run-log and RUN-STATE appends follow, keyed by event id, so a replay never
+duplicates an event. A sink that fails (an unwritable log or plan) never fails the
+command: the event stays in the outbox, `status.telemetry_degraded` names it, and the
+next command or `resume` replays it.
+
+**Launch handshake and quiescence.** Intent `{attempt_id, node,
+pre_snapshot_digest}` is committed; a launcher is spawned in its own process
+group and blocks on a release byte; `{pid, pgid}` is committed; only then is the
+byte sent. If the engine dies first the launcher's stdin closes and the worker
+never runs. On exit the completion envelope is written atomically. An attempt is
+recorded only after its **whole process group** is gone: surviving descendants are
+killed and awaited first; quiescence that cannot be proven (always on Windows) is
+`quiescence_unknown` and the node is not done. `resume` and `drive` reconcile each
+attempt, RED and proof runners included: envelope present → recorded; any process in the group
+alive → wait or refuse (never a second writer); group gone with no envelope →
+compare with the pre-snapshot: no relevant writes → re-queue, writes → judgment
+point. Quiescence means the whole group is gone (POSIX `kill(-pgid, 0)` returns
+`ESRCH`). One function, `engine-quiesce.mjs` `retire()`, is the only way any attempt
+(worker, RED runner or proof runner) reaches a terminal status or releases its locks, on
+every path (exit, timeout, crash, exception, reconcile): it kills and awaits the group, or
+accepts an attempt that never recorded a pid (never released); otherwise the attempt stays
+`unknown` with its locks, and reconcile reports it live (no dispatch, so a node marked
+`failed->pending` never runs beside it) until `retire()` proves its group gone. The state
+commit refuses (`unquiesced_exit`) to persist a terminal attempt that did not pass through it;
+a state file written before that rule is refused at load (`legacy_state`: confirm nothing of
+the run still runs, delete the state file, re-run `init`). Retries cover only spawn failures and provider errors with proven
+quiescence and no relevant writes, at most 1 per node, logged. A timeout or
+tree-kill alone never retries.
+
+**Ownership.** Worker snapshots include the ticket plan file; its only allowed change
+is a verified RUN-STATE append (`run-state.mjs` `runStateAppendOnly`), so a worker that
+edits the narrative is an `ownership_violation`. A worker's verified append is kept
+auditable as a `PLAN_APPENDED` engine event; a worker append of `START`, `DAG_BOUND` or
+`RETRY`, of a line starting with `{` that is not JSON, or of any line break other than `\n` /
+`\r\n` is an ownership violation (`run-state.mjs` `workerRunStateAppend`, for engine and carrier
+dispatches alike). Every RUN-STATE reader, engine and carrier, goes through `run-state.mjs`,
+which splits lines on every break a common reader honours (Python `str.splitlines`: lone CR,
+U+2028, U+2029, NEL, VT, FF, FS/GS/RS). A block holding one of those (other than `\r\n`), or a
+`{` line that is not JSON, is `run_state_malformed`: every mutating command refuses until the
+owner normalizes the plan file. Lines first seen in a block whose already-observed bytes were
+rewritten are untrusted, so no later rewrite can turn hidden bytes into owner authority. `RETRY` and `DAG_BOUND` authority stays the orchestrator's RUN-STATE write,
+as without the engine, and the engine honours an authority line only from
+`state.authority.trusted` (`engine-authority.mjs`). At the start and end of every locked
+command it classifies each new `START`/`DAG_BOUND`/`RETRY` line: trusted only when no attempt
+(worker, RED runner or proof runner) was started since its last quiescent observation,
+otherwise `untrusted` (listed in `status.authority_untrusted`). Any dispatched code (a worker,
+a RED spec, a proof command) that appends one is therefore never honoured; an owner line
+appended while something dispatched is live is also untrusted, and the owner re-appends a
+distinct line (for example with a timestamp) once `status` shows nothing live. When git cannot produce a snapshot
+the result is `ownership_unavailable`, never clean. Declared `resources` are held as
+durable locks per attempt; a node whose resource is held, including by a RED runner
+that survived a crashed gate, is not dispatched.
+
+**Staleness.** A completed node stores fingerprints of its declared reads and
+writes (existence, type, mode, content hash; never mtime). On `drive` or
+`resume`, a changed input or output marks the node and its dependency closure
+`stale`; stale nodes re-run automatically only before the REVIEW freeze.
+
+**REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
+records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
+The authorized exception is one REPAIR opened by a `gate review` FAIL: the gate
+enqueues `repair-<review_execution>` with the finding-bound write set (the paths its
+findings name plus the declared repair ownership) and the brief named by
+`repair_prompt_file`; `drive` dispatches it only while the work tree is still the frozen
+candidate (any drift since the freeze, even outside every node and the write set, is
+`post_freeze_drift` on the repair: nothing is launched and it is never absorbed into the repaired
+candidate). Writes outside it are `repair_outside_findings`. An original FAIL with `overflow`
+(primary or second opinion) is terminal: it is recorded but opens no repair (`review_terminal`, a
+judgment point), so no confirmation or `SHIP_READY` follows without a RUN-STATE `RETRY` linked to
+it. On completion the engine appends `{kind: "repair",
+review_execution, old_candidate, new_candidate, write_set}` to the review chain,
+re-freezes on the new candidate and records the affected closure in
+`status.confirmation`; then `gate review` with `kind: "confirmation"`, then `gate
+ship-ready`. REPAIR authorization comes from engine state (the review chain), in
+the engine and in `carrier.mjs` whenever a state file exists; the carrier's
+timing-log check is only the fallback when no state file exists, and a missing or
+unwritable log only degrades telemetry. A repair goes through the RED barrier (it
+inherits the prerequisites of every node whose writes it overlaps) and budget
+admission like a node.
+
+**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair
+batches per ticket in total; one REVIEW repair and one confirmation per
+authorized review execution (`rounds.review_repairs[<review_execution>]`).
+Beyond them, or after a terminal failure, is `round_limit`: it needs an
+explicitly authorized retry. A counter moves only when the dispatch is actually
+launched, never on a refused one; an automatic infra retry of a review repair re-dispatches
+within the round it already holds. Counters are never reset.
+
+**`mark`** accepts only `failed->pending` (counts as a retry, capped at 1) and
+`pending->cancelled`, with a reason. It cannot mark nodes done, create gate
+evidence, change ownership, enable API billing or reset a counter; any other
+transition or extra key is `mark_refused`. When `failed->pending` clears a
+node's judgments (for example `quiescence_unknown`), the MARK event records them as
+`cleared_judgments`, with the reason as the authorization.
+
+**Judgment points** (`status.judgments[].code`) stop the engine and go back to
+the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`,
+`crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants
+can outlive the leader, so every finished attempt there needs a human),
+`ownership_violation`, `ownership_unavailable`, `post_freeze_drift`,
+`repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`,
+`red_invalidated`, `red_required` and `candidate_unavailable`. The gate adds
+unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL
+(`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).
+
+**Budgets.** `config.budget` holds dispatch thresholds: a warning at 80%, and at
+100% no new dispatch (`budget_stop`, a judgment point). Before every node **and
+repair** dispatch the engine re-reads its own records plus `<TICKET>.usage.jsonl`,
+deduplicated by `source_execution_id`, and evaluates `phase_tokens` with the
+dispatching item's phase. Work in flight can overshoot, and that is reported.
+Unknown usage (including a malformed import line) sets the `budget_unenforceable`
+flag rather than counting as within budget; the engine does not stop on it.
+`status.budget` shows the ticket and phase state (`ok|warn|stop_dispatch|unknown`)
+and the flags. Budgets never change review or model policy.
+
+## Gate verifier
+
+`scripts/gate.mjs` is a library of decisions; a refusal is returned as `{ok,
+code, reasons}`, never thrown. Gate state is authoritative in the engine state
+file; timing logs stay best effort and never block.
+
+- **`gateRed`** is a scheduler prerequisite: a node whose dependency has `redSpecs`
+  is not dispatched until RED is accepted, repairs included. The engine runs the
+  DAG-bound runner itself: `gate red` input is `{node, command?, specs?}`, where
+  `command` only names a formatted `config.testCommands` entry; the command, its
+  format, the timeout and the node's `resources` never come from the input. It runs
+  with a bounded timeout, its own process group and the resource locks
+  under the same durable attempt protocol as workers, so a surviving runner
+  holding a lock is reconciled, not re-run. A runner (RED or proof) is `exited` only
+  after its whole group is proven gone; a group that survives the kill, or whose
+  quiescence is unknown, leaves the attempt `unknown` with its locks held and returns
+  `quiescence_unknown` (judgment point) with no evidence or proof recorded. When a runner
+  changes the approval binding (plan narrative or DAG bytes), its result is dropped
+  (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is
+  re-verified before RED evidence or local proof is committed, so drifted evidence never
+  reaches disk. Runner adapters (`parseRunnerOutput`):
+  `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs
+  every named spec to report an **assertion** failure; import, compile and
+  collection errors do not count. Unsupported output cannot establish RED: that
+  is a judgment point and the manual flow applies, marked degraded. Evidence is
+  bound to the spec files' content digests, the baseline candidate and the resolved
+  `config.base` commit, ordered by event sequence, and is refused if recorded after a
+  dependent production dispatch. Before a dependent (or repair) is dispatched, a
+  changed spec digest or a moved `config.base` drops the evidence
+  (`red_invalidated`; re-run `gate red`, which then ignores dispatches before the
+  invalidation). A dependent's own writes never invalidate it.
+- **`gateReview`** accepts a review only when bound together: the complete primary
+  artifact (the `references/review.md` output contract), a reviewer identity
+  distinct from every builder, the frozen candidate ID, coverage, parity and
+  security outcomes, the second-opinion artifact with its route and candidate,
+  and the reconciliation record. Nested rows are validated: `reviewed_paths`,
+  `coverage_partitions`, `acceptance_criteria` and `rule_rows` must be non-empty with
+  their review.md fields, and every outcome must be in its enum. Identities are
+  written `<provider>:<model>[:suffix]`; a reviewer equal to (or extending) any
+  builder identity the engine recorded is `reviewer_is_builder`, and a builder recorded as
+  `<provider>:provider-default` (no `modelMap` entry, so the CLI's unknown default) matches
+  every reviewer of that provider, and the primary and
+  second opinion must differ (`reviewers_not_distinct`). It tracks the original →
+  repair → confirmation chain by `review_execution`. Counts or a route name alone
+  are never accepted. An accepted FAIL returns the finding-bound `repair` write set.
+  Through `run-engine.mjs gate review`, the reviewed candidate is the frozen one: a
+  new original review after any earlier original (a FAIL or the freeze) needs a
+  RUN-STATE `{event: "RETRY", run_id, review_execution, predecessor, authorized_by}`
+  naming the previous execution and trusted by the engine (`retry_unauthorized`
+  otherwise; a fresh id alone is refused; a matching but untrusted line is a judgment point), and an accepted FAIL needs `repair_prompt_file` (`repair_prompt_missing`).
+- **Candidate integrity.** The exclusion list is pinned: exactly the ticket plan
+  file and `session-log.md`, order-insensitive; directories or extra entries are
+  refused. Parity and VAPT evidence stay inside the candidate and are finalized
+  during PROVE; the reviewer's verdict plus the digest of the artifact it graded
+  live in gate state.
+- **`gateShipReady`** emits `SHIP_READY` only when the current candidate equals the
+  reviewed one, the exclusions are unaltered, graded artifact digests still
+  match, the review chain is accepted, every required node is done or cancelled,
+  no attempt is live, no repair is open, no judgment is unresolved
+  (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local
+  proof is bound to that candidate, and every required risk evidence is present.
+  Local proof is produced by the engine running every `config.testCommands` entry
+  (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage
+  error. A proof command that changes the work tree is refused as
+  `candidate_mismatch`, and one that changes the approval binding (the excluded plan
+  narrative or the DAG bytes) is refused with that binding code and its proof dropped; no
+  `SHIP_READY` is recorded. A proof runner without proven quiescence records no proof
+  and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS
+  `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful
+  closure is ever synthesized.
+- **Risk → evidence** (`RISK_EVIDENCE` in `harness.mjs`, additive; no label
+  removes a gate): concurrency → `interleaving-spec`; auth, security →
+  `authorization-spec`, `negative-spec`; tenancy → `cross-tenant-spec`; payments →
+  `failure-path-spec`, `idempotency-spec`; migration, schema → `replay-check`,
+  `rollback-compat-check`; ui → `parity-measurements`. Each needs a path, and
+  kinds ending in `-spec` also need accepted RED. Presence is checked in code;
+  the reviewer judges adequacy.
+
+## Eval report
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/eval.mjs report --repo <R> (--ticket <T> | --all) [--usage <usage.jsonl>...]
+```
+
+Read-only (`ship-ticket-eval-v1`). Reads the run log, the engine state and usage
+files; anything a source does not carry is `unknown`, never zero. Metrics: tokens
+by role and the orchestrator share, wall clock per phase, review and repair
+rounds, pre-ship findings by severity (from `gate review` records), resume
+attempts and outcomes, infra retries, admission refusals. Exactly three
+suggestions exist and are printed, never applied: orchestrator share above 50% →
+split the session; review/build above 1.2 on a UI ticket → run the parity probe
+first; more than one REVIEW repair → the brief was too weak.
 
 ## Docker ownership
 
@@ -268,5 +591,17 @@ is no prune.
 - Cross-process locks between two concurrent ship-ticket runs on one host are not
   provided. Declare `port:`/`db:` locks within a run and use distinct ports per run.
 - Gemini/Antigravity adapters are template-only (above).
+- Windows process-group quiescence cannot be proven, so a crashed attempt there
+  is a judgment point rather than an automatic re-queue.
+- Worker worktree isolation and join are deferred: ownership checks plus content
+  fingerprints cover today's failure modes.
+- Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready
+  --repo <dir> --ticket <key> --run-id <id> --input <json-file>`: under the engine
+  lock it computes the candidate itself (pinned exclusions), calls `gate.mjs`,
+  commits the result and, on ship-ready, appends `SHIP_READY` to RUN-STATE once.
+  Exit 0 accepted, 2 refused or judgment point, 1 usage error.
+- Real-ticket savings are not measured. The plan's fixture benchmark and an
+  `eval.mjs` comparison against the SCRUM-140/96/393 baseline are still to be run
+  on a real ticket; do not quote a saving.
 - Windows behavior of the shims is covered by unit tests and the Windows CI job
   with a fake CLI. Real Claude/Codex Windows installs were not exercised.

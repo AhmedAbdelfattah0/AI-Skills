@@ -40,4 +40,18 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Test ship-ticket execution harness
-        run: node --test skills/ship-ticket/scripts/harness.test.mjs skills/ship-ticket/scripts/docker-lifecycle.test.mjs skills/ship-ticket/scripts/carrier-usage.test.mjs
+        run: >-
+          node --test
+          skills/ship-ticket/scripts/harness.test.mjs
+          skills/ship-ticket/scripts/docker-lifecycle.test.mjs
+          skills/ship-ticket/scripts/carrier-usage.test.mjs
+          skills/ship-ticket/scripts/candidate-id.test.mjs
+          skills/ship-ticket/scripts/usage.test.mjs
+          skills/ship-ticket/scripts/gate.test.mjs
+          skills/ship-ticket/scripts/run-engine.test.mjs
+          skills/ship-ticket/scripts/run-engine-repair.test.mjs
+          skills/ship-ticket/scripts/run-engine-review3.test.mjs
+          skills/ship-ticket/scripts/run-engine-review4.test.mjs
+          skills/ship-ticket/scripts/run-engine-review5.test.mjs
+          skills/ship-ticket/scripts/eval.test.mjs
+          skills/ship-ticket/scripts/engine-bench.test.mjs

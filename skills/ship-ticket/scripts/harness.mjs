@@ -118,6 +118,35 @@ export function routeModel(phase, node) {
   return node.complexity === 'low' ? 'economy' : 'inherit';
 }
 
+/**
+ * Risk label -> evidence kinds `gate ship-ready` requires (plan P1-5). Additive
+ * only: labels add kinds and never remove a gate. Kinds ending in `-spec` also
+ * need accepted RED. `shared-contract` is a known routing label with no evidence
+ * kind in the plan table yet; `ui` is an evidence-only label (not a routing one).
+ */
+export const RISK_EVIDENCE = Object.freeze({
+  concurrency: Object.freeze(['interleaving-spec']),
+  auth: Object.freeze(['authorization-spec', 'negative-spec']),
+  security: Object.freeze(['authorization-spec', 'negative-spec']),
+  tenancy: Object.freeze(['cross-tenant-spec']),
+  payments: Object.freeze(['failure-path-spec', 'idempotency-spec']),
+  migration: Object.freeze(['replay-check', 'rollback-compat-check']),
+  schema: Object.freeze(['replay-check', 'rollback-compat-check']),
+  ui: Object.freeze(['parity-measurements']),
+  'shared-contract': Object.freeze([]),
+});
+
+/** Sorted unique evidence kinds for `labels`; throws TypeError for a label outside RISK_EVIDENCE. */
+export function requiredEvidence(labels) {
+  if (!Array.isArray(labels)) throw new TypeError('risk labels must be an array');
+  const kinds = new Set();
+  for (const label of labels) {
+    if (!Object.hasOwn(RISK_EVIDENCE, label)) throw new TypeError(`unknown risk label: ${String(label)}`);
+    for (const kind of RISK_EVIDENCE[label]) kinds.add(kind);
+  }
+  return [...kinds].sort();
+}
+
 const MB = 1024 * 1024;
 
 /**

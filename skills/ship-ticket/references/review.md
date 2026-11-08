@@ -41,6 +41,10 @@ Finish these checks before announcing REVIEW or appending its start event:
   non-test write, with behavioral assertion failures (not missing-module or
   compile errors); otherwise the PROVE event declares `red: RETROACTIVE` and the
   report says so;
+  When an engine state file exists, the RED event is `gate.mjs` `gateRed`
+  evidence (runner-produced by the DAG-bound `config.testCommands` runner, bound to
+  the spec digests and the baseline), not hand-written; unsupported runner output
+  falls back to the manual event, marked degraded;
 - test-quality, docs-accuracy, applicable static security rows and runtime attack
   work are complete or carry a named degradation;
 - UI metadata and the parity artifact are complete when UI is in scope;
@@ -345,6 +349,20 @@ Append one compact `REVIEW` event to the plan's execution block. When repair ran
 append `REPAIR` and `CONFIRM` events as well. Record identities, candidate IDs,
 review profile, findings, dispositions, command outcomes, degradations and final
 outcome; do not copy source bytes into the plan.
+
+With the run engine, also evaluate each review artifact through `gate.mjs`
+(`gateReview` for the original and the confirmation, `gateShipReady` before
+SHIP), recorded with `run-engine.mjs gate review|ship-ready`. They bind the artifact
+chain, reviewer identity, candidate ID and second opinion, and refuse an incomplete or
+stale record; a refusal is a failed review step, not something to patch by hand.
+Write `reviewer_identity` as `<provider>:<model>` (a suffix may follow): the gate
+refuses a reviewer equal to any builder the engine dispatched and a second opinion
+equal to the primary. An accepted FAIL needs `repair_prompt_file` (the repair brief);
+the engine then enqueues and dispatches the finding-bound repair, records it, and the
+confirmation reviews the repaired candidate. A new original review after a FAIL needs
+the owner's RUN-STATE `RETRY` event naming its predecessor execution, appended while nothing
+dispatched is live (a line that appears while a worker or runner could run is never honoured). Without the engine, the manual
+record above is the fallback. Details: [execution-harness.md](execution-harness.md).
 
 - Clean primary PASS, with a usable second opinion whose findings are all
   reconciled (its own `outcome` need not be PASS) → `COMPLETE` for this phase and

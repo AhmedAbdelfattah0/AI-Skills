@@ -341,7 +341,8 @@ function summary(options) {
     tickets = [validateId('ticket', options.ticket)];
   } else if (existsSync(directory)) {
     tickets = readdirSync(directory)
-      .filter((name) => name.endsWith('.jsonl'))
+      // <ticket>.engine.jsonl is the run engine's own event file, not a timing log.
+      .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.engine.jsonl'))
       .map((name) => name.slice(0, -'.jsonl'.length))
       .filter((name) => SAFE_ID.test(name))
       .sort();
