@@ -259,6 +259,9 @@ export class Oracle {
     const newAttempts = S.attempts.filter(a => !(P?.attempts ?? []).some(b => b.attempt_id === a.attempt_id));
     const recorded = gateKind && ok && ['review_accepted', 'unit_review_accepted', 'red_accepted', 'ship_ready'].includes(code);
     if (!bound && (recorded || newAttempts.some(a => a.pid))) bad('P1', `ran or recorded while the plan narrative or DAG differed from the binding`);
+    // A unit check that drifted the binding mid-command: nothing dispatches after it in that command (PR #38 4507607938).
+    const cmdEvents = (S.events ?? []).filter(e => e.seq > (P?.seq ?? 0)), drop = cmdEvents.find(e => e.type === 'UNIT_CHECK_DROPPED');
+    if (drop && cmdEvents.some(e => e.type === 'DISPATCH' && e.seq > drop.seq)) bad('P1', `dispatched after unit ${drop.unit}'s checks drifted the binding`);
 
     // ---- P2 authority provenance ----------------------------------------------------------
     for (const line of S.authority?.trusted ?? []) if (!M.owner.includes(line)) bad('P2', `trusted authority line not appended by the owner: ${line}`);

@@ -329,6 +329,25 @@ test('4507607938 unit checks that drift the approval binding record no evidence 
   assert.ok(s.events.some(e => e.type === 'UNIT_CHECK_DROPPED' && e.unit === 'u1'));
 });
 
+test('4507607938 a drop at the same idle point stops the drive: no dependent of a unit verified just before is dispatched', { skip: WIN_SKIP }, (t) => {
+  // u1 passes, then u2's check rewrites the plan narrative: c (released by u1) must not run under the differing binding.
+  const forge = { cmd: process.execPath, args: ['-e', "const f='.specs/plans/T-1.md',fs=require('fs');fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace('Approved narrative.','Forged narrative.'))"] };
+  const fx = fixture(t, { commit: true, config: { testCommands: { ok: PASS, forge } },
+    nodes: [unitNode('a', { unit: 'u1' }), unitNode('b', { unit: 'u2', checks: ['forge'] }), { id: 'c', deps: ['a'], writes: ['src/c.txt'] }],
+    behaviour: { a: { write: { 'src/a.txt': 'a' } }, b: { write: { 'src/b.txt': 'b' } }, c: { write: { 'src/c.txt': 'c' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const r = fx.cli('drive');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(r.out.outcome, 'judgment');
+  assert.ok(r.out.judgments.some(j => j.code === 'approval_mismatch'), JSON.stringify(r.out.judgments));
+  const s = fx.readState();
+  assert.equal(s.unit_checks.u1.evidence?.state, 'verified', 'u1 was checked first, before the drift');
+  assert.ok(s.events.some(e => e.type === 'UNIT_CHECK_DROPPED' && e.unit === 'u2'));
+  assert.equal(fx.runs('c').length, 0, 'nothing is dispatched after the drift in that drive');
+  assert.equal(r.out.nodes.c.state, 'pending');
+  assert.equal(s.attempts.filter(a => a.kind === 'node').length, 2, 'only a and b ran');
+});
+
 // ------------------------------------------------------------------ MINOR: usage and eval
 
 test('4505921051 a re-imported execution with strictly larger counters replaces the earlier reading; a smaller or equal one is refused', () => {

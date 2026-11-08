@@ -294,6 +294,10 @@ async function runCheck(E, u, name, resources) {
   return { name, exit_code: result.exitCode, result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) };
 }
 
+/** The judgments `verifyBinding` returns: while one is held (transient), nothing more runs in this drive. */
+const BINDING_CODES = new Set(['run_mismatch', 'approval_mismatch', 'run_state_malformed', 'dag_mismatch']);
+export const bindingHeld = (transient) => transient.some(j => BINDING_CODES.has(j.code));
+
 /**
  * Run the checks of every ready unit (nothing live, no durable judgment), in dependency order,
  * each unit at most once per engine command. Before each pick, stale evidence is recorded as an
@@ -305,11 +309,12 @@ async function runCheck(E, u, name, resources) {
  * the binding taken after the checks, so a failure stays bound (never re-run by itself). A failure
  * before the freeze marks the unit's nodes failed. Checks ran repository code: when they drifted the
  * approval binding (plan narrative, DAG bytes) nothing is recorded (UNIT_CHECK_DROPPED, the drift
- * judgments go to `transient`), so no dependent dispatches on that evidence. Returns whether a
- * unit became verified.
+ * judgments go to `transient`), so no dependent dispatches on that evidence, and it returns false
+ * (as it does whenever `transient` holds a binding judgment): the drive dispatches nothing more.
+ * Returns whether a unit became verified.
  */
 export async function runUnitChecks(E, transient = []) {
-  if (!hasUnits(E.S)) return false;
+  if (!hasUnits(E.S) || bindingHeld(transient)) return false;
   let progressed = false;
   E.unitChecked ??= new Set();
   for (;;) {
@@ -339,7 +344,7 @@ export async function runUnitChecks(E, transient = []) {
       note(E.S, 'UNIT_CHECK_DROPPED', { unit: u, binding: unbound.map(j => j.code) });
       for (const j of unbound) if (!transient.some(x => x.code === j.code)) transient.push(j);
       await E.commit();
-      return progressed;
+      return false; // never progress: the caller must not dispatch a node or repair under the differing binding
     }
     const post = io.fingerprints(E.ctx.repoRoot, watched);
     const touched = watched.filter(p => post[p] !== pre[p]);

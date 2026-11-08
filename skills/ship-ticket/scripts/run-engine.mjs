@@ -30,7 +30,7 @@ import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearS
 import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired } from './engine-quiesce.mjs';
-import { hasUnits, unitDrift, unitWork, runUnitChecks, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
+import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
@@ -280,7 +280,7 @@ export async function drive(ctx) {
       if (auth !== true) transient.push(judgment('billing_unverified', null, 'subscription login not proven; refusing to risk API billing'));
       else {
         try { await dispatchNodes(E, transient, hasUnits(E.S) ? { onIdle: () => runUnitChecks(E, transient), hold: () => unitWork(E) } : {}); } finally { await E.commit(); }
-        await runRepairs(E, transient);
+        if (!bindingHeld(transient)) await runRepairs(E, transient); // a unit check drifted the binding: dispatch nothing more
         if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E, transient); } // a repair's fingerprint refresh is never renewed evidence
         reconcileReviews(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
         for (const j of drift(E, { mutate: false })) transient.push(j);
