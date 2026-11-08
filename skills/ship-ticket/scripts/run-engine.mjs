@@ -361,7 +361,10 @@ export async function gate(ctx) {
       await deliver(E);
       reconcileReviews(E);
       const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
-      const v = c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
+      // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
+      const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
+      const v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
+        : c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
       const S = E.S;
       note(S, 'GATE', { gate: ctx.gate, ok: v.ok, code: v.code });

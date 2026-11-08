@@ -61,3 +61,24 @@ jobs:
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/launcher-sampler.test.mjs
           skills/ship-ticket/scripts/wave1-metrics.test.mjs
+          skills/ship-ticket/scripts/engine-explore.test.mjs
+          skills/ship-ticket/scripts/engine-crash.test.mjs
+
+  # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
+  # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
+  # (each engine guard patched out in a temp copy must fail the property harness). POSIX only;
+  # one test file at a time, since both spawn many real engine and worker processes.
+  engine-properties:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Seeded CLI layer and mutation check
+        env:
+          ENGINE_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-seeded.test.mjs
+          skills/ship-ticket/scripts/engine-mutation.test.mjs
