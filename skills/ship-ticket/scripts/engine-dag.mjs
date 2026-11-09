@@ -4,6 +4,7 @@
  * RED spec pinning, sequenced engine events and judgments. No I/O. Node built-ins only.
  */
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { validateNodes, schedule, RISK_EVIDENCE } from './harness.mjs';
 import { exactExclusions } from './gate.mjs';
 import { BEGIN, END } from './run-state.mjs';
@@ -20,6 +21,8 @@ export const judgment = (code, node, reason) => ({ code, ...(node ? { node } : {
 export const clampTimeout = (ms) => Math.min(3600000, Math.max(1000, ms));
 export const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const strings = (v) => Array.isArray(v) && v.every(x => typeof x === 'string');
+/** Plan roots a worker may never own (carrier.mjs PLAN_ROOTS). */
+const PLAN_ROOTS = ['.specs', '.spec'];
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const RUNNER_FORMATS = ['tap', 'vitest-json', 'jest-json'];
 
@@ -86,6 +89,15 @@ export function validateEngineDag(doc, { ticket } = {}) {
     return { deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'medium', modelTier: 'inherit',
       estimatedMemoryMb: 0, phase: 'BUILD', evidence: [], redSpecs: [], ...n };
   });
+  // The carrier refuses any worker that owns a plan root (no forged START); refuse it here, at init, not as a node_failed mid-run.
+  for (const n of nodes) {
+    const hit = [...(Array.isArray(n.writes) ? n.writes : []), ...(Array.isArray(n.othersOwned) ? n.othersOwned : [])].find(p => typeof p === 'string' && PLAN_ROOTS.some(r => {
+      const q = p.replace(/\\/g, '/').split('/').filter(x => x && x !== '.').join('/').toLowerCase();
+      const norm = posix.normalize(q);
+      return norm === r || norm.startsWith(r + '/');
+    }));
+    if (hit !== undefined) bad(`node ${n.id}: ${hit} is under a plan artifact root (.specs/.spec); workers may not own it, so write it from the orchestrator, not a node`);
+  }
   try {
     const plain = nodes.map(n => ({ id: n.id, deps: n.deps, reads: n.reads, writes: n.writes, resources: n.resources, risk: n.risk,
       complexity: n.complexity, model: n.modelTier, estimatedMemoryMb: n.estimatedMemoryMb }));

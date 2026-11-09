@@ -30,6 +30,13 @@ export function gitPath(repoRoot, rel) {
   return resolve(repoRoot, r.stdout.trim());
 }
 
+/** Absolute git common dir of the work tree at `repoRoot`: shared by every linked work tree, so removing one leaves it intact. */
+export function commonGitDir(repoRoot) {
+  const r = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
+  if (r.status !== 0) throw coded('not_a_repo', `${repoRoot} is not a git work tree`);
+  return resolve(repoRoot, r.stdout.trim());
+}
+
 /**
  * Atomically persist `state` as JSON: temp write, fsync, rename, directory fsync,
  * each preceded by its hook boundary. On win32 a rename EPERM/EBUSY is retried
