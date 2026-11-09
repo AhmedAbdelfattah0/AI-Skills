@@ -1,0 +1,1074 @@
+[
+ {
+  "scenario_id": "S-DEV-01",
+  "must_select": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-04",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-API-05",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-08",
+   "VAPT-API-03"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-02": "Hourly job emails a shopper address nobody proved, with store-branded text; needs recipient/tenant caps",
+   "VAPT-ABUSE-03": "Resume link is built from the store domain; it must use only a verified host",
+   "VAPT-ABUSE-05": "Sends consume the store sender quota triggered by anonymous visitors",
+   "VAPT-ABUSE-04": "Cross-store hourly queue can starve tenants or bypass per-caller limits",
+   "VAPT-API-08": "Anonymous capture endpoint is unthrottled and stores unbounded payloads",
+   "VAPT-WEB-01": "Shopper name and cart text are stored and rendered into HTML mail and admin views",
+   "VAPT-API-05": "Cart, email and domain inputs reach storage and template construction",
+   "VAPT-API-07": "Anonymous endpoint must not leak driver errors on malformed carts"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "A capture endpoint plus mailer job has no role hierarchy and no session-assurance surface, so privilege-tier and session-level attacks do not apply."
+ },
+ {
+  "scenario_id": "S-DEV-02",
+  "must_select": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07",
+   "VAPT-API-04",
+   "VAPT-API-01",
+   "VAPT-API-06",
+   "VAPT-API-08",
+   "VAPT-API-05"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-ABUSE-03"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-01": "Unproven email selects the loyalty account whose points are spent",
+   "VAPT-ABUSE-05": "Anonymous redeem debits another person balance",
+   "VAPT-ABUSE-07": "Discount is derived from a client-supplied points amount; server must own it",
+   "VAPT-API-04": "Points amount and discount fields are accepted from the body",
+   "VAPT-API-01": "Account lookup by email is an identifier-swap object access",
+   "VAPT-API-06": "Refusals and responses must not reveal victim balance or account existence",
+   "VAPT-API-08": "Email guessing against loyalty accounts needs a throttle",
+   "VAPT-API-05": "Email and points inputs reach an RPC and lookup query"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "An order/RPC change sends no link or token and renders no external navigation, so redirect and message-destination attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-03",
+  "must_select": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-03",
+   "VAPT-API-01",
+   "VAPT-WEB-01"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-CFG-04",
+   "VAPT-WEB-02",
+   "VAPT-CFG-01"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-02": "Cron emails carts to unproven recipients; suspended tenants must stop sending and caps apply",
+   "VAPT-ABUSE-04": "Oldest-100 global queue allows head-of-line starvation across stores",
+   "VAPT-ABUSE-06": "Sweep sends for stores whose state (suspended/closed/delay) may have changed",
+   "VAPT-ABUSE-03": "Next-step email carries a resume link needing a verified host",
+   "VAPT-API-01": "Job spans all tenants; cart must pair with its own store sender and data",
+   "VAPT-WEB-01": "Caller-controlled text is rendered into the email body"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "A cron job has no browser request, cookie, cross-origin or UI surface, so CSRF, redirect, cookie, CORS and UI-hiding attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-04",
+  "must_select": [
+   "VAPT-ABUSE-04",
+   "VAPT-API-08",
+   "VAPT-ABUSE-06",
+   "VAPT-API-01",
+   "VAPT-API-05",
+   "VAPT-ABUSE-05",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-04": "Anonymous stock holds can exhaust inventory; bounded by more than a rate limit",
+   "VAPT-API-08": "Unthrottled anonymous reserve endpoint and unbounded quantity",
+   "VAPT-ABUSE-06": "Holds must expire and release on expiry and order placement",
+   "VAPT-API-01": "Client-supplied checkout id lets one caller touch or release another hold",
+   "VAPT-API-05": "Variant id and quantity reach the reservation function",
+   "VAPT-ABUSE-05": "Anonymous action burdens the merchant stock",
+   "VAPT-API-07": "Reservation errors must not leak SQL text"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A stock-hold endpoint sends no messages or links, so outbound-message and link-destination attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-05",
+  "must_select": [
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-06",
+   "VAPT-API-03",
+   "VAPT-WEB-02",
+   "VAPT-API-04",
+   "VAPT-API-08",
+   "VAPT-ABUSE-04"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-ABUSE-03"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-05": "Anonymous COD guest orders debit the merchant prepaid wallet",
+   "VAPT-ABUSE-07": "Fee and wallet balance must be server-derived and gated by plan",
+   "VAPT-ABUSE-06": "Negative balance state locks orders page and must reverse/stop correctly",
+   "VAPT-API-03": "Wallet-access middleware gates an admin operation",
+   "VAPT-WEB-02": "Admin page lock cannot rest on UI hiding only",
+   "VAPT-API-04": "Fee, plan or balance fields must not be writable from the body",
+   "VAPT-API-08": "Anonymous order spam drains the wallet",
+   "VAPT-ABUSE-04": "Fairness across merchants and orders under a rate limit"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "An order-fee and wallet change adds no external navigation or message links, so redirect and link-destination attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-06",
+  "must_select": [
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-07",
+   "VAPT-API-01",
+   "VAPT-ABUSE-05"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-CFG-01",
+   "VAPT-CFG-04",
+   "VAPT-WEB-02"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-06": "Expiry must reverse stock, discount code and loyalty points and stop payment attempts",
+   "VAPT-ABUSE-04": "Stock release and shared discount-code usage are shared resources",
+   "VAPT-ABUSE-07": "Restored points, discount and status are server-owned derived values",
+   "VAPT-API-01": "Job sweeps orders across tenants and must scope reversals per owner",
+   "VAPT-ABUSE-05": "Reversal of loyalty points and balances affects third-party balances"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "A backend expiry job and migration has no browser surface (CSRF, CORS, cookies, redirects, UI hiding), so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-07",
+  "must_select": [
+   "VAPT-ABUSE-07",
+   "VAPT-API-04",
+   "VAPT-API-05",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-03",
+   "VAPT-WEB-05",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-07": "fulfillment_type drives the shipping charge; server must derive fees",
+   "VAPT-API-04": "Client-set field changes persisted price and flow",
+   "VAPT-API-05": "Enum value feeds order logic and queries",
+   "VAPT-API-07": "Invalid fulfillment values must not leak errors"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "An order-field change sets no cookies, links or redirects, so link-destination, redirect and cookie-flag attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-08",
+  "must_select": [
+   "VAPT-ABUSE-08",
+   "VAPT-API-01",
+   "VAPT-API-02",
+   "VAPT-API-06",
+   "VAPT-API-03"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-08": "Direct data API bypasses the Worker MFA check, so aal1 sessions could read data",
+   "VAPT-API-01": "Policies must enforce tenant isolation via JWT helper",
+   "VAPT-API-02": "Helper trusts JWT claims; audience/tenant/revocation must be proven",
+   "VAPT-API-06": "Direct reads expose all columns of settings and variants",
+   "VAPT-API-03": "Member role gating on read vs write policies"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "Database policies add no browser page, outbound message or wallet, so CSRF, redirect, message and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-09",
+  "must_select": [
+   "VAPT-WEB-03",
+   "VAPT-ABUSE-08",
+   "VAPT-WEB-05",
+   "VAPT-CFG-04",
+   "VAPT-WEB-01",
+   "VAPT-API-02",
+   "VAPT-CFG-02"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-WEB-03": "Recovery tokens and session are stored in browser storage",
+   "VAPT-ABUSE-08": "Recovery-assurance session and crafted links must not reach data or replace a session",
+   "VAPT-WEB-05": "Post-reset redirect and fragment handling can be an open redirect",
+   "VAPT-CFG-04": "Session should use httpOnly secure SameSite cookies not storage",
+   "VAPT-WEB-01": "Fragment values flow into the DOM",
+   "VAPT-API-02": "Token exchange must reject expired, tampered or revoked tokens",
+   "VAPT-CFG-02": "Page carrying tokens needs CSP and referrer protection"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A client reset page runs no queue, balance or fairness logic, so shared-resource and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-10",
+  "must_select": [
+   "VAPT-API-01",
+   "VAPT-ABUSE-01",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-08",
+   "VAPT-ABUSE-04",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07"
+  ],
+  "rationale": {
+   "VAPT-API-01": "Order lookup by number plus contact is an identifier-swap access",
+   "VAPT-ABUSE-01": "Unproven phone/email is authority to read the order",
+   "VAPT-API-05": "Case-insensitive match is an injection and wildcard risk",
+   "VAPT-API-06": "Response carries address and order data to an anonymous caller",
+   "VAPT-API-08": "Guessable order numbers need throttle",
+   "VAPT-ABUSE-04": "Guess cap must not be bypassed via alternate routes or omittable key",
+   "VAPT-API-07": "Lookup errors must not leak query text"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A read-only lookup writes no price or entitlement and debits nothing, so derived-value and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-11",
+  "must_select": [
+   "VAPT-API-03",
+   "VAPT-WEB-02",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-08",
+   "VAPT-WEB-01",
+   "VAPT-API-02",
+   "VAPT-WEB-04",
+   "VAPT-API-01"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-04"
+  ],
+  "rationale": {
+   "VAPT-API-03": "New moderation permission must not be a path around the tenants permission",
+   "VAPT-WEB-02": "Moderation actions must be enforced server-side",
+   "VAPT-ABUSE-06": "Suspending a store must stop its side effects and reverse cleanly",
+   "VAPT-ABUSE-08": "Staff actions on stores need adequate session assurance",
+   "VAPT-WEB-01": "Reports contain user-supplied content viewed by staff",
+   "VAPT-API-02": "Staff identity and permission claims must be verified",
+   "VAPT-WEB-04": "State-changing moderation requests need anti-CSRF",
+   "VAPT-API-01": "Actions are addressed by id across tenants"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "A staff moderation queue sends no tokens in messages and debits no balance, so link-destination, cost and fairness attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-12",
+  "must_select": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-07",
+   "VAPT-API-04",
+   "VAPT-API-03",
+   "VAPT-ABUSE-08",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-WEB-02",
+   "VAPT-WEB-04"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-ABUSE-04"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-01": "Email typed by superadmin may be pre-claimed unverified; account creation must not inherit the grant",
+   "VAPT-ABUSE-07": "Role row is a sensitive privilege field",
+   "VAPT-API-04": "Role and user id must not be mass-assigned",
+   "VAPT-API-03": "Only superadmin may add staff",
+   "VAPT-ABUSE-08": "Privileged admin action needs strong session assurance",
+   "VAPT-ABUSE-02": "Creating an account may send mail to an unproven address",
+   "VAPT-ABUSE-03": "Any invite or set-password link must use a verified host",
+   "VAPT-WEB-02": "Staff creation must be enforced server-side",
+   "VAPT-WEB-04": "State-changing admin request needs CSRF protection"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A staff-role grant has no redirect surface and no shared-resource queue, so unsafe navigation and fairness attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-DEV-13",
+  "must_select": [],
+  "inapplicable": [
+   "VAPT-API-01",
+   "VAPT-API-02",
+   "VAPT-API-03",
+   "VAPT-API-04",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-07",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-WEB-02",
+   "VAPT-WEB-03",
+   "VAPT-WEB-04",
+   "VAPT-CFG-01",
+   "VAPT-CFG-02",
+   "VAPT-CFG-04",
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-08"
+  ],
+  "rationale": {},
+  "confidence": "high",
+  "inapplicable_basis": "A copy/label reword in static markup adds no server code, input, sink, request or config, so only a committed-secret or markup-link risk remains and is listed as exceptions.",
+  "exceptions": {
+   "VAPT-CFG-03": "Any committed file, including markup and snapshot tests, can contain a secret.",
+   "VAPT-WEB-05": "Edited HTML could add an external link or target=_blank without rel=noopener."
+  }
+ },
+ {
+  "scenario_id": "S-DEV-14",
+  "must_select": [],
+  "inapplicable": [
+   "VAPT-API-01",
+   "VAPT-API-02",
+   "VAPT-API-03",
+   "VAPT-API-04",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-07",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-WEB-02",
+   "VAPT-WEB-03",
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-CFG-01",
+   "VAPT-CFG-02",
+   "VAPT-CFG-04",
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-08"
+  ],
+  "rationale": {},
+  "confidence": "high",
+  "inapplicable_basis": "A pure, output-identical formatting helper has no request, auth, data, sink or config surface, so only a committed-secret risk remains and is listed as an exception.",
+  "exceptions": {
+   "VAPT-CFG-03": "Any committed source or test file can contain a secret."
+  }
+ },
+ {
+  "scenario_id": "S-SEA-01",
+  "must_select": [],
+  "inapplicable": [
+   "VAPT-API-01",
+   "VAPT-API-02",
+   "VAPT-API-03",
+   "VAPT-API-04",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-07",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-WEB-02",
+   "VAPT-WEB-03",
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-CFG-01",
+   "VAPT-CFG-02",
+   "VAPT-CFG-04",
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-08"
+  ],
+  "rationale": {},
+  "confidence": "high",
+  "inapplicable_basis": "A docs-only change touches no executable, config or rendered app surface, so only a committed-secret risk remains and is listed as an exception.",
+  "exceptions": {
+   "VAPT-CFG-03": "Docs can paste a real key or token into setup steps."
+  }
+ },
+ {
+  "scenario_id": "S-SEA-02",
+  "must_select": [],
+  "inapplicable": [
+   "VAPT-API-01",
+   "VAPT-API-02",
+   "VAPT-API-03",
+   "VAPT-API-04",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-07",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-WEB-02",
+   "VAPT-WEB-03",
+   "VAPT-WEB-04",
+   "VAPT-CFG-01",
+   "VAPT-CFG-02",
+   "VAPT-CFG-04",
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-08"
+  ],
+  "rationale": {},
+  "confidence": "high",
+  "inapplicable_basis": "CSS and static marketing copy add no server code, input, sink or config, so only a committed-secret or markup-link risk remains and is listed as exceptions.",
+  "exceptions": {
+   "VAPT-CFG-03": "Any committed file, including CSS and HTML, can contain a secret.",
+   "VAPT-WEB-05": "Edited HTML could add an external link or target=_blank without rel=noopener."
+  }
+ },
+ {
+  "scenario_id": "S-SEA-03",
+  "must_select": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-08",
+   "VAPT-WEB-04",
+   "VAPT-WEB-05",
+   "VAPT-CFG-04",
+   "VAPT-API-02",
+   "VAPT-API-07",
+   "VAPT-CFG-03"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-01": "Linking by profile email to an existing local account enables takeover unless email verified",
+   "VAPT-ABUSE-08": "Callback starts a session; crafted callback links must not replace a session",
+   "VAPT-WEB-04": "OAuth state/login CSRF on the callback",
+   "VAPT-WEB-05": "Post-login redirect target must be validated",
+   "VAPT-CFG-04": "Session cookie needs httpOnly, secure, SameSite",
+   "VAPT-API-02": "Token audience, signature and issuer must be validated",
+   "VAPT-API-07": "Callback errors must not leak token exchange details",
+   "VAPT-CFG-03": "Client secret must not be committed or logged"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A login callback has no stock, queue or wallet logic, so shared-resource fairness and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-04",
+  "must_select": [
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-01",
+   "VAPT-API-08",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-08",
+   "VAPT-API-02",
+   "VAPT-ABUSE-06",
+   "VAPT-CFG-04",
+   "VAPT-API-07",
+   "VAPT-WEB-04"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-07",
+   "VAPT-API-03"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-03": "Reset link must use a verified host, not a Host header",
+   "VAPT-ABUSE-02": "Platform sends reset mail needing recipient caps",
+   "VAPT-ABUSE-01": "Response must not reveal account existence",
+   "VAPT-API-08": "Throttle reset requests and token guesses",
+   "VAPT-ABUSE-04": "Guess cap must hold across alternate routes and omittable keys",
+   "VAPT-ABUSE-08": "Reset flow produces recovery-assurance sessions",
+   "VAPT-API-02": "Token must reject expired, reused or revoked values",
+   "VAPT-ABUSE-06": "Single-use, expiry and other-session sign-out must reverse state",
+   "VAPT-CFG-04": "Session cookie flags after reset",
+   "VAPT-API-07": "Errors must not leak token internals",
+   "VAPT-WEB-04": "Confirm endpoint is a state change"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A reset flow writes no price or entitlement field and has no role tiers beyond the caller, so derived-value and function-level role attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-05",
+  "must_select": [
+   "VAPT-API-03",
+   "VAPT-API-02",
+   "VAPT-ABUSE-08",
+   "VAPT-WEB-02",
+   "VAPT-API-06",
+   "VAPT-CFG-04",
+   "VAPT-ABUSE-06",
+   "VAPT-API-01",
+   "VAPT-WEB-04",
+   "VAPT-WEB-03"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-API-03": "Impersonation must be restricted to support staff only",
+   "VAPT-API-02": "Impersonation session token must be scoped, short-lived and revocable",
+   "VAPT-ABUSE-08": "Impersonation session assurance and replacement of existing session",
+   "VAPT-WEB-02": "Staff-only control must be enforced server-side",
+   "VAPT-API-06": "Org owners see the audit trail; it must not expose excess data",
+   "VAPT-CFG-04": "Impersonation session cookie flags",
+   "VAPT-ABUSE-06": "Short-lived session must expire and stop side effects",
+   "VAPT-API-01": "Target user selection must not cross unauthorized boundaries",
+   "VAPT-WEB-04": "Starting impersonation is a state change",
+   "VAPT-WEB-03": "Impersonation token must not be stored in client storage"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "An impersonation session feature has no queue or wallet logic, so fairness and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-06",
+  "must_select": [
+   "VAPT-API-01",
+   "VAPT-API-03",
+   "VAPT-API-04",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-06",
+   "VAPT-WEB-02",
+   "VAPT-API-02",
+   "VAPT-ABUSE-08"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-API-01": "Project and member ids must be checked against the caller",
+   "VAPT-API-03": "Only project admins may manage members",
+   "VAPT-API-04": "Role field in the body is privilege escalation",
+   "VAPT-ABUSE-07": "Role is a sensitive field requiring field-level enforcement",
+   "VAPT-ABUSE-06": "Last-admin invariant and removal lifecycle",
+   "VAPT-WEB-02": "Admin-only action must not rely on UI hiding",
+   "VAPT-API-02": "Caller identity must be verified",
+   "VAPT-ABUSE-08": "Role changes and removals write protected membership data through a session; assurance level must be enforced"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "Membership endpoints send no links and debit nothing, so link-destination and cost-shifting attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-07",
+  "must_select": [
+   "VAPT-API-01",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-08",
+   "VAPT-ABUSE-08",
+   "VAPT-ABUSE-02",
+   "VAPT-API-03",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-ABUSE-07",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-API-01": "Invoice export must be scoped to the caller tenant",
+   "VAPT-API-05": "Date range input and CSV cells can inject (formula/query)",
+   "VAPT-API-06": "Export must not include columns or rows the caller may not see",
+   "VAPT-API-08": "Unbounded date range and file size",
+   "VAPT-ABUSE-08": "Reads protected invoices through a session",
+   "VAPT-ABUSE-02": "Scheduled exports may be sent to recipients not proven",
+   "VAPT-API-03": "Report access role check",
+   "VAPT-API-07": "Export errors must not leak query text"
+  },
+  "confidence": "medium",
+  "inapplicable_basis": "A read-only export does not write price or entitlement fields, debit balances or navigate, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-08",
+  "must_select": [
+   "VAPT-API-01",
+   "VAPT-WEB-01",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-08",
+   "VAPT-API-08",
+   "VAPT-API-02"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07"
+  ],
+  "rationale": {
+   "VAPT-API-01": "Shared search table can leak notes across tenants",
+   "VAPT-WEB-01": "Highlighted snippets render stored note text",
+   "VAPT-API-05": "Query string reaches full-text query parser",
+   "VAPT-API-06": "Snippets may expose notes the caller cannot see",
+   "VAPT-ABUSE-04": "Shared indexer queue can starve tenants",
+   "VAPT-ABUSE-08": "Reads protected notes through a session",
+   "VAPT-API-08": "Search is expensive and needs throttle and bounds",
+   "VAPT-API-02": "Indexer service identity and tenant claims"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "Search and indexing neither send messages, debit balances nor write priced fields, so outbound-message, cost and derived-value attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-09",
+  "must_select": [
+   "VAPT-API-02",
+   "VAPT-API-08",
+   "VAPT-API-05",
+   "VAPT-API-06",
+   "VAPT-API-01",
+   "VAPT-API-07",
+   "VAPT-CFG-01",
+   "VAPT-ABUSE-04",
+   "VAPT-API-03"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-07",
+   "VAPT-WEB-05"
+  ],
+  "rationale": {
+   "VAPT-API-02": "API key authentication and revocation",
+   "VAPT-API-08": "Unbounded page size, filters, GraphQL depth",
+   "VAPT-API-05": "Filters reach query layer; GraphQL injection",
+   "VAPT-API-06": "Responses and GraphQL schema may expose internal fields",
+   "VAPT-API-01": "Integrator keys must only see their permitted catalogue",
+   "VAPT-API-07": "GraphQL errors leak stack traces",
+   "VAPT-CFG-01": "Credentialed cross-origin access to public API",
+   "VAPT-ABUSE-04": "Rate limit bypass through GraphQL batching or alternate route",
+   "VAPT-API-03": "Introspection or admin fields reachable by low privilege"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A read-only catalogue API sends no messages, links or navigation and writes no priced field, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-10",
+  "must_select": [
+   "VAPT-API-05",
+   "VAPT-API-08",
+   "VAPT-WEB-01",
+   "VAPT-API-01",
+   "VAPT-CFG-02",
+   "VAPT-API-07",
+   "VAPT-API-02",
+   "VAPT-CFG-03",
+   "VAPT-ABUSE-08"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-07"
+  ],
+  "rationale": {
+   "VAPT-API-05": "Original filename and keys enable path traversal",
+   "VAPT-API-08": "Upload size and count limits",
+   "VAPT-WEB-01": "Uploaded HTML/SVG or filename executes when served",
+   "VAPT-API-01": "Signed URLs and ticket attachments must be owner scoped",
+   "VAPT-CFG-02": "nosniff and content type headers for served files",
+   "VAPT-API-07": "Multipart parse errors must not leak paths",
+   "VAPT-API-02": "Signed URL expiry and tampering",
+   "VAPT-CFG-03": "Storage credentials must not leak",
+   "VAPT-ABUSE-08": "Uploads and signed-URL downloads of ticket attachments reach protected data through a session"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "File upload handling neither claims identifiers, sends messages or links, nor writes priced fields, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-11",
+  "must_select": [
+   "VAPT-CFG-03",
+   "VAPT-API-06",
+   "VAPT-API-03",
+   "VAPT-API-01",
+   "VAPT-WEB-02",
+   "VAPT-WEB-03",
+   "VAPT-API-05",
+   "VAPT-API-07",
+   "VAPT-API-04",
+   "VAPT-ABUSE-08"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-WEB-05"
+  ],
+  "rationale": {
+   "VAPT-CFG-03": "Integration keys and application key must not leak in logs or repo",
+   "VAPT-API-06": "Stored keys must be masked and never returned decrypted",
+   "VAPT-API-03": "Only workspace admins may manage keys",
+   "VAPT-API-01": "Keys must be tenant scoped",
+   "VAPT-WEB-02": "Admin-only control enforced server side",
+   "VAPT-WEB-03": "Keys must not appear in client bundles or logs",
+   "VAPT-API-05": "Job calls third party using stored endpoint/key input",
+   "VAPT-API-07": "Errors must not echo key material",
+   "VAPT-API-04": "Workspace id or owner must not be mass-assigned",
+   "VAPT-ABUSE-08": "Admin saving and reading integration keys goes through a session needing sufficient assurance"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "Secret storage has no recipient identity, message link, fairness queue or navigation, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-12",
+  "must_select": [
+   "VAPT-API-06",
+   "VAPT-API-03",
+   "VAPT-API-01",
+   "VAPT-WEB-01",
+   "VAPT-API-05",
+   "VAPT-ABUSE-08",
+   "VAPT-WEB-02",
+   "VAPT-API-08"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07"
+  ],
+  "rationale": {
+   "VAPT-API-06": "Log exposes emails, IPs and user agents beyond need",
+   "VAPT-API-03": "Only authorised staff may read and export",
+   "VAPT-API-01": "Tenant scoping on activity log",
+   "VAPT-WEB-01": "User agent and actor strings are attacker-controlled and rendered",
+   "VAPT-API-05": "User filter reaches query",
+   "VAPT-ABUSE-08": "Reads protected data through a session",
+   "VAPT-WEB-02": "Export restriction enforced server side",
+   "VAPT-API-08": "Unbounded export"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A read/export log page sends no messages or links, debits nothing and writes no priced field, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-13",
+  "must_select": [
+   "VAPT-API-02",
+   "VAPT-API-01",
+   "VAPT-API-05",
+   "VAPT-API-08",
+   "VAPT-ABUSE-04",
+   "VAPT-CFG-03",
+   "VAPT-CFG-02",
+   "VAPT-WEB-01",
+   "VAPT-API-07",
+   "VAPT-CFG-01"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03"
+  ],
+  "rationale": {
+   "VAPT-API-02": "Signed download tokens and signing secret",
+   "VAPT-API-01": "Download of other users objects by key swap",
+   "VAPT-API-05": "Object key path traversal into R2/KV",
+   "VAPT-API-08": "Per-user counters and download abuse",
+   "VAPT-ABUSE-04": "Durable Object counters can be bypassed or starved",
+   "VAPT-CFG-03": "Signing secret declared in Worker config",
+   "VAPT-CFG-02": "nosniff and CSP for user-generated downloads",
+   "VAPT-WEB-01": "User-generated content served with executable type",
+   "VAPT-API-07": "Errors leak bindings or paths",
+   "VAPT-CFG-01": "Cross-origin reads of downloads"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A download Worker claims no identifier as authority and sends no messages or links, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-14",
+  "must_select": [
+   "VAPT-API-02",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-07",
+   "VAPT-CFG-03",
+   "VAPT-API-01",
+   "VAPT-API-08",
+   "VAPT-API-07",
+   "VAPT-API-05"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-02",
+   "VAPT-WEB-04",
+   "VAPT-WEB-05"
+  ],
+  "rationale": {
+   "VAPT-API-02": "Signature, timestamp and replay verification",
+   "VAPT-ABUSE-02": "Customer notification email needs caps and no free text",
+   "VAPT-ABUSE-06": "Subscription status transitions, out-of-order and replayed events",
+   "VAPT-ABUSE-07": "Plan entitlements must be derived server-side from verified events",
+   "VAPT-CFG-03": "Signing secret handling",
+   "VAPT-API-01": "Event must map to the correct tenant/customer",
+   "VAPT-API-08": "Event queue flooding needs bounds and throttle",
+   "VAPT-API-07": "Handler errors must not leak details",
+   "VAPT-API-05": "Event payload reaches DB writes"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A server-to-server webhook consumer has no browser surface, so UI-hiding, CSRF and navigation attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-15",
+  "must_select": [
+   "VAPT-CFG-03",
+   "VAPT-API-05",
+   "VAPT-API-07",
+   "VAPT-API-08"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-WEB-04",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-CFG-03": "CI workflow now uses a token; secret exposure",
+   "VAPT-API-05": "New HTTP client with external service: SSRF and injection",
+   "VAPT-API-07": "Wrapper errors may leak endpoints or tokens",
+   "VAPT-API-08": "Outbound calls need timeouts and bounds"
+  },
+  "confidence": "high",
+  "expected_reassess": "REAPPROVAL",
+  "reassess_rationale": "New outbound trust boundary, third-party dependency and CI secret use far exceed a patch version bump plan.",
+  "added_controls": [
+   "VAPT-CFG-03",
+   "VAPT-API-05",
+   "VAPT-API-07",
+   "VAPT-API-08"
+  ],
+  "inapplicable_basis": "A dependency bump, HTTP wrapper and CI edit have no browser page, so CSRF, redirect and cookie attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-16",
+  "must_select": [
+   "VAPT-WEB-01",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-API-08",
+   "VAPT-API-05",
+   "VAPT-API-01"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-06",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-WEB-01": "Planned bio field renders stored user text",
+   "VAPT-ABUSE-02": "Share endpoint emails an unproven address with user text",
+   "VAPT-ABUSE-03": "Emailed link must use a verified host",
+   "VAPT-API-08": "Throttle the share endpoint and per-user caps",
+   "VAPT-API-05": "Header and template injection via the address and text",
+   "VAPT-API-01": "Shared profile must belong to the caller"
+  },
+  "confidence": "high",
+  "expected_reassess": "REAPPROVAL",
+  "reassess_rationale": "Adds a new endpoint and outbound mail to arbitrary addresses, a new trust boundary beyond a read-only bio render.",
+  "added_controls": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-API-08",
+   "VAPT-API-05",
+   "VAPT-API-01"
+  ],
+  "inapplicable_basis": "Profile rendering and a share endpoint have no lifecycle state machine or cookie handling, so transition and cookie-flag attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-17",
+  "must_select": [
+   "VAPT-WEB-02",
+   "VAPT-API-03",
+   "VAPT-API-01",
+   "VAPT-API-04",
+   "VAPT-ABUSE-07",
+   "VAPT-API-02",
+   "VAPT-WEB-04",
+   "VAPT-ABUSE-06",
+   "VAPT-ABUSE-08"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05"
+  ],
+  "rationale": {
+   "VAPT-WEB-02": "Route guard and flag hide controls but PATCH calls must be enforced server-side",
+   "VAPT-API-03": "Archive and role change need server role checks",
+   "VAPT-API-01": "Project and member ids need ownership check",
+   "VAPT-API-04": "Role/plan fields in PATCH body",
+   "VAPT-ABUSE-07": "Role and plan gate must not follow client config",
+   "VAPT-API-02": "Caller identity must be verified",
+   "VAPT-WEB-04": "PATCH state changes need CSRF protection",
+   "VAPT-ABUSE-06": "Archive lifecycle side effects",
+   "VAPT-ABUSE-08": "Reads and writes through a session"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "Admin guard and PATCH endpoints send no messages or links and debit nothing, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-18",
+  "must_select": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-04",
+   "VAPT-API-08",
+   "VAPT-API-05"
+  ],
+  "inapplicable": [
+   "VAPT-WEB-05",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-ABUSE-02": "SMS to unproven numbers with caller text; caps needed",
+   "VAPT-ABUSE-05": "Anonymous submissions consume the merchant prepaid credit",
+   "VAPT-ABUSE-04": "Limit left to gateway; fairness bypass under rate limit",
+   "VAPT-API-08": "No throttle in this change",
+   "VAPT-API-05": "Number and text reach SMS gateway"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "A quote form and SMS send have no navigation or cookie surface, so redirect and cookie-flag attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-19",
+  "must_select": [
+   "VAPT-WEB-03",
+   "VAPT-WEB-01",
+   "VAPT-CFG-04",
+   "VAPT-CFG-02",
+   "VAPT-API-02"
+  ],
+  "inapplicable": [
+   "VAPT-API-05",
+   "VAPT-API-08",
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-04",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07"
+  ],
+  "rationale": {
+   "VAPT-WEB-03": "Token and PII stored in localStorage",
+   "VAPT-WEB-01": "XSS can read localStorage token",
+   "VAPT-CFG-04": "Session token should be in httpOnly cookie",
+   "VAPT-CFG-02": "CSP limits XSS exfiltration",
+   "VAPT-API-02": "Token expiry and revocation"
+  },
+  "confidence": "high",
+  "inapplicable_basis": "Client token storage adds no server input, queue, message, or priced field, so injection, resource, message, cost and derived-value attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-20",
+  "must_select": [
+   "VAPT-API-01",
+   "VAPT-ABUSE-08",
+   "VAPT-API-06",
+   "VAPT-API-02",
+   "VAPT-API-05",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07",
+   "VAPT-WEB-04",
+   "VAPT-API-04",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-API-01": "Project id in the path must be checked for membership",
+   "VAPT-ABUSE-08": "Reads protected data through a session",
+   "VAPT-API-06": "Summary must not expose other projects data",
+   "VAPT-API-02": "Authentication on the route",
+   "VAPT-API-05": "Path id reaches a query",
+   "VAPT-API-07": "Error responses for bad ids"
+  },
+  "confidence": "high",
+  "expected_reassess": "UNCHANGED",
+  "reassess_rationale": "Actual change is exactly the planned endpoint with no extra surface.",
+  "added_controls": [],
+  "inapplicable_basis": "A read-only summary endpoint writes nothing, sends nothing and debits nothing, so those attacks cannot arise."
+ },
+ {
+  "scenario_id": "S-SEA-21",
+  "must_select": [
+   "VAPT-API-05",
+   "VAPT-API-01",
+   "VAPT-ABUSE-08",
+   "VAPT-API-06",
+   "VAPT-API-08",
+   "VAPT-API-07"
+  ],
+  "inapplicable": [
+   "VAPT-ABUSE-02",
+   "VAPT-ABUSE-03",
+   "VAPT-ABUSE-05",
+   "VAPT-ABUSE-07",
+   "VAPT-WEB-04",
+   "VAPT-API-04",
+   "VAPT-CFG-04"
+  ],
+  "rationale": {
+   "VAPT-API-05": "Status filter reaches a query; validate against fixed set",
+   "VAPT-API-01": "Orders list must be merchant scoped",
+   "VAPT-ABUSE-08": "Reads protected data through a session",
+   "VAPT-API-06": "List fields visible to the caller only",
+   "VAPT-API-08": "Pagination bounds",
+   "VAPT-API-07": "Invalid filter error must not leak"
+  },
+  "confidence": "high",
+  "expected_reassess": "UNCHANGED",
+  "reassess_rationale": "An optional validated filter in the same file and endpoint adds no new boundary.",
+  "added_controls": [],
+  "inapplicable_basis": "A read-only list filter writes nothing, sends nothing and debits nothing, so those attacks cannot arise."
+ }
+]

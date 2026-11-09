@@ -1,0 +1,100 @@
+[
+ {
+  "id": "S-SEA-07",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Endpoint serves protected data to a signed-in (or staff) caller, i.e. it reads/trusts a session; matches the definition's positive example 'a route that reads protected data for any valid session'."
+ },
+ {
+  "id": "S-SEA-08",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Endpoint serves protected data to a signed-in (or staff) caller, i.e. it reads/trusts a session; matches the definition's positive example 'a route that reads protected data for any valid session'."
+ },
+ {
+  "id": "S-SEA-12",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Endpoint serves protected data to a signed-in (or staff) caller, i.e. it reads/trusts a session; matches the definition's positive example 'a route that reads protected data for any valid session'."
+ },
+ {
+  "id": "S-SEA-09",
+  "fact": "attempt_limit",
+  "old": true,
+  "new": false,
+  "reason": "Summary describes only a generic rate limit on a public catalogue read; nothing guessable (no code/secret) sits behind it, which the definition's negative case says is not an attempt limit."
+ },
+ {
+  "id": "S-SEA-10",
+  "fact": "persistent_write",
+  "old": "unknown",
+  "new": true,
+  "reason": "Summary says files are stored in object storage; storing an object creates state in a system the change calls, so true (not unknown)."
+ },
+ {
+  "id": "S-DEV-09",
+  "fact": "link_or_token_in_message",
+  "old": true,
+  "new": false,
+  "reason": "The page only consumes a link (tokens in the URL fragment) sent by an existing mail; this change sends no message, so no outbound message carries a link."
+ },
+ {
+  "id": "S-SEA-05",
+  "fact": "state_transitions",
+  "old": false,
+  "new": false,
+  "reason": "Impersonation issues a short-lived session; that is covered by session_context. No entity (user, order, store) moves through a lifecycle state and no side effects must stop, so false stays."
+ },
+ {
+  "id": "S-DEV-12",
+  "fact": "sensitive_field_write",
+  "old": true,
+  "new": true,
+  "reason": "A typed role is written to a staff role row: role is a listed value of consequence, so true is correct."
+ },
+ {
+  "id": "S-SEA-05",
+  "fact": "sensitive_field_write",
+  "old": true,
+  "new": false,
+  "reason": "No client-writable field sets or derives a role/price/plan/status; staff only pick an existing user and the session mirrors that user's existing rights. Definition's listed values are not written."
+ },
+ {
+  "id": "S-SEA-11",
+  "fact": "sensitive_field_write",
+  "old": true,
+  "new": false,
+  "reason": "The input is a third-party API key: not price, fee, payment status, entitlement, plan or role, and it derives no such value. Stored secrets are a different concern (security-config), not this fact."
+ },
+ {
+  "id": "S-SEA-05",
+  "fact": "outbound_message",
+  "old": "unknown",
+  "new": "unknown",
+  "reason": "Summary does not say whether a notice is sent to the impersonated user; honest unknown."
+ },
+ {
+  "id": "S-DEV-12",
+  "fact": "outbound_message",
+  "old": "unknown",
+  "new": "unknown",
+  "reason": "Summary does not say whether an invite mail is sent when an account is created; honest unknown."
+ },
+ {
+  "id": "S-SEA-07",
+  "fact": "outbound_message",
+  "old": "unknown",
+  "new": "unknown",
+  "reason": "Scheduled exports are mentioned later but delivery channel is not stated; honest unknown."
+ },
+ {
+  "id": "S-SEA-15",
+  "fact": "outbound_message",
+  "old": "unknown",
+  "new": "unknown",
+  "reason": "The new wrapper calls an external service; whether it is a message is not stated; honest unknown."
+ }
+]

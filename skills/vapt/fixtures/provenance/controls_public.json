@@ -1,0 +1,177 @@
+[
+ {
+  "id": "VAPT-API-01",
+  "tier": "[NN]",
+  "title": "BOLA / IDOR",
+  "attack": "BOLA / IDOR. User A reads, updates, or deletes an object owned by user B by swapping the identifier. Test every identifier the route accepts, including nested and in-body ones.",
+  "prevent": "User A reads, updates or deletes an object owned by user B by swapping any identifier the route accepts, including nested and in-body ones."
+ },
+ {
+  "id": "VAPT-API-02",
+  "tier": "[NN]",
+  "title": "Broken authentication",
+  "attack": "Broken authentication. The route answers with no credential, an expired one, a tampered signature, a token issued for another audience/tenant, or one that was revoked.",
+  "prevent": "The route answers with no credential, an expired one, a tampered signature, a token for another audience/tenant, or a revoked one."
+ },
+ {
+  "id": "VAPT-API-03",
+  "tier": "[NN]",
+  "title": "Broken function-level authorization",
+  "attack": "Broken function-level authorization. A low-privilege principal reaches an operation meant for a higher role — including the method nobody guarded (GET protected, DELETE forgotten).",
+  "prevent": "A low-privilege principal reaches an operation meant for a higher role, including the method nobody guarded."
+ },
+ {
+  "id": "VAPT-API-04",
+  "tier": "[NN]",
+  "title": "Mass assignment",
+  "attack": "Mass assignment. A privileged field submitted in the body is persisted — role, is_admin, tenant_id, verified, balance, price, created_by.",
+  "prevent": "A privileged field submitted in the body is persisted (role, is_admin, tenant_id, verified, balance, price, created_by)."
+ },
+ {
+  "id": "VAPT-API-05",
+  "tier": "[NN]",
+  "title": "Injection",
+  "attack": "Injection. Untrusted input reaching an interpreter — SQL/NoSQL, command, template, LDAP, or path traversal on any file/path parameter.",
+  "prevent": "Untrusted input reaches an interpreter: SQL/NoSQL, command, template, LDAP, or path traversal on any file/path parameter."
+ },
+ {
+  "id": "VAPT-API-06",
+  "tier": "[NN]",
+  "title": "Excessive data exposure",
+  "attack": "Excessive data exposure. The response body carries fields this caller must not see — password hashes, internal IDs, other users' data, plan/billing internals, soft-deleted rows.",
+  "prevent": "The response body carries fields this caller must not see (hashes, internal IDs, other users' data, plan/billing internals, soft-deleted rows)."
+ },
+ {
+  "id": "VAPT-API-07",
+  "tier": "[NN]",
+  "title": "Error leakage",
+  "attack": "Error leakage. A malformed or hostile request returns a stack trace, driver error, file path, or query text.",
+  "prevent": "A malformed or hostile request returns a stack trace, driver error, file path, or query text."
+ },
+ {
+  "id": "VAPT-API-08",
+  "tier": "[D]",
+  "title": "Resource abuse",
+  "attack": "Resource abuse. No throttle on an expensive or auth-adjacent route; unbounded page size, upload size, or payload depth.",
+  "prevent": "No throttle on an expensive or auth-adjacent route; unbounded page size, upload size or payload depth."
+ },
+ {
+  "id": "VAPT-WEB-01",
+  "tier": "[NN]",
+  "title": "XSS",
+  "attack": "XSS. A stored or reflected value reaches an HTML, attribute, URL, or script sink and executes. Test what the *server* stores, not just what the form accepts.",
+  "prevent": "A stored or reflected value reaches an HTML, attribute, URL or script sink and executes. Test what the server stores."
+ },
+ {
+  "id": "VAPT-WEB-02",
+  "tier": "[NN]",
+  "title": "Client-side-only authorization",
+  "attack": "Client-side-only authorization. The UI hides the control, but the underlying request still succeeds when issued directly. The hidden button is not a permission.",
+  "prevent": "The UI hides the control but the underlying request still succeeds when issued directly."
+ },
+ {
+  "id": "VAPT-WEB-03",
+  "tier": "[NN]",
+  "title": "Credential exposure in the client",
+  "attack": "Credential exposure in the client. Session token in localStorage, a secret/API key inlined into the built bundle, PII in a client-side log.",
+  "prevent": "Session token in localStorage, a secret/API key inlined into the built bundle, PII in a client-side log."
+ },
+ {
+  "id": "VAPT-WEB-04",
+  "tier": "[NN]",
+  "title": "CSRF / unsafe cross-origin state change",
+  "attack": "CSRF / unsafe cross-origin state change. A state-changing request succeeds without an anti-CSRF token or an equivalent SameSite guarantee.",
+  "prevent": "A state-changing request succeeds without an anti-CSRF token or an equivalent SameSite guarantee."
+ },
+ {
+  "id": "VAPT-WEB-05",
+  "tier": "[D]",
+  "title": "Unsafe navigation",
+  "attack": "Unsafe navigation. Open redirect, unvalidated postMessage origin, target=\"_blank\" without rel=\"noopener\".",
+  "prevent": "Open redirect, unvalidated postMessage origin, target=\"_blank\" without rel=\"noopener\"."
+ },
+ {
+  "id": "VAPT-CFG-01",
+  "tier": "[NN]",
+  "title": "CORS",
+  "attack": "CORS. A credentialed request from an unintended origin is accepted — reflected Origin, wildcard with credentials, a too-loose regex.",
+  "prevent": "A credentialed request from an unintended origin is accepted (reflected Origin, wildcard with credentials, loose regex)."
+ },
+ {
+  "id": "VAPT-CFG-02",
+  "tier": "[D]",
+  "title": "Missing security headers",
+  "attack": "Missing security headers on the surface this change ships — CSP, X-Content-Type-Options, frame-ancestors, HSTS.",
+  "prevent": "Missing CSP, X-Content-Type-Options, frame-ancestors or HSTS on the surface this change ships."
+ },
+ {
+  "id": "VAPT-CFG-03",
+  "tier": "[NN]",
+  "title": "Reachable secret",
+  "attack": "Reachable secret. A key committed to the repo, baked into a build artifact, or written to a log.",
+  "prevent": "A key committed to the repo, baked into a build artifact, or written to a log."
+ },
+ {
+  "id": "VAPT-CFG-04",
+  "tier": "[NN]",
+  "title": "Cookie flags",
+  "attack": "Cookie flags. A session cookie set without httpOnly + secure + an explicit SameSite.",
+  "prevent": "A session cookie set without httpOnly + secure + an explicit SameSite."
+ },
+ {
+  "id": "VAPT-ABUSE-01",
+  "tier": "[NN]",
+  "title": "Unproven identifier as authority",
+  "attack": "Unproven identifier as authority. An email or phone the caller has not proven spends, redeems, overwrites, claims, receives a privileged grant (including one an admin later gives to an identifier pre-claimed while unverified), or keys a limit. The refusal must not depend on victim data (no balance or existence oracle).",
+  "prevent": "An email or phone the caller has not proven must not spend, redeem, overwrite, claim, receive a privileged grant, or key a limit, and an identifier pre-claimed while unverified must not inherit authority when a legitimate admin later grants it. Refusal must not depend on victim data, so there is no balance or existence oracle."
+ },
+ {
+  "id": "VAPT-ABUSE-02",
+  "tier": "[NN]",
+  "title": "Outbound message abuse",
+  "attack": "Outbound message abuse. The platform sends a message or mail to a recipient the caller has not proven, carrying caller-controlled text, with no recipient or tenant cap — including jobs for a suspended tenant that keep sending.",
+  "prevent": "A platform-sent message or mail to a recipient the caller has not proven, carrying caller-controlled text, needs recipient and tenant caps and must not carry the free text to unverified recipients. Jobs for suspended tenants must not keep sending."
+ },
+ {
+  "id": "VAPT-ABUSE-03",
+  "tier": "[NN]",
+  "title": "Link and token destination trust",
+  "attack": "Link and token destination trust. A link or token in an outbound message points at a host or origin that is not verified.",
+  "prevent": "Links or tokens placed in outbound messages must use only a verified host or origin; the platform must never place a token under an unverified host."
+ },
+ {
+  "id": "VAPT-ABUSE-04",
+  "tier": "[D]",
+  "title": "Shared-resource and fairness abuse under the rate limit",
+  "attack": "Shared-resource and fairness abuse under the rate limit. Stock or inventory holds, queue head-of-line starvation across tenants, or a guess cap bypassed through an alternate route or an omittable limit key.",
+  "prevent": "Stock or inventory holds, queue head-of-line starvation across tenants, and guess-cap bypass via alternate routes or omittable limit keys must be bounded by more than a per-caller rate limit."
+ },
+ {
+  "id": "VAPT-ABUSE-05",
+  "tier": "[NN]",
+  "title": "Caller-triggered cost shifting",
+  "attack": "Caller-triggered cost shifting. An anonymous or low-trust action debits another party's balance, wallet or quota with no economic cap.",
+  "prevent": "An anonymous or low-trust action must not debit another party's balance, wallet or quota without an economic cap."
+ },
+ {
+  "id": "VAPT-ABUSE-06",
+  "tier": "[D]",
+  "title": "Lifecycle and transition invariants",
+  "attack": "Lifecycle and transition invariants. Cancel, expire, suspend, dismiss and pending-attempt states fail to reverse or stop their side effects, or leave stuck or perpetual state; an expired, suspended or closed entity still takes new orders for free.",
+  "prevent": "Cancel, expire, suspend, dismiss, close and pending-attempt states must reverse or stop their side effects and never leave stuck or perpetual state; an expired, suspended or closed entity must refuse new orders or charge the fee it owes."
+ },
+ {
+  "id": "VAPT-ABUSE-07",
+  "tier": "[NN]",
+  "title": "Server owns derived values, gates and sensitive fields",
+  "attack": "Server owns derived values, gates and sensitive fields. A client- or role-writable field sets price, fees, payment status, entitlement or a plan gate, without field-level server enforcement, including a value the server derives from a client-set input.",
+  "prevent": "Client- or role-writable fields that set price, fees, payment status, entitlement or plan gates must be enforced server-side at field level."
+ },
+ {
+  "id": "VAPT-ABUSE-08",
+  "tier": "[D]",
+  "title": "Session assurance and context at every entry point",
+  "attack": "Session assurance and context at every entry point. A valid session of insufficient assurance (aal1, recovery) reaches data, or a crafted link replaces a session.",
+  "prevent": "Valid sessions of insufficient assurance (aal1, recovery) and session replacement via crafted links must not reach data or replace a session."
+ }
+]

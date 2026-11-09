@@ -1,0 +1,358 @@
+{
+  "note": "Computed by make-ledger.mjs; do not edit entries by hand. entries are expected catalog over-breadth cost, not selector errors. broad_gate_only_required are required labels reachable only through a broad gate: if those gates narrow, they are the first catalog-misses to review and must not be dropped silently. reassess holds the scope-exceeds-plan deltas; only added_in_delta is scored.",
+  "total": 47,
+  "by_control": {
+    "VAPT-ABUSE-02": "VAPT-ABUSE-02 \"Outbound message abuse\" is selected by the catalog on boundary outbound-data or outbound_message or recipient_unproven; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-ABUSE-04": "VAPT-ABUSE-04 \"Shared-resource and fairness abuse under the rate limit\" is selected by the catalog on boundary business-invariant or shared_resource or attempt_limit; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-ABUSE-05": "VAPT-ABUSE-05 \"Caller-triggered cost shifting\" is selected by the catalog on boundary business-invariant or caller_triggered_debit; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-ABUSE-07": "VAPT-ABUSE-07 \"Server owns derived values, gates and sensitive fields\" is selected by the catalog on boundary business-invariant or persistent_write or plan_gated_feature or spends_or_reserves_value or sensitive_field_write; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-API-03": "VAPT-API-03 \"Broken function-level authorization\" is selected by the catalog on any of 11 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-API-05": "VAPT-API-05 \"Injection\" is selected by the catalog on any of 11 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-API-08": "VAPT-API-08 \"Resource abuse\" is selected by the catalog on any of 10 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-CFG-01": "VAPT-CFG-01 \"CORS\" is selected by the catalog on any of 7 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-CFG-04": "VAPT-CFG-04 \"Cookie flags\" is selected by the catalog on boundary auth-lifecycle or client-storage or security-config or session_context; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-WEB-02": "VAPT-WEB-02 \"Client-side-only authorization\" is selected by the catalog on any of 11 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-WEB-04": "VAPT-WEB-04 \"CSRF / unsafe cross-origin state change\" is selected by the catalog on boundary auth-lifecycle or client-storage or security-config or outbound-data or a compound condition; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth.",
+    "VAPT-WEB-05": "VAPT-WEB-05 \"Unsafe navigation\" is selected by the catalog on any of 11 boundary kinds; the labeler judged it intrinsically inapplicable to the listed scenarios, so each entry is catalog over-breadth."
+  },
+  "entries": [
+    {
+      "scenario": "S-DEV-01",
+      "control": "VAPT-API-03",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-DEV-02",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-DEV-03",
+      "control": "VAPT-CFG-01",
+      "via": "boundary async-consumer"
+    },
+    {
+      "scenario": "S-DEV-03",
+      "control": "VAPT-WEB-02",
+      "via": "boundary outbound-data"
+    },
+    {
+      "scenario": "S-DEV-03",
+      "control": "VAPT-WEB-04",
+      "via": "boundary outbound-data"
+    },
+    {
+      "scenario": "S-DEV-03",
+      "control": "VAPT-WEB-05",
+      "via": "boundary outbound-data"
+    },
+    {
+      "scenario": "S-DEV-05",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-DEV-06",
+      "control": "VAPT-CFG-01",
+      "via": "boundary async-consumer"
+    },
+    {
+      "scenario": "S-DEV-06",
+      "control": "VAPT-WEB-02",
+      "via": "boundary async-consumer"
+    },
+    {
+      "scenario": "S-DEV-06",
+      "control": "VAPT-WEB-04",
+      "via": "boundary async-consumer & fact persistent_write"
+    },
+    {
+      "scenario": "S-DEV-06",
+      "control": "VAPT-WEB-05",
+      "via": "boundary async-consumer"
+    },
+    {
+      "scenario": "S-DEV-07",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-DEV-08",
+      "control": "VAPT-WEB-04",
+      "via": "boundary auth-lifecycle"
+    },
+    {
+      "scenario": "S-DEV-08",
+      "control": "VAPT-WEB-05",
+      "via": "boundary auth-lifecycle"
+    },
+    {
+      "scenario": "S-DEV-11",
+      "control": "VAPT-ABUSE-04",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-11",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-12",
+      "control": "VAPT-ABUSE-04",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-12",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-03",
+      "control": "VAPT-ABUSE-04",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-03",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-04",
+      "control": "VAPT-ABUSE-07",
+      "via": "fact persistent_write"
+    },
+    {
+      "scenario": "S-SEA-04",
+      "control": "VAPT-API-03",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-06",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-07",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-07",
+      "control": "VAPT-ABUSE-07",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-07",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-08",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-08",
+      "control": "VAPT-ABUSE-07",
+      "via": "fact persistent_write"
+    },
+    {
+      "scenario": "S-SEA-09",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-10",
+      "control": "VAPT-ABUSE-02",
+      "via": "boundary outbound-data"
+    },
+    {
+      "scenario": "S-SEA-10",
+      "control": "VAPT-ABUSE-07",
+      "via": "fact persistent_write"
+    },
+    {
+      "scenario": "S-SEA-11",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-14",
+      "control": "VAPT-WEB-02",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-14",
+      "control": "VAPT-WEB-04",
+      "via": "boundary outbound-data"
+    },
+    {
+      "scenario": "S-SEA-14",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-15",
+      "control": "VAPT-CFG-04",
+      "via": "boundary security-config"
+    },
+    {
+      "scenario": "S-SEA-15",
+      "control": "VAPT-WEB-04",
+      "via": "boundary security-config"
+    },
+    {
+      "scenario": "S-SEA-15",
+      "control": "VAPT-WEB-05",
+      "via": "boundary external-input-operation"
+    },
+    {
+      "scenario": "S-SEA-16",
+      "control": "VAPT-CFG-04",
+      "via": "fact session_context"
+    },
+    {
+      "scenario": "S-SEA-17",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-SEA-18",
+      "control": "VAPT-WEB-05",
+      "via": "boundary request-handler"
+    },
+    {
+      "scenario": "S-SEA-19",
+      "control": "VAPT-API-05",
+      "via": "boundary auth-lifecycle"
+    },
+    {
+      "scenario": "S-SEA-19",
+      "control": "VAPT-API-08",
+      "via": "boundary auth-lifecycle"
+    },
+    {
+      "scenario": "S-SEA-20",
+      "control": "VAPT-CFG-04",
+      "via": "fact session_context"
+    },
+    {
+      "scenario": "S-SEA-20",
+      "control": "VAPT-WEB-04",
+      "via": "boundary request-handler & fact session_context"
+    },
+    {
+      "scenario": "S-SEA-21",
+      "control": "VAPT-CFG-04",
+      "via": "fact session_context"
+    },
+    {
+      "scenario": "S-SEA-21",
+      "control": "VAPT-WEB-04",
+      "via": "boundary request-handler & fact session_context"
+    }
+  ],
+  "broad_gate_only_required": [
+    {
+      "scenario": "S-DEV-01",
+      "control": "VAPT-ABUSE-04",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-01",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-04",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-05",
+      "control": "VAPT-ABUSE-04",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-06",
+      "control": "VAPT-ABUSE-05",
+      "via": "boundary business-invariant"
+    },
+    {
+      "scenario": "S-DEV-12",
+      "control": "VAPT-ABUSE-03",
+      "via": "boundary auth-lifecycle & unknown outbound_message"
+    },
+    {
+      "scenario": "S-SEA-04",
+      "control": "VAPT-ABUSE-01",
+      "via": "boundary auth-lifecycle"
+    }
+  ],
+  "reassess": [
+    {
+      "scenario": "S-SEA-15",
+      "delta": [
+        "VAPT-ABUSE-02",
+        "VAPT-API-01",
+        "VAPT-API-02",
+        "VAPT-API-03",
+        "VAPT-API-04",
+        "VAPT-API-05",
+        "VAPT-API-06",
+        "VAPT-API-07",
+        "VAPT-API-08",
+        "VAPT-CFG-01",
+        "VAPT-CFG-02",
+        "VAPT-CFG-03",
+        "VAPT-CFG-04",
+        "VAPT-WEB-01",
+        "VAPT-WEB-02",
+        "VAPT-WEB-03",
+        "VAPT-WEB-04",
+        "VAPT-WEB-05"
+      ],
+      "added_in_delta": [
+        "VAPT-API-05",
+        "VAPT-API-07",
+        "VAPT-API-08",
+        "VAPT-CFG-03"
+      ],
+      "already_planned": []
+    },
+    {
+      "scenario": "S-SEA-16",
+      "delta": [
+        "VAPT-ABUSE-02",
+        "VAPT-ABUSE-03",
+        "VAPT-ABUSE-07",
+        "VAPT-ABUSE-08",
+        "VAPT-API-04",
+        "VAPT-CFG-01",
+        "VAPT-CFG-04",
+        "VAPT-WEB-04"
+      ],
+      "added_in_delta": [
+        "VAPT-ABUSE-02",
+        "VAPT-ABUSE-03"
+      ],
+      "already_planned": [
+        "VAPT-API-01",
+        "VAPT-API-05",
+        "VAPT-API-08"
+      ]
+    },
+    {
+      "scenario": "S-SEA-20",
+      "delta": [],
+      "added_in_delta": [],
+      "already_planned": []
+    },
+    {
+      "scenario": "S-SEA-21",
+      "delta": [],
+      "added_in_delta": [],
+      "already_planned": []
+    }
+  ]
+}

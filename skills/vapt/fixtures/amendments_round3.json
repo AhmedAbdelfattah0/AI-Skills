@@ -1,0 +1,163 @@
+[
+ {
+  "id": "S-DEV-12",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Superadmin route is reached by a signed-in staff session, same as S-SEA-12. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-SEA-16",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Authenticated share endpoint trusts the caller's session. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-SEA-13",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Per-user download counters require identifying the signed-in user (principal authenticated), so the Worker reads a user credential/session. Closest call; only the 'per-user' wording supports it. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-DEV-05",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Wallet-access middleware gates the merchant's orders admin page for signed-in members, so it trusts a session. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-DEV-13",
+  "fact": "session_context",
+  "old": false,
+  "new": false,
+  "reason": "No handler, session or route; pure text/helper/docs. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-DEV-14",
+  "fact": "session_context",
+  "old": false,
+  "new": false,
+  "reason": "No handler, session or route; pure text/helper/docs. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-SEA-01",
+  "fact": "session_context",
+  "old": false,
+  "new": false,
+  "reason": "No handler, session or route; pure text/helper/docs. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-SEA-09",
+  "fact": "session_context",
+  "old": false,
+  "new": false,
+  "reason": "API keys identify the integrator; a key is not a session. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-DEV-02",
+  "fact": "session_context",
+  "old": false,
+  "new": false,
+  "reason": "Checkout identifies the shopper by a typed email, with no session read or trusted. Rule: true when a signed-in/staff principal reaches the change through a route or middleware (it reads/trusts a session), or the change creates/consumes a session; false for anonymous-only, service-only, API-key-only, and for pure UI-text/helper/docs changes with no handler. Clause: 'reads, creates, replaces or trusts a session'."
+ },
+ {
+  "id": "S-DEV-02",
+  "fact": "caller_triggered_debit",
+  "old": false,
+  "new": true,
+  "reason": "Anonymous/low-trust checkout deducts points from the loyalty account of whoever owns the typed email, a balance belonging to someone else. Clause: 'action by an anonymous or low-trust caller debits a balance ... that belongs to someone else'. Rule: true when the debited ledger/balance/quota/credit has a different owner than the caller."
+ },
+ {
+  "id": "S-DEV-01",
+  "fact": "caller_triggered_debit",
+  "old": false,
+  "new": false,
+  "reason": "Summary mentions a per-store sender identity but no quota, balance or credit being consumed; no debit is stated. Rule as for S-DEV-02."
+ },
+ {
+  "id": "S-DEV-05",
+  "fact": "caller_triggered_debit",
+  "old": true,
+  "new": true,
+  "reason": "Already true: guest order debits the merchant's wallet."
+ },
+ {
+  "id": "S-SEA-16",
+  "fact": "caller_triggered_debit",
+  "old": false,
+  "new": false,
+  "reason": "Share email consumes no balance/quota/credit; nothing stated. Rule as for S-DEV-02."
+ },
+ {
+  "id": "S-SEA-18",
+  "fact": "caller_triggered_debit",
+  "old": true,
+  "new": true,
+  "reason": "Already true: anonymous submission consumes the merchant's prepaid credit."
+ },
+ {
+  "id": "S-DEV-01",
+  "fact": "shared_resource",
+  "old": false,
+  "new": false,
+  "reason": "Summary describes a per-store capture and an hourly job but does not say one queue or worker is shared across stores; the cross-store pool is not stated. Rule: true only when the summary states several callers/tenants drawing on one finite pool (stock, queue, worker, quota)."
+ },
+ {
+  "id": "S-DEV-03",
+  "fact": "shared_resource",
+  "old": true,
+  "new": true,
+  "reason": "Already true: one sweep takes the oldest 100 carts across all stores, a stated shared queue/worker budget. Differs from S-DEV-01 only because the summary states it."
+ },
+ {
+  "id": "S-DEV-05",
+  "fact": "state_transitions",
+  "old": false,
+  "new": true,
+  "reason": "A negative balance locks the merchant's orders page: a suspension/lock lifecycle state that must halt order admin. Clause: 'suspend ... or must stop side effects on such a move'. Rule: true when the summary states an entity state change (cancel, expire, suspend, lock, remove) or a session expiry/revocation/sign-out."
+ },
+ {
+  "id": "S-DEV-06",
+  "fact": "state_transitions",
+  "old": true,
+  "new": true,
+  "reason": "Already true: orders cancelled, stock released, payments stopped."
+ },
+ {
+  "id": "S-SEA-03",
+  "fact": "state_transitions",
+  "old": false,
+  "new": false,
+  "reason": "Only starts a session cookie; no expiry, revocation or sign-out stated. Same rule as S-SEA-05: session start alone is session_context, not a lifecycle move."
+ },
+ {
+  "id": "S-SEA-05",
+  "fact": "state_transitions",
+  "old": true,
+  "new": true,
+  "reason": "Stays true: summary states a short-lived session (expiry). Same rule as S-SEA-03."
+ },
+ {
+  "id": "S-DEV-03",
+  "fact": "link_or_token_in_message",
+  "old": "unknown",
+  "new": "unknown",
+  "reason": "Stays unknown: the summary says only 'sends the next-step email'; no link or token is stated. Rule: true only if the summary states one; false when no message is known to be sent; unknown when a message is sent with unstated content."
+ },
+ {
+  "id": "S-SEA-14",
+  "fact": "link_or_token_in_message",
+  "old": false,
+  "new": "unknown",
+  "reason": "Customer email is sent but its content is not stated; same rule as S-DEV-03."
+ },
+ {
+  "id": "S-SEA-18",
+  "fact": "link_or_token_in_message",
+  "old": false,
+  "new": "unknown",
+  "reason": "An SMS is sent but its content is not stated; same rule as S-DEV-03."
+ }
+]

@@ -1,0 +1,83 @@
+{
+  "note": "Recoverable label history: must_select changes from labels v3 to labels v4 (reason as given by the labeler).",
+  "v5_note": "Labels v5 changed no must_select; it added inapplicable_basis to every label and the low-risk exceptions only.",
+  "changes": [
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-DEV-01",
+      "control": "VAPT-ABUSE-01",
+      "reason": "address is only the recipient of the recovery mail"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-DEV-03",
+      "control": "VAPT-ABUSE-01",
+      "reason": "cron sweep sends to stored recipients, no identity claim"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-DEV-06",
+      "control": "VAPT-ABUSE-01",
+      "reason": "expiry job reverses state, no caller identifier as authority"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-SEA-14",
+      "control": "VAPT-ABUSE-01",
+      "reason": "customer identified by a signature-verified webhook"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-SEA-16",
+      "control": "VAPT-ABUSE-01",
+      "reason": "typed address is only a recipient; ABUSE-02/03 cover it"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-SEA-16",
+      "control": "VAPT-ABUSE-05",
+      "reason": "no balance debited; also removed from added_controls"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "removed_from_must_select",
+      "scenario": "S-SEA-18",
+      "control": "VAPT-ABUSE-01",
+      "reason": "number is only the SMS recipient"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "added_to_must_select",
+      "scenario": "S-SEA-06",
+      "control": "VAPT-ABUSE-08"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "added_to_must_select",
+      "scenario": "S-SEA-10",
+      "control": "VAPT-ABUSE-08"
+    },
+    {
+      "from": "labels v3",
+      "to": "labels v4",
+      "change": "added_to_must_select",
+      "scenario": "S-SEA-11",
+      "control": "VAPT-ABUSE-08"
+    }
+  ]
+}
