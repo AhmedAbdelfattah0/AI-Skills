@@ -4,7 +4,7 @@
  * RED spec pinning, sequenced engine events and judgments. No I/O. Node built-ins only.
  */
 import { createHash } from 'node:crypto';
-import { posix } from 'node:path';
+import { posix, isAbsolute } from 'node:path';
 import { validateNodes, schedule, RISK_EVIDENCE } from './harness.mjs';
 import { exactExclusions } from './gate.mjs';
 import { BEGIN, END } from './run-state.mjs';
@@ -89,6 +89,12 @@ export function validateEngineDag(doc, { ticket } = {}) {
     return { deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'medium', modelTier: 'inherit',
       estimatedMemoryMb: 0, phase: 'BUILD', evidence: [], redSpecs: [], ...n };
   });
+  // othersOwned goes to the carrier as ownership paths (repoRelative there); hold it to the same rule as writes (harness validateNodes).
+  for (const n of nodes) {
+    if (!Array.isArray(n.othersOwned)) continue;
+    const badPath = n.othersOwned.find(p => typeof p !== 'string' || !p || isAbsolute(p) || p.includes('\\') || p.split('/').some(x => x === '..' || x === '.' || !x));
+    if (badPath !== undefined) bad(`node ${n.id}: othersOwned paths must be repository-relative and normalized`);
+  }
   // The carrier refuses any worker that owns a plan root (no forged START); refuse it here, at init, not as a node_failed mid-run.
   for (const n of nodes) {
     const hit = [...(Array.isArray(n.writes) ? n.writes : []), ...(Array.isArray(n.othersOwned) ? n.othersOwned : [])].find(p => typeof p === 'string' && PLAN_ROOTS.some(r => {

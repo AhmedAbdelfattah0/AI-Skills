@@ -30,7 +30,7 @@ test('gap 2: a node that writes or co-owns a plan root is dag_invalid at init, n
     for (const field of ['writes', 'othersOwned']) {
       const d = structuredClone(doc);
       d.nodes[0][field] = [bad];
-      assert.throws(() => validateEngineDag(d, { ticket: 'T-1' }), { code: 'dag_invalid', message: /plan artifact root/ }, `${field}: ${bad}`);
+      assert.throws(() => validateEngineDag(d, { ticket: 'T-1' }), { code: 'dag_invalid' }, `${field}: ${bad}`);
     }
   }
   const fine = structuredClone(doc);
@@ -116,4 +116,30 @@ test('gap 2 (review): malformed writes stay dag_invalid, not an uncoded TypeErro
     d.nodes[0].writes = w;
     assert.throws(() => validateEngineDag(d, { ticket: 'T-1' }), { code: 'dag_invalid' }, JSON.stringify(w));
   }
+});
+
+test('CodeRabbit 4513255380: othersOwned must be repository-relative and normalized, like writes (dag_invalid at init)', { skip: WIN_SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true });
+  const doc = JSON.parse(readFileSync(fx.dagFile, 'utf8'));
+  for (const p of ['../.specs/x', '/abs/.specs', '/abs/other', '../outside', 'C:\\x', 'a//b', 'a/./b', '']) {
+    const d = structuredClone(doc);
+    d.nodes[0].othersOwned = [p];
+    assert.throws(() => validateEngineDag(d, { ticket: 'T-1' }), { code: 'dag_invalid', message: /repository-relative and normalized/ }, JSON.stringify(p));
+  }
+  const ok2 = structuredClone(doc);
+  ok2.nodes[0].othersOwned = ['docs/other.md', 'a:assets']; // a legal POSIX directory name the carrier accepts
+  validateEngineDag(ok2, { ticket: 'T-1' });
+});
+
+test('CodeRabbit 4513255398: a failed archive leaves no numbered directory behind', { skip: WIN_SKIP }, async (t) => {
+  const fx = fixture(t, { commit: true, behaviour: { a: { write: { 'src/a.txt': 'a1' } } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive'));
+  // A directory where usage.jsonl should be makes the copy fail midway (EISDIR), after state.json was copied.
+  mkdirSync(fx.usageFile(), { recursive: true });
+  const r = fx.cli('archive');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const base = join(commonGitDir(fx.repo), 'ai-skills', 'ship-ticket', 'archive', 'T-1');
+  const left = existsSync(base) ? readdirSync(base) : [];
+  assert.deepEqual(left, [], `no partial archive or staging directory remains: ${left}`);
 });

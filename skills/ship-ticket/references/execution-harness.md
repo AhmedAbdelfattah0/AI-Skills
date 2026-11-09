@@ -623,7 +623,9 @@ in the work tree's own git dir, so `git worktree remove` deletes them (SCRUM-307
 timing data that way). Run `run-engine.mjs archive` first: it copies them with a `manifest.json`
 (sha256 per file) to `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/`, never
 overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
-`.attempts/` (envelopes and outputs).
+`.attempts/` (envelopes and outputs). Files are staged and published whole, so a failed copy leaves no numbered
+directory. `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
+or its last line may be a partial record (the manifest hashes the copy, not a repaired file).
 
 **Plan roots are not node writes.** A node whose `writes` or `othersOwned` sit under `.specs/` or
 `.spec/` is `dag_invalid` at `init` (the carrier always refused such a worker, as a `node_failed` at

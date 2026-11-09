@@ -17,7 +17,7 @@
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  */
-import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
@@ -419,14 +419,20 @@ export async function archive(ctx) {
     const base = join(io.commonGitDir(ctx.repoRoot), 'ai-skills', 'ship-ticket', 'archive', ctx.ticket);
     mkdirSync(base, { recursive: true });
     let n = readdirSync(base).filter(d => d.startsWith(ctx.runId + '-') && /^\d+$/.test(d.slice(ctx.runId.length + 1))).length + 1, dir;
-    for (;; n++) { dir = join(base, `${ctx.runId}-${n}`); try { mkdirSync(dir); break; } catch (e) { if (e.code !== 'EEXIST') throw e; } }
+    while (existsSync(dir = join(base, `${ctx.runId}-${n}`))) n++;
+    // Stage, then publish: a failed copy never leaves a numbered directory (the ticket lock excludes a concurrent archive).
+    const stage = join(base, `.staging-${ctx.runId}-${n}-${randomUUID()}`);
+    mkdirSync(stage);
     const files = {};
-    for (const [name, src] of [['state.json', E.P.state], ['engine.jsonl', E.P.log], ['usage.jsonl', E.P.usage]]) {
-      if (!existsSync(src)) continue;
-      copyFileSync(src, join(dir, name));
-      files[name] = sha(readFileSync(join(dir, name)));
-    }
-    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, archived_at: new Date().toISOString(), files }, null, 2) + '\n');
+    try {
+      for (const [name, src] of [['state.json', E.P.state], ['engine.jsonl', E.P.log], ['usage.jsonl', E.P.usage]]) {
+        if (!existsSync(src)) continue;
+        copyFileSync(src, join(stage, name));
+        files[name] = sha(readFileSync(join(stage, name)));
+      }
+      writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, archived_at: new Date().toISOString(), files }, null, 2) + '\n');
+      renameSync(stage, dir);
+    } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
     return { archive: dir, files };
   }, { load: false });
 }
