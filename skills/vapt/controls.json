@@ -1,0 +1,2283 @@
+{
+  "catalog_version": 1,
+  "semantics": "applies_when is a closed grammar: {\"all\":[...]} | {\"any\":[...]} | leaf {\"fact\",\"op\":\"includes|is\",\"value\"}; \"includes\" applies to enum facts, \"is\" to any; no leaf tests a fact for false, so predicates are monotone. Unknown encoding: a fact whose key is absent, whose value is null, or whose value is the string \"unknown\" is unknown for that change, and an unknown fact value matches every leaf on that fact (so an unknown never removes a control). Validation: an out-of-vocabulary fact value is rejected: a fact name outside fact_vocabulary, a bool fact holding anything but true, false or an unknown encoding (for example \"yes\"), an enum fact that is not an array, or an array element outside the fact's values (for example the boundary kind \"request_handler\") makes the evaluator throw, so a typo can never silently drop a control. Selection accounting replaces reverse-engineering the predicates: for every control and every boundary kind, the kind as the only boundary with every other fact known-false either selects the control or appears in its not_applicable map with a reason; a reason starting \"gated by <fact>:\" must select once that fact is true, any other reason must stay unselected with every fact true. A boundary kind describes the changed code only, so a reason is valid only as an intrinsic impossibility of that kind; a reason that defers to another boundary kind, another control or selection elsewhere is rejected (that other component may be unchanged), and the reason's truth is a review item. [NN] controls apply to every kind unless a reason is written, because a false \"not applicable\" on an [NN] control is a security hole. ABUSE controls list primary_facts that alone must select them. The principals fact is informational (see unused_ok). SKILL.md tables and this file must agree on ids, tiers, titles, attack text and BE-* mirrors (skills/vapt/controls.test.mjs enforces it).",
+  "fact_vocabulary": {
+    "boundaries": {
+      "type": "enum",
+      "values": [
+        "request-handler",
+        "auth-lifecycle",
+        "external-input-operation",
+        "rendering-sink",
+        "server-input",
+        "file-path",
+        "client-storage",
+        "outbound-data",
+        "async-consumer",
+        "security-config",
+        "business-invariant"
+      ],
+      "definition": "The set of trust-boundary kinds the change introduces or modifies (the STEP 2 table in SKILL.md). A change may have several; a change touching none is out of scope and each exclusion must be named.",
+      "examples": {
+        "positive": "Adds a route that reads an order by id: [request-handler]. A webhook receiver: [request-handler, async-consumer].",
+        "negative": "Renaming a CSS class or a pure date formatter touches no boundary: do not list one."
+      },
+      "value_definitions": {
+        "business-invariant": "Code that enforces a business rule (price, stock, fee, quota, entitlement, lifecycle, outbound sends), even when it is an RPC, migration, trigger or service touching no request handler. Example: a SQL function that computes the order total. A client-callable RPC or SQL function is also tagged request-handler, because a caller reaches it directly."
+      }
+    },
+    "principals": {
+      "type": "enum",
+      "values": [
+        "anonymous",
+        "authenticated",
+        "staff",
+        "service"
+      ],
+      "definition": "Informational: who can reach the changed surface (anonymous = no credential; authenticated = any signed-in end user; staff = an operator or admin role; service = machine-to-machine). No control narrows on it, because narrowing on 'authenticated' hid anonymous object-by-id routes and staff-only routes; it only tells STEP 3 which identities to build.",
+      "examples": {
+        "positive": "Order tracking by id with no login: [anonymous]. An admin refund endpoint: [staff].",
+        "negative": "A route that merely sits behind a login is not 'authenticated only' for selection purposes: a request-handler change selects the request controls regardless."
+      }
+    },
+    "persistent_write": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the change creates, updates, upserts or deletes state in any system: its own store (ORM, raw SQL, RPC, migration, queue write) or a system it calls, such as an identity provider (user records, roles, metadata), a payment provider (customers, charges, refunds, subscriptions) or a connected store or SaaS.",
+      "examples": {
+        "positive": "A handler that inserts an order row; a handler that calls the identity provider to update or delete a user, writing nothing locally.",
+        "negative": "A pure read is false, even through a provider (fetching a customer from the payment provider); a cache write that holds no business state is false."
+      }
+    },
+    "outbound_message": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the platform sends an email, SMS, push or webhook to a party outside the request, directly or from a job.",
+      "examples": {
+        "positive": "A cron sweep that mails invoice reminders.",
+        "negative": "An HTTP response to the caller is not an outbound message."
+      }
+    },
+    "recipient_unproven": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when a message recipient is named by the caller or taken from data the caller controls and has not proven ownership of.",
+      "examples": {
+        "positive": "A 'share this order' form that mails any address typed in.",
+        "negative": "A password-reset mail to the address already verified on the account is proven."
+      }
+    },
+    "identity_claim_unproven": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when an email, phone or similar identifier the caller merely asserts is used as authority to spend, redeem, overwrite, claim, receive a grant or key a limit.",
+      "examples": {
+        "positive": "A coupon redeemed by typing someone else's email; a staff invite that grants a role to an address nobody proved.",
+        "negative": "Using the id of the authenticated session as identity is a proven identity."
+      }
+    },
+    "spends_or_reserves_value": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the change debits, charges, reserves, holds or releases money, credit, stock, quota or points.",
+      "examples": {
+        "positive": "Placing an order reserves stock.",
+        "negative": "Reading a balance does not spend or reserve it."
+      }
+    },
+    "shared_resource": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when several callers or tenants draw on one finite pool: stock, a queue, a worker, a quota.",
+      "examples": {
+        "positive": "A shared job queue consumed by all tenants.",
+        "negative": "A per-user draft document nobody else can touch."
+      }
+    },
+    "caller_triggered_debit": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when an action by an anonymous or low-trust caller debits a balance, wallet, fee ledger or quota that belongs to someone else.",
+      "examples": {
+        "positive": "A shopper's order debits the store owner's fee balance.",
+        "negative": "A user spending their own wallet is not a cost shift."
+      }
+    },
+    "state_transitions": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the change moves an entity through lifecycle states (cancel, expire, suspend, dismiss, pending, closed) or must stop side effects on such a move.",
+      "examples": {
+        "positive": "Store suspension that should halt orders, mails and jobs.",
+        "negative": "A stateless calculation with no stored status."
+      }
+    },
+    "plan_gated_feature": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when access to a feature depends on a plan, role, entitlement or feature flag that the server must enforce, including from background jobs and crons.",
+      "examples": {
+        "positive": "A cron that runs a premium feature for every tenant.",
+        "negative": "A feature every user has regardless of plan."
+      }
+    },
+    "link_or_token_in_message": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when an outbound message carries any link, token or magic URL, whatever the source of its host: configuration, tenant data, or the request itself.",
+      "examples": {
+        "positive": "A password-reset mail whose link host is built from the request Host or X-Forwarded-Host header; a link to a tenant custom domain.",
+        "negative": "A plain-text notification with no URL and no token."
+      }
+    },
+    "session_context": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the change reads, creates, replaces or trusts a session, its assurance level (aal1, recovery) or a session-bearing link.",
+      "examples": {
+        "positive": "A route that reads protected data for any valid session.",
+        "negative": "A public marketing page with no session."
+      }
+    },
+    "attempt_limit": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when the change enforces a cap on guesses or attempts (login tries, code redemption tries, per-key limits), including a tenant-local endpoint that guards a guessable secret.",
+      "examples": {
+        "positive": "A coupon-code endpoint that allows five guesses per key.",
+        "negative": "A generic request rate limit with nothing guessable behind it still counts only if it guards a guessable value."
+      }
+    },
+    "sensitive_field_write": {
+      "type": "bool",
+      "values": [
+        true,
+        false
+      ],
+      "definition": "True when a client or role-writable input sets, or is used to derive, a value of consequence: price, fee, shipping total, payment status, entitlement, plan, role.",
+      "examples": {
+        "positive": "fulfillment_type=pickup silently sets shipping to 0.",
+        "negative": "A free-text note field with no effect on money or access."
+      }
+    }
+  },
+  "controls": [
+    {
+      "id": "VAPT-API-01",
+      "family": "API",
+      "title": "BOLA / IDOR",
+      "tier": "[NN]",
+      "attack": "BOLA / IDOR. User A reads, updates, or deletes an object owned by user B by swapping the identifier. Test every identifier the route accepts, including nested and in-body ones.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "User A reads, updates or deletes an object owned by user B by swapping any identifier the route accepts, including nested and in-body ones.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Two tenants, one owned object per type; for each identifier A requests B's object and asserts the refusal status; the owner request still succeeds."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-01 with a cross-tenant refusal and an owner-succeeds case.",
+      "static_mirror": [
+        "BE-SEC-09",
+        "BE-TEN-02",
+        "BE-TEN-03"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-01"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API1:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-02",
+      "family": "API",
+      "title": "Broken authentication",
+      "tier": "[NN]",
+      "attack": "Broken authentication. The route answers with no credential, an expired one, a tampered signature, a token issued for another audience/tenant, or one that was revoked.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "The route answers with no credential, an expired one, a tampered signature, a token for another audience/tenant, or a revoked one.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Table of credentials (none, expired, tampered, wrong audience, revoked) against the route; assert 401/403 for each and 200 for a valid one."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-02 covering each credential row plus a valid-credential control.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-02"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API2:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-03",
+      "family": "API",
+      "title": "Broken function-level authorization",
+      "tier": "[NN]",
+      "attack": "Broken function-level authorization. A low-privilege principal reaches an operation meant for a higher role — including the method nobody guarded (GET protected, DELETE forgotten).",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "A low-privilege principal reaches an operation meant for a higher role, including the method nobody guarded.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "For every HTTP method on the route, low-privilege and high-privilege principals; assert low is refused and high succeeds."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-03 per method and role.",
+      "static_mirror": [
+        "BE-SEC-09"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-03"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API5:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-04",
+      "family": "API",
+      "title": "Mass assignment",
+      "tier": "[NN]",
+      "attack": "Mass assignment. A privileged field submitted in the body is persisted — role, is_admin, tenant_id, verified, balance, price, created_by.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "all": [
+              {
+                "any": [
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "request-handler"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "auth-lifecycle"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "external-input-operation"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "server-input"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "file-path"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "client-storage"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "async-consumer"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "business-invariant"
+                  }
+                ]
+              },
+              {
+                "fact": "persistent_write",
+                "op": "is",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by persistent_write: mass assignment is a submitted field being persisted, so a request-handler change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "auth-lifecycle": "gated by persistent_write: mass assignment is a submitted field being persisted, so an auth-lifecycle change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "external-input-operation": "gated by persistent_write: mass assignment is a submitted field being persisted, so an external-input-operation change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "rendering-sink": "a rendering-sink change only outputs a value into a page; it takes no submitted body and writes nothing, so no privileged field can be persisted through it.",
+        "server-input": "gated by persistent_write: mass assignment is a submitted field being persisted, so a server-input change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "file-path": "gated by persistent_write: mass assignment is a submitted field being persisted, so a file-path change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "client-storage": "gated by persistent_write: mass assignment is a submitted field being persisted, so a client-storage change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "async-consumer": "gated by persistent_write: mass assignment is a submitted field being persisted, so an async-consumer change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact.",
+        "business-invariant": "gated by persistent_write: mass assignment is a submitted field being persisted, so a business-invariant change that stores nothing in any system cannot exhibit it; any write through this surface sets the fact."
+      },
+      "prevent": "A privileged field submitted in the body is persisted (role, is_admin, tenant_id, verified, balance, price, created_by).",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Submit each privileged field in the body as an ordinary principal; assert the stored or provider-held value is unchanged or the request is refused."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-04 reading back the stored row or the provider object.",
+      "static_mirror": [
+        "BE-SEC-03"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-04"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API3:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-05",
+      "family": "API",
+      "title": "Injection",
+      "tier": "[NN]",
+      "attack": "Injection. Untrusted input reaching an interpreter — SQL/NoSQL, command, template, LDAP, or path traversal on any file/path parameter.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "Untrusted input reaches an interpreter: SQL/NoSQL, command, template, LDAP, or path traversal on any file/path parameter.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Send injection and traversal payloads per parameter; assert no interpreter effect, no foreign data, and a clean refusal."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-05 per input parameter.",
+      "static_mirror": [
+        "BE-SEC-03",
+        "BE-SEC-05"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-05"
+        },
+        {
+          "kind": "owasp",
+          "ref": "A03:2021"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-06",
+      "family": "API",
+      "title": "Excessive data exposure",
+      "tier": "[NN]",
+      "attack": "Excessive data exposure. The response body carries fields this caller must not see — password hashes, internal IDs, other users' data, plan/billing internals, soft-deleted rows.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "The response body carries fields this caller must not see (hashes, internal IDs, other users' data, plan/billing internals, soft-deleted rows).",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Request as each principal; assert the response keys exclude the forbidden field list."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-06 with an explicit forbidden-field list.",
+      "static_mirror": [
+        "BE-SEC-02"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-06"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API3:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-07",
+      "family": "API",
+      "title": "Error leakage",
+      "tier": "[NN]",
+      "attack": "Error leakage. A malformed or hostile request returns a stack trace, driver error, file path, or query text.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "A malformed or hostile request returns a stack trace, driver error, file path, or query text.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Send malformed bodies and types; assert the error body contains none of the leak markers."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-07.",
+      "static_mirror": [
+        "BE-SEC-08"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-07"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-API-08",
+      "family": "API",
+      "title": "Resource abuse",
+      "tier": "[D]",
+      "attack": "Resource abuse. No throttle on an expensive or auth-adjacent route; unbounded page size, upload size, or payload depth.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "client-storage": "client-storage is state in the caller's own browser; filling or reading it spends only that caller's device, never server capacity, a throttle or another party's quota."
+      },
+      "prevent": "No throttle on an expensive or auth-adjacent route; unbounded page size, upload size or payload depth.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Bounded probe: exceed the documented limit by a small margin and assert the limiter engages; oversize page/upload/depth is refused."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-API-08 proving the limiter engages without flooding.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-API-08"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API4:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-WEB-01",
+      "family": "WEB",
+      "title": "XSS",
+      "tier": "[NN]",
+      "attack": "XSS. A stored or reflected value reaches an HTML, attribute, URL, or script sink and executes. Test what the *server* stores, not just what the form accepts.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "A stored or reflected value reaches an HTML, attribute, URL or script sink and executes. Test what the server stores.",
+      "verify": {
+        "type": "both",
+        "pattern": "Store a payload through the server, render it, assert it is inert (escaped or not executed)."
+      },
+      "env": "browser-runner",
+      "evidence": "Committed test named VAPT-WEB-01 on the rendered output.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-WEB-01"
+        },
+        {
+          "kind": "owasp",
+          "ref": "A03:2021"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-WEB-02",
+      "family": "WEB",
+      "title": "Client-side-only authorization",
+      "tier": "[NN]",
+      "attack": "Client-side-only authorization. The UI hides the control, but the underlying request still succeeds when issued directly. The hidden button is not a permission.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "The UI hides the control but the underlying request still succeeds when issued directly.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Issue the hidden control's request directly as an unprivileged principal; assert refusal."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-WEB-02.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-WEB-02"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API5:2023"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-WEB-03",
+      "family": "WEB",
+      "title": "Credential exposure in the client",
+      "tier": "[NN]",
+      "attack": "Credential exposure in the client. Session token in localStorage, a secret/API key inlined into the built bundle, PII in a client-side log.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "Session token in localStorage, a secret/API key inlined into the built bundle, PII in a client-side log.",
+      "verify": {
+        "type": "both",
+        "pattern": "After login, assert storage holds no session token; scan the built bundle for known secret shapes."
+      },
+      "env": "browser-runner",
+      "evidence": "Committed test named VAPT-WEB-03.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-WEB-03"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-WEB-04",
+      "family": "WEB",
+      "title": "CSRF / unsafe cross-origin state change",
+      "tier": "[NN]",
+      "attack": "CSRF / unsafe cross-origin state change. A state-changing request succeeds without an anti-CSRF token or an equivalent SameSite guarantee.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "all": [
+              {
+                "any": [
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "request-handler"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "external-input-operation"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "rendering-sink"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "server-input"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "file-path"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "async-consumer"
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "business-invariant"
+                  }
+                ]
+              },
+              {
+                "any": [
+                  {
+                    "fact": "persistent_write",
+                    "op": "is",
+                    "value": true
+                  },
+                  {
+                    "fact": "state_transitions",
+                    "op": "is",
+                    "value": true
+                  },
+                  {
+                    "fact": "spends_or_reserves_value",
+                    "op": "is",
+                    "value": true
+                  },
+                  {
+                    "fact": "session_context",
+                    "op": "is",
+                    "value": true
+                  },
+                  {
+                    "fact": "outbound_message",
+                    "op": "is",
+                    "value": true
+                  },
+                  {
+                    "fact": "boundaries",
+                    "op": "includes",
+                    "value": "outbound-data"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: a request-handler change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "external-input-operation": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: an external-input-operation change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "rendering-sink": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: a rendering-sink change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "server-input": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: a server-input change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "file-path": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: a file-path change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "async-consumer": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: an async-consumer change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state.",
+        "business-invariant": "gated by persistent_write or state_transitions or spends_or_reserves_value or session_context or outbound_message: a business-invariant change that writes nothing, transitions nothing, spends nothing, touches no session, sends no message and calls no outside system is a read, and a forged cross-site read changes no state."
+      },
+      "prevent": "A state-changing request succeeds without an anti-CSRF token or an equivalent SameSite guarantee.",
+      "verify": {
+        "type": "both",
+        "pattern": "Request layer (request-harness): replay the state-changing request without the anti-CSRF token and with a foreign Origin; assert refusal, with a legitimate same-origin request carrying the token as the positive control. SameSite row (browser-runner only): where protection relies on SameSite cookies, assert it only with real browser behaviour (a cross-site navigation or form post does not carry the session cookie); an in-process client cannot show this and must not fail a legitimately SameSite-protected app."
+      },
+      "env": "request-harness",
+      "evidence": "Committed test named VAPT-WEB-04.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-WEB-04"
+        },
+        {
+          "kind": "owasp",
+          "ref": "A01:2021"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself.",
+      "env_also": [
+        "browser-runner"
+      ]
+    },
+    {
+      "id": "VAPT-WEB-05",
+      "family": "WEB",
+      "title": "Unsafe navigation",
+      "tier": "[D]",
+      "attack": "Unsafe navigation. Open redirect, unvalidated postMessage origin, target=\"_blank\" without rel=\"noopener\".",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "Open redirect, unvalidated postMessage origin, target=\"_blank\" without rel=\"noopener\".",
+      "verify": {
+        "type": "both",
+        "pattern": "Supply an off-origin redirect target and a foreign postMessage origin; assert both are ignored; assert rel on external links."
+      },
+      "env": "browser-runner",
+      "evidence": "Committed test named VAPT-WEB-05.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-WEB-05"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-CFG-01",
+      "family": "CFG",
+      "title": "CORS",
+      "tier": "[NN]",
+      "attack": "CORS. A credentialed request from an unintended origin is accepted — reflected Origin, wildcard with credentials, a too-loose regex.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "rendering-sink": "a rendering-sink change only shapes page content; it cannot set an Access-Control-* response header, so it cannot make a credentialed cross-origin read acceptable.",
+        "server-input": "server-input is the sending side of a request inside our own page; it cannot set an Access-Control-* response header, so it cannot make a credentialed cross-origin read acceptable.",
+        "client-storage": "client-storage is per-origin browser state; it sets no Access-Control-* response header and the browser never shares it across origins.",
+        "outbound-data": "outbound-data is a call to another party's server; it sets no Access-Control-* header on our responses, and whether that party admits our origin is its policy, not ours."
+      },
+      "prevent": "A credentialed request from an unintended origin is accepted (reflected Origin, wildcard with credentials, loose regex).",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Boot the app and, from an unintended origin, send (1) a credentialed preflight and assert it is not allowed, and (2) a credentialed simple (non-preflight) request (GET, or POST with a form content type, carrying the session cookie) and assert the response does not reflect the origin in Access-Control-Allow-Origin and does not send Access-Control-Allow-Credentials: true. Positive control: the intended origin is allowed."
+      },
+      "env": "boot-and-inspect",
+      "evidence": "Committed test named VAPT-CFG-01 asserting actual response headers.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-CFG-01"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-CFG-02",
+      "family": "CFG",
+      "title": "Missing security headers",
+      "tier": "[D]",
+      "attack": "Missing security headers on the surface this change ships — CSP, X-Content-Type-Options, frame-ancestors, HSTS.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          }
+        ]
+      },
+      "not_applicable": {
+        "server-input": "server-input is a form or binding on the sending side of a request; it ships no HTTP response, so it has no response header to omit.",
+        "client-storage": "client-storage is browser state, not a shipped HTTP surface; it carries no response headers that could be missing.",
+        "outbound-data": "outbound-data is a request this server sends, not a response it ships to a browser, so browser security headers have nothing to protect on it.",
+        "business-invariant": "business-invariant code computes and enforces a rule and returns data to its caller; it ships no page and sets no HTTP response header."
+      },
+      "prevent": "Missing CSP, X-Content-Type-Options, frame-ancestors or HSTS on the surface this change ships.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Boot the app and assert the headers on the shipped surface."
+      },
+      "env": "boot-and-inspect",
+      "evidence": "Committed test named VAPT-CFG-02.",
+      "static_mirror": [
+        "BE-HDR-01"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-CFG-02"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-CFG-03",
+      "family": "CFG",
+      "title": "Reachable secret",
+      "tier": "[NN]",
+      "attack": "Reachable secret. A key committed to the repo, baked into a build artifact, or written to a log.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "request-handler"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "external-input-operation"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "rendering-sink"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "server-input"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "file-path"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "async-consumer"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {},
+      "prevent": "A key committed to the repo, baked into a build artifact, or written to a log.",
+      "verify": {
+        "type": "static",
+        "pattern": "Executable scan test over tracked files, build output and captured logs for known secret shapes; assert zero hits and fail on any hit."
+      },
+      "env": "repo-scan",
+      "evidence": "Committed scan test named VAPT-CFG-03 that fails on a planted fake secret.",
+      "static_mirror": [
+        "BE-RT-03",
+        "BE-SEC-04"
+      ],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-CFG-03"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-CFG-04",
+      "family": "CFG",
+      "title": "Cookie flags",
+      "tier": "[NN]",
+      "attack": "Cookie flags. A session cookie set without httpOnly + secure + an explicit SameSite.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "client-storage"
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "security-config"
+          },
+          {
+            "fact": "session_context",
+            "op": "is",
+            "value": true
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by session_context: a request-handler change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "external-input-operation": "gated by session_context: an external-input-operation change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "rendering-sink": "gated by session_context: a rendering-sink change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "server-input": "gated by session_context: a server-input change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "file-path": "gated by session_context: a file-path change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "outbound-data": "gated by session_context: an outbound-data change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "async-consumer": "gated by session_context: an async-consumer change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true.",
+        "business-invariant": "gated by session_context: a business-invariant change that reads, creates, replaces or trusts no session sets no session cookie, so there is no cookie flag to omit; an OAuth callback, impersonation or tenant switch that sets one has session_context true."
+      },
+      "prevent": "A session cookie set without httpOnly + secure + an explicit SameSite.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Log in and assert Set-Cookie attributes on the session cookie."
+      },
+      "env": "boot-and-inspect",
+      "evidence": "Committed test named VAPT-CFG-04.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-CFG-04"
+        }
+      ],
+      "validated": "Wording and tier copied from the SKILL.md rule table; no change in meaning. Unvalidated against external evidence beyond the skill itself."
+    },
+    {
+      "id": "VAPT-ABUSE-01",
+      "family": "ABUSE",
+      "title": "Unproven identifier as authority",
+      "tier": "[NN]",
+      "attack": "Unproven identifier as authority. An email or phone the caller has not proven spends, redeems, overwrites, claims, receives a privileged grant (including one an admin later gives to an identifier pre-claimed while unverified), or keys a limit. The refusal must not depend on victim data (no balance or existence oracle).",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "identity_claim_unproven",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by identity_claim_unproven: a request-handler change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "external-input-operation": "gated by identity_claim_unproven: an external-input-operation change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "rendering-sink": "gated by identity_claim_unproven: a rendering-sink change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "server-input": "gated by identity_claim_unproven: a server-input change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "file-path": "gated by identity_claim_unproven: a file-path change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "client-storage": "gated by identity_claim_unproven: a client-storage change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "outbound-data": "gated by identity_claim_unproven: an outbound-data change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "async-consumer": "gated by identity_claim_unproven: an async-consumer change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "security-config": "gated by identity_claim_unproven: a security-config change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it.",
+        "business-invariant": "gated by identity_claim_unproven: a business-invariant change that uses no caller-asserted email or phone as authority has no unproven identifier to abuse; the class follows the identifier, so the fact (not the surface) decides it."
+      },
+      "primary_facts": [
+        "identity_claim_unproven"
+      ],
+      "prevent": "An email or phone the caller has not proven must not spend, redeem, overwrite, claim, receive a privileged grant, or key a limit, and an identifier pre-claimed while unverified must not inherit authority when a legitimate admin later grants it. Refusal must not depend on victim data, so there is no balance or existence oracle.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: anonymous attacker, victim whose identifier is named, owner who proved it, a legitimate admin. Request: the spend/redeem/overwrite/claim/grant/limit action naming the victim identifier. Assert: the attacker is refused with identical externally observable values for victim-with-data and victim-without-data (status, error code and message, and relevant headers; only ids and timestamps may be normalised away), the victim's state is unchanged, and a request carrying no identifier cannot bypass a per-identifier limit. Staged row (F13): the attacker pre-claims an unverified identifier, then the admin grants authority to that identifier; assert privilege activation requires proof of the identifier and the pre-claimed account gains nothing. Rotation row: from the same phone or device, repeat the limited action with a new, unproven email each time; assert the limit still counts across the normalised identifiers (case, dots, plus-tags, phone formatting) and the device, so rotating the email does not reset it. Positive control: the proven owner succeeds, and a different phone or device with its own proven identifier is not blocked by the attacker's count."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-01 with an equal-response pair (victim with and without data) and an unchanged-state read-back.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-01"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F03"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F04"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F13"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F15"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API6:2023"
+        }
+      ],
+      "validated": "Reasoned from the F03/F04/F13/F15 finding evidence (attacker named the identifier and the action succeeded or answered differently); not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-02",
+      "family": "ABUSE",
+      "title": "Outbound message abuse",
+      "tier": "[NN]",
+      "attack": "Outbound message abuse. The platform sends a message or mail to a recipient the caller has not proven, carrying caller-controlled text, with no recipient or tenant cap — including jobs for a suspended tenant that keep sending.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "outbound_message",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "recipient_unproven",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "outbound-data"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by outbound_message or recipient_unproven: a request-handler change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "auth-lifecycle": "gated by outbound_message or recipient_unproven: an auth-lifecycle change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "external-input-operation": "gated by outbound_message or recipient_unproven: an external-input-operation change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "rendering-sink": "gated by outbound_message or recipient_unproven: a rendering-sink change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "server-input": "gated by outbound_message or recipient_unproven: a server-input change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "file-path": "gated by outbound_message or recipient_unproven: a file-path change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "client-storage": "gated by outbound_message or recipient_unproven: a client-storage change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "async-consumer": "gated by outbound_message or recipient_unproven: an async-consumer change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "security-config": "gated by outbound_message or recipient_unproven: a security-config change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse.",
+        "business-invariant": "gated by outbound_message or recipient_unproven: a business-invariant change that sends no email, SMS, push or webhook and names no unproven recipient has no message to abuse."
+      },
+      "primary_facts": [
+        "outbound_message",
+        "recipient_unproven"
+      ],
+      "prevent": "A platform-sent message or mail to a recipient the caller has not proven, carrying caller-controlled text, needs recipient and tenant caps and must not carry the free text to unverified recipients. Jobs for suspended tenants must not keep sending.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: anonymous caller, unproven recipient, suspended tenant. Request: the action that triggers the message with free text and a third-party recipient. Assert (recipient rows live here, not in the predicate) against a stubbed outbound transport: no message with the caller text reaches the unproven recipient; the (N+1)th message to one recipient or from one tenant within the window is refused; a queued job for a suspended tenant sends nothing. Positive control: a verified recipient receives the message."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-02 asserting on the stubbed transport's captured messages.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-02"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F02"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F04"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F07"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F19"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API6:2023"
+        }
+      ],
+      "validated": "Reasoned from the F02/F04/F07 (mail sent to the named address with attacker text) and F19 (sweep sends for a suspended tenant) finding evidence; the evidence used mocked transports; not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-03",
+      "family": "ABUSE",
+      "title": "Link and token destination trust",
+      "tier": "[NN]",
+      "attack": "Link and token destination trust. A link or token in an outbound message points at a host or origin that is not verified.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "link_or_token_in_message",
+            "op": "is",
+            "value": true
+          },
+          {
+            "all": [
+              {
+                "fact": "boundaries",
+                "op": "includes",
+                "value": "auth-lifecycle"
+              },
+              {
+                "fact": "outbound_message",
+                "op": "is",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by link_or_token_in_message: a request-handler change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "auth-lifecycle": "gated by link_or_token_in_message or outbound_message: an auth-lifecycle change that sends no message and puts no link, token or magic URL into one has no destination host to trust.",
+        "external-input-operation": "gated by link_or_token_in_message: an external-input-operation change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "rendering-sink": "gated by link_or_token_in_message: a rendering-sink change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "server-input": "gated by link_or_token_in_message: a server-input change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "file-path": "gated by link_or_token_in_message: a file-path change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "client-storage": "gated by link_or_token_in_message: a client-storage change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "outbound-data": "gated by link_or_token_in_message: an outbound-data change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "async-consumer": "gated by link_or_token_in_message: an async-consumer change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "security-config": "gated by link_or_token_in_message: a security-config change that puts no link, token or magic URL into an outbound message has no destination host to trust.",
+        "business-invariant": "gated by link_or_token_in_message: a business-invariant change that puts no link, token or magic URL into an outbound message has no destination host to trust."
+      },
+      "primary_facts": [
+        "link_or_token_in_message"
+      ],
+      "prevent": "Links or tokens placed in outbound messages must use only a verified host or origin; the platform must never place a token under an unverified host.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: tenant owner with an unverified custom domain, with a verified one, with none; an anonymous caller who forges the Host and X-Forwarded-Host headers. Request: trigger the message (sign-up, reset, invite, order mail), once with forged host headers. Assert on the stubbed transport that every link host and every token-bearing URL in the body is in the verified set, that a token is never placed under an unverified host, and that a request-header host never reaches the link. Positive control: the verified domain host is used."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-03 parsing URLs from the captured message.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-03"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F23"
+        }
+      ],
+      "validated": "Reasoned from the single F23 finding (unverified domain linked, same as verified); not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-04",
+      "family": "ABUSE",
+      "title": "Shared-resource and fairness abuse under the rate limit",
+      "tier": "[D]",
+      "attack": "Shared-resource and fairness abuse under the rate limit. Stock or inventory holds, queue head-of-line starvation across tenants, or a guess cap bypassed through an alternate route or an omittable limit key.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "shared_resource",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "attempt_limit",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by shared_resource or attempt_limit: a request-handler change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "auth-lifecycle": "gated by shared_resource or attempt_limit: an auth-lifecycle change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "external-input-operation": "gated by shared_resource or attempt_limit: an external-input-operation change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "rendering-sink": "gated by shared_resource or attempt_limit: a rendering-sink change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "server-input": "gated by shared_resource or attempt_limit: a server-input change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "file-path": "gated by shared_resource or attempt_limit: a file-path change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "client-storage": "gated by shared_resource or attempt_limit: a client-storage change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "outbound-data": "gated by shared_resource or attempt_limit: an outbound-data change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "async-consumer": "gated by shared_resource or attempt_limit: an async-consumer change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit.",
+        "security-config": "gated by shared_resource or attempt_limit: a security-config change that draws on no finite shared pool and caps no guesses has no hold, starvation or guess-cap bypass to exhibit."
+      },
+      "primary_facts": [
+        "shared_resource",
+        "attempt_limit"
+      ],
+      "prevent": "Stock or inventory holds, queue head-of-line starvation across tenants, and guess-cap bypass via alternate routes or omittable limit keys must be bounded by more than a per-caller rate limit.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: one low-trust caller, a second tenant/shopper. Request: repeat the hold/enqueue/guess action up to and beyond the documented cap, and via every alternate route that exposes the same check, and with the limit key omitted. Assert: total held quantity is capped per caller, hold expiry releases stock, the second principal's work still progresses, and the guess cap counts attempts across routes. Positive control: the second principal completes a normal action. The guess-cap row also applies to a tenant-local endpoint (attempt_limit), not only to shared pools."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-04 with before/after availability for the second principal.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-04"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F01"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F05"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F08"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F17"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API6:2023"
+        }
+      ],
+      "validated": "Reasoned from the F05/F08/F17 finding evidence (real-Postgres reproductions of the faults); F01 (queue starvation) was reproduced only against mocks, so its starvation bound is unvalidated on a real queue. Marked [D] because fair-share limits are a product decision; not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-05",
+      "family": "ABUSE",
+      "title": "Caller-triggered cost shifting",
+      "tier": "[NN]",
+      "attack": "Caller-triggered cost shifting. An anonymous or low-trust action debits another party's balance, wallet or quota with no economic cap.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "caller_triggered_debit",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by caller_triggered_debit: a request-handler change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "auth-lifecycle": "gated by caller_triggered_debit: an auth-lifecycle change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "external-input-operation": "gated by caller_triggered_debit: an external-input-operation change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "rendering-sink": "gated by caller_triggered_debit: a rendering-sink change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "server-input": "gated by caller_triggered_debit: a server-input change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "file-path": "gated by caller_triggered_debit: a file-path change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "client-storage": "gated by caller_triggered_debit: a client-storage change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "outbound-data": "gated by caller_triggered_debit: an outbound-data change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "async-consumer": "gated by caller_triggered_debit: an async-consumer change in which no caller action debits another party's balance, wallet or quota has no cost to shift.",
+        "security-config": "gated by caller_triggered_debit: a security-config change in which no caller action debits another party's balance, wallet or quota has no cost to shift."
+      },
+      "primary_facts": [
+        "caller_triggered_debit"
+      ],
+      "prevent": "An anonymous or low-trust action must not debit another party's balance, wallet or quota without an economic cap.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: anonymous caller, the party whose balance is debited. Request: the action repeated N times beyond a small cap. Assert: the debited party's balance never goes below the cap-defined floor and no lock side effect fires from caller actions alone; actions beyond the cap are refused. Positive control: an authorized action debits normally."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-05 reading the ledger before and after.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-05"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F09"
+        },
+        {
+          "kind": "owasp",
+          "ref": "API6:2023"
+        }
+      ],
+      "validated": "Reasoned from the F09 finding evidence (ledger went negative after three anonymous orders; real Postgres). The expired-store-takes-orders case debits nothing, so it is a lifecycle invariant and is covered by VAPT-ABUSE-06, not here. The cap value is a product decision; not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-06",
+      "family": "ABUSE",
+      "title": "Lifecycle and transition invariants",
+      "tier": "[D]",
+      "attack": "Lifecycle and transition invariants. Cancel, expire, suspend, dismiss and pending-attempt states fail to reverse or stop their side effects, or leave stuck or perpetual state; an expired, suspended or closed entity still takes new orders for free.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "state_transitions",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by state_transitions: a request-handler change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "auth-lifecycle": "gated by state_transitions: an auth-lifecycle change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "external-input-operation": "gated by state_transitions: an external-input-operation change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "rendering-sink": "gated by state_transitions: a rendering-sink change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "server-input": "gated by state_transitions: a server-input change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "file-path": "gated by state_transitions: a file-path change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "client-storage": "gated by state_transitions: a client-storage change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "outbound-data": "gated by state_transitions: an outbound-data change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "async-consumer": "gated by state_transitions: an async-consumer change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind.",
+        "security-config": "gated by state_transitions: a security-config change that moves no entity through cancel, expire, suspend, dismiss or pending states has no transition side effect to leave behind."
+      },
+      "primary_facts": [
+        "state_transitions"
+      ],
+      "prevent": "Cancel, expire, suspend, dismiss, close and pending-attempt states must reverse or stop their side effects and never leave stuck or perpetual state; an expired, suspended or closed entity must refuse new orders or charge the fee it owes.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: the entity owner, a shopper or caller acting on the entity, and the scheduler that runs its jobs. Request: drive each terminal transition (cancel, expire, suspend, dismiss, close, abandon a pending attempt) from a seeded state, then act on the entity again. Assert: after each transition the counters, reservations, points and discounts the entity took are released, scheduled jobs for it stop, and a stale pending attempt cannot block the next one beyond its timeout. Dismiss row (F21): after a dismiss, close or other terminal state, send a new trigger with different content; assert the new trigger still produces its effect (the dismissal suppresses only the content it dismissed, not later different content). Expired-entity row (F22): drive the entity to expired, suspended and closed, then place a new order; assert the entity refuses new orders or charges the owed fee (assert via the refusal or via a ledger entry). Positive control: the non-terminal path keeps its effects and a repeat of the same dismissed content stays dismissed."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-06 per transition with a state read-back.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-06"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F06"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F12"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F19"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F21"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F22"
+        }
+      ],
+      "validated": "Reasoned from the F06/F12/F21/F22 finding evidence (real Postgres) and F19 (suspended tenant still sends). Marked [D] since correct reversal rules are domain-specific; not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-07",
+      "family": "ABUSE",
+      "title": "Server owns derived values, gates and sensitive fields",
+      "tier": "[NN]",
+      "attack": "Server owns derived values, gates and sensitive fields. A client- or role-writable field sets price, fees, payment status, entitlement or a plan gate, without field-level server enforcement, including a value the server derives from a client-set input.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "persistent_write",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "plan_gated_feature",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "spends_or_reserves_value",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "sensitive_field_write",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "business-invariant"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a request-handler change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "auth-lifecycle": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: an auth-lifecycle change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "external-input-operation": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: an external-input-operation change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "rendering-sink": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a rendering-sink change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "server-input": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a server-input change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "file-path": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a file-path change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "client-storage": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a client-storage change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "outbound-data": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: an outbound-data change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "async-consumer": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: an async-consumer change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set.",
+        "security-config": "gated by sensitive_field_write or plan_gated_feature or spends_or_reserves_value or persistent_write: a security-config change that writes nothing, spends nothing, gates no feature and takes no consequential client input has no derived value or gate for a client to set."
+      },
+      "primary_facts": [
+        "sensitive_field_write",
+        "plan_gated_feature",
+        "spends_or_reserves_value",
+        "persistent_write"
+      ],
+      "prevent": "Client- or role-writable fields that set price, fees, payment status, entitlement or plan gates must be enforced server-side at field level.",
+      "verify": {
+        "type": "runtime",
+        "pattern": "Principals: shopper/low role, staff role, plan without the feature. Request: write each sensitive field directly (shipping total, payment status, feature toggle) and use a gated feature on a plan that lacks it, including from background jobs. Direct-field-write row: assert the stored value is server-derived and the write is refused or ignored for that role. Derivation row (F16): the client sets an input the server derives a value from (fulfillment_type=pickup sets shipping to 0); assert the derived value is recomputed from authoritative inputs and inconsistent combinations are rejected. Assert the gated feature is refused. Positive control: the entitled principal succeeds."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-07 reading the stored value after each write.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-07"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F14"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F16"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F24"
+        }
+      ],
+      "validated": "Reasoned from the F16 and F24 finding evidence (real Postgres) and F14 (a cron using a feature the plan lacks), which was reproduced only on mocked clients, so its enforcement check is service-logic only; not run against fixed code."
+    },
+    {
+      "id": "VAPT-ABUSE-08",
+      "family": "ABUSE",
+      "title": "Session assurance and context at every entry point",
+      "tier": "[D]",
+      "attack": "Session assurance and context at every entry point. A valid session of insufficient assurance (aal1, recovery) reaches data, or a crafted link replaces a session.",
+      "applies_when": {
+        "any": [
+          {
+            "fact": "session_context",
+            "op": "is",
+            "value": true
+          },
+          {
+            "fact": "boundaries",
+            "op": "includes",
+            "value": "auth-lifecycle"
+          }
+        ]
+      },
+      "not_applicable": {
+        "request-handler": "gated by session_context: a request-handler change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "external-input-operation": "gated by session_context: an external-input-operation change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "rendering-sink": "gated by session_context: a rendering-sink change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "server-input": "gated by session_context: a server-input change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "file-path": "gated by session_context: a file-path change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "client-storage": "gated by session_context: a client-storage change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "outbound-data": "gated by session_context: an outbound-data change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "async-consumer": "gated by session_context: an async-consumer change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "security-config": "gated by session_context: a security-config change that reads, creates, replaces or trusts no session has no session assurance to bypass.",
+        "business-invariant": "gated by session_context: a business-invariant change that reads, creates, replaces or trusts no session has no session assurance to bypass."
+      },
+      "primary_facts": [
+        "session_context"
+      ],
+      "prevent": "Valid sessions of insufficient assurance (aal1, recovery) and session replacement via crafted links must not reach data or replace a session.",
+      "verify": {
+        "type": "both",
+        "pattern": "Principals: full-assurance session, aal1 session, recovery session, signed-in admin. Request: read protected data through every entry point (each route and the direct data API); open a crafted session-bearing link while signed in. Assert: low-assurance sessions are refused on every entry point (request layer) and, in a real browser (session-replacement row), the signed-in session is never replaced without confirmation. Positive control: full-assurance read succeeds."
+      },
+      "env": "datastore-fixture",
+      "evidence": "Committed test named VAPT-ABUSE-08 running one case per entry point.",
+      "static_mirror": [],
+      "sources": [
+        {
+          "kind": "vapt",
+          "ref": "skills/vapt/SKILL.md#VAPT-ABUSE-08"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F18"
+        },
+        {
+          "kind": "audit",
+          "ref": "storecraft-run-1:F20"
+        }
+      ],
+      "validated": "Reasoned from the F18 (real auth policies) and F20 (real auth client library) finding evidence; both are low-confidence and the replacement-without-confirmation expectation is a design stance; not run against fixed code.",
+      "env_also": [
+        "browser-runner"
+      ]
+    }
+  ],
+  "leads": [
+    {
+      "ref": "custom-domain tenant binding",
+      "note": "Missing-class lead (source NV03): domain verification may not bind the name to the claiming tenant. Needs hosting facts before it can be a control."
+    },
+    {
+      "ref": "NV01",
+      "note": "Repo-scoped backup secret versus environment gate. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV02",
+      "note": "CSV formula neutralization with semicolon list separators. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV04",
+      "note": "CR/LF in email header fields passed to the mail binding. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV05",
+      "note": "Reset-link session enrolling a factor at the identity provider. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV06",
+      "note": "Unbounded scheduled moderation scan. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV07",
+      "note": "Webhook selecting the order from an unsigned field. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV08",
+      "note": "Refund callbacks read as a fresh sale. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV09",
+      "note": "Public telemetry DSN crowding out triage. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV10",
+      "note": "Unbounded cart item list. Unvalidated lead from storecraft-run-1; not a control."
+    },
+    {
+      "ref": "NV11",
+      "note": "Unbounded order notes and customer object. Unvalidated lead from storecraft-run-1; not a control."
+    }
+  ],
+  "unused_ok": [
+    {
+      "fact": "principals",
+      "reason": "Informational input for STEP 3 fixtures; no predicate narrows on it because narrowing on 'authenticated' dropped anonymous object-by-id routes (F10) and staff-only routes (F11)."
+    }
+  ]
+}
