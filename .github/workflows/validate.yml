@@ -62,6 +62,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-unit-review.test.mjs
           skills/ship-ticket/scripts/run-engine-wave3.test.mjs
           skills/ship-ticket/scripts/run-engine-cr38.test.mjs
+          skills/ship-ticket/scripts/run-engine-rebind.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/launcher-sampler.test.mjs

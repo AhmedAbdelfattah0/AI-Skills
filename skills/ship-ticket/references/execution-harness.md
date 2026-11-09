@@ -296,6 +296,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)
 ```
@@ -615,8 +616,18 @@ after the freeze, the work tree is then the frozen candidate again and the run c
 came before the final review (the review froze the drifted tree), the reverted tree is no longer
 the reviewed candidate, so ship-ready refuses `candidate_mismatch`: the owner appends a RUN-STATE
 `RETRY` and a new original final review is recorded on the reverted tree. A final review FAIL does
-not recover it: while the judgment stands `drive` dispatches nothing, the repair included
-(reproduced in Wave 3.5 repair; the owner decides whether that should change).
+not recover it by itself: while the judgment stands `drive` dispatches nothing, the repair included.
+**Accepting a deliberate hand edit (`rebind`).** When the edit was intended (a typecheck fix, a
+secret-scan marker) and was made before the review froze the candidate, `run-engine.mjs rebind
+--reason <text>` re-binds the drifted done nodes' fingerprints to the work tree and appends a
+`REBIND` event (the reason, the candidate and each node's path deltas) to RUN-STATE. It is refused
+unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: the review saw
+these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY),
+and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale),
+a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`), live attempts (`rebind_attempts_live`) or units
+(`rebind_units`: unit evidence is not re-bound). It never moves the freeze or relaxes the drift
+check. A changed RED spec still needs `gate red`. Known limit: a node that declares a directory (not files) whose contents changed is refused as `rebind_uncovered`, because coverage is exact path equality and the candidate lists files; this fails closed. Declare files, not directories, for nodes the owner may need to rebind. If a crash follows the commit, the next command delivers the `REBIND` event once, and a repeated `rebind` then answers `rebind_nothing_drifted`: the first call already took effect. Hand edits remain the owner's responsibility:
+the review already covers them because the frozen candidate includes them.
 The authorized exception is one REPAIR opened by a `gate review` FAIL: the gate
 enqueues `repair-<review_execution>` with the finding-bound write set (the paths its
 findings name plus the declared repair ownership) and the brief named by

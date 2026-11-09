@@ -242,7 +242,7 @@ const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.ur
 export function candidateId(repoRoot, base, excludes) {
   const args = [CANDIDATE_CLI, '--repo', repoRoot, '--base', base, ...[...new Set(excludes)].flatMap(e => ['--exclude', e])];
   const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
-  try { if (r.status === 0) return { candidate_id: JSON.parse(r.stdout).candidate_id }; } catch { /* reported below */ }
+  try { if (r.status === 0) { const j = JSON.parse(r.stdout); return { candidate_id: j.candidate_id, paths: (j.paths ?? []).map(p => p.path) }; } } catch { /* reported below */ }
   return { reason: (r.stderr || r.error?.message || 'candidate-id failed').trim() };
 }
 

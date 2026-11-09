@@ -11,7 +11,7 @@
  * is never dispatched. The API contract is the comment blocks at the top of run-engine.test.mjs
  * and run-engine-repair.test.mjs.
  *
- * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id>
+ * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
@@ -29,7 +29,7 @@ import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note,
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
-import { unretired } from './engine-quiesce.mjs';
+import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 
@@ -352,6 +352,53 @@ export async function clearUnitCmd(ctx) {
   });
 }
 
+/**
+ * Owner acceptance of hand edits made to done nodes' files between the last drive and the review
+ * freeze (SCRUM-307). Re-binds the drifted done nodes' fingerprints to the work tree, and only when
+ * that tree is exactly the frozen candidate: the review then saw these bytes, so the fingerprints
+ * were the only stale part. It never moves the freeze, and drift(), startsFromFreeze and the
+ * ship-ready conjunction are untouched. The reason is the recorded authorization (like `mark`);
+ * the REBIND event carries each node's path deltas. Not offered with units (their evidence bindings
+ * are not re-bound). A changed RED spec still needs `gate red`. Refusals throw (CLI exit 1).
+ */
+export async function rebind(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && k !== 'reason');
+  if (extra.length || typeof ctx.reason !== 'string' || !ctx.reason.trim())
+    throw coded('rebind_refused', `rebind takes --reason (non-empty) and no other fields${extra.length ? ` (got ${extra})` : ''}`);
+  return locked(ctx, async (E) => {
+    const S = E.S;
+    const unbound = verifyBinding(E);
+    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));
+    if (!S.freeze) throw coded('rebind_no_freeze', 'no review freeze: before it a drifted node is re-run (stale), not rebound');
+    if (hasUnits(S)) throw coded('rebind_units', 'rebind does not cover runs with units (their evidence bindings are not re-bound)');
+    const live = S.attempts.filter(a => LIVE.includes(a.status)).map(a => a.attempt_id);
+    if (live.length) throw coded('rebind_attempts_live', `attempts still live: ${live.join(', ')}`);
+    const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    if (!c.candidate_id || c.candidate_id !== S.freeze.candidate)
+      throw coded('rebind_not_frozen_tree', `work tree is ${c.candidate_id ?? c.reason}, frozen is ${S.freeze.candidate}: revert the edit or record an owner RETRY for a new review`);
+    const nodes = [];
+    for (const [id, n] of Object.entries(S.nodes)) {
+      if (n.state !== 'done' || !n.fps) continue;
+      const now = io.fingerprints(ctx.repoRoot, Object.keys(n.fps));
+      const paths = Object.keys(n.fps).filter(q => n.fps[q] !== now[q]).map(q => ({ path: q, from: n.fps[q] ?? null, to: now[q] ?? null }));
+      if (paths.length) nodes.push({ node: id, paths, fps: now });
+    }
+    if (!nodes.length) throw coded('rebind_nothing_drifted', 'no done node has drifted input or output');
+    // The frozen candidate vouches only for the bytes it covers: a drifted path outside it (excluded, e.g. session-log.md) was never reviewed.
+    const covered = new Set(c.paths ?? []);
+    const outside = [...new Set(nodes.flatMap(n => n.paths.map(p => p.path)))].filter(p => !covered.has(p));
+    if (outside.length) throw coded('rebind_uncovered', `drifted paths the frozen candidate does not cover (excluded or unchanged from the base) are never rebound: ${outside.join(', ')}; revert them`);
+    for (const n of nodes) S.nodes[n.node].fps = n.fps;
+    const ev = { run_id: S.run_id, event: 'REBIND', event_id: 'rebind-' + randomUUID(), candidate_id: c.candidate_id, reason: ctx.reason,
+      nodes: nodes.map(({ node, paths }) => ({ node, paths })), timestamp: new Date().toISOString() };
+    note(S, 'REBIND', { event_id: ev.event_id, nodes: nodes.map(n => n.node) });
+    S.outbox.push(ev);
+    await E.commit();
+    await deliver(E);
+    return view(E);
+  });
+}
+
 const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state']);
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
@@ -394,12 +441,13 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
+    rebind: () => rebind({ ...ctx, reason: flags.reason }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
         if (gateKind !== 'unit-review' || (input?.unit !== undefined && input.unit !== flags.unit)) throw new Error('--unit is for gate unit-review and must equal the input unit');
