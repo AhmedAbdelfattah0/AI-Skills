@@ -1,0 +1,1757 @@
+[
+ {
+  "id": "S-DEV-01",
+  "set": "dev",
+  "category": "public-api",
+  "family": "unproven-identifier",
+  "origin": "audit:F02",
+  "summary": "Add an abandoned-cart capture endpoint for storefront visitors: it stores the cart with the shopper's email and name, and an hourly job emails a recovery message (store-branded, with a resume link built from the store's domain) in two steps. The sender identity is configured per store.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/cart.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/cart-recovery.ts",
+    "boundaries": [
+     "async-consumer",
+     "business-invariant",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "async-consumer",
+    "business-invariant",
+    "outbound-data"
+   ],
+   "principals": [
+    "anonymous",
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": true,
+   "recipient_unproven": true,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": true,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-02",
+  "set": "dev",
+  "category": "authorization",
+  "family": "unproven-identifier",
+  "origin": "audit:F03",
+  "summary": "Let shoppers redeem loyalty points at checkout. The order endpoint accepts a points amount and the customer's email, looks up the loyalty account for that email in the store, and the order RPC deducts the points from the balance and applies a discount.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/orders.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "db/functions/place_order.sql",
+    "boundaries": [
+     "business-invariant",
+     "request-handler"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant"
+   ],
+   "principals": [
+    "anonymous",
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": true,
+   "spends_or_reserves_value": true,
+   "shared_resource": false,
+   "caller_triggered_debit": true,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": true
+  }
+ },
+ {
+  "id": "S-DEV-03",
+  "set": "dev",
+  "category": "multi-tenant-data",
+  "family": "resource-hold",
+  "origin": "audit:F01",
+  "summary": "Add the cron sweep that picks the oldest 100 open recovery carts across all stores each hour, then sends the next-step email for each cart whose store has a sender configured and whose delay has elapsed.",
+  "changed_surfaces": [
+   {
+    "path": "src/jobs/recovery-sweep.ts",
+    "boundaries": [
+     "async-consumer",
+     "business-invariant",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "async-consumer",
+    "business-invariant",
+    "outbound-data"
+   ],
+   "principals": [
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": true,
+   "recipient_unproven": "unknown",
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": "unknown",
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-04",
+  "set": "dev",
+  "category": "public-api",
+  "family": "resource-hold",
+  "origin": "audit:F05",
+  "summary": "Add a checkout-hold step: before payment the storefront calls an endpoint that reserves the requested quantity per variant for 15 minutes so stock is not sold twice. Holds are kept per checkout id supplied by the client and released on expiry or order placement.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/checkout-hold.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "db/functions/reserve_inventory.sql",
+    "boundaries": [
+     "business-invariant",
+     "request-handler"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": true,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-05",
+  "set": "dev",
+  "category": "public-api",
+  "family": "cost-shifting",
+  "origin": "audit:F09",
+  "summary": "Introduce a per-order platform fee for stores on a pay-per-order plan. When an order is placed (including cash-on-delivery guest orders) the fee is debited from the merchant's prepaid wallet, and a negative balance locks the merchant's orders admin page.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/orders.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "db/functions/place_order.sql",
+    "boundaries": [
+     "business-invariant",
+     "request-handler"
+    ]
+   },
+   {
+    "path": "src/middleware/wallet-access.ts",
+    "boundaries": [
+     "business-invariant",
+     "security-config"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant",
+    "security-config"
+   ],
+   "principals": [
+    "anonymous",
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": true,
+   "shared_resource": false,
+   "caller_triggered_debit": true,
+   "state_transitions": true,
+   "plan_gated_feature": true,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-06",
+  "set": "dev",
+  "category": "multi-tenant-data",
+  "family": "lifecycle",
+  "origin": "audit:F06",
+  "summary": "Add an expiry job that closes unpaid online-payment orders after a payment window: it marks them cancelled, releases the reserved stock and stops further payment attempts. Orders may have consumed a limited discount code and loyalty points at placement.",
+  "changed_surfaces": [
+   {
+    "path": "db/migrations/close_unpaid_orders.sql",
+    "boundaries": [
+     "business-invariant",
+     "async-consumer"
+    ]
+   },
+   {
+    "path": "src/jobs/close-unpaid.ts",
+    "boundaries": [
+     "async-consumer",
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "business-invariant",
+    "async-consumer"
+   ],
+   "principals": [
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": true,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-07",
+  "set": "dev",
+  "category": "public-api",
+  "family": "server-owned-field",
+  "origin": "audit:F16",
+  "summary": "Support pickup and digital products at checkout: the order endpoint accepts a fulfillment_type field (shipped, pickup, digital). For non-shipped types the order carries no shipping charge and no shipping quote is required.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/orders.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/order-service.ts",
+    "boundaries": [
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": true
+  }
+ },
+ {
+  "id": "S-DEV-08",
+  "set": "dev",
+  "category": "authentication",
+  "family": "session-assurance",
+  "origin": "audit:F18",
+  "summary": "Add row-level security policies to settings, static pages and product variants tables so merchant members can read their own tenant's rows directly through the hosted data API, using a helper that resolves the tenant from the caller's JWT. The Worker API already requires MFA-level sessions for the same data.",
+  "changed_surfaces": [
+   {
+    "path": "db/migrations/tenant_rls.sql",
+    "boundaries": [
+     "security-config",
+     "auth-lifecycle"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "security-config",
+    "auth-lifecycle"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-09",
+  "set": "dev",
+  "category": "authentication",
+  "family": "session-assurance",
+  "origin": "audit:F20",
+  "summary": "Build the admin password-reset page: the emailed link carries recovery tokens in the URL fragment, the page exchanges them with the auth client, stores the resulting session in browser storage and lets the user set a new password, then redirects to the dashboard.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/pages/reset-password.ts",
+    "boundaries": [
+     "auth-lifecycle",
+     "client-storage"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "auth-lifecycle",
+    "client-storage"
+   ],
+   "principals": [
+    "anonymous",
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-10",
+  "set": "dev",
+  "category": "public-api",
+  "family": "injection",
+  "origin": "audit:F10",
+  "summary": "Add anonymous order tracking: the visitor enters an order number and the phone or email used at checkout, and the API looks up the order by case-insensitive match on order number plus contact and returns the order summary and address.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/track-order.ts",
+    "boundaries": [
+     "request-handler",
+     "external-input-operation",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/order-lookup.ts",
+    "boundaries": [
+     "external-input-operation"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "external-input-operation",
+    "server-input"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": true,
+   "spends_or_reserves_value": false,
+   "shared_resource": "unknown",
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": true,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-11",
+  "set": "dev",
+  "category": "authorization",
+  "family": "permission-mapping",
+  "origin": "audit:F11",
+  "summary": "Add a platform moderation queue: staff with a moderation permission can review reports and act on them, with actions including hiding a product, warning a store or suspending a store. Direct store suspend/reactivate endpoints already exist behind a separate tenants permission.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/platform-moderation.ts",
+    "boundaries": [
+     "request-handler",
+     "business-invariant"
+    ]
+   },
+   {
+    "path": "src/services/moderation.ts",
+    "boundaries": [
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "business-invariant"
+   ],
+   "principals": [
+    "staff"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-12",
+  "set": "dev",
+  "category": "authorization",
+  "family": "unproven-identifier",
+  "origin": "audit:F13",
+  "summary": "Let a superadmin add platform staff by typing an email address and role: the service finds the existing auth account with that email (or creates one) and inserts a staff role row linking the user id, with an audit log entry.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/platform-staff.ts",
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle"
+    ]
+   },
+   {
+    "path": "src/services/platform-staff.ts",
+    "boundaries": [
+     "auth-lifecycle",
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "auth-lifecycle",
+    "business-invariant"
+   ],
+   "principals": [
+    "staff"
+   ],
+   "persistent_write": true,
+   "outbound_message": "unknown",
+   "recipient_unproven": false,
+   "identity_claim_unproven": true,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": true
+  }
+ },
+ {
+  "id": "S-DEV-13",
+  "set": "dev",
+  "category": "low-risk",
+  "family": "none",
+  "origin": "synthetic",
+  "summary": "Reword the empty-state message and button label on the products list page and update the matching snapshot test. No logic, route or data change.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/pages/products-empty.html",
+    "boundaries": []
+   }
+  ],
+  "facts": {
+   "boundaries": [],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-DEV-14",
+  "set": "dev",
+  "category": "low-risk",
+  "family": "none",
+  "origin": "synthetic",
+  "summary": "Refactor a pure date-range formatting helper into its own module with unit tests; output for all inputs is unchanged and no caller changes behavior.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/lib/format-date-range.ts",
+    "boundaries": []
+   }
+  ],
+  "facts": {
+   "boundaries": [],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-01",
+  "set": "sealed",
+  "category": "low-risk",
+  "family": "none",
+  "origin": "synthetic",
+  "summary": "Documentation-only change: update the contributing guide with the local setup steps and fix typos in the architecture overview. No source files are modified.",
+  "changed_surfaces": [
+   {
+    "path": "docs/CONTRIBUTING.md",
+    "boundaries": []
+   }
+  ],
+  "facts": {
+   "boundaries": [],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-02",
+  "set": "sealed",
+  "category": "low-risk",
+  "family": "none",
+  "origin": "synthetic",
+  "summary": "Adjust button padding, the footer link colour and the hero heading copy on the marketing page. CSS and static text only.",
+  "changed_surfaces": [
+   {
+    "path": "site/styles/marketing.css",
+    "boundaries": []
+   },
+   {
+    "path": "site/pages/home.html",
+    "boundaries": []
+   }
+  ],
+  "facts": {
+   "boundaries": [],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-03",
+  "set": "sealed",
+  "category": "authentication",
+  "family": "oauth-callback",
+  "origin": "synthetic",
+  "summary": "Add 'Sign in with an external identity provider' using the authorization code flow. The callback route exchanges the code for tokens, reads the profile email, links to an existing local account with the same email or creates one, and starts a session cookie.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/oauth/callback.ts",
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle",
+     "external-input-operation"
+    ]
+   },
+   {
+    "path": "src/auth/link-account.ts",
+    "boundaries": [
+     "auth-lifecycle",
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "auth-lifecycle",
+    "external-input-operation",
+    "business-invariant"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": "unknown",
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-04",
+  "set": "sealed",
+  "category": "authentication",
+  "family": "reset-link",
+  "origin": "synthetic",
+  "summary": "Implement 'forgot password': the endpoint accepts an email, creates a single-use reset token valid for 30 minutes and emails a link to the account's registered address; the confirm endpoint verifies the token and sets a new password, signing out other sessions.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/password-reset.ts",
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/mailer.ts",
+    "boundaries": [
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "auth-lifecycle",
+    "server-input",
+    "outbound-data"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "persistent_write": true,
+   "outbound_message": true,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": true,
+   "session_context": true,
+   "attempt_limit": true,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-05",
+  "set": "sealed",
+  "category": "authorization",
+  "family": "impersonation",
+  "origin": "synthetic",
+  "summary": "Add an admin 'view as user' feature: support staff pick a user in the console and receive a short-lived session acting as that user, with a banner and an audit entry. Intended for support staff only; owners of an organisation can see the audit trail.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/admin/impersonate.ts",
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle"
+    ]
+   },
+   {
+    "path": "src/auth/session.ts",
+    "boundaries": [
+     "auth-lifecycle"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "auth-lifecycle"
+   ],
+   "principals": [
+    "staff"
+   ],
+   "persistent_write": true,
+   "outbound_message": "unknown",
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-06",
+  "set": "sealed",
+  "category": "authorization",
+  "family": "object-by-id",
+  "origin": "synthetic",
+  "summary": "Add endpoints to change a project member's role and to remove a member, addressed by project id and member id. Project admins may manage members; the last admin cannot be removed.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/projects/members.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/membership.ts",
+    "boundaries": [
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": true
+  }
+ },
+ {
+  "id": "S-SEA-07",
+  "set": "sealed",
+  "category": "multi-tenant-data",
+  "family": "export",
+  "origin": "synthetic",
+  "summary": "Add a CSV report export for invoices: the user picks a date range and the server builds the file from the invoices table and returns a download. The same report is later offered to scheduled exports.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/reports/export.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/report-builder.ts",
+    "boundaries": [
+     "business-invariant",
+     "external-input-operation"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant",
+    "external-input-operation"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": "unknown",
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-08",
+  "set": "sealed",
+  "category": "multi-tenant-data",
+  "family": "search-index",
+  "origin": "synthetic",
+  "summary": "Add a shared full-text search across notes in a multi-tenant workspace app. A new search table is populated by a background indexer, and a query endpoint returns matching notes with highlighted snippets.",
+  "changed_surfaces": [
+   {
+    "path": "db/migrations/note_search.sql",
+    "boundaries": [
+     "security-config",
+     "business-invariant"
+    ]
+   },
+   {
+    "path": "src/routes/search.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input",
+     "rendering-sink"
+    ]
+   },
+   {
+    "path": "src/jobs/indexer.ts",
+    "boundaries": [
+     "async-consumer"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "security-config",
+    "business-invariant",
+    "request-handler",
+    "server-input",
+    "rendering-sink",
+    "async-consumer"
+   ],
+   "principals": [
+    "authenticated",
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-09",
+  "set": "sealed",
+  "category": "public-api",
+  "family": "pagination",
+  "origin": "synthetic",
+  "summary": "Expose a public read API (REST and GraphQL) for the product catalogue with cursor pagination, filters and a configurable page size. API keys identify the integrator; list endpoints are rate limited.",
+  "changed_surfaces": [
+   {
+    "path": "src/api/catalog.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input",
+     "external-input-operation"
+    ]
+   },
+   {
+    "path": "src/api/graphql/schema.ts",
+    "boundaries": [
+     "request-handler",
+     "external-input-operation"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "external-input-operation"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-10",
+  "set": "sealed",
+  "category": "public-api",
+  "family": "file-upload",
+  "origin": "synthetic",
+  "summary": "Allow users to upload an avatar image and attachments on support tickets. The endpoint accepts multipart uploads, stores files under a generated key in object storage and serves them back via signed URLs with the original file name.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/uploads.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input",
+     "file-path"
+    ]
+   },
+   {
+    "path": "src/services/storage.ts",
+    "boundaries": [
+     "file-path",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "file-path",
+    "outbound-data"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-11",
+  "set": "sealed",
+  "category": "sensitive-data",
+  "family": "secret-storage",
+  "origin": "synthetic",
+  "summary": "Let workspace admins save third-party integration API keys. Keys are encrypted at rest with an application key, shown masked in the UI, and decrypted by a job that calls the third party on the workspace's behalf.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/integrations.ts",
+    "boundaries": [
+     "request-handler",
+     "security-config",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/secret-vault.ts",
+    "boundaries": [
+     "security-config",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "security-config",
+    "server-input",
+    "outbound-data"
+   ],
+   "principals": [
+    "authenticated",
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-12",
+  "set": "sealed",
+  "category": "sensitive-data",
+  "family": "audit-log",
+  "origin": "synthetic",
+  "summary": "Add an activity log page that lists who did what, including actor email, IP address and user agent, filterable by user and exportable to JSON for compliance officers.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/audit-log.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "web/src/pages/audit-log.ts",
+    "boundaries": [
+     "rendering-sink"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "rendering-sink"
+   ],
+   "principals": [
+    "staff"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-13",
+  "set": "sealed",
+  "category": "cloudflare-worker-infra",
+  "family": "worker-bindings",
+  "origin": "synthetic",
+  "summary": "Add an edge Worker that serves user-generated downloads: it reads metadata from a KV namespace, streams objects from an R2 bucket, and coordinates per-user download counters through a Durable Object. Bindings and a signing secret are declared in the Worker config file.",
+  "changed_surfaces": [
+   {
+    "path": "workers/downloads/src/index.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input",
+     "file-path"
+    ]
+   },
+   {
+    "path": "workers/downloads/wrangler.toml",
+    "boundaries": [
+     "security-config"
+    ]
+   },
+   {
+    "path": "workers/downloads/src/counter.ts",
+    "boundaries": [
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "file-path",
+    "security-config",
+    "business-invariant"
+   ],
+   "principals": [
+    "anonymous",
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": true,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": true,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-14",
+  "set": "sealed",
+  "category": "cloudflare-worker-infra",
+  "family": "webhook",
+  "origin": "synthetic",
+  "summary": "Add a webhook receiver Worker for payment-provider events: it verifies the signature, queues the event, and a queue consumer updates subscription status in the database and notifies the customer by email.",
+  "changed_surfaces": [
+   {
+    "path": "workers/webhooks/src/receiver.ts",
+    "boundaries": [
+     "request-handler",
+     "external-input-operation",
+     "async-consumer"
+    ]
+   },
+   {
+    "path": "workers/webhooks/src/consumer.ts",
+    "boundaries": [
+     "async-consumer",
+     "business-invariant",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "external-input-operation",
+    "async-consumer",
+    "business-invariant",
+    "outbound-data"
+   ],
+   "principals": [
+    "service"
+   ],
+   "persistent_write": true,
+   "outbound_message": true,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": "unknown",
+   "link_or_token_in_message": "unknown",
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  }
+ },
+ {
+  "id": "S-SEA-15",
+  "set": "sealed",
+  "category": "scope-exceeds-plan",
+  "family": "dependency",
+  "origin": "synthetic",
+  "summary": "Plan: bump a date library patch version. Actual: bump also adds a new HTTP client dependency, a wrapper that calls an external service, and a CI workflow edit to use a token.",
+  "changed_surfaces": [
+   {
+    "path": "package.json",
+    "boundaries": [
+     "security-config"
+    ]
+   },
+   {
+    "path": "package-lock.json",
+    "boundaries": [
+     "security-config"
+    ]
+   },
+   {
+    "path": "src/lib/http-client.ts",
+    "boundaries": [
+     "external-input-operation",
+     "outbound-data"
+    ]
+   },
+   {
+    "path": ".github/workflows/ci.yml",
+    "boundaries": [
+     "security-config"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "security-config",
+    "external-input-operation",
+    "outbound-data"
+   ],
+   "principals": [
+    "service"
+   ],
+   "persistent_write": false,
+   "outbound_message": "unknown",
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  },
+  "planned_surfaces": [
+   {
+    "path": "package.json",
+    "boundaries": []
+   },
+   {
+    "path": "package-lock.json",
+    "boundaries": []
+   }
+  ],
+  "planned_facts": {
+   "boundaries": [],
+   "principals": [
+    "service"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  },
+  "actual_diff_signals": [
+   "new-dependency",
+   "out-of-plan-path",
+   "infra-or-ci-config",
+   "env-or-secret-reference"
+  ]
+ },
+ {
+  "id": "S-SEA-16",
+  "set": "sealed",
+  "category": "scope-exceeds-plan",
+  "family": "outbound-message",
+  "origin": "synthetic",
+  "summary": "Plan: show an additional 'bio' field on the profile page. Actual: also adds a 'share profile' endpoint that emails a link to an address typed by the user.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/pages/profile.ts",
+    "boundaries": [
+     "rendering-sink"
+    ]
+   },
+   {
+    "path": "src/routes/profile-share.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/mailer.ts",
+    "boundaries": [
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "rendering-sink",
+    "request-handler",
+    "server-input",
+    "outbound-data"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": true,
+   "outbound_message": true,
+   "recipient_unproven": true,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": true,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  },
+  "planned_surfaces": [
+   {
+    "path": "web/src/pages/profile.ts",
+    "boundaries": [
+     "rendering-sink"
+    ]
+   }
+  ],
+  "planned_facts": {
+   "boundaries": [
+    "rendering-sink"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "persistent_write": false,
+   "outbound_message": false,
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": false,
+   "attempt_limit": false,
+   "sensitive_field_write": false
+  },
+  "actual_diff_signals": [
+   "out-of-plan-path",
+   "new-route",
+   "mail-or-notification-send"
+  ]
+ },
+ {
+  "id": "S-SEA-17",
+  "set": "sealed",
+  "category": "authorization",
+  "family": "client-side-guard",
+  "origin": "synthetic",
+  "summary": "Hide admin actions (archive a project, change a member's role) in the single-page app behind a route guard and a feature flag read from the client config. The same actions are now performed by calling new PATCH endpoints on the projects and members APIs directly from the page.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/router/admin-guard.ts",
+    "boundaries": []
+   },
+   {
+    "path": "src/routes/projects-admin.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/routes/members.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input",
+     "business-invariant"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant"
+   ],
+   "principals": [
+    "staff",
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": true,
+   "plan_gated_feature": true,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": true,
+   "persistent_write": true,
+   "outbound_message": false
+  }
+ },
+ {
+  "id": "S-SEA-18",
+  "set": "sealed",
+  "category": "public-api",
+  "family": "third-party-debit",
+  "origin": "synthetic",
+  "summary": "Add a public 'request a quote' form on a merchant's storefront and a 'send test notification' button on a partner page. Each submission sends an SMS to the number typed in and consumes one unit of the merchant's prepaid messaging credit. Rate limiting is left to the gateway configuration and is not part of this change.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/public/quote.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   },
+   {
+    "path": "src/services/sms-credit.ts",
+    "boundaries": [
+     "business-invariant",
+     "outbound-data"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input",
+    "business-invariant",
+    "outbound-data"
+   ],
+   "principals": [
+    "anonymous"
+   ],
+   "recipient_unproven": true,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": true,
+   "shared_resource": true,
+   "caller_triggered_debit": true,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": "unknown",
+   "session_context": false,
+   "attempt_limit": "unknown",
+   "sensitive_field_write": false,
+   "persistent_write": true,
+   "outbound_message": true
+  }
+ },
+ {
+  "id": "S-SEA-19",
+  "set": "sealed",
+  "category": "sensitive-data",
+  "family": "client-storage",
+  "origin": "synthetic",
+  "summary": "Change the single-page app to keep the signed-in user's API token and full profile (name, email, phone, address) in browser localStorage so a reload keeps the user signed in and the profile loads instantly.",
+  "changed_surfaces": [
+   {
+    "path": "web/src/auth/token-store.ts",
+    "boundaries": [
+     "client-storage",
+     "auth-lifecycle"
+    ]
+   },
+   {
+    "path": "web/src/state/profile-cache.ts",
+    "boundaries": [
+     "client-storage"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "client-storage",
+    "auth-lifecycle"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false,
+   "persistent_write": false,
+   "outbound_message": false
+  }
+ },
+ {
+  "id": "S-SEA-20",
+  "set": "sealed",
+  "category": "scope-exceeds-plan",
+  "family": "matches-plan",
+  "origin": "synthetic",
+  "summary": "Plan: add a read-only GET /projects/:id/summary endpoint returning task counts for a project the signed-in user belongs to. Actual: exactly that endpoint, nothing else.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/projects-summary.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false,
+   "persistent_write": false,
+   "outbound_message": false
+  },
+  "planned_surfaces": [
+   {
+    "path": "src/routes/projects-summary.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   }
+  ],
+  "planned_facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false,
+   "persistent_write": false,
+   "outbound_message": false
+  },
+  "actual_diff_signals": [
+   "none"
+  ]
+ },
+ {
+  "id": "S-SEA-21",
+  "set": "sealed",
+  "category": "scope-exceeds-plan",
+  "family": "extra-low-risk",
+  "origin": "synthetic",
+  "summary": "Plan: add a paginated GET /orders list endpoint for the signed-in merchant's dashboard. Actual: the same endpoint and file, plus one extra optional 'status' filter parameter validated against a fixed set of values; no new route, dependency, config or write.",
+  "changed_surfaces": [
+   {
+    "path": "src/routes/orders-list.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   }
+  ],
+  "facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false,
+   "persistent_write": false,
+   "outbound_message": false
+  },
+  "planned_surfaces": [
+   {
+    "path": "src/routes/orders-list.ts",
+    "boundaries": [
+     "request-handler",
+     "server-input"
+    ]
+   }
+  ],
+  "planned_facts": {
+   "boundaries": [
+    "request-handler",
+    "server-input"
+   ],
+   "principals": [
+    "authenticated"
+   ],
+   "recipient_unproven": false,
+   "identity_claim_unproven": false,
+   "spends_or_reserves_value": false,
+   "shared_resource": false,
+   "caller_triggered_debit": false,
+   "state_transitions": false,
+   "plan_gated_feature": false,
+   "link_or_token_in_message": false,
+   "session_context": true,
+   "attempt_limit": false,
+   "sensitive_field_write": false,
+   "persistent_write": false,
+   "outbound_message": false
+  },
+  "actual_diff_signals": [
+   "none"
+  ]
+ }
+]

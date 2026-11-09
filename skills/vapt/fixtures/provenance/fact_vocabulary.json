@@ -1,0 +1,196 @@
+{
+ "boundaries": {
+  "type": "enum",
+  "values": [
+   "request-handler",
+   "auth-lifecycle",
+   "external-input-operation",
+   "rendering-sink",
+   "server-input",
+   "file-path",
+   "client-storage",
+   "outbound-data",
+   "async-consumer",
+   "security-config",
+   "business-invariant"
+  ],
+  "definition": "The set of trust-boundary kinds the change introduces or modifies (the STEP 2 table in SKILL.md). A change may have several; a change touching none is out of scope and each exclusion must be named.",
+  "examples": {
+   "positive": "Adds a route that reads an order by id: [request-handler]. A webhook receiver: [request-handler, async-consumer].",
+   "negative": "Renaming a CSS class or a pure date formatter touches no boundary: do not list one."
+  },
+  "value_definitions": {
+   "business-invariant": "Code that enforces a business rule (price, stock, fee, quota, entitlement, lifecycle, outbound sends), even when it is an RPC, migration, trigger or service touching no request handler. Example: a SQL function that computes the order total. A client-callable RPC or SQL function is also tagged request-handler, because a caller reaches it directly."
+  }
+ },
+ "principals": {
+  "type": "enum",
+  "values": [
+   "anonymous",
+   "authenticated",
+   "staff",
+   "service"
+  ],
+  "definition": "Informational: who can reach the changed surface (anonymous = no credential; authenticated = any signed-in end user; staff = an operator or admin role; service = machine-to-machine). No control narrows on it, because narrowing on 'authenticated' hid anonymous object-by-id routes and staff-only routes; it only tells STEP 3 which identities to build.",
+  "examples": {
+   "positive": "Order tracking by id with no login: [anonymous]. An admin refund endpoint: [staff].",
+   "negative": "A route that merely sits behind a login is not 'authenticated only' for selection purposes: a request-handler change selects the request controls regardless."
+  }
+ },
+ "persistent_write": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the change creates, updates, upserts or deletes state in any system: its own store (ORM, raw SQL, RPC, migration, queue write) or a system it calls, such as an identity provider (user records, roles, metadata), a payment provider (customers, charges, refunds, subscriptions) or a connected store or SaaS.",
+  "examples": {
+   "positive": "A handler that inserts an order row; a handler that calls the identity provider to update or delete a user, writing nothing locally.",
+   "negative": "A pure read is false, even through a provider (fetching a customer from the payment provider); a cache write that holds no business state is false."
+  }
+ },
+ "outbound_message": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the platform sends an email, SMS, push or webhook to a party outside the request, directly or from a job.",
+  "examples": {
+   "positive": "A cron sweep that mails invoice reminders.",
+   "negative": "An HTTP response to the caller is not an outbound message."
+  }
+ },
+ "recipient_unproven": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when a message recipient is named by the caller or taken from data the caller controls and has not proven ownership of.",
+  "examples": {
+   "positive": "A 'share this order' form that mails any address typed in.",
+   "negative": "A password-reset mail to the address already verified on the account is proven."
+  }
+ },
+ "identity_claim_unproven": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when an email, phone or similar identifier the caller merely asserts is used as authority to spend, redeem, overwrite, claim, receive a grant or key a limit.",
+  "examples": {
+   "positive": "A coupon redeemed by typing someone else's email; a staff invite that grants a role to an address nobody proved.",
+   "negative": "Using the id of the authenticated session as identity is a proven identity."
+  }
+ },
+ "spends_or_reserves_value": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the change debits, charges, reserves, holds or releases money, credit, stock, quota or points.",
+  "examples": {
+   "positive": "Placing an order reserves stock.",
+   "negative": "Reading a balance does not spend or reserve it."
+  }
+ },
+ "shared_resource": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when several callers or tenants draw on one finite pool: stock, a queue, a worker, a quota.",
+  "examples": {
+   "positive": "A shared job queue consumed by all tenants.",
+   "negative": "A per-user draft document nobody else can touch."
+  }
+ },
+ "caller_triggered_debit": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when an action by an anonymous or low-trust caller debits a balance, wallet, fee ledger or quota that belongs to someone else.",
+  "examples": {
+   "positive": "A shopper's order debits the store owner's fee balance.",
+   "negative": "A user spending their own wallet is not a cost shift."
+  }
+ },
+ "state_transitions": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the change moves an entity through lifecycle states (cancel, expire, suspend, dismiss, pending, closed) or must stop side effects on such a move.",
+  "examples": {
+   "positive": "Store suspension that should halt orders, mails and jobs.",
+   "negative": "A stateless calculation with no stored status."
+  }
+ },
+ "plan_gated_feature": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when access to a feature depends on a plan, role, entitlement or feature flag that the server must enforce, including from background jobs and crons.",
+  "examples": {
+   "positive": "A cron that runs a premium feature for every tenant.",
+   "negative": "A feature every user has regardless of plan."
+  }
+ },
+ "link_or_token_in_message": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when an outbound message carries any link, token or magic URL, whatever the source of its host: configuration, tenant data, or the request itself.",
+  "examples": {
+   "positive": "A password-reset mail whose link host is built from the request Host or X-Forwarded-Host header; a link to a tenant custom domain.",
+   "negative": "A plain-text notification with no URL and no token."
+  }
+ },
+ "session_context": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the change reads, creates, replaces or trusts a session, its assurance level (aal1, recovery) or a session-bearing link.",
+  "examples": {
+   "positive": "A route that reads protected data for any valid session.",
+   "negative": "A public marketing page with no session."
+  }
+ },
+ "attempt_limit": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when the change enforces a cap on guesses or attempts (login tries, code redemption tries, per-key limits), including a tenant-local endpoint that guards a guessable secret.",
+  "examples": {
+   "positive": "A coupon-code endpoint that allows five guesses per key.",
+   "negative": "A generic request rate limit with nothing guessable behind it still counts only if it guards a guessable value."
+  }
+ },
+ "sensitive_field_write": {
+  "type": "bool",
+  "values": [
+   true,
+   false
+  ],
+  "definition": "True when a client or role-writable input sets, or is used to derive, a value of consequence: price, fee, shipping total, payment status, entitlement, plan, role.",
+  "examples": {
+   "positive": "fulfillment_type=pickup silently sets shipping to 0.",
+   "negative": "A free-text note field with no effect on money or access."
+  }
+ }
+}

@@ -1,0 +1,149 @@
+{
+  "version": 4,
+  "created": "2026-11-09",
+  "seal_anchor": "none yet: the work is uncommitted; the anchor is the commit that first contains this manifest (git log --follow skills/vapt/fixtures/manifest.json)",
+  "sets": {
+    "dev": [
+      "S-DEV-01",
+      "S-DEV-02",
+      "S-DEV-03",
+      "S-DEV-04",
+      "S-DEV-05",
+      "S-DEV-06",
+      "S-DEV-07",
+      "S-DEV-08",
+      "S-DEV-09",
+      "S-DEV-10",
+      "S-DEV-11",
+      "S-DEV-12",
+      "S-DEV-13",
+      "S-DEV-14"
+    ],
+    "sealed": [
+      "S-SEA-01",
+      "S-SEA-02",
+      "S-SEA-03",
+      "S-SEA-04",
+      "S-SEA-05",
+      "S-SEA-06",
+      "S-SEA-07",
+      "S-SEA-08",
+      "S-SEA-09",
+      "S-SEA-10",
+      "S-SEA-11",
+      "S-SEA-12",
+      "S-SEA-13",
+      "S-SEA-14",
+      "S-SEA-15",
+      "S-SEA-16",
+      "S-SEA-17",
+      "S-SEA-18",
+      "S-SEA-19",
+      "S-SEA-20",
+      "S-SEA-21"
+    ]
+  },
+  "sha256": {
+    "scenarios.json": "a1a4063907c299ddb3a58ac76f53de5ffee010875c700b5c49e962bc3524287e",
+    "labels.json": "bf548aa77471e25ddcf51fb5d0f36412191779ad95289dbcc6eecd0ba0b32631",
+    "amendments.json": "9f3c40a0f519d8c31277dd00776169179b14b5958413bf5e3faf42c264ae8897",
+    "amendments_round2.json": "ffbcdd7868a20bfd056338884e2cb364bc7875ff8634b33489ae0bd6d50a5db3",
+    "amendments_round3.json": "a338246b35e37568e43405b7bb44292052ab3142430f5953a18311d4d17dbf9d",
+    "label_history.json": "a315e9550bdad554ee429d5ad7f664b04a925786ca37dbc71a7d4da015541f8f",
+    "provenance/fact_vocabulary.json": "90f3c539d5191aadd88e39dbb4afb31b4dbec8152a206a95f4795a62028361a6",
+    "provenance/controls_public.json": "744bee36b77810cfff38edd0dd77398324fbf5ae0944c84ff2c39455de62584f"
+  },
+  "catalog_digest_at_seal": "d238f817b61179c58119be88296a33aa3ed4d421353be6eb98537c41124be47a",
+  "history": [
+    {
+      "version": 1,
+      "date": "2026-11-09",
+      "change": "30 scenarios with must_not_select labels; reviewed and failed in review round 1."
+    },
+    {
+      "version": 2,
+      "date": "2026-11-09",
+      "change": "Facts amended (round 1, amendments.json), 5 sealed scenarios added (S-SEA-16 to S-SEA-21), labels re-authored by a fresh labeler with must_select and inapplicable replacing must_not_select; the labeler re-evaluated five named ABUSE-07 inapplicable labels after the primary-fact consistency check (two removed, three kept)."
+    },
+    {
+      "version": 3,
+      "date": "2026-11-09",
+      "change": "Reachability check and a drift-guarded copy of the catalog evaluator (selector.mjs) added; round 2 fact amendments (6 changes, see amendments_round2.json); labels v4 (7 unreachable required labels dropped, ABUSE-08 added in 3 scenarios; see label_history.json); computed disagreement ledger replaces the hand list."
+    },
+    {
+      "version": 4,
+      "date": "2026-11-09",
+      "change": "Round 3 fact amendments (amendments_round3.json, 23 entries, 8 value changes); labels v5 with inapplicable_basis on every label and exceptions on low-risk labels; computed broad_gate_only_required and reassess sections in disagreements.json; pre-registered baselines; label_history.json; actual_diff_signals vocabulary. Resealed; the sealed set was seen by the reviewers and the orchestrator."
+    }
+  ],
+  "provenance": {
+    "scenario_author": {
+      "role": "sonnet agent",
+      "model_tier": "sonnet",
+      "date": "2026-11-09",
+      "saw": [
+        "provenance/fact_vocabulary.json"
+      ],
+      "note": "Dev scenarios were additionally written from the audit report. The sealed author did not see the audit report or the controls, but fact_vocabulary.json carries examples derived from the audit, so the sealed set is only weakly independent of the audit."
+    },
+    "labeler": {
+      "role": "separate sonnet agent",
+      "model_tier": "sonnet",
+      "date": "2026-11-09",
+      "saw": [
+        "scenarios.json",
+        "provenance/controls_public.json (id, tier, title, attack, prevent)"
+      ],
+      "never_saw": [
+        "applies_when predicates",
+        "not_applicable"
+      ],
+      "saw_outcome_of": [
+        "the primary-fact consistency check: five named ABUSE-07 scenarios were returned to the labeler for re-evaluation (labels v3), so the labeler indirectly saw that persistent_write gates ABUSE-07; primary_facts themselves were not shown"
+      ]
+    },
+    "recorded": "The exact inputs the authors and labeler saw are kept in provenance/. Prompts and transcripts are not recorded."
+  },
+  "rules": [
+    "No catalog tuning against sealed results. Dev scenarios may be used to tune predicates; sealed scenarios may not.",
+    "Any change to controls.json after seal makes the digest test fail. Re-record catalog_digest_at_seal and mark all prior sealed results stale.",
+    "Results on this set are reported as implementation fidelity only. No claim of security improvement or generalization is made until a non-StoreCraft, independently sealed corpus is scored. The sealed set here stays only weakly independent.",
+    "The sealed set was seen by the reviewers and the orchestrator at reseal; this is recorded here and weakens its blindness for later selector work."
+  ],
+  "limits": [
+    "Measures the mapping from given facts to controls, not fact extraction from a diff.",
+    "Labels were reasoned from scenario text, but several ABUSE facts map almost one-to-one to primary facts, so agreement on those controls is partly by construction.",
+    "A control that is neither in must_select nor in inapplicable is unlabeled; selecting it is acceptable over-selection by policy and is not an error.",
+    "ADD_CONTROLS has no fixture: only REAPPROVAL and UNCHANGED reassess verdicts are covered.",
+    "Dev scenarios derive from the audit that shaped the catalog, so dev results say nothing about generalization. Dev origin: 12 audit-derived plus 2 synthetic.",
+    "Selector scoring is not done here; C-1 validates fixture structure, consistency and labelling policy only.",
+    "The label/catalog disagreement ledger (disagreements.json) is computed, not hand-listed: make-ledger.mjs runs the catalog evaluator on each scenario's facts and records every inapplicable label the catalog selects anyway, with via saying why. The test requires the ledger to equal the computed set exactly and reports its size. Its entries are expected catalog over-breadth cost, not selector errors; a catalog-following selector shows each one as an inapplicable-violation. An entry whose via is one of the control's own primary_facts is additionally a primary-fact label violation (an unknown primary fact counts as true), which the labels test rejects, except VAPT-ABUSE-07 via persistent_write: the catalog selects ABUSE-07 on any persistent write on purpose, so that one pair is exempt (BROAD_FACTS) and stays visible only in the ledger.",
+    "The seal is anchored only by git history (see seal_anchor): the commit that first contains manifest version 4 is the anchor. Moving a scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff manifest.sets and the scenario origins between commits.",
+    "Recall measures implementation fidelity to the catalog, not catalog completeness or security improvement; a score at or near the catalog_faithful baseline is expected and proves nothing about security. The boundary-universal baseline uses the controls the selector returns for every single boundary kind (computed: 11)."
+  ],
+  "preregistered_baselines": {
+    "must_select_total": 231,
+    "ledger_size": 47,
+    "boundary_universal_controls": 11,
+    "baselines": {
+      "catalog_faithful": {
+        "recall": "231/231",
+        "recalled": 231,
+        "inapplicable_violations": 47,
+        "net_hard_defects": 0
+      },
+      "all_controls_when_any_boundary": {
+        "recall": "231/231",
+        "recalled": 231,
+        "inapplicable_violations": 102,
+        "net_hard_defects": 55
+      },
+      "boundary_universal_when_any_boundary": {
+        "recall": "121/231",
+        "recalled": 121,
+        "inapplicable_violations": 19,
+        "net_hard_defects": 0
+      }
+    }
+  }
+}

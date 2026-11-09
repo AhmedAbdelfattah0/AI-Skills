@@ -1,0 +1,100 @@
+[
+ {
+  "id": "S-DEV-11",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Staff act on reports through a permissioned console route; it reads and trusts a staff session, same standard as S-SEA-12."
+ },
+ {
+  "id": "S-SEA-06",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Member edits are authorised from the signed-in caller's session and project-admin role; the handler trusts a session."
+ },
+ {
+  "id": "S-SEA-10",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Uploads are accepted from signed-in users (principal authenticated); the route trusts a valid session."
+ },
+ {
+  "id": "S-SEA-11",
+  "fact": "session_context",
+  "old": false,
+  "new": true,
+  "reason": "Workspace-admin route reads/trusts the admin's session to save and show keys."
+ },
+ {
+  "id": "S-SEA-19",
+  "fact": "session_context",
+  "old": true,
+  "new": true,
+  "reason": "Already true: stores the signed-in session token client-side."
+ },
+ {
+  "id": "S-DEV-01",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Summary only says the cart is stored with the shopper's email and a recovery mail is sent to it (recipient_unproven covers that); it does not say the email keys, overwrites or claims an existing cart, so no asserted identity is used as authority."
+ },
+ {
+  "id": "S-DEV-03",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Service cron over stored carts; no caller-asserted identifier is used as authority."
+ },
+ {
+  "id": "S-DEV-06",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Expiry job acts on stored orders; no caller-asserted identifier."
+ },
+ {
+  "id": "S-SEA-14",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Provider webhook authenticated by signature; no asserted email/phone is authority."
+ },
+ {
+  "id": "S-SEA-16",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Typed address is only a message recipient (recipient_unproven), not authority to spend, redeem, claim or key a limit."
+ },
+ {
+  "id": "S-SEA-18",
+  "fact": "identity_claim_unproven",
+  "old": false,
+  "new": false,
+  "reason": "Typed phone number is only an SMS recipient; the debit is keyed to the merchant, not to an asserted identity."
+ },
+ {
+  "id": "S-DEV-03",
+  "fact": "link_or_token_in_message",
+  "old": false,
+  "new": "unknown",
+  "reason": "Summary says only 'sends the next-step email'; it does not state a link or token, so neither true nor false can be asserted from this change."
+ },
+ {
+  "id": "S-SEA-05",
+  "fact": "state_transitions",
+  "old": false,
+  "new": true,
+  "reason": "Definition lists 'expire': the impersonation session is short-lived, so it moves issued->expired (and ending it must stop acting-as access). Changed from my earlier false."
+ },
+ {
+  "id": "S-SEA-16",
+  "fact": "caller_triggered_debit",
+  "old": false,
+  "new": false,
+  "reason": "No balance, wallet, fee ledger or quota is debited by the share email; nothing shifts cost onto someone else's ledger."
+ }
+]
