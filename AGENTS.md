@@ -234,14 +234,25 @@ others:
 | `security` | while writing | secure-by-default patterns, refuse-to-generate list |
 | `backend-code-quality` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, in ship-ticket's rule pass | static rule IDs — *the control exists in the file* |
 | `security-audit` (external: cloudflare/security-audit-skill; output outside the repo) | whole codebase, on request | coverage-ledger hunting waves, independently verified findings, validated `findings.json` |
-| `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`) | after the code is written, in ship-ticket's PROVE phase | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
+| `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`/`ABUSE-*`) | after the code is written, in ship-ticket's PROVE phase | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
 
 `vapt` is scoped by **trust boundaries, not files** (a pure formatter has no
 adversary), its output is **committed tests rather than a report** (so CI, not an
 agent's summary, is what blocks the merge), and it runs in two modes: GATE (the
-diff) and AUDIT (backfill over already-shipped code in the base branch). Its
-`VAPT-*` rules deliberately mirror `BE-SEC-*` one-for-one — the static rule
-asserts, the runtime rule proves. **Never point it at production or shared
+diff) and AUDIT (backfill over already-shipped code in the base branch).
+Many `VAPT-API-*` rules mirror `BE-SEC-*` — the static rule
+asserts, the runtime rule proves. The `VAPT-ABUSE-*` classes (business abuse of a
+working feature: unproven identity as authority, outbound message abuse, cost
+shifting, state invariants and the like) have **no static `BE-*` mirror**: no
+"the control exists in the file" rule can assert them, so a committed runtime
+test is their only proof. The rule set is also kept machine-readable in
+`skills/vapt/controls.json`; the `SKILL.md` tables and that catalog must agree,
+and `skills/vapt/controls.test.mjs` (run in CI) fails on drift. Each control
+also carries a `not_applicable` map: every boundary kind that does not select it
+needs a written, test-checked reason; the reason's truth is a review item. The
+test rejects a reason that defers to another boundary kind or control, because a
+kind describes the changed code and that other component may be unchanged; so a
+narrowed predicate cannot hide a surface. **Never point it at production or shared
 staging**; that rule of engagement is load-bearing, not boilerplate.
 
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the

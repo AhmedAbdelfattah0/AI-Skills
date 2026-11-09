@@ -91,7 +91,7 @@ changes any of:
 | Kind | Trust boundary | Examples (detect the repo's idiom, don't assume one) |
 |---|---|---|
 | `request-handler` | Request handler or its route registration | controller, handler, resolver, RPC method, route table |
-| `auth-lifecycle` | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy |
+| `auth-lifecycle` | Auth / session / token lifecycle | login, refresh, verify, logout, guard, middleware, policy. A handler that issues, refreshes or replaces a session cookie is **also** tagged `auth-lifecycle` |
 | `external-input-operation` | Query or command taking external input | ORM call, raw SQL, search filter, sort/pagination param |
 | `rendering-sink` | Rendering a value it did not author | template, component, `innerHTML`-class sink, markdown/HTML render |
 | `server-input` | Input that reaches a server | form, upload widget, URL/query param binding |
@@ -100,6 +100,7 @@ changes any of:
 | `outbound-data` | Outbound call carrying credentials or user data | webhook send, third-party SDK, server-to-server fetch |
 | `async-consumer` | Async consumer of external payloads | queue worker, cron, webhook receiver, event handler |
 | `security-config` | Security-relevant config | CORS, headers, cookie options, secret wiring, ACL/policy files |
+| `business-invariant` | Code that enforces a business rule, even with no request handler in the diff | RPC / SQL function / migration / trigger / service that enforces price, stock, fee, quota, entitlement, lifecycle or outbound sends. A client-callable RPC / SQL function is **also** tagged `request-handler`: a caller reaches it directly |
 
 **Explicitly out of scope:** pure functions over trusted input, type/DTO
 declarations, styling, copy, existing tests, build config that touches none of
@@ -141,7 +142,7 @@ default a documented project convention may override.
 |---|---|---|
 | `VAPT-API-01` | `[NN]` | **BOLA / IDOR.** User A reads, updates, or deletes an object owned by user B by swapping the identifier. Test every identifier the route accepts, including nested and in-body ones. |
 | `VAPT-API-02` | `[NN]` | **Broken authentication.** The route answers with no credential, an expired one, a tampered signature, a token issued for another audience/tenant, or one that was revoked. |
-| `VAPT-API-03` | `[NN]` | **Broken function-level authz.** A low-privilege principal reaches an operation meant for a higher role — including the method nobody guarded (`GET` protected, `DELETE` forgotten). |
+| `VAPT-API-03` | `[NN]` | **Broken function-level authorization.** A low-privilege principal reaches an operation meant for a higher role — including the method nobody guarded (`GET` protected, `DELETE` forgotten). |
 | `VAPT-API-04` | `[NN]` | **Mass assignment.** A privileged field submitted in the body is persisted — `role`, `is_admin`, `tenant_id`, `verified`, `balance`, `price`, `created_by`. |
 | `VAPT-API-05` | `[NN]` | **Injection.** Untrusted input reaching an interpreter — SQL/NoSQL, command, template, LDAP, or path traversal on any file/path parameter. |
 | `VAPT-API-06` | `[NN]` | **Excessive data exposure.** The response body carries fields this caller must not see — password hashes, internal IDs, other users' data, plan/billing internals, soft-deleted rows. |
@@ -167,6 +168,67 @@ default a documented project convention may override.
 | `VAPT-CFG-03` | `[NN]` | **Reachable secret.** A key committed to the repo, baked into a build artifact, or written to a log. |
 | `VAPT-CFG-04` | `[NN]` | **Cookie flags.** A session cookie set without `httpOnly` + `secure` + an explicit `SameSite`. |
 
+### `VAPT-ABUSE-*` — business-abuse surface
+
+Abuse of a feature either working as built or missing a guard the feature needed:
+no malformed input is required, just an anonymous or low-trust caller using a
+legitimate action against someone else. Every rule here is proved by a table-driven test (principals, request,
+asserted refusal or invariant, positive control) — never by judgment.
+
+| ID | Tier | The attack |
+|---|---|---|
+| `VAPT-ABUSE-01` | `[NN]` | **Unproven identifier as authority.** An email or phone the caller has not proven spends, redeems, overwrites, claims, receives a privileged grant (including one an admin later gives to an identifier pre-claimed while unverified), or keys a limit. The refusal must not depend on victim data (no balance or existence oracle). |
+| `VAPT-ABUSE-02` | `[NN]` | **Outbound message abuse.** The platform sends a message or mail to a recipient the caller has not proven, carrying caller-controlled text, with no recipient or tenant cap — including jobs for a suspended tenant that keep sending. |
+| `VAPT-ABUSE-03` | `[NN]` | **Link and token destination trust.** A link or token in an outbound message points at a host or origin that is not verified. |
+| `VAPT-ABUSE-04` | `[D]` | **Shared-resource and fairness abuse under the rate limit.** Stock or inventory holds, queue head-of-line starvation across tenants, or a guess cap bypassed through an alternate route or an omittable limit key. |
+| `VAPT-ABUSE-05` | `[NN]` | **Caller-triggered cost shifting.** An anonymous or low-trust action debits another party's balance, wallet or quota with no economic cap. |
+| `VAPT-ABUSE-06` | `[D]` | **Lifecycle and transition invariants.** Cancel, expire, suspend, dismiss and pending-attempt states fail to reverse or stop their side effects, or leave stuck or perpetual state; an expired, suspended or closed entity still takes new orders for free. |
+| `VAPT-ABUSE-07` | `[NN]` | **Server owns derived values, gates and sensitive fields.** A client- or role-writable field sets price, fees, payment status, entitlement or a plan gate, without field-level server enforcement, including a value the server derives from a client-set input. |
+| `VAPT-ABUSE-08` | `[D]` | **Session assurance and context at every entry point.** A valid session of insufficient assurance (aal1, recovery) reaches data, or a crafted link replaces a session. |
+
+### The machine catalog
+
+`controls.json` (next to this file) is the machine-readable form of every rule
+above: id, family, tier, the `attack` text, an `applies_when` predicate over a
+closed fact vocabulary, a `not_applicable` map, prevention, how it is verified,
+the environment (`env`, plus `env_also` when a second runner is needed) and
+evidence it needs, sources, a validation note, and for `VAPT-ABUSE-*` the
+`primary_facts`. It also records unvalidated **leads**, which are never controls.
+
+- **`attack`** equals this table's cell for the rule, compared after one
+  normalisation: remove every backtick, remove every `**`, collapse whitespace
+  runs to one space, trim. Any other change in either place is drift.
+- **`not_applicable`** is the selection accounting. For each of the 11 boundary
+  kinds, the test selects with that kind as the only boundary and every other
+  fact known-false; the kinds that do **not** select the rule must be exactly the
+  map's keys; each needs a written, test-checked reason; the reason's truth is a review item.
+  The test checks that a reason has 30+ characters and names its kind; a reason
+  starting `gated by <fact>:` is checked to select once that fact is true, and
+  any other reason is checked to stay unselected even with every fact true. A
+  boundary kind describes the **changed** code, so a reason is valid only as an
+  intrinsic impossibility of that kind ("a client-storage change cannot execute
+  a SQL query"). A reason that defers to another kind, another control or
+  "selected elsewhere" is rejected (that other component may be unchanged), and
+  so is an exclusion where the attack's check (authorization, state, query
+  predicate, policy, redirect allowlist, provider call) can live in that kind.
+  An `[NN]` rule applies to every kind unless such a reason is written: `{}`
+  means all 11.
+- **Fact values** outside the vocabulary (a fact name not listed, `"yes"` for a
+  yes/no fact, an unknown boundary kind such as `request_handler`) are an error
+  that stops selection, never a silent non-match that drops a rule.
+- **`primary_facts`** (ABUSE only) names the facts that alone, with no boundary,
+  must select the rule; every yes/no fact has at least one such owner.
+
+**This `SKILL.md` table and `controls.json` must agree (`controls.test.mjs`
+enforces it) on rule ids, tiers, titles, `attack` text, the boundary-kind list
+and the `BE-*` mirror column below; the `[NN]` obligation phrases of
+`VAPT-ABUSE-01/02/03/05/07` (`must not …`, `must never …`, `must use only …`,
+`must be enforced …`, listed in `PREVENT_PINS`) are pinned in `prevent`; every
+`VAPT-ABUSE-*` `verify.pattern` carries `Principals:`, `Request:`, an Assert part
+naming the rule's subject, and a `Positive control`; and every boundary kind and
+fact must be used by a predicate or deliberately listed as unused:** add a rule
+to both or to neither.
+
 ### How this maps onto the static rules
 
 The symmetry is deliberate — `backend-code-quality` **asserts** the control
@@ -180,9 +242,15 @@ exists; this skill **proves** it engages:
 | `BE-SEC-02` don't return internal fields | `VAPT-API-06` |
 | `BE-SEC-08` no stack traces to clients | `VAPT-API-07` |
 | `BE-SEC-05` parameterized queries | `VAPT-API-05` |
+| `BE-HDR-01` security response headers | `VAPT-CFG-02` |
+| `BE-RT-03` secrets from config, `BE-SEC-04` no secrets in logs | `VAPT-CFG-03` |
 
 *(If `backend-code-quality` isn't installed, this column is just context — the
 `VAPT-*` rules stand on their own and none of them depend on it.)*
+
+`VAPT-ABUSE-*` rules have **no `BE-*` mirror**. They describe misuse of a
+working feature, which no static "the control exists in the file" rule can assert;
+their proof is the committed runtime test alone.
 
 ## STEP 5 — Write the abuse cases as committed tests
 
@@ -195,6 +263,7 @@ same way ship-ticket's UNDERSTAND phase enumerates the repository commands. Then
 | Server request surface | The repo's test runner against an **in-process** app instance (supertest, `httpx.AsyncClient`, `httptest`, `TestClient`, Laravel/Rails request tests…) — whatever this repo already uses. |
 | Browser surface | The repo's e2e/browser runner (Playwright, Cypress, …). If it has none and the class is provable at the request layer, prove it there and say so. If it's genuinely browser-only with no runner, that class is **DEGRADED by ID**. |
 | Config and transport | A test that boots the app and asserts the actual response header / CORS behavior / cookie attributes — not a test that reads the config file back. |
+| Business-abuse surface | The repo's test runner against an in-process app with a seeded disposable datastore and a **stubbed outbound transport**; assert on the captured messages and the stored state, never on logs. |
 
 Rules for the tests themselves:
 
