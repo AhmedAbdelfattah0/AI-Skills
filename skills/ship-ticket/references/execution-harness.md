@@ -297,6 +297,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)
 ```
@@ -617,6 +618,20 @@ came before the final review (the review froze the drifted tree), the reverted t
 the reviewed candidate, so ship-ready refuses `candidate_mismatch`: the owner appends a RUN-STATE
 `RETRY` and a new original final review is recorded on the reverted tree. A final review FAIL does
 not recover it by itself: while the judgment stands `drive` dispatches nothing, the repair included.
+**Before removing the ticket worktree: `archive`.** The state file, engine log and usage ledger live
+in the work tree's own git dir, so `git worktree remove` deletes them (SCRUM-307 lost its token and
+timing data that way). Run `run-engine.mjs archive` first: it copies them with a `manifest.json`
+(sha256 per file) to `<git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/`, never
+overwriting an earlier archive. It is owner-invoked, takes the lock but changes nothing in engine state, refuses another run's id (`run_mismatch`), and does not copy
+`.attempts/` (envelopes and outputs). Files are staged and published whole, so a failed copy leaves no numbered
+directory. `usage.jsonl` is copied as it stands: run `archive` when nothing is dispatching or importing usage,
+or its last line may be a partial record (the manifest hashes the copy, not a repaired file).
+
+**Plan roots are not node writes.** A node whose `writes` or `othersOwned` sit under `.specs/` or
+`.spec/` is `dag_invalid` at `init` (the carrier always refused such a worker, as a `node_failed` at
+dispatch). Evidence files under `.specs/` (a VAPT ledger, a review record) are written by the
+orchestrator, not by a node.
+
 **Accepting a deliberate hand edit (`rebind`).** When the edit was intended (a typecheck fix, a
 secret-scan marker) and was made before the review froze the candidate, `run-engine.mjs rebind
 --reason <text>` re-binds the drifted done nodes' fingerprints to the work tree and appends a

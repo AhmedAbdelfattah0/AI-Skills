@@ -11,13 +11,13 @@
  * is never dispatched. The API contract is the comment blocks at the top of run-engine.test.mjs
  * and run-engine-repair.test.mjs.
  *
- * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind --repo <dir> --ticket <key> --run-id <id>
+ * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
@@ -399,6 +399,44 @@ export async function rebind(ctx) {
   });
 }
 
+/**
+ * Copy the run's durable records out of the work tree's own git dir, which `git worktree remove`
+ * deletes (SCRUM-307 lost its state, engine log and usage ledger that way). Destination:
+ * <git common dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>/ with state.json,
+ * engine.jsonl, usage.jsonl (when present) and manifest.json { ticket, run_id, archived_at,
+ * files: name -> sha256 }. Takes the lock but neither observes nor commits (engine state and RUN-STATE
+ * observation are untouched, so the copy is the state as left behind); refuses another run's id
+ * (`run_mismatch`); never overwrites an earlier archive.
+ */
+export async function archive(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k));
+  if (extra.length) throw coded('archive_refused', `archive takes no fields (got ${extra})`);
+  return locked(ctx, async (E) => {
+    if (!existsSync(E.P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
+    let runId;
+    try { runId = JSON.parse(readFileSync(E.P.state, 'utf8')).run_id; } catch { throw coded('state_unreadable', `${E.P.state} is not valid JSON`); }
+    if (runId !== ctx.runId) throw coded('run_mismatch', `engine state belongs to run ${runId}, not ${ctx.runId}`);
+    const base = join(io.commonGitDir(ctx.repoRoot), 'ai-skills', 'ship-ticket', 'archive', ctx.ticket);
+    mkdirSync(base, { recursive: true });
+    let n = readdirSync(base).filter(d => d.startsWith(ctx.runId + '-') && /^\d+$/.test(d.slice(ctx.runId.length + 1))).length + 1, dir;
+    while (existsSync(dir = join(base, `${ctx.runId}-${n}`))) n++;
+    // Stage, then publish: a failed copy never leaves a numbered directory (the ticket lock excludes a concurrent archive).
+    const stage = join(base, `.staging-${ctx.runId}-${n}-${randomUUID()}`);
+    mkdirSync(stage);
+    const files = {};
+    try {
+      for (const [name, src] of [['state.json', E.P.state], ['engine.jsonl', E.P.log], ['usage.jsonl', E.P.usage]]) {
+        if (!existsSync(src)) continue;
+        copyFileSync(src, join(stage, name));
+        files[name] = sha(readFileSync(join(stage, name)));
+      }
+      writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ ticket: ctx.ticket, run_id: ctx.runId, archived_at: new Date().toISOString(), files }, null, 2) + '\n');
+      renameSync(stage, dir);
+    } catch (e) { rmSync(stage, { recursive: true, force: true }); throw e; }
+    return { archive: dir, files };
+  }, { load: false });
+}
+
 const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state']);
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
@@ -441,13 +479,14 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
+    archive: () => archive({ ...ctx, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id'].includes(k)) ? { extra: 1 } : {}) }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
         if (gateKind !== 'unit-review' || (input?.unit !== undefined && input.unit !== flags.unit)) throw new Error('--unit is for gate unit-review and must equal the input unit');
