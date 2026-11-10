@@ -19,8 +19,10 @@ the committed specs below.
 ## 2. When plan §3a is required
 
 Required when any of these holds: the change is ELEVATED, security-sensitive, has
-non-empty `riskLabels`, or a `vapt` trigger fires. Otherwise §3a is the single
-line `No security-relevant surface: <evidence>`. Policy 2 itself (the DAG keys
+non-empty `riskLabels`, or a `vapt` trigger fires. Otherwise §3a is the three-line
+compact form `select` prints for an empty selection: the line
+`No security-relevant surface: <evidence>`, the `security-pairs sha256:<hex>` line
+and the machine block. Policy 2 itself (the DAG keys
 below) is required for every run approved after the cutoff (section 11), so a
 no-surface run still binds `controlCoverage: []`, an evidenced empty assessment.
 
@@ -35,6 +37,9 @@ Facts are the input to selection. Each fact in the catalog's `fact_vocabulary`:
 - is **explicitly unknown** when it is: `"unknown: <why>"`. Never default to
   `false`; an unknown fact keeps its controls selected;
 - uses only vocabulary values (`fact_out_of_vocabulary` otherwise).
+
+A surface path is a file; a directory path matches no signal. Paths use forward
+slashes: a backslash in a surface path or a changed path is refused `bad_input`.
 
 ## 4. Running select
 
@@ -72,31 +77,44 @@ that would sit outside the existing node paths is a contract expansion:
 `config.testCommands` runner, because the proof parses each spec's result. `init`
 refuses with `security_policy_required` (post-cutoff run without policy 2),
 `security_pairs_mismatch` (the narrative's `security-pairs` line or machine block
-does not match the DAG's pairs and digest) and `catalog_unavailable` (catalog
-missing or not the one approved).
+does not match the DAG's pairs and digest, or an approved surface path lies outside
+every node's `writes`) and `catalog_unavailable` (catalog missing or not the one
+approved).
 
 ## 7. Reassessment
 
 `gate reassess` re-evaluates the candidate against the approved plan. Its input is
 `{ classifications: [{ signal_id, facts?, evidence?, reason? }], surfaces?: [{ boundary_id,
 kind, path, principals[] }] }`. `surfaces` are new or changed boundaries the candidate
-introduces inside the Design Contract; they are unioned with the approved block's
-surfaces, so a new route or auth surface produces new pairs (`ADD_CONTROLS`, then
-`addendum_required` until an owner `SECURITY_ADDENDUM`). No classification, by reason,
+introduces inside the Design Contract; `reassess` unites them with the approved block's
+surfaces itself, in the gate and in the standalone helper alike, so a new route or auth
+surface produces new pairs (`ADD_CONTROLS`, then `addendum_required` until an owner
+`SECURITY_ADDENDUM`). An input surface that reuses an approved boundary id with a
+different kind, path or principals is refused `bad_input`. No classification, by reason,
 by cited facts or both, closes a `new-route`, `auth-or-middleware-change` or
 `migration-or-rls-change` signal on a path that is not an approved surface (facts never
 add a boundary): it closes only through an input surface at that path whose pairs cover
-the signal's control class. Input `surfaces` are
+the signal's control class. On a path that is an approved surface a classification can
+close such a signal. That is intended: the owner approved that file as a surface in the
+plan, a mechanical signal can be a false alarm, and the classification is recorded and
+reviewed. An approved surface counts only at exactly the signal's path. Input `surfaces` are
 not stored: every later `gate reassess` call must supply them again, or the signal
 reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis.
 
 **Proving a pair spec (attribution rule).** Under TAP, a passing test carries no file
 location, so a pair spec counts as passed only when the formatted command runs exactly
-that one spec file (one non-option argument, a relative path, options written
-`--flag=value`). A whole-suite command, a glob, a directory or an absolute path proves
-nothing for TAP; jest and vitest results carry their file and are unaffected. Name one
+that one spec file: one non-option argument, a relative path with forward slashes, and
+only these options: `--test`, `--test-reporter=tap`, `--test-reporter-destination=stdout`,
+`--test-name-pattern=`, `--test-concurrency=`, `--test-timeout=`, `--no-warnings`. Any
+other option (`--import=`, `--require=`, `--loader=`, another reporter, an unknown flag)
+proves nothing for TAP, and neither does a whole-suite command, a glob, a directory or an
+absolute path. A jest or vitest result that carries its file is attributed by it; one
+without a file is attributed only under the same rule (exactly one file, only the
+options listed above), which a `--json` or `--reporter=json` command does not meet.
+Name one
 spec file per formatted command in the plan. A same-named test in another file never
-discharges a pair.
+discharges a pair. Not covered: a preload set through `NODE_OPTIONS` in the engine's own
+environment, which a worker cannot set.
 
 Reassessment runs when the orchestrator calls `gate reassess`, not automatically on
 every engine run: at the start of PROVE, after every PROVE or REVIEW repair that
@@ -142,7 +160,10 @@ A classification can only raise facts; it can never remove an approved pair.
 The recorded reassessment must match the tuple **candidate_id + approved plan
 digest + catalog digest + effective addendum set**. If any part moved, review and
 ship-ready refuse `reassess_stale`; a review made under an older catalog or
-addendum set refuses `security_review_stale`.
+addendum set refuses `security_review_stale`. `gate ship-ready` makes these checks
+twice: before the local proof and again after it, before it records ship-ready, so
+a proof command that changes the installed catalog is refused `reassess_stale`. A
+proof command that moves `config.base` leaves its pairs unproven (`control_unproven`).
 
 Recovery differs by code:
 

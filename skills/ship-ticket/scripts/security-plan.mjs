@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const EVALUATOR_URL = new URL('../../vapt/controls.mjs', import.meta.url).href;
 const DEFAULT_CATALOG = fileURLToPath(new URL('../../vapt/controls.json', import.meta.url));
-const EVAL_FNS = ['assertFacts', 'selected', 'via', 'why', 'catalogDigest'];
+const EVAL_FNS = ['unknownish', 'assertFacts', 'selected', 'via', 'why', 'catalogDigest'];
 let DEFAULT_EVALUATOR = null;
 try { DEFAULT_EVALUATOR = await import(EVALUATOR_URL); } catch { DEFAULT_EVALUATOR = null; }
 
@@ -31,11 +31,19 @@ export const OUTCOMES = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
 // ---------------------------------------------------------------------------------------------------- utils
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
-const unknownish = (v) => v === undefined || v === null || v === 'unknown';
-const partlyUnknown = (v) => unknownish(v) || (Array.isArray(v) && v.includes('unknown'));
+// The unknown encoding is the evaluator's (`ev.unknownish`, skills/vapt/controls.mjs): this module keeps no copy.
+const partlyUnknown = (ev, v) => ev.unknownish(v) || (Array.isArray(v) && v.includes('unknown'));
 const sha = (s) => 'sha256:' + createHash('sha256').update(s).digest('hex');
 const uniqSorted = (xs) => [...new Set(xs)].sort();
-const normPath = (p) => String(p).replace(/\\/g, '/').replace(/^(\.\/)+/, '');
+const normPath = (p) => String(p).replace(/^(\.\/)+/, '');
+/**
+ * A surface or changed path, normalized. A backslash is refused, never converted: on POSIX it is a legal file-name
+ * character, so `src\a.ts` converted would alias `src/a.ts`. Git reports changed paths with forward slashes.
+ */
+function inputPath(p, what) {
+  if (String(p).includes('\\')) refuse('bad_input', `${what} ${JSON.stringify(p)} contains a backslash; use forward slashes`);
+  return normPath(p);
+}
 /** Canonical JSON: object keys sorted recursively, no whitespace, undefined dropped. */
 export function canon(v) {
   if (Array.isArray(v)) return '[' + v.map((x) => (x === undefined ? 'null' : canon(x))).join(',') + ']';
@@ -146,33 +154,33 @@ function validateSurfaces(surfaces, vocab) {
     seen.add(s.boundary_id);
     if (!kinds.has(s.kind)) refuse('fact_out_of_vocabulary', `surface ${s.boundary_id}: kind ${JSON.stringify(s.kind)} is not a boundary kind`);
     if (principals) for (const p of s.principals) if (!principals.has(p)) refuse('fact_out_of_vocabulary', `surface ${s.boundary_id}: principal ${JSON.stringify(p)}`);
-    out.push({ boundary_id: s.boundary_id, kind: s.kind, path: normPath(s.path), principals: uniqSorted(s.principals) });
+    out.push({ boundary_id: s.boundary_id, kind: s.kind, path: inputPath(s.path, `surface ${s.boundary_id}: path`), principals: uniqSorted(s.principals) });
   }
   return out.sort((a, b) => (a.boundary_id < b.boundary_id ? -1 : a.boundary_id > b.boundary_id ? 1 : 0));
 }
 
 const DERIVED = ['boundaries', 'principals'];
 /** A known value cites a path; an unknown one says `unknown: <why>`. Only the keys in `keys` are checked. */
-function checkCitations(facts, evidence, vocab, keys) {
+function checkCitations(ev, facts, evidence, vocab, keys) {
   for (const k of Object.keys(evidence)) if (!vocab[k]) refuse('fact_out_of_vocabulary', `evidence for unknown fact '${k}'`);
   for (const k of keys) {
     const v = facts[k], e = evidence[k];
     if (!nonEmpty(e) || /[\r\n]/.test(e)) refuse('fact_uncited', `${k}: no citation`);
     const saysUnknown = /^unknown:/i.test(e.trim());
     if (saysUnknown && !/^unknown:\s*\S/i.test(e.trim())) refuse('fact_uncited', `${k}: "unknown:" needs a reason`);
-    if (saysUnknown && !partlyUnknown(v)) refuse('fact_uncited', `${k}: a known value needs a path citation, not "unknown:"`);
-    if (!saysUnknown && unknownish(v)) refuse('fact_uncited', `${k}: an unknown value needs "unknown: <why>"`);
+    if (saysUnknown && !partlyUnknown(ev, v)) refuse('fact_uncited', `${k}: a known value needs a path citation, not "unknown:"`);
+    if (!saysUnknown && ev.unknownish(v)) refuse('fact_uncited', `${k}: an unknown value needs "unknown: <why>"`);
   }
 }
 
 const sameSet = (a, b) => Array.isArray(a) && Array.isArray(b) && canon(uniqSorted(a)) === canon(uniqSorted(b));
 
 /** Normalized facts over the whole vocabulary: unknown encodings -> 'unknown', enums sorted and deduped. */
-function normFacts(facts, vocab) {
+function normFacts(ev, facts, vocab) {
   const out = {};
   for (const k of Object.keys(vocab).sort()) {
     const v = facts[k];
-    out[k] = unknownish(v) ? 'unknown' : Array.isArray(v) ? uniqSorted(v) : v;
+    out[k] = ev.unknownish(v) ? 'unknown' : Array.isArray(v) ? uniqSorted(v) : v;
   }
   return out;
 }
@@ -211,7 +219,7 @@ function compute({ catalog, evaluator: ev }, facts, surfaces) {
   });
   const excluded = catalog.controls.filter((c) => !ids.includes(c.id)).map((c) => ({ control_id: c.id, why: ev.why(c.applies_when, facts) }))
     .sort((a, b) => (a.control_id < b.control_id ? -1 : 1));
-  const unknown_facts = Object.keys(catalog.fact_vocabulary).filter((k) => partlyUnknown(facts[k])).sort();
+  const unknown_facts = Object.keys(catalog.fact_vocabulary).filter((k) => partlyUnknown(ev, facts[k])).sort();
   return { controls, pairs, excluded, unknown_facts, unpaired };
 }
 
@@ -242,8 +250,8 @@ export function selectControls(catalogArg, input) {
         refuse('surface_facts_mismatch', `facts.${k} ${JSON.stringify(input.facts[k])} differs from the surfaces' ${JSON.stringify(derived[k])}`);
       }
     }
-    checkCitations(input.facts, input.evidence, vocab, Object.keys(vocab).filter((k) => !DERIVED.includes(k)));
-    const facts = normFacts({ ...input.facts, ...(vocab.principals ? derived : { boundaries: derived.boundaries }) }, vocab);
+    checkCitations(ev, input.facts, input.evidence, vocab, Object.keys(vocab).filter((k) => !DERIVED.includes(k)));
+    const facts = normFacts(ev, { ...input.facts, ...(vocab.principals ? derived : { boundaries: derived.boundaries }) }, vocab);
     return buildSelection(r, catalog, digest, facts, surfaces);
   });
 }
@@ -284,18 +292,20 @@ const blockJson = (b) => canon(b).replace(/</g, '\\u003c').replace(/>/g, '\\u003
 export function renderSection3a(sel) {
   const verify = new Map((sel.controls ?? []).map((c) => [c.control_id, c.verify_type]));
   const pairs = sel.pairs.map((p) => p.pair_id);
-  const out = [`Security risk assessment: policy 2, catalog v${esc(sel.catalog_version)} \`${sel.catalog_digest}\`, selection \`${sel.selection_digest}\`.`, ''];
-  if (!sel.pairs.length) out.push('No security-relevant surface: no changed surface selects a catalog control under the cited facts (see the security-plan block).', '');
-  else {
-    out.push('| Boundary | Kind | Control | Tier | Verify | Paired by | Why it applies |', '|---|---|---|---|---|---|---|');
-    for (const p of sel.pairs) out.push(`| \`${esc(p.boundary_id)}\` | ${esc(p.kind)} | ${p.control_id} | ${p.tier} | ${esc(verify.get(p.control_id) ?? '')} | ${p.paired_by} | ${esc(p.why)} |`);
-    out.push('');
+  const block = { policy: 2, catalog_digest: sel.catalog_digest, facts: sel.facts, surfaces: sel.surfaces,
+    controls: sel.controls.map((c) => c.control_id), pairs, selection_digest: sel.selection_digest };
+  if (!sel.pairs.length && !sel.controls.length) {
+    // Nothing selected (a small fix): the compact form, one evidence line, the pairs line and the machine block.
+    return [`No security-relevant surface: no changed surface selects a catalog control under the cited facts (policy 2, catalog v${esc(sel.catalog_version)} \`${sel.catalog_digest}\`, selection \`${sel.selection_digest}\`, ${sel.surfaces?.length ?? 0} surface(s), unknown facts: ${sel.unknown_facts?.length ? sel.unknown_facts.join(', ') : 'none'}).`,
+      pairsLine({ catalogDigest: sel.catalog_digest, pairs }), `<!-- security-plan: ${blockJson(block)} -->`].join('\n');
   }
+  const out = [`Security risk assessment: policy 2, catalog v${esc(sel.catalog_version)} \`${sel.catalog_digest}\`, selection \`${sel.selection_digest}\`.`, ''];
+  out.push('| Boundary | Kind | Control | Tier | Verify | Paired by | Why it applies |', '|---|---|---|---|---|---|---|');
+  for (const p of sel.pairs) out.push(`| \`${esc(p.boundary_id)}\` | ${esc(p.kind)} | ${p.control_id} | ${p.tier} | ${esc(verify.get(p.control_id) ?? '')} | ${p.paired_by} | ${esc(p.why)} |`);
+  out.push('');
   if (sel.excluded?.length) { out.push('Excluded (predicates false for the cited facts):'); for (const e of sel.excluded) out.push(`- ${e.control_id}: ${esc(e.why)}`); out.push(''); }
   out.push(`Unknown facts (their controls stay selected): ${sel.unknown_facts?.length ? sel.unknown_facts.join(', ') : 'none'}.`, '');
   out.push(pairsLine({ catalogDigest: sel.catalog_digest, pairs }));
-  const block = { policy: 2, catalog_digest: sel.catalog_digest, facts: sel.facts, surfaces: sel.surfaces,
-    controls: sel.controls.map((c) => c.control_id), pairs, selection_digest: sel.selection_digest };
   out.push(`<!-- security-plan: ${blockJson(block)} -->`);
   return out.join('\n');
 }
@@ -381,11 +391,11 @@ const SIGNAL_CLASS = {
 function normFiles(files) {
   if (!Array.isArray(files)) refuse('bad_input', 'changed files must be an array');
   return files.map((f) => {
-    if (typeof f === 'string' && nonEmpty(f)) return { path: normPath(f), added: [] };
+    if (typeof f === 'string' && nonEmpty(f)) return { path: inputPath(f, 'changed file'), added: [] };
     if (!isObj(f) || !nonEmpty(f.path) || (f.added !== undefined && (!Array.isArray(f.added) || !f.added.every((l) => typeof l === 'string')))) {
       refuse('bad_input', `changed file ${JSON.stringify(f)} needs path and optional added[] of strings`);
     }
-    return { path: normPath(f.path), added: f.added ?? [] };
+    return { path: inputPath(f.path, 'changed file'), added: f.added ?? [] };
   });
 }
 
@@ -445,11 +455,11 @@ function globRe(glob) {
 }
 
 /** Monotone merge: unknown beats true beats false; enums union. Never lowers a fact. */
-function mergeFacts(vocab, base, add) {
+function mergeFacts(ev, vocab, base, add) {
   const out = { ...base };
   for (const [k, a] of Object.entries(add)) {
     const b = out[k];
-    if (unknownish(a) || unknownish(b)) out[k] = 'unknown';
+    if (ev.unknownish(a) || ev.unknownish(b)) out[k] = 'unknown';
     else if (vocab[k].type === 'bool') out[k] = b === true || a === true;
     else out[k] = uniqSorted([...(Array.isArray(b) ? b : []), ...a]);
   }
@@ -469,9 +479,27 @@ function validateClassifications(ev, list, vocab) {
     if (!Object.keys(facts).length && !nonEmpty(c.reason)) refuse('bad_input', `classification ${c.signal_id} needs facts or a reason`);
     if (DERIVED.some((k) => k in facts)) refuse('bad_input', `classification ${c.signal_id}: boundaries and principals come from the inventory`);
     checkFacts(ev, facts, vocab);
-    checkCitations(facts, evidence, vocab, Object.keys(facts));
+    checkCitations(ev, facts, evidence, vocab, Object.keys(facts));
     return { signal_id: c.signal_id, facts, reason: c.reason ?? null };
   });
+}
+
+const surfaceKey = (s) => canon([s.kind, normPath(s.path), uniqSorted(s.principals)]);
+/**
+ * The candidate's surfaces: the approved block's surfaces united with the (validated) inventory's, sorted by
+ * boundary_id. An inventory surface identical to an approved one is that surface; one that reuses an approved
+ * boundary id with another kind, path or principals is refused (bad_input), so an approved id's pairs can never
+ * cover a new path. The result is the same whether or not the caller already listed the approved surfaces.
+ */
+function withApprovedSurfaces(approved, inventory) {
+  const byId = new Map(inventory.map((s) => [s.boundary_id, s]));
+  const out = [...inventory];
+  for (const a of approved) {
+    const s = byId.get(a.boundary_id);
+    if (!s) { out.push({ boundary_id: a.boundary_id, kind: a.kind, path: normPath(a.path), principals: uniqSorted(a.principals) }); continue; }
+    if (surfaceKey(s) !== surfaceKey(a)) refuse('bad_input', `inventory surface ${a.boundary_id} redefines the approved surface (kind, path or principals differ); give a new boundary a new id`);
+  }
+  return out.sort((a, b) => (a.boundary_id < b.boundary_id ? -1 : a.boundary_id > b.boundary_id ? 1 : 0));
 }
 
 /**
@@ -495,7 +523,7 @@ export function reassess(input = {}) {
     if (!block) refuse('plan_block_invalid', nBlocks > 1 ? 'more than one security-plan block' : 'the security-plan block is malformed or inconsistent');
     const inv = Array.isArray(input.inventory) ? { surfaces: input.inventory } : input.inventory;
     if (!isObj(inv)) refuse('bad_input', 'inventory must be {surfaces[]} or an array');
-    const surfaces = validateSurfaces(inv.surfaces, vocab);
+    const surfaces = withApprovedSurfaces(block.surfaces, validateSurfaces(inv.surfaces, vocab));
     const changed = input.changed;
     if (!isObj(changed) || !Array.isArray(changed.contract_paths) || !changed.contract_paths.length || !changed.contract_paths.every(nonEmpty)) {
       refuse('bad_input', 'changed.contract_paths (the Design Contract paths) is required');
@@ -515,8 +543,8 @@ export function reassess(input = {}) {
 
     // The pairs the inventory's surfaces select under the approved facts (classifications only add to these):
     // a new surface at a signal's path closes the signal, and its pairs not yet effective become delta_pairs.
-    const surfaceFacts = (base) => normFacts({ ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
-      ...(vocab.principals ? { principals: unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
+    const surfaceFacts = (base) => normFacts(ev, { ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
+      ...(vocab.principals ? { principals: ev.unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
     const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces).pairs.map((p) => p.pair_id);
     const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs });
     const basis = [];
@@ -540,7 +568,7 @@ export function reassess(input = {}) {
     const used = classifications.filter((c) => signals.some((s) => s.id === c.signal_id));
 
     let merged = { ...block.facts };
-    for (const c of used) merged = mergeFacts(vocab, merged, c.facts);
+    for (const c of used) merged = mergeFacts(ev, vocab, merged, c.facts);
     const facts = surfaceFacts(merged);
     const core = compute(r, facts, surfaces);
     const approvedControls = new Set(effective.map((p) => parsePairId(p).control_id));

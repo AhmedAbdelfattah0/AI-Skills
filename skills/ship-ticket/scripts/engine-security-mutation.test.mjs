@@ -3,7 +3,7 @@
  * of the repository layout the engine needs (skills/ship-ticket/scripts and skills/vapt, for the
  * catalog and its evaluator) in a temp dir with ONE guard patched out by an exact string replacement
  * that must match exactly once (the repo is never edited). For mutant S#, the tests tagged [S#] in
- * gate-security.test.mjs and run-engine-security.test.mjs must FAIL with a failing test carrying that
+ * gate-security.test.mjs, run-engine-security.test.mjs and security-plan.test.mjs must FAIL with a failing test carrying that
  * tag; the unpatched copy (the control) must PASS every tagged test, or the result would say nothing.
  *
  * Runs with ENGINE_MUTATION=1 (the engine-properties CI job) or ENGINE_SECURITY_MUTATION=1.
@@ -23,7 +23,7 @@ const VAPT = join(HERE, '..', '..', 'vapt');
 const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
   : process.env.ENGINE_MUTATION !== '1' && process.env.ENGINE_SECURITY_MUTATION !== '1'
     ? 'slow: runs with ENGINE_MUTATION=1 (engine-properties CI job) or ENGINE_SECURITY_MUTATION=1' : false;
-const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs'];
+const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs', 'security-plan.test.mjs'];
 const CONCURRENCY = 4;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -54,7 +54,7 @@ export const SECURITY_MUTANTS = [
   { tag: 'S12', name: 'C3: every run is treated as policy 2', file: 'engine-dag.mjs',
     from: 'export const securityOn = (S) => S?.config?.securityPolicy === 2;', to: 'export const securityOn = (S) => true;' },
   { tag: 'S13', name: 'C9: init never binds the narrative to the DAG pairs', file: 'run-engine.mjs',
-    from: '    await bindSecurity(ctx, dag.config, start, text, narrative);\n', to: '' },
+    from: '    await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);\n', to: '' },
   { tag: 'S14', name: 'review: pair rows, NOT_APPLICABLE and NOT_TRIGGERED are not checked', file: 'engine-gates.mjs',
     from: "?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);", to: ';' },
   { tag: 'S15', name: 'freshness: a stale reassessment is accepted', file: 'engine-gates.mjs',
@@ -87,6 +87,30 @@ export const SECURITY_MUTANTS = [
     to: 'const dismissed = (s) => byId.has(s.id) && !(Object.keys(byId.get(s.id).facts).length === 0 && SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));' },
   { tag: 'S28', name: 'ship-ready: the post-proof control pairs reuse the pre-proof base, so a proof that moves config.base still proves a pair', file: 'engine-gates.mjs',
     from: '    E.baseCommit = undefined;\n', to: '' },
+  { tag: 'S29', name: "reassess: the inventory surfaces are taken as given (no union with the approved surfaces, no redefinition refusal)", file: 'security-plan.mjs',
+    from: "    const surfaces = withApprovedSurfaces(block.surfaces, validateSurfaces(inv.surfaces, vocab));\n", to: "    const surfaces = validateSurfaces(inv.surfaces, vocab);\n" },
+  { tag: 'S30', name: "reassess: an approved surface whose path is a prefix of the signal path counts as an approved path", file: 'security-plan.mjs',
+    from: "const dismissed = (s) => byId.has(s.id) && !(SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));", to: "const dismissed = (s) => byId.has(s.id) && !(SURFACE_SIGNALS.includes(s.kind) && ![...approvedPaths].some((p) => s.path.startsWith(p)));" },
+  { tag: 'S31', name: "reassess: one classification dismisses every open signal", file: 'security-plan.mjs',
+    from: "const dismissed = (s) => byId.has(s.id) && !(SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));", to: "const dismissed = (s) => byId.size > 0 && !(SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));" },
+  { tag: 'S32', name: "C7 attribution: any option (--import=, --require=, a reporter path) still lets a command count as running only the spec file", file: 'gate.mjs',
+    from: "  if (!args.every((a) => typeof a !== 'string' || !a.startsWith('-') || soleOption(a))) return null;\n", to: "" },
+  { tag: 'S33', name: "C7 path matching: a backslash in any result path is taken for a separator (POSIX aliasing)", file: 'gate.mjs',
+    from: "const r = WIN_PATH.test(String(resultFile)) ? norm(resultFile) : String(resultFile);", to: "const r = norm(resultFile);" },
+  { tag: 'S34', name: "DAG: a pair spec file with a backslash, '.', '..' or empty segment is accepted", file: 'engine-dag.mjs',
+    from: "const odd = p.specs.find(s => !normalRel(s.file));", to: "const odd = undefined;" },
+  { tag: 'S35', name: "TAP adapter: a '# Subtest:' name is not unescaped (a nested spec under a name with '#' or '\\' is never found)", file: 'gate.mjs',
+    from: "stack[level] = sub[1].replace(/\\\\([#\\\\])/g, '$1');", to: "stack[level] = sub[1];" },
+  { tag: 'S36', name: "select/reassess: a backslash in a surface or changed path is accepted (no refusal)", file: 'security-plan.mjs',
+    from: "  if (String(p).includes('\\\\')) refuse('bad_input', `${what} ${JSON.stringify(p)} contains a backslash; use forward slashes`);\n", to: "" },
+  { tag: 'S37', name: "C7 attribution: a file argument with a backslash still counts as the slash spec file (POSIX aliasing)", file: 'gate.mjs',
+    from: "  if (pos[0].includes('\\\\')) return null;\n", to: "" },
+  { tag: 'S38', name: "ship-ready: the security context is not re-derived after the proof, so a proof that rewrites the catalog ships on the stale reassessment", file: 'engine-gates.mjs',
+    from: "    if (sec) {\n      sec = await securityContext(E, candidate); // post-proof security context\n", to: "    if (false) {\n      sec = await securityContext(E, candidate); // post-proof security context\n" },
+  { tag: 'S39', name: "init: an approved §3a surface outside every node's writes binds", file: 'run-engine.mjs',
+    from: "  if (outside.length) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
+  { tag: 'S40', name: 'init: a reassess refusal of the approved block is taken for "no surface outside the contract"', file: 'run-engine.mjs',
+    from: "  if (!res.ok) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

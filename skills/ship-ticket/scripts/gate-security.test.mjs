@@ -226,8 +226,9 @@ const spec = (format, name) => ({ file: format === 'tap' ? 'spec/sec.test.mjs' :
 /** The args of the command each output came from (REAL_TAP ran exactly spec/sec.test.mjs; the JSON runners locate every result). */
 const ARGS = { tap: ['--test', '--test-reporter=tap', 'spec/sec.test.mjs'], 'jest-json': ['--json'], 'vitest-json': ['--reporter=json'] };
 
-// node's TAP writes a string as a JS literal, so on Windows a failure location arrives with every backslash doubled.
-// Canned here so the row runs on every platform; the real-TAP rows below exercise it on a Windows runner.
+// The location shapes CI's node versions write. node 20 and later write the location as a JS string literal, so on
+// Windows every backslash arrives doubled; node 18 writes an ES module's location as a file:/// URL instead.
+// Canned here so every row runs on every platform; the real-TAP rows below exercise the local shape on each runner.
 const winTap = (location) => ['TAP version 13', '# Subtest: fails', 'not ok 1 - fails', '  ---', '  duration_ms: 1', "  type: 'test'",
   `  location: '${location}'`, "  failureType: 'testCodeFailure'", "  error: '1 !== 2'", "  code: 'ERR_ASSERTION'", "  name: 'AssertionError'",
   '  ...', '1..1', '# tests 1', '# pass 0', '# fail 1'].join('\n');
@@ -248,6 +249,106 @@ test('TAP adapter: a Windows failure location (backslashes doubled by node) matc
   assert.deepEqual(at(String.raw`D:\a\repo\spec\sec.test.mjs:5:1`), { file: String.raw`D:\a\repo\spec\sec.test.mjs`, status: 'fail', red: 'fail' });
   assert.deepEqual(at('/r/spec/sec.test.mjs:5:1'), { file: '/r/spec/sec.test.mjs', status: 'fail', red: 'fail' });
   assert.deepEqual(at('/r/spec/other.test.mjs:5:1'), { file: '/r/spec/other.test.mjs', status: 'missing', red: undefined });
+  // UNC, as node 20+ emits it (every backslash doubled): matches its own file only.
+  assert.deepEqual(at(String.raw`\\\\server\\share\\repo\\spec\\sec.test.mjs:5:1`), { file: String.raw`\\server\share\repo\spec\sec.test.mjs`, status: 'fail', red: 'fail' });
+  assert.deepEqual(at(String.raw`\\\\server\\share\\repo\\spec\\other.test.mjs:5:1`), { file: String.raw`\\server\share\repo\spec\other.test.mjs`, status: 'missing', red: undefined });
+  assert.deepEqual(at(String.raw`\\\\server\\share\\repo\\other\\sec.test.mjs:5:1`), { file: String.raw`\\server\share\repo\other\sec.test.mjs`, status: 'missing', red: undefined });
+  // UNC with single backslashes (a runner that does not escape): fileOf's un-doubling collapses the leading '\\' to '\',
+  // so the path is neither drive-rooted nor UNC and is never converted: it fails closed (missing), as does its twin.
+  assert.deepEqual(at(String.raw`\\server\share\repo\spec\sec.test.mjs:5:1`), { file: String.raw`\server\share\repo\spec\sec.test.mjs`, status: 'missing', red: undefined });
+  assert.deepEqual(at(String.raw`\\server\share\repo\spec\other.test.mjs:5:1`), { file: String.raw`\server\share\repo\spec\other.test.mjs`, status: 'missing', red: undefined });
+  // Four backslashes per separator (escaped twice): one un-doubling leaves pairs, so it never matches (fail closed), nor does its twin.
+  assert.deepEqual(at(String.raw`D:\\\\a\\\\repo\\\\spec\\\\sec.test.mjs:5:1`), { file: String.raw`D:\\a\\repo\\spec\\sec.test.mjs`, status: 'missing', red: undefined });
+  assert.deepEqual(at(String.raw`D:\\\\a\\\\repo\\\\spec\\\\other.test.mjs:5:1`), { file: String.raw`D:\\a\\repo\\spec\\other.test.mjs`, status: 'missing', red: undefined });
+  // node 18: an ES module's location is a file:/// URL (POSIX and Windows drive forms).
+  assert.deepEqual(at('file:///r/spec/sec.test.mjs:5:1'), { file: 'file:///r/spec/sec.test.mjs', status: 'fail', red: 'fail' });
+  assert.deepEqual(at('file:///r/spec/other.test.mjs:5:1'), { file: 'file:///r/spec/other.test.mjs', status: 'missing', red: undefined });
+  assert.deepEqual(at('file:///r/other/sec.test.mjs:5:1'), { file: 'file:///r/other/sec.test.mjs', status: 'missing', red: undefined });
+  assert.deepEqual(at('file:///D:/a/repo/spec/sec.test.mjs:5:1'), { file: 'file:///D:/a/repo/spec/sec.test.mjs', status: 'fail', red: 'fail' });
+  assert.deepEqual(at('file:///D:/a/repo/spec/other.test.mjs:5:1'), { file: 'file:///D:/a/repo/spec/other.test.mjs', status: 'missing', red: undefined });
+});
+
+test('[S33] C7 path matching: a backslash converts to a separator only in a drive-rooted or UNC result path; on POSIX it is part of a file name', () => {
+  const s = { file: 'spec/sec.test.mjs', name: 'fails' };
+  const located = (file) => ({ supported: true, results: [{ name: 'fails', file, status: 'fail', failure_kind: 'assertion', detail: null }] });
+  const rows = [
+    // [result path, spec status]
+    [String.raw`/r/spec\sec.test.mjs`, 'missing'], // a POSIX file literally named 'spec\sec.test.mjs' in /r
+    [String.raw`spec\sec.test.mjs`, 'missing'],
+    [String.raw`/r\spec\sec.test.mjs`, 'missing'],
+    ['/r/spec/sec.test.mjs', 'fail'],
+    [String.raw`D:\r\spec\sec.test.mjs`, 'fail'],
+    [String.raw`d:\r\spec\sec.test.mjs`, 'fail'],
+    [String.raw`\\srv\share\spec\sec.test.mjs`, 'fail'],
+    [String.raw`D:\r\spec\other.test.mjs`, 'missing'],
+    [String.raw`\\srv\share\other\sec.test.mjs`, 'missing'],
+  ];
+  for (const [file, want] of rows) {
+    assert.equal(G.specStatus(s, located(file)), want, file);
+    assert.equal(G.findSpec(s, located(file).results).hit?.status, want === 'fail' ? 'fail' : undefined, `RED: ${file}`);
+  }
+});
+
+test('[S34] DAG: a pair spec file must be repository-relative and normalized (no backslash, ".", ".." or empty segment), like othersOwned', () => {
+  const at = (file) => ({ file, name: SPEC.name });
+  const dag = (file) => secDag([{ ...PAIR, specs: [at(file)] }], {}, { redSpecs: [at(file), SPEC2] });
+  for (const file of [String.raw`src/api/x\sec.test.mjs`, 'src/api/./sec.test.mjs', 'src/api/x/../sec.test.mjs', 'src/api//sec.test.mjs']) {
+    invalid(dag(file));
+  }
+  assert.doesNotThrow(() => valid(dag('src/api/x/sec.test.mjs')), 'the twin with a slash');
+  // A trusted addendum goes through the same pair check: its backslash spec adds nothing.
+  const sec = A.securityEvents(authS({ trusted: [ADD({ pairs: [{ boundary: 'POST-orders', control: 'VAPT-API-02', node: 'api', specs: [at(String.raw`src/api/x\y.test.mjs`)] }] })] }));
+  assert.deepEqual(ids(sec), ['GET-orders:VAPT-API-01']);
+  assert.equal(sec.conflicts.length, 1);
+  assert.deepEqual(ids(A.securityEvents(authS({ trusted: [ADD({ pairs: [{ boundary: 'POST-orders', control: 'VAPT-API-02', node: 'api', specs: [at('src/api/x/y.test.mjs')] }] })] }))),
+    ['GET-orders:VAPT-API-01', 'POST-orders:VAPT-API-02'], 'the twin with a slash');
+});
+
+// A nested test whose parent's name carries an escaped character ('#', '\'): node escapes it in '# Subtest:' too.
+writeFileSync(join(root, 'spec', 'esc.test.mjs'), `import test from 'node:test';\nimport assert from 'node:assert/strict';\n`
+  + `test('a#b', async (t) => { await t.test('inner', () => { assert.equal(1, 2); }); await t.test('ok', () => {}); });\n`
+  + `test('c\\\\d', async (t) => { await t.test('inner', () => { assert.equal(1, 2); }); await t.test('ok', () => {}); });\n`);
+const ESC_TAP = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'spec/esc.test.mjs'], { cwd: root, encoding: 'utf8', env: cleanEnv }).stdout;
+
+test('[S35] TAP adapter: a "# Subtest:" name is unescaped like a result name, so a nested spec under "a#b" or "c\\d" is found and inherits its file', () => {
+  assert.match(ESC_TAP, /^# Subtest: a\\#b$/m, 'node escapes the parent name');
+  const parsed = G.parseRunnerOutput('tap', ESC_TAP);
+  const file = 'spec/esc.test.mjs';
+  for (const parent of ['a#b', 'c\\d']) {
+    assert.equal(G.specStatus({ file, name: `${parent} > inner` }, parsed), 'fail', `${parent} > inner`);
+    assert.equal(G.findSpec({ file, name: `${parent} > inner` }, parsed.results).hit?.failure_kind, 'assertion', `RED ${parent} > inner`);
+    assert.equal(G.specStatus({ file, name: `${parent} > ok` }, parsed), 'pass', `${parent} > ok inherits its parent's located file`);
+    assert.equal(G.specStatus({ file: 'spec/other.test.mjs', name: `${parent} > ok` }, parsed), 'missing', `${parent} > ok is not another file's`);
+  }
+  assert.equal(G.specStatus({ file, name: String.raw`a\#b > ok` }, parsed), 'missing', 'the escaped spelling is not the name');
+});
+
+test('[S32] C7 attribution: an unlocated pass is the spec file\'s only when every option of the command is on the allowlist', () => {
+  const s = { file: 'spec/a.test.mjs', name: 'x' };
+  const unlocated = { supported: true, results: [{ name: 'x', file: null, status: 'pass', failure_kind: null, detail: null }] };
+  const status = (opts) => G.specStatus(s, unlocated, { args: [...opts, 'spec/a.test.mjs'] });
+  const refused = [
+    ['--test', '--import=./other.mjs'], ['--test', '--require=./x.cjs'], ['--test', '-r=./x.cjs'], ['--test', '--loader=./l.mjs'],
+    ['--test', '--experimental-loader=./l.mjs'], ['--test', '--test-reporter=./r.mjs'], ['--test', '--test-reporter=spec'],
+    ['--test', '--test-reporter-destination=out.txt'], ['--test', '--test-reporter'], ['--test', '--test-shard=1/2'],
+    ['--test', '--test-only'], ['--test', '--env-file=.env'], ['--test', '--experimental-test-module-mocks'], ['--test', '--unknown-flag'],
+    ['--test', '--'], ['--test', '-'], ['--test', '--test-name-pattern='], ['--test', '--test-timeout='], ['--test', '--TEST'],
+    ['--json'], ['--reporter=json'],
+  ];
+  for (const opts of refused) assert.equal(status(opts), 'missing', opts.join(' '));
+  const accepted = [[], ['--test'], ['--test', '--test-reporter=tap'],
+    ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', '--test-name-pattern=x', '--test-concurrency=1', '--test-timeout=5000', '--no-warnings']];
+  for (const opts of accepted) assert.equal(status(opts), 'pass', opts.join(' ') || '(no options)');
+});
+
+test('[S37] C7 attribution: a command whose file argument has a backslash runs another file on POSIX, so it attributes nothing', () => {
+  const s = { file: 'spec/a.test.mjs', name: 'x' };
+  const unlocated = { supported: true, results: [{ name: 'x', file: null, status: 'pass', failure_kind: null, detail: null }] };
+  const status = (file) => G.specStatus(s, unlocated, { args: ['--test', '--test-reporter=tap', file] });
+  assert.equal(status(String.raw`spec\a.test.mjs`), 'missing');
+  assert.equal(status(String.raw`.\spec\a.test.mjs`), 'missing');
+  assert.equal(status('spec/a.test.mjs'), 'pass', 'the forward-slash twin');
+  assert.equal(status('./spec/a.test.mjs'), 'pass', 'the forward-slash twin with ./');
 });
 
 test('[S4] C7 spec-status matrix: pass/fail/skip/todo/missing/truncated/unformatted across tap, jest and vitest; only pass proves', () => {
@@ -324,7 +425,10 @@ test('[S19] C7 attribution: the same rows in the jest and vitest shapes (located
     assert.equal(status(doc(''), ['--json', 'spec/decoy.test.js']), 'missing', `${format}: an unlocated pass of a run of another file`);
     assert.equal(status(doc(''), ['--json', 'spec/x.test.js', 'spec/decoy.test.js']), 'missing', `${format}: an unlocated pass of a run of two files`);
     assert.equal(status(doc(`${root}/spec/x.test.js`)), 'pass', `${format}: the spec's own located file`);
-    assert.equal(status(doc(''), ['--json', 'spec/x.test.js']), 'pass', `${format}: an unlocated pass of a run of exactly the spec file`);
+    // '--json' is not on the attribution allowlist (node --test options only), so even a run of exactly the spec file
+    // attributes no unlocated pass; the jest and vitest shapes locate every result through the suite name.
+    assert.equal(status(doc(''), ['--json', 'spec/x.test.js']), 'missing', `${format}: an unlocated pass of a run with an option off the allowlist`);
+    assert.equal(status(doc(''), ['spec/x.test.js']), 'pass', `${format}: an unlocated pass of a run of exactly the spec file, no option`);
   }
 });
 

@@ -282,6 +282,9 @@ function unitShipRefusal(E) {
   return null;
 }
 
+/** Ship-ready's security conjuncts on one security context (checked before the proof and again after it). */
+const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? coverageRefusal(S, sec);
+
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
   const S = E.S;
@@ -298,7 +301,7 @@ async function shipReadyGate(E, input, candidate) {
   let sec = null;
   if (securityOn(S)) {
     sec = await securityContext(E, candidate);
-    const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? coverageRefusal(S, sec);
+    const refusal = shipSecurityRefusal(S, sec);
     if (refusal) return refusal;
   }
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts),
@@ -330,6 +333,16 @@ async function shipReadyGate(E, input, candidate) {
     if (after.candidate_id !== candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
+    }
+    // ...and the security decision must still hold: a proof command can rewrite the installed catalog or append
+    // RUN-STATE lines, so the pre-proof context is re-derived and its three refusals rerun before anything binds.
+    if (sec) {
+      sec = await securityContext(E, candidate); // post-proof security context
+      const moved = shipSecurityRefusal(S, sec);
+      if (moved) {
+        S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [moved.code] };
+        return moved;
+      }
     }
     S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}) };
     if (sec) current.control_pairs = controlPairs(E, sec, candidate);
@@ -478,17 +491,20 @@ function changedFiles(E, paths) {
   });
 }
 
-const surfaceKey = (s) => JSON.stringify([s.boundary_id, s.kind, String(s.path).replace(/\\/g, '/').replace(/^(\.\/)+/, ''), [...new Set(s.principals)].sort()]);
-/** Approved surfaces then the input's, an input surface identical to one already listed dropped (never a redefinition). */
-function unionSurfaces(approved, extra) {
-  const seen = new Set(approved.map(surfaceKey));
-  return [...approved, ...extra.filter(s => !seen.has(surfaceKey(s)))];
+/**
+ * The Design Contract of `nodes` (an array): every node's writes, each a file or a directory (`w` and
+ * `w/**`), as security-plan.mjs reassess matches changed and surface paths against it. The one derivation
+ * shared by gate reassess and init (bindSecurity); a DAG with no writes gets a contract nothing matches.
+ */
+export function designContract(nodes) {
+  const contract = [...new Set(nodes.flatMap(n => n.writes.flatMap(w => [w, `${w}/**`])))].sort();
+  return contract.length ? contract : ['\u0000no-design-contract'];
 }
 
 /**
  * gate reassess (policy 2): security-plan.mjs reassess over the candidate's changed files (paths and
- * added lines), the Design Contract (the union of the DAG nodes' writes), the approved §3a block's
- * surfaces united with the input `surfaces` (a new boundary the change introduces) and the trusted
+ * added lines), the Design Contract (designContract of the DAG nodes), the input `surfaces` (a new
+ * boundary the change introduces; reassess unites them with the approved §3a block's) and the trusted
  * addenda. UNCHANGED records S.security.reassessed (the freshness tuple) and a
  * SECURITY_REASSESSED event; an unclassified signal -> reassess_unclassified; ADD_CONTROLS not yet
  * covered by a trusted addendum -> addendum_required (with the suggested addendum); REAPPROVAL ->
@@ -500,13 +516,11 @@ async function reassessGate(E, input, candidate) {
   const refusal = securityRefusal(sec);
   if (refusal) return refusal;
   const plan = io.readIfExists(E.P.plan) ?? '';
-  const block = sec.sp.parsePlanSecurityBlock(plan);
-  const contract = [...new Set(Object.values(S.nodes).flatMap(n => n.writes.flatMap(w => [w, `${w}/**`])))].sort(); // a write is a file or a directory
-  // The candidate's surfaces: the approved ones plus the input's (a new route or auth surface). An input surface
-  // identical to an approved one is that surface; one that redefines an approved boundary id stays and is refused
-  // (bad_input: duplicate boundary_id); one outside the Design Contract is a REAPPROVAL basis.
-  const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: unionSurfaces(block?.surfaces ?? [], input.surfaces ?? []) },
-    changed: { contract_paths: contract.length ? contract : ['\u0000no-design-contract'], files: changedFiles(E, E.candidatePaths ?? []) },
+  // The input surfaces pass straight through: reassess unites them with the approved ones (an identical one is
+  // that surface; one that redefines an approved boundary id is refused bad_input; one outside the Design
+  // Contract is a REAPPROVAL basis).
+  const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: input.surfaces ?? [] },
+    changed: { contract_paths: designContract(Object.values(S.nodes)), files: changedFiles(E, E.candidatePaths ?? []) },
     classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })) });
   if (!res.ok) {
     if (res.code === 'classification_missing') return gateNo('reassess_unclassified', res.reasons, { unclassified: res.unclassified ?? [], signals: res.signals ?? [] });

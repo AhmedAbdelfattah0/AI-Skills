@@ -429,14 +429,20 @@ test('scenario facts, surfaces and boundary unions are consistent', () => assert
 test('labels obey the labelling policy and primary-fact consistency', () => assert.deepEqual(checkLabels(real), []));
 const catalogTestSrc = readFileSync(join(here, 'controls.test.mjs'), 'utf8');
 const selectorSrc = readFileSync(join(here, 'fixtures/selector.mjs'), 'utf8');
+// The ship-ticket planner uses the evaluator it loads at run time; it must not carry its own copy either.
+const PLANNER = '../ship-ticket/scripts/security-plan.mjs';
+const plannerSrc = readFileSync(join(here, PLANNER), 'utf8');
 test('fixtures/selector.mjs re-exports the one evaluator in controls.mjs (object identity)', () => {
   for (const n of SHARED) {
     assert.equal(typeof C[n], 'function', `${n} exported by controls.mjs`);
     assert.strictEqual(S[n], C[n], `${n} in fixtures/selector.mjs must be the controls.mjs export`);
   }
 });
-test('neither selector.mjs nor controls.test.mjs declares its own evaluator function', () => {
-  assert.deepEqual(checkSharedEvaluator({ 'fixtures/selector.mjs': selectorSrc, 'controls.test.mjs': catalogTestSrc }), []);
+test('neither selector.mjs, controls.test.mjs nor the ship-ticket security-plan.mjs declares its own evaluator function', () => {
+  assert.deepEqual(checkSharedEvaluator({ 'fixtures/selector.mjs': selectorSrc, 'controls.test.mjs': catalogTestSrc, [PLANNER]: plannerSrc }), []);
+  const pasted = checkSharedEvaluator({ [PLANNER]: `${plannerSrc}\nconst unknownish = (v) => v === undefined || v === null || v === 'unknown';\n` });
+  assert.equal(pasted.length, 1, pasted.join('|'));
+  assert.ok(pasted[0].includes(PLANNER) && pasted[0].includes("'unknownish'") && /controls\.mjs/.test(pasted[0]), pasted[0]);
 });
 test('evaluator copy behaves: unknown matches every leaf, includes/is leaves, all/any', () => {
   const node = { any: [{ fact: 'persistent_write', op: 'is', value: true }, { all: [

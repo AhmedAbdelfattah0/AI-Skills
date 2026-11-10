@@ -58,9 +58,9 @@ const CATALOG = SP.loadCatalog();
 assert.equal(CATALOG.ok, true, 'the installed catalog loads');
 const BOOLS = Object.entries(CATALOG.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
 /** A selection over the REAL catalog: one server-input surface (12 pairs) or none (an evidenced empty assessment). */
-function selection({ surfaces = true } = {}) {
+function selection({ surfaces = true, surfacePath = 'src/orders.ts' } = {}) {
   const r = SP.selectControls(CATALOG, { security_policy: 2,
-    surfaces: surfaces ? [{ boundary_id: 'orders-api', kind: 'server-input', path: 'src/orders.ts', principals: ['service'] }] : [],
+    surfaces: surfaces ? [{ boundary_id: 'orders-api', kind: 'server-input', path: surfacePath, principals: ['service'] }] : [],
     facts: Object.fromEntries(BOOLS.map(k => [k, false])), evidence: Object.fromEntries(BOOLS.map(k => [k, 'src/orders.ts:handler'])) });
   assert.equal(r.ok, true, J(r));
   return r;
@@ -76,9 +76,9 @@ const UNIT = { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SP
  * A policy-2 run: node `api` writes the pair specs (its named redSpecs), node `impl` (after api's RED)
  * writes src/impl.txt. `coverage(pairs)` and `narrative(sel)` let a row bend the DAG or the plan.
  */
-function secFx(t, { surfaces = true, coverage = (c) => c, narrative, catalogDigest = CATALOG.digest, startAt, implWrites = {}, extraNodes = [],
+function secFx(t, { surfaces = true, surfacePath, coverage = (c) => c, narrative, catalogDigest = CATALOG.digest, startAt, implWrites = {}, extraNodes = [],
   testCommands = { unit: UNIT }, extraEvents = () => [], behaviour = {} } = {}) {
-  const sel = selection({ surfaces });
+  const sel = selection({ surfaces, surfacePath });
   const ids = sel.pairs.map(p => p.pair_id);
   const cov = coverage(sel.pairs.map(p => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC_FILE, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, startAt, extraEvents,
@@ -170,6 +170,28 @@ test('[S13] C9 init binds the narrative pairs line and §3a block to the DAG bot
   initFails(initOf(secFx(t, { narrative: (sel) => SP.pairsLine({ catalogDigest: 'sha256:' + '0'.repeat(64), pairs: sel.pairs }) })), 'security_pairs_mismatch');
   initFails(initOf(secFx(t, { catalogDigest: 'sha256:' + '0'.repeat(64) })), 'catalog_unavailable'); // DAG digest is not the installed catalog
   initFails(initOf(secFx(t, { coverage: (c) => c.map((p, i) => (i ? p : { ...p, control: 'VAPT-API-99' })) })), 'dag_invalid'); // control not in the catalog
+});
+
+test('[S39] init refuses an approved §3a surface outside every node\'s writes (security_pairs_mismatch, naming the path); its twin inside a node\'s writes binds', { skip: WIN_SKIP }, (t) => {
+  const outside = secFx(t, { surfacePath: 'lib/orders.ts' }); // nodes write spec/ and src/ only
+  const r = outside.cli('init', { dag: outside.dagFile });
+  initFails(r, 'security_pairs_mismatch');
+  assert.match(r.stderr, /lib\/orders\.ts/, 'the message names the surface path');
+  const inside = secFx(t, { surfacePath: 'src/orders.ts' });
+  ok(inside.cli('init', { dag: inside.dagFile }), 'the twin: the surface is under node impl\'s writes');
+});
+
+test('[S40] init refuses an approved §3a block that reassess refuses (fail closed: security_pairs_mismatch with the reassess code); its valid twin binds', { skip: WIN_SKIP }, (t) => {
+  // The selection digest covers facts and controls, not surfaces: another surface kind keeps the block parseable
+  // and its pairs line valid, but its pairs no longer follow from its facts and surfaces (plan_block_invalid).
+  const bent = (sel) => SP.renderSection3a(sel).replace('"kind":"server-input"', '"kind":"request-handler"');
+  const bad = secFx(t, { narrative: bent });
+  assert.notEqual(SP.parsePlanSecurityBlock(readFileSync(bad.planFile, 'utf8')), null, 'the bent block still parses');
+  const r = bad.cli('init', { dag: bad.dagFile });
+  initFails(r, 'security_pairs_mismatch');
+  assert.match(r.stderr, /plan_block_invalid/, 'the message carries the reassess code');
+  const good = secFx(t);
+  ok(good.cli('init', { dag: good.dagFile }), 'the twin: the rendered block');
 });
 
 test('[S13] init: a missing catalog is catalog_unavailable (in-process seam); the installed catalog digest is computed from the file', { skip: WIN_SKIP }, async (t) => {
@@ -282,56 +304,93 @@ test('[S28] a proof command that moves config.base (an empty commit, candidate u
   assert.equal(S.ship_ready, undefined);
 });
 
-test('[S20] [S25] [S26] reassess: a new route is never dismissed by a reason alone; `surfaces` makes it ADD_CONTROLS (addendum_required); a trusted covering addendum makes it fresh', { skip: WIN_SKIP }, (t) => {
-  const ROUTE = 'src/routes/admin.ts';
-  const fx = secFx(t, { implWrites: { [ROUTE]: "app.get('/admin', (req, res) => res.send('ok'));\n" },
-    extraNodes: [{ id: 'extra', writes: ['spec2'] }], behaviour: { extra: { write: { 'spec2/admin.test.mjs': '// route specs\n' } } } });
-  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive')); ok(fx.gate('red', { node: 'api' })); ok(fx.cli('drive'));
-  const sig = `new-route@${ROUTE}`;
-  assert.deepEqual(refused(fx.gate('reassess', {}), 'reassess_unclassified').out.unclassified, [sig]);
-  assert.deepEqual(refused(fx.gate('reassess', { classifications: [{ signal_id: sig, reason: 'internal only' }] }), 'reassess_unclassified').out.unclassified, [sig],
-    'a reason alone does not dismiss a new route off every approved surface');
-  const NEW = { boundary_id: 'admin-api', kind: 'server-input', path: ROUTE, principals: ['service'] };
-  const add = refused(fx.gate('reassess', { surfaces: [NEW] }), 'addendum_required');
-  assert.equal(add.out.judgment_point, true);
-  assert.equal(add.out.outcome, 'ADD_CONTROLS');
-  for (const c of ['VAPT-API-01', 'VAPT-API-02', 'VAPT-API-03']) assert.ok(add.out.delta_pairs.includes(`admin-api:${c}`), c);
-  assert.deepEqual(add.out.addendum.pairs, add.out.delta_pairs, 'the suggested addendum');
-  assert.equal(fx.readState().security?.reassessed, undefined, 'ADD_CONTROLS records no fresh reassessment');
-  // The owner appends the covering addendum (one spec per pair under node extra's writes).
-  fx.appendRunState({ run_id: 'run-1', event: 'SECURITY_ADDENDUM', addendum_id: 'add-route', authorized_by: 'owner', reason: 'reassess ADD_CONTROLS for the admin route',
-    pairs: add.out.delta_pairs.map(id => ({ boundary: id.slice(0, id.lastIndexOf(':')), control: id.slice(id.lastIndexOf(':') + 1), node: 'extra',
-      specs: [{ file: 'spec2/admin.test.mjs', name: id }] })) });
-  const fresh = fx.gate('reassess', { surfaces: [NEW] });
-  ok(fresh, 'covered by a trusted addendum');
-  assert.equal(fresh.out.outcome, 'UNCHANGED');
-  assert.deepEqual(fx.readState().security.reassessed.addendum_set, ['add-route']);
-  refused(fx.gate('reassess', {}), 'reassess_unclassified'); // surfaces are not stored: omitted, the signal reopens (fail closed)
-  // An approved boundary id redefined by an input surface is refused; the identical definition is the same surface.
-  const approved = fx.sel.surfaces[0];
-  assert.equal(fx.gate('reassess', { surfaces: [NEW, { ...approved }] }).out.code, 'reassessed');
-  const redefined = fx.gate('reassess', { surfaces: [NEW, { ...approved, path: 'src/other.ts' }] });
-  assert.equal(redefined.status, 2, redefined.stdout);
-  assert.equal(redefined.out.code, 'bad_input');
-  // An input surface outside the Design Contract is REAPPROVAL.
-  refused(fx.gate('reassess', { surfaces: [NEW, { ...NEW, boundary_id: 'lib-admin', path: 'lib/admin.ts' }] }), 'security_reapproval');
+test('[S38] a proof command that rewrites the catalog the engine loads is not shipped on the stale reassessment: reassess_stale, no ship_ready', { skip: WIN_SKIP }, async (t) => {
+  // The engine loads a byte-identical copy of the installed catalog (the ctx.catalogFile seam); the proof's last
+  // command appends a newline to it: still a valid catalog, another digest, outside the repo (candidate unchanged).
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'catalog-proof-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const copy = join(dir, 'controls.json');
+  copyFileSync(new URL('../../vapt/controls.json', import.meta.url), copy);
+  const rewrite = { cmd: process.execPath, args: ['-e', `require('fs').appendFileSync(${J(copy)}, '\\n')`] };
+  const fx = built(secFx(t, { testCommands: { unit: UNIT, rewrite } }));
+  ok(fx.gate('review', secReview(fx, 'rx-1')));
+  const cand = fx.candidate();
+  const r = await gateCmd({ ...fx.ctx({ catalogFile: copy }), gate: 'ship-ready', input: {} });
+  assert.notEqual(SP.catalogDigest(readFileSync(copy)), CATALOG.digest, 'the proof rewrote the catalog');
+  assert.equal(proofRuns(fx), 2, 'the proof ran (both commands)');
+  assert.equal(fx.candidate(), cand, 'the candidate is unchanged');
+  assert.equal(r.code, 'reassess_stale', J(r));
+  const S = fx.readState();
+  assert.equal(S.ship_ready, undefined, 'no ship_ready on a catalog the reassessment never saw');
+  assert.equal(S.local_proof.candidate_id, null, 'the proof is bound to no candidate');
+  assert.deepEqual(S.local_proof.dropped, ['reassess_stale']);
+  assert.ok(!runStateEvents(fx.planFile).some(e => e.event === 'SHIP_READY'));
 });
 
-test('[S27] reassess: a cited fact (no-op or raised) never dismisses a new route off every approved surface; the same input with `surfaces` is addendum_required', { skip: WIN_SKIP }, (t) => {
-  const ROUTE = 'src/routes/admin.ts';
-  const fx = secFx(t, { implWrites: { [ROUTE]: "app.get('/admin', (req, res) => res.send('ok'));\n" } });
-  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive')); ok(fx.gate('red', { node: 'api' })); ok(fx.cli('drive'));
-  const sig = `new-route@${ROUTE}`;
-  const cited = (value) => ({ classifications: [{ signal_id: sig, facts: { [BOOLS[0]]: value }, evidence: { [BOOLS[0]]: `${ROUTE}:1` } }] });
-  for (const value of [false, true]) {
-    assert.deepEqual(refused(fx.gate('reassess', cited(value)), 'reassess_unclassified').out.unclassified, [sig], `fact ${value}`);
-    assert.equal(fx.readState().security?.reassessed, undefined, `fact ${value}: no reassessment is recorded`);
-  }
-  // Twin, one field (`surfaces`): the surface at the route's path closes the signal and its pairs need an addendum.
-  const add = refused(fx.gate('reassess', { ...cited(false), surfaces: [{ boundary_id: 'admin-api', kind: 'server-input', path: ROUTE, principals: ['service'] }] }), 'addendum_required');
-  assert.equal(add.out.outcome, 'ADD_CONTROLS');
-  for (const c of ['VAPT-API-01', 'VAPT-API-02', 'VAPT-API-03']) assert.ok(add.out.delta_pairs.includes(`admin-api:${c}`), c);
-});
+/**
+ * The three surface-introducing signal kinds (security-plan.mjs SURFACE_SIGNALS), each with a changed file
+ * (under node impl's writes) that raises it, the control class an approved surface at its path must carry,
+ * and the input surface kind that selects that whole class (so it closes the signal: ADD_CONTROLS).
+ */
+const SURFACE_KINDS = [
+  { signal: 'new-route', path: 'src/routes/admin.ts', content: "app.get('/admin', (req, res) => res.send('ok'));\n", closer: 'server-input',
+    controls: ['VAPT-API-01', 'VAPT-API-02', 'VAPT-API-03'] },
+  { signal: 'auth-or-middleware-change', path: 'src/auth/guard.ts', content: 'export const guard = (user) => Boolean(user);\n', closer: 'auth-lifecycle',
+    controls: ['VAPT-API-02', 'VAPT-API-03', 'VAPT-CFG-04', 'VAPT-ABUSE-08'] },
+  { signal: 'migration-or-rls-change', path: 'src/migrations/001_orders.sql', content: 'alter table orders enable row level security;\n', closer: 'business-invariant',
+    controls: ['VAPT-API-01', 'VAPT-ABUSE-07'] },
+];
+
+for (const K of SURFACE_KINDS) {
+  test(`[S20] [S25] [S26] reassess (${K.signal}): never dismissed by a reason alone; \`surfaces\` makes it ADD_CONTROLS (addendum_required); a trusted covering addendum makes it fresh`, { skip: WIN_SKIP }, (t) => {
+    const fx = secFx(t, { implWrites: { [K.path]: K.content },
+      extraNodes: [{ id: 'extra', writes: ['spec2'] }], behaviour: { extra: { write: { 'spec2/added.test.mjs': '// added specs\n' } } } });
+    ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive')); ok(fx.gate('red', { node: 'api' })); ok(fx.cli('drive'));
+    const sig = `${K.signal}@${K.path}`;
+    assert.deepEqual(refused(fx.gate('reassess', {}), 'reassess_unclassified').out.unclassified, [sig]);
+    assert.deepEqual(refused(fx.gate('reassess', { classifications: [{ signal_id: sig, reason: 'internal only' }] }), 'reassess_unclassified').out.unclassified, [sig],
+      `a reason alone does not dismiss a ${K.signal} off every approved surface`);
+    const NEW = { boundary_id: 'added', kind: K.closer, path: K.path, principals: ['service'] };
+    const add = refused(fx.gate('reassess', { surfaces: [NEW] }), 'addendum_required');
+    assert.equal(add.out.judgment_point, true);
+    assert.equal(add.out.outcome, 'ADD_CONTROLS');
+    for (const c of K.controls) assert.ok(add.out.delta_pairs.includes(`added:${c}`), c);
+    assert.deepEqual(add.out.addendum.pairs, add.out.delta_pairs, 'the suggested addendum');
+    assert.equal(fx.readState().security?.reassessed, undefined, 'ADD_CONTROLS records no fresh reassessment');
+    // The owner appends the covering addendum (one spec per pair under node extra's writes).
+    fx.appendRunState({ run_id: 'run-1', event: 'SECURITY_ADDENDUM', addendum_id: 'add-surface', authorized_by: 'owner', reason: `reassess ADD_CONTROLS for the ${K.signal}`,
+      pairs: add.out.delta_pairs.map(id => ({ boundary: id.slice(0, id.lastIndexOf(':')), control: id.slice(id.lastIndexOf(':') + 1), node: 'extra',
+        specs: [{ file: 'spec2/added.test.mjs', name: id }] })) });
+    const fresh = fx.gate('reassess', { surfaces: [NEW] });
+    ok(fresh, 'covered by a trusted addendum');
+    assert.equal(fresh.out.outcome, 'UNCHANGED');
+    assert.deepEqual(fx.readState().security.reassessed.addendum_set, ['add-surface']);
+    refused(fx.gate('reassess', {}), 'reassess_unclassified'); // surfaces are not stored: omitted, the signal reopens (fail closed)
+    // An approved boundary id redefined by an input surface is refused; the identical definition is the same surface.
+    const approved = fx.sel.surfaces[0];
+    assert.equal(fx.gate('reassess', { surfaces: [NEW, { ...approved }] }).out.code, 'reassessed');
+    const redefined = fx.gate('reassess', { surfaces: [NEW, { ...approved, path: 'src/other.ts' }] });
+    assert.equal(redefined.status, 2, redefined.stdout);
+    assert.equal(redefined.out.code, 'bad_input');
+    // An input surface outside the Design Contract is REAPPROVAL.
+    refused(fx.gate('reassess', { surfaces: [NEW, { ...NEW, boundary_id: 'lib-added', path: 'lib/added.ts' }] }), 'security_reapproval');
+  });
+
+  test(`[S27] reassess (${K.signal}): a cited fact (no-op or raised) never dismisses it off every approved surface; the same input with \`surfaces\` is addendum_required`, { skip: WIN_SKIP }, (t) => {
+    const fx = secFx(t, { implWrites: { [K.path]: K.content } });
+    ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive')); ok(fx.gate('red', { node: 'api' })); ok(fx.cli('drive'));
+    const sig = `${K.signal}@${K.path}`;
+    const cited = (value) => ({ classifications: [{ signal_id: sig, facts: { [BOOLS[0]]: value }, evidence: { [BOOLS[0]]: `${K.path}:1` } }] });
+    for (const value of [false, true]) {
+      assert.deepEqual(refused(fx.gate('reassess', cited(value)), 'reassess_unclassified').out.unclassified, [sig], `fact ${value}`);
+      assert.equal(fx.readState().security?.reassessed, undefined, `fact ${value}: no reassessment is recorded`);
+    }
+    // Twin, one field (`surfaces`): the surface at the signal's path closes it and its pairs need an addendum.
+    const add = refused(fx.gate('reassess', { ...cited(false), surfaces: [{ boundary_id: 'added', kind: K.closer, path: K.path, principals: ['service'] }] }), 'addendum_required');
+    assert.equal(add.out.outcome, 'ADD_CONTROLS');
+    for (const c of K.controls) assert.ok(add.out.delta_pairs.includes(`added:${c}`), c);
+  });
+}
 
 // ------------------------------------------------------------------ doc/code field parity
 

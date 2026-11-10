@@ -77,6 +77,8 @@ export const pairRoundTrips = (boundary, control) => { const m = PAIR_ID.exec(`$
 const specKey = (s) => `${s.file}\u0000${s.name}`;
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const isSpec = (s) => isObj(s) && Object.keys(s).length === 2 && typeof s.file === 'string' && s.file.length > 0 && typeof s.name === 'string' && s.name.length > 0;
+/** A repository-relative, normalized path: not absolute, no backslash, no '.', '..' or empty segment (writes, othersOwned, pair specs). */
+const normalRel = (p) => typeof p === 'string' && p.length > 0 && !isAbsolute(p) && !p.includes('\\') && !p.split('/').some(x => x === '..' || x === '.' || !x);
 
 /**
  * Shape and contract checks of one (boundary, control) pair against `nodes` (by id): returns
@@ -90,6 +92,9 @@ export function pairProblem(p, nodesById, { needPinned = true } = {}) {
   if (!pairRoundTrips(p.boundary, p.control)) return { shape: `pair id ${J(pairKey(p))} does not split back into its boundary and control` };
   if (typeof p.node !== 'string') return { shape: 'node must be a node id' };
   if (!Array.isArray(p.specs) || !p.specs.length || !p.specs.every(isSpec)) return { shape: `${pairKey(p)}: specs must be a non-empty [{ file, name }]` };
+  // A backslash would match a different file on POSIX than the one the spec names; held to the othersOwned rule.
+  const odd = p.specs.find(s => !normalRel(s.file));
+  if (odd) return { shape: `${pairKey(p)}: spec file ${J(odd.file)} must be repository-relative and normalized (no backslash, '.', '..' or empty segment)` };
   const n = Object.hasOwn(nodesById, p.node) ? nodesById[p.node] : undefined;
   if (!n) return { contract: `${pairKey(p)}: node ${p.node} is not in the DAG` };
   const outside = p.specs.find(s => !under(s.file, n.writes ?? []));
@@ -183,7 +188,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   // othersOwned goes to the carrier as ownership paths (repoRelative there); hold it to the same rule as writes (harness validateNodes).
   for (const n of nodes) {
     if (!Array.isArray(n.othersOwned)) continue;
-    const badPath = n.othersOwned.find(p => typeof p !== 'string' || !p || isAbsolute(p) || p.includes('\\') || p.split('/').some(x => x === '..' || x === '.' || !x));
+    const badPath = n.othersOwned.find(p => !normalRel(p));
     if (badPath !== undefined) bad(`node ${n.id}: othersOwned paths must be repository-relative and normalized`);
   }
   // The carrier refuses any worker that owns a plan root (no forged START); refuse it here, at init, not as a node_failed mid-run.
