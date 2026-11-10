@@ -1,0 +1,694 @@
+{
+ "schema": "vapt-effectiveness-facts-v1",
+ "cases": {
+  "F01": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "business-invariant",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": false,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": "unknown",
+    "link_or_token_in_message": true,
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": false
+   }
+  },
+  "F02": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "business-invariant",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": false,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": "unknown",
+    "link_or_token_in_message": true,
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": false
+   }
+  },
+  "F03": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "async-consumer",
+     "outbound-data",
+     "external-input-operation"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": true,
+    "session_context": "unknown",
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F04": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "rendering-sink",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": false,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": "unknown",
+    "link_or_token_in_message": true,
+    "session_context": false,
+    "attempt_limit": false,
+    "sensitive_field_write": false
+   }
+  },
+  "F05": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "async-consumer",
+     "outbound-data"
+    ],
+    "principals": [
+     "anonymous",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": "unknown",
+    "link_or_token_in_message": "unknown",
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F06": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "outbound-data",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F07": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": false,
+    "link_or_token_in_message": true,
+    "session_context": false,
+    "attempt_limit": false,
+    "sensitive_field_write": true
+   }
+  },
+  "F08": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "business-invariant",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F09": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": false,
+    "attempt_limit": false,
+    "sensitive_field_write": true
+   }
+  },
+  "F10": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "outbound-data",
+     "async-consumer"
+    ],
+    "principals": [
+     "anonymous",
+     "staff"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": false,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F11": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle",
+     "business-invariant",
+     "security-config",
+     "async-consumer"
+    ],
+    "principals": [
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": false,
+    "recipient_unproven": false,
+    "identity_claim_unproven": "unknown",
+    "spends_or_reserves_value": false,
+    "shared_resource": false,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": false,
+    "session_context": true,
+    "attempt_limit": false,
+    "sensitive_field_write": true
+   }
+  },
+  "F12": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "async-consumer"
+    ],
+    "principals": [
+     "authenticated",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": false,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": "unknown",
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": false,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F13": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle",
+     "external-input-operation",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": "unknown",
+    "recipient_unproven": "unknown",
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": "unknown",
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F14": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": true,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F15": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "external-input-operation",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": "unknown",
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F16": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "outbound-data"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F17": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "business-invariant",
+     "async-consumer",
+     "security-config",
+     "external-input-operation"
+    ],
+    "principals": [
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": false,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": false,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F18": {
+   "facts": {
+    "boundaries": [
+     "auth-lifecycle",
+     "request-handler",
+     "security-config",
+     "business-invariant",
+     "rendering-sink"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": false,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": false,
+    "shared_resource": true,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": false,
+    "session_context": true,
+    "attempt_limit": false,
+    "sensitive_field_write": true
+   }
+  },
+  "F19": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "outbound-data",
+     "business-invariant",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": true,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": "unknown"
+   }
+  },
+  "F20": {
+   "facts": {
+    "boundaries": [
+     "auth-lifecycle",
+     "client-storage",
+     "external-input-operation",
+     "security-config"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": false,
+    "shared_resource": true,
+    "caller_triggered_debit": "unknown",
+    "state_transitions": true,
+    "plan_gated_feature": false,
+    "link_or_token_in_message": true,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F21": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "async-consumer",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": "unknown",
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": false,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": false,
+    "sensitive_field_write": true
+   }
+  },
+  "F22": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "external-input-operation",
+     "outbound-data",
+     "async-consumer",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": false,
+    "identity_claim_unproven": false,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": true,
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F23": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "external-input-operation",
+     "outbound-data",
+     "async-consumer",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": "unknown",
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": "unknown",
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": true,
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  },
+  "F24": {
+   "facts": {
+    "boundaries": [
+     "request-handler",
+     "auth-lifecycle",
+     "external-input-operation",
+     "outbound-data",
+     "async-consumer",
+     "security-config",
+     "business-invariant"
+    ],
+    "principals": [
+     "anonymous",
+     "authenticated",
+     "staff",
+     "service"
+    ],
+    "persistent_write": true,
+    "outbound_message": true,
+    "recipient_unproven": true,
+    "identity_claim_unproven": true,
+    "spends_or_reserves_value": true,
+    "shared_resource": true,
+    "caller_triggered_debit": "unknown",
+    "state_transitions": true,
+    "plan_gated_feature": true,
+    "link_or_token_in_message": "unknown",
+    "session_context": true,
+    "attempt_limit": true,
+    "sensitive_field_write": true
+   }
+  }
+ }
+}

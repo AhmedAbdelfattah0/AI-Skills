@@ -1,0 +1,715 @@
+{
+  "schema": "vapt-effectiveness-results-v1",
+  "catalog_digest": "sha256:ed41751ae3b4392d197d98aff78bbd0f6c0461ae7fe6c3f224bf32718899e5b4",
+  "fixtures_version": 6,
+  "always_on": [
+    "VAPT-API-01",
+    "VAPT-API-02",
+    "VAPT-API-03",
+    "VAPT-API-05",
+    "VAPT-API-06",
+    "VAPT-API-07",
+    "VAPT-WEB-01",
+    "VAPT-WEB-02",
+    "VAPT-WEB-03",
+    "VAPT-WEB-05",
+    "VAPT-CFG-03"
+  ],
+  "specific": [
+    "VAPT-API-04",
+    "VAPT-API-08",
+    "VAPT-WEB-04",
+    "VAPT-CFG-01",
+    "VAPT-CFG-02",
+    "VAPT-CFG-04",
+    "VAPT-ABUSE-01",
+    "VAPT-ABUSE-02",
+    "VAPT-ABUSE-03",
+    "VAPT-ABUSE-04",
+    "VAPT-ABUSE-05",
+    "VAPT-ABUSE-06",
+    "VAPT-ABUSE-07",
+    "VAPT-ABUSE-08"
+  ],
+  "R0": {
+    "recalled": 231,
+    "must_select_total": 231,
+    "inapplicable_violations": 47,
+    "net_hard_defects": 0,
+    "fixtures_version": 6
+  },
+  "R1": {
+    "label": "retrospective, in-sample, development data",
+    "cases": 12,
+    "boolean": {
+      "persistent_write": {
+        "agree": 10,
+        "writer_true_ref_false": 2,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 0
+      },
+      "outbound_message": {
+        "agree": 4,
+        "writer_true_ref_false": 7,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 1,
+        "ref_unknown": 1
+      },
+      "recipient_unproven": {
+        "agree": 5,
+        "writer_true_ref_false": 5,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 1,
+        "ref_unknown": 1
+      },
+      "identity_claim_unproven": {
+        "agree": 6,
+        "writer_true_ref_false": 5,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 1,
+        "ref_unknown": 0
+      },
+      "spends_or_reserves_value": {
+        "agree": 9,
+        "writer_true_ref_false": 3,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 0
+      },
+      "shared_resource": {
+        "agree": 4,
+        "writer_true_ref_false": 7,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 1
+      },
+      "caller_triggered_debit": {
+        "agree": 5,
+        "writer_true_ref_false": 5,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 2,
+        "ref_unknown": 0
+      },
+      "state_transitions": {
+        "agree": 5,
+        "writer_true_ref_false": 7,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 0
+      },
+      "plan_gated_feature": {
+        "agree": 2,
+        "writer_true_ref_false": 7,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 3,
+        "ref_unknown": 0
+      },
+      "link_or_token_in_message": {
+        "agree": 3,
+        "writer_true_ref_false": 2,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 6,
+        "ref_unknown": 1
+      },
+      "session_context": {
+        "agree": 9,
+        "writer_true_ref_false": 1,
+        "writer_false_ref_true": 1,
+        "writer_unknown": 1,
+        "ref_unknown": 0
+      },
+      "attempt_limit": {
+        "agree": 4,
+        "writer_true_ref_false": 8,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 0
+      },
+      "sensitive_field_write": {
+        "agree": 5,
+        "writer_true_ref_false": 7,
+        "writer_false_ref_true": 0,
+        "writer_unknown": 0,
+        "ref_unknown": 0
+      }
+    },
+    "enum": {
+      "boundaries": {
+        "both": 27,
+        "writer_only": 25,
+        "ref_only": 8
+      },
+      "principals": {
+        "both": 14,
+        "writer_only": 21,
+        "ref_only": 2
+      }
+    }
+  },
+  "R2": {
+    "label": "retrospective, in-sample, development data",
+    "pairs": {
+      "specific": {
+        "selected_known": 24,
+        "selected_unknown_only": 0,
+        "not_selected": 0
+      },
+      "always_on": {
+        "selected_known": 2,
+        "selected_unknown_only": 0,
+        "not_selected": 0
+      }
+    },
+    "findings": {
+      "specific_source_selected_known": 22,
+      "specific_source_selected_unknown_only": 0,
+      "specific_source_not_selected": 0,
+      "only_always_on_sources": 2
+    },
+    "primary_facts": {
+      "some_true": 24,
+      "none_true_some_unknown": 0,
+      "all_false": 0
+    }
+  },
+  "R3": {
+    "label": "retrospective, in-sample, development data",
+    "folds": {
+      "full": {
+        "findings": 24,
+        "specific_hit_known": 21,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 2,
+        "partial_only": 1,
+        "none": 0
+      },
+      "family:unproven-contact": {
+        "findings": 7,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 5,
+        "none": 2
+      },
+      "family:resource-exhaustion": {
+        "findings": 5,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 5,
+        "none": 0
+      },
+      "family:lifecycle": {
+        "findings": 5,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 3,
+        "none": 2
+      },
+      "family:server-owned-values": {
+        "findings": 3,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 3,
+        "none": 0
+      },
+      "family:session-assurance": {
+        "findings": 2,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 1,
+        "none": 1
+      },
+      "all_abuse_removed": {
+        "findings": 22,
+        "specific_hit_known": 0,
+        "specific_hit_unknown_only": 0,
+        "always_on_only": 0,
+        "partial_only": 13,
+        "none": 9
+      }
+    }
+  },
+  "R4": {
+    "label": "public advisories; the only data here that does not come from the audited product",
+    "cells": {
+      "catalog_as_given": {
+        "needed_selected": 0,
+        "needed_missed": 0,
+        "unneeded_selected": 153,
+        "unneeded_left_out": 183
+      },
+      "catalog_known_only": {
+        "needed_selected": 0,
+        "needed_missed": 0,
+        "unneeded_selected": 153,
+        "unneeded_left_out": 183
+      },
+      "select_everything": {
+        "needed_selected": 0,
+        "needed_missed": 0,
+        "unneeded_selected": 336,
+        "unneeded_left_out": 0
+      },
+      "always_on_only": {
+        "needed_selected": 0,
+        "needed_missed": 0,
+        "unneeded_selected": 0,
+        "unneeded_left_out": 336
+      }
+    },
+    "outcomes": {
+      "catalog_as_given": {
+        "specific_hit": 0,
+        "specific_missed": 0,
+        "always_on_hit": 10,
+        "always_on_missed": 0,
+        "partial_only": 14,
+        "no_check_in_catalog": 0
+      },
+      "catalog_known_only": {
+        "specific_hit": 0,
+        "specific_missed": 0,
+        "always_on_hit": 10,
+        "always_on_missed": 0,
+        "partial_only": 14,
+        "no_check_in_catalog": 0
+      },
+      "select_everything": {
+        "specific_hit": 0,
+        "specific_missed": 0,
+        "always_on_hit": 10,
+        "always_on_missed": 0,
+        "partial_only": 14,
+        "no_check_in_catalog": 0
+      },
+      "always_on_only": {
+        "specific_hit": 0,
+        "specific_missed": 0,
+        "always_on_hit": 10,
+        "always_on_missed": 0,
+        "partial_only": 14,
+        "no_check_in_catalog": 0
+      }
+    },
+    "by_cwe": {
+      "CWE-116": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-1333": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-176": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-22": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-248": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-287": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-400": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-405": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-532": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-601": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-639": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-674": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-770": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 1,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-78": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-79": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 2,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 2,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-835": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 0,
+          "always_on_missed": 0,
+          "partial_only": 2,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-862": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 1,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      },
+      "CWE-94": {
+        "catalog_as_given": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 2,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        },
+        "catalog_known_only": {
+          "specific_hit": 0,
+          "specific_missed": 0,
+          "always_on_hit": 2,
+          "always_on_missed": 0,
+          "partial_only": 0,
+          "no_check_in_catalog": 0
+        }
+      }
+    }
+  },
+  "R5": {
+    "development": {
+      "as_given": {
+        "cases": 24,
+        "min": 22,
+        "median": 24,
+        "max": 25
+      },
+      "known_only": {
+        "cases": 24,
+        "min": 22,
+        "median": 23,
+        "max": 25
+      }
+    },
+    "corpus2": {
+      "as_given": {
+        "cases": 24,
+        "min": 12,
+        "median": 17.5,
+        "max": 24
+      },
+      "known_only": {
+        "cases": 24,
+        "min": 12,
+        "median": 17.5,
+        "max": 24
+      }
+    }
+  },
+  "judges": {
+    "agreement": {
+      "development": {
+        "yes": {
+          "yes": 25,
+          "partial": 0,
+          "no": 1
+        },
+        "partial": {
+          "yes": 1,
+          "partial": 32,
+          "no": 13
+        },
+        "no": {
+          "yes": 0,
+          "partial": 2,
+          "no": 526
+        }
+      },
+      "corpus2": {
+        "yes": {
+          "yes": 10,
+          "partial": 1,
+          "no": 0
+        },
+        "partial": {
+          "yes": 0,
+          "partial": 18,
+          "no": 3
+        },
+        "no": {
+          "yes": 0,
+          "partial": 0,
+          "no": 568
+        }
+      }
+    },
+    "wave_a_concordance": {
+      "covered": {
+        "covered": 2,
+        "partial": 0,
+        "none": 0
+      },
+      "partial": {
+        "covered": 0,
+        "partial": 14,
+        "none": 0
+      },
+      "none": {
+        "covered": 0,
+        "partial": 2,
+        "none": 6
+      }
+    }
+  },
+  "claim": {
+    "allowed": false,
+    "sentence": "On this corpus the catalog did not show useful selection."
+  }
+}

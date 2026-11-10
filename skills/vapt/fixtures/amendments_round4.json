@@ -1,0 +1,9 @@
+[
+ {
+  "id": "S-SEA-18",
+  "fact": "attempt_limit",
+  "old": "unknown",
+  "new": false,
+  "reason": "Independent re-check against the reworded attempt_limit definition. The summary says rate limiting is left to the gateway configuration and is not part of this change, and nothing in the change checks a guessable value, so nothing is capped and no guessable value is checked; the text decides the value."
+ }
+]

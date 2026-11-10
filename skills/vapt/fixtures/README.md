@@ -1,4 +1,4 @@
-# vapt selection fixtures (version 5)
+# vapt selection fixtures (version 6)
 
 Thirty-five ticket-like scenarios (`scenarios.json`) with expected control labels
 (`labels.json`), split by `manifest.json` into a dev set (14) and a sealed set (21).
@@ -30,7 +30,10 @@ planned facts and `actual_diff_signals` from a fixed vocabulary (`none` only alo
   minus selected(planned facts), `added_in_delta`, and `already_planned`.
 The test recomputes every section and requires an exact match.
 
-## Scoring (once `select` exists)
+## Scoring
+
+Selector scoring against these labels runs in
+`skills/ship-ticket/scripts/security-plan.test.mjs`.
 
 - Recall of `must_select` per control, category and family, always as counts.
   Recall measures implementation fidelity to the catalog, not catalog completeness
@@ -48,20 +51,28 @@ The test recomputes every section and requires an exact match.
   security improvement or generalization is made until a non-StoreCraft,
   independently sealed corpus is scored.
 
+## Effectiveness measurement
+
+A separate measurement, on real pre-fix code and on public advisories from other
+projects, is in [`effectiveness/`](effectiveness/README.md); read its
+[`REPORT.md`](effectiveness/REPORT.md). Under the rule fixed in advance for that run, the
+public corpus did not show useful selection, so no claim of security improvement or
+generalization is made.
+
 ## Provenance and limits
 
 - Sealed is only weakly independent: its author saw `fact_vocabulary.json`, whose
   examples derive from the audit, and reviewers and the orchestrator saw the sealed
   set at each reseal. Dev derives from the audit (12 audit-derived, 2 synthetic).
 - This measures facts to controls, not fact extraction from a diff.
-- `provenance/` holds what the author and labeler saw. Fact amendments: rounds 1-3
-  (`amendments.json`, `amendments_round2.json`, `amendments_round3.json`); label
+- `provenance/` holds what the author and labeler saw. Fact amendments: rounds 1-4
+  (`amendments.json`, `amendments_round2.json`, `amendments_round3.json`, `amendments_round4.json`); label
   changes from v3 to v4 are in `label_history.json`.
 
 ## Seal anchor and re-sealing
 
 The seal is anchored only by git history: the commit that first contains manifest
-version 5 is the anchor (`manifest.seal_anchor`; the v4 anchor was `2ca3647`). Moving a
+version 6 is the anchor (`manifest.seal_anchor`; the v5 anchor was `111c06f`, the v4 anchor `2ca3647`). Moving a
 scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff
 `manifest.sets` and the scenario origins between commits. The catalog evaluator exists
 once, in `../controls.mjs`; `selector.mjs` re-exports it (`unknownish`, `assertFacts`,

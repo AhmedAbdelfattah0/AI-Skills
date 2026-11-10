@@ -1,0 +1,148 @@
+{
+  "schema": "vapt-effectiveness-prereg-v1",
+  "status": "Fixed before any fact writer, judge or scorer ran. The sha256 of this file is posted on the public issue named in manifest.json before those runs. A change to this file after that post invalidates every result.",
+  "approved_plan": ".specs/plans/AIS-HARNESS-4-wave-c2.md",
+  "frozen": {
+    "catalog_digest": "sha256:ed41751ae3b4392d197d98aff78bbd0f6c0461ae7fe6c3f224bf32718899e5b4",
+    "evaluator": "selected(catalog, facts) exported by skills/vapt/controls.mjs. The scorer uses no other selection logic.",
+    "fixtures": "skills/vapt/fixtures at the version sealed after the attempt_limit re-check: 5 if no value changes, otherwise 6.",
+    "no_tuning": "In this wave nothing under skills/vapt changes except skills/vapt/fixtures/effectiveness/**, skills/vapt/effectiveness.test.mjs, a pointer in skills/vapt/fixtures/README.md and, only if the re-check changes a value, the version 6 re-seal. A weakness the measurement finds is listed for follow-up and is not fixed here. A scorer defect found after the first scoring run may be fixed only to match these definitions, and every such fix is listed in the report."
+  },
+  "definitions": {
+    "always_on": "The controls boundaryUniversal(catalog) returns on the full frozen catalog (skills/vapt/fixtures/selector.mjs): selected for every single boundary kind with every boolean fact false.",
+    "specific": "Every control that is not always_on.",
+    "as_given": "Facts exactly as the writer wrote them. An unknown fact keeps its controls.",
+    "known_only": "The same facts with every unknown boolean fact set to false and every unknown enum fact (absent, null or the string \"unknown\") set to an empty list.",
+    "positive": "A (case, control) cell both judges label \"yes\".",
+    "at_least_partial": "A (case, control) cell both judges label \"yes\" or \"partial\", and that is not positive.",
+    "judge_question": "If the team had written and passed a test that carries out this control's stated attack against this change before release, would that test necessarily have exposed this weakness? yes: the stated attack directly exercises the weakness. partial: the control concerns the same area but its stated attack would not necessarily expose it. no: unrelated."
+  },
+  "development_data": {
+    "label": "retrospective, in-sample, development data",
+    "source": "storecraft-run-1, 24 confirmed findings F01 to F24. The catalog's eight VAPT-ABUSE controls were written from these findings, and the fact vocabulary's examples paraphrase some of them.",
+    "case_inputs": "Per finding: the files the audit record cites, at the audited commit, and as ticket text the messages of the commits that last wrote the cited lines (git blame at the audited commit). Built by a script, no authored text. Local only.",
+    "families": {
+      "unproven-contact": ["F02", "F03", "F04", "F07", "F13", "F15", "F23"],
+      "resource-exhaustion": ["F01", "F05", "F08", "F09", "F17"],
+      "lifecycle": ["F06", "F12", "F19", "F21", "F22"],
+      "server-owned-values": ["F14", "F16", "F24"],
+      "session-assurance": ["F18", "F20"]
+    },
+    "pre_audit_covered": { "F10": "VAPT-API-05", "F11": "VAPT-API-03" },
+    "source_controls": "For a family finding: every control whose sources list storecraft-run-1:<finding>. For F10 and F11: the control in pre_audit_covered.",
+    "wave_a_mapping": {
+      "covered": ["F10", "F11"],
+      "none": ["F06", "F12", "F13", "F15", "F19", "F21", "F22", "F23"],
+      "partial": ["F01", "F02", "F03", "F04", "F05", "F07", "F08", "F09", "F14", "F16", "F17", "F18", "F20", "F24"]
+    }
+  },
+  "corpus2_rule": {
+    "label": "public advisories; the only data here that does not come from the audited product",
+    "source": "GitHub Advisory Database REST API (GET /advisories), type=reviewed, ecosystems npm and pip",
+    "window": "published from 2026-08-01T00:00:00Z up to the freeze time recorded in corpus2-index.json",
+    "order": "published_at descending across both ecosystems; ties by ghsa_id ascending",
+    "keep_when": [
+      "not withdrawn",
+      "a reference matches https://github.com/<owner>/<repo>/commit/<sha>; the first such reference in list order is the fix commit",
+      "the fix commit is readable through the API and has exactly one parent",
+      "the fix commit modifies between 1 and 5 source files (status \"modified\")",
+      "the pre-fix sizes of those files total at most 200000 bytes",
+      "fewer than 2 kept cases already share its first-listed CWE id (\"none\" when it lists no CWE)",
+      "fewer than 2 kept cases already share its repository"
+    ],
+    "source_file": "extension .js .mjs .cjs .ts .tsx .jsx or .py; not under a directory named test, tests, __tests__, spec, specs, e2e, testing, fixtures, doc, docs, example, examples, sample, samples, vendor, node_modules, dist or build; basename not *.test.*, *.spec.*, test_*.py, *_test.py, conftest.py, *.d.ts or *.min.js",
+    "stop": "24 kept cases, or the list is exhausted",
+    "skip_log": "Every advisory examined and not kept is logged with the first rule that excluded it: withdrawn, no_fix_commit, commit_unavailable, merge_commit, no_source_files, too_many_files, too_large, cwe_cap, repo_cap.",
+    "committed": "Advisory id, CWE ids, ecosystem, package, repository, fix and parent commit ids, file paths, published time. No upstream code is copied into this repository; it is fetched on demand.",
+    "case_inputs": "Fact writer: package name, repository description, the kept file paths and their pre-fix contents. No advisory text, no fix diff, no ticket (none exists). Judge: advisory summary, description, CWE ids and the fix diff."
+  },
+  "roles": {
+    "fact_writer": "Fresh agent per batch. Sees the catalog's fact_vocabulary (names, definitions, examples) and the case inputs. Never sees controls, predicates, findings, advisories, labels or judgments. Catalog-blind; on development data it is audit-exposed through the vocabulary examples.",
+    "judge": "Two fresh, independent agents. Each sees the weakness record (finding or advisory with fix diff) and, per control, id, tier, title, attack and prevent. Never sees predicates, sources, facts or selections. Labels every control for every case with the judge_question.",
+    "orchestrator": "Has seen the catalog. Writes no fact, label or judgment. Runs scripts, posts hashes and does not read corpus 2 before its hash is posted.",
+    "blindness": "By instruction and an inputs-only folder. The agents have file access, so this is not enforced. Each agent reports the files it read."
+  },
+  "measures": {
+    "R0": {
+      "name": "selector fidelity on the 35 fixture scenarios",
+      "counts": ["recalled of must_select_total", "inapplicable_violations", "net_hard_defects"],
+      "note": "Restated from the fixtures manifest at the version sealed after the re-check. Implementation fidelity only."
+    },
+    "R1": {
+      "name": "agreement between the fact writer and the reference scenarios",
+      "cases": "The fixture scenarios whose origin is audit:<finding>, compared with the writer's facts for that finding.",
+      "counts_per_boolean_fact": ["agree", "writer_true_ref_false", "writer_false_ref_true", "writer_unknown", "ref_unknown"],
+      "counts_per_enum_fact": ["both", "writer_only", "ref_only"],
+      "note": "Agreement, not accuracy: the reference facts were written from the audit report and amended three times against the catalog."
+    },
+    "R2": {
+      "name": "source control selection from the writer's facts",
+      "cases": "All 24 findings.",
+      "counts_per_pair": ["selected_known", "selected_unknown_only", "not_selected"],
+      "pair": "(finding, source control). Pairs whose source control is always_on are counted separately: selecting an always-on control shows nothing.",
+      "counts_per_finding": ["specific_source_selected_known", "specific_source_selected_unknown_only", "specific_source_not_selected", "only_always_on_sources"],
+      "primary_facts": "Per (finding, VAPT-ABUSE source control): some_true, none_true_some_unknown, all_false over that control's primary_facts in the writer's facts."
+    },
+    "R3": {
+      "name": "dependence on family-derived controls (ablation)",
+      "folds": {
+        "full": "No control removed. All 24 findings.",
+        "family:<name>": "Remove every control with any audit source in that family. Score that family's findings.",
+        "all_abuse_removed": "Remove the eight VAPT-ABUSE controls. Score the 22 family findings."
+      },
+      "outcome_per_finding_first_that_applies": {
+        "specific_hit_known": "a remaining specific control is positive and selected under known_only",
+        "specific_hit_unknown_only": "a remaining specific control is positive and selected as_given",
+        "always_on_only": "a remaining always_on control is positive and selected as_given",
+        "partial_only": "a remaining control selected as_given is at_least_partial",
+        "none": "otherwise"
+      },
+      "note": "Not a generalization result. Conditions derived from a family that sit on other controls (the business-invariant and auth-lifecycle boundary kinds, and the state, value and session facts) stay in place: rebuilding the catalog per fold is not feasible. always_on is computed once, on the full catalog."
+    },
+    "R4": {
+      "name": "selection on public advisories",
+      "selectors": ["catalog_as_given", "catalog_known_only", "select_everything", "always_on_only"],
+      "counts_per_cell": ["needed_selected", "needed_missed", "unneeded_selected", "unneeded_left_out"],
+      "cell": "(case, specific control). needed = positive.",
+      "outcome_per_case_first_that_applies": {
+        "specific_hit": "at least one specific control is positive, and one of them is selected",
+        "specific_missed": "at least one specific control is positive, and none of them is selected",
+        "always_on_hit": "an always_on control is positive and selected",
+        "always_on_missed": "an always_on control is positive and none is selected",
+        "partial_only": "no control is positive and at least one is at_least_partial",
+        "no_check_in_catalog": "otherwise"
+      },
+      "case_outcomes_for": ["catalog_as_given", "catalog_known_only"],
+      "breakdown": "Case outcomes per first-listed CWE id."
+    },
+    "R5": {
+      "name": "breadth",
+      "counts": "Controls selected per case, minimum, median and maximum, as_given and known_only, for the 24 development cases and for corpus 2."
+    },
+    "judges": {
+      "agreement": "Per corpus, the 3 by 3 count of (judge 1 label, judge 2 label) over every (case, control) cell.",
+      "wave_a_concordance": "Development data, the 17 controls that are not VAPT-ABUSE. Judges' category per finding: covered if one of those controls is positive, none if both judges label all of them \"no\", otherwise partial. Reported as a 3 by 3 count against wave_a_mapping."
+    }
+  },
+  "claim_rules": {
+    "always": [
+      "Counts only, never percentages.",
+      "Never state or imply that security improved.",
+      "R1, R2 and R3 are always labelled with development_data.label.",
+      "Each result names its limits next to it."
+    ],
+    "beyond_the_audited_product": {
+      "allowed_when": "On corpus 2 with catalog_as_given: specific_hit + specific_missed is at least 1, and 2 * specific_hit >= specific_hit + specific_missed, and unneeded_left_out >= unneeded_selected.",
+      "allowed_sentence": "On {cases} public advisory cases the catalog selected a needed specific check in {specific_hit} of the {needs_specific} cases that needed one, and left out {unneeded_left_out} unneeded specific checks against {unneeded_selected} it selected.",
+      "otherwise_sentence": "On this corpus the catalog did not show useful selection.",
+      "note": "The sentence the rule selects is rendered by the scorer into the report's results block. No other sentence about data beyond the audited product is allowed."
+    }
+  },
+  "not_measured": [
+    "Whether a selected control's test would in fact be written and would in fact catch the weakness: no live run.",
+    "A before and after comparison of harness versions on equivalent tasks: the optional live run was not run.",
+    "Execution time and token cost.",
+    "Fact extraction from a ticket on corpus 2: no ticket exists there, the writer sees code only.",
+    "The reassess step (diff against plan)."
+  ]
+}

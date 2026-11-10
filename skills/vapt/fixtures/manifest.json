@@ -1,7 +1,7 @@
 {
-  "version": 5,
+  "version": 6,
   "created": "2026-11-09",
-  "seal_anchor": "v5 (current): the anchor is the commit that first contains manifest version 5 (find it with git log --follow skills/vapt/fixtures/manifest.json and the first commit whose manifest says \"version\": 5; none yet while the work is uncommitted). The v4 anchor was 2ca3647.",
+  "seal_anchor": "v6 (current): the anchor is the commit that first contains manifest version 6 (find it with git log --follow skills/vapt/fixtures/manifest.json and the first commit whose manifest says \"version\": 6; none yet while the work is uncommitted). The v5 anchor was 111c06f, the v4 anchor 2ca3647.",
   "sets": {
     "dev": [
       "S-DEV-01",
@@ -44,11 +44,12 @@
     ]
   },
   "sha256": {
-    "scenarios.json": "a1a4063907c299ddb3a58ac76f53de5ffee010875c700b5c49e962bc3524287e",
+    "scenarios.json": "0c49dad847272c8e829fd6aae4fb6a0a5032c2815ce2bf0e61c23e4c074de244",
     "labels.json": "bf548aa77471e25ddcf51fb5d0f36412191779ad95289dbcc6eecd0ba0b32631",
     "amendments.json": "9f3c40a0f519d8c31277dd00776169179b14b5958413bf5e3faf42c264ae8897",
     "amendments_round2.json": "ffbcdd7868a20bfd056338884e2cb364bc7875ff8634b33489ae0bd6d50a5db3",
     "amendments_round3.json": "a338246b35e37568e43405b7bb44292052ab3142430f5953a18311d4d17dbf9d",
+    "amendments_round4.json": "f37c21af69f25514ccfdd69e4b32b9ef246c15ae24afe1f5891b6be08dcab94a",
     "label_history.json": "a315e9550bdad554ee429d5ad7f664b04a925786ca37dbc71a7d4da015541f8f",
     "provenance/fact_vocabulary.json": "90f3c539d5191aadd88e39dbb4afb31b4dbec8152a206a95f4795a62028361a6",
     "provenance/controls_public.json": "744bee36b77810cfff38edd0dd77398324fbf5ae0944c84ff2c39455de62584f"
@@ -79,6 +80,11 @@
       "version": 5,
       "date": "2026-11-09",
       "change": "catalog-only re-seal: attempt_limit wording, WEB-01/CFG-04 recipe rows; evaluator moved to controls.mjs; predicates unchanged, ledger/baselines byte-identical; no sealed results existed, none stale"
+    },
+    {
+      "version": 6,
+      "date": "2026-11-10",
+      "change": "attempt_limit re-checked against the reworded definition by an independent auditor (fresh sonnet agent; saw scenario summaries, changed surfaces, current values and the old and new definition; never saw the catalog predicates or controls): 34 of 35 values kept (5 marked unclear and kept: S-DEV-02, S-DEV-09, S-SEA-03, S-SEA-09, S-SEA-13), S-SEA-18 unknown to false (amendments_round4.json); selection for that scenario unchanged, so labels, ledger and baselines are byte-identical; no sealed results existed, none stale"
     }
   ],
   "provenance": {
@@ -116,15 +122,15 @@
     "The sealed set was seen by the reviewers and the orchestrator at reseal; this is recorded here and weakens its blindness for later selector work."
   ],
   "limits": [
-    "attempt_limit reworded after seal; no fact re-audit applied",
+    "attempt_limit was re-checked at version 6 against the reworded definition (one value changed, S-SEA-18); the other facts were not re-audited",
     "Measures the mapping from given facts to controls, not fact extraction from a diff.",
     "Labels were reasoned from scenario text, but several ABUSE facts map almost one-to-one to primary facts, so agreement on those controls is partly by construction.",
     "A control that is neither in must_select nor in inapplicable is unlabeled; selecting it is acceptable over-selection by policy and is not an error.",
     "ADD_CONTROLS has no fixture: only REAPPROVAL and UNCHANGED reassess verdicts are covered.",
     "Dev scenarios derive from the audit that shaped the catalog, so dev results say nothing about generalization. Dev origin: 12 audit-derived plus 2 synthetic.",
-    "Selector scoring is not done here; C-1 validates fixture structure, consistency and labelling policy only.",
+    "Selector scoring runs in skills/ship-ticket/scripts/security-plan.test.mjs; this suite validates fixture structure, consistency and labelling policy only.",
     "The label/catalog disagreement ledger (disagreements.json) is computed, not hand-listed: make-ledger.mjs runs the catalog evaluator on each scenario's facts and records every inapplicable label the catalog selects anyway, with via saying why. The test requires the ledger to equal the computed set exactly and reports its size. Its entries are expected catalog over-breadth cost, not selector errors; a catalog-following selector shows each one as an inapplicable-violation. An entry whose via is one of the control's own primary_facts is additionally a primary-fact label violation (an unknown primary fact counts as true), which the labels test rejects, except VAPT-ABUSE-07 via persistent_write: the catalog selects ABUSE-07 on any persistent write on purpose, so that one pair is exempt (BROAD_FACTS) and stays visible only in the ledger.",
-    "The seal is anchored only by git history (see seal_anchor): the commit that first contains manifest version 5 is the anchor. Moving a scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff manifest.sets and the scenario origins between commits.",
+    "The seal is anchored only by git history (see seal_anchor): the commit that first contains manifest version 6 is the anchor. Moving a scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff manifest.sets and the scenario origins between commits.",
     "Recall measures implementation fidelity to the catalog, not catalog completeness or security improvement; a score at or near the catalog_faithful baseline is expected and proves nothing about security. The boundary-universal baseline uses the controls the selector returns for every single boundary kind (computed: 11)."
   ],
   "preregistered_baselines": {
