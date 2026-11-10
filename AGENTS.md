@@ -269,7 +269,8 @@ the phase table, invariants, state transitions, companion routing and resume
 contract. Everything a single
 phase consumes lives in `references/<phase>.md` and is loaded when that phase
 starts: `understand`, `plan`, `cross-model`, `codex-cli`, `prove`, `design-parity`,
-`review`, `ship`, with cross-phase operational timing isolated in `observability`. **Keep
+`review`, `ship`, with cross-phase operational timing isolated in `observability` and
+the application of the `vapt` control catalog to a ticket (policy 2) in `security-risk`. **Keep
 it that way.** It was a 2359-line monolith and the length was
 itself a defect: policy deleted in one place stayed executable in a dozen others,
 and parallelism decided in one section was ignored 350 lines later. If you add a

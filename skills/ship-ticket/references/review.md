@@ -179,7 +179,10 @@ and rule-catalogue work:
 - for UI, perform the complete parity comparison against the pinned reference;
 - for trust boundaries, review the static control trace and frozen runtime attack
   evidence without rerunning attacks;
-- return an explicit `security_outcome` for a security-sensitive ticket.
+- return an explicit `security_outcome` for a security-sensitive ticket;
+- under security policy 2, return one primary `rule_row` per effective pair,
+  `subject_id` `<boundary>:<control>`, with the pair's spec evidence (see
+  [security-risk.md](security-risk.md)).
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
@@ -215,7 +218,7 @@ fallback; do not import the PLAN debate into REVIEW.
 ## Output contract
 
 The primary workflow returns the complete schema below. The second-opinion counterpart
-returns identity, candidate ID, findings, overflow and an outcome; its free-form
+(given the §3a security plan in its prompt) returns identity, candidate ID, findings, overflow and an outcome; its free-form
 opinion does not claim the primary workflow's checklist coverage.
 
 ```text
@@ -243,7 +246,9 @@ single CodeRabbit fallback, then `WAIT_FOR_USER`.
 
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
-passing and `overflow: false`.
+passing and `overflow: false`. Under security policy 2, `NOT_TRIGGERED` for
+`security_outcome` is rejected while unwaived pairs are effective, and
+`NOT_APPLICABLE` is rejected for a pair without a trusted `SECURITY_WAIVER`.
 
 ## Reconcile once
 

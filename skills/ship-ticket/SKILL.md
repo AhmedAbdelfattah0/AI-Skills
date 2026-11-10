@@ -92,6 +92,7 @@ Load a phase reference only when entering that phase:
 | PROVE | [references/prove.md](references/prove.md) |
 | PROVE with UI | [references/design-parity.md](references/design-parity.md) |
 | REVIEW | [references/review.md](references/review.md) |
+| PLAN, PROVE or REVIEW of security-relevant work | [references/security-risk.md](references/security-risk.md) |
 | REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 
@@ -267,6 +268,9 @@ Security-sensitive work:
 - requires explicit attack and security outcomes from the primary reviewer.
 
 The label does not invent attack classes or replace static/runtime evidence.
+Which attack classes apply comes from the `vapt` control catalog, selected and
+reassessed as [references/security-risk.md](references/security-risk.md) describes;
+the profile, routing and labels above stay as written here.
 
 ## Rules and deviations
 

@@ -13,7 +13,7 @@
  *
  * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
- *      run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
+ *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  */
@@ -25,9 +25,9 @@ import { truncatedOutputs } from './run-summary.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
-import { GATES, gateNo, refreshRed, redInvalidJudgments } from './engine-gates.mjs';
+import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
@@ -39,7 +39,7 @@ export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
-  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe']);
+  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile']);
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
@@ -67,7 +67,7 @@ function approvedPlan(ctx, P, S = null) {
   const events = runStateEvents(text);
   const start = (S ? trustedEvents(S, 'START') : events.filter(e => e.event === 'START')).filter(e => e.run_id === ctx.runId).at(-1);
   if (!start || normDigest(start.approved_plan_digest) !== digest) throw coded('approval_mismatch', `plan narrative does not match START of ${ctx.runId}`);
-  return { text, digest, events };
+  return { text, digest, events, start };
 }
 
 /** Context for one command: paths, state, serialized commits and live in-process attempts. */
@@ -128,14 +128,21 @@ function verifyBinding(E) {
   const { S, ctx } = E;
   if (S.run_id !== ctx.runId) return [judgment('run_mismatch', null, `engine state belongs to run ${S.run_id}, not ${ctx.runId}`)];
   const out = [];
-  try { if (approvedPlan(ctx, E.P, S).digest !== S.plan_digest) out.push(judgment('approval_mismatch', null, 'plan narrative differs from the one bound at init')); }
-  catch (e) {
+  try {
+    const approved = approvedPlan(ctx, E.P, S);
+    if (approved.digest !== S.plan_digest) out.push(judgment('approval_mismatch', null, 'plan narrative differs from the one bound at init'));
+    // Grandfathering is by the trusted START's approval time, never by a missing field (AIS-HARNESS-4 Wave B).
+    else if (!securityOn(S) && !legacyApproval(approved.start)) out.push(judgment('security_policy_required', null,
+      'the trusted START is not approved before the security policy cutoff, and the bound DAG has no config.securityPolicy 2'));
+  } catch (e) {
     if (e.code === 'run_state_malformed') out.push(judgment(e.code, null, e.message));
     else if (e.code === 'approval_mismatch') out.push(judgment('approval_mismatch', null, 'plan narrative no longer matches the approved START'));
     else throw e;
   }
   const raw = io.readIfExists(ctx.dagFile ?? S.dag_file);
   if (raw === null || sha(raw) !== S.dag_digest) out.push(judgment('dag_mismatch', null, 'DAG bytes differ from the bound digest'));
+  if (securityOn(S) && S.security?.reapproval) out.push(judgment('security_reapproval', null,
+    `reassessment of ${S.security.reapproval.candidate_id} needs REAPPROVAL (a new START and plan digest; WAIT_FOR_USER)`));
   return out;
 }
 
@@ -163,8 +170,8 @@ function view(E, transient = []) {
   return { schema: STATUS_SCHEMA, ticket: S.ticket, run_id: S.run_id,
     nodes: Object.fromEntries(Object.entries(S.nodes).map(([id, n]) => [id, { state: n.state, attempts: n.attempts, retries: n.retries }])),
     repairs: S.repairs.map(r => ({ id: r.id, state: r.state })),
-    judgments: [...S.judgments, ...transient, ...failed, ...failedRepairs, ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []),
-      ...(unitReviewOn(S) ? unitReviewJudgments(S, units) : [])],
+    judgments: [...S.judgments, ...transient.filter(j => !(j.code === 'security_reapproval' && S.security?.reapproval)), ...failed, ...failedRepairs,
+      ...redInvalidJudgments(S), ...(units ? unitJudgments(S, units) : []), ...(unitReviewOn(S) ? unitReviewJudgments(S, units) : []), ...securityJudgments(S)],
     rounds: structuredClone(S.rounds), confirmation: S.confirmation ?? null, red_pending: redPending(S),
     budget: budget && { ticket: budget.ticket, phase: budget.phase, flags: budget.flags,
       ...(budget.phase_unknown.records ? { phase_unknown: budget.phase_unknown } : {}) },
@@ -203,11 +210,39 @@ async function deliver(E) {
   await E.commit();
 }
 
+/**
+ * Security policy at init (AIS-HARNESS-4 Wave B). Without config.securityPolicy only a run whose START
+ * was approved before SECURITY_POLICY_CUTOFF is admitted (security_policy_required). With policy 2:
+ * the installed catalog loads and is the one the plan was approved against (catalog_unavailable),
+ * every control id is in it (dag_invalid), and the approved narrative carries both the
+ * `security-pairs` line of exactly the DAG's pairs and a verified §3a machine block with the same
+ * pairs and catalog digest (security_pairs_mismatch).
+ */
+async function bindSecurity(ctx, config, start, text, narrative) {
+  if (config.securityPolicy === undefined) {
+    if (!legacyApproval(start)) throw coded('security_policy_required', 'a run approved after the security policy cutoff needs config.securityPolicy 2 with catalogDigest and controlCoverage');
+    return;
+  }
+  const sp = await securityPlan();
+  const cat = sp.loadCatalog(catalogOptions(ctx));
+  if (!cat.ok) throw coded('catalog_unavailable', `${cat.code}: ${(cat.reasons ?? []).join('; ')}`);
+  if (cat.digest !== config.catalogDigest) throw coded('catalog_unavailable', `config.catalogDigest ${config.catalogDigest} is not the installed catalog ${cat.digest}; re-select and re-approve`);
+  const known = new Set(cat.catalog.controls.map(c => c.id));
+  const unknown = config.controlCoverage.map(p => p.control).filter(c => !known.has(c));
+  if (unknown.length) throw coded('dag_invalid', `config.controlCoverage names control(s) not in the catalog: ${[...new Set(unknown)].join(', ')}`);
+  const ids = config.controlCoverage.map(pairKey).sort();
+  const line = sp.pairsLine({ catalogDigest: config.catalogDigest, pairs: ids });
+  if (!narrative.includes(line)) throw coded('security_pairs_mismatch', 'the approved narrative has no security-pairs line for exactly the DAG\'s controlCoverage and catalogDigest');
+  const block = sp.parsePlanSecurityBlock(text);
+  if (!block || block.catalog_digest !== config.catalogDigest || JSON.stringify(block.pairs) !== JSON.stringify(ids))
+    throw coded('security_pairs_mismatch', 'the approved §3a security-plan block is missing, invalid or names other pairs than config.controlCoverage');
+}
+
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
 export async function init(ctx) {
   return locked(ctx, async (E) => {
     if (existsSync(E.P.state)) throw coded('state_exists', `${E.P.state} already exists`);
-    const { text, digest, events } = approvedPlan(ctx, E.P);
+    const { text, digest, events, start } = approvedPlan(ctx, E.P);
     let raw;
     try { raw = readFileSync(ctx.dagFile); } catch { throw coded('dag_invalid', 'dagFile unreadable'); }
     let doc;
@@ -215,6 +250,7 @@ export async function init(ctx) {
     const dag = validateEngineDag(doc, { ticket: ctx.ticket });
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
+    await bindSecurity(ctx, dag.config, start, text, narrative);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
@@ -447,9 +483,11 @@ export async function gate(ctx) {
       const unbound = verifyBinding(E);
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
+      if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
       await deliver(E);
       reconcileReviews(E);
       const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+      if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
       const v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })
@@ -479,7 +517,7 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume,

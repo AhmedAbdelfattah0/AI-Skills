@@ -6,14 +6,15 @@
  * RUN-STATE RETRY event), the builder roster, the repair it enqueues, and the local proof (it runs
  * the DAG's testCommands itself). Inputs only select. `E` is run-engine.mjs's command context.
  */
-import { existsSync, statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { existsSync, statSync, readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { gateRed, gateReview, gateShipReady } from './gate.mjs';
+import { spawnSync } from 'node:child_process';
+import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
-import { retryEvent } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap } from './engine-dag.mjs';
+import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
@@ -76,13 +77,23 @@ async function redGate(E, input, candidate) {
   if (!node) return gateNo('unknown_node', [`no node ${input.node} in the bound DAG`]);
   const runner = redRunner(E.S.config, input.command);
   if (!runner) return gateNo('unknown_command', [`no RED runner ${input.command ?? '(unnamed)'} among the formatted config.testCommands`]);
-  const pin = pinnedSpecs(node, input.specs);
+  // Policy 2: `addendum` names a trusted, effective SECURITY_ADDENDUM; its specs for this node are the pin
+  // and the evidence lands in S.gates.red_addendum['<addendum_id>/<node>'] (node RED is untouched).
+  let addendumSpecs, slot;
+  if (input.addendum !== undefined) {
+    const a = securityEvents(E.S).addenda.find(x => x.addendum_id === input.addendum);
+    if (!a) return gateNo('spec_unpinned', [`no trusted, effective SECURITY_ADDENDUM ${input.addendum} of this run`]);
+    addendumSpecs = a.pairs.filter(p => p.node === node.id).flatMap(p => p.specs);
+    slot = { map: 'red_addendum', key: `${a.addendum_id}/${node.id}` };
+  }
+  const pin = pinnedSpecs(node, input.specs, addendumSpecs);
   if (pin.code) return gateNo(pin.code, [pin.reason]);
   const baseCommit = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD');
   const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
-    specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources] }, runnerDeps(E));
+    specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) }, runnerDeps(E));
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
-  if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit }); delete E.S.gates.red_invalid?.[node.id]; }
+  if (v.ok && slot) Object.assign(E.S.gates.red_addendum[slot.key], { command: runner.name, base_commit: baseCommit });
+  else if (v.ok) { Object.assign(E.S.gates.red[node.id], { command: runner.name, base_commit: baseCommit }); delete E.S.gates.red_invalid?.[node.id]; }
   const { state: _s, ...out } = v;
   return out;
 }
@@ -148,7 +159,9 @@ function confirmationPolicy(S, rx) {
   const ws = S.review_chain.findLast(r => r.review_execution === rx && r.kind === 'repair')?.write_set ?? [];
   const risky = Object.values(S.nodes).some(n => (n.risk ?? []).some(l => CONFIRM_SECOND_OPINION.includes(l))
     && [...n.reads, ...n.writes].some(p => ws.some(q => overlap(p, q))));
-  return risky ? 'required' : 'optional';
+  // Policy 2: a repair touching any effective pair's spec file needs the second opinion too.
+  const pairSpec = securityOn(S) && securityEvents(S).pairs.some(p => p.specs.some(s => ws.some(q => overlap(s.file, q))));
+  return risky || pairSpec ? 'required' : 'optional';
 }
 
 /**
@@ -156,7 +169,7 @@ function confirmationPolicy(S, rx) {
  * authorized retry). A new original after any earlier original needs a RETRY linked to its
  * predecessor. An accepted FAIL enqueues the finding-bound repair from its write set.
  */
-function reviewGate(E, input, candidate) {
+async function reviewGate(E, input, candidate) {
   const S = E.S;
   const units = unitsRefusal(E);
   if (units) return units;
@@ -185,6 +198,13 @@ function reviewGate(E, input, candidate) {
     if (stale) return stale;
     v.record.units_consumed = consumedUnits.map(c => ({ unit: c.unit, evidence_id: c.evidence_id }));
   }
+  if (securityOn(S)) {
+    const sec = await securityContext(E, candidate);
+    const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);
+    if (refusal) return refusal;
+    // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
+    if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
+  }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
     return gateNo('repair_prompt_missing', ['an accepted FAIL opens a repair: repair_prompt_file must be the absolute path of its brief']);
@@ -211,7 +231,7 @@ function reviewGate(E, input, candidate) {
  */
 async function runProof(E) {
   const run = runnerDeps(E).spawnRunner;
-  const commands = [];
+  const commands = [], runs = [];
   for (const [name, c] of Object.entries(E.S.config.testCommands ?? {})) {
     const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent' };
     E.S.attempts.push(a);
@@ -232,11 +252,16 @@ async function runProof(E) {
       return { refusal: gateNo('quiescence_unknown', [reason], { judgment_point: true }) };
     }
     a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
+    // args: an unlocated pass is the spec's only when the command runs exactly that file (gate.mjs soleFile).
+    if (c.format) runs.push({ format: c.format, stdout: result.stdout ?? '', truncated: result.truncated === true || result.timedOut === true, args: [...(c.args ?? [])] });
     commands.push({ name, cmd: c.cmd, args: [...(c.args ?? [])], exit_code: result.exitCode,
       result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) });
   }
   await E.commit();
-  return { commands };
+  // Policy 2 only: the parsed status of every effective pair spec (only pass proves; legacy proof bytes unchanged).
+  if (!securityOn(E.S)) return { commands };
+  const specs = securityEvents(E.S).pairs.flatMap(p => p.specs);
+  return { commands, spec_results: specResults(specs, runs) };
 }
 
 const proven = (S, candidate) => S.local_proof?.candidate_id === candidate && S.local_proof.commands.length > 0
@@ -270,10 +295,17 @@ async function shipReadyGate(E, input, candidate) {
     if (list !== undefined) S.risk_evidence = boundRiskEvidence(S, list.map(({ kind, path }) => ({ kind, path })), io.evidenceExists(E.ctx.repoRoot));
   };
   rebind();
-  const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts) };
+  let sec = null;
+  if (securityOn(S)) {
+    sec = await securityContext(E, candidate);
+    const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? coverageRefusal(S, sec);
+    if (refusal) return refusal;
+  }
+  const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts),
+    ...(sec ? { control_pairs: controlPairs(E, sec, candidate) } : {}) };
   let v = gateShipReady({ state: S, current });
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {
-    const { refusal, commands } = await runProof(E);
+    const { refusal, commands, spec_results } = await runProof(E);
     if (refusal) return refusal;
     // The proof ran repository commands: the approval binding (excluded plan narrative, DAG bytes) and
     // the candidate must still hold BEFORE a proof bound to the candidate is recorded.
@@ -296,7 +328,8 @@ async function shipReadyGate(E, input, candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
     }
-    S.local_proof = { candidate_id: candidate, commands, seq: S.seq };
+    S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}) };
+    if (sec) current.control_pairs = controlPairs(E, sec, candidate);
     // Git-ignored artifacts and evidence are outside the candidate id: re-derive them from what the proof left.
     rebind();
     current.artifact_digests = io.artifactDigests(E.ctx.repoRoot, input.artifacts);
@@ -311,4 +344,199 @@ async function shipReadyGate(E, input, candidate) {
   return { judgment_point: false, ...v };
 }
 
-export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate };
+// ---- security policy 2 (AIS-HARNESS-4 Wave B) ----------------------------------------------------
+
+let securityPlanModule = null;
+/** security-plan.mjs, loaded only by policy-2 paths (a legacy run never touches the catalog machinery). */
+export const securityPlan = async () => (securityPlanModule ??= await import('./security-plan.mjs'));
+/** loadCatalog options: the installed catalog, or ctx.catalogFile (an in-process test seam; no CLI flag). */
+export const catalogOptions = (ctx) => (ctx.catalogFile ? { catalogPath: ctx.catalogFile } : {});
+
+/**
+ * Everything a policy-2 decision on `candidate` reads, re-derived per call: the installed catalog, the
+ * effective pairs (DAG coverage + trusted addenda), the waivers of this candidate and the freshness
+ * tuple (candidate, approved plan digest, catalog digest, effective addendum set).
+ */
+export async function securityContext(E, candidate) {
+  const sp = await securityPlan();
+  const catalog = sp.loadCatalog(catalogOptions(E.ctx));
+  const events = securityEvents(E.S);
+  const { waived, unauthorized } = waiverState(E.S, events, candidate);
+  const tuple = { candidate_id: candidate, plan_digest: E.S.plan_digest, catalog_digest: catalog.ok ? catalog.digest : null,
+    addendum_set: events.addenda.map(a => a.addendum_id).sort() };
+  return { sp, catalog, events, waived, unauthorized, tuple };
+}
+const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendum_set: [...sec.tuple.addendum_set] });
+const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
+  && JSON.stringify(a.addendum_set) === JSON.stringify(b.addendum_set);
+
+/** Policy-2 event problems every security decision refuses on (judgment points: the owner resolves them). */
+export function securityRefusal(sec) {
+  const jp = { judgment_point: true };
+  if (!sec.catalog.ok) return gateNo('catalog_unavailable', [`the control catalog is unavailable (${sec.catalog.code}): ${(sec.catalog.reasons ?? []).join('; ')}`], jp);
+  const { conflicts, outside, forged, addenda } = sec.events;
+  if (conflicts.length) return gateNo('addendum_conflict', conflicts.map(c => `${c.addendum_id}: ${c.reason}`), jp);
+  if (outside.length) return gateNo('addendum_outside_contract', outside.map(c => `${c.addendum_id}: ${c.reason} (WAIT_FOR_USER: re-approve the plan)`), jp);
+  const trustedIds = new Set(addenda.map(a => a.addendum_id));
+  const open = forged.addenda.filter(e => !trustedIds.has(e.addendum_id));
+  if (open.length) return gateNo('addendum_required', open.map(e => `SECURITY_ADDENDUM ${e.addendum_id} appeared while dispatched work could run, so it is not owner `
+    + 'authority and adds nothing; once status shows nothing live, the owner re-appends it as a distinct line'), jp);
+  if (sec.unauthorized.length) return gateNo('waiver_unauthorized', sec.unauthorized.map(k => `a SECURITY_WAIVER of ${k} appeared while dispatched work could run: `
+    + 'not owner authority; once nothing is live the owner re-appends a distinct line'), jp);
+  return null;
+}
+
+/** The recorded reassessment must be of exactly this tuple (gate reassess records it). */
+export function reassessRefusal(S, sec) {
+  const r = S.security?.reassessed;
+  if (sameTuple(r, sec.tuple)) return null;
+  const parts = !r ? ['no reassessment recorded'] : ['candidate_id', 'plan_digest', 'catalog_digest', 'addendum_set']
+    .filter(k => JSON.stringify(r[k]) !== JSON.stringify(sec.tuple[k])).map(k => `${k} changed since the reassessment`);
+  return gateNo('reassess_stale', [`run gate reassess on the current candidate first: ${parts.join(', ')}`]);
+}
+
+/** Ship-ready: the original review behind the authorizing record must have covered the current catalog and addenda. */
+export function coverageRefusal(S, sec) {
+  const chain = S.review_chain, last = chain.at(-1);
+  if (!last || !['original', 'confirmation'].includes(last.kind) || last.outcome !== 'PASS') return null; // gateShipReady: review_not_accepted
+  const original = chain.find(r => r.review_execution === last.review_execution && r.kind === 'original');
+  if (JSON.stringify(original?.security_coverage) === JSON.stringify(coverageOf(sec))) return null;
+  return gateNo('security_review_stale', [`review ${last.review_execution} covered ${JSON.stringify(original?.security_coverage ?? null)}, now `
+    + `${JSON.stringify(coverageOf(sec))}: an addendum or a catalog change needs a new independent review (an owner RETRY)`]);
+}
+
+/**
+ * An original review under policy 2: exactly one primary rule_row per effective pair, subject_id
+ * '<boundary>:<control>'; NOT_APPLICABLE only for a waived pair; security_outcome NOT_TRIGGERED only
+ * when every effective pair is waived.
+ */
+export function securityRowsRefusal(p, sec) {
+  const rows = p.rule_rows, keys = sec.events.pairs.map(pairKey);
+  const wrong = keys.map(k => [k, rows.filter(r => r.subject_id === k).length]).filter(([, n]) => n !== 1);
+  if (wrong.length) return gateNo('incomplete_contract', wrong.map(([k, n]) => `primary.rule_rows must hold exactly one row with subject_id ${k} (found ${n})`));
+  const escape = keys.filter(k => rows.find(r => r.subject_id === k).outcome === 'NOT_APPLICABLE' && !sec.waived.includes(k));
+  if (escape.length) return gateNo('security_row_escape', escape.map(k => `${k}: NOT_APPLICABLE needs a trusted SECURITY_WAIVER for this candidate`));
+  if (p.security_outcome === 'NOT_TRIGGERED' && keys.some(k => !sec.waived.includes(k)))
+    return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while unwaived security pairs are effective']);
+  return null;
+}
+
+/**
+ * Per effective, unwaived pair: proven when its RED slot (node RED, or the addendum's) holds every
+ * pair spec exactly, the RED still binds (no spec rewritten, base unmoved: the placeholder-file
+ * guard), and this candidate's local proof shows each spec 'pass'.
+ */
+function controlPairs(E, sec, candidate) {
+  const S = E.S;
+  const results = S.local_proof?.candidate_id === candidate ? S.local_proof.spec_results ?? [] : [];
+  return sec.events.pairs.filter(p => !sec.waived.includes(pairKey(p))).map(p => {
+    const ev = p.addendum ? S.gates.red_addendum?.[`${p.addendum}/${p.node}`] : S.gates.red?.[p.node];
+    const red = Boolean(ev) && p.specs.every(s => (ev.specs ?? []).some(x => x.file === s.file && x.name === s.name)) && !redChanges(E, ev);
+    const pass = p.specs.every(s => results.some(r => r.file === s.file && r.name === s.name && r.status === 'pass'));
+    return { boundary: p.boundary, control: p.control, proven: red && pass };
+  });
+}
+
+/**
+ * Added lines per file of a `git diff` text: Map(path -> lines). Header state per file: `diff --git`
+ * starts a file, `--- ` arms its header, and `+++ ` is the file header only while armed (after `--- `,
+ * before the file's first `@@`); inside a hunk every '+' line is an added line, even one that reads
+ * `+++ ` (an added source line starting with '++ ').
+ */
+export function addedLinesByFile(text) {
+  const added = new Map();
+  let cur = null, armed = false, inHunk = false;
+  for (const l of text.split('\n')) {
+    if (l.startsWith('diff --git ')) { cur = null; armed = false; inHunk = false; continue; }
+    if (!inHunk && l.startsWith('--- ')) { armed = true; continue; }
+    if (armed && l.startsWith('+++ ')) {
+      armed = false;
+      cur = l.startsWith('+++ b/') ? l.slice(6) : null;
+      if (cur !== null && !added.has(cur)) added.set(cur, []);
+      continue;
+    }
+    if (l.startsWith('@@')) { inHunk = true; armed = false; continue; }
+    if (inHunk && cur !== null && l.startsWith('+')) added.get(cur).push(l.slice(1));
+  }
+  return added;
+}
+
+const MAX_ADDED_BYTES = 1024 * 1024;
+/** The candidate's changed paths with their added lines (git diff from config.base; an unlisted path is read whole: more signals, never fewer). */
+function changedFiles(E, paths) {
+  const root = E.ctx.repoRoot, added = new Map();
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
+    { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+  if (r.status === 0) for (const [p, lines] of addedLinesByFile(r.stdout)) added.set(p, lines);
+  return paths.map(p => {
+    if (added.has(p)) return { path: p, added: added.get(p) };
+    try { const b = readFileSync(join(root, p)); return { path: p, added: b.length <= MAX_ADDED_BYTES ? b.toString('utf8').split(/\r?\n/) : [] }; }
+    catch { return { path: p, added: [] }; }
+  });
+}
+
+const surfaceKey = (s) => JSON.stringify([s.boundary_id, s.kind, String(s.path).replace(/\\/g, '/').replace(/^(\.\/)+/, ''), [...new Set(s.principals)].sort()]);
+/** Approved surfaces then the input's, an input surface identical to one already listed dropped (never a redefinition). */
+function unionSurfaces(approved, extra) {
+  const seen = new Set(approved.map(surfaceKey));
+  return [...approved, ...extra.filter(s => !seen.has(surfaceKey(s)))];
+}
+
+/**
+ * gate reassess (policy 2): security-plan.mjs reassess over the candidate's changed files (paths and
+ * added lines), the Design Contract (the union of the DAG nodes' writes), the approved §3a block's
+ * surfaces united with the input `surfaces` (a new boundary the change introduces) and the trusted
+ * addenda. UNCHANGED records S.security.reassessed (the freshness tuple) and a
+ * SECURITY_REASSESSED event; an unclassified signal -> reassess_unclassified; ADD_CONTROLS not yet
+ * covered by a trusted addendum -> addendum_required (with the suggested addendum); REAPPROVAL ->
+ * S.security.reapproval, a judgment that stops drive and every gate (verifyBinding).
+ */
+async function reassessGate(E, input, candidate) {
+  const S = E.S;
+  const sec = await securityContext(E, candidate);
+  const refusal = securityRefusal(sec);
+  if (refusal) return refusal;
+  const plan = io.readIfExists(E.P.plan) ?? '';
+  const block = sec.sp.parsePlanSecurityBlock(plan);
+  const contract = [...new Set(Object.values(S.nodes).flatMap(n => n.writes.flatMap(w => [w, `${w}/**`])))].sort(); // a write is a file or a directory
+  // The candidate's surfaces: the approved ones plus the input's (a new route or auth surface). An input surface
+  // identical to an approved one is that surface; one that redefines an approved boundary id stays and is refused
+  // (bad_input: duplicate boundary_id); one outside the Design Contract is a REAPPROVAL basis.
+  const res = sec.sp.reassess({ plan, catalog: sec.catalog, inventory: { candidate_id: candidate, surfaces: unionSurfaces(block?.surfaces ?? [], input.surfaces ?? []) },
+    changed: { contract_paths: contract.length ? contract : ['\u0000no-design-contract'], files: changedFiles(E, E.candidatePaths ?? []) },
+    classifications: input.classifications ?? [], addenda: sec.events.addenda.map(a => ({ pairs: a.pairs.map(pairKey) })) });
+  if (!res.ok) {
+    if (res.code === 'classification_missing') return gateNo('reassess_unclassified', res.reasons, { unclassified: res.unclassified ?? [], signals: res.signals ?? [] });
+    if (['plan_block_missing', 'plan_block_invalid'].includes(res.code)) return gateNo('security_pairs_mismatch', res.reasons, { judgment_point: true });
+    if (['catalog_missing', 'catalog_invalid'].includes(res.code)) return gateNo('catalog_unavailable', res.reasons, { judgment_point: true });
+    return gateNo(res.code, res.reasons ?? []);
+  }
+  S.security ??= {};
+  if (res.outcome === 'REAPPROVAL') {
+    S.security.reapproval = { candidate_id: candidate, basis: res.reapproval_basis, seq: S.seq ?? 0 };
+    note(S, 'SECURITY_REAPPROVAL', { candidate_id: candidate });
+    return gateNo('security_reapproval', res.reasons, { judgment_point: true, outcome: res.outcome, reapproval_basis: res.reapproval_basis });
+  }
+  if (res.outcome === 'ADD_CONTROLS') return gateNo('addendum_required', res.delta_pairs.map(p => `${p}: not in an effective pair or a trusted SECURITY_ADDENDUM`),
+    { judgment_point: true, outcome: res.outcome, delta_pairs: res.delta_pairs, addendum: res.addendum });
+  note(S, 'SECURITY_REASSESSED', { candidate_id: candidate, outcome: res.outcome });
+  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq };
+  S.outbox.push({ run_id: S.run_id, event: 'SECURITY_REASSESSED', event_id: `security-reassessed-${S.run_id}-${S.seq}`, candidate_id: candidate,
+    outcome: res.outcome, plan_digest: sec.tuple.plan_digest, catalog_digest: sec.tuple.catalog_digest, addendum_set: sec.tuple.addendum_set,
+    timestamp: new Date().toISOString() });
+  return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals };
+}
+
+/** View judgments of a policy-2 run (none for a legacy run): a recorded REAPPROVAL and unresolved event problems. */
+export function securityJudgments(S) {
+  if (!securityOn(S)) return [];
+  const out = [];
+  if (S.security?.reapproval) out.push(judgment('security_reapproval', null, `reassessment of ${S.security.reapproval.candidate_id} needs REAPPROVAL: a new START and plan digest (WAIT_FOR_USER)`));
+  const ev = securityEvents(S), trustedIds = new Set(ev.addenda.map(a => a.addendum_id));
+  for (const c of ev.conflicts) out.push(judgment('addendum_conflict', null, `${c.addendum_id}: ${c.reason}`));
+  for (const c of ev.outside) out.push(judgment('addendum_outside_contract', null, `${c.addendum_id}: ${c.reason}`));
+  for (const e of ev.forged.addenda.filter(x => !trustedIds.has(x.addendum_id))) out.push(judgment('addendum_required', null, `SECURITY_ADDENDUM ${e.addendum_id} is untrusted (appended while work was live); re-append it once nothing is live`));
+  return out;
+}
+
+export const GATES = { red: redGate, review: reviewGate, 'ship-ready': shipReadyGate, 'unit-review': unitReviewGate, reassess: reassessGate };

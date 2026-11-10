@@ -2,7 +2,7 @@
 // Scores nothing: it checks that the fixture files are well formed, sealed, internally
 // consistent with the control catalog, and that the labels obey the labelling policy.
 // Selector scoring needs Wave B's select and is not done here. Reachability of the labels
-// is checked against the catalog evaluator (copied once in fixtures/selector.mjs, drift-guarded).
+// is checked against the catalog evaluator (imported from controls.mjs; the guard below forbids local copies).
 // Run: node --test skills/vapt/fixtures.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +10,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as C from './controls.mjs';
+import * as S from './fixtures/selector.mjs';
+import { DIFF_SIGNALS } from './controls.mjs';
 import { holds, selected, via, why, computeLedger, computeBroadOnly, computeReassess, computeBaselines, scoreSelector, ledgerReason } from './fixtures/selector.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,8 +26,7 @@ const SCENARIO_KEYS = ['id', 'set', 'category', 'family', 'origin', 'summary', '
 const SCOPE_KEYS = ['planned_surfaces', 'planned_facts', 'actual_diff_signals'];
 const LABEL_KEYS = ['scenario_id', 'must_select', 'inapplicable', 'rationale', 'confidence', 'inapplicable_basis'];
 const MIN_BASIS = 20;
-const SIGNALS = ['out-of-plan-path', 'new-route', 'new-dependency', 'auth-or-middleware-change', 'migration-or-rls-change',
-  'env-or-secret-reference', 'infra-or-ci-config', 'mail-or-notification-send', 'payment-or-stock-or-wallet-call', 'none'];
+const SIGNALS = DIFF_SIGNALS;
 const AMENDMENT_FILES = ['amendments.json', 'amendments_round2.json', 'amendments_round3.json'];
 const LABEL_HISTORY = 'label_history.json';
 const SCOPE_LABEL_KEYS = ['expected_reassess', 'reassess_rationale', 'added_controls'];
@@ -241,32 +243,16 @@ export function checkLabels(d) {
   return e;
 }
 
-// ---- evaluator drift guard: fixtures/selector.mjs must carry the catalog evaluator verbatim ----
-const EVALUATOR_PARTS = ['unknownish', 'assertFacts', 'holds'];
-// Source of one top-level declaration: a one-line `export const NAME =`, or `export function NAME(` up to the first `\n}`.
-export function extractDecl(src, name) {
+// ---- evaluator single-source guard: the evaluator exists once, in controls.mjs ----
+const SHARED = ['unknownish', 'assertFacts', 'holds', 'via', 'why', 'selected'];
+// A local declaration of a shared evaluator function in `src` (function, or const/let/var binding).
+export function localEvaluatorDecls(src) {
   const text = String(src);
-  const c = new RegExp(`^export const ${name} = .*$`, 'm').exec(text);
-  if (c) return c[0];
-  const f = new RegExp(`^export function ${name}\\(`, 'm').exec(text);
-  if (!f) return null;
-  const end = text.indexOf('\n}', f.index);
-  return end < 0 ? null : text.slice(f.index, end + 2);
+  return SHARED.filter((n) => new RegExp(`^\\s*(?:export\\s+)?(?:async\\s+)?(?:function\\s*\\*?\\s*${n}\\s*\\(|(?:const|let|var)\\s+${n}\\s*=)`, 'm').test(text));
 }
-const normWs = (s) => s.replace(/\s+/g, ' ').trim();
-export function checkEvaluatorDrift(catalogSrc, copySrc) {
-  const e = [];
-  for (const name of EVALUATOR_PARTS) {
-    const a = extractDecl(catalogSrc, name);
-    const b = extractDecl(copySrc, name);
-    if (!a) { e.push(`evaluator drift: '${name}' not found in controls.test.mjs; update EVALUATOR_PARTS in fixtures.test.mjs`); continue; }
-    if (!b) { e.push(`evaluator drift: '${name}' not found in fixtures/selector.mjs`); continue; }
-    if (normWs(a) !== normWs(b)) e.push(`evaluator drift: '${name}' in fixtures/selector.mjs differs from controls.test.mjs. `
-      + `Re-sync the copy from controls.test.mjs, ${REGEN}, and re-seal (re-record catalog_digest_at_seal, add a history entry, mark prior sealed results stale).`);
-  }
-  const h = extractDecl(copySrc, 'holds');
-  if (h && !h.includes("node.op === 'includes'")) e.push('evaluator drift: holds in fixtures/selector.mjs lacks the includes leaf');
-  return e;
+export function checkSharedEvaluator(sources) {
+  return Object.entries(sources).flatMap(([file, src]) => localEvaluatorDecls(src)
+    .map((n) => `evaluator drift: ${file} declares its own '${n}'; import it from controls.mjs instead of pasting a copy (a copy needs ${REGEN} and a re-seal).`));
 }
 
 // ---- reachability: the labels against what the catalog evaluator selects from each scenario's facts ----
@@ -426,7 +412,7 @@ const labelOf = (d, id) => d.labels.find((l) => l.scenario_id === id);
 const firstScenario = (d, pred) => d.scenarios.find(pred);
 
 test('fixtures are present and non-trivial', () => {
-  assert.equal(real.manifest.version, 4);
+  assert.equal(real.manifest.version, 5);
   assert.equal(real.scenarios.length, 35);
   assert.equal(real.labels.length, 35);
 });
@@ -441,9 +427,14 @@ test('scenario facts, surfaces and boundary unions are consistent', () => assert
 test('labels obey the labelling policy and primary-fact consistency', () => assert.deepEqual(checkLabels(real), []));
 const catalogTestSrc = readFileSync(join(here, 'controls.test.mjs'), 'utf8');
 const selectorSrc = readFileSync(join(here, 'fixtures/selector.mjs'), 'utf8');
-test('evaluator copy in fixtures/selector.mjs equals the catalog evaluator in controls.test.mjs', () => {
-  for (const n of EVALUATOR_PARTS) assert.ok(extractDecl(catalogTestSrc, n), `${n} extracted from controls.test.mjs`);
-  assert.deepEqual(checkEvaluatorDrift(catalogTestSrc, selectorSrc), []);
+test('fixtures/selector.mjs re-exports the one evaluator in controls.mjs (object identity)', () => {
+  for (const n of SHARED) {
+    assert.equal(typeof C[n], 'function', `${n} exported by controls.mjs`);
+    assert.strictEqual(S[n], C[n], `${n} in fixtures/selector.mjs must be the controls.mjs export`);
+  }
+});
+test('neither selector.mjs nor controls.test.mjs declares its own evaluator function', () => {
+  assert.deepEqual(checkSharedEvaluator({ 'fixtures/selector.mjs': selectorSrc, 'controls.test.mjs': catalogTestSrc }), []);
 });
 test('evaluator copy behaves: unknown matches every leaf, includes/is leaves, all/any', () => {
   const node = { any: [{ fact: 'persistent_write', op: 'is', value: true }, { all: [
@@ -642,14 +633,14 @@ test('negative: the BROAD_FACTS exemption is narrow (only ABUSE-07/persistent_wr
   for (const [c, facts] of PRIMARY) if (c !== 'VAPT-ABUSE-07')
     for (const f of facts) assert.ok(hit(checkLabels(inapWhere(c, f)), c, f), `${c}/${f} not exempt`);
 });
-test('negative: a drifted or missing evaluator copy is rejected with a re-sync and re-seal message', () => {
-  const drifted = selectorSrc.replace('return v === node.value;', 'return v !== node.value;');
-  assert.notEqual(drifted, selectorSrc, 'mutation applied');
-  const errs = checkEvaluatorDrift(catalogTestSrc, drifted);
-  assert.ok(errs.some((m) => /'holds'.*differs/.test(m) && /Re-sync/.test(m) && /re-seal/.test(m)), errs.join('\n'));
-  const noUnknown = selectorSrc.replace(/^export const unknownish = .*$/m, '');
-  assert.ok(checkEvaluatorDrift(catalogTestSrc, noUnknown).some((m) => /'unknownish' not found/.test(m)));
-  assert.ok(checkEvaluatorDrift(catalogTestSrc, selectorSrc.replace("v.includes('unknown') || ", '')).length > 0, 'dropped unknown-in-array match');
+test('negative: a pasted local evaluator function is rejected with a controls.mjs pointer', () => {
+  for (const decl of ['export function holds(node, facts) { return true; }', 'export const unknownish = (v) => v == null;',
+    'function via(node, facts) { return ""; }', 'const why = () => "";', 'export function assertFacts(f) { return f; }', 'function selected() { return []; }']) {
+    const errs = checkSharedEvaluator({ 'fixtures/selector.mjs': `${selectorSrc}\n${decl}\n` });
+    assert.equal(errs.length, 1, `${decl}: ${errs.join('|')}`);
+    assert.ok(/controls\.mjs/.test(errs[0]) && /re-seal/.test(errs[0]), errs[0]);
+  }
+  assert.deepEqual(localEvaluatorDecls('export { holds, via } from "../controls.mjs";\nimport { selected } from "../controls.mjs";'), [], 're-exports and imports are not declarations');
 });
 // Data-independent mutations: start from a clean world where every label is reachable and the ledger is exact,
 // so each negative proves its own check fires (the real data may currently be red on these checks).

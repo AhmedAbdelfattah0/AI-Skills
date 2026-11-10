@@ -436,7 +436,7 @@ test('workerRunStateAppend: an append-only change is exempt only when it inserts
   const base = '# Plan\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n';
   const add = (line) => base.replace('<!-- RUN-STATE:END -->', line + '\n<!-- RUN-STATE:END -->');
   assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}')), true);
-  assert.deepEqual(AUTHORITY_EVENTS, ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR']);
+  assert.deepEqual(AUTHORITY_EVENTS, ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR', 'SECURITY_ADDENDUM', 'SECURITY_WAIVER']);
   for (const ev of AUTHORITY_EVENTS) assert.equal(workerRunStateAppend(base, add(`{"event":"NOTE"}\n  {"event":"${ev}"}`)), false, ev);
   assert.equal(workerRunStateAppend(base, add('{"event":"NOTE"}').replace('# Plan', '# Plan!')), false, 'still append-only first');
 });

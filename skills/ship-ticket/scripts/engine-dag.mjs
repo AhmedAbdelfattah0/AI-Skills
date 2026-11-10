@@ -5,7 +5,7 @@
  */
 import { createHash } from 'node:crypto';
 import { posix, isAbsolute } from 'node:path';
-import { validateNodes, schedule, RISK_EVIDENCE } from './harness.mjs';
+import { validateNodes, schedule, RISK_EVIDENCE, CONTROL_ID } from './harness.mjs';
 import { exactExclusions } from './gate.mjs';
 import { BEGIN, END } from './run-state.mjs';
 export { BEGIN, END, runStateEvents } from './run-state.mjs';
@@ -41,7 +41,98 @@ export function planNarrativeDigest(text) {
 
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
-  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview'];
+  'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
+  'securityPolicy', 'catalogDigest', 'controlCoverage'];
+
+// ---- security policy 2 (AIS-HARNESS-4 Wave B) -------------------------------------------------
+
+/**
+ * Runs whose trusted START was approved before this instant are grandfathered (no security policy
+ * needed, byte-identical behaviour). The one place the cutoff lives.
+ * It must be >= the merge instant of the Wave B PR and is finalized by the owner at merge: a run
+ * STARTed after the cutoff by an engine without Wave B (no config.securityPolicy) would otherwise fail
+ * verifyBinding (security_policy_required) once this engine resumes it.
+ */
+export const SECURITY_POLICY_CUTOFF = '2026-11-12T00:00:00.000Z';
+/** Whether a START approves a legacy run: approved_at (else timestamp) strictly before the cutoff; missing or unparseable fails closed. */
+export function legacyApproval(start) {
+  const at = start?.approved_at ?? start?.timestamp;
+  const t = typeof at === 'string' ? Date.parse(at) : NaN;
+  return Number.isFinite(t) && t < Date.parse(SECURITY_POLICY_CUTOFF);
+}
+/** Every new branch, event, state key and view field of Wave B is gated on this. */
+export const securityOn = (S) => S?.config?.securityPolicy === 2;
+/** Every refusal code the engine half of Wave B introduced (security-plan.mjs keeps its own SECURITY_CODES). */
+export const ENGINE_SECURITY_CODES = Object.freeze(['security_policy_required', 'security_pairs_mismatch', 'catalog_unavailable', 'control_unproven',
+  'waiver_unauthorized', 'addendum_conflict', 'addendum_outside_contract', 'addendum_required', 'reassess_unclassified', 'reassess_stale',
+  'security_review_stale', 'security_row_escape', 'security_outcome_escape', 'security_reapproval']);
+/** A boundary id: printable (no control character or line break), no edge whitespace, at most 200 characters; ':' allowed. */
+export const BOUNDARY_ID = /^[^\s\x00-\x1f\x7f\x85\u2028\u2029](?:[^\x00-\x1f\x7f\x85\u2028\u2029]{0,198}[^\s\x00-\x1f\x7f\x85\u2028\u2029])?$/;
+/** The pair id '<boundary>:<control>' (review rule_rows subject_id). */
+export const pairKey = (p) => `${p.boundary}:${p.control}`;
+/** security-plan.mjs parsePairId's split: the LAST colon that precedes a control id (kept local: the engine imports no catalog code on legacy paths). */
+const PAIR_ID = /^(.+):(VAPT-[A-Z]+-\d\d)$/;
+/** Whether the pair id of (boundary, control) splits back into exactly that boundary and control. */
+export const pairRoundTrips = (boundary, control) => { const m = PAIR_ID.exec(`${boundary}:${control}`); return Boolean(m) && m[1] === boundary && m[2] === control; };
+const specKey = (s) => `${s.file}\u0000${s.name}`;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const isSpec = (s) => isObj(s) && Object.keys(s).length === 2 && typeof s.file === 'string' && s.file.length > 0 && typeof s.name === 'string' && s.name.length > 0;
+
+/**
+ * Shape and contract checks of one (boundary, control) pair against `nodes` (by id): returns
+ * { shape } for a malformed pair, { contract } when its node is unknown or a spec is not under the
+ * node's writes, { pinned } when a spec is missing from the node's named redSpecs, else {}.
+ */
+export function pairProblem(p, nodesById, { needPinned = true } = {}) {
+  if (!isObj(p) || Object.keys(p).some(k => !['boundary', 'control', 'node', 'specs'].includes(k))) return { shape: 'a pair is { boundary, control, node, specs }' };
+  if (typeof p.boundary !== 'string' || !BOUNDARY_ID.test(p.boundary)) return { shape: `boundary ${J(p.boundary)} must be a printable id (no line break or control character, no edge whitespace)` };
+  if (typeof p.control !== 'string' || !CONTROL_ID.test(p.control)) return { shape: `control ${J(p.control)} is not a catalog control id` };
+  if (!pairRoundTrips(p.boundary, p.control)) return { shape: `pair id ${J(pairKey(p))} does not split back into its boundary and control` };
+  if (typeof p.node !== 'string') return { shape: 'node must be a node id' };
+  if (!Array.isArray(p.specs) || !p.specs.length || !p.specs.every(isSpec)) return { shape: `${pairKey(p)}: specs must be a non-empty [{ file, name }]` };
+  const n = Object.hasOwn(nodesById, p.node) ? nodesById[p.node] : undefined;
+  if (!n) return { contract: `${pairKey(p)}: node ${p.node} is not in the DAG` };
+  const outside = p.specs.find(s => !under(s.file, n.writes ?? []));
+  if (outside) return { contract: `${pairKey(p)}: spec ${outside.file} is not under node ${p.node} writes (contract expansion needs re-approval)` };
+  if (needPinned) {
+    const named = (n.redSpecs ?? []).filter(isObj).map(specKey);
+    const unpinned = p.specs.find(s => !named.includes(specKey(s)));
+    if (unpinned) return { pinned: `${pairKey(p)}: spec ${unpinned.file} "${unpinned.name}" is not a named redSpecs entry of node ${p.node}` };
+  }
+  return {};
+}
+const J = JSON.stringify;
+
+/**
+ * Policy-2 config: securityPolicy (only 2), catalogDigest ('sha256:<hex>'), controlCoverage (each pair
+ * its own spec(s), each spec a named redSpecs entry under its node's writes, no spec shared between
+ * pairs). None of the three is defaulted, so a legacy DAG's bytes and bound config are unchanged.
+ */
+function validateSecurity(nodes, c, bad) {
+  const p = c.securityPolicy;
+  if (p !== undefined && p !== 2) bad('config.securityPolicy must be 2 (omit it only for a run approved before the policy cutoff)');
+  if (p !== 2) {
+    if (c.controlCoverage !== undefined || c.catalogDigest !== undefined) bad('config.controlCoverage and config.catalogDigest need config.securityPolicy 2');
+    return;
+  }
+  if (typeof c.catalogDigest !== 'string' || !DIGEST_RE.test(c.catalogDigest)) bad('config.catalogDigest must be sha256:<hex> of the catalog the plan was approved against');
+  if (!Array.isArray(c.controlCoverage)) bad('config.controlCoverage must be an array of { boundary, control, node, specs } ([] is an evidenced empty assessment)');
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const pairs = new Set(), specs = new Map();
+  for (const pair of c.controlCoverage) {
+    const why = pairProblem(pair, byId);
+    if (why.shape || why.contract || why.pinned) bad(`config.controlCoverage: ${why.shape ?? why.contract ?? why.pinned}`);
+    if (pairs.has(pairKey(pair))) bad(`config.controlCoverage: duplicate pair ${pairKey(pair)}`);
+    pairs.add(pairKey(pair));
+    for (const s of pair.specs) {
+      const other = specs.get(specKey(s));
+      if (other !== undefined && other !== pairKey(pair)) bad(`config.controlCoverage: spec ${s.file} "${s.name}" is shared by ${other} and ${pairKey(pair)} (each pair has its own spec)`);
+      specs.set(specKey(s), pairKey(pair));
+    }
+  }
+  if (c.controlCoverage.length && !Object.values(c.testCommands ?? {}).some(e => e.format))
+    bad('config.controlCoverage needs a formatted config.testCommands runner (the proof parses each pair spec\'s result)');
+}
 const NODE_FIELDS = ['id', 'deps', 'reads', 'writes', 'othersOwned', 'resources', 'risk', 'complexity', 'modelTier',
   'estimatedMemoryMb', 'promptFile', 'phase', 'role', 'evidence', 'redSpecs', 'unit', 'acceptance', 'checks'];
 // REPAIR is never a DAG node: the engine dispatches repairs from review records only (it would fail 'dispatch refused').
@@ -111,6 +202,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
     schedule({ phase: 'BUILD', nodes: plain, maxConcurrency: c.width ?? 1, memoryBudgetMb: c.memoryBudgetMb ?? null }); // cycles, budget
   } catch (e) { bad(e.message); }
   validateUnits(nodes, c, bad);
+  validateSecurity(nodes, c, bad);
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }
@@ -218,8 +310,15 @@ export function providerOk(provider, out) {
 
 // ---- gate CLI inputs ------------------------------------------------------------------------
 
+const nonEmptyString = (v) => typeof v === 'string' && v.length > 0;
+/** A reassess input surface: exactly { boundary_id, kind, path, principals[] }; the boundary id obeys BOUNDARY_ID and the pair-id round trip. */
+const surfaceShape = (s) => isObj(s) && Object.keys(s).length === 4 && ['boundary_id', 'kind', 'path', 'principals'].every(k => Object.hasOwn(s, k))
+  && typeof s.boundary_id === 'string' && BOUNDARY_ID.test(s.boundary_id) && pairRoundTrips(s.boundary_id, 'VAPT-API-01')
+  && nonEmptyString(s.kind) && nonEmptyString(s.path) && Array.isArray(s.principals) && s.principals.length > 0 && s.principals.every(nonEmptyString);
+
 const GATE_FIELDS = {
-  red: ['node', 'command', 'specs'],
+  red: ['node', 'command', 'specs', 'addendum'],
+  reassess: ['classifications', 'surfaces'],
   review: ['review_execution', 'kind', 'primary', 'second_opinion', 'reconciliation', 'graded_artifacts', 'repair_ownership', 'repair_prompt_file',
     'units_consumed'],
   'ship-ready': ['risk_evidence', 'artifacts', 'exclusions', 'candidate_id'],
@@ -234,7 +333,7 @@ const GATE_FIELDS = {
  */
 export function gateInput(kind, doc) {
   const bad = (m) => { throw coded('bad_input', `gate ${kind}: ${m}`); };
-  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review, ship-ready or unit-review');
+  if (!Object.hasOwn(GATE_FIELDS, kind ?? '')) bad('kind must be red, review, ship-ready, unit-review or reassess');
   if (!isObj(doc)) bad('input must be a JSON object');
   const extra = Object.keys(doc).filter(k => !GATE_FIELDS[kind].includes(k));
   if (extra.length) bad(`unknown input field(s): ${extra.join(', ')} (commands, formats, resources and local proof come from the bound DAG)`);
@@ -243,7 +342,13 @@ export function gateInput(kind, doc) {
     if (doc.command !== undefined && typeof doc.command !== 'string') bad('command selects a config.testCommands entry by name');
     if (doc.specs !== undefined && !(Array.isArray(doc.specs) && doc.specs.every(x => isObj(x) && typeof x.file === 'string' && typeof x.name === 'string')))
       bad('specs must be [{ file, name }]');
+    if (doc.addendum !== undefined && !(typeof doc.addendum === 'string' && SAFE_NAME.test(doc.addendum))) bad('addendum names a trusted SECURITY_ADDENDUM addendum_id');
   }
+  if (kind === 'reassess' && doc.classifications !== undefined && !(Array.isArray(doc.classifications) && doc.classifications.every(c => isObj(c)
+    && typeof c.signal_id === 'string' && c.signal_id.length > 0 && Object.keys(c).every(k => ['signal_id', 'facts', 'evidence', 'reason'].includes(k)))))
+    bad('classifications must be [{ signal_id, facts?, evidence?, reason? }] (security-plan.mjs reassess)');
+  if (kind === 'reassess' && doc.surfaces !== undefined && !(Array.isArray(doc.surfaces) && doc.surfaces.every(surfaceShape)))
+    bad('surfaces must be [{ boundary_id, kind, path, principals: [string] }] with a printable boundary id that round-trips as a pair id (security-plan.mjs select surfaces)');
   if (['review', 'unit-review'].includes(kind) && doc.repair_prompt_file !== undefined && typeof doc.repair_prompt_file !== 'string') bad('repair_prompt_file must be a path');
   if (['review', 'unit-review'].includes(kind) && doc.repair_ownership !== undefined && !strings(doc.repair_ownership)) bad('repair_ownership must be paths');
   if (kind === 'unit-review') {
@@ -264,7 +369,13 @@ export function gateInput(kind, doc) {
  * RED specs pinned by the DAG node: `{file,name}` entries are used as-is (input specs, if any,
  * must equal them); plain path entries only bound which files input specs may name.
  */
-export function pinnedSpecs(node, specs) {
+export function pinnedSpecs(node, specs, addendumSpecs) {
+  // A trusted SECURITY_ADDENDUM's named specs for this node are the pin source when given (gate red --addendum).
+  if (addendumSpecs !== undefined) {
+    if (!addendumSpecs.length) return { code: 'spec_unpinned', reason: `the addendum names no spec for node ${node.id}` };
+    if (specs && JSON.stringify(specs) !== JSON.stringify(addendumSpecs)) return { code: 'spec_unpinned', reason: 'input specs differ from the addendum specs' };
+    return { specs: addendumSpecs };
+  }
   const pinned = node.redSpecs ?? [];
   const named = pinned.filter(isObj);
   if (named.length) {

@@ -62,7 +62,8 @@ function sandbox(root, label, nodes) {
   const dagDigest = 'sha256:' + sha256(dagText);
   const narrative = `# Plan ${TICKET}\n\nBench plan.\n\nExecution DAG digest: ${dagDigest}\n\n`;
   const approved = planNarrativeDigest(`${narrative}${BEGIN}\n${END}\n`);
-  const start = { run_id: RUN, event: 'START', timestamp: new Date().toISOString(), approved_plan_digest: approved };
+  // A fixed approval time before SECURITY_POLICY_CUTOFF: the bench DAG is a legacy (policy-1) run; a clock-derived START would stop init after the cutoff.
+  const start = { run_id: RUN, event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: approved };
   writeFileSync(join(repo, '.specs', 'plans', `${TICKET}.md`), `${narrative}${BEGIN}\n${JSON.stringify(start)}\n${END}\n`);
   return { dir, repo, env, prompts, dagFile, approved };
 }
