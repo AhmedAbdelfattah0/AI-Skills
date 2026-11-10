@@ -28,7 +28,7 @@ Every event carries run_id, event and timestamp. Use only these event names:
 
 | Event | Required evidence |
 |---|---|
-| **START** | approved-plan digest, human approver and target base |
+| **START** | approved-plan digest, human approver, target base and approval time (`approved_at`; `timestamp` is read when absent), which sets security-policy grandfathering |
 | **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write |
 | **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
 | **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
@@ -37,6 +37,9 @@ Every event carries run_id, event and timestamp. Use only these event names:
 | **WAIT_FOR_USER** | phase, reason and the one action needed |
 | **FAIL** | phase, terminal evidence and remaining work |
 | **SHIP_READY** | reviewed candidate ID and approved-plan digest |
+| **SECURITY_ADDENDUM** | `run_id`, `addendum_id`, `pairs`, `authorized_by`, `reason`; authority event, add-only; each pair has boundary, control, node, specs |
+| **SECURITY_WAIVER** | `run_id`, `boundary`, `control`, `candidate`, `policy_version`, `authorized_by`, `reason`; authority event, policy_version 2, one candidate |
+| **SECURITY_REASSESSED** | `run_id`, `event`, `event_id`, `candidate_id`, `plan_digest`, `catalog_digest`, `addendum_set`, `outcome`, `timestamp`; engine-recorded, not authority |
 
 This is an execution summary, not a source archive. Do not store copied source
 bytes, prose preimages, per-line timing chatter or duplicate findings. Persist

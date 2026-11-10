@@ -1,7 +1,7 @@
 {
-  "version": 4,
+  "version": 5,
   "created": "2026-11-09",
-  "seal_anchor": "none yet: the work is uncommitted; the anchor is the commit that first contains this manifest (git log --follow skills/vapt/fixtures/manifest.json)",
+  "seal_anchor": "v5 (current): the anchor is the commit that first contains manifest version 5 (find it with git log --follow skills/vapt/fixtures/manifest.json and the first commit whose manifest says \"version\": 5; none yet while the work is uncommitted). The v4 anchor was 2ca3647.",
   "sets": {
     "dev": [
       "S-DEV-01",
@@ -53,7 +53,7 @@
     "provenance/fact_vocabulary.json": "90f3c539d5191aadd88e39dbb4afb31b4dbec8152a206a95f4795a62028361a6",
     "provenance/controls_public.json": "744bee36b77810cfff38edd0dd77398324fbf5ae0944c84ff2c39455de62584f"
   },
-  "catalog_digest_at_seal": "d238f817b61179c58119be88296a33aa3ed4d421353be6eb98537c41124be47a",
+  "catalog_digest_at_seal": "ed41751ae3b4392d197d98aff78bbd0f6c0461ae7fe6c3f224bf32718899e5b4",
   "history": [
     {
       "version": 1,
@@ -74,6 +74,11 @@
       "version": 4,
       "date": "2026-11-09",
       "change": "Round 3 fact amendments (amendments_round3.json, 23 entries, 8 value changes); labels v5 with inapplicable_basis on every label and exceptions on low-risk labels; computed broad_gate_only_required and reassess sections in disagreements.json; pre-registered baselines; label_history.json; actual_diff_signals vocabulary. Resealed; the sealed set was seen by the reviewers and the orchestrator."
+    },
+    {
+      "version": 5,
+      "date": "2026-11-09",
+      "change": "catalog-only re-seal: attempt_limit wording, WEB-01/CFG-04 recipe rows; evaluator moved to controls.mjs; predicates unchanged, ledger/baselines byte-identical; no sealed results existed, none stale"
     }
   ],
   "provenance": {
@@ -111,6 +116,7 @@
     "The sealed set was seen by the reviewers and the orchestrator at reseal; this is recorded here and weakens its blindness for later selector work."
   ],
   "limits": [
+    "attempt_limit reworded after seal; no fact re-audit applied",
     "Measures the mapping from given facts to controls, not fact extraction from a diff.",
     "Labels were reasoned from scenario text, but several ABUSE facts map almost one-to-one to primary facts, so agreement on those controls is partly by construction.",
     "A control that is neither in must_select nor in inapplicable is unlabeled; selecting it is acceptable over-selection by policy and is not an error.",
@@ -118,7 +124,7 @@
     "Dev scenarios derive from the audit that shaped the catalog, so dev results say nothing about generalization. Dev origin: 12 audit-derived plus 2 synthetic.",
     "Selector scoring is not done here; C-1 validates fixture structure, consistency and labelling policy only.",
     "The label/catalog disagreement ledger (disagreements.json) is computed, not hand-listed: make-ledger.mjs runs the catalog evaluator on each scenario's facts and records every inapplicable label the catalog selects anyway, with via saying why. The test requires the ledger to equal the computed set exactly and reports its size. Its entries are expected catalog over-breadth cost, not selector errors; a catalog-following selector shows each one as an inapplicable-violation. An entry whose via is one of the control's own primary_facts is additionally a primary-fact label violation (an unknown primary fact counts as true), which the labels test rejects, except VAPT-ABUSE-07 via persistent_write: the catalog selects ABUSE-07 on any persistent write on purpose, so that one pair is exempt (BROAD_FACTS) and stays visible only in the ledger.",
-    "The seal is anchored only by git history (see seal_anchor): the commit that first contains manifest version 4 is the anchor. Moving a scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff manifest.sets and the scenario origins between commits.",
+    "The seal is anchored only by git history (see seal_anchor): the commit that first contains manifest version 5 is the anchor. Moving a scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff manifest.sets and the scenario origins between commits.",
     "Recall measures implementation fidelity to the catalog, not catalog completeness or security improvement; a score at or near the catalog_faithful baseline is expected and proves nothing about security. The boundary-universal baseline uses the controls the selector returns for every single boundary kind (computed: 11)."
   ],
   "preregistered_baselines": {

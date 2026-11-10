@@ -59,6 +59,18 @@ artifacts and ownership, and runs the real integration/end-to-end node that
 depends on both. A provider test does not replace consumer conformance, and a
 frontend mock does not prove the live provider.
 
+**Under security policy 2, run `gate reassess` after the stage-4 recompute** (and
+at the start of PROVE, and after any repair touching mapped files), classifying every
+open signal and passing any new or changed boundaries as `surfaces`. No classification
+(a reason, cited facts or both) closes a `new-route`, `auth-or-middleware-change` or
+`migration-or-rls-change` signal on a path that is not an approved surface: it closes
+only through an input surface at that path whose pairs cover the signal's control
+class, supplied again on every call. The orchestrator calls
+it explicitly (it is not automatic), and review and ship-ready fail closed if it was
+skipped. See [security-risk.md](security-risk.md). The effective pair set (approved
+pairs plus trusted addenda) is a floor: every pair needs its own named spec to
+show a pass. A skipped spec is not a pass.
+
 **Record every boundary in one stable shape.** REVIEW uses this evidence without
 re-running the attacks:
 
@@ -71,6 +83,8 @@ control_paths[]       implementation and transitive control owners
 positive_tests[]      test names and outcomes
 refusal_tests[]       test names and outcomes
 authorization_tests[] test names and outcomes, or []
+pairs[]               '<boundary>:<control>' pairs this boundary carries (policy 2), each
+                      with its named spec and result
 commands[]            exact executed commands and results
 ```
 

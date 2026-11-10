@@ -50,8 +50,11 @@ export const MUTANTS = [
     from: 'function drift(E, { mutate = true } = {}) {\n', to: 'function drift(E, { mutate = true } = {}) {\n  return [];\n' },
 ];
 
-/** Copy the scripts dir, apply `mutant` (null: the control), run the property harness; resolve its exit code and failing test names. */
-async function runHarness(t, mutant) {
+/**
+ * Copy the scripts dir, apply `mutant` (null: the control), run the target test files (default: the
+ * property harness); resolve its exit code and failing test names.
+ */
+export async function runHarness(t, mutant, { tests = ['engine-explore.test.mjs'] } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'engine-mutant-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dir = join(root, 'scripts');
@@ -62,7 +65,7 @@ async function runHarness(t, mutant) {
     writeFileSync(file, text.replace(mutant.from, mutant.to));
   }
   const { NODE_TEST_CONTEXT: _nested, ...env } = process.env;
-  const child = spawn(process.execPath, ['--test', 'engine-explore.test.mjs'], { cwd: dir, env: { ...env, ENGINE_EXPLORE_BUDGET: BUDGET }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--test', ...tests], { cwd: dir, env: { ...env, ENGINE_EXPLORE_BUDGET: BUDGET }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', timedOut = false;
   child.stdout.on('data', (d) => { out += d; });
   child.stderr.on('data', (d) => { out += d; });

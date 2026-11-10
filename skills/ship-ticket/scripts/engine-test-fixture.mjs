@@ -94,9 +94,11 @@ const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.ur
  * 'none' binds nothing. extraEvents(dagDigest) appends further RUN-STATE events.
  * digestForm: 'colon' (canonical) or 'dash' (legacy spelling the engine normalizes).
  * commit: make an initial commit so candidate ids (base HEAD) are computable.
+ * startAt: the START timestamp (default 2026-11-05, before the security policy cutoff).
+ * narrativeExtra: text appended to the approved narrative (e.g. a plan §3a security block).
  */
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
-  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false } = {}) {
+  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, 'repo');
@@ -129,9 +131,9 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const dagDigest = sha(dagText);
   const dash = (d) => (digestForm === 'dash' ? d.replace(/^sha256:/, 'sha256-') : d);
 
-  const narrative = `# Plan T-1\n\nApproved narrative.\n\n${bind === 'plan' ? `Execution DAG digest: ${dash(dagDigest)}\n\n` : ''}`;
+  const narrative = `# Plan T-1\n\nApproved narrative.\n\n${bind === 'plan' ? `Execution DAG digest: ${dash(dagDigest)}\n\n` : ''}${narrativeExtra}`;
   const skeleton = `${narrative}${BEGIN}\n${END}\n`;
-  const events = [{ run_id: 'run-1', event: 'START', timestamp: '2026-11-05T00:00:00Z', approved_plan_digest: dash(narrativeDigest(skeleton)) }];
+  const events = [{ run_id: 'run-1', event: 'START', timestamp: startAt, approved_plan_digest: dash(narrativeDigest(skeleton)) }];
   if (bind === 'dag_bound') events.push({ run_id: 'run-1', event: 'DAG_BOUND', dag_digest: dash(dagDigest) });
   events.push(...extraEvents(dagDigest));
   const planFile = join(repo, '.specs', 'plans', 'T-1.md');

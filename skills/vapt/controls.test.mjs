@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertFacts, holds } from './controls.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -71,34 +72,6 @@ const GATED = /^gated by ([a-z_]+(?: or [a-z_]+)*): /;
 // 1. remove every backtick, 2. remove every `**`, 3. collapse whitespace runs to one space, 4. trim.
 export const normalizeAttack = (s) => String(s ?? '').replace(/`/g, '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
 
-// ---- evaluator: unknown (absent, null, "unknown") matches every leaf ----
-export const unknownish = (v) => v === undefined || v === null || v === 'unknown';
-// Out-of-vocabulary input is an error, never a silent non-match (which would drop a control).
-export function assertFacts(facts, vocab) {
-  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) throw new TypeError('out-of-vocabulary facts: not an object');
-  for (const [name, v] of Object.entries(facts)) {
-    const def = vocab[name];
-    if (!def) throw new TypeError(`out-of-vocabulary fact name '${name}'`);
-    if (unknownish(v)) continue;
-    if (def.type === 'bool') {
-      if (v !== true && v !== false) throw new TypeError(`out-of-vocabulary value ${JSON.stringify(v)} for bool fact '${name}'`);
-    } else {
-      if (!Array.isArray(v)) throw new TypeError(`out-of-vocabulary value ${JSON.stringify(v)} for enum fact '${name}' (must be an array)`);
-      for (const x of v) if (x !== 'unknown' && !def.values.includes(x)) throw new TypeError(`out-of-vocabulary value ${JSON.stringify(x)} in enum fact '${name}'`);
-    }
-  }
-  return facts;
-}
-export function holds(node, facts, vocab) {
-  if (vocab) assertFacts(facts, vocab);
-  if (!node || typeof node !== 'object') return false;
-  if (node.all) return node.all.every((n) => holds(n, facts));
-  if (node.any) return node.any.some((n) => holds(n, facts));
-  const v = facts[node.fact];
-  if (unknownish(v)) return true;
-  if (node.op === 'includes') return Array.isArray(v) ? v.includes('unknown') || v.includes(node.value) : v === node.value;
-  return v === node.value;
-}
 const boolFactsOf = (vocab) => Object.entries(vocab).filter(([, d]) => d?.type === 'bool').map(([k]) => k);
 // Known-negative world: only `kinds` are boundaries, every bool fact false, principals known.
 export const negWorld = (vocab, kinds, extra = {}) => ({
@@ -191,8 +164,9 @@ export function validateCatalog(cat, ctx) {
     }
     if (!ENVS.includes(c.env)) bad('fields', `${id}: env '${c.env}' not allowed`);
     if (!VERIFY_TYPES.includes(c.verify?.type)) bad('fields', `${id}: verify.type '${c.verify?.type}' not allowed`);
-    if (c.family === 'ABUSE' && (typeof c.verify?.pattern !== 'string' || c.verify.pattern.trim() === '')) {
-      bad('abuse-pattern', `${id}: ABUSE control needs a non-empty verify.pattern`);
+    if (typeof c.verify?.pattern !== 'string' || c.verify.pattern.trim() === '') {
+      bad('pattern', `${id}: every control needs a non-empty verify.pattern`);
+      if (c.family === 'ABUSE') bad('abuse-pattern', `${id}: ABUSE control needs a non-empty verify.pattern`);
     }
     if (c.family === 'ABUSE' && !(Array.isArray(c.static_mirror) && c.static_mirror.length === 0)) bad('abuse-mirror', `${id}: ABUSE controls have no BE-* mirror (static_mirror must be [])`);
     if (!Array.isArray(c.static_mirror)) bad('mirror', `${id}: static_mirror must be an explicit array ([] = deliberately none)`);
@@ -254,7 +228,7 @@ export function validateCatalog(cat, ctx) {
         else if (!c.applies_when || !holds(c.applies_when, negWorld(vocab, [], { [f]: true }))) bad('primary-facts', `${id}: ${f}=true alone does not select it`);
       }
     } else if (c.primary_facts !== undefined) bad('primary-facts', `${id}: primary_facts is only for ABUSE controls`);
-    if (typeof c.verify?.pattern === 'string' || c.family === 'ABUSE') {
+    {
       const pat = c.verify?.pattern ?? '';
       if (pat.trim().length < 40 || !/assert/i.test(pat)) bad('verify-pattern', `${id}: verify.pattern must be >= 40 chars and state an assertion`);
       if (c.family === 'ABUSE' && (!/positive control/i.test(pat) || !refusalWord.test(pat))) {
@@ -377,6 +351,7 @@ test('fact vocabulary is complete and tied to SKILL.md', () => expectClean('voca
 test('control ids are unique', () => expectClean('unique'));
 test('catalog and SKILL.md tables agree on ids and tiers', () => expectClean('drift'));
 test('every control has all fields with allowed values', () => expectClean('fields'));
+test('every control has a non-empty verify.pattern', () => expectClean('pattern'));
 test('every ABUSE control has a deterministic verify.pattern', () => expectClean('abuse-pattern'));
 test('ABUSE controls declare no BE-* mirror', () => expectClean('abuse-mirror'));
 test('static_mirror is an explicit array and its ids exist in backend-code-quality', () => expectClean('mirror'));
@@ -417,6 +392,15 @@ test('validator rejects a dropped control', () => {
 });
 test('validator rejects an ABUSE control without a pattern', () => {
   rejects((c) => { c.controls.find((x) => x.family === 'ABUSE').verify.pattern = ''; }, 'abuse-pattern');
+});
+test('validator rejects a non-ABUSE control with a missing, empty or null verify.pattern', () => {
+  rejects((c) => { delete c.controls.find((x) => x.id === 'VAPT-API-01').verify.pattern; }, 'pattern');
+  rejects((c) => { c.controls.find((x) => x.id === 'VAPT-API-01').verify.pattern = ''; }, 'pattern');
+  rejects((c) => { c.controls.find((x) => x.id === 'VAPT-CFG-02').verify.pattern = null; }, 'pattern');
+  rejects((c) => { delete c.controls.find((x) => x.id === 'VAPT-CFG-02').verify; }, 'pattern');
+});
+test('validator rejects a vacuous verify.pattern on a non-ABUSE control', () => {
+  rejects((c) => { c.controls.find((x) => x.id === 'VAPT-API-01').verify.pattern = 'check it'; }, 'verify-pattern');
 });
 test('validator rejects an applies_when fact outside the vocabulary', () => {
   rejects((c) => { c.controls[0].applies_when = { fact: 'nonsense', op: 'is', value: true }; }, 'grammar');
@@ -494,6 +478,35 @@ test('content pins: findings are mapped to the control that actually covers them
   assert.doesNotMatch(JSON.stringify(by('VAPT-ABUSE-08')), /Worker/);
   assert.match(by('VAPT-WEB-04').verify.pattern, /SameSite/);
   assert.equal(by('VAPT-WEB-04').verify.type, 'both');
+});
+
+// Wave B residual pins. Reflected and stored XSS are both rendering-sink attacks; Set-Cookie is issued by more
+// than login; attempt_limit is true for any route that checks a guessable value, capped or not.
+const wavePinErrors = (c) => {
+  const by = (id) => c.controls.find((x) => x.id === id);
+  const e = [];
+  const need = (text, re, what) => { if (!re.test(String(text ?? ''))) e.push(`${what} must match ${re}`); };
+  for (const re of [/reflected/i, /stored/i]) need(by('VAPT-WEB-01')?.verify?.pattern, re, 'VAPT-WEB-01 verify.pattern');
+  for (const re of [/callback/, /impersonat/, /tenant switch/, /SameSite/]) need(by('VAPT-CFG-04')?.verify?.pattern, re, 'VAPT-CFG-04 verify.pattern');
+  for (const re of [/whether or not/, /route/]) need(c.fact_vocabulary?.attempt_limit?.definition, re, 'attempt_limit.definition');
+  if (/still counts/.test(c.fact_vocabulary?.attempt_limit?.examples?.negative ?? '')) e.push('attempt_limit negative example must be a genuine negative');
+  return e;
+};
+test('Wave B pins: WEB-01 covers reflected and stored, CFG-04 covers every Set-Cookie issuer, attempt_limit covers uncapped guess routes', () => {
+  assert.deepEqual(wavePinErrors(catalog), []);
+});
+test('Wave B pins bite: dropping a pinned word is detected', () => {
+  const mut = (fn) => { const c = clone(catalog); fn(c); return wavePinErrors(c); };
+  const sub = (c, id, re, to) => { const x = c.controls.find((y) => y.id === id); x.verify.pattern = x.verify.pattern.replace(re, to); };
+  assert.ok(mut((c) => sub(c, 'VAPT-WEB-01', /reflected/gi, 'echoed')).some((m) => /reflected/.test(m)));
+  assert.ok(mut((c) => sub(c, 'VAPT-WEB-01', /stored/gi, 'saved')).some((m) => /stored/.test(m)));
+  assert.ok(mut((c) => sub(c, 'VAPT-CFG-04', /callback/g, 'return')).some((m) => /callback/.test(m)));
+  assert.ok(mut((c) => sub(c, 'VAPT-CFG-04', /impersonat/g, 'switch')).some((m) => /impersonat/.test(m)));
+  assert.ok(mut((c) => sub(c, 'VAPT-CFG-04', /tenant switch/g, 'tenant move')).some((m) => /tenant switch/.test(m)));
+  assert.ok(mut((c) => sub(c, 'VAPT-CFG-04', /SameSite/g, 'Lax')).some((m) => /SameSite/.test(m)));
+  assert.ok(mut((c) => { c.fact_vocabulary.attempt_limit.definition = c.fact_vocabulary.attempt_limit.definition.replace(/whether or not/g, 'if'); }).some((m) => /whether or not/.test(m)));
+  assert.ok(mut((c) => { c.fact_vocabulary.attempt_limit.definition = c.fact_vocabulary.attempt_limit.definition.replace(/route/g, 'path'); }).some((m) => /route/.test(m)));
+  assert.ok(mut((c) => { c.fact_vocabulary.attempt_limit.examples.negative += ' It still counts.'; }).length > 0);
 });
 
 // ---- more negative tests ----

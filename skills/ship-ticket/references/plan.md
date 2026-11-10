@@ -171,6 +171,20 @@ unit · file ownership · expected size and risk · overhead vs value>. <If spli
 | <spec doesn't say what happens on empty results> | blocks the empty state | ask user / assume Y and flag it |
 <or: "None found — checked <what you checked>.">
 
+### 3a. Security risk assessment
+<Required when ELEVATED, security-sensitive, `riskLabels` non-empty or a vapt trigger fires; paste `security-plan.mjs select` output (`rows_md`). Otherwise one line: "No security-relevant surface: <evidence>". See [security-risk.md](security-risk.md).>
+
+Baseline: catalog v<N> `<catalog digest>`, policy 2, <N> controls / <M> pairs, unknown facts: <list or none>.
+
+| Risk (control) | Why it applies | Pairs (boundary) | Verification | Success evidence | Blocks |
+|---|---|---|---|---|---|
+| <VAPT-API-01> | <cited fact> | <boundary id> | <named spec> | <spec passes, RED seen first> | <merge / none> |
+
+Excluded: <control: reason from the catalog, or none>.
+
+security-pairs sha256:<hex>
+<!-- security-plan: {...} -->
+
 ## 4. How I'll prove it works
 - <one bullet per build step: the test or check that shows it's done>
 - <security-sensitive: the failing test that comes FIRST>

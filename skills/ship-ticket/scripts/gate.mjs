@@ -6,7 +6,7 @@
  * Only programmer errors (an unknown risk label) throw. The full API contract
  * is the comment block at the top of gate.test.mjs.
  */
-import { requiredEvidence } from './harness.mjs';
+import { requiredEvidence, controlKind } from './harness.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
 
 export { requiredEvidence };
@@ -135,16 +135,67 @@ const sameFile = (resultFile, specFile) => {
  * failure carries a location (node's TAP locates every failure, not every pass): a same-named
  * failure of another file never satisfies RED.
  */
-function specVerdict(spec, results) {
+export function findSpec(spec, results) {
   const named = results.filter((r) => r.name === spec.name);
   const locatedFailure = results.some((r) => r.file && r.status === 'fail');
   const hit = named.find((r) => sameFile(r.file, spec.file))
     ?? (named.length === 1 && !named[0].file && !(named[0].status === 'fail' && locatedFailure) ? named[0] : undefined);
   const load = results.find((r) => r.failure_kind === 'load' && sameFile(r.file, spec.file));
+  return { hit, load };
+}
+
+function specVerdict(spec, results) {
+  const { hit, load } = findSpec(spec, results);
   if (!hit) return load ? ['non_assertion_failure', `${spec.file}: failed to load (${spec.name})`] : ['spec_missing', `${spec.file}: no result named "${spec.name}"`];
   if (hit.status !== 'fail') return ['spec_not_failing', `${spec.name}: ${hit.status}`];
   if (hit.failure_kind !== 'assertion') return ['non_assertion_failure', `${spec.name}: ${hit.failure_kind} failure`];
   return null;
+}
+
+const relPath = (p) => norm(p).replace(/^(\.\/)+/, '');
+/**
+ * The one file a command runs: its only argument that is not an option (no leading '-'), as a relative
+ * path; null for none, several, or an absolute path. `--flag value` counts the value, so a command
+ * attributes only with `--flag=value` options: anything else attributes nothing (fail closed).
+ */
+export function soleFile(args) {
+  if (!Array.isArray(args)) return null;
+  const pos = args.filter((a) => typeof a !== 'string' || !a.startsWith('-'));
+  if (pos.length !== 1 || typeof pos[0] !== 'string') return null;
+  const p = relPath(pos[0]);
+  return p && !p.startsWith('/') && !/^[A-Za-z]:/.test(p) ? p : null;
+}
+
+/**
+ * One named spec in one parsed runner output (a parseRunnerOutput result): 'pass' | 'fail' | 'skip'
+ * (todo and pending included) | 'missing' | 'unparsed' (no parse, unsupported or truncated output).
+ * A file that failed to load is 'fail'. A pass proves only when it is the spec's own file's: a located
+ * result, or an unlocated one (node's TAP never locates a pass) of a `run` whose `args` run exactly the
+ * spec file (soleFile); any other unlocated pass may be another file's same-named test, so it is
+ * 'missing'. RED's matching (findSpec) is unchanged.
+ */
+export function specStatus(spec, parsed, run = {}) {
+  if (!parsed || parsed.supported !== true || !Array.isArray(parsed.results)) return 'unparsed';
+  const { hit, load } = findSpec(spec, parsed.results);
+  if (!hit) return load ? 'fail' : 'missing';
+  const unattributed = hit.status === 'pass' && !hit.file && soleFile(run?.args) !== relPath(spec.file);
+  if (unattributed) return 'missing';
+  return ['pass', 'fail', 'skip'].includes(hit.status) ? hit.status : 'unparsed';
+}
+
+const SPEC_RANK = ['fail', 'skip', 'unparsed', 'pass', 'missing'];
+/**
+ * Status of each spec across the formatted runs of one proof (`runs`: [{ format, stdout, truncated?, args? }],
+ * `args` the command's arguments): the first of fail > skip > unparsed > pass > missing that any run shows,
+ * so a spec is 'pass' only when at least one run shows its own file passing and none shows it failing,
+ * skipped or unreadable.
+ */
+export function specResults(specs, runs) {
+  const parsed = runs.map((r) => (r.truncated === true ? null : parseRunnerOutput(r.format, r.stdout ?? '')));
+  return specs.map((s) => {
+    const seen = parsed.map((p, i) => specStatus(s, p, runs[i]));
+    return { file: s.file, name: s.name, status: SPEC_RANK.find((x) => seen.includes(x)) ?? 'missing' };
+  });
 }
 
 const refuse = (state, code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, degraded: false, reasons, state, ...extra });
@@ -159,6 +210,11 @@ export async function gateRed(input, deps) {
   const state = structuredClone(input.state);
   state.attempts ??= []; state.locks ??= {}; state.events ??= []; state.gates ??= {}; state.gates.red ??= {};
   const { node, command, format, specs = [], baselineCandidate, timeoutMs, resources = [] } = input;
+  // Where accepted evidence lands: the node's RED (default) or, under security policy 2, one trusted
+  // addendum's RED for this node (key '<addendum_id>/<node>'). The engine sets it; never an input.
+  const slot = input.slot ?? { map: 'red', key: node };
+  if (!['red', 'red_addendum'].includes(slot?.map) || typeof slot.key !== 'string' || !slot.key) throw new TypeError(`gateRed: unknown evidence slot ${JSON.stringify(slot)}`);
+  state.gates[slot.map] ??= {};
   const snapshot = () => structuredClone(state);
 
   if (!baselineCandidate) return refuse(state, 'no_baseline', ['RED evidence must be bound to a tested baseline candidate']);
@@ -166,7 +222,8 @@ export async function gateRed(input, deps) {
   const dependents = Object.entries(state.nodes ?? {}).filter(([, n]) => (n.deps ?? []).includes(node)).map(([id]) => id);
   // Dispatches before the engine dropped this node's RED evidence (RED_INVALIDATED) are not "before RED".
   const reset = Math.max(0, ...state.events.filter((e) => e.type === 'RED_INVALIDATED' && e.node === node).map((e) => e.seq ?? 0));
-  const early = state.events.find((e) => e.type === 'DISPATCH' && dependents.includes(e.node) && (e.seq ?? 0) > reset);
+  // An addendum's spec is added after its node's dependents may already run: "before RED" binds only node RED.
+  const early = slot.map === 'red' && state.events.find((e) => e.type === 'DISPATCH' && dependents.includes(e.node) && (e.seq ?? 0) > reset);
   if (early) {
     return refuse(state, 'dispatched_before_red', [`${early.node} was dispatched at seq ${early.seq} before RED was accepted`], { judgment_point: true });
   }
@@ -250,7 +307,7 @@ export async function gateRed(input, deps) {
   state.events.push({ seq: state.seq, type: verdict ? 'RED_REFUSED' : 'RED_ACCEPTED', node, attempt_id: attempt.attempt_id });
   if (!verdict) {
     const evidence = { node, attempt_id: attempt.attempt_id, seq: state.seq, format, baseline_candidate: baselineCandidate, spec_digests, specs: structuredClone(specs) };
-    state.gates.red[node] = evidence;
+    state.gates[slot.map][slot.key] = evidence;
     verdict = { ok: true, code: 'red_accepted', judgment_point: false, degraded: false, reasons: [], evidence, state };
   }
   await deps.commit(snapshot());
@@ -495,6 +552,19 @@ export function gateShipReady({ state = {}, current = {} } = {}) {
   const proofOk = isObj(lp) && lp.candidate_id === current.candidate_id && Array.isArray(lp.commands) && lp.commands.length > 0
     && lp.commands.every((c) => nonEmpty(c?.cmd) && c.result === 'pass');
   if (!proofOk) add('missing_local_proof');
+
+  // Security policy 2: every effective, unwaived (boundary, control) pair the engine derived needs its own
+  // proof (RED in its slot, spec not rewritten since, named spec 'pass' in this proof). Judged only once
+  // the proof holds (the first call must reach the proof run, never loop on it) and after every legacy
+  // reason, so a legacy verdict's reasons[0] never changes. Absent for policy-1 runs.
+  if (proofOk && current.control_pairs !== undefined) {
+    const pairs = Array.isArray(current.control_pairs) ? current.control_pairs : [null];
+    const unproven = pairs.filter((p) => p?.proven !== true);
+    if (unproven.length) {
+      add('control_unproven');
+      for (const p of unproven) missing.push(nonEmpty(p?.boundary) && nonEmpty(p?.control) ? controlKind(p.boundary, p.control) : 'malformed-control-pair');
+    }
+  }
 
   if (reasons.length) return { ok: false, code: reasons[0], reasons, missing };
   return { ok: true, code: 'ship_ready', reasons, missing, event: { type: 'SHIP_READY', candidate_id: current.candidate_id } };

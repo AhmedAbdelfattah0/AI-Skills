@@ -1,4 +1,4 @@
-# vapt selection fixtures (version 4)
+# vapt selection fixtures (version 5)
 
 Thirty-five ticket-like scenarios (`scenarios.json`) with expected control labels
 (`labels.json`), split by `manifest.json` into a dev set (14) and a sealed set (21).
@@ -20,7 +20,7 @@ planned facts and `actual_diff_signals` from a fixed vocabulary (`none` only alo
 
 ## Computed ledger (`disagreements.json`, written by `make-ledger.mjs`)
 
-- `entries`: computed, see `disagreements.json` (47 at the v4 seal). Inapplicable
+- `entries`: computed, see `disagreements.json` (47 at the v5 seal). Inapplicable
   labels the catalog selects anyway, with `via`. Expected catalog over-breadth cost.
 - `broad_gate_only_required`: required ABUSE labels whose primary facts are all
   false, so only the broad business-invariant or auth-lifecycle gate reaches them.
@@ -61,9 +61,11 @@ The test recomputes every section and requires an exact match.
 ## Seal anchor and re-sealing
 
 The seal is anchored only by git history: the commit that first contains manifest
-version 4 is the anchor (`manifest.seal_anchor`). Moving a scenario between dev and
-sealed and re-hashing passes the tests, so reviewers must diff `manifest.sets` and
-the scenario origins between commits. `selector.mjs` is the drift-guarded copy of
-the catalog evaluator. After any label or catalog change, run
+version 5 is the anchor (`manifest.seal_anchor`; the v4 anchor was `2ca3647`). Moving a
+scenario between dev and sealed and re-hashing passes the tests, so reviewers must diff
+`manifest.sets` and the scenario origins between commits. The catalog evaluator exists
+once, in `../controls.mjs`; `selector.mjs` re-exports it (`unknownish`, `assertFacts`,
+`holds`, `via`, `why`, `selected`) and `fixtures.test.mjs` checks object identity and
+that no local copy is declared. After any label or catalog change, run
 `node skills/vapt/fixtures/make-ledger.mjs`; a `controls.json` change also needs a
 new `catalog_digest_at_seal`, a `history` entry, and stale prior sealed results.

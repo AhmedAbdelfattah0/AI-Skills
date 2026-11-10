@@ -195,6 +195,10 @@ the environment (`env`, plus `env_also` when a second runner is needed) and
 evidence it needs, sources, a validation note, and for `VAPT-ABUSE-*` the
 `primary_facts`. It also records unvalidated **leads**, which are never controls.
 
+The evaluator that decides which controls an `applies_when` selects lives in
+`controls.mjs` next to this file, as one definition shared by the catalog test, the
+fixtures and the ship-ticket planner.
+
 - **`attack`** equals this table's cell for the rule, compared after one
   normalisation: remove every backtick, remove every `**`, collapse whitespace
   runs to one space, trim. Any other change in either place is drift.

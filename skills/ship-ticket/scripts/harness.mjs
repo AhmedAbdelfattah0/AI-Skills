@@ -136,6 +136,14 @@ export const RISK_EVIDENCE = Object.freeze({
   'shared-contract': Object.freeze([]),
 });
 
+/**
+ * A catalog control id (skills/vapt/controls.json) and the evidence kind of one (boundary, control)
+ * pair under security policy 2. Pair kinds are derived by the engine from config.controlCoverage and
+ * never pass through requiredEvidence (which throws on a label outside RISK_EVIDENCE).
+ */
+export const CONTROL_ID = /^VAPT-(API|WEB|CFG|ABUSE)-\d{2}$/;
+export const controlKind = (boundary, control) => `${boundary}:${control}-spec`;
+
 /** Sorted unique evidence kinds for `labels`; throws TypeError for a label outside RISK_EVIDENCE. */
 export function requiredEvidence(labels) {
   if (!Array.isArray(labels)) throw new TypeError('risk labels must be an array');

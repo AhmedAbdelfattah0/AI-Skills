@@ -178,10 +178,10 @@
         true,
         false
       ],
-      "definition": "True when the change enforces a cap on guesses or attempts (login tries, code redemption tries, per-key limits), including a tenant-local endpoint that guards a guessable secret.",
+      "definition": "True when the change caps attempts (login tries, code redemption tries, per-key limits) OR adds or changes any route that checks a guessable value, whether or not that route is capped, including a tenant-local endpoint that guards a guessable secret.",
       "examples": {
         "positive": "A coupon-code endpoint that allows five guesses per key.",
-        "negative": "A generic request rate limit with nothing guessable behind it still counts only if it guards a guessable value."
+        "negative": "A page-view counter or a generic request rate limit on a route that checks no guessable value."
       }
     },
     "sensitive_field_write": {
@@ -981,7 +981,7 @@
       "prevent": "A stored or reflected value reaches an HTML, attribute, URL or script sink and executes. Test what the server stores.",
       "verify": {
         "type": "both",
-        "pattern": "Store a payload through the server, render it, assert it is inert (escaped or not executed)."
+        "pattern": "Stored: store a payload through the server, render it, assert it is inert (escaped or not executed). Reflected: send the payload in a request value that is echoed into a response, error page or redirect parameter, assert it is not executed as script."
       },
       "env": "browser-runner",
       "evidence": "Committed test named VAPT-WEB-01 on the rendered output.",
@@ -1651,7 +1651,7 @@
       "prevent": "A session cookie set without httpOnly + secure + an explicit SameSite.",
       "verify": {
         "type": "runtime",
-        "pattern": "Log in and assert Set-Cookie attributes on the session cookie."
+        "pattern": "Drive every flow that issues a Set-Cookie (login, OAuth or SSO callback, refresh, impersonation, tenant switch) and assert each session cookie carries Secure, HttpOnly and an explicit SameSite attribute."
       },
       "env": "boot-and-inspect",
       "evidence": "Committed test named VAPT-CFG-04.",
