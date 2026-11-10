@@ -226,6 +226,30 @@ const spec = (format, name) => ({ file: format === 'tap' ? 'spec/sec.test.mjs' :
 /** The args of the command each output came from (REAL_TAP ran exactly spec/sec.test.mjs; the JSON runners locate every result). */
 const ARGS = { tap: ['--test', '--test-reporter=tap', 'spec/sec.test.mjs'], 'jest-json': ['--json'], 'vitest-json': ['--reporter=json'] };
 
+// node's TAP writes a string as a JS literal, so on Windows a failure location arrives with every backslash doubled.
+// Canned here so the row runs on every platform; the real-TAP rows below exercise it on a Windows runner.
+const winTap = (location) => ['TAP version 13', '# Subtest: fails', 'not ok 1 - fails', '  ---', '  duration_ms: 1', "  type: 'test'",
+  `  location: '${location}'`, "  failureType: 'testCodeFailure'", "  error: '1 !== 2'", "  code: 'ERR_ASSERTION'", "  name: 'AssertionError'",
+  '  ...', '1..1', '# tests 1', '# pass 0', '# fail 1'].join('\n');
+
+test('TAP adapter: a Windows failure location (backslashes doubled by node) matches its own spec file and no other', () => {
+  const s = { file: 'spec/sec.test.mjs', name: 'fails' };
+  const run = { format: 'tap', args: ARGS.tap };
+  const at = (location) => {
+    const parsed = G.parseRunnerOutput('tap', winTap(location));
+    return { file: parsed.results[0].file, status: G.specStatus(s, parsed, run), red: G.findSpec(s, parsed.results).hit?.status };
+  };
+  // As node emits it on Windows: two backslash characters per separator.
+  assert.deepEqual(at(String.raw`D:\\a\\repo\\spec\\sec.test.mjs:5:1`), { file: String.raw`D:\a\repo\spec\sec.test.mjs`, status: 'fail', red: 'fail' });
+  // Twin differing in the file only: a located failure of another file is not this spec's.
+  assert.deepEqual(at(String.raw`D:\\a\\repo\\spec\\other.test.mjs:5:1`), { file: String.raw`D:\a\repo\spec\other.test.mjs`, status: 'missing', red: undefined });
+  assert.deepEqual(at(String.raw`D:\\a\\repo\\other\\sec.test.mjs:5:1`), { file: String.raw`D:\a\repo\other\sec.test.mjs`, status: 'missing', red: undefined });
+  // Unchanged shapes: single backslashes (a runner that does not escape) and POSIX paths.
+  assert.deepEqual(at(String.raw`D:\a\repo\spec\sec.test.mjs:5:1`), { file: String.raw`D:\a\repo\spec\sec.test.mjs`, status: 'fail', red: 'fail' });
+  assert.deepEqual(at('/r/spec/sec.test.mjs:5:1'), { file: '/r/spec/sec.test.mjs', status: 'fail', red: 'fail' });
+  assert.deepEqual(at('/r/spec/other.test.mjs:5:1'), { file: '/r/spec/other.test.mjs', status: 'missing', red: undefined });
+});
+
 test('[S4] C7 spec-status matrix: pass/fail/skip/todo/missing/truncated/unformatted across tap, jest and vitest; only pass proves', () => {
   assert.match(REAL_TAP, /^TAP version/m, 'real node --test TAP');
   const outputs = { tap: REAL_TAP, 'jest-json': JEST, 'vitest-json': VITEST };

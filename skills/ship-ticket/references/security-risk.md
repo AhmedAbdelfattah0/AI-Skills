@@ -121,10 +121,13 @@ surface, only by an input surface at that path (rule above).
 | `env-or-secret-reference` | `VAPT-CFG-03` |
 | `new-dependency`, `infra-or-ci-config` | none: never covered mechanically, always need a classification |
 
-A surface closes a signal only when its kind, with the merged facts, selects every
-control of that class. A kind that selects less leaves the signal open (it fails
-closed): declare the kind that matches the change, or `unknown`, which selects every
-boundary-gated control. A classification whose `signal_id` matches no signal is ignored.
+A signal closes through surfaces only when the surfaces at its path, evaluated with
+the approved plan's facts, together select every control of that class. Facts raised
+by a classification in the same call do not count toward this. Surfaces that select
+less leave the signal open (it fails closed): declare the kind that matches the
+change, add a second surface at that path of a kind that selects the class, or use
+`unknown`, which selects what all the boundary kinds together select. A classification
+whose `signal_id` matches no signal is ignored.
 
 | Outcome | Meaning | Next |
 |---|---|---|

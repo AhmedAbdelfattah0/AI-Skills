@@ -15,7 +15,9 @@ export { requiredEvidence };
 // Runner adapters
 
 const LOAD_TEXT = /ERR_MODULE_NOT_FOUND|SyntaxError|Cannot find module|Failed to load|Transform failed|Test suite failed to run|unexpected token/i;
-const fileOf = (location) => (typeof location === 'string' ? location.replace(/:\d+:\d+$/, '') : null);
+// node's TAP writes a string as a JS literal, so a Windows location arrives with every backslash doubled
+// ('D:\\a\\spec\\x.test.mjs:3:1'). Undo the doubling, or the located result never matches its spec file.
+const fileOf = (location) => (typeof location === 'string' ? location.replace(/:\d+:\d+$/, '').replace(/\\\\/g, '\\') : null);
 const unquote = (v) => {
   const s = v.trim();
   if (s.length >= 2 && ((s[0] === "'" && s.at(-1) === "'") || (s[0] === '"' && s.at(-1) === '"'))) return s.slice(1, -1).replace(/''/g, "'");
