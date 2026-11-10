@@ -27,7 +27,7 @@ import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
   BEGIN, END, legacyApproval, securityOn, pairKey } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
-import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments } from './engine-gates.mjs';
+import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
@@ -216,9 +216,11 @@ async function deliver(E) {
  * the installed catalog loads and is the one the plan was approved against (catalog_unavailable),
  * every control id is in it (dag_invalid), and the approved narrative carries both the
  * `security-pairs` line of exactly the DAG's pairs and a verified §3a machine block with the same
- * pairs and catalog digest (security_pairs_mismatch).
+ * pairs and catalog digest (security_pairs_mismatch), every surface path of which lies inside the Design
+ * Contract (designContract of the DAG nodes, matched by reassess itself: else the first gate reassess ends in
+ * a permanent REAPPROVAL; security_pairs_mismatch naming the path).
  */
-async function bindSecurity(ctx, config, start, text, narrative) {
+async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (config.securityPolicy === undefined) {
     if (!legacyApproval(start)) throw coded('security_policy_required', 'a run approved after the security policy cutoff needs config.securityPolicy 2 with catalogDigest and controlCoverage');
     return;
@@ -236,6 +238,12 @@ async function bindSecurity(ctx, config, start, text, narrative) {
   const block = sp.parsePlanSecurityBlock(text);
   if (!block || block.catalog_digest !== config.catalogDigest || JSON.stringify(block.pairs) !== JSON.stringify(ids))
     throw coded('security_pairs_mismatch', 'the approved §3a security-plan block is missing, invalid or names other pairs than config.controlCoverage');
+  // The reassess gate's own contract check over the approved surfaces alone (no changed file, no input surface).
+  const res = sp.reassess({ plan: text, catalog: cat, inventory: [], changed: { contract_paths: designContract(nodes), files: [] } });
+  // Fail closed: an approved block reassess cannot reassess would bind here and refuse at the first gate.
+  if (!res.ok) throw coded('security_pairs_mismatch', `the approved §3a security-plan block cannot be reassessed (${res.code}): ${(res.reasons ?? []).join('; ')}`);
+  const outside = res.reapproval_basis.filter(b => b.kind === 'out-of-plan-path').map(b => b.path);
+  if (outside.length) throw coded('security_pairs_mismatch', `the approved §3a surface path(s) ${outside.join(', ')} lie outside every node's writes (the Design Contract); re-plan and re-approve`);
 }
 
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
@@ -250,7 +258,7 @@ export async function init(ctx) {
     const dag = validateEngineDag(doc, { ticket: ctx.ticket });
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
-    await bindSecurity(ctx, dag.config, start, text, narrative);
+    await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;

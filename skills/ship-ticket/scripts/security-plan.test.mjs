@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import * as SP from './security-plan.mjs';
+import * as EVAL from '../../vapt/controls.mjs';
 import { planNarrativeDigest } from './engine-dag.mjs'; // test-only parity check; the module itself imports no engine file
 import { scoreSelector } from '../../vapt/fixtures/selector.mjs';
 
@@ -153,7 +154,7 @@ test('an unknown fact keeps its controls selected and is listed', () => {
   assert.deepEqual(r2.unknown_facts, ['persistent_write']);
 });
 
-test('a surface of kind unknown pairs with every boundary-gated control; a concrete kind does not', () => {
+test('a surface of kind unknown selects every control some boundary kind selects, plus multi-kind predicates (real catalog: 24 of the 25 controls, all but VAPT-ABUSE-03); a concrete kind does not', () => {
   const u = ok(SP.selectControls(syn, input([surf('U', 'unknown')])));
   const kinds = SYN.fact_vocabulary.boundaries.values;
   for (const k of kinds) {
@@ -162,6 +163,16 @@ test('a surface of kind unknown pairs with every boundary-gated control; a concr
   }
   assert.deepEqual(pairIds(u), ['U:VAPT-ABUSE-02', 'U:VAPT-API-01', 'U:VAPT-WEB-01', 'U:VAPT-WEB-02']);
   assert.ok(!pairIds(ok(SP.selectControls(syn, input([surf('R', 'rendering-sink')])))).includes('R:VAPT-ABUSE-02'));
+  // The real catalog, every bool fact false: kind unknown selects exactly what all boundary kinds together select.
+  const bools = Object.entries(real.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
+  const neg = Object.fromEntries(bools.map((k) => [k, false]));
+  const one = (kind) => ok(SP.selectControls(real, { security_policy: 2, surfaces: [{ boundary_id: 'U', kind, path: 'src/u.ts', principals: ['service'] }],
+    facts: neg, evidence: Object.fromEntries(bools.map((k) => [k, 'src/u.ts:1'])) })).controls.map((c) => c.control_id);
+  const unk = one('unknown');
+  assert.deepEqual(unk, [...new Set(real.catalog.fact_vocabulary.boundaries.values.flatMap(one))].sort());
+  assert.equal(real.catalog.controls.length, 25);
+  assert.equal(unk.length, 24);
+  assert.deepEqual(real.catalog.controls.map((c) => c.id).filter((c) => !unk.includes(c)), ['VAPT-ABUSE-03']);
 });
 
 test('facts.boundaries / principals are derived from surfaces; a disagreeing value is refused', () => {
@@ -258,6 +269,9 @@ test('renderSection3a -> parsePlanSecurityBlock round-trip; tampered, missing or
   const sel = ok(SP.selectControls(syn, input([surf('GET /a/:id', 'request-handler', 'src/a.ts'), surf('B', 'rendering-sink')], { ...FALSE3, persistent_write: true })));
   const md = SP.renderSection3a(sel);
   assert.equal(md, sel.rows_md);
+  // The non-empty form is pinned byte for byte (the compact empty form must not change it).
+  assert.equal(sel.catalog_digest, 'sha256:a7c05119844180f0ba7c2882a07692a8cf23db6c69ff914e2f59d18395e40bd0', 'the synthetic catalog bytes the pin was taken on');
+  assert.equal(createHash('sha256').update(md).digest('hex'), 'c71a360d25416ec553f958bdc61c2579973fa99ba99887d2cf560ea973033af6');
   assert.ok(md.includes(SP.pairsLine({ catalogDigest: sel.catalog_digest, pairs: pairIds(sel) })));
   const blk = SP.parsePlanSecurityBlock(planWith(sel));
   assert.equal(blk.policy, 2);
@@ -278,6 +292,26 @@ test('renderSection3a -> parsePlanSecurityBlock round-trip; tampered, missing or
   assert.equal(SP.parsePlanSecurityBlock(planWith(sel).replace(line, '<!-- security-plan: {not json} -->')), null);
   const withEvents = planWith(sel).replace('{"event":"START"}', `{"event":"START"}\n{"event":"X","note":"security-pairs sha256:${'0'.repeat(64)}"}\n${line}`);
   assert.deepEqual(SP.parsePlanSecurityBlock(withEvents)?.pairs, pairIds(sel), 'RUN-STATE events cannot add or break a block or pairs line');
+});
+
+test('an empty selection renders the compact form: one evidence line, the pairs line and the machine block, nothing else; it round-trips', () => {
+  const empty = ok(SP.selectControls(syn, input([], { ...FALSE3, session_context: 'unknown' })));
+  assert.deepEqual(empty.pairs, []);
+  const lines = empty.rows_md.split('\n');
+  assert.equal(lines.length, 3, empty.rows_md);
+  assert.match(lines[0], /^No security-relevant surface: \S/);
+  assert.ok(lines[0].includes(empty.catalog_digest) && lines[0].includes(empty.selection_digest) && lines[0].includes('session_context'), 'the evidence names the catalog, the selection and the unknown facts');
+  assert.equal(lines[1], SP.pairsLine({ catalogDigest: empty.catalog_digest, pairs: [] }));
+  assert.match(lines[2], /^<!-- security-plan: \{.*\} -->$/);
+  assert.equal(SP.renderSection3a(empty), empty.rows_md);
+  const blk = SP.parsePlanSecurityBlock(planWith(empty));
+  assert.ok(blk, 'the compact form parses');
+  assert.deepEqual([blk.pairs, blk.controls, blk.surfaces], [[], [], []]);
+  assert.equal(blk.selection_digest, empty.selection_digest);
+  assert.equal(blk.facts.session_context, 'unknown');
+  // Reassess accepts a compact-form plan: a no-signal change with no surface stays UNCHANGED.
+  const r = ok(SP.reassess({ plan: planWith(empty), catalog: syn, inventory: [], changed: { contract_paths: ['docs/**'], files: [{ path: 'docs/a.md' }] } }));
+  assert.equal(r.outcome, 'UNCHANGED');
 });
 
 test('effectiveSet is an add-only union of approved pairs and addenda', () => {
@@ -302,7 +336,7 @@ test('reassessSignals: mechanical path and added-line patterns; a benign path gi
   assert.deepEqual(kinds([{ path: 'src/lib/a.ts', added: ["alter table orders enable row level security;"] }]), ['migration-or-rls-change']);
   assert.deepEqual(kinds([{ path: 'src/lib/a.ts', added: ["router.post('/x', h);"] }]), ['new-route']);
   assert.deepEqual(kinds(['src/middleware/auth.ts']), ['auth-or-middleware-change']);
-  assert.deepEqual(kinds([{ path: 'src\\lib\\format-date.ts', added: ['return d.toISOString();'] }]), []);
+  assert.deepEqual(kinds([{ path: 'src/lib/format-date.ts', added: ['return d.toISOString();'] }]), []);
   const s = sig([{ path: 'src/lib/a.ts', added: ['sendMail(x)'] }])[0];
   assert.deepEqual(Object.keys(s).sort(), ['class', 'id', 'kind', 'path']);
   assert.equal(s.class, null);
@@ -364,7 +398,6 @@ test('reassess: an out-of-contract path forces REAPPROVAL; the same path inside 
   assert.deepEqual(r.reapproval_basis, [{ kind: 'out-of-plan-path', path: 'src/other.ts' }]);
   assert.ok(r.signals.some((s) => s.kind === 'out-of-plan-path' && s.path === 'src/other.ts'));
   assert.equal(ok(rea(sel, { changed: { contract_paths: ['src/*.ts'], files } })).outcome, 'UNCHANGED');
-  assert.equal(ok(rea(sel, { changed: { contract_paths: ['src/a.ts'], files: [{ path: 'src\\a.ts' }] } })).outcome, 'UNCHANGED', 'Windows separators');
   assert.equal(ok(rea(sel, { changed: { contract_paths: ['src/*.ts'], files: [{ path: 'src/x/a.ts' }] } })).outcome, 'REAPPROVAL', '* stays in one segment');
   const inv = { surfaces: [surf('A', 'request-handler', 'src/a.ts'), surf('Z', 'rendering-sink', 'lib/z.ts')] };
   assert.equal(ok(rea(sel, { inventory: inv })).outcome, 'REAPPROVAL', 'an inventory surface outside the contract');
@@ -521,13 +554,116 @@ test('reassess: no classification of any shape closes a new-route, auth-or-middl
   assert.equal(ok(run([mail], { classifications: [{ ...noop, signal_id: mailSig }] })).outcome, 'UNCHANGED');
 });
 
-test('reassess: a newly selected control with no inventory surface refuses control_unpaired; an approved one does not', () => {
+test('[S30] an approved surface counts only at exactly the signal\'s path: a prefix or a suffix of it is not an approved path', () => {
+  const bools = REAL_BOOLS;
+  const plan = (path) => ok(SP.selectControls(real, { security_policy: 2, facts: Object.fromEntries(bools.map((k) => [k, false])),
+    evidence: Object.fromEntries(bools.map((k) => [k, `${path}:1`])), surfaces: [svc('mw', 'server-input', path)] }));
+  const run = (approvedPath, signalPath) => {
+    const sig = `auth-or-middleware-change@${signalPath}`;
+    return [sig, SP.reassess({ plan: planWith(plan(approvedPath)), catalog: real, inventory: [], changed: { contract_paths: ['src/**', 'auth/**'], files: [{ path: signalPath }] },
+      classifications: [{ signal_id: sig, reason: 'comment only' }] })];
+  };
+  // [approved surface path, signal path]: the approved path is a prefix, then a suffix, of the signal's path
+  for (const [approvedPath, signalPath] of [['src/auth/a.ts', 'src/auth/a.ts.bak'], ['auth/a.ts', 'src/auth/a.ts'], ['src/auth/a', 'src/auth/a.ts']]) {
+    const [sig, r] = run(approvedPath, signalPath);
+    assert.deepEqual(refused(r, 'classification_missing').unclassified, [sig], `${approvedPath} vs ${signalPath}`);
+    assert.equal(r.signals.find((s) => s.id === sig).class, null);
+    // twin: the same classification at exactly the approved path is accepted
+    const [sig2, same] = run(approvedPath, approvedPath);
+    assert.equal(ok(same).outcome, 'UNCHANGED', approvedPath);
+    assert.deepEqual(same.classifications_used, [sig2]);
+  }
+});
+
+test('[S31] a classification closes only the signal it names: with two open signals and one classified, exactly the other stays open and is named', () => {
+  const sel = approvedSyn();
+  const changed = { contract_paths: ['src/a.ts', 'package.json', 'go.mod'], files: [{ path: 'package.json' }, { path: 'go.mod' }] };
+  assert.deepEqual(refused(rea(sel, { changed }), 'classification_missing').unclassified, ['new-dependency@go.mod', 'new-dependency@package.json']);
+  for (const [done, left] of [['new-dependency@go.mod', 'new-dependency@package.json'], ['new-dependency@package.json', 'new-dependency@go.mod']]) {
+    const r = refused(rea(sel, { changed, classifications: [{ signal_id: done, reason: 'patch bump' }] }), 'classification_missing');
+    assert.deepEqual(r.unclassified, [left], done);
+    assert.equal(r.reasons.length, 1);
+  }
+  assert.equal(ok(rea(sel, { changed, classifications: ['new-dependency@go.mod', 'new-dependency@package.json'].map((signal_id) => ({ signal_id, reason: 'patch bump' })) })).outcome, 'UNCHANGED');
+});
+
+test('the evaluator\'s unknownish is the one used (no local copy); an evaluator without it is catalog_missing', () => {
+  const { unknownish: _drop, ...noUnknownish } = EVAL;
+  refused(SP.loadCatalog({ catalogPath: SYN_PATH, evaluator: noUnknownish }), 'catalog_missing');
+  // An evaluator that also treats false as unknown: a false fact cited by path is then uncited, and is listed as unknown.
+  const loose = ok(SP.loadCatalog({ catalogPath: SYN_PATH, evaluator: { ...EVAL, unknownish: (v) => EVAL.unknownish(v) || v === false } }));
+  const s = [surf('A', 'request-handler')];
+  ok(SP.selectControls(syn, input(s)));
+  refused(SP.selectControls(loose, input(s)), 'fact_uncited');
+  const why = { persistent_write: 'unknown: treated as unknown', session_context: 'unknown: treated as unknown', outbound_message: 'unknown: treated as unknown' };
+  const r = ok(SP.selectControls(loose, { security_policy: 2, surfaces: s, facts: FALSE3, evidence: why }));
+  assert.deepEqual(r.unknown_facts, ['outbound_message', 'persistent_write', 'session_context']);
+  assert.ok(pairIds(r).includes('A:VAPT-ABUSE-07'), 'the evaluator\'s unknown keeps its control selected');
+});
+
+test('reassess: a newly selected control with no surface (approved or inventory) refuses control_unpaired; the approved surfaces always count', () => {
   const changed = { contract_paths: ['src/a.ts', 'docs/**'], files: [{ path: 'docs/x.md', added: ['await stripe.charges.create(c)'] }] };
   const id = 'payment-or-stock-or-wallet-call@docs/x.md';
-  const cls = [{ signal_id: id, facts: { persistent_write: true }, evidence: { persistent_write: 'docs/x.md' } }];
-  refused(rea(approvedSyn(), { inventory: [], changed, classifications: cls }), 'control_unpaired');
-  const r = ok(rea(approvedSyn({ ...FALSE3, persistent_write: true }), { inventory: [], changed, classifications: cls }));
-  assert.equal(r.outcome, 'UNCHANGED');
+  const cls = (v) => [{ signal_id: id, facts: { persistent_write: v }, evidence: { persistent_write: 'docs/x.md' } }];
+  // An approved plan with no surface and an empty inventory: the raised fact has nothing to pair with.
+  refused(rea(approvedSyn(FALSE3, []), { inventory: [], changed, classifications: cls(true) }), 'control_unpaired');
+  assert.equal(ok(rea(approvedSyn(FALSE3, []), { inventory: [], changed, classifications: cls(false) })).outcome, 'UNCHANGED');
+  // An inventory that leaves the approved surface out still pairs with it (reassess unites them).
+  const r = ok(rea(approvedSyn(), { inventory: [], changed, classifications: cls(true) }));
+  assert.equal(r.outcome, 'ADD_CONTROLS');
+  assert.deepEqual(r.delta_pairs, ['A:VAPT-ABUSE-07']);
+  assert.equal(ok(rea(approvedSyn({ ...FALSE3, persistent_write: true }), { inventory: [], changed, classifications: cls(true) })).outcome, 'UNCHANGED');
+});
+
+test('[S29] reassess unites the approved surfaces with the inventory itself: a redefined approved boundary id is bad_input; leaving the approved surfaces out changes nothing', () => {
+  const sel = approvedSyn();
+  const A = surf('A', 'request-handler', 'src/a.ts');
+  // (a) an inventory surface that reuses an approved boundary id with another path, kind or principals is refused
+  for (const [label, redefined] of [['path', { ...A, path: 'src/b.ts' }], ['kind', { ...A, kind: 'rendering-sink' }], ['principals', { ...A, principals: ['anonymous'] }]]) {
+    refused(rea(sel, { inventory: { surfaces: [redefined] }, changed: { contract_paths: ['src/**'], files: [{ path: 'src/a.ts' }] } }), 'bad_input', label);
+  }
+  // an identical copy is the approved surface, in any spelling of the same principals set
+  ok(rea(sel, { inventory: { surfaces: [{ ...A, path: './src/a.ts', principals: ['authenticated', 'authenticated'] }] } }));
+  // (b) with or without the approved surfaces in the inventory, the result is the same object
+  const without = (over) => rea(sel, { ...over, inventory: { candidate_id: 'cand-1', surfaces: (over.inventory?.surfaces ?? []).filter((s) => s.boundary_id !== 'A') } });
+  const cases = [
+    {},
+    { inventory: { surfaces: [A, surf('B', 'rendering-sink', 'web/b.ts')] }, changed: { contract_paths: ['src/a.ts', 'web/**'], files: [{ path: 'web/b.ts', added: ['render(view)'] }] } },
+  ];
+  for (const over of cases) {
+    const withA = rea(sel, { ...over, inventory: { candidate_id: 'cand-1', surfaces: over.inventory?.surfaces ?? [A] } });
+    assert.deepEqual(without(over), withA, JSON.stringify(over));
+  }
+  // a control spanning two kinds (WEB-02): the approved rendering-sink plus a new outbound-data surface selects it
+  const rs = approvedSyn(FALSE3, [surf('B', 'rendering-sink', 'web/b.ts')]);
+  const C = surf('C', 'outbound-data', 'web/c.ts');
+  const changed = { contract_paths: ['web/**'], files: [{ path: 'web/c.ts' }] };
+  const omit = ok(rea(rs, { inventory: { surfaces: [C] }, changed }));
+  assert.deepEqual(omit, ok(rea(rs, { inventory: { surfaces: [rs.surfaces[0], C] }, changed })));
+  assert.ok(omit.delta_pairs.includes('B:VAPT-WEB-02') && omit.delta_pairs.includes('C:VAPT-WEB-02'), JSON.stringify(omit.delta_pairs));
+  // (c) the standalone new-route case: an approved boundary id re-pathed onto a new route is never UNCHANGED
+  const bools = Object.entries(real.catalog.fact_vocabulary).filter(([, d]) => d.type === 'bool').map(([k]) => k);
+  const approved = ok(SP.selectControls(real, { security_policy: 2, facts: Object.fromEntries(bools.map((k) => [k, false])),
+    evidence: Object.fromEntries(bools.map((k) => [k, 'src/orders.ts:handler'])), surfaces: [{ boundary_id: 'orders-api', kind: 'server-input', path: 'src/orders.ts', principals: ['service'] }] }));
+  const route = { path: 'src/routes/admin.ts', added: ["app.get('/admin', h)"] };
+  const moved = SP.reassess({ plan: planWith(approved), catalog: real, inventory: { surfaces: [{ ...approved.surfaces[0], path: route.path }] },
+    changed: { contract_paths: ['src/**'], files: [route] } });
+  assert.notEqual(moved.outcome, 'UNCHANGED');
+  refused(moved, 'bad_input');
+});
+
+test('[S36] a surface path or changed path with a backslash is refused bad_input (select, reassess inventory, reassess changed files, reassessSignals)', () => {
+  const bs = 'src\\a.ts';
+  refused(SP.selectControls(syn, input([surf('A', 'request-handler', bs)])), 'bad_input');
+  ok(SP.selectControls(syn, input([surf('A', 'request-handler', 'src/a.ts')])));
+  const sel = approvedSyn();
+  for (const files of [[{ path: bs }], [bs], [{ path: 'src/a.ts', added: [] }, { path: 'web\\b.ts' }]]) {
+    refused(rea(sel, { changed: { contract_paths: ['src/a.ts', 'web/**'], files } }), 'bad_input');
+  }
+  assert.equal(ok(rea(sel, { changed: { contract_paths: ['src/a.ts'], files: [{ path: 'src/a.ts' }] } })).outcome, 'UNCHANGED');
+  refused(rea(sel, { inventory: { surfaces: [surf('A', 'request-handler', 'src/a.ts'), surf('B', 'rendering-sink', 'web\\b.ts')] },
+    changed: { contract_paths: ['src/a.ts', 'web/**'], files: [{ path: 'src/a.ts' }] } }), 'bad_input');
+  assert.throws(() => SP.reassessSignals({ paths: [{ path: 'src\\lib\\format-date.ts', added: [] }], catalog: real.catalog }), TypeError);
 });
 
 test('reassess: plan without a block or with a tampered block refuses; a missing contract is bad input', () => {

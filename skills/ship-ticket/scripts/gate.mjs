@@ -36,7 +36,9 @@ function parseTap(text) {
     const body = line.slice(indent);
     const level = Math.floor(indent / 4);
     const sub = body.match(/^# Subtest: (.*)$/);
-    if (sub) { stack.length = level; stack[level] = sub[1]; continue; }
+    // node escapes '#' and '\' in a subtest's announced name as in its result line: unescape it the same way, or a
+    // nested result under 'a#b' is named 'a\#b > ...' and never matches its spec nor inherits its parent's file.
+    if (sub) { stack.length = level; stack[level] = sub[1].replace(/\\([#\\])/g, '$1'); continue; }
     const res = body.match(/^(not )?ok \d+(?: - (.*))?$/);
     if (!res) {
       if (level === 0 && body.startsWith('#')) diag.push(body.replace(/^# ?/, ''));
@@ -125,9 +127,13 @@ export function parseRunnerOutput(format, text) {
 // gateRed
 
 const norm = (p) => String(p).replace(/\\/g, '/');
+/** A Windows path: drive-rooted ('X:\') or UNC ('\\server\share\'). Only there is a backslash a separator. */
+const WIN_PATH = /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)/;
 const sameFile = (resultFile, specFile) => {
   if (!resultFile) return false;
-  const r = norm(resultFile); const s = norm(specFile).replace(/^\.\//, '');
+  // On POSIX a backslash is part of a file name: '/r/spec\\a.test.mjs' is not 'spec/a.test.mjs'.
+  const r = WIN_PATH.test(String(resultFile)) ? norm(resultFile) : String(resultFile);
+  const s = norm(specFile).replace(/^\.\//, '');
   return r === s || r.endsWith(`/${s}`);
 };
 
@@ -155,15 +161,23 @@ function specVerdict(spec, results) {
 }
 
 const relPath = (p) => norm(p).replace(/^(\.\/)+/, '');
+/** The only options a sole-file command may carry: none of them loads other code or tests, or moves the report. */
+const SOLE_OPTIONS = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', '--no-warnings'];
+const SOLE_VALUED = /^--test-(?:name-pattern|concurrency|timeout)=./;
+const soleOption = (a) => SOLE_OPTIONS.includes(a) || SOLE_VALUED.test(a);
 /**
  * The one file a command runs: its only argument that is not an option (no leading '-'), as a relative
- * path; null for none, several, or an absolute path. `--flag value` counts the value, so a command
- * attributes only with `--flag=value` options: anything else attributes nothing (fail closed).
+ * path; null for none, several, or an absolute path. Every option must be on the allowlist above
+ * (`--import=`, `--require=`, `-r=`, `--loader=`, another reporter, any unknown flag or a bare
+ * `--flag value` attributes nothing: fail closed).
  */
 export function soleFile(args) {
   if (!Array.isArray(args)) return null;
+  if (!args.every((a) => typeof a !== 'string' || !a.startsWith('-') || soleOption(a))) return null;
   const pos = args.filter((a) => typeof a !== 'string' || !a.startsWith('-'));
   if (pos.length !== 1 || typeof pos[0] !== 'string') return null;
+  // On POSIX 'spec\a.test.mjs' is another file than 'spec/a.test.mjs' (the DAG rule for paths: no backslash).
+  if (pos[0].includes('\\')) return null;
   const p = relPath(pos[0]);
   return p && !p.startsWith('/') && !/^[A-Za-z]:/.test(p) ? p : null;
 }

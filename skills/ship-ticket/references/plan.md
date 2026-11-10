@@ -172,7 +172,7 @@ unit · file ownership · expected size and risk · overhead vs value>. <If spli
 <or: "None found — checked <what you checked>.">
 
 ### 3a. Security risk assessment
-<Required when ELEVATED, security-sensitive, `riskLabels` non-empty or a vapt trigger fires; paste `security-plan.mjs select` output (`rows_md`). Otherwise one line: "No security-relevant surface: <evidence>". See [security-risk.md](security-risk.md).>
+<Required when ELEVATED, security-sensitive, `riskLabels` non-empty or a vapt trigger fires; paste `security-plan.mjs select` output (`rows_md`). Otherwise paste the three-line compact form `select` prints for an empty selection: the line "No security-relevant surface: <evidence>", the `security-pairs` line and the machine block. See [security-risk.md](security-risk.md).>
 
 Baseline: catalog v<N> `<catalog digest>`, policy 2, <N> controls / <M> pairs, unknown facts: <list or none>.
 
