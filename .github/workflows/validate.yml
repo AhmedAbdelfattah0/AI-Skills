@@ -26,6 +26,8 @@ jobs:
         run: node --test skills/vapt/controls.test.mjs
       - name: Test vapt selection fixtures
         run: node --test skills/vapt/fixtures.test.mjs
+      - name: Test vapt effectiveness tools
+        run: node --test skills/vapt/effectiveness.test.mjs
       - name: Test vendored security-audit validators
         run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs
 

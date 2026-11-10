@@ -1,0 +1,488 @@
+{
+  "schema": "vapt-effectiveness-corpus2-v1",
+  "frozen_at": "2026-11-10T09:05:47Z",
+  "examined": 41,
+  "cases": [
+    {
+      "id": "C2-01",
+      "ghsa_id": "GHSA-gcwf-c25f-p9rv",
+      "cwes": [
+        "CWE-601"
+      ],
+      "ecosystem": "pip",
+      "package": "kiwitcms",
+      "repo": "kiwitcms/Kiwi",
+      "fix_sha": "65d8f7c2743d7f06a4fca77c060b9d561f02f948",
+      "parent_sha": "494385fc5c1c5e295fca4ae4515eeceff4122382",
+      "files": [
+        "tcms/kiwi_auth/views.py"
+      ],
+      "published_at": "2026-11-09T23:24:14Z"
+    },
+    {
+      "id": "C2-02",
+      "ghsa_id": "GHSA-h89v-g948-47vp",
+      "cwes": [
+        "CWE-835"
+      ],
+      "ecosystem": "npm",
+      "package": "moleculer",
+      "repo": "moleculerjs/moleculer",
+      "fix_sha": "168ecbdc245c9a9d1dc4ef9b8a81dbae38ee3063",
+      "parent_sha": "6e151319f6af922d7197c4bcaa5b2625202db016",
+      "files": [
+        "src/transporters/tcp/parser.js"
+      ],
+      "published_at": "2026-11-09T22:31:16Z"
+    },
+    {
+      "id": "C2-03",
+      "ghsa_id": "GHSA-85gg-2gfq-q95m",
+      "cwes": [
+        "CWE-22",
+        "CWE-59"
+      ],
+      "ecosystem": "pip",
+      "package": "code-graph-rag",
+      "repo": "vitali87/code-graph-rag",
+      "fix_sha": "2648c95aa550ce2d9361a8e75ed669d5f4b451b8",
+      "parent_sha": "7c79f7e1042286aee61cb0514f38969c0a4af384",
+      "files": [
+        "codebase_rag/utils/path_utils.py"
+      ],
+      "published_at": "2026-11-09T22:16:41Z"
+    },
+    {
+      "id": "C2-04",
+      "ghsa_id": "GHSA-gj9m-f8ph-pmhr",
+      "cwes": [
+        "CWE-287",
+        "CWE-290",
+        "CWE-346"
+      ],
+      "ecosystem": "pip",
+      "package": "gpustack",
+      "repo": "gpustack/gpustack",
+      "fix_sha": "53f42a6a553542974396d16a4ff6b12bcbedb48d",
+      "parent_sha": "aff1b0d15153349d730ffab46969a26ee2317259",
+      "files": [
+        "gpustack/api/auth.py",
+        "gpustack/cmd/start.py",
+        "gpustack/config/config.py"
+      ],
+      "published_at": "2026-11-09T22:15:27Z"
+    },
+    {
+      "id": "C2-05",
+      "ghsa_id": "GHSA-cp25-j9x5-p5xm",
+      "cwes": [
+        "CWE-116",
+        "CWE-248",
+        "CWE-775"
+      ],
+      "ecosystem": "pip",
+      "package": "urwid",
+      "repo": "urwid/urwid",
+      "fix_sha": "b79d9a96843a6f5950bb2bfab5d059bdc61c538b",
+      "parent_sha": "567e3006d6c26ace8e7e73117645314be09dfc81",
+      "files": [
+        "urwid/display/web.py"
+      ],
+      "published_at": "2026-11-09T22:05:06Z"
+    },
+    {
+      "id": "C2-06",
+      "ghsa_id": "GHSA-vvr2-h2jp-838m",
+      "cwes": [
+        "CWE-22"
+      ],
+      "ecosystem": "pip",
+      "package": "code-graph-rag",
+      "repo": "vitali87/code-graph-rag",
+      "fix_sha": "6541e920a27961fa8f3ff49ef38c0e0bd09cd626",
+      "parent_sha": "daea785ded2d3924c8d88907dde9c32be0613c18",
+      "files": [
+        "codebase_rag/mcp/tools.py"
+      ],
+      "published_at": "2026-11-09T21:21:32Z"
+    },
+    {
+      "id": "C2-07",
+      "ghsa_id": "GHSA-h7c4-q426-7jh9",
+      "cwes": [
+        "CWE-400"
+      ],
+      "ecosystem": "npm",
+      "package": "@tsparticles/mcp-server",
+      "repo": "tsparticles/tsparticles",
+      "fix_sha": "d3b5672bd61bb847abfa21193c34eabf7aba6896",
+      "parent_sha": "fa9070eb1f1e542fa2b89cf6295b7cd312d37e2f",
+      "files": [
+        "integrations/mcp-server/src/index.ts"
+      ],
+      "published_at": "2026-11-09T21:14:51Z"
+    },
+    {
+      "id": "C2-08",
+      "ghsa_id": "GHSA-4p8p-pjpq-2w7h",
+      "cwes": [
+        "CWE-248"
+      ],
+      "ecosystem": "npm",
+      "package": "@tsparticles/mcp-server",
+      "repo": "tsparticles/tsparticles",
+      "fix_sha": "25fb70e7f527a91568adaef576570289083f243b",
+      "parent_sha": "97bae92be72deebcf47220862342ed79be2ed064",
+      "files": [
+        "integrations/mcp-server/src/index.ts"
+      ],
+      "published_at": "2026-11-09T21:13:55Z"
+    },
+    {
+      "id": "C2-09",
+      "ghsa_id": "GHSA-6w3r-6hpr-hp6p",
+      "cwes": [
+        "CWE-770"
+      ],
+      "ecosystem": "npm",
+      "package": "ag-psd",
+      "repo": "Agamnentzar/ag-psd",
+      "fix_sha": "57ea7d865238b6b7c8a2e976bcf2a77e03116e2f",
+      "parent_sha": "e64f0c96a5b8f9ea7c79599d08bbcfc57345b781",
+      "files": [
+        "src/psdReader.ts"
+      ],
+      "published_at": "2026-11-09T21:08:28Z"
+    },
+    {
+      "id": "C2-10",
+      "ghsa_id": "GHSA-96wc-2m84-2cj7",
+      "cwes": [
+        "CWE-674",
+        "CWE-835"
+      ],
+      "ecosystem": "npm",
+      "package": "isomorphic-git",
+      "repo": "isomorphic-git/isomorphic-git",
+      "fix_sha": "823843d1cd19182df79bc907c767f5bcecb39a0b",
+      "parent_sha": "1395431bc1ee8770e6936eeb26da3ec34ca0ae7b",
+      "files": [
+        "src/commands/checkout.js",
+        "src/internal-apis.js",
+        "src/managers/GitRefManager.js",
+        "src/models/GitTree.js",
+        "src/utils/applyDelta.js"
+      ],
+      "published_at": "2026-11-09T19:58:32Z"
+    },
+    {
+      "id": "C2-11",
+      "ghsa_id": "GHSA-p2mm-64f6-gmpp",
+      "cwes": [
+        "CWE-94",
+        "CWE-116"
+      ],
+      "ecosystem": "pip",
+      "package": "fastapi-code-generator",
+      "repo": "koxudaxi/fastapi-code-generator",
+      "fix_sha": "49301dbdb82170d7f50877419d994b05cb1fa2bc",
+      "parent_sha": "ec5b615dc1d8a9ce490340d6efd68d2ffd273d1a",
+      "files": [
+        "fastapi_code_generator/parser.py",
+        "fastapi_code_generator/prompt_data.py"
+      ],
+      "published_at": "2026-11-09T19:48:08Z"
+    },
+    {
+      "id": "C2-12",
+      "ghsa_id": "GHSA-6xmv-cjr5-w3q8",
+      "cwes": [
+        "CWE-94",
+        "CWE-116"
+      ],
+      "ecosystem": "pip",
+      "package": "fastapi-code-generator",
+      "repo": "koxudaxi/fastapi-code-generator",
+      "fix_sha": "49301dbdb82170d7f50877419d994b05cb1fa2bc",
+      "parent_sha": "ec5b615dc1d8a9ce490340d6efd68d2ffd273d1a",
+      "files": [
+        "fastapi_code_generator/parser.py",
+        "fastapi_code_generator/prompt_data.py"
+      ],
+      "published_at": "2026-11-09T19:46:27Z"
+    },
+    {
+      "id": "C2-13",
+      "ghsa_id": "GHSA-w7qv-268h-9h3f",
+      "cwes": [
+        "CWE-532"
+      ],
+      "ecosystem": "pip",
+      "package": "loggingredactor",
+      "repo": "armurox/loggingredactor",
+      "fix_sha": "361a528e56437b9c269e69f3863de4b3e568391b",
+      "parent_sha": "75ae0a094bcbb7b1806cca7eba652c785c463fa9",
+      "files": [
+        "loggingredactor/redacting_filter.py",
+        "setup.py"
+      ],
+      "published_at": "2026-11-09T18:15:18Z"
+    },
+    {
+      "id": "C2-14",
+      "ghsa_id": "GHSA-r4hm-p9f9-fj9v",
+      "cwes": [
+        "CWE-79"
+      ],
+      "ecosystem": "pip",
+      "package": "GeoNode",
+      "repo": "GeoNode/geonode",
+      "fix_sha": "0803857b22eba5b55729145ef401b1bc1c23e332",
+      "parent_sha": "a0f50e5eb4cf6d19693967879aa78a296037d7ac",
+      "files": [
+        "geonode/metadata/handlers/abstract.py",
+        "geonode/metadata/manager.py",
+        "geonode/metadata/settings.py"
+      ],
+      "published_at": "2026-11-06T19:50:34Z"
+    },
+    {
+      "id": "C2-15",
+      "ghsa_id": "GHSA-9fpx-fr6j-2vh6",
+      "cwes": [
+        "CWE-78"
+      ],
+      "ecosystem": "pip",
+      "package": "GeoNode",
+      "repo": "GeoNode/geonode",
+      "fix_sha": "1408290c0bb54872924a9b334a516db9758a2180",
+      "parent_sha": "a595f66fd68b09dd138417d0d63db4c399b0508f",
+      "files": [
+        "geonode/upload/handlers/common/vector.py"
+      ],
+      "published_at": "2026-11-06T19:39:38Z"
+    },
+    {
+      "id": "C2-16",
+      "ghsa_id": "GHSA-mc8m-rr6c-r5qr",
+      "cwes": [
+        "CWE-862"
+      ],
+      "ecosystem": "npm",
+      "package": "@payloadcms/storage-vercel-blob",
+      "repo": "payloadcms/payload",
+      "fix_sha": "47abe9bb5c444330dbfaa9a5bc2033337932270b",
+      "parent_sha": "c491d5fb4c1835e8e651836d82bfb962d8076b4c",
+      "files": [
+        "packages/payload/src/exports/internal.ts",
+        "packages/payload/src/uploads/endpoints/uploadInstructions.ts",
+        "packages/storage-r2/src/adapter.ts",
+        "packages/storage-r2/src/handleMultiPartUpload.ts"
+      ],
+      "published_at": "2026-11-04T17:00:39Z"
+    },
+    {
+      "id": "C2-17",
+      "ghsa_id": "GHSA-3cgg-c5pp-57h6",
+      "cwes": [
+        "CWE-79"
+      ],
+      "ecosystem": "npm",
+      "package": "odf-kit",
+      "repo": "GitHubNewbie0/odf-kit",
+      "fix_sha": "fa3abc5a7a757f56c7212b2dbe99d1d2db995420",
+      "parent_sha": "1424227d1ca2716a249b623d1456575ff0331dcc",
+      "files": [
+        "src/odt/to-html/html-renderer.ts"
+      ],
+      "published_at": "2026-11-04T16:14:34Z"
+    },
+    {
+      "id": "C2-18",
+      "ghsa_id": "GHSA-f9j6-8p6x-r9j6",
+      "cwes": [
+        "CWE-176"
+      ],
+      "ecosystem": "npm",
+      "package": "@sd-jwt/decode",
+      "repo": "openwallet-foundation/sd-jwt-js",
+      "fix_sha": "3d8a72a0a279d67439db038c9c2b52621568b866",
+      "parent_sha": "c9d73e4db2a925e5096988fffe7eded62db1b6a7",
+      "files": [
+        "packages/core/src/decode/decode.ts",
+        "packages/core/src/index.ts",
+        "packages/core/src/utils/disclosure.ts",
+        "packages/sd-jwt-vc/src/sd-jwt-vc-instance.ts"
+      ],
+      "published_at": "2026-11-02T17:54:39Z"
+    },
+    {
+      "id": "C2-19",
+      "ghsa_id": "GHSA-5849-834g-hvw5",
+      "cwes": [
+        "CWE-835"
+      ],
+      "ecosystem": "pip",
+      "package": "pypdf",
+      "repo": "py-pdf/pypdf",
+      "fix_sha": "06593f993789a4b573dd955730c1a7051128bb2a",
+      "parent_sha": "f176db1a1f7f9af3e472e69a843ef1175653b044",
+      "files": [
+        "pypdf/_reader.py"
+      ],
+      "published_at": "2026-10-30T23:13:16Z"
+    },
+    {
+      "id": "C2-20",
+      "ghsa_id": "GHSA-cggf-277g-3q54",
+      "cwes": [
+        "CWE-400"
+      ],
+      "ecosystem": "pip",
+      "package": "pypdf",
+      "repo": "py-pdf/pypdf",
+      "fix_sha": "ea4ac663133f1b3de1d7a8f2e6fa239802fde79e",
+      "parent_sha": "06593f993789a4b573dd955730c1a7051128bb2a",
+      "files": [
+        "pypdf/_configuration.py",
+        "pypdf/_doc_common.py"
+      ],
+      "published_at": "2026-10-30T23:13:01Z"
+    },
+    {
+      "id": "C2-21",
+      "ghsa_id": "GHSA-4528-x5fx-h6hg",
+      "cwes": [
+        "CWE-1333"
+      ],
+      "ecosystem": "npm",
+      "package": "joi",
+      "repo": "hapijs/joi",
+      "fix_sha": "03dc1d909818503b06240dadc81e9227ed2649cf",
+      "parent_sha": "b3973e5e6d72a9b0d15b697dd3079bc40e0b1353",
+      "files": [
+        "lib/types/string.js"
+      ],
+      "published_at": "2026-10-30T23:10:23Z"
+    },
+    {
+      "id": "C2-22",
+      "ghsa_id": "GHSA-8494-f6mr-cjpv",
+      "cwes": [
+        "CWE-1333"
+      ],
+      "ecosystem": "npm",
+      "package": "@hapi/content",
+      "repo": "hapijs/content",
+      "fix_sha": "0993851dc7234976a3fce3a7c31662b213c940fd",
+      "parent_sha": "6fed62114f940896005ea4ee622030830da9cb56",
+      "files": [
+        "lib/index.js"
+      ],
+      "published_at": "2026-10-30T23:10:13Z"
+    },
+    {
+      "id": "C2-23",
+      "ghsa_id": "GHSA-g3hv-75wg-m249",
+      "cwes": [
+        "CWE-405"
+      ],
+      "ecosystem": "npm",
+      "package": "minimatch",
+      "repo": "isaacs/minimatch",
+      "fix_sha": "77a0f5c4b80bdc641c3c930a1d9edf5ad2db57f8",
+      "parent_sha": "6f9f13168f7172d2ef824eef6c3a47e1517ae94a",
+      "files": [
+        "src/index.ts"
+      ],
+      "published_at": "2026-10-30T23:09:55Z"
+    },
+    {
+      "id": "C2-24",
+      "ghsa_id": "GHSA-c73q-w75p-j82v",
+      "cwes": [
+        "CWE-639",
+        "CWE-1188"
+      ],
+      "ecosystem": "pip",
+      "package": "Authlib",
+      "repo": "authlib/authlib",
+      "fix_sha": "1bd2a313492ce0a4d0571c150730907aa3fc91ff",
+      "parent_sha": "311da11e41ae44fac570ac5224a45e0fec993939",
+      "files": [
+        "authlib/oauth2/rfc7592/endpoint.py"
+      ],
+      "published_at": "2026-10-30T23:09:04Z"
+    }
+  ],
+  "skipped": [
+    {
+      "ghsa_id": "GHSA-5xjx-9qx6-jcrv",
+      "rule": "no_fix_commit"
+    },
+    {
+      "ghsa_id": "GHSA-9vhv-g5hf-m7m7",
+      "rule": "too_many_files"
+    },
+    {
+      "ghsa_id": "GHSA-f42p-wjw5-97qh",
+      "rule": "no_source_files"
+    },
+    {
+      "ghsa_id": "GHSA-447x-qqwf-m7xq",
+      "rule": "repo_cap"
+    },
+    {
+      "ghsa_id": "GHSA-cw2g-2vwq-88w6",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-9qw7-j9xw-fv9c",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-h667-4jj2-cgv4",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-fqpv-mq26-pr4j",
+      "rule": "too_many_files"
+    },
+    {
+      "ghsa_id": "GHSA-m5ph-mmg5-6w5h",
+      "rule": "no_source_files"
+    },
+    {
+      "ghsa_id": "GHSA-64vx-6h2c-rjh7",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-gh9r-c94j-cmp5",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-33r5-xmm8-v6x5",
+      "rule": "no_fix_commit"
+    },
+    {
+      "ghsa_id": "GHSA-7w38-ggh5-v542",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-x9rp-7wh3-2rj5",
+      "rule": "no_source_files"
+    },
+    {
+      "ghsa_id": "GHSA-j656-3hf2-fvjc",
+      "rule": "too_many_files"
+    },
+    {
+      "ghsa_id": "GHSA-mfr5-77xh-9j7h",
+      "rule": "cwe_cap"
+    },
+    {
+      "ghsa_id": "GHSA-3g3m-2fjr-6pw4",
+      "rule": "cwe_cap"
+    }
+  ]
+}

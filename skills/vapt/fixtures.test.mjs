@@ -27,7 +27,7 @@ const SCOPE_KEYS = ['planned_surfaces', 'planned_facts', 'actual_diff_signals'];
 const LABEL_KEYS = ['scenario_id', 'must_select', 'inapplicable', 'rationale', 'confidence', 'inapplicable_basis'];
 const MIN_BASIS = 20;
 const SIGNALS = DIFF_SIGNALS;
-const AMENDMENT_FILES = ['amendments.json', 'amendments_round2.json', 'amendments_round3.json'];
+const AMENDMENT_FILES = ['amendments.json', 'amendments_round2.json', 'amendments_round3.json', 'amendments_round4.json'];
 const LABEL_HISTORY = 'label_history.json';
 const SCOPE_LABEL_KEYS = ['expected_reassess', 'reassess_rationale', 'added_controls'];
 const REASSESS = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
@@ -62,6 +62,7 @@ function load() {
     amendments: rawOpt('fixtures/amendments.json'),
     amendments2: rawOpt('fixtures/amendments_round2.json'),
     amendments3: rawOpt('fixtures/amendments_round3.json'),
+    amendments4: rawOpt('fixtures/amendments_round4.json'),
     labelHistory: rawOpt(`fixtures/${LABEL_HISTORY}`),
     provenance: Object.fromEntries(PROVENANCE.map((p) => [p, rawOpt(`fixtures/${p}`)])),
   };
@@ -77,6 +78,7 @@ function load() {
     amendments: files.amendments ? JSON.parse(files.amendments) : null,
     amendments2: files.amendments2 ? JSON.parse(files.amendments2) : null,
     amendments3: files.amendments3 ? JSON.parse(files.amendments3) : null,
+    amendments4: files.amendments4 ? JSON.parse(files.amendments4) : null,
     labelHistory: files.labelHistory ? JSON.parse(files.labelHistory) : null,
     ledger: rawOpt(LEDGER_FILE) ? JSON.parse(raw(LEDGER_FILE)) : null,
   };
@@ -91,7 +93,7 @@ export function checkHashes(d) {
   if (h['labels.json'] !== sha(d.files.labels)) e.push('labels.json hash differs from manifest');
   if (!d.files.amendments) e.push('amendments.json is missing');
   else if (h['amendments.json'] !== sha(d.files.amendments)) e.push('amendments.json hash differs from manifest');
-  for (const [name, buf] of [['amendments_round2.json', d.files.amendments2], ['amendments_round3.json', d.files.amendments3], [LABEL_HISTORY, d.files.labelHistory]]) {
+  for (const [name, buf] of [['amendments_round2.json', d.files.amendments2], ['amendments_round3.json', d.files.amendments3], ['amendments_round4.json', d.files.amendments4], [LABEL_HISTORY, d.files.labelHistory]]) {
     if (!buf) e.push(`${name} is missing`);
     else if (h[name] !== sha(buf)) e.push(`${name} hash differs from manifest`);
   }
@@ -380,14 +382,14 @@ export function checkAmendments(d) {
   const e = [];
   if (!Array.isArray(d.amendments)) return ['amendments.json is missing or not an array'];
   if (!d.amendments.length) e.push('amendments.json is empty');
-  const rounds = [[2, d.amendments2], [3, d.amendments3]];
+  const rounds = [[2, d.amendments2], [3, d.amendments3], [4, d.amendments4]];
   for (const [n, list] of rounds) {
     if (!Array.isArray(list)) e.push(`amendments round ${n} is missing or not an array`);
     else if (!list.length) e.push(`amendments round ${n} is empty`);
   }
   if (e.length) return e;
   const facts = new Map(d.scenarios.map((s) => [s.id, s.facts]));
-  // Rounds 2 and 3: an entry's new value is the scenario's current value unless a later round amends the same fact.
+  // Rounds 2 to 4: an entry's new value is the scenario's current value unless a later round amends the same fact.
   for (const [n, list] of rounds) list.forEach((a, i) => {
     for (const k of ['id', 'fact', 'old', 'new', 'reason']) if (!(k in a)) e.push(`round-${n} amendment ${i}: missing ${k}`);
     if (typeof a.reason !== 'string' || !a.reason.trim()) e.push(`round-${n} amendment ${i}: empty reason`);
@@ -412,7 +414,7 @@ const labelOf = (d, id) => d.labels.find((l) => l.scenario_id === id);
 const firstScenario = (d, pred) => d.scenarios.find(pred);
 
 test('fixtures are present and non-trivial', () => {
-  assert.equal(real.manifest.version, 5);
+  assert.equal(real.manifest.version, 6);
   assert.equal(real.scenarios.length, 35);
   assert.equal(real.labels.length, 35);
 });
@@ -464,7 +466,7 @@ test('the disagreement ledger equals the computed set of catalog-selected inappl
   t.diagnostic(`ledger size: ${real.ledger?.entries?.length} catalog over-breadth entries over ${Object.keys(real.ledger?.by_control ?? {}).length} controls`);
 });
 test('coverage matrix: controls, boundaries, categories and reassess verdicts', () => assert.deepEqual(checkCoverage(real), []));
-test('amendments (rounds 1, 2 and 3) are recorded and well formed', () => assert.deepEqual(checkAmendments(real), []));
+test('amendments (rounds 1 to 4) are recorded and well formed', () => assert.deepEqual(checkAmendments(real), []));
 test('every label carries an inapplicable_basis; low-risk exceptions complete the control set exactly', () => assert.deepEqual(checkBasis(real), []));
 test('pre-registered baselines equal the values recomputed with the selector', (t) => {
   assert.deepEqual(checkBaselines(real), []);
@@ -614,6 +616,8 @@ test('negative: amendments must be present, complete and match real scenarios an
   assert.ok(checkAmendments(mutated((d) => { d.amendments[0].id = 'S-GHOST'; })).length > 0);
   assert.ok(checkAmendments(mutated((d) => { d.amendments[0].fact = 'not_a_fact'; })).length > 0);
   assert.ok(checkAmendments(mutated((d) => { d.amendments2 = null; })).length > 0, 'round 2 missing');
+  assert.ok(checkAmendments(mutated((d) => { d.amendments4 = null; })).length > 0, 'round 4 missing');
+  assert.ok(checkAmendments(mutated((d) => { d.amendments4[0].id = 'S-GHOST'; })).length > 0, 'round 4 scenario');
   assert.ok(checkAmendments(mutated((d) => { delete d.amendments2[0].reason; })).length > 0, 'round 2 reason');
   assert.ok(checkAmendments(mutated((d) => { d.amendments2[0].id = 'S-GHOST'; })).length > 0, 'round 2 scenario');
   assert.ok(checkAmendments(mutated((d) => { const a = d.amendments2[0]; d.scenarios.find((s) => s.id === a.id).facts[a.fact] = !a.new; }))
@@ -771,6 +775,8 @@ test('negative: history timeline, seal anchor and label history are enforced', (
   assert.ok(has(checkHistory(mutated((d) => { const c = d.labelHistory.changes.find((x) => x.change === 'removed_from_must_select'); delete c.reason; })), /lacks a reason/));
   assert.ok(has(checkHashes({ ...real, files: { ...real.files, labelHistory: Buffer.concat([real.files.labelHistory ?? Buffer.alloc(0), Buffer.from(' ')]) } }), /label_history.json/));
   assert.ok(has(checkHashes({ ...real, files: { ...real.files, amendments3: null } }), /amendments_round3.json is missing/));
+  assert.ok(has(checkHashes({ ...real, files: { ...real.files, amendments4: null } }), /amendments_round4.json is missing/));
+  assert.ok(has(checkHashes({ ...real, files: { ...real.files, amendments4: Buffer.concat([real.files.amendments4 ?? Buffer.alloc(0), Buffer.from(' ')]) } }), /amendments_round4.json hash differs/));
 });
 test('negative: net hard defects count violation pairs outside the ledger, never a count difference', () => {
   const entries = computeLedger(catalog, real.scenarios, real.labels);

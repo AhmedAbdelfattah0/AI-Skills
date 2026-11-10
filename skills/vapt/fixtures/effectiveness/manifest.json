@@ -1,0 +1,70 @@
+{
+  "schema": "vapt-effectiveness-manifest-v1",
+  "sha256": {
+    "prereg.json": "12bc56f7491fbb9a727373e6a419c5be3c3a25f7ccaf36a1239de12612d8ca02",
+    "storecraft-facts.json": "b6a6287ee27f5aca4d2780bbc03d3bb164e0d0b49d56ddf3926d87e20b0ac629",
+    "storecraft-judgments.json": "b98d5a951210ee3ad85d182f37d51a7e4eb5d4e781f5557606e00075e7849d61",
+    "corpus2-index.json": "781795f8eb7e98b65bb01720759511a385df7a7a4c76c966408aa5b3b4335dde",
+    "corpus2-facts.json": "c2d2a7f312d78b6735ff2b189e3bf3e51a676c143b6d6a54dd837001f3743bf8",
+    "corpus2-judgments.json": "31864f935606ab9e92dd8654de5a5e8d3e46c34e07c53cf097c659b0071b9979"
+  },
+  "catalog_digest": "sha256:ed41751ae3b4392d197d98aff78bbd0f6c0461ae7fe6c3f224bf32718899e5b4",
+  "fixtures_version": 6,
+  "posted": {
+    "issue": "https://github.com/AhmedAbdelfattah0/AI-Skills/issues/45",
+    "why": "GitHub's timestamps on these posts show the order in which the hashes were posted: rules first, then the public case list, then the scoring inputs. The hashes in each post equal the sha256 values above. No post hashes the scorer's code, so the posts cannot show when the scorer first ran.",
+    "posts": [
+      { "what": "prereg.json and the catalog, before any fact writer, judge or scorer ran", "url": "https://github.com/AhmedAbdelfattah0/AI-Skills/issues/45" },
+      { "what": "corpus2-index.json, before anyone read it", "url": "https://github.com/AhmedAbdelfattah0/AI-Skills/issues/45#issuecomment-6763399639" },
+      { "what": "the five data files and the fixtures manifest at version 6, before the scorer ran on them", "url": "https://github.com/AhmedAbdelfattah0/AI-Skills/issues/45#issuecomment-6763848849" }
+    ]
+  },
+  "provenance": {
+    "date": "2026-11-10",
+    "fact_writers": {
+      "who": "11 fresh agents, model tier sonnet: 8 for the development cases (3 cases each, in id order) and 3 for corpus 2 (8 cases each, in id order).",
+      "saw": ["one instruction file, the same for all (sha256 e01bf2620eee75bc4a0ab6213a24f4412b946dfb23a818dd7bb76dc50bc349f5)", "the catalog's fact_vocabulary extracted to its own file (sha256 e95136029b3cd6216d4d1b3c34ead33dba8852af3184e6a167efb6cdc8571362)", "their own case inputs as prereg.json defines them"],
+      "never_given": ["controls, predicates, findings, advisories, fix diffs, labels, judgments, other writers' outputs"],
+      "instruction_change": "The instruction file was edited once, before any writer ran: writers with ticket text may read large files by region instead of in full.",
+      "self_reported_deviations": [
+        "One writer created and deleted a scratch file outside its folder, and counted lines across other case folders without opening them.",
+        "Two writers listed the shared output folder and saw other writers' file names; they report opening none.",
+        "One writer's first write attempt hung and was rerun.",
+        "One writer read two cases by region and skipped a document and a shell script in a third.",
+        "Cases C2-11 and C2-12 hold identical files (two advisories fixed by one commit) and received identical facts."
+      ]
+    },
+    "judges": {
+      "who": "2 fresh agents, model tier opus, each labelling all 48 cases without sight of the other.",
+      "saw": ["one instruction file (sha256 ba78a0494ba64c7eb787d09dc658716fa27704b0bda5fb03570dbb92958e4aff)", "id, tier, title, attack and prevent of the 25 controls (sha256 744bee36b77810cfff38edd0dd77398324fbf5ae0944c84ff2c39455de62584f, equal to ../provenance/controls_public.json)", "per development case a trimmed finding record; per corpus-2 case the advisory summary, description, CWE ids, severity and the fix diff"],
+      "never_given": ["predicates, sources, facts, selections, the other judge's labels"],
+      "self_reported_deviations": []
+    },
+    "orchestrator": "Has seen the catalog. Wrote no fact, label or judgment; ran the scripts, merged agent outputs with a schema check, and posted the hashes.",
+    "not_recorded": "Agent prompts, transcripts and the judges' and writers' per-label notes are not kept in this repository."
+  },
+  "local_only": {
+    "development_inputs": "The audit record, the audited product's files and its commit messages stayed on the author's machine. sha256 over the sorted list of every input file and its hash, as written by prep-local.mjs: 01874410b959a905464b7357a15242199345371dadbe461557b3ad995cf023cd.",
+    "cannot_be_checked_from_this_repository": "A reader of this repository cannot re-run fact writing or judging on the development cases, and cannot verify that hash."
+  },
+  "corpus2": {
+    "picked_by": "build-corpus2.mjs pick --freeze 2026-11-10T09:05:47Z",
+    "examined": 41,
+    "kept": 24,
+    "skipped": 17
+  },
+  "recheck": {
+    "what": "attempt_limit re-checked in the 35 fixture scenarios against its reworded definition by an independent agent (model tier sonnet) that saw only the scenario text, changed surfaces, current values and the old and new definition.",
+    "result": "34 values kept, 5 of them marked unclear. One changed: S-SEA-18 from unknown to false (../amendments_round4.json). The controls selected for that scenario are the same, so labels, ledger and baselines are unchanged. The fixtures were re-sealed at version 6 before scoring."
+  },
+  "limits": [
+    "Blindness is by instruction and an inputs-only folder, not enforced: the agents had file access. The deviations above are self-reported.",
+    "On the development cases the fact writer is catalog-blind but audit-exposed: the fact vocabulary's examples paraphrase some findings, and the catalog's eight VAPT-ABUSE controls were written from these findings. R1, R2 and R3 are in-sample.",
+    "The development ticket text is the messages of up to 8 commits that last wrote the cited lines, and the code is every cited file in full. That is broader than one real ticket, so the facts are broad.",
+    "On corpus 2 there is no ticket: the writer sees whole pre-fix files of the fix commit. Many cases are library code with no request handler.",
+    "Both judges are the same model family, so their agreement overstates independent agreement. A cell counts only when both say yes.",
+    "Corpus 2 is 24 advisories published between 2026-10-30 and 2026-11-09, picked by a mechanical rule. It is small and not a random sample of weaknesses.",
+    "A selected control is a planned test, not a caught weakness. Nothing here ran a control's test.",
+    "The development inputs are local only and cannot be re-run from this repository."
+  ]
+}

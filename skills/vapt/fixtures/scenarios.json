@@ -1557,7 +1557,7 @@
    "plan_gated_feature": false,
    "link_or_token_in_message": "unknown",
    "session_context": false,
-   "attempt_limit": "unknown",
+   "attempt_limit": false,
    "sensitive_field_write": false,
    "persistent_write": true,
    "outbound_message": true
