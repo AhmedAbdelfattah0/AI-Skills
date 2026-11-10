@@ -32,6 +32,7 @@ import { readFileSync, writeFileSync, mkdtempSync, copyFileSync, rmSync, realpat
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, runStateEvents, runLogEvents, codes } from './engine-test-fixture.mjs';
 import * as DAG from './engine-dag.mjs';
 // The one cutoff constant (never a copy of its value here: it is finalized at merge).
@@ -260,6 +261,25 @@ test('[S21] a formatted proof whose output was truncated proves no pair spec (un
   assert.ok(S.attempts.some(a => a.kind === 'proof' && a.node === 'loud' && a.envelope?.truncated === true), 'the loud proof was truncated');
   assert.ok(S.local_proof.commands.every(c => c.result === 'pass'), 'every proof command exits 0');
   assert.ok(S.local_proof.spec_results.every(x => x.status === 'unparsed'), J(S.local_proof.spec_results));
+});
+
+test('[S28] a proof command that moves config.base (an empty commit, candidate unchanged) leaves every pair unproven: control_unproven', { skip: WIN_SKIP }, (t) => {
+  // The proof's last command commits nothing on HEAD (config.base): the work tree, so the candidate, is unchanged.
+  const move = { cmd: process.execPath, args: ['-e', "require('child_process').execFileSync('git',"
+    + "['-c','user.name=t','-c','user.email=t@example.com','commit','-q','--allow-empty','-m','moved'])"] };
+  const fx = built(secFx(t, { testCommands: { unit: UNIT, move } }));
+  ok(fx.gate('review', secReview(fx, 'rx-1')));
+  const head = () => spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fx.repo, encoding: 'utf8' }).stdout.trim();
+  const [before, cand] = [head(), fx.candidate()];
+  assert.equal(fx.readState().gates.red.api.base_commit, before, 'RED was accepted against the current base');
+  const r = refused(fx.gate('ship-ready', {}), 'control_unproven');
+  assert.notEqual(head(), before, 'the proof moved the base');
+  assert.equal(fx.candidate(), cand, 'the candidate is unchanged');
+  const S = fx.readState();
+  assert.equal(S.local_proof.candidate_id, cand, 'the proof is bound to the candidate');
+  assert.ok(S.local_proof.spec_results.every(x => x.status === 'pass'), 'every pair spec passed: only the RED binding is unproven');
+  assert.deepEqual([...r.out.missing].sort(), fx.ids.map(id => `${id}-spec`).sort());
+  assert.equal(S.ship_ready, undefined);
 });
 
 test('[S20] [S25] [S26] reassess: a new route is never dismissed by a reason alone; `surfaces` makes it ADD_CONTROLS (addendum_required); a trusted covering addendum makes it fresh', { skip: WIN_SKIP }, (t) => {
@@ -503,7 +523,7 @@ test('[S9] an addendum outside the contract or in conflict is a judgment', { ski
 
 // ------------------------------------------------------------------ C5 authority per event
 
-const CANDIDATE_CLI = new URL('./candidate-id.mjs', import.meta.url).pathname;
+const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
 /**
  * A proof command that appends `ev` to RUN-STATE once, while its proof attempt is live; '__CAND__'
  * in `ev` becomes the work tree's candidate id (so a waiver names the candidate it would waive).

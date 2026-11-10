@@ -85,6 +85,8 @@ export const SECURITY_MUTANTS = [
   { tag: 'S27', name: 'reassess: only an empty-facts classification is held back, so a cited no-op fact dismisses a surface-introducing signal off every approved surface', file: 'security-plan.mjs',
     from: 'const dismissed = (s) => byId.has(s.id) && !(SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));',
     to: 'const dismissed = (s) => byId.has(s.id) && !(Object.keys(byId.get(s.id).facts).length === 0 && SURFACE_SIGNALS.includes(s.kind) && !approvedPaths.has(s.path));' },
+  { tag: 'S28', name: 'ship-ready: the post-proof control pairs reuse the pre-proof base, so a proof that moves config.base still proves a pair', file: 'engine-gates.mjs',
+    from: '    E.baseCommit = undefined;\n', to: '' },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

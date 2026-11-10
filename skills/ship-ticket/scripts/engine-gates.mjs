@@ -307,6 +307,9 @@ async function shipReadyGate(E, input, candidate) {
   if (!v.ok && v.reasons.every(r => r === 'missing_local_proof') && !proven(S, candidate)) {
     const { refusal, commands, spec_results } = await runProof(E);
     if (refusal) return refusal;
+    // The proof ran repository commands, which can move config.base (an empty commit): forget the base
+    // redChanges cached for the pre-proof derivation, so the post-proof control_pairs re-resolve it.
+    E.baseCommit = undefined;
     // The proof ran repository commands: the approval binding (excluded plan narrative, DAG bytes) and
     // the candidate must still hold BEFORE a proof bound to the candidate is recorded.
     const unbound = E.verifyBinding();
