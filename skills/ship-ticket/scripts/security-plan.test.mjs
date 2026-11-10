@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -794,6 +794,103 @@ test('CLI select from a standalone install without vapt refuses catalog_missing,
     const out = JSON.parse(r.stdout);
     assert.equal(out.code, 'catalog_missing'); assert.ok(!('controls' in out));
   }
+});
+
+test('AC2 a keyword match alone creates a signal and never selects a control', () => {
+  // a. Selection reads structured facts and surface kinds, never words: free text full of security vocabulary changes nothing.
+  const WORDS = 'payment auth admin wallet password token';
+  const plainIn = input([surf('A', 'request-handler', 'src/a.ts'), surf('B', 'rendering-sink', 'src/b.ts')], FALSE3, { summary: 'format a date' });
+  const loudIn = input([surf('A', 'request-handler', `src/${WORDS.replace(/ /g, '-')}.ts`), surf('B', 'rendering-sink', 'src/wallet/password.ts')], FALSE3, { summary: `${WORDS} admin payment` });
+  for (const k of Object.keys(loudIn.evidence)) loudIn.evidence[k] = unknownish(FALSE3[k]) ? `unknown: ${WORDS} not determined` : `src/payment/${k}.ts:authToken`;
+  const plain = ok(SP.selectControls(syn, plainIn));
+  const loud = ok(SP.selectControls(syn, loudIn));
+  assert.ok(plain.controls.length > 0, 'the plain case selects something, so equality is not vacuous');
+  assert.deepEqual(loud.controls.map((c) => c.control_id), plain.controls.map((c) => c.control_id));
+  assert.deepEqual(pairIds(loud), pairIds(plain));
+  assert.deepEqual(loud.excluded.map((e) => e.control_id), plain.excluded.map((e) => e.control_id));
+  // the same on the real catalog, with the boundary ids themselves carrying the words (compare the control part of the pairs)
+  const realSurf = (ids) => [svc(ids[0], 'server-input', 'src/orders.ts'), svc(ids[1], 'auth-lifecycle', 'src/login.ts')];
+  const realFacts = Object.fromEntries(REAL_BOOLS.map((k) => [k, false]));
+  const realIn = (ids, text) => ({ security_policy: 2, surfaces: realSurf(ids), facts: realFacts, summary: text,
+    evidence: Object.fromEntries(REAL_BOOLS.map((k) => [k, `src/${text.split(' ')[0]}.ts:handler`])) });
+  const rPlain = ok(SP.selectControls(real, realIn(['orders-api', 'login'], 'format dates')));
+  const rLoud = ok(SP.selectControls(real, realIn(['payment-admin-wallet', 'password-token-auth'], WORDS)));
+  assert.ok(rPlain.controls.length > 0);
+  assert.deepEqual(rLoud.controls.map((c) => c.control_id), rPlain.controls.map((c) => c.control_id));
+  assert.deepEqual(rLoud.pairs.map((p) => p.control_id), rPlain.pairs.map((p) => p.control_id));
+
+  // b. A keyword in the diff (a route registration, a mail send, a payment call) is a signal, not a control.
+  const approved = ok(SP.selectControls(real, { security_policy: 2, surfaces: APPROVED_REAL, facts: Object.fromEntries(REAL_BOOLS.map((k) => [k, false])),
+    evidence: Object.fromEntries(REAL_BOOLS.map((k) => [k, 'src/orders.ts:handler'])) }));
+  const files = [
+    { path: 'src/lib/mail.ts', added: ['await transporter.sendMail(msg);'] },
+    { path: 'src/lib/pay.ts', added: ['await stripe.refunds.create({ charge });'] },
+    { path: 'src/lib/r.ts', added: ["router.post('/x', h);"] },
+  ];
+  const expectIds = ['mail-or-notification-send@src/lib/mail.ts', 'new-route@src/lib/r.ts', 'payment-or-stock-or-wallet-call@src/lib/pay.ts'];
+  const rea2 = (fs, classifications = []) => SP.reassess({ plan: planWith(approved), catalog: real,
+    inventory: { candidate_id: 'cand-k', surfaces: approved.surfaces }, changed: { contract_paths: ['src/**'], files: fs }, classifications, addenda: [] });
+  const detected = SP.reassessSignals({ paths: files, approvedPairs: [], approvedSurfaces: [], catalog: real.catalog });
+  assert.deepEqual(detected.map((s) => s.id), expectIds, 'the three diffs are detected as signals');
+  assert.ok(detected.every((s) => s.class === null));
+  const open = refused(rea2(files), 'classification_missing');
+  assert.deepEqual([...open.unclassified].sort(), expectIds, 'every signal is reported and left open');
+  assert.deepEqual(open.signals.map((s) => s.id).sort(), expectIds);
+  assert.ok(!('delta_pairs' in open) && !('addendum' in open) && !('outcome' in open), 'no control or pair is added by the keyword');
+  // the two signals that introduce no surface, alone: an open signal blocks, nothing is added
+  const quiet = files.slice(0, 2);
+  const quietOpen = refused(rea2(quiet), 'classification_missing');
+  assert.deepEqual([...quietOpen.unclassified].sort(), [expectIds[0], expectIds[2]]);
+
+  // c. A reason closes the signal and nothing more: still no new pair, no addendum, no new control.
+  const reasons = (ids) => ids.map((signal_id) => ({ signal_id, reason: 'reviewed: no new boundary' }));
+  const closed = ok(rea2(quiet, reasons([expectIds[0], expectIds[2]])));
+  assert.equal(closed.outcome, 'UNCHANGED');
+  assert.deepEqual(closed.delta_pairs, []);
+  assert.ok(!('addendum' in closed) || closed.addendum == null || closed.addendum.pairs.length === 0);
+  assert.deepEqual([...closed.classifications_used].sort(), [expectIds[0], expectIds[2]]);
+  assert.deepEqual(closed.signals.map((s) => s.id).sort(), [expectIds[0], expectIds[2]], 'the signals are still reported');
+  // the route signal introduces a surface: a reason does not turn it into a control either, it stays open
+  const routeReason = refused(rea2(files, reasons(expectIds)), 'classification_missing');
+  assert.deepEqual(routeReason.unclassified, ['new-route@src/lib/r.ts']);
+  assert.ok(!('delta_pairs' in routeReason) && !('addendum' in routeReason));
+});
+
+test('AC3 a re-check that finds no change writes nothing to disk', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'secplan-ac3-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const snapshot = (root) => {
+    const out = {};
+    for (const rel of readdirSync(root, { recursive: true }).sort()) {
+      const st = statSync(join(root, rel));
+      out[rel] = st.isDirectory() ? 'dir' : createHash('sha256').update(readFileSync(join(root, rel))).digest('hex');
+    }
+    return out;
+  };
+  const put = (name, text) => { writeFileSync(join(dir, name), typeof text === 'string' ? text : JSON.stringify(text)); return join(dir, name); };
+  const catalogPath = put('controls.json', readFileSync(SYN_PATH, 'utf8'));
+  const sel = approvedSyn();
+  const planPath = put('plan.md', planWith(sel));
+  const invPath = put('inventory.json', { candidate_id: 'c', surfaces: [surf('A', 'request-handler', 'src/a.ts')] });
+  const changedPath = put('changed.json', { contract_paths: ['src/a.ts'], files: [{ path: 'src/a.ts', added: ['const x = 1;'] }] });
+  const factsPath = put('facts.json', input([], FALSE3));
+  const run = (args) => {
+    const r = spawnSync(process.execPath, [SCRIPT, ...args, '--catalog', catalogPath], { cwd: dir, encoding: 'utf8' });
+    let out = null; try { out = JSON.parse(r.stdout); } catch { /* asserted below */ }
+    return { status: r.status, out, stderr: r.stderr };
+  };
+  const before = snapshot(dir);
+  assert.deepEqual(Object.keys(before).sort(), ['changed.json', 'controls.json', 'facts.json', 'inventory.json', 'plan.md'], 'the directory holds only the inputs');
+  const re = run(['reassess', '--plan', planPath, '--inventory', invPath, '--changed', changedPath]);
+  assert.equal(re.status, 0, re.stderr);
+  assert.equal(re.out.outcome, 'UNCHANGED');
+  assert.deepEqual(re.out.signals, []);
+  assert.deepEqual(snapshot(dir), before, 'reassess left the directory untouched');
+  const se = run(['select', '--facts', factsPath]);
+  assert.equal(se.status, 0, se.stderr);
+  assert.deepEqual(se.out.pairs, []);
+  assert.equal(se.out.rows_md.split('\n').length, 3, 'the compact three-line form');
+  assert.deepEqual(snapshot(dir), before, 'select left the directory untouched');
 });
 
 test('CLI reassess: UNCHANGED exit 0, ADD_CONTROLS exit 0, REAPPROVAL exit 2, classification_missing exit 2', () => {
