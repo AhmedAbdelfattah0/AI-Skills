@@ -224,7 +224,7 @@ function processed(record) {
  * Joins provider-reported usage records into a run summary by `run_id`.
  * Returns a copy of `run` with `usage`: tokens by role (processed = input +
  * output + cache read + cache write; `'unknown'` when no record of the role
- * reports a counter), the total, the orchestrator share in percent, and
+ * reports a counter), the total, the orchestrator and reviewer shares in percent, and
  * reported cost partitioned by `cost_basis` (bases are never added together).
  * @param {object} run a `buildRun` result
  * @param {object[]} records usage records (any run; others are ignored)
@@ -252,12 +252,14 @@ export function attachUsage(run, records) {
   const totals = Object.values(roles).map((r) => r.processed_tokens).filter(known);
   const total = totals.length ? totals.reduce((a, b) => a + b, 0) : null;
   const orchestrator = roles.orchestrator?.processed_tokens;
+  const reviewer = roles.reviewer?.processed_tokens;
   const anyUnknown = mine.some((r) => processed(r) === null); // one record without counters makes the share unknowable
   return { ...run, usage: {
     tokens_by_role: mine.length ? roles : UNKNOWN,
     tokens_by_phase: mine.length ? phases : UNKNOWN,
     processed_tokens_total: total ?? UNKNOWN,
     orchestrator_share_pct: known(orchestrator) && !anyUnknown && total > 0 ? Math.round(orchestrator / total * 1000) / 10 : UNKNOWN,
+    reviewer_share_pct: known(reviewer) && !anyUnknown && total > 0 ? Math.round(reviewer / total * 1000) / 10 : UNKNOWN,
     cost_by_basis: cost,
   } };
 }

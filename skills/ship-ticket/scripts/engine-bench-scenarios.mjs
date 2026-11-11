@@ -401,6 +401,38 @@ async function s9(meter) {
     && redProvenance.archived_files.join() === 'engine.jsonl,manifest.json,state.json' && redProvenance.second_run_init.refused === 'state_exists' };
 }
 
+async function s10(meter) {
+  // config.base is NOT set: the engine resolves it to HEAD of the work tree (the shape of the archived runs).
+  // The "target" moves by a commit on that same HEAD that touches a file node b owns.
+  const w = world(meter, { config: { width: 1, base: undefined }, nodes: [node('a'), node('b', { deps: ['a'] })] });
+  w.fx.behave(plain('a', 'b'));
+  const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: w.fx.repo, encoding: 'utf8' });
+  w.init();
+  const configHasBase = 'base' in (w.fx.readState().config ?? {});
+  const half = w.cli('drive', { until: 'a' });
+  const headBefore = git('rev-parse', 'HEAD').stdout.trim();
+  const candidateBefore = w.fx.candidate();
+  mkdirSync(join(w.fx.repo, 'src'), { recursive: true });
+  writeFileSync(join(w.fx.repo, 'src', 'b.txt'), 'upstream change to a file the plan owns');
+  git('add', 'src/b.txt'); git('commit', '-q', '-m', 'upstream');
+  const candidateAfter = w.fx.candidate();
+  const after = w.cli('drive');
+  const stateAfter = w.fx.readState();
+  const candidateFinal = w.fx.candidate();
+  const bBytes = readFileSync(join(w.fx.repo, 'src', 'b.txt'), 'utf8');
+  const ship = refusalOf(w.gate('ship-ready', {}));
+  const headMoved = git('rev-parse', 'HEAD').stdout.trim() !== headBefore;
+  const shows = { config_base_in_state: configHasBase, head_moved: headMoved, candidate_id_changed: candidateBefore !== candidateAfter,
+    drive_before_move: { outcome: half.out?.outcome ?? null, nodes: states(half.out) },
+    drive_after_move: { exit: after.status, outcome: after.out?.outcome ?? null, nodes: states(after.out), judgments: codes(after.out),
+      writer_runs: { a: w.fx.runs('a').length, b: w.fx.runs('b').length } },
+    evidence: { frozen_candidate_recorded: Boolean(stateAfter.frozen_candidate),
+      final_candidate_differs_from_pre_move: candidateFinal !== candidateBefore, upstream_bytes_overwritten_by_node_b: bBytes === 'b',
+      node_a_state_after: stateAfter.nodes?.a?.state ?? null, red_invalid_recorded: Boolean(stateAfter.gates?.red_invalid) },
+    ship_ready: { code: ship.code, reasons: ship.reasons.map(x => x.split(':')[0]) } };
+  return { shows, ok: configHasBase === false && headMoved && half.out?.outcome !== 'done' };
+}
+
 export const SCENARIOS = [
   { id: 'S1', title: 'one node', run: s1, flags: {} },
   { id: 'S2', title: 'contract, frontend and backend in one wave, then a join', run: s2, flags: {} },
@@ -411,6 +443,7 @@ export const SCENARIOS = [
   { id: 'S7', title: 'UI change: ship-ready refuses without parity evidence', run: s7, flags: { ui: true } },
   { id: 'S8', title: 'evidence integrity (baseline): second-opinion fixes and failures, reused finding ids, a moving candidate', run: s8, flags: {} },
   { id: 'S9', title: 'cross-run recovery (baseline): base moves mid-run, RED provenance after archive', run: s9, flags: {} },
+  { id: 'S10', title: 'cross-run recovery (baseline): config.base unset (HEAD) and the branch tip moves over a node-owned file mid-run', run: s10, flags: {} },
 ];
 
 /** Run one scenario and return its result; `deps.buildNodes` is the bench's DAG shape builder. */
@@ -432,10 +465,10 @@ export async function runScenario(def, deps, record = loadRecord()) {
   } finally { meter.cleanup(); }
 }
 
-/** `which` is an id (S1..S9) or 'all'; returns the results in order. */
+/** `which` is an id (S1..S10) or 'all'; returns the results in order. */
 export async function runScenarios(which, deps) {
   const defs = which === 'all' ? SCENARIOS : SCENARIOS.filter(d => d.id === which);
-  if (!defs.length) throw new Error(`unknown scenario ${which}: expected S1..S9 or all`);
+  if (!defs.length) throw new Error(`unknown scenario ${which}: expected S1..S10 or all`);
   const record = loadRecord();
   const out = [];
   for (const def of defs) out.push(await runScenario(def, deps, record));
