@@ -15,13 +15,17 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { POSIX, fixture, runStateEvents, failReview } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);
 
-/** Build a, hand-edit its file, freeze a FAIL review on the edited tree. */
+/**
+ * Build a, hand-edit its file, freeze a FAIL review on the edited tree. The workers finish by
+ * themselves, so timeoutMs is only a failure bound (#49: the fixture's 10 s expired under load).
+ */
 function handEditedThenFailed(t) {
-  const fx = fixture(t, { commit: true, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   writeFileSync(join(fx.repo, 'src', 'a.txt'), 'a1 + hand fix');

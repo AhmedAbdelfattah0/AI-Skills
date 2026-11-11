@@ -606,7 +606,10 @@ matching pattern when extending them:
   writer dispatch, `usage.mjs`, `docker-lifecycle.mjs`) refuses PLAN, defaults to
   subscription billing, and builds Claude/Codex arguments only from flags verified
   against the installed CLIs; keep it that way when a CLI changes. None of these
-  needs project-local setup, so symlink and copy installs behave the same.
+  needs project-local setup, so symlink and copy installs behave the same. Orchestrator
+  checks outside the engine: `scripts/ship-ready-check.mjs` (a hand-written `SHIP_READY`
+  must match an engine `GATE ship-ready` line), `scripts/base-drift.mjs` (base against
+  target tip, overlap with declared paths).
 - **`project-audit`** — *executes its bundled dependency-free Node continuity
   checker in place*. It reads current/prior manifests without writing to the
   audited repositories; structural accounting does not replace evidence review.

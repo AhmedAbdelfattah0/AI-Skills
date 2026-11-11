@@ -64,6 +64,7 @@ import { init, drive, acquireLock, planNarrativeDigest } from './run-engine.mjs'
 import { verifyReviewExecution } from './carrier.mjs';
 import { POSIX, fixture, codes, runStateEvents, runLogEvents, waitUntil, delay, passReview, failReview,
   confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS, processGone } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const injected = () => Object.assign(new Error('injected fault'), { code: 'injected' });
@@ -115,7 +116,8 @@ test('R1 gate commands re-verify run identity and the approved plan and DAG dige
 // ------------------------------------------------------------------ R2 quiescence before done
 
 test('R2 a node is done only after its whole process group is gone (a background descendant is reaped)', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t);
+  // timeoutMs is only a failure bound: the worker finishes by itself (#49).
+  const fx = fixture(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS } });
   const pidFile = join(fx.root, 'sleeper.pid');
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, sleeper: pidFile } });
   ok(fx.cli('init', { dag: fx.dagFile }));
@@ -124,8 +126,9 @@ test('R2 a node is done only after its whole process group is gone (a background
   assert.equal(r.out.nodes.a.state, 'done');
   const pid = Number(readFileSync(pidFile, 'utf8'));
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } });
-  const gone = () => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; } };
-  assert.ok(await waitUntil(gone, 1000), 'the descendant was killed before the node was recorded done');
+  // A killed descendant may linger as a zombie until its new parent reaps it, which under load took
+  // longer than this 1 s window (#49); processGone counts a zombie as dead. The window is unchanged.
+  assert.ok(await waitUntil(() => processGone(pid), 1000), 'the descendant was killed before the node was recorded done');
 });
 
 test('R2 unknown quiescence after a clean exit is a judgment point and the node is not done', async (t) => {
@@ -141,7 +144,8 @@ test('R2 unknown quiescence after a clean exit is a judgment point and the node 
 // ------------------------------------------------------------------ R3 lock barrier
 
 test('R3 drive keeps the lock until every launched attempt has settled, then rethrows', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', writes: ['src/b.txt'] }] });
+  // timeoutMs is only a failure bound: worker a ends when the flag appears (#49).
+  const fx = fixture(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', writes: ['src/b.txt'] }] });
   const flag = join(fx.root, 'release-a');
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: flag }, b: { write: { 'src/b.txt': 'b1' } } });
   await init(fx.ctx());

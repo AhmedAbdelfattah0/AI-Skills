@@ -32,7 +32,7 @@ test('the bench CLI runs both modes to completion and reports numeric counts', {
   }
 });
 
-// ------------------------------------------------------------------ seven scenarios (engine-bench-scenarios.mjs)
+// ------------------------------------------------------------------ nine scenarios (engine-bench-scenarios.mjs)
 
 const METRICS = ['orchestrator_commands', 'bytes_read', 'reference_bytes', 'wall_ms', 'nodes_completed', 'judgments', 'owner_interventions', 'proof_runs', 'retries'];
 const scenario = async (id) => (await runScenarios(id, { buildNodes }))[0];
@@ -49,9 +49,9 @@ test('the scenario CLI prints one result per scenario and exits 0 when it is ok'
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
   assert.deepEqual(out.map(x => x.id), ['S1']);
-  const bad = spawnSync(process.execPath, [BENCH, '--scenario', 'S9'], { encoding: 'utf8' });
+  const bad = spawnSync(process.execPath, [BENCH, '--scenario', 'S10'], { encoding: 'utf8' });
   assert.equal(bad.status, 1);
-  assert.match(bad.stderr, /unknown scenario S9/);
+  assert.match(bad.stderr, /unknown scenario S10/);
 });
 
 test('S1 one node completes with the smallest command count', { skip: N7_SKIP }, async () => {
@@ -153,6 +153,52 @@ test('S7 a ui ticket label makes ship-ready refuse without parity evidence', { s
   assert.ok(cleared.reasons.includes('review_not_accepted'), 'the absent review still blocks');
   assert.ok(r.metrics.reference_bytes > referenceBytes({}), 'a ui shape loads design-parity.md as well');
   assert.equal(r.metrics.reference_bytes, referenceBytes({ ui: true }));
+});
+
+test('S8 baseline: what the review gate records and refuses for evidence-integrity cases today', { skip: N7_SKIP }, async () => {
+  const r = await scenario('S8');
+  assertResult(r, 'S8');
+  const s = r.shows;
+  // (1) a second-opinion minor finding disposed `fix` under a primary PASS is refused and nothing is recorded.
+  assert.equal(s.primary_pass_with_second_opinion_fix.refusal.code, 'outcome_inconsistent');
+  assert.deepEqual(s.primary_pass_with_second_opinion_fix.refusal.reasons, ['PASS with findings to fix']);
+  assert.deepEqual(s.primary_pass_with_second_opinion_fix.chain_after, []);
+  // (2) a second-opinion FAIL with every finding `not applicable` is accepted as PASS; the record keeps the route and the findings, not the verdict.
+  const so = s.primary_pass_with_second_opinion_fail_not_applicable;
+  assert.equal(so.result.code, 'review_accepted');
+  assert.equal(so.recorded_outcome, 'PASS');
+  assert.equal(so.recorded_second_opinion_route, 'codex');
+  assert.equal(so.recorded_has_second_opinion_outcome, false, 'the second-opinion verdict is not in the original record');
+  assert.deepEqual(so.chain_after[0].findings, [{ id: 'S1', source: 'codex', severity: 'major', disposition: 'not applicable' }]);
+  // (3) a second original review needs an owner RETRY; behind one, the same finding id is recorded again and nothing links the two.
+  const ids = s.finding_ids_reused_across_executions;
+  assert.deepEqual([ids.first.code, ids.second_without_retry.code, ids.second_with_owner_retry.code], ['review_accepted', 'retry_unauthorized', 'review_accepted']);
+  assert.deepEqual(ids.finding_ids_in_chain, ['rx-1:F1', 'rx-2:F1']);
+  // (4) a confirmation is refused while the tree differs from the frozen candidate, whichever candidate it names, and accepted once the tree is restored.
+  const moving = s.candidate_moves_before_confirmation;
+  assert.equal(moving.tree_moved_after_repair, true);
+  assert.deepEqual([moving.confirm_on_pre_repair_candidate.code, moving.confirm_on_moved_tree.code], ['stale_candidate', 'stale_candidate']);
+  assert.equal(moving.confirm_on_repaired_candidate_after_restoring_the_tree.code, 'review_accepted');
+  assert.deepEqual(moving.chain_after.map(x => x.kind), ['original', 'repair', 'confirmation']);
+  assert.equal(r.metrics.reference_bytes, referenceBytes({}));
+});
+
+test('S9 baseline: a moved base is not detected by the engine in this world (single RED node, no dependent, so no RED check ran), and the archive does not carry the RED attempt output', { skip: N7_SKIP }, async () => {
+  const r = await scenario('S9');
+  assertResult(r, 'S9');
+  const base = r.shows.base_moves_mid_run;
+  assert.equal(base.drive_before_move.nodes.b, 'pending');
+  assert.equal(base.base_drift_report.exit, 1);
+  assert.deepEqual(base.base_drift_report.stdout, ['base-drift: OVERLAP', '  src/b.txt (declared src/b.txt, node b writes)']);
+  assert.equal(base.drive_after_move.outcome, 'done', 'today the engine finishes the run over a moved base and raises no judgment');
+  assert.deepEqual(base.drive_after_move.judgments, []);
+  const red = r.shows.red_provenance_in_a_later_run;
+  assert.equal(red.after_base_move.red_invalidated, false);
+  assert.equal(red.after_base_move.red_still_accepted, true);
+  assert.equal(red.red_attempt_output_live, true);
+  assert.equal(red.archive_contains_attempts, false);
+  assert.deepEqual(red.archived_files, ['engine.jsonl', 'manifest.json', 'state.json']);
+  assert.equal(red.second_run_init.refused, 'state_exists', 'a second run cannot start from the live state; it would have to rely on the archive');
 });
 
 test('peakConcurrency counts overlapping node attempts and nothing else', () => {

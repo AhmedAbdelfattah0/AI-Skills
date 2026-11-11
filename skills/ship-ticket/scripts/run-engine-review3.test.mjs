@@ -36,6 +36,7 @@ import { spawnSync } from 'node:child_process';
 import { init, drive, gate } from './run-engine.mjs';
 import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
   primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const FAILING_SPEC = `import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails on assertion', () => { assert.equal(1, 2); });\n`;
@@ -69,7 +70,8 @@ function failed(t, { config = {}, behaviour = {} } = {}) {
 // ------------------------------------------------------------------ A provider-default builders
 
 test('A a provider-default builder matches every reviewer of its provider (primary, second opinion, confirmation)', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { commit: true, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
+  // timeoutMs is only a failure bound for workers that finish by themselves (#49).
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   assert.ok(fx.readState().builders.some(b => b.identity === 'claude:provider-default'), 'the default fixture records the unresolved model');

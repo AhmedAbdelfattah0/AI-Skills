@@ -79,6 +79,11 @@ concurrently, then join once:
   evidence;
 - no unrelated user changes would enter the commit.
 
+Re-run `base-drift.mjs check` (brief.md) before SHIP. With the engine, after
+SHIP_READY is appended and before the commit, run `ship-ready-check.mjs check
+--run-state <plan> --engine-log <log> --run-id <ID> --require-event`; nonzero stops (`WAIT_FOR_USER`). Not applicable after degradation: record `harness degraded` and get explicit user approval
+(`WAIT_FOR_USER`) before the commit.
+
 Append SHIP_READY and the one predeclared ticket-keyed session-log entry. Those two
 recording writes are excluded from candidate identity. No code, test, comment,
 documentation, parity or VAPT evidence may change after REVIEW PASS.
