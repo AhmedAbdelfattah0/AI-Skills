@@ -9,7 +9,7 @@
 #   codex        ~/.agents/skills              OpenAI Codex
 #   gemini       ~/.gemini/skills              Gemini CLI (also reads ~/.agents/skills)
 #   agents       ~/.agents/skills              any standard-compliant tool
-#   antigravity  ~/.gemini/antigravity/skills  Google Antigravity (global skills)
+#   antigravity  ~/.gemini/config/skills       Google Antigravity (global skills)
 #   all          claude + agents + gemini + antigravity
 #
 #   ./scripts/install.sh                          # all skills → Claude Code, symlinked
@@ -59,7 +59,7 @@ target_dir() {
     claude) echo "$HOME/.claude/skills" ;;
     codex|agents) echo "$HOME/.agents/skills" ;;
     gemini) echo "$HOME/.gemini/skills" ;;
-    antigravity) echo "$HOME/.gemini/antigravity/skills" ;;
+    antigravity) echo "$HOME/.gemini/config/skills" ;;
     *) echo "" ;;
   esac
 }

@@ -32,7 +32,7 @@ node scripts/cli.mjs install --copy       # real files instead of symlinks (or -
 node scripts/cli.mjs install --target codex|gemini|agents|antigravity|all   # other AI tools
                                           # (SKILL.md is an open standard; codex/agents →
                                           # ~/.agents/skills, gemini → ~/.gemini/skills,
-                                          # antigravity → ~/.gemini/antigravity/skills);
+                                          # antigravity → ~/.gemini/config/skills);
                                           # --dest <path> for custom dirs
 node scripts/cli.mjs update               # refresh the source, then re-sync what it installed
 node scripts/cli.mjs update --check       # report what would change; write nothing
@@ -135,9 +135,19 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
 - **Install mode is auto-chosen:** from a clone the CLI **symlinks** (edits/`git pull` go live with no
   re-install); from an ephemeral `npx` cache it **copies** (a symlink into a temp cache would dangle).
   `--copy`/`--link` override. On Windows the CLI uses directory **junctions** (no admin needed).
+- **Antigravity's global path moved.** `--target antigravity` installs to `~/.gemini/config/skills`,
+  the directory Antigravity's documentation names for its App, CLI and IDE (checked 2026-11).
+  `~/.gemini/antigravity/skills` is the legacy path: `install` no longer writes there, but a plain
+  `update` still refreshes an install it finds there, so an existing one is not orphaned. The legacy
+  directory is deliberately not a `--target` value.
 - **CI is Node, not bash** — `.github/workflows/validate.yml` runs `node scripts/cli.mjs validate` on
   ubuntu. Keep `cli.mjs`'s validator and `validate.sh` in sync if you touch validation logic; the Node
   one is authoritative.
+- **The CLI has its own tests,** `scripts/cli.test.mjs`, run by CI on ubuntu, macOS and Windows with
+  Node 18 and 22. Every test runs a temp copy of `cli.mjs` and `autoupdate.mjs` against a temp home
+  directory, so no test can reach a real skills directory, a scheduler or this checkout (`update`
+  would otherwise `git pull` it). Keep it that way: never point a test at the real CLI's `install`,
+  `update` or `autoupdate`.
 - **`validate.sh` is a 16-line wrapper**, not a second implementation. It execs
   `node scripts/cli.mjs validate`. It used to be an 86-line parallel validator that drifted from the
   Node one — the exact failure the checks exist to catch — and it needed bash ≥ 4 for `declare -A`,
@@ -147,7 +157,7 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
 - `.skill` files are plain zips with the skill folder at the root; a `.md` renamed to `.skill` is not
   valid, which is why `package.sh` zips programmatically.
 
-## The six invariants the validator enforces
+## The eight invariants the validator enforces
 
 These are the failure modes that actually break a skill — or silently hollow one out. Treat them as
 hard rules when adding or editing a skill:
@@ -163,13 +173,31 @@ hard rules when adding or editing a skill:
 4. **Every relative markdown link must resolve.** A skill split across `references/` is only as good
    as its links — a dangling one silently drops the procedure it pointed at, and the reader is never
    told. Checked across the `SKILL.md` and every file under its `references/`.
-5. **No orphan references.** A file under `references/` that nothing links to is dead weight nobody
-   will ever be told to load.
+5. **No orphan references.** A file under `references/` that nothing reachable from `SKILL.md` links
+   to or names is dead weight nobody will ever be told to load.
 6. **Retired vocabulary stays retired.** A concept deleted from a skill but left referenced elsewhere
    is how `ship-ticket` came to carry fourteen live instructions consuming a classifier that had been
    removed. The retired list lives in `RETIRED_VOCABULARY` in `scripts/cli.mjs`; **add to it whenever
    you delete a concept**, and the check will fail any file that still names it. On its first run it
    found `nn-guard` routing users to a "GATE 2" that never existed in this library.
+7. **The outcome vocabulary has exactly one owner and can express failure.** Exactly one file in the
+   library defines `OUTCOME_VOCABULARY` (`ship-ticket/references/ship.md`), and it must list `PASS`,
+   `FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE` and `DEGRADED`. A vocabulary that calls itself complete
+   and omits `FAIL` makes a failure unrecordable. The validator enforced this before this list
+   named it.
+8. **Every cited rule ID exists in the skill that owns it.** `BE-*` belongs to
+   `backend-code-quality`, `NG-*` to `angular-code-quality`, `TEST-*` to `test-quality`, `DOC-*` to
+   `docs-accuracy` and `VAPT-*` to `vapt`. A single ID, a range (`BE-AUTH-01…07`), a slash list and
+   a comma list in any `SKILL.md` or `references/*.md` are expanded and each ID must appear in the
+   owner's `SKILL.md` or `references/`. On its first run it found five: `nn-guard` blocked edits on a
+   `BE-SEC-10` that no skill defined, and three of its ranges ran past the last rule of their
+   family. Three limits: a typo inside the owning skill defines itself; the `ux-audit` families
+   (cited only inside `ux-audit`) are not covered; and a comma-list member followed by a word
+   (`TEST-01, 02 and 08`) is read as prose and not checked, because `BE-SEC-01, 20 lines later`
+   must not invent a citation. A range end that is a full ID of another family
+   (`BE-SEC-01…BE-AUTH-09`) is checked as a citation of its own; one that names another family
+   without its prefix (`BE-AUTH-01…VAL-03`) cannot be read, so only the head is checked. **Add the prefix to `RULE_ID_OWNERS` in
+   `scripts/cli.mjs` when a skill starts owning a new rule family.**
 
 ## Skill anatomy
 
