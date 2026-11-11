@@ -305,7 +305,8 @@ Classify before writing. The tiers are universal; the mechanism is yours.
 | **Webhook** | inbound provider callbacks | Signature verification; replay protection; idempotency; audit log |
 | **System** | cron, service-to-service | Shared secret or mTLS; not publicly routable |
 
-**The eight `[NN]` invariants. Never, in any stack, at any stage of the project:**
+**The nine `[NN]` "never" invariants (`BE-SEC-09`, the tenth security invariant, follows the
+list). Never, in any stack, at any stage of the project:**
 
 - `BE-SEC-01` — Using elevated/admin datastore credentials where a request-scoped credential
   would work. This bypasses the authorization layer entirely = data leak.
@@ -320,6 +321,9 @@ Classify before writing. The tiers are universal; the mechanism is yours.
 - `BE-SEC-06` — Skipping signature verification or idempotency on a webhook.
 - `BE-SEC-07` — Swallowing errors silently (empty catch). Handle, log, or re-throw.
 - `BE-SEC-08` — Returning stack traces or internal error messages to clients in production.
+- `BE-SEC-10` — Disabling TLS certificate verification on outbound connections
+  (`NODE_TLS_REJECT_UNAUTHORIZED=0`, `InsecureSkipVerify: true`, `verify=False`). It lets anyone
+  on the network path impersonate the peer.
 
 Authentication answers *who*. `BE-SEC-09` `[NN]` — **Authorization is checked on every protected
 access**, not once at login. An authenticated user reaching another user's row is the most common

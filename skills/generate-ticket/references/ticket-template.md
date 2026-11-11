@@ -108,7 +108,7 @@ mechanics — this is what lets them make good calls under ambiguity.>`
 - **Fail-closed:** `<secrets/config that must deny when missing>`.
 - **Validation:** `<what is validated server-side and never trusted from client>`.
 - **Idempotency / audit:** `<retryable paths, audit logging>`.
-- **Security-sensitive?** `<yes/no — if yes, ship-ticket routes to its strong model>`.
+- **Security-sensitive?** `<yes/no — if yes, ship-ticket selects elevated review and requires explicit attack and security outcomes>`.
 - `<omit lines that don't apply; keep the ones that do>`
 
 ---

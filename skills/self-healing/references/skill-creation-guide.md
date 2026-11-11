@@ -2,7 +2,7 @@
 
 Follow this when creating a new `SKILL.md` or improving an existing one.
 It codifies the conventions the library actually enforces and the patterns
-proven across its 17 skills.
+proven across the library's skills.
 
 ## Hard invariants (the validator enforces these — CI fails otherwise)
 
@@ -11,6 +11,13 @@ proven across its 17 skills.
 3. Every `.sh` the SKILL.md invokes is either bundled in the repo or generated
    by the skill itself (`mv`/`cp`/`tee`/`>` targeting that basename). A call
    to a script that is neither is the exit-127 trap.
+4. Every relative Markdown link resolves.
+5. No orphan file under `references/` — something reachable from `SKILL.md` must link to it or name it.
+6. Retired vocabulary stays retired.
+7. The canonical outcome vocabulary (PASS, FAIL, NOT_TRIGGERED,
+   NOT_APPLICABLE, DEGRADED) has exactly one owner.
+8. Every cited rule ID (`BE-*`, `NG-*`, `TEST-*`, `DOC-*`, `VAPT-*`; single IDs,
+   ranges, slash and comma lists) exists in the skill that owns it.
 
 ## The description is a router — write it like one
 
@@ -19,7 +26,7 @@ proven across its 17 skills.
   when …" situations. The description is what Claude Code matches to decide
   whether to load the skill — dense beats elegant.
 - **Negative routing**: end with `DO NOT USE for X (use skill-Y)`. This is how
-  17 skills coexist without collisions — every exclusion names the sibling
+  the library's skills coexist without collisions — every exclusion names the sibling
   that owns the excluded case.
 - If the skill should run *reactively* (after work, without being asked), say
   so explicitly in the description — "run after writing X, before presenting,

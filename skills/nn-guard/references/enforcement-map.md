@@ -26,8 +26,8 @@ Every rule lives at layer 1; this map records which also have deterministic cove
 
 ## Layer 1 only (no honest mechanical signature — do not fake a check)
 
-BE-SEC-01/02/03/04/08/09 · BE-AUTH-01…09 · BE-VAL-01…05 · BE-TEN-01…05 · BE-RT-02/04 ·
-BE-HDR-01…06 · BE-WHK-02…08 · BE-AUD-01…04 · NG-SEC-01/03/05/06 · NG-CORE-02 ·
+BE-SEC-01/02/03/04/08/09 · BE-AUTH-01…07 · BE-VAL-01…04 · BE-TEN-01…05 · BE-RT-02/04 ·
+BE-HDR-01…05 · BE-WHK-02…08 · BE-AUD-01…04 · NG-SEC-01/03/05/06 · NG-CORE-02 ·
 all [ARCH]/[D].
 
 These need semantics grep can't see (is the tenant from the token? is the audit table

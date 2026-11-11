@@ -33,8 +33,9 @@ if [ ! -f session-log.md ]; then
   exit 0
 fi
 
-# Print the last entry (everything after the final --- separator)
-awk 'BEGIN{last=""} /^---/{block=$0; next} {block=block"\n"$0} /^---/{last=block} END{print last}' session-log.md
+# Print the last entry: from the final "## Session:" heading to its last content
+# line (trailing "---" and blank lines dropped). Prints nothing if there is none.
+awk '/^## Session:/{out=$0; held=""; on=1; next} !on{next} /^(---|[ \t]*)$/{held=held "\n" $0; next} {out=out held "\n" $0; held=""} END{if(on)print out}' session-log.md
 ```
 
 Or simply `cat session-log.md` and read the last block.

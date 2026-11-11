@@ -92,8 +92,9 @@ create table tenant_payment_credentials (
 
 ## Invariants & security
 
-- **Security-sensitive: yes** — route to strong model. Tenant payment credentials
-  are the most sensitive per-tenant data in the platform.
+- **Security-sensitive: yes** — ship-ticket selects elevated review and requires
+  explicit attack and security outcomes. Tenant payment credentials are the most
+  sensitive per-tenant data in the platform.
 - **Tenant isolation:** a cross-tenant read of credentials is catastrophic. Read/
   write via the sanctioned tenant-scoped path; add the call site to the RLS-refactor
   ticket's phase-2 list.

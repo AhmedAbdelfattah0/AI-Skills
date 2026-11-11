@@ -24,7 +24,7 @@ import {
   symlinkSync, cpSync, mkdirSync, writeFileSync, readlinkSync, renameSync, rmdirSync,
 } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -44,10 +44,20 @@ const TARGETS = {
   codex:  join(homedir(), '.agents', 'skills'),   // OpenAI Codex (alias of agents)
   gemini: join(homedir(), '.gemini', 'skills'),   // Gemini CLI native dir
   // Google Antigravity reads ONE global dir (its workspace dir is .agents/skills,
-  // which is only reachable per-repo, not from here).
-  antigravity: join(homedir(), '.gemini', 'antigravity', 'skills'),
+  // which is only reachable per-repo, not from here). Its documentation
+  // (antigravity.google/docs/skills, as of 2026-11) names ~/.gemini/config/skills; the older
+  // ~/.gemini/antigravity/skills is LEGACY_DIRS below.
+  antigravity: join(homedir(), '.gemini', 'config', 'skills'),
 };
 const DEFAULT_TARGET = 'claude';
+
+// Directories an older release installed into. Only `update` without a
+// --target/--dest consults this, so an existing install keeps being refreshed.
+// It is deliberately not part of TARGETS: `install --target antigravity|all`
+// must never write here, and the label is not an accepted --target value.
+const LEGACY_DIRS = {
+  'antigravity (legacy path)': join(homedir(), '.gemini', 'antigravity', 'skills'),
+};
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -455,6 +465,14 @@ function resolveDests({ targetSpec, destOverride, fallback }) {
   return [...seen].map(([dir, label]) => ({ label, dir }));
 }
 
+// Legacy install directories that still exist, for a plain `update` only.
+function legacyDests({ targetSpec, destOverride }) {
+  if (targetSpec || destOverride) return [];
+  return Object.entries(LEGACY_DIRS)
+    .filter(([, dir]) => existsSync(dir))
+    .map(([label, dir]) => ({ label, dir }));
+}
+
 function parseFlags(args) {
   const names = [];
   const flags = new Set();
@@ -706,10 +724,13 @@ function runUpdate(args) {
   }
 
   const existingTargets = Object.keys(TARGETS).filter((k) => existsSync(TARGETS[k]));
-  const destDirs = resolveDests({
-    targetSpec, destOverride,
-    fallback: existingTargets.length ? existingTargets : [DEFAULT_TARGET],
-  }).filter(({ label, dir }) => {
+  const destDirs = [
+    ...resolveDests({
+      targetSpec, destOverride,
+      fallback: existingTargets.length ? existingTargets : [DEFAULT_TARGET],
+    }),
+    ...legacyDests({ targetSpec, destOverride }),
+  ].filter(({ label, dir }) => {
     if (existsSync(dir)) return true;
     if (targetSpec || destOverride) say(`—  [${label}] ${dir} does not exist — nothing installed there`);
     return false;
@@ -1083,7 +1104,7 @@ function cmdAutoupdate(args) {
   });
 }
 
-// Port of scripts/validate.sh — same three invariants, cross-platform.
+// Port of scripts/validate.sh, since extended — the same checks CI enforces, cross-platform.
 const ROOT = join(SKILLS_DIR, '..');
 
 // Retired prose is written in Markdown, where an editor may wrap any inter-word
@@ -1114,6 +1135,115 @@ function originalLineForRetiredHit(source, originalOffsets, normalizedOffset) {
   return source.slice(0, sourceOffset).split('\n').length;
 }
 
+// ---- check 8: cited rule IDs -------------------------------------------------
+//
+// Each rule-ID prefix belongs to one skill, which alone may define it.
+const RULE_ID_OWNERS = {
+  BE: 'backend-code-quality',
+  NG: 'angular-code-quality',
+  TEST: 'test-quality',
+  DOC: 'docs-accuracy',
+  VAPT: 'vapt',
+};
+
+// An ID is PREFIX-NN or PREFIX-FAMILY-NN with exactly two digits. After the first
+// ID a citation may continue as a range (BE-AUTH-01…07, also `..`, `...`, an en
+// dash), a slash list (BE-SEC-01/02) or a comma list (NG-ARCH-03,05). A range or
+// slash list is one whatever follows it ("TEST-01..12 from the …"). A range end is
+// bare (…07), the head's prefix and family (…BE-AUTH-07, …TEST-12) or its family
+// alone (…AUTH-09); that is the `(?:(?:\1-)?\2)?` below, \1 and \2 being the head's
+// prefix and family. An end that is a full ID of another prefix or family is not
+// consumed, so the global match reads it as a citation of its own. An end with
+// another family and no prefix (BE-AUTH-01…VAL-03) cannot be read as a citation,
+// so only the head is checked. A comma-list member followed by a word is prose
+// ("BE-SEC-01, 20 lines later"): the lookahead gives it back, which also means a
+// member followed by a word (`TEST-01, 02 and 08`) is read as prose and not checked. A
+// wildcard has no digits and an unlisted prefix (SCRUM-108, CWE-22) is not in the
+// owner table, so neither matches.
+const NOT_BEFORE_WORD = '(?![ \\t]*[A-Za-z0-9])';
+const RULE_ID_RE = new RegExp(
+  `(?<![A-Za-z0-9_-])(${Object.keys(RULE_ID_OWNERS).join('|')})-((?:[A-Z]+-)?)(\\d{2})(?!\\d)`
+  + '(?:[ \\t]*(?:…|\\.{2,3}|–)[ \\t]*(?:(?:\\1-)?\\2)?(\\d{2})(?!\\d)'
+  + '|((?:/\\d{2}(?!\\d))+)'
+  + `|((?:,[ \\t]*\\d{2}(?!\\d))+)${NOT_BEFORE_WORD})?`,
+  'g',
+);
+
+const lineAt = (text, index) => text.slice(0, index).split('\n').length;
+
+// Numbers a citation names: the head, plus whatever its range or list adds.
+function citedNumbers(head, rangeEnd, slashes, commas) {
+  const nums = [head];
+  if (rangeEnd) {
+    // Both orders: TEST-12…01 names every ID between its ends, not only the head.
+    const [lo, hi] = [Math.min(head, Number(rangeEnd)), Math.max(head, Number(rangeEnd))];
+    for (let n = lo; n <= hi; n++) nums.push(n);
+  }
+  if (slashes) nums.push(...slashes.split('/').filter(Boolean).map(Number));
+  if (commas) nums.push(...commas.split(',').map((s) => s.trim()).filter(Boolean).map(Number));
+  return nums;
+}
+
+const ruleId = (prefix, family, n) => `${prefix}-${family}${String(n).padStart(2, '0')}`;
+
+// Every ID a text cites, expanded, with its line.
+function citedRuleIds(text) {
+  const cited = [];
+  for (const m of text.matchAll(RULE_ID_RE)) {
+    const [, prefix, family, head, rangeEnd, slashes, commas] = m;
+    const line = lineAt(text, m.index);
+    for (const n of citedNumbers(Number(head), rangeEnd, slashes, commas)) {
+      cited.push({ id: ruleId(prefix, family, n), line });
+    }
+  }
+  return cited;
+}
+
+// Only a full ID token defines an ID: a range or list inside the owner does not
+// define its expanded members. Known limit, accepted: a typo inside the owning
+// skill defines itself, because this cannot tell a definition from a citation.
+function definedRuleIds(text) {
+  return new Set([...text.matchAll(RULE_ID_RE)].map((m) => ruleId(m[1], m[2], Number(m[3]))));
+}
+
+// The Markdown a skill is judged by: its SKILL.md and every references/**/*.md.
+function skillDocs(name) {
+  const docs = [join(SKILLS_DIR, name, 'SKILL.md')];
+  const refDir = join(SKILLS_DIR, name, 'references');
+  if (existsSync(refDir)) walk(refDir, (f) => { if (f.endsWith('.md')) docs.push(f); });
+  return docs;
+}
+
+// prefix -> Set of defined IDs, or null when the owning skill is not in the library.
+function collectRuleDefinitions() {
+  const defs = {};
+  for (const [prefix, owner] of Object.entries(RULE_ID_OWNERS)) {
+    if (!existsSync(join(SKILLS_DIR, owner))) { defs[prefix] = null; continue; }
+    defs[prefix] = new Set();
+    for (const doc of skillDocs(owner).filter(existsSync)) {
+      for (const id of definedRuleIds(readFileSync(doc, 'utf8'))) defs[prefix].add(id);
+    }
+  }
+  return defs;
+}
+
+// One entry per distinct undefined ID per line, in file order.
+function undefinedCitations(docs, definitions) {
+  const missing = [];
+  for (const doc of docs) {
+    const path = relative(SKILLS_DIR, doc).split(sep).join('/');
+    const seen = new Set();
+    for (const { id, line } of citedRuleIds(readFileSync(doc, 'utf8'))) {
+      const prefix = id.split('-')[0];
+      const key = `${line}:${id}`;
+      if (definitions[prefix]?.has(id) || seen.has(key)) continue;
+      seen.add(key);
+      missing.push({ id, line, path, owner: RULE_ID_OWNERS[prefix] });
+    }
+  }
+  return missing;
+}
+
 function cmdValidate() {
   // All subdirectories — including any missing a SKILL.md, so we can flag them.
   const names = readdirSync(SKILLS_DIR, { withFileTypes: true })
@@ -1127,6 +1257,7 @@ function cmdValidate() {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   console.log(`Validating skills in ${SKILLS_DIR}\n`);
+  const ruleDefinitions = collectRuleDefinitions();
   let fail = false;
   const outcomeVocabularyOwners = [];
 
@@ -1166,9 +1297,8 @@ function cmdValidate() {
     // 4. Every relative markdown link in the SKILL.md or its references/ resolves.
     //    A skill split across references/ is only as good as its links: a dangling
     //    one silently drops the procedure it was pointing at.
-    const docs = [md];
+    const docs = skillDocs(name);
     const refDir = join(SKILLS_DIR, name, 'references');
-    if (existsSync(refDir)) walk(refDir, (f) => { if (f.endsWith('.md')) docs.push(f); });
     for (const doc of docs) {
       const body = readFileSync(doc, 'utf8');
       for (const lm of body.matchAll(/\]\((?!https?:|mailto:)([^)#\s]+)(?:#[^)]*)?\)/g)) {
@@ -1247,6 +1377,15 @@ function cmdValidate() {
           console.log(`❌ ${name}: the outcome vocabulary omits ${v}.`);
           err = fail = true;
         }
+    }
+
+    // 8. Every rule ID a skill cites is defined by the skill that owns its prefix.
+    //    Otherwise a citation can point at a rule that was never written, and the
+    //    reviewer who follows it finds nothing to enforce.
+    for (const c of undefinedCitations(docs, ruleDefinitions)) {
+      const gone = ruleDefinitions[c.id.split('-')[0]] === null ? ' Its owner skill is missing from the library.' : '';
+      console.log(`❌ ${name}: ${c.path}:${c.line} cites '${c.id}', which ${c.owner} does not define.${gone}`);
+      err = fail = true;
     }
 
     if (!err) console.log(`✅ ${name}`);
@@ -1443,7 +1582,7 @@ Install flags:
                           codex        ~/.agents/skills              (OpenAI Codex)
                           gemini       ~/.gemini/skills              (Gemini CLI)
                           agents       ~/.agents/skills              (any standard-compliant tool)
-                          antigravity  ~/.gemini/antigravity/skills  (Google Antigravity)
+                          antigravity  ~/.gemini/config/skills       (Google Antigravity)
                           all          claude + agents + gemini + antigravity
   --dest <path>         install into a custom directory instead
 
