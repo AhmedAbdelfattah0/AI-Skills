@@ -5,6 +5,9 @@
  * fake provider CLI, then executes it twice: `manual` (the documented hand-run loop) and `engine`.
  *
  * CLI: engine-bench.mjs [--nodes 6] [--json]     exit 0 only when every node of both modes completed
+ *      engine-bench.mjs --scenario <S1..S7|all> [--json]     one result per scenario (engine-bench-scenarios.mjs);
+ *                                                             exit 0 only when every scenario is ok; on Windows every
+ *                                                             scenario is skipped (limit N7) with ok false, so it exits 1
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { planNarrativeDigest } from './run-engine.mjs';
 import { isEntrypoint } from './harness.mjs';
+import { runScenarios } from './engine-bench-scenarios.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = (name) => join(HERE, name);
@@ -117,11 +121,20 @@ export function bench({ nodes: count = 6 } = {}) {
 }
 
 if (isEntrypoint(import.meta.url)) {
-  const argv = process.argv.slice(2), at = argv.indexOf('--nodes');
-  const n = at >= 0 ? Number(argv[at + 1]) : 6;
-  if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json]\n'); process.exit(1); }
-  const r = bench({ nodes: n });
-  if (argv.includes('--json')) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-  else for (const k of ['manual', 'engine']) process.stdout.write(`${k}: ${JSON.stringify(r[k])}\n`);
-  process.exitCode = r.ok ? 0 : 1;
+  const argv = process.argv.slice(2), at = argv.indexOf('--nodes'), scenarioAt = argv.indexOf('--scenario');
+  if (scenarioAt >= 0) {
+    const which = argv[scenarioAt + 1] ?? '';
+    const results = await runScenarios(which, { buildNodes }).catch(e => { process.stderr.write(`engine-bench: ${e.message}\n`); return null; });
+    if (!results) process.exit(1);
+    if (argv.includes('--json')) process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+    else for (const r of results) process.stdout.write(JSON.stringify(r) + '\n');
+    process.exitCode = results.every(r => r.ok) ? 0 : 1;
+  } else {
+    const n = at >= 0 ? Number(argv[at + 1]) : 6;
+    if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json] | --scenario <S1..S7|all> [--json]\n'); process.exit(1); }
+    const r = bench({ nodes: n });
+    if (argv.includes('--json')) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+    else for (const k of ['manual', 'engine']) process.stdout.write(`${k}: ${JSON.stringify(r[k])}\n`);
+    process.exitCode = r.ok ? 0 : 1;
+  }
 }
