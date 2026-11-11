@@ -1,0 +1,273 @@
+{
+  "spine": {
+    "file": "SKILL.md",
+    "bytes": 42072
+  },
+  "references": [
+    {
+      "file": "references/codex-cli.md",
+      "bytes": 3393
+    },
+    {
+      "file": "references/cross-model.md",
+      "bytes": 13459
+    },
+    {
+      "file": "references/design-parity.md",
+      "bytes": 7594
+    },
+    {
+      "file": "references/execution-harness.md",
+      "bytes": 67942
+    },
+    {
+      "file": "references/observability.md",
+      "bytes": 19990
+    },
+    {
+      "file": "references/plan.md",
+      "bytes": 26847
+    },
+    {
+      "file": "references/prove.md",
+      "bytes": 16250
+    },
+    {
+      "file": "references/review.md",
+      "bytes": 32656
+    },
+    {
+      "file": "references/security-risk.md",
+      "bytes": 12557
+    },
+    {
+      "file": "references/ship.md",
+      "bytes": 8048
+    },
+    {
+      "file": "references/understand.md",
+      "bytes": 15245
+    }
+  ],
+  "total_bytes": 266053,
+  "file_count": 12,
+  "phases": [
+    {
+      "phase": "START",
+      "loads": [
+        {
+          "file": "references/observability.md",
+          "bytes": 19990,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "UNDERSTAND",
+      "loads": [
+        {
+          "file": "references/understand.md",
+          "bytes": 15245,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "PLAN",
+      "loads": [
+        {
+          "file": "references/plan.md",
+          "bytes": 26847,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        },
+        {
+          "file": "references/codex-cli.md",
+          "bytes": 3393,
+          "condition": "Codex is the counterpart",
+          "flag": "codex"
+        }
+      ]
+    },
+    {
+      "phase": "BUILD",
+      "loads": [
+        {
+          "file": "references/execution-harness.md",
+          "bytes": 67942,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "PROVE",
+      "loads": [
+        {
+          "file": "references/prove.md",
+          "bytes": 16250,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/design-parity.md",
+          "bytes": 7594,
+          "condition": "PROVE with UI",
+          "flag": "ui"
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        }
+      ]
+    },
+    {
+      "phase": "REVIEW",
+      "loads": [
+        {
+          "file": "references/review.md",
+          "bytes": 32656,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": "REVIEW with elevated counterpart",
+          "flag": "elevated"
+        },
+        {
+          "file": "references/codex-cli.md",
+          "bytes": 3393,
+          "condition": "Codex is the counterpart",
+          "flag": "codex"
+        }
+      ]
+    },
+    {
+      "phase": "SHIP",
+      "loads": [
+        {
+          "file": "references/ship.md",
+          "bytes": 8048,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    }
+  ],
+  "unit_text": [
+    {
+      "file": "references/execution-harness.md",
+      "bytes": 14986,
+      "headings": [
+        "Units (opt-in; AIS-HARNESS-3 Wave 2a)."
+      ]
+    },
+    {
+      "file": "references/review.md",
+      "bytes": 10373,
+      "headings": [
+        "## Unit review (opt-in: `config.unitReview`)",
+        "## Repair routing (units)",
+        "## Final review on unit evidence"
+      ]
+    }
+  ],
+  "runs": {
+    "without_units": {
+      "flags": {
+        "ui": false,
+        "security": false,
+        "elevated": false,
+        "codex": false,
+        "units": false
+      },
+      "files": [
+        "SKILL.md",
+        "references/cross-model.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/ship.md",
+        "references/understand.md"
+      ],
+      "bytes": 242509
+    },
+    "with_units": {
+      "flags": {
+        "ui": false,
+        "security": false,
+        "elevated": false,
+        "codex": false,
+        "units": true
+      },
+      "files": [
+        "SKILL.md",
+        "references/cross-model.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/ship.md",
+        "references/understand.md"
+      ],
+      "bytes": 242509
+    },
+    "all_conditions": {
+      "flags": {
+        "ui": true,
+        "security": true,
+        "elevated": true,
+        "codex": true,
+        "units": true
+      },
+      "files": [
+        "SKILL.md",
+        "references/codex-cli.md",
+        "references/cross-model.md",
+        "references/design-parity.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/security-risk.md",
+        "references/ship.md",
+        "references/understand.md"
+      ],
+      "bytes": 266053
+    }
+  }
+}
