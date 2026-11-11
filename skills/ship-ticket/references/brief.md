@@ -39,6 +39,13 @@ contract change) and Report block.
 The Report block is a fenced `ship-ticket-report` example with exactly the keys `tests`, `red_seen`,
 `blockers` and `needs_outside_ownership`. The format is the one in `references/execution-harness.md`.
 
+## Base drift
+
+Record the base SHA at `init`; leave `config.base` as is. At BUILD start, before freeze
+and before SHIP run
+`node scripts/base-drift.mjs check --repo <R> --base <SHA> --target <ref> --dag <dag.json>`.
+Exit 1: `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA.
+
 ## Check a brief
 
 ```text

@@ -193,7 +193,21 @@ that survived a crashed gate, is not dispatched.
 `archive` paragraph, continued:
 
 Files are staged and published whole, so a failed copy leaves no numbered
-directory.
+directory. `archive` copies only state, log and usage. After it runs, copy
+`<git-dir>/ai-skills/ship-ticket/<ticket>.attempts` to
+`<git-common-dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>.attempts`, a sibling
+of the archive directory it printed.
+
+### Base pin and SHIP_READY cross-check
+
+`base-drift.mjs check --repo <R> --base <SHA> --target <ref> --dag <dag.json>
+[--contract-paths <file>]` exits non-zero and lists changed files that overlap DAG
+`reads`/`writes` or the contract list. `ship-ready-check.mjs check --run-state <plan>
+--engine-log <file>` fails for any SHIP_READY without a `GATE ship-ready ok` line of the
+same candidate. There is no hand-written exception: editing the plan narrative changes
+the approved-plan digest. When the engine cannot write the pair, record `harness degraded`
+([execution-harness.md](execution-harness.md)) and get explicit user approval
+(`WAIT_FOR_USER`) before the commit.
 
 ### `mark`
 

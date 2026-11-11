@@ -5,7 +5,7 @@
  * fake provider CLI, then executes it twice: `manual` (the documented hand-run loop) and `engine`.
  *
  * CLI: engine-bench.mjs [--nodes 6] [--json]     exit 0 only when every node of both modes completed
- *      engine-bench.mjs --scenario <S1..S7|all> [--json]     one result per scenario (engine-bench-scenarios.mjs);
+ *      engine-bench.mjs --scenario <S1..S9|all> [--json]     one result per scenario (engine-bench-scenarios.mjs);
  *                                                             exit 0 only when every scenario is ok; on Windows every
  *                                                             scenario is skipped (limit N7) with ok false, so it exits 1
  */
@@ -131,7 +131,7 @@ if (isEntrypoint(import.meta.url)) {
     process.exitCode = results.every(r => r.ok) ? 0 : 1;
   } else {
     const n = at >= 0 ? Number(argv[at + 1]) : 6;
-    if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json] | --scenario <S1..S7|all> [--json]\n'); process.exit(1); }
+    if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json] | --scenario <S1..S9|all> [--json]\n'); process.exit(1); }
     const r = bench({ nodes: n });
     if (argv.includes('--json')) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     else for (const k of ['manual', 'engine']) process.stdout.write(`${k}: ${JSON.stringify(r[k])}\n`);

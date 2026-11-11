@@ -262,6 +262,13 @@ Give every finding one disposition:
 | `not applicable` | a rule does not fire | named rule ID and applicability evidence |
 | `human waiver` | an `[NN]` invariant would bend | `WAIT_FOR_USER`; never self-approve |
 
+A disposition row carries `finding_id` and `source` (`primary` or the second opinion's
+route); `id`s are unique per reviewer.
+The gate stores only the primary `outcome`, refusing a primary `PASS` with a finding
+disposed `fix` (`outcome_inconsistent`). The reviewer re-judges the outcome; never edit it by hand. Repair and
+confirmation follow. Run `usage.mjs import-session` (and `import-codex`)
+after every review execution (reviews are unmetered).
+
 A rejected second-opinion finding that could affect correctness, security or
 parity must be included in the targeted confirmation even when no bytes change.
 **An in-scope minor is `fix`, not a follow-up.** A minor inside a Design Contract

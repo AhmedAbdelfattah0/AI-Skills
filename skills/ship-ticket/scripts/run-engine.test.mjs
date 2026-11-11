@@ -115,6 +115,7 @@ import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
 import { POSIX, BEGIN, END, narrativeDigest, delay, codes, fixture, spawnSpy, runStateEvents, runLogEvents, waitUntil,
   STAGED, STAGED_BEHAVIOUR, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
+import { HANDSHAKE_BOUND_MS, waitFor } from './test-wait.test-helper.mjs';
 
 const ENGINE_URL = new URL('./run-engine.mjs', import.meta.url).href;
 /** Windows cannot prove process-group quiescence, so a finished attempt there is a judgment, never done (R2). */
@@ -129,8 +130,28 @@ const injected = () => Object.assign(new Error('injected fault'), { code: 'injec
  * engine's behaviour under test (timeout -> failed, never auto-retried) does not depend on the value.
  */
 // 1500 ms (2x the worst unloaded cold start) flaked once with run-engine-repair.test.mjs running in
-// parallel under the full suite; 3000 ms leaves headroom for that load.
+// parallel under the full suite, and 3000 ms still flaked under heavier load (#49). The timer is now
+// armed only after the `startedHooks` handshake below has seen the worker log its run, so the value
+// no longer has to cover the cold start.
 const HANG_TIMEOUT_MS = 3000;
+
+/**
+ * Hooks for a `hang` fixture: the engine arms its timeout only after the awaited `after-release`
+ * boundary (engine-attempts.mjs), so holding that boundary until the released worker has logged its
+ * run (runs.log, the worker's own marker) makes the timeout fire on a worker that really started.
+ * The hook never throws (that would abort the attempt before its timer exists); a missed handshake
+ * is recorded and asserted after `drive` by `assertStarted`.
+ */
+function startedHooks(fx, id) {
+  const missed = [];
+  let released = 0;
+  const hooks = { boundary: async (name) => {
+    if (name !== 'after-release') return;
+    const before = released++;
+    try { await waitFor(() => fx.runs(id).length > before, `worker ${id} logged release #${before + 1}`); } catch (e) { missed.push(e.message); }
+  } };
+  return { hooks, assertStarted: () => assert.deepEqual(missed, [], 'handshake: every released worker logged its run before the timeout was armed') };
+}
 
 /** Run `drive` in a child process that SIGKILLs itself at a handshake boundary (a real engine crash). */
 function crashAt(fx, boundary) {
@@ -141,7 +162,7 @@ await drive({ ...ctx, verifySubscription: () => true, handleSignals: false,
   hooks: { boundary(name) { if (name === ${JSON.stringify(boundary)}) process.kill(process.pid, 'SIGKILL'); } } });
 `);
   const r = spawnSync(process.execPath, [script, JSON.stringify({ repoRoot: fx.repo, ticket: 'T-1', runId: 'run-1', dagFile: fx.dagFile })],
-    { env: fx.env, encoding: 'utf8', timeout: 20000 });
+    { env: fx.env, encoding: 'utf8', timeout: HANDSHAKE_BOUND_MS }); // failure bound only (#49)
   assert.equal(r.signal, 'SIGKILL', `engine must reach the '${boundary}' boundary and die there; stderr: ${r.stderr}`);
 }
 
@@ -253,14 +274,17 @@ test('AC1 mark allows only pending->cancelled and failed->pending, and nothing e
 
 test('AC1 failed->pending counts as an attempt and is capped at one retry', { skip: N7_SKIP }, async (t) => {
   const fx = fixture(t, { config: { timeoutMs: HANG_TIMEOUT_MS }, behaviour: { a: { hang: true } } });
+  const { hooks, assertStarted } = startedHooks(fx, 'a');
   await init(fx.ctx());
-  const first = await drive(fx.ctx());
+  const first = await drive(fx.ctx({ hooks }));
+  assertStarted();
   assert.equal(first.nodes.a.state, 'failed');
   assert.equal(first.nodes.a.retries, 0);
   const marked = await mark(fx.ctx({ node: 'a', transition: 'failed->pending', reason: 'retry after fix' }));
   assert.equal(marked.nodes.a.state, 'pending');
   assert.equal(marked.nodes.a.retries, 1);
-  const second = await drive(fx.ctx());
+  const second = await drive(fx.ctx({ hooks }));
+  assertStarted();
   assert.equal(second.nodes.a.state, 'failed');
   assert.equal(fx.runs('a').length, 2);
   await assert.rejects(async () => mark(fx.ctx({ node: 'a', transition: 'failed->pending', reason: 'again' })), { code: 'retry_cap' });
@@ -458,14 +482,16 @@ test('AC4 a live worker after an engine crash is never duplicated; its envelope 
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: finishFlag } });
   await init(fx.ctx());
   crashAt(fx, 'after-release');
-  assert.ok(await waitUntil(() => fx.runs('a').length === 1), 'released worker started');
+  // Waits on the worker's own markers with a failure bound, not the fixture's 6 s default (#49).
+  assert.ok(await waitUntil(() => fx.runs('a').length === 1, HANDSHAKE_BOUND_MS), 'released worker started');
   const spy = spawnSpy();
   const live = await resume(fx.ctx({ spawn: spy.fn }));
   assert.equal(live.nodes.a.state, 'running', 'a live process group stays running');
   setTimeout(() => writeFileSync(finishFlag, ''), 300);
   await drive(fx.ctx({ spawn: spy.fn }));
   let last;
-  assert.ok(await waitUntil(async () => (last = await resume(fx.ctx({ spawn: spy.fn }))).nodes.a.state !== 'running'));
+  assert.ok(await waitUntil(async () => (last = await resume(fx.ctx({ spawn: spy.fn }))).nodes.a.state !== 'running', HANDSHAKE_BOUND_MS),
+    'handshake: the finished worker\'s envelope was recorded by resume');
   assert.equal(last.nodes.a.state, 'done', 'envelope recorded');
   assert.equal(spy.calls.length, 0, 'no duplicate writer was spawned');
   assert.equal(fx.runs('a').length, 1);
@@ -475,9 +501,9 @@ test('AC4 a dead worker with an envelope is recorded, not re-run', { skip: POSIX
   const fx = fixture(t);
   await init(fx.ctx());
   crashAt(fx, 'after-release');
-  assert.ok(await waitUntil(() => fx.runs('a').length === 1));
+  assert.ok(await waitUntil(() => fx.runs('a').length === 1, HANDSHAKE_BOUND_MS), 'handshake: the released worker logged its run');
   let s;
-  assert.ok(await waitUntil(async () => (s = await resume(fx.ctx())).nodes.a.state !== 'running'), 'worker and launcher finish and write the envelope');
+  assert.ok(await waitUntil(async () => (s = await resume(fx.ctx())).nodes.a.state !== 'running', HANDSHAKE_BOUND_MS), 'worker and launcher finish and write the envelope');
   assert.equal(s.nodes.a.state, 'done');
   assert.equal(s.nodes.a.attempts, 1);
   assert.equal(fx.runs('a').length, 1);
@@ -507,8 +533,10 @@ test('AC4 unknown process-group quiescence (Windows) is a judgment point', { ski
 
 test('AC4 a timeout alone never triggers an automatic retry', async (t) => {
   const fx = fixture(t, { config: { timeoutMs: HANG_TIMEOUT_MS }, behaviour: { a: { hang: true } } });
+  const { hooks, assertStarted } = startedHooks(fx, 'a');
   await init(fx.ctx());
-  const r = await drive(fx.ctx());
+  const r = await drive(fx.ctx({ hooks }));
+  assertStarted();
   assert.equal(r.nodes.a.state, 'failed');
   assert.equal(r.nodes.a.retries, 0);
   assert.equal(fx.runs('a').length, 1);

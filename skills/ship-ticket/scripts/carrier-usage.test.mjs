@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
   ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
+import { WORKER_FAILURE_BOUND_MS, waitFor, waitForFile, processGone } from './test-wait.test-helper.mjs';
 
 // Real output shapes captured from Claude Code 2.1.318 and Codex CLI 0.166.0 (content trimmed).
 const CLAUDE_OUT = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'OK',
@@ -35,8 +36,10 @@ function fixture(t, { start = true, digest = DIGEST } = {}) {
   return { root, repo };
 }
 
+// timeoutMs is only a failure bound for a fake CLI that finishes by itself (#49): under CPU load a
+// 10 s budget expired before the child wrote its files, which surfaced as ENOENT on them.
 const config = (fx, extra = {}) => ({ phase: 'BUILD', provider: 'claude', nodeId: 'frontend', workdir: fx.repo,
-  ownership: { writes: ['src'] }, timeoutMs: 10000, promptFile: join(fx.root, 'prompt.txt'),
+  ownership: { writes: ['src'] }, timeoutMs: WORKER_FAILURE_BOUND_MS, promptFile: join(fx.root, 'prompt.txt'),
   approval: { ticket: 'T-1', runId: 'run-1', approvedPlanDigest: DIGEST }, ...extra });
 
 test('carrier refuses PLAN and REVIEW', (t) => {
@@ -298,6 +301,7 @@ process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
   const result = await dispatch(config(fx, { resultFile: join(fx.root, 'message.json'), usageLog: join(fx.root, 'usage.jsonl'),
     modelMap: { strong: 'opus' }, complexity: 'high' }),
     { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.timed_out, false, 'handshake: the fake CLI finished and wrote child-env.json within the failure bound');
   const child = JSON.parse(readFileSync(join(fx.root, 'child-env.json'), 'utf8'));
   assert.equal(child.key, null, 'API key stripped under subscription billing');
   assert.equal(child.prompt, 'Implement the node.');
@@ -319,6 +323,7 @@ test('integration: writes outside ownership fail the node', async (t) => {
 process.stdin.resume(); process.stdin.on('end', () => { writeFileSync('package.json', '{}'); process.stdout.write(${JSON.stringify(CLAUDE_OUT)}); });
 `);
   const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.timed_out, false, 'handshake: the fake CLI finished within the failure bound');
   assert.equal(result.ownership_check, 'violated');
   assert.deepEqual(result.writes_outside_ownership, ['package.json']);
   assert.equal(result.succeeded, false);
@@ -359,29 +364,40 @@ test('integration: timeout kills the child process tree', async (t) => {
   const fx = fixture(t);
   const pidFile = join(fx.root, 'grandchild.pid');
   const env = fakeCli(t, fx, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
-const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore' });
 writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
-setTimeout(() => {}, 60000);
+setTimeout(() => {}, 600000);
 `);
-  const started = Date.now();
-  // 5 s, not 1.5 s: under a loaded full-suite run the fake CLI can need over 1.5 s to start and write its pid file.
-  const result = await dispatch(config(fx, { timeoutMs: 5000 }), { env, verifySubscription: () => true, handleSignals: false });
-  assert.equal(result.timed_out, true);
-  assert.equal(result.succeeded, false);
-  assert.ok(Date.now() - started < 20000);
-  const pid = Number(readFileSync(pidFile, 'utf8'));
-  await new Promise(r => setTimeout(r, 500));
-  let alive = true;
-  try { process.kill(pid, 0); } catch { alive = false; }
-  assert.equal(alive, false, 'grandchild was killed with the tree');
+  // dispatch arms its timer at spawn, before the worker is released, so no handshake can hold it
+  // until the grandchild exists. The precondition is observed instead: an attempt whose timeout
+  // fired before the fake CLI wrote grandchild.pid did not exercise the tree kill (#49: ENOENT
+  // under load), so it is repeated with a doubled budget. Every attempt must still time out.
+  let pid = null, timeoutMs = 5000;
+  for (; timeoutMs <= 40000 && pid === null; timeoutMs *= 2) {
+    const started = Date.now();
+    const result = await dispatch(config(fx, { timeoutMs }), { env, verifySubscription: () => true, handleSignals: false });
+    assert.equal(result.timed_out, true);
+    assert.equal(result.succeeded, false);
+    assert.ok(Date.now() - started < timeoutMs + 15000, 'returned soon after the timeout, not when the 600 s child ended');
+    if (existsSync(pidFile)) pid = Number(readFileSync(pidFile, 'utf8'));
+  }
+  assert.ok(pid, 'handshake: the fake CLI never wrote grandchild.pid before its timeout, even at a 40 s budget');
+  await waitFor(() => processGone(pid), 'grandchild was killed with the tree', { ms: 30000 });
 });
 
 test('integration: abort signal cancels a running node', async (t) => {
   const fx = fixture(t);
-  const env = fakeCli(t, fx, `setTimeout(() => {}, 60000);\n`);
+  const started = join(fx.root, 'child-started');
+  const env = fakeCli(t, fx, `import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(started)}, '');
+setTimeout(() => {}, 600000);
+`);
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), 500);
-  const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false, signal: controller.signal });
+  // Abort once the released child has started (its own marker), not after a fixed 500 ms that,
+  // under load, could fire before the spawn (a refusal) or before the child ran.
+  const pending = dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false, signal: controller.signal });
+  await waitForFile(started, 'the released fake CLI started').finally(() => controller.abort());
+  const result = await pending;
   assert.equal(result.cancelled, true);
   assert.equal(result.succeeded, false);
   assert.equal(existsSync(join(fx.repo, 'src', 'built.txt')), false);
@@ -392,6 +408,7 @@ test('integration: telemetry failure never discards the execution outcome (CX-11
   const env = fakeCli(t, fx, `process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(${JSON.stringify(CLAUDE_OUT)}));\n`);
   const result = await dispatch(config(fx, { usageLog: join(fx.root, 'missing-dir', 'usage.jsonl') }),
     { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.timed_out, false, 'handshake: the fake CLI finished within the failure bound');
   assert.equal(result.succeeded, true);
   assert.deepEqual(result.telemetry_degraded, ['usage_log:ENOENT']);
   assert.equal(result.usage.output_tokens, 4);
@@ -402,20 +419,21 @@ test('integration: a background descendant cannot hold dispatch open or outlive 
   const fx = fixture(t);
   const pidFile = join(fx.root, 'bg.pid');
   const env = fakeCli(t, fx, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
-const g = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 60000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+const g = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 600000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
 writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
 process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
 process.exit(0);
 `);
+  // Observables instead of a 15 s wall-clock budget (#49): the timeout never fired, and dispatch
+  // returned long before the descendant holding the inherited pipes would have ended (600 s).
   const started = Date.now();
-  const result = await dispatch(config(fx, { timeoutMs: 30000 }), { env, verifySubscription: () => true, handleSignals: false });
-  assert.ok(Date.now() - started < 15000, 'did not wait for the inherited pipes or the timeout');
+  const result = await dispatch(config(fx), { env, verifySubscription: () => true, handleSignals: false });
+  assert.equal(result.timed_out, false, 'did not wait for the timeout');
+  assert.ok(Date.now() - started < 60000, 'did not wait for the inherited pipes (the descendant lives 600 s)');
   assert.equal(result.exit_code, 0);
   assert.equal(result.process_tree_terminated, true, 'termination verified, not just signalled (CX-6)');
   const pid = Number(readFileSync(pidFile, 'utf8'));
-  let alive = true;
-  try { process.kill(pid, 0); } catch { alive = false; }
-  assert.equal(alive, false, 'SIGTERM-ignoring descendant was SIGKILLed before dispatch returned (CX-6)');
+  assert.equal(processGone(pid), true, 'SIGTERM-ignoring descendant was SIGKILLed before dispatch returned (CX-6)');
 });
 
 test('runStateAppendOnly accepts only insertions inside the RUN-STATE block', () => {
@@ -521,6 +539,7 @@ test('RED carrier: invalid JSON, wrong shape or a missing block is unstructured,
     const fx = fixture(t);
     const env = fakeCli(t, fx, stdinThen(fx, '', claudeOut(text)));
     const result = await dispatch(config(fx, { resultFile: join(fx.root, 'm.json') }), { env, verifySubscription: () => true, handleSignals: false });
+    assert.equal(result.timed_out, false, name + ': handshake: the fake CLI finished within the failure bound');
     const msg = JSON.parse(readFileSync(join(fx.root, 'm.json'), 'utf8'));
     assert.equal(msg.report, 'unstructured', name);
     assert.equal(typeof msg.report_failure, 'string', name);
@@ -545,6 +564,7 @@ test('RED carrier: onSpawn gets {attempt_id,pid,pgid} before the prompt is relea
   };
   const result = await dispatch(config(fx, { attemptId: 'att-1', resultFile: join(fx.root, 'm.json'), usageLog: join(fx.root, 'u.jsonl') }),
     { env, verifySubscription: () => true, handleSignals: false, onSpawn });
+  assert.equal(result.timed_out, false, 'handshake: the released fake CLI wrote its stdin marker within the failure bound');
   assert.ok(seen, 'onSpawn called');
   assert.equal(seen.attempt_id, 'att-1');
   assert.ok(Number.isInteger(seen.pid) && seen.pid > 0);

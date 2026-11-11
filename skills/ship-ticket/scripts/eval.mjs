@@ -18,6 +18,9 @@
  * - `unit_checks` (opt-in units only): the per-unit projection (engine-units.mjs), recomputed
  *   against the work tree of `--repo`; printed as `units` only when the state has units, with each
  *   unit's computed `review` state when the run records unit reviews (config.unitReview).
+ * - `authority.trusted[]` (JSON lines): `retry_count` counts the `RETRY` events. `events[]` also feeds
+ *   `gate_calls` (`GATE`) and `proof_reruns` (`LOCAL_PROOF` events minus the first). `review_usage_share_pct`
+ *   is the `reviewer` role's share of processed tokens; `unknown` when no reviewer usage row exists.
  * - `attempts[].envelope.truncated` (launcher output past 32 MiB): printed as `truncated_outputs`
  *   only when any exists. Usage records without a `phase` are the `phase unknown` bucket of
  *   `tokens_by_phase`.
@@ -54,6 +57,31 @@ function resumes(state) {
   return { attempts: list.length, outcomes };
 }
 
+/** Trusted RETRY authority events of the matched state; `'unknown'` without an authority record. */
+const retryCount = (state) => (Array.isArray(state?.authority?.trusted) && typeof state.run_id === 'string' && state.run_id
+  ? state.authority.trusted.filter((l) => { try { const e = JSON.parse(l); return e?.event === 'RETRY' && e.run_id === state.run_id; } catch { return false; } }).length : UNKNOWN);
+
+/** Proof passes after the first: LOCAL_PROOF events minus one (never negative); `'unknown'` without an events array. */
+function proofReruns(state) {
+  const n = countEvents(state, 'LOCAL_PROOF');
+  return known(n) ? Math.max(0, n - 1) : UNKNOWN;
+}
+
+/**
+ * Share of processed tokens used by the `reviewer` role, one decimal. `'unknown'` (never 0) when the
+ * run has no usage, no reviewer row, or any record without counters (the total is then unknowable).
+ */
+function reviewUsageShare(run, records) {
+  if (Array.isArray(records) && records.some((r) => r && r.run_id === run.run_id && r.role === 'reviewer'
+    && !['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'].some((k) => known(r[k])))) return UNKNOWN;
+  const roles = run.usage?.tokens_by_role;
+  const reviewer = roles && typeof roles === 'object' ? roles.reviewer?.processed_tokens : undefined;
+  const total = run.usage?.processed_tokens_total;
+  if (!known(reviewer) || !known(total) || total <= 0) return UNKNOWN;
+  const anyUnknown = Object.values(roles).some((r) => !known(r?.processed_tokens));
+  return anyUnknown ? UNKNOWN : Math.round(reviewer / total * 1000) / 10;
+}
+
 function findingsBySeverity(chain) {
   const withFindings = chain.filter((r) => Array.isArray(r?.findings));
   if (!withFindings.length) return UNKNOWN;
@@ -78,7 +106,7 @@ function acceptedCost(run) {
  * @param {object} run
  * @param {{state?: object}} [sources]
  */
-export function evaluateRun(run, { state, repoRoot = null } = {}) {
+export function evaluateRun(run, { state, repoRoot = null, records = null } = {}) {
   const matched = state && state.run_id === run.run_id ? state : null;
   const chain = Array.isArray(matched?.review_chain) ? matched.review_chain : null;
   const hasReview = run.intervals.some((i) => i.kind === 'phase' && i.name === 'REVIEW');
@@ -103,6 +131,10 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
     resumes: resumes(matched),
     infra_retries: countEvents(matched, 'INFRA_RETRY'),
     admission_refusals: countEvents(matched, 'ADMISSION_REFUSED'),
+    retry_count: retryCount(matched),
+    gate_calls: countEvents(matched, 'GATE'),
+    proof_reruns: proofReruns(matched),
+    review_usage_share_pct: reviewUsageShare(run, records),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
     ...(matched?.unit_checks ? { units: withReviews(matched, unitProjection(matched, repoRoot), repoRoot ? unitStates(matched, repoRoot) : null) } : {}),
@@ -171,7 +203,7 @@ const median = (values) => {
 export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   const joined = runs.map((r) => attachUsage(r, records));
   const metrics = joined.map((r) => {
-    const m = evaluateRun(r, { state: states[r.ticket], repoRoot });
+    const m = evaluateRun(r, { state: states[r.ticket], repoRoot, records });
     return { ...m, suggestions: suggest(m, rawValues(r)) };
   });
   const fired = {};

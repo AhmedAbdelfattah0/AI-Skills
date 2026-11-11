@@ -24,10 +24,11 @@
  */
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { join, dirname } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { fixture, POSIX, codes, waitUntil } from './engine-test-fixture.mjs';
+import { fixture, POSIX, codes, waitUntil, primaryReview, secondOpinion, passReview, failReview, confirmReview } from './engine-test-fixture.mjs';
 import { loadRecord, referenceBytes } from './load-record.mjs';
 
 export const LIMITS = 'fake provider: mechanism and orchestration overhead only';
@@ -272,6 +273,134 @@ async function s7(meter) {
     && !withEvidence.reasons.includes('missing_risk_evidence') && withEvidence.missing.length === 0 };
 }
 
+// ---- Wave 2b baselines (S8, S9): record what today's engine does; nothing here changes behaviour.
+
+// Digests and temp paths differ on every run; the scenario table keeps the refusal's shape, not those bytes.
+const stable = (text) => String(text).replace(/sha256:[0-9a-f]{64}|\b[0-9a-f]{40,64}\b/g, '<digest>').replace(/\/[^\s]*\/(?:run-engine-test-[^/\s]*)/g, '<tmp>');
+const refusalOf = (r) => ({ exit: r.status, ok: r.out?.ok ?? null, code: r.out?.code ?? null, reasons: (r.out?.reasons ?? []).map(stable) });
+const chainOf = (w) => (w.fx.readState().review_chain ?? []).map(r => ({ review_execution: r.review_execution, kind: r.kind, outcome: r.outcome ?? null,
+  source_keys: Object.keys(r).sort(), findings: (r.findings ?? []).map(f => ({ id: f.id, source: f.source, severity: f.severity, disposition: f.disposition })),
+  second_opinion_route: r.second_opinion_route ?? null, second_opinion_outcome: r.second_opinion_outcome ?? null }));
+const builtWorld = (meter) => {
+  const w = world(meter, { nodes: [node('a')] });
+  w.fx.behave({ ...plain('a'), fix: writeOf('a') });
+  w.init(); w.cli('drive');
+  return w;
+};
+const dispose = (id, source, disposition) => ({ finding_id: id, source, disposition });
+
+async function s8(meter) {
+  // (1) primary PASS + a second-opinion finding disposed `fix`.
+  const w1 = builtWorld(meter), c1 = w1.fx.candidate();
+  const r1 = w1.gate('review', passReview('rx-1', c1, {
+    second_opinion: secondOpinion(c1, { findings: [{ id: 'S1', severity: 'minor', path: 'src/a.txt' }] }),
+    reconciliation: { dispositions: [dispose('S1', 'codex', 'fix')] } }));
+  const fixPass = { refusal: refusalOf(r1), chain_after: chainOf(w1) };
+
+  // (2) primary PASS + second opinion FAIL whose findings are all `not applicable`.
+  const w2 = builtWorld(meter), c2 = w2.fx.candidate();
+  const r2 = w2.gate('review', passReview('rx-1', c2, {
+    second_opinion: secondOpinion(c2, { outcome: 'FAIL', findings: [{ id: 'S1', severity: 'major', path: 'src/a.txt' }] }),
+    reconciliation: { dispositions: [dispose('S1', 'codex', 'not applicable')] } }));
+  const record2 = r2.out?.record ?? null;
+  const soFail = { result: refusalOf(r2), recorded_outcome: record2?.outcome ?? null, recorded_second_opinion_route: record2?.second_opinion_route ?? null,
+    recorded_has_second_opinion_outcome: Boolean(record2 && 'second_opinion_outcome' in record2), chain_after: chainOf(w2) };
+
+  // (3) the same finding id in two executions: nothing links them.
+  const w3 = builtWorld(meter), c3 = w3.fx.candidate();
+  const reuse = (rx) => w3.gate('review', passReview(rx, c3, {
+    primary: primaryReview(c3, { findings: [{ id: 'F1', severity: 'minor', path: 'src/a.txt' }] }),
+    reconciliation: { dispositions: [dispose('F1', 'primary', 'not applicable')] } }));
+  const first = reuse('rx-1'), second = reuse('rx-2');
+  // The refusal above is the only way a second original review is reached, so the id can repeat only behind an owner RETRY.
+  w3.fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'bench-owner' });
+  const authorized = reuse('rx-2');
+  const reused = { first: refusalOf(first), second_without_retry: refusalOf(second), second_with_owner_retry: refusalOf(authorized),
+    chain_after: chainOf(w3), finding_ids_in_chain: chainOf(w3).flatMap(r => r.findings.map(f => `${r.review_execution}:${f.id}`)) };
+
+  // (4) the candidate moves between the review and its confirmation.
+  const w4 = builtWorld(meter), c4 = w4.fx.candidate();
+  const fail = w4.gate('review', failReview('rx-1', c4, 'src/a.txt', w4.fx.prompt('fix')));
+  w4.cli('drive');
+  const repaired = w4.fx.candidate();
+  const stateBefore = w4.fx.readState();
+  writeFileSync(join(w4.fx.repo, 'src', 'moved.txt'), 'edited after the repair');
+  const moved = w4.fx.candidate();
+  const staleOnReview = w4.gate('review', confirmReview('rx-1', c4));
+  const onMoved = w4.gate('review', confirmReview('rx-1', moved));
+  rmSync(join(w4.fx.repo, 'src', 'moved.txt'));
+  const onRepaired = w4.gate('review', confirmReview('rx-1', repaired)); // control: the tree is back at the repaired candidate
+  const movingCandidate = { original_fail: refusalOf(fail), tree_moved_after_repair: moved !== repaired, frozen_after_repair: stateBefore.frozen_candidate === repaired,
+    confirm_on_pre_repair_candidate: refusalOf(staleOnReview), confirm_on_moved_tree: refusalOf(onMoved), confirm_on_repaired_candidate_after_restoring_the_tree: refusalOf(onRepaired),
+    chain_after: chainOf(w4).map(r => ({ review_execution: r.review_execution, kind: r.kind, outcome: r.outcome })) };
+
+  const shows = { primary_pass_with_second_opinion_fix: fixPass, primary_pass_with_second_opinion_fail_not_applicable: soFail,
+    finding_ids_reused_across_executions: reused, candidate_moves_before_confirmation: movingCandidate };
+  return { shows, ok: fixPass.refusal.code === 'outcome_inconsistent' && fixPass.chain_after.length === 0
+    && soFail.result.code === 'review_accepted' && soFail.recorded_outcome === 'PASS' && soFail.recorded_has_second_opinion_outcome === false
+    && soFail.chain_after[0]?.findings[0]?.disposition === 'not applicable'
+    && reused.first.code === 'review_accepted' && reused.second_without_retry.code === 'retry_unauthorized' && reused.second_with_owner_retry.code === 'review_accepted'
+    && reused.finding_ids_in_chain.join() === 'rx-1:F1,rx-2:F1'
+    && movingCandidate.confirm_on_pre_repair_candidate.code === 'stale_candidate' && movingCandidate.confirm_on_moved_tree.code === 'stale_candidate'
+    && movingCandidate.confirm_on_repaired_candidate_after_restoring_the_tree.code === 'review_accepted' };
+}
+
+async function s9(meter) {
+  // (1) The base moves mid-run: pre-flight with base-drift.mjs, then what the engine does today.
+  const w = world(meter, { config: { width: 1, base: 'target' }, nodes: [node('a'), node('b', { deps: ['a'] })] });
+  w.fx.behave(plain('a', 'b'));
+  const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: w.fx.repo, encoding: 'utf8' });
+  git('branch', 'target'); // the plan's base is a branch the target repository can move
+  const pinned = git('rev-parse', 'target').stdout.trim();
+  w.init();
+  const half = w.cli('drive', { until: 'a' });
+  mkdirSync(join(w.fx.repo, 'src'), { recursive: true });
+  writeFileSync(join(w.fx.repo, 'src', 'b.txt'), 'upstream change to a file the plan owns');
+  git('add', 'src/b.txt'); git('commit', '-q', '-m', 'upstream'); git('branch', '-f', 'target', 'HEAD');
+  const drift = spawnSync(process.execPath, [fileURLToPath(new URL('./base-drift.mjs', import.meta.url)), 'check', '--repo', w.fx.repo, '--base', pinned, '--target', 'target', '--dag', w.fx.dagFile],
+    { encoding: 'utf8' });
+  meter.commands++; meter.bytes += Buffer.byteLength(drift.stdout);
+  const after = w.cli('drive');
+  const baseMove = { drive_before_move: { outcome: half.out?.outcome ?? null, nodes: states(half.out) },
+    base_drift_report: { exit: drift.status, stdout: drift.stdout.trim().split('\n') },
+    drive_after_move: { exit: after.status, outcome: after.out?.outcome ?? null, nodes: states(after.out), judgments: codes(after.out), writer_runs: { a: w.fx.runs('a').length, b: w.fx.runs('b').length } } };
+
+  // (2) RED provenance across runs: the archive copies state, engine log and usage, not the attempts directory.
+  const r = world(meter, { red: true, config: { base: 'target' }, nodes: [node('spec', { redSpecs: [{ file: 'spec/red.test.mjs', name: SPEC_NAME }] })] });
+  r.fx.behave(plain('spec'));
+  spawnSync('git', ['branch', 'target'], { cwd: r.fx.repo });
+  r.init();
+  const red = r.gate('red', { node: 'spec', command: 'unit' });
+  const attemptsDir = join(dirname(r.fx.stateFile()), 'T-1.attempts');
+  const live = existsSync(attemptsDir) ? readdirSync(attemptsDir).sort() : [];
+  const redEvidence = r.fx.readState().gates?.red?.spec ?? null;
+  // The base moves after RED was accepted. The engine's redValid/refreshRed invalidate RED only when a dependent of the RED node is checked or dispatched; this world has one RED node and no dependent, so that check never runs.
+  const gitR = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: r.fx.repo, encoding: 'utf8' });
+  writeFileSync(join(r.fx.repo, 'upstream.txt'), 'unrelated upstream change');
+  gitR('add', 'upstream.txt'); gitR('commit', '-q', '-m', 'upstream'); gitR('branch', '-f', 'target', 'HEAD');
+  const afterMove = r.cli('drive');
+  const shipReady = refusalOf(r.gate('ship-ready', {}));
+  const invalid = r.fx.readState().gates?.red_invalid?.spec ?? null;
+  const redAfterMove = { drive_exit: afterMove.status, drive_outcome: afterMove.out?.outcome ?? null, judgments: codes(afterMove.out),
+    red_invalidated: Boolean(invalid), base_moved: invalid?.base_moved ?? null, red_still_accepted: Boolean(r.fx.readState().gates?.red?.spec), ship_ready_reasons: shipReady.reasons.map(x => x.split(':')[0]), ship_ready_code: shipReady.code };
+  const arch = r.cli('archive');
+  const archived = arch.out?.archive ? readdirSync(arch.out.archive).sort() : [];
+  const archivedAttempts = arch.out?.archive ? archived.filter(n => n.includes('attempts')) : [];
+  const second = r.cli('init', { dag: r.fx.dagFile }, { runId: 'run-2' });
+  const attemptId = redEvidence?.attempt_id ?? null;
+  const redProvenance = { after_base_move: redAfterMove, red_attempt_output_live: Boolean(attemptId) && live.some(n => n.startsWith(attemptId)), red_gate: red.out?.code ?? null, red_evidence_keys: Object.keys(redEvidence ?? {}).sort(), attempt_files_before_archive: live.length > 0,
+    archive_exit: arch.status, archived_files: archived, archive_contains_attempts: archivedAttempts.length > 0,
+    attempt_files_after_archive: existsSync(attemptsDir) ? readdirSync(attemptsDir).length > 0 : false,
+    second_run_init: { exit: second.status, code: second.out?.code ?? null, refused: /state_exists/.test(second.stderr + second.stdout) ? 'state_exists' : stable((second.stderr || second.stdout).trim().split('\n')[0].slice(0, 160)) } };
+
+  const shows = { base_moves_mid_run: baseMove, red_provenance_in_a_later_run: redProvenance };
+  return { shows, ok: baseMove.drive_before_move.nodes.b === 'pending' && baseMove.base_drift_report.exit === 1 && baseMove.base_drift_report.stdout[0] === 'base-drift: OVERLAP'
+    && baseMove.drive_after_move.outcome === 'done' && baseMove.drive_after_move.judgments.length === 0
+    && redAfterMove.red_invalidated === false && redAfterMove.red_still_accepted === true
+    && redProvenance.red_gate === 'red_accepted' && redProvenance.red_attempt_output_live === true && redProvenance.archive_contains_attempts === false
+    && redProvenance.archived_files.join() === 'engine.jsonl,manifest.json,state.json' && redProvenance.second_run_init.refused === 'state_exists' };
+}
+
 export const SCENARIOS = [
   { id: 'S1', title: 'one node', run: s1, flags: {} },
   { id: 'S2', title: 'contract, frontend and backend in one wave, then a join', run: s2, flags: {} },
@@ -280,6 +409,8 @@ export const SCENARIOS = [
   { id: 'S5', title: 'failure and recovery: provider error, timeout, engine crash, worker crash', run: s5, flags: {} },
   { id: 'S6', title: 'scope expansion: one undeclared file is an ownership violation and the whole run stops', run: s6, flags: {} },
   { id: 'S7', title: 'UI change: ship-ready refuses without parity evidence', run: s7, flags: { ui: true } },
+  { id: 'S8', title: 'evidence integrity (baseline): second-opinion fixes and failures, reused finding ids, a moving candidate', run: s8, flags: {} },
+  { id: 'S9', title: 'cross-run recovery (baseline): base moves mid-run, RED provenance after archive', run: s9, flags: {} },
 ];
 
 /** Run one scenario and return its result; `deps.buildNodes` is the bench's DAG shape builder. */
@@ -301,10 +432,10 @@ export async function runScenario(def, deps, record = loadRecord()) {
   } finally { meter.cleanup(); }
 }
 
-/** `which` is an id (S1..S7) or 'all'; returns the results in order. */
+/** `which` is an id (S1..S9) or 'all'; returns the results in order. */
 export async function runScenarios(which, deps) {
   const defs = which === 'all' ? SCENARIOS : SCENARIOS.filter(d => d.id === which);
-  if (!defs.length) throw new Error(`unknown scenario ${which}: expected S1..S7 or all`);
+  if (!defs.length) throw new Error(`unknown scenario ${which}: expected S1..S9 or all`);
   const record = loadRecord();
   const out = [];
   for (const def of defs) out.push(await runScenario(def, deps, record));

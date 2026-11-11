@@ -233,3 +233,45 @@ test('seam: CLI report --all never reads the engine event file <ticket>.engine.j
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout).runs.map((x) => x.ticket), ['T1']);
 });
+
+// ---- N4: retry count, gate calls, proof reruns, review usage share -------------------------
+
+test('evaluateRun reports retry_count, gate_calls, proof_reruns and review_usage_share_pct', () => {
+  const state = { run_id: 'run-1',
+    authority: { trusted: [JSON.stringify({ event: 'RETRY', run_id: 'run-1' }), JSON.stringify({ event: 'START' }), JSON.stringify({ event: 'RETRY', run_id: 'run-1' })], untrusted: [] },
+    events: events('GATE', 'GATE', 'GATE', 'LOCAL_PROOF', 'LOCAL_PROOF', 'LOCAL_PROOF') };
+  const run = attachUsage(build('T1', 'run-1'), [rec('run-1', 'orchestrator', 60, 0), rec('run-1', 'reviewer', 20, 0), rec('run-1', 'builder', 20, 0)]);
+  const m = evaluateRun(run, { state });
+  assert.equal(m.retry_count, 2);
+  assert.equal(m.gate_calls, 3);
+  assert.equal(m.proof_reruns, 2);
+  assert.equal(m.review_usage_share_pct, 20);
+});
+
+test('N4 metrics are unknown, never 0, when the sources do not carry them', () => {
+  const noReviewer = attachUsage(build('T1', 'run-1'), [rec('run-1', 'orchestrator', 60, 0), rec('run-1', 'builder', 40, 0)]);
+  const m = evaluateRun(noReviewer, { state: { run_id: 'run-1', authority: {}, events: events('GATE') } });
+  assert.equal(m.review_usage_share_pct, 'unknown', 'missing reviewer usage row');
+  assert.equal(m.retry_count, 'unknown');
+  assert.equal(m.gate_calls, 1);
+  assert.equal(m.proof_reruns, 0, 'no proof event in a known events array is zero reruns');
+  const bare = evaluateRun(build('T1', 'run-1'), {});
+  for (const key of ['review_usage_share_pct', 'retry_count', 'gate_calls', 'proof_reruns']) assert.equal(bare[key], 'unknown', key);
+  const nullCounters = attachUsage(build('T1', 'run-1'), [rec('run-1', 'reviewer', null, null), rec('run-1', 'builder', 40, 0)]);
+  assert.equal(evaluateRun(nullCounters, {}).review_usage_share_pct, 'unknown', 'reviewer row without counters');
+});
+
+test('retry_count counts only RETRY lines of the matched run', () => {
+  const line = (run_id) => JSON.stringify({ event: 'RETRY', run_id });
+  const state = { run_id: 'run-1', authority: { trusted: [line('run-1'), line('run-OTHER'), line('run-OTHER')], untrusted: [] }, events: events('GATE') };
+  assert.equal(evaluateRun(build('T1', 'run-1'), { state }).retry_count, 1);
+});
+
+test('review_usage_share_pct is unknown when a reviewer record has no counters, even beside a measured one', () => {
+  const rows = runRows('T1', 'run-1');
+  const out = evaluate({ runs: [buildRun('T1', 'run-1', rows)], records: [rec('run-1', 'reviewer', 20, 0),
+    { ...rec('run-1', 'reviewer', null, null), source_execution_id: 'run-1-reviewer-x' }, rec('run-1', 'builder', 80, 0)] });
+  assert.equal(out.runs[0].review_usage_share_pct, 'unknown');
+  const ok = evaluate({ runs: [buildRun('T1', 'run-1', rows)], records: [rec('run-1', 'reviewer', 20, 0), rec('run-1', 'builder', 80, 0)] });
+  assert.equal(ok.runs[0].review_usage_share_pct, 20);
+});
