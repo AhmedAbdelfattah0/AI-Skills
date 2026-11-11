@@ -1,16 +1,22 @@
 #!/usr/bin/env node
 /**
- * Load record for the ship-ticket spine (AIS-BENCH-1 Wave 1). Measurement only: it reads
+ * Load record for the ship-ticket spine (AIS-BENCH-1 Waves 1 and 2). Measurement only: it reads
  * SKILL.md and references/ and writes nothing. It reports which reference each phase loads, how
- * many bytes that is, and how many bytes of opt-in unit text sit inside the files a run loads, so
- * a later wave can be compared with today.
+ * many bytes that is (per run and per phase), and how many bytes of opt-in unit text sit inside the
+ * files a run loads, so a later wave can be compared with today.
+ *
+ * Flags of a run: ui, security, elevated, codex (conditions of the load table), units (any DAG node has
+ * `unit`: references/units.md at BUILD, PROVE and REVIEW), split (the plan chooses SPLIT: units.md at
+ * PLAN) and internals (the operator card names references/harness-internals.md, which loads on demand
+ * and is counted only then, never in the default run).
  *
  * Source of truth: the "Entering | Load" table in SKILL.md. A table row this script does not
  * declare in ENTERING makes it throw (CLI exit 1 with the row), so an edit of the table cannot be
  * silently mis-measured. Loads stated in prose, not in the table, are declared in PROSE_LOADS.
  *
- * Unit text counting rule: the bytes of whole Markdown sections that belong to the opt-in units
- * feature, listed per file in UNIT_SECTIONS. A section that starts at a heading runs to the next
+ * Unit text counting rule: references/units.md counts whole in a run that loads it. In every other file
+ * the bytes of whole Markdown sections that belong to the opt-in units feature, listed per file in
+ * UNIT_SECTIONS, count as leftovers (a clean tree has none). A section that starts at a heading runs to the next
  * heading of the same or a higher level. A section that starts at a column-0 bold lead paragraph
  * (`**Units (opt-in; ...).**`, which this repository uses as a sub-heading) runs to the next
  * heading or the next column-0 bold lead paragraph. Single sentences about units elsewhere
@@ -28,7 +34,7 @@ const DEFAULT_SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Every phase of a full run, in order. 'START' is the "Workflow start" row. */
 export const PHASES = ['START', 'UNDERSTAND', 'PLAN', 'BUILD', 'PROVE', 'REVIEW', 'SHIP'];
-export const FLAGS = ['ui', 'security', 'elevated', 'codex'];
+export const FLAGS = ['ui', 'security', 'elevated', 'codex', 'units', 'split', 'internals'];
 
 /** The declared meaning of each "Entering" cell: the phases it applies to and the flag that gates it. */
 const ENTERING = {
@@ -36,6 +42,11 @@ const ENTERING = {
   UNDERSTAND: { phases: ['UNDERSTAND'], flag: null },
   PLAN: { phases: ['PLAN'], flag: null },
   BUILD: { phases: ['BUILD'], flag: null },
+  'PLAN when the plan chooses SPLIT': { phases: ['PLAN'], flag: 'split' },
+  'BUILD, PROVE or REVIEW when any DAG node has `unit`': { phases: ['BUILD', 'PROVE', 'REVIEW'], flag: 'units' },
+  // Deliberate: the operator card is read before BUILD, so that is where it names harness-internals.md; the row counts at BUILD only,
+  // and only when the flag says the card sent the operator there.
+  'On demand, when the operator card names it': { phases: ['BUILD'], flag: 'internals' },
   PROVE: { phases: ['PROVE'], flag: null },
   'PROVE with UI': { phases: ['PROVE'], flag: 'ui' },
   REVIEW: { phases: ['REVIEW'], flag: null },
@@ -55,11 +66,18 @@ const PROSE_LOADS = [
   { phase: 'REVIEW', file: 'references/codex-cli.md', flag: 'codex', condition: 'Codex is the counterpart' },
 ];
 
-/** Opt-in unit text, per file: the start line of each section counted whole. */
+/**
+ * Opt-in unit text that must no longer sit inside a file every run loads: the start line of each section
+ * counted whole. Since Wave 2 the unit rules live in references/units.md, so a clean tree finds none of
+ * these and `unit_text` is empty; a section found here is a leftover. units.md is counted whole instead
+ * (UNITS_FILE), and only in a run that loads it.
+ */
 const UNIT_SECTIONS = {
   'references/execution-harness.md': [/^\*\*Units \(opt-in;/],
   'references/review.md': [/^## Unit review \(opt-in/, /^## Repair routing \(units\)/, /^## Final review on unit evidence/],
 };
+
+const UNITS_FILE = 'references/units.md';
 
 const LINK = /\[(references\/[\w.-]+\.md)\]\([^)]*\)/g;
 
@@ -112,13 +130,20 @@ export function sections(text, starts) {
   return found;
 }
 
-/** Distinct files and their bytes for a full run under `flags`; a load with a flag counts only when that flag is true. */
+/** Distinct files, their bytes, and the bytes each phase loads (without the spine) for a full run under `flags`; a load with a flag counts only when that flag is true. */
 function runOf(record, flags) {
   const bytesOf = Object.fromEntries([record.spine, ...record.references].map(r => [r.file, r.bytes]));
   const files = new Set([record.spine.file]);
-  for (const phase of record.phases) for (const l of phase.loads) if (!l.flag || flags[l.flag]) files.add(l.file);
+  const phase_bytes = {};
+  for (const phase of record.phases) {
+    const seen = new Set();
+    for (const l of phase.loads) if (!l.flag || flags[l.flag]) { files.add(l.file); seen.add(l.file); }
+    phase_bytes[phase.phase] = [...seen].reduce((n, f) => n + bytesOf[f], 0);
+  }
   const list = [...files].sort();
-  return { files: list, bytes: list.reduce((n, f) => n + bytesOf[f], 0) };
+  const sum = (names) => names.reduce((n, f) => n + bytesOf[f], 0);
+  const leftover = record.unit_text.filter(u => files.has(u.file)).reduce((n, u) => n + u.bytes, 0);
+  return { files: list, bytes: sum(list), phase_bytes, unit_text_bytes: leftover + (files.has(UNITS_FILE) ? bytesOf[UNITS_FILE] : 0) };
 }
 
 export function loadRecord({ skillDir = DEFAULT_SKILL_DIR } = {}) {
@@ -130,21 +155,25 @@ export function loadRecord({ skillDir = DEFAULT_SKILL_DIR } = {}) {
   const spine = { file: 'SKILL.md', bytes: statSync(join(skillDir, 'SKILL.md')).size };
   const phases = PHASES.map(phase => ({ phase, loads: byPhase[phase].map(l => ({ file: l.file, bytes: bytesOf[l.file], condition: l.condition, flag: l.flag })) }));
 
-  const unit_text = Object.entries(UNIT_SECTIONS).map(([file, starts]) => {
+  const unit_text = Object.entries(UNIT_SECTIONS).filter(([file]) => existsSync(join(skillDir, file))).map(([file, starts]) => {
     const found = sections(readFileSync(join(skillDir, file), 'utf8'), starts);
-    if (found.length !== starts.length) throw new Error(`unit sections of ${file}: expected ${starts.length}, found ${found.length}`);
     return { file, bytes: found.reduce((n, s) => n + s.bytes, 0), headings: found.map(s => s.heading) };
-  });
+  }).filter(u => u.headings.length);
 
   const record = { spine, references, total_bytes: spine.bytes + references.reduce((n, r) => n + r.bytes, 0), file_count: 1 + references.length, phases, unit_text };
-  // Opt-in unit text lives inside files every run loads, so a run with units and one without load the same files.
+  // A run without units loads no unit file; a run with units loads units.md at PLAN (the plan chose SPLIT) and at BUILD, PROVE and REVIEW.
   const plain = { ui: false, security: false, elevated: false, codex: false };
-  const run = (units, flags) => ({ flags: { ...flags, units }, ...runOf(record, flags) });
-  record.runs = { without_units: run(false, plain), with_units: run(true, plain), all_conditions: run(true, Object.fromEntries(FLAGS.map(f => [f, true]))) };
+  const run = (extra, flags) => ({ flags: { units: false, split: false, internals: false, ...flags, ...extra }, ...runOf(record, { ...flags, ...extra }) });
+  record.runs = {
+    without_units: run({}, plain),
+    plan_chooses_split: run({ split: true }, plain),
+    with_units: run({ units: true, split: true }, plain),
+    all_conditions: run({}, Object.fromEntries(FLAGS.map(f => [f, true]))),
+  };
   return record;
 }
 
-/** Bytes of the distinct files a full run START to SHIP loads under `flags` ({ui, security, elevated, codex}; missing means false). */
+/** Bytes of the distinct files a full run START to SHIP loads under `flags` ({ui, security, elevated, codex, units, split, internals}; missing means false). */
 export function referenceBytes(flags = {}, record = loadRecord()) {
   return runOf(record, flags).bytes;
 }

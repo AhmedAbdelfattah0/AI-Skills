@@ -95,6 +95,7 @@ jobs:
           skills/ship-ticket/scripts/security-plan.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
+          skills/ship-ticket/scripts/brief.test.mjs
           skills/ship-ticket/scripts/launcher-sampler.test.mjs
           skills/ship-ticket/scripts/wave1-metrics.test.mjs
           skills/ship-ticket/scripts/engine-explore.test.mjs

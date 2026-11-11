@@ -1,0 +1,528 @@
+{
+ "entries": [
+  {
+   "old": "| BUILD | this spine |",
+   "reason": "load-table row: BUILD now also loads brief.md (fixed row of the Wave 2 plan)"
+  },
+  {
+   "old": "With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only `status`. Record RED, review and ship-ready with `run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>` rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair, which the next `drive` dispatches. With `config.unitReview`, record each unit's independent review with `gate unit-review` first ([review.md](references/review.md), Unit review); unit reviews do not replace the final review, which stays mandatory and names `units_consumed`. Judgment points (`status.judgments`) come back to you or the user. The manual flow below is the documented fallback when the engine or gate module is unavailable (record `harness degraded`). A run that falls back after `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate` it again, since its ledger no longer reflects the work. While that state file exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does not authorize is **WAIT_FOR_USER**, never a hand-edit of the state file.",
+   "reason": "unit clause (config.unitReview, gate unit-review, units_consumed) replaced by a pointer to units.md; the unit-review and final-review rules are in units.md"
+  },
+  {
+   "old": "`memoryBudgetMb: \"auto\"` takes OS free memory, capped by Node's cgroup-aware `availableMemory()` (Node >= 22). On older Node it is capped by the cgroup limit minus measured cgroup usage (`memory.current` / `memory.usage_in_bytes`). A reserve of 1 GiB or 15% of total, whichever is larger, is subtracted. If a cgroup limit exists but its usage is unreadable, the estimate is `memory_verified: false`. `memory_safety` is `estimated` only when a verified budget applied and **every** node has `estimatedMemoryMb`; otherwise it is `unverified`. Node's available/constrained probes are cgroup-aware only on Linux, so they are consulted only there. On macOS, `os.freemem()` counts only free pages (about 0.7 GB of 24 GB on the host where this was found), so the harness reads `vm_stat` and counts free, inactive, speculative and purgeable pages instead.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "**Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused. `REPAIR` (a review repair writer) routes like BUILD, is recorded as `phase: \"REPAIR\"` in results and usage, and requires `reviewExecution` (the review round being repaired). When the run engine's state file exists, that execution must be an accepted FAIL with a finding-bound write set in its review chain; only without engine state does the run log's REVIEW `start` row decide. It may declare `redSpecs` (repo-relative spec paths); then `redEvidence` must be an absolute path to a non-empty file with the failing-run output, written by the orchestrator, or dispatch is refused.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "**Approval evidence (event binding, not content verification):** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the supplied digest. Plan content drift remains SHIP's approved-plan digest check, because the digest algorithm belongs to PLAN. The carrier reads the plan artifact and never writes it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker cannot forge `START`. The same applies to `ownership.othersOwned`, so a plan change can never be exempted.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "**Billing:** `billing` defaults to `subscription`. The child environment drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches. Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`. Gemini/Antigravity: Google API-key and Vertex variables). The CLI's own status is then checked in that environment: `claude auth status --json` must report `authMethod: \"claude.ai\"` with `apiProvider: \"firstParty\"`, and `codex login status` must report `Logged in using ChatGPT`. Any other answer refuses dispatch before a process starts. Variable names are matched case-insensitively (Windows). `\"billing\": \"api\"` also needs `\"allowApiBilling\": true`, which only the user can authorize.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "**Verified adapters:** Claude and Codex arguments are built from flags checked against Claude Code 2.1.318 and Codex CLI 0.166.0: `claude -p --output-format json --no-session-persistence --permission-mode <acceptEdits|auto|dontAsk|manual> [--model <id>]` and `codex exec --json --ephemeral -s <read-only|workspace-write> [-m <id>] -`. Caller `args` are rejected, so `--model` cannot be smuggled in. `--model`/`-m` is emitted only when `modelMap` maps the routed tier; otherwise the provider default runs (`model: \"provider-default\"`). `bypassPermissions`, `plan` and `danger-full-access` are refused. Hooks are not disabled (no `--bare`), so PostToolUse guards such as nn-guard still run.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "The budget metric is `processed_tokens = input + output + cache_read + cache_write` (or `output_tokens`); see Budgets above.",
+   "reason": "position word: \"see Budgets above\" now reads \"below\" (Budgets follows the usage section in the card)"
+  },
+  {
+   "old": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)\n```",
+   "reason": "split: every sentence of this fence exists unchanged in the new files (the fence was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "`config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`, `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready` runs every entry as the local proof), `base`, `riskLabels` (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in, below). Billing is `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with `billing: \"api\"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design; `allowApiBilling` exists only for a library caller the user authorized.",
+   "reason": "link re-pointed: \"(opt-in, below)\" now links units.md; rest of the item unchanged"
+  },
+  {
+   "old": "node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`, `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`, `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`), `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see **Units**).",
+   "reason": "link re-pointed: \"(see **Units**)\" now links units.md; rest of the item unchanged"
+  },
+  {
+   "old": "`status` prints the compact `ship-ticket-engine-status-v1` view, including `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state likewise), `unit_reviews_pending` only with `config.unitReview` (`unit_reviews` in state likewise), and `truncated_outputs` only when an attempt's output passed the capture cap (below).",
+   "reason": "unit clause (units, unit_ceiling, unit_reviews_pending) moved to units.md; the rest, including \"capture cap (below)\", unchanged and the capture-cap paragraph is still below it in the card"
+  },
+  {
+   "old": "**Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own independent review chain. The engine never dispatches a reviewer: the orchestrator relays it ([review.md](review.md), Unit review) and `gate unit-review` validates and records it under the lock, reusing `gate.mjs` `gateReview` (contract, enums, dispositions, builder roster, distinct reviewers). The input is `{unit, review_execution, kind: original|confirmation, approved_plan_digest, dag_digest, base_commit, primary, second_opinion?, reconciliation, graded_artifacts?, repair_ownership?, repair_prompt_file?}`, where the reviewers' `candidate_id` is the unit's evidence id (`status.units.<u>.evidence.id`); `--unit` may name the unit instead. It is accepted only when the unit is `verified`, nothing is live, the digests are the bound ones and the evidence id and base commit are the current evidence's. Refusals record nothing: `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`, `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain), `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`, `repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket has `config.riskLabels`. Its review and its confirmation then need a second opinion (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`; a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a second opinion is optional and validated when given. The record carries each reviewer's provider and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`), the reviewers, findings and outcome. The review state is recomputed at every read against the current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh original is due), `fail` awaiting `repair|recheck|confirmation`, or `fail` terminal (computed judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit. The new evidence becomes the candidate of the one targeted confirmation only when, against the binding the FAIL reviewed, nothing but files inside the repair write set changed (`UNIT_REPAIR_BOUND`). A declared directory is compared file by file against its tree recorded at the FAIL, so a repair writing `src/a.txt` inside a declared `src` binds, while any other changed, added or removed entry inside it is outside the repair. A node re-run, a dependency unit's re-check, an upstream change or a base move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL whose cycle the ceiling cannot carry (`ceiling_refused`, recorded with `repair_opened: false`) and any FAIL after the freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's last execution>, authorized_by}` admits a new original. A re-review, a repair and a confirmation spend the parent-wide ceiling. Opening a repair needs 3 unheld slots: it spends 1 and holds its re-check and confirmation for the unit until the cycle ends or is cancelled (`UNIT_CEILING_RELEASED`). The spends are recorded (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger: stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair). `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current PASS (and `gate review` the two Wave 3 refusals below). The `drive` outcome `done` does not cover pending unit reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).",
+   "reason": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section below in units.md"
+  },
+  {
+   "old": "**Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit reviews do not replace the final review ([review.md](review.md), Final review on unit evidence). After the refusals above, `gate review` also refuses, recording nothing: `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose `id` (when that is an acceptance id; else its `criterion`: one row covers one id) is an acceptance id mapped on a node (every id of `config.acceptanceIds`), and `units_consumed_stale` when an original or a confirmation does not name, in the input field `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is refused. The accepted record carries `units_consumed`, and `gate ship-ready` re-checks the record that authorizes ship (the last accepted original or confirmation) by the same rule, refusing `units_consumed_stale` when a unit's evidence moved since (for example the resolved base moved and the units were re-checked and re-reviewed on a byte-identical candidate). `init` refuses (`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without `config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.",
+   "reason": "link re-pointed: \"([review.md](review.md), Final review on unit evidence)\" now names the section below in units.md"
+  },
+  {
+   "old": "It is refused unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: the review saw these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY), and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale), a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`), live attempts (`rebind_attempts_live`) or units (`rebind_units`: unit evidence is not re-bound).",
+   "reason": "unit clause \"or units (`rebind_units`...)\" moved to units.md"
+  },
+  {
+   "old": "**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair batches per ticket in total; one REVIEW repair and one confirmation per authorized review execution (`rounds.review_repairs[<review_execution>]`; a unit review execution: `rounds.unit_review_repairs[<review_execution>]`, present once one ran).",
+   "reason": "unit clause (rounds.unit_review_repairs) moved to units.md"
+  },
+  {
+   "old": "**Judgment points** (`status.judgments[].code`) stop the engine and go back to the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`, `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants can outlive the leader: known limit N7 below), `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`, `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`, `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review repair that failed; it is terminal for its review execution, and an owner RETRY of that review cancels it as `superseded by retry`); with units also `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews `unit_review_terminal`.",
+   "reason": "unit clauses (unit_check_failed, unit_invalidation_storm, parent_ceiling, unit_review_terminal) moved to units.md"
+  },
+  {
+   "old": "The gate adds unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2); its `units_unverified` and `unit_reviews_missing` refusals are not judgment points (`drive` runs the checks; the orchestrator relays the unit reviews).",
+   "reason": "unit clause (units_unverified, unit_reviews_missing are not judgment points) moved to units.md"
+  },
+  {
+   "old": "**`gateRed`** is a scheduler prerequisite: a node whose dependency has `redSpecs` is not dispatched until RED is accepted, repairs included. The engine runs the DAG-bound runner itself: `gate red` input is `{node, command?, specs?}`, where `command` only names a formatted `config.testCommands` entry; the command, its format, the timeout and the node's `resources` never come from the input. It runs with a bounded timeout, its own process group and the resource locks under the same durable attempt protocol as workers, so a surviving runner holding a lock is reconciled, not re-run. A runner (RED or proof) is `exited` only after its whole group is proven gone; a group that survives the kill, or whose quiescence is unknown, leaves the attempt `unknown` with its locks held and returns `quiescence_unknown` (judgment point) with no evidence or proof recorded. When a runner changes the approval binding (plan narrative or DAG bytes), its result is dropped (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is re-verified before RED evidence or local proof is committed, so drifted evidence never reaches disk. Runners (RED, proof and unit checks) run repository commands with the engine's own, unmodified environment, API keys included: the billing strip above applies to provider workers only. Runner adapters (`parseRunnerOutput`): `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs every named spec to report an **assertion** failure; import, compile and collection errors do not count. A spec matches a result by name and file; a result without a file counts only when no other result has that name and, if it failed, no other failure carries a location (so another file's same-named failure never makes RED). A runner that rewrites a named spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before the runner starts. Unsupported output cannot establish RED: that is a judgment point and the manual flow applies, marked degraded. Evidence is bound to the spec files' content digests, the baseline candidate and the resolved `config.base` commit, ordered by event sequence, and is refused if recorded after a dependent production dispatch. Before a drive dispatches a dependent (or repair) that needs it, a changed spec digest or a moved `config.base` drops the evidence (`RED_INVALIDATED`, kept in `gates.red_invalid` with the old evidence) and the engine re-runs RED itself with the recorded runner and specs, once per invalidation (`RED_RERUN`; it ignores dispatches before the invalidation). The `red_invalidated` judgment names the re-run's attempt and outcome. Accepted: that drive stops, the next one dispatches. Refused (typically `spec_not_failing`, because dependents already implement the specs): every later `drive` and `status` reports it until `gate red` is accepted, or the spec files and `config.base` are restored to the old evidence's bytes (`RED_RESTORED`); otherwise the owner decides. A dependent's own writes never invalidate it.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "**`gateShipReady`** emits `SHIP_READY` only when the current candidate equals the reviewed one, the exclusions are unaltered, graded artifact digests still match, the review chain is accepted, every required node is done or cancelled, no attempt is live, no repair is open, no judgment is unresolved (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local proof is bound to that candidate, and every required risk evidence is present (a `-spec` kind needs accepted RED on that file; any other kind must name an existing file inside the repository, checked by the engine). Local proof is produced by the engine running every `config.testCommands` entry (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage error. A proof command that changes the work tree is refused as `candidate_mismatch` and its proof is bound to no tree (`local_proof.candidate_id: null`, `dropped: [\"candidate_mismatch\"]`), so a RETRY review of the tree it left still needs a proof of that tree; one that changes the approval binding (the excluded plan narrative or the DAG bytes) is refused with that binding code and its proof dropped; no `SHIP_READY` is recorded. With units, the unit conjuncts are re-checked after the proof ran: a proof command that leaves the tree but makes unit evidence stale (for example an empty commit moving `config.base`) is refused with the existing code (`units_unverified`, `unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive` re-checks the units (spending rechecks), and the proof command must be fixed or it moves the base again on the next ship-ready. A proof runner without proven quiescence records no proof and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful closure is ever synthesized.",
+   "reason": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+  },
+  {
+   "old": "Metrics: tokens by role and by phase (`phase unknown` for records without one) and the orchestrator share, wall clock per phase, review and repair rounds, pre-ship findings by severity (from `gate review` records), resume attempts and outcomes, infra retries, admission refusals, `units` (the per-unit projection above) when the run has units, and `truncated_outputs` when an attempt's output passed the capture cap.",
+   "reason": "unit clause (\"`units` (the per-unit projection above) when the run has units\") moved to units.md; the sentence otherwise unchanged, now in harness-internals.md"
+  },
+  {
+   "old": "The `unit_review*` activities occur only with `config.unitReview` ([review.md](review.md), Unit review): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`.",
+   "reason": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section in units.md (Timing activities)"
+  },
+  {
+   "old": "When they are present, a unit's checks must pass before another unit's nodes depending on it start and before REVIEW; the rules are in [execution-harness.md](execution-harness.md) (Run engine, **Units**).",
+   "reason": "link re-pointed: the unit rules are now in units.md"
+  },
+  {
+   "old": "Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each unit need its own independent review before the final review ([review.md](review.md), Unit review).",
+   "reason": "link re-pointed: Unit review is now in units.md"
+  },
+  {
+   "old": "With unit reviews the final review must grade every id by name (`acceptance_uncovered` otherwise; [review.md](review.md), Final review on unit evidence).",
+   "reason": "link re-pointed inside the block moved to units.md: now \"Final review on unit evidence, below\""
+  },
+  {
+   "old": "It is safe but costs ceiling and reviewer time; AIS-HARNESS-3 Wave 4 measures it before any finer binding is built ([execution-harness.md](execution-harness.md), Units).",
+   "reason": "link re-pointed inside the block moved to units.md: now \"Engine rules, below\""
+  },
+  {
+   "old": "When the repair touches a `concurrency`-labelled node, or repairs a security or architecture finding (Repair routing, below), the second opinion on the repair (from a provider other than the primary's: Codex for the Opus primary; CodeRabbit if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL` with evidence.",
+   "reason": "link re-pointed: \"(Repair routing, below)\" now names the Repair routing section that moved to units.md; the confirmation rule itself is unchanged"
+  },
+  {
+   "old": "**Unit reviews do not replace the final review.** The final review in this file is still mandatory on the exact assembled candidate, with the same Opus primary, the mandatory second opinion and the same repair, confirmation and RETRY policy.",
+   "reason": "position word: \"in this file\" now links review.md (block moved to units.md)"
+  },
+  {
+   "old": "**Who.** An Opus primary reviewer that is independent of every builder, under the rules in this file. The gate refuses a reviewer whose identity equals a builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node carries a risk label, or the ticket has `config.riskLabels`) also needs a second opinion from a provider other than the primary's (Codex for the Opus primary, whatever the host: on a Codex host the counterpart Claude would share the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit` with identity `coderabbit:<model>`. If neither can run, stop and ask (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the gate requires the second opinion to come from a different provider than the primary (`reviewers_same_provider`) and records each reviewer's provider and model. It does not check model names: assigning Opus as primary and Codex as second is the orchestrator's duty under the owner rule. For a unit that is not risky the second opinion is optional; when it is given, the gate validates it.",
+   "reason": "position word: \"in this file\" now links review.md (block moved to units.md)"
+  },
+  {
+   "old": "**Input.** Give the reviewer the unit's exact files and diff (its nodes' declared reads and writes), its acceptance ids, the contract versions it reads, its check results, the approved plan and the threat model. The artifact uses the output contract above, with `candidate_id` set to `status.units.<u>.evidence.id`. The gate input adds `unit`, `approved_plan_digest`, `dag_digest` and `base_commit` (`status.units.<u>.evidence.base_commit`). Record it with `run-engine.mjs gate unit-review --input <file>`. Use a unique `review_execution` for each unit review (`review-<opaque>`); the final review may not reuse it.",
+   "reason": "position word: \"the output contract above\" now links review.md (block moved to units.md)"
+  },
+  {
+   "old": "**FAIL and repair.** Reconcile as above. An accepted FAIL with `fix` findings needs `repair_prompt_file` and opens one repair. Its write set (the fixed findings' paths plus `repair_ownership`) must lie inside the unit's declared writes; anything outside is `repair_outside_unit`, so leave that finding to the final review: record the unit review with that finding dispositioned to the final review (for example `final-review`, never `fix`) and its rows judged on the unit alone, so the unit can PASS (a unit FAIL with nothing to fix is terminal), then carry the finding into the final review as a primary finding to `fix`, whose one repair may cross units. `drive` runs the repair only while the unit's evidence is still the one that was reviewed; otherwise it cancels the repair and the review goes stale. Then `drive` re-checks the unit. The re-checked evidence becomes the repaired candidate only when the repair's own writes are the sole change; a node rebuild, a dependency unit's re-check or any other change makes the review stale instead, so a fresh review is due. The same primary (plus the second opinion when the unit is risky) then gives one targeted confirmation on the repaired evidence (`kind: \"confirmation\"`). Each unit review execution gets one repair and one confirmation. The following are terminal for the unit (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL the ceiling cannot carry, and any unit FAIL after the REVIEW freeze (after the freeze, only the final review's repair may change the candidate). Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues, never an automatic retry.",
+   "reason": "position word: \"Reconcile as above\" now links review.md (block moved to units.md)"
+  },
+  {
+   "old": "When unit reviews exist (`config.unitReview`), the final review in this file is mandatory and runs on the exact assembled candidate, with the same Opus primary, the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit if it is unavailable or out of quota; if none can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and owner-RETRY policy.",
+   "reason": "position word: \"in this file\" now links review.md (block moved to units.md)"
+  },
+  {
+   "old": "With the run engine, also evaluate each review artifact through `gate.mjs` (`gateReview` for the original and the confirmation, `gateShipReady` before SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, above).",
+   "reason": "position word: \"`gate unit-review`, above\" now links units.md"
+  },
+  {
+   "new": "| BUILD | this spine and [references/brief.md](references/brief.md) |",
+   "reason": "load-table row: BUILD loads brief.md (fixed row of the Wave 2 plan)"
+  },
+  {
+   "new": "| PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |",
+   "reason": "load-table row: units.md at PLAN when the plan chooses to split (fixed row)"
+  },
+  {
+   "new": "| BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |",
+   "reason": "load-table row: units.md at BUILD, PROVE, REVIEW when a node has unit (fixed row)"
+  },
+  {
+   "new": "| On demand, when the operator card names it | [references/harness-internals.md](references/harness-internals.md) |",
+   "reason": "load-table row: harness-internals.md on demand (fixed row)"
+  },
+  {
+   "new": "With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only `status`. Record RED, review and ship-ready with `run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>` rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair, which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow [units.md](references/units.md); unit reviews do not replace the final review, which stays mandatory. Judgment points (`status.judgments`) come back to you or the user. The manual flow below is the documented fallback when the engine or gate module is unavailable (record `harness degraded`). A run that falls back after `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate` it again, since its ledger no longer reflects the work. While that state file exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does not authorize is **WAIT_FOR_USER**, never a hand-edit of the state file.",
+   "reason": "unit clause (config.unitReview, gate unit-review, units_consumed) replaced by a pointer to units.md; the unit-review and final-review rules are in units.md"
+  },
+  {
+   "new": "Mechanism and rationale are in [harness-internals.md](harness-internals.md), read on demand; rules for nodes that carry `unit` are in [units.md](units.md).",
+   "reason": "new pointer sentence at the top of the card (harness-internals.md and units.md)"
+  },
+  {
+   "new": "`memory_safety` is `estimated` only when a verified budget applied and **every** node has `estimatedMemoryMb`; otherwise it is `unverified`.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "**Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused. `REPAIR` (a review repair writer) routes like BUILD, is recorded as `phase: \"REPAIR\"` in results and usage, and requires `reviewExecution` (the review round being repaired). It may declare `redSpecs` (repo-relative spec paths); then `redEvidence` must be an absolute path to a non-empty file with the failing-run output, written by the orchestrator, or dispatch is refused.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "**Approval evidence (event binding, not content verification):** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the supplied digest. The carrier reads the plan artifact and never writes it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker cannot forge `START`. The same applies to `ownership.othersOwned`, so a plan change can never be exempted.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "**Billing:** `billing` defaults to `subscription`. The child environment drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches. Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`. Gemini/Antigravity: Google API-key and Vertex variables). The CLI's own status is then checked in that environment: `claude auth status --json` must report `authMethod: \"claude.ai\"` with `apiProvider: \"firstParty\"`, and `codex login status` must report `Logged in using ChatGPT`. Any other answer refuses dispatch before a process starts. `\"billing\": \"api\"` also needs `\"allowApiBilling\": true`, which only the user can authorize.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "**Adapter limits:** `bypassPermissions`, `plan` and `danger-full-access` are refused.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "The budget metric is `processed_tokens = input + output + cache_read + cache_write` (or `output_tokens`); see Budgets below.",
+   "reason": "position word: \"see Budgets above\" now reads \"below\""
+  },
+  {
+   "new": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`\n```",
+   "reason": "split: fence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "`config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`, `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready` runs every entry as the local proof), `base`, `riskLabels` (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with `billing: \"api\"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design; `allowApiBilling` exists only for a library caller the user authorized.",
+   "reason": "link re-pointed to units.md; rest unchanged"
+  },
+  {
+   "new": "node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`, `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`, `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`), `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see [units.md](units.md)).",
+   "reason": "link re-pointed to units.md; rest unchanged"
+  },
+  {
+   "new": "`acceptance` and `config.acceptanceIds` are legal on a DAG without units; [units.md](units.md) applies only when a node has `unit`.",
+   "reason": "new sentence required by the plan: unit-less acceptance/config.acceptanceIds is legal, and units.md applies only when a node has unit"
+  },
+  {
+   "new": "`status` prints the compact `ship-ticket-engine-status-v1` view, including `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).",
+   "reason": "unit clause removed (moved to units.md); \"(below)\" unchanged, the capture-cap paragraph is still below it in the card"
+  },
+  {
+   "new": "On `lock_held` wait for the holder and retry; never delete the lock file by hand.",
+   "reason": "new decision sentence required by the repair batch: on lock_held wait and retry, never delete the lock file by hand"
+  },
+  {
+   "new": "**Launch handshake and quiescence:** details and `retire()` in [harness-internals.md](harness-internals.md).",
+   "reason": "new pointer sentence for the launch handshake moved to harness-internals.md"
+  },
+  {
+   "new": "RUN-STATE readers split lines on every break a common reader honours (list: [harness-internals.md](harness-internals.md)).",
+   "reason": "new pointer sentence: the break list moved to harness-internals.md; keeps the antecedent of \"one of those\" in the next sentence"
+  },
+  {
+   "new": "It is refused unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: the review saw these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY), and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale), a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`) or live attempts (`rebind_attempts_live`).",
+   "reason": "clause \"or units (`rebind_units`...)\" removed (moved to units.md); grammar of the list adjusted"
+  },
+  {
+   "new": "**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair batches per ticket in total; one REVIEW repair and one confirmation per authorized review execution (`rounds.review_repairs[<review_execution>]`).",
+   "reason": "unit parenthetical removed (moved to units.md)"
+  },
+  {
+   "new": "**Judgment points** (`status.judgments[].code`) stop the engine and go back to the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`, `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants can outlive the leader: known limit N7 below), `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`, `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`, `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review repair that failed; it is terminal for its review execution, and an owner RETRY of that review cancels it as `superseded by retry`).",
+   "reason": "unit clause removed (moved to units.md)"
+  },
+  {
+   "new": "The gate adds unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).",
+   "reason": "unit clause removed (moved to units.md)"
+  },
+  {
+   "new": "**`gateRed`** is a scheduler prerequisite: a node whose dependency has `redSpecs` is not dispatched until RED is accepted, repairs included. The engine runs the DAG-bound runner itself: `gate red` input is `{node, command?, specs?}`, where `command` only names a formatted `config.testCommands` entry; the command, its format, the timeout and the node's `resources` never come from the input. It runs with a bounded timeout, its own process group and the resource locks under the same durable attempt protocol as workers, so a surviving runner holding a lock is reconciled, not re-run. A runner (RED or proof) is `exited` only after its whole group is proven gone; a group that survives the kill, or whose quiescence is unknown, leaves the attempt `unknown` with its locks held and returns `quiescence_unknown` (judgment point) with no evidence or proof recorded. When a runner changes the approval binding (plan narrative or DAG bytes), its result is dropped (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is re-verified before RED evidence or local proof is committed, so drifted evidence never reaches disk. Runners (RED, proof and unit checks) run repository commands with the engine's own, unmodified environment, API keys included: the billing strip above applies to provider workers only. Runner adapters (`parseRunnerOutput`): `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs every named spec to report an **assertion** failure; import, compile and collection errors do not count. A runner that rewrites a named spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before the runner starts. Unsupported output cannot establish RED: that is a judgment point and the manual flow applies, marked degraded. Evidence is bound to the spec files' content digests, the baseline candidate and the resolved `config.base` commit, ordered by event sequence, and is refused if recorded after a dependent production dispatch. Before a drive dispatches a dependent (or repair) that needs it, a changed spec digest or a moved `config.base` drops the evidence (`RED_INVALIDATED`, kept in `gates.red_invalid` with the old evidence) and the engine re-runs RED itself with the recorded runner and specs, once per invalidation (`RED_RERUN`; it ignores dispatches before the invalidation). The `red_invalidated` judgment names the re-run's attempt and outcome. Accepted: that drive stops, the next one dispatches. Refused (typically `spec_not_failing`, because dependents already implement the specs): every later `drive` and `status` reports it until `gate red` is accepted, or the spec files and `config.base` are restored to the old evidence's bytes (`RED_RESTORED`); otherwise the owner decides. A dependent's own writes never invalidate it.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+  },
+  {
+   "new": "# Execution harness internals (on demand)",
+   "reason": "title of the new on-demand file"
+  },
+  {
+   "new": "Mechanism and rationale moved out of [execution-harness.md](execution-harness.md), the operator card.",
+   "reason": "lead sentence of harness-internals.md"
+  },
+  {
+   "new": "Everything the orchestrator must or must not do stays in the card; open this file when a rule there points here or when a run misbehaves.",
+   "reason": "lead sentence of harness-internals.md"
+  },
+  {
+   "new": "Memory probes behind `memoryBudgetMb: \"auto\"` (the `memory_safety` meaning is in the card):",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "`memoryBudgetMb: \"auto\"` takes OS free memory, capped by Node's cgroup-aware `availableMemory()` (Node >= 22). On older Node it is capped by the cgroup limit minus measured cgroup usage (`memory.current` / `memory.usage_in_bytes`). A reserve of 1 GiB or 15% of total, whichever is larger, is subtracted. If a cgroup limit exists but its usage is unreadable, the estimate is `memory_verified: false`. Node's available/constrained probes are cgroup-aware only on Linux, so they are consulted only there. On macOS, `os.freemem()` counts only free pages (about 0.7 GB of 24 GB on the host where this was found), so the harness reads `vm_stat` and counts free, inactive, speculative and purgeable pages instead.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Carrier mechanism that the card summarizes in \"What it enforces\":",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "Phase bullet, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "When the run engine's state file exists, that execution must be an accepted FAIL with a finding-bound write set in its review chain; only without engine state does the run log's REVIEW `start` row decide.",
+   "reason": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Approval evidence bullet, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "Plan content drift remains SHIP's approved-plan digest check, because the digest algorithm belongs to PLAN.",
+   "reason": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Billing bullet, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "Variable names are matched case-insensitively (Windows).",
+   "reason": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Gemini and Antigravity details (the card keeps the template-only and `acknowledgeUnverifiedAuth` rules):",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "**Verified adapters:** Claude and Codex arguments are built from flags checked against Claude Code 2.1.318 and Codex CLI 0.166.0: `claude -p --output-format json --no-session-persistence --permission-mode <acceptEdits|auto|dontAsk|manual> [--model <id>]` and `codex exec --json --ephemeral -s <read-only|workspace-write> [-m <id>] -`. Caller `args` are rejected, so `--model` cannot be smuggled in. `--model`/`-m` is emitted only when `modelMap` maps the routed tier; otherwise the provider default runs (`model: \"provider-default\"`). Hooks are not disabled (no `--bare`), so PostToolUse guards such as nn-guard still run.",
+   "reason": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Counter sources and the import details behind the card's usage summary:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "Files paragraph, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "### State ledger format",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "### Lock and persistence",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "Lock and persistence paragraph, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "### Launch handshake and quiescence",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "### Authority lines",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "Ownership paragraph, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "`archive` paragraph, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "### `mark`",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "`mark` paragraph, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "## Gate internals",
+   "reason": "new section heading in harness-internals.md"
+  },
+  {
+   "new": "`gateRed` bullet, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "A spec matches a result by name and file; a result without a file counts only when no other result has that name and, if it failed, no other failure carries a location (so another file's same-named failure never makes RED).",
+   "reason": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+  },
+  {
+   "new": "Eval report section, continued:",
+   "reason": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+  },
+  {
+   "new": "Metrics: tokens by role and by phase (`phase unknown` for records without one) and the orchestrator share, wall clock per phase, review and repair rounds, pre-ship findings by severity (from `gate review` records), resume attempts and outcomes, infra retries, admission refusals and `truncated_outputs` when an attempt's output passed the capture cap.",
+   "reason": "unit clause removed (moved to units.md); sentence otherwise unchanged"
+  },
+  {
+   "new": "The `unit_review*` activities in the BUILD row occur only with `config.unitReview`; their metrics are in [units.md](units.md), Timing activities.",
+   "reason": "new pointer sentence in observability.md; the original paragraph moved to units.md (Timing activities)"
+  },
+  {
+   "new": "When they are present, a unit's checks must pass before another unit's nodes depending on it start and before REVIEW; the rules are in [units.md](units.md).",
+   "reason": "link re-pointed to units.md"
+  },
+  {
+   "new": "Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each unit need its own independent review before the final review ([units.md](units.md), Unit review).",
+   "reason": "link re-pointed to units.md"
+  },
+  {
+   "new": "When the plan chooses to split, read [units.md](units.md) before writing the DAG: it holds the `config.acceptanceIds` declaration, the `config.unitRecheckCeiling` sizing and the known over-review cost.",
+   "reason": "new pointer sentence in plan.md where the moved blocks stood"
+  },
+  {
+   "new": "When the repair touches a `concurrency`-labelled node, or repairs a security or architecture finding (the security or architecture class of Repair routing in [units.md](units.md)), the second opinion on the repair (from a provider other than the primary's: Codex for the Opus primary; CodeRabbit if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL` with evidence.",
+   "reason": "link re-pointed: \"(Repair routing, below)\" now names the Repair routing section that moved to units.md; the confirmation rule itself is unchanged"
+  },
+  {
+   "new": "With `config.unitReview`, the per-unit reviews, the unit repair routing and the final review on unit evidence are in [units.md](units.md); without it none of that applies.",
+   "reason": "new pointer sentence in review.md where the unit sections stood"
+  },
+  {
+   "new": "With the run engine, also evaluate each review artifact through `gate.mjs` (`gateReview` for the original and the confirmation, `gateShipReady` before SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, [units.md](units.md)).",
+   "reason": "position word: \"`gate unit-review`, above\" now links units.md"
+  },
+  {
+   "new": "# Units (opt-in)",
+   "reason": "title of the new opt-in file"
+  },
+  {
+   "new": "Load this file when the plan chooses to split the ticket into units (PLAN), and when any node of the bound DAG has `unit` (BUILD, PROVE, REVIEW).",
+   "reason": "lead sentence of units.md (load condition)"
+  },
+  {
+   "new": "A run whose DAG has no `unit` field does not need it: [execution-harness.md](execution-harness.md) covers that run on its own.",
+   "reason": "lead sentence of units.md"
+  },
+  {
+   "new": "## Planning a split",
+   "reason": "new section heading in units.md"
+  },
+  {
+   "new": "These blocks belong to the PLAN step \"Decomposition: split or not\" in [plan.md](plan.md); they apply once the plan chooses to split.",
+   "reason": "new lead-in line in units.md"
+  },
+  {
+   "new": "With unit reviews the final review must grade every id by name (`acceptance_uncovered` otherwise; Final review on unit evidence, below).",
+   "reason": "link re-pointed (same file)"
+  },
+  {
+   "new": "It is safe but costs ceiling and reviewer time; AIS-HARNESS-3 Wave 4 measures it before any finer binding is built (Engine rules, below).",
+   "reason": "link re-pointed (same file)"
+  },
+  {
+   "new": "## Engine rules",
+   "reason": "new section heading in units.md"
+  },
+  {
+   "new": "The run engine rules for nodes that carry `unit` ([execution-harness.md](execution-harness.md) holds the rest of the Run engine):",
+   "reason": "new lead-in line in units.md"
+  },
+  {
+   "new": "**Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own independent review chain. The engine never dispatches a reviewer: the orchestrator relays it (Unit review, below) and `gate unit-review` validates and records it under the lock, reusing `gate.mjs` `gateReview` (contract, enums, dispositions, builder roster, distinct reviewers). The input is `{unit, review_execution, kind: original|confirmation, approved_plan_digest, dag_digest, base_commit, primary, second_opinion?, reconciliation, graded_artifacts?, repair_ownership?, repair_prompt_file?}`, where the reviewers' `candidate_id` is the unit's evidence id (`status.units.<u>.evidence.id`); `--unit` may name the unit instead. It is accepted only when the unit is `verified`, nothing is live, the digests are the bound ones and the evidence id and base commit are the current evidence's. Refusals record nothing: `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`, `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain), `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`, `repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket has `config.riskLabels`. Its review and its confirmation then need a second opinion (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`; a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a second opinion is optional and validated when given. The record carries each reviewer's provider and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`), the reviewers, findings and outcome. The review state is recomputed at every read against the current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh original is due), `fail` awaiting `repair|recheck|confirmation`, or `fail` terminal (computed judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit. The new evidence becomes the candidate of the one targeted confirmation only when, against the binding the FAIL reviewed, nothing but files inside the repair write set changed (`UNIT_REPAIR_BOUND`). A declared directory is compared file by file against its tree recorded at the FAIL, so a repair writing `src/a.txt` inside a declared `src` binds, while any other changed, added or removed entry inside it is outside the repair. A node re-run, a dependency unit's re-check, an upstream change or a base move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL whose cycle the ceiling cannot carry (`ceiling_refused`, recorded with `repair_opened: false`) and any FAIL after the freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's last execution>, authorized_by}` admits a new original. A re-review, a repair and a confirmation spend the parent-wide ceiling. Opening a repair needs 3 unheld slots: it spends 1 and holds its re-check and confirmation for the unit until the cycle ends or is cancelled (`UNIT_CEILING_RELEASED`). The spends are recorded (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger: stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair). `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current PASS (and `gate review` the two Wave 3 refusals below). The `drive` outcome `done` does not cover pending unit reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).",
+   "reason": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section below in units.md"
+  },
+  {
+   "new": "**Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit reviews do not replace the final review (Final review on unit evidence, below). After the refusals above, `gate review` also refuses, recording nothing: `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose `id` (when that is an acceptance id; else its `criterion`: one row covers one id) is an acceptance id mapped on a node (every id of `config.acceptanceIds`), and `units_consumed_stale` when an original or a confirmation does not name, in the input field `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is refused. The accepted record carries `units_consumed`, and `gate ship-ready` re-checks the record that authorizes ship (the last accepted original or confirmation) by the same rule, refusing `units_consumed_stale` when a unit's evidence moved since (for example the resolved base moved and the units were re-checked and re-reviewed on a byte-identical candidate). `init` refuses (`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without `config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.",
+   "reason": "link re-pointed: now \"(Final review on unit evidence, below)\""
+  },
+  {
+   "new": "The unit commands of the Run engine:",
+   "reason": "new lead-in line in units.md for the two unit commands"
+  },
+  {
+   "new": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)\n```",
+   "reason": "split: fence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/units.md)"
+  },
+  {
+   "new": "### Unit rules inside other engine sections",
+   "reason": "new sub-heading in units.md"
+  },
+  {
+   "new": "Each of these completes a section of [execution-harness.md](execution-harness.md) for a DAG with units.",
+   "reason": "new lead-in line in units.md"
+  },
+  {
+   "new": "`status` prints, besides the fields named in the card, `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state likewise), `unit_reviews_pending` only with `config.unitReview` (`unit_reviews` in state likewise).",
+   "reason": "unit clause moved here from the card status sentence"
+  },
+  {
+   "new": "Round counters (card): a unit review execution: `rounds.unit_review_repairs[<review_execution>]`, present once one ran.",
+   "reason": "unit parenthetical moved here from the card Round counters paragraph"
+  },
+  {
+   "new": "`rebind` (card) is also refused with units (`rebind_units`: unit evidence is not re-bound).",
+   "reason": "unit clause moved here from the card rebind paragraph"
+  },
+  {
+   "new": "Judgment points (card): with units also `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews `unit_review_terminal`.",
+   "reason": "unit clause moved here from the card Judgment points paragraph"
+  },
+  {
+   "new": "Gate refusals: its `units_unverified` and `unit_reviews_missing` refusals are not judgment points (`drive` runs the checks; the orchestrator relays the unit reviews).",
+   "reason": "unit clause moved here from the card Judgment points paragraph"
+  },
+  {
+   "new": "`gate ship-ready` (card), with units:",
+   "reason": "new lead-in line in units.md for the moved ship-ready unit sentence"
+  },
+  {
+   "new": "With units, the unit conjuncts are re-checked after the proof ran: a proof command that leaves the tree but makes unit evidence stale (for example an empty commit moving `config.base`) is refused with the existing code (`units_unverified`, `unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive` re-checks the units (spending rechecks), and the proof command must be fixed or it moves the base again on the next ship-ready.",
+   "reason": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/units.md)"
+  },
+  {
+   "new": "Eval report (card), metrics: `units` (the per-unit projection above) when the run has units.",
+   "reason": "unit clause moved here from the card Eval report Metrics sentence"
+  },
+  {
+   "new": "**Unit reviews do not replace the final review.** The final review in [review.md](review.md) is still mandatory on the exact assembled candidate, with the same Opus primary, the mandatory second opinion and the same repair, confirmation and RETRY policy.",
+   "reason": "position word: \"in this file\" now links review.md"
+  },
+  {
+   "new": "**Who.** An Opus primary reviewer that is independent of every builder, under the rules in [review.md](review.md). The gate refuses a reviewer whose identity equals a builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node carries a risk label, or the ticket has `config.riskLabels`) also needs a second opinion from a provider other than the primary's (Codex for the Opus primary, whatever the host: on a Codex host the counterpart Claude would share the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit` with identity `coderabbit:<model>`. If neither can run, stop and ask (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the gate requires the second opinion to come from a different provider than the primary (`reviewers_same_provider`) and records each reviewer's provider and model. It does not check model names: assigning Opus as primary and Codex as second is the orchestrator's duty under the owner rule. For a unit that is not risky the second opinion is optional; when it is given, the gate validates it.",
+   "reason": "position word: \"in this file\" now links review.md"
+  },
+  {
+   "new": "**Input.** Give the reviewer the unit's exact files and diff (its nodes' declared reads and writes), its acceptance ids, the contract versions it reads, its check results, the approved plan and the threat model. The artifact uses the output contract in [review.md](review.md), with `candidate_id` set to `status.units.<u>.evidence.id`. The gate input adds `unit`, `approved_plan_digest`, `dag_digest` and `base_commit` (`status.units.<u>.evidence.base_commit`). Record it with `run-engine.mjs gate unit-review --input <file>`. Use a unique `review_execution` for each unit review (`review-<opaque>`); the final review may not reuse it.",
+   "reason": "position word: \"the output contract above\" now links review.md (block moved to units.md)"
+  },
+  {
+   "new": "**FAIL and repair.** Reconcile as in [review.md](review.md). An accepted FAIL with `fix` findings needs `repair_prompt_file` and opens one repair. Its write set (the fixed findings' paths plus `repair_ownership`) must lie inside the unit's declared writes; anything outside is `repair_outside_unit`, so leave that finding to the final review: record the unit review with that finding dispositioned to the final review (for example `final-review`, never `fix`) and its rows judged on the unit alone, so the unit can PASS (a unit FAIL with nothing to fix is terminal), then carry the finding into the final review as a primary finding to `fix`, whose one repair may cross units. `drive` runs the repair only while the unit's evidence is still the one that was reviewed; otherwise it cancels the repair and the review goes stale. Then `drive` re-checks the unit. The re-checked evidence becomes the repaired candidate only when the repair's own writes are the sole change; a node rebuild, a dependency unit's re-check or any other change makes the review stale instead, so a fresh review is due. The same primary (plus the second opinion when the unit is risky) then gives one targeted confirmation on the repaired evidence (`kind: \"confirmation\"`). Each unit review execution gets one repair and one confirmation. The following are terminal for the unit (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL the ceiling cannot carry, and any unit FAIL after the REVIEW freeze (after the freeze, only the final review's repair may change the candidate). Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues, never an automatic retry.",
+   "reason": "position word: \"as above\" now links review.md"
+  },
+  {
+   "new": "When unit reviews exist (`config.unitReview`), the final review in [review.md](review.md) is mandatory and runs on the exact assembled candidate, with the same Opus primary, the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit if it is unavailable or out of quota; if none can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and owner-RETRY policy.",
+   "reason": "position word: \"in this file\" now links review.md"
+  },
+  {
+   "new": "## Timing activities",
+   "reason": "new section heading in units.md"
+  },
+  {
+   "new": "The `unit_review*` activities occur only with `config.unitReview` (Unit review, above): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`.",
+   "reason": "link re-pointed: now \"(Unit review, above)\" (same file)"
+  },
+  {
+   "new": "## Scheduling and admission",
+   "reason": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+  },
+  {
+   "new": "## Writer carrier",
+   "reason": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+  },
+  {
+   "new": "## Provider-reported usage",
+   "reason": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+  },
+  {
+   "new": "## Run engine",
+   "reason": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+  },
+  {
+   "new": "## Eval report",
+   "reason": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+  },
+  {
+   "new": "**`gateShipReady`** emits `SHIP_READY` only when the current candidate equals the reviewed one, the exclusions are unaltered, graded artifact digests still match, the review chain is accepted, every required node is done or cancelled, no attempt is live, no repair is open, no judgment is unresolved (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local proof is bound to that candidate, and every required risk evidence is present (a `-spec` kind needs accepted RED on that file; any other kind must name an existing file inside the repository, checked by the engine). Local proof is produced by the engine running every `config.testCommands` entry (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage error. A proof command that changes the work tree is refused as `candidate_mismatch` and its proof is bound to no tree (`local_proof.candidate_id: null`, `dropped: [\"candidate_mismatch\"]`), so a RETRY review of the tree it left still needs a proof of that tree; one that changes the approval binding (the excluded plan narrative or the DAG bytes) is refused with that binding code and its proof dropped; no `SHIP_READY` is recorded. A proof runner without proven quiescence records no proof and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful closure is ever synthesized.",
+   "reason": "the gateShipReady item as it was, minus the sentence about unit conjuncts after the proof, which moved to units.md (its old text is covered by its own entry); everything else, including the remote-CI sentence, is unchanged and stays in the card"
+  }
+ ]
+}

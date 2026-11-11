@@ -88,13 +88,16 @@ Load a phase reference only when entering that phase:
 | Workflow start | [references/observability.md](references/observability.md) |
 | UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) |
 | PLAN | [references/plan.md](references/plan.md) and [references/cross-model.md](references/cross-model.md) |
-| BUILD | this spine |
+| BUILD | this spine and [references/brief.md](references/brief.md) |
 | PROVE | [references/prove.md](references/prove.md) |
 | PROVE with UI | [references/design-parity.md](references/design-parity.md) |
 | REVIEW | [references/review.md](references/review.md) |
 | PLAN, PROVE or REVIEW of security-relevant work | [references/security-risk.md](references/security-risk.md) |
 | REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
+| PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |
+| BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |
+| On demand, when the operator card names it | [references/harness-internals.md](references/harness-internals.md) |
 
 ## Execution harness (outside PLAN)
 
@@ -424,10 +427,8 @@ Read the plan and Design Contract from disk before writing.
   `status`. Record RED, review and ship-ready with `run-engine.mjs gate
   red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>`
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
-  which the next `drive` dispatches. With `config.unitReview`, record each unit's
-  independent review with `gate unit-review` first
-  ([review.md](references/review.md), Unit review); unit reviews do not replace the
-  final review, which stays mandatory and names `units_consumed`. Judgment points (`status.judgments`) come back to you or the
+  which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow
+  [units.md](references/units.md); unit reviews do not replace the final review, which stays mandatory. Judgment points (`status.judgments`) come back to you or the
   user. The manual flow below is the documented fallback when the engine or gate
   module is unavailable (record `harness degraded`). A run that falls back after
   `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`

@@ -276,11 +276,11 @@ run ready nodes serially and record the performance degradation and reason.
 mapped to at least one node). Leave them out and the run is unchanged. When they
 are present, a unit's checks must pass before another unit's nodes depending on it
 start and before REVIEW; the rules are in
-[execution-harness.md](execution-harness.md) (Run engine, **Units**). Whether to
+[units.md](units.md). Whether to
 split a ticket into units is the planner's recorded judgment, approved with the plan.
 Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each
 unit need its own independent review before the final review
-([review.md](review.md), Unit review).
+([units.md](units.md), Unit review).
 
 ### Decomposition: split or not
 
@@ -315,32 +315,7 @@ Then decide:
   `config.acceptanceIds`, `config.unitRecheckCeiling`, `config.unitReview`);
   they are fixed at approval and never re-decomposed at run time.
 
-**Declare `config.acceptanceIds`** as the plan's own acceptance-criterion ids
-(for example `AC1`..`ACn`, as written in the plan), and map each to at least one
-node through `acceptance`. With unit reviews the final review must grade every id
-by name (`acceptance_uncovered` otherwise; [review.md](review.md), Final review on
-unit evidence). `config.unitReview` therefore requires `config.acceptanceIds`: `init`
-refuses a DAG that sets it without them (`dag_invalid`), since coverage of no ids
-would pass vacuously.
-
-**Set `config.unitRecheckCeiling` for the unit count.** It is one run-wide
-allowance (default 4) shared by every unit re-check, unit re-review, unit repair
-and unit confirmation; the unit count never multiplies it. A unit repair cycle
-needs 3 unheld slots (the repair, its re-check, its confirmation), and a stale
-upstream unit costs each dependent a re-check and a re-review. Size it for the
-cycles you expect (roughly 3 per unit that may need a repair plus 2 per dependent
-of a churning contract) and record that reasoning in the plan. Disclosed limit
-(held slots): while one unit's open repair holds its two slots, another unit's
-re-check can exhaust the rest and raise a durable `parent_ceiling` that halts all
-dispatch, that repair included, until the owner decides. A higher ceiling for a
-multi-unit ticket is the mitigation; it is still a fixed, approved bound.
-
-**Known over-review cost.** A dependent unit binds its upstream unit's evidence,
-not the bytes of the contract they share. When the upstream unit is re-checked,
-every dependent's evidence and unit review go stale and are redone, even if the
-shared contract did not change. It is safe but costs ceiling and reviewer time;
-AIS-HARNESS-3 Wave 4 measures it before any finer binding is built
-([execution-harness.md](execution-harness.md), Units).
+When the plan chooses to split, read [units.md](units.md) before writing the DAG: it holds the `config.acceptanceIds` declaration, the `config.unitRecheckCeiling` sizing and the known over-review cost.
 
 ### Full-stack: the frontend does not wait for the backend
 

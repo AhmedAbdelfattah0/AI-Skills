@@ -1,0 +1,345 @@
+[
+  {
+    "id": "S1",
+    "title": "one node",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "nodes": {
+        "a": "done"
+      },
+      "writer_runs": 1,
+      "commands": [
+        "init",
+        "drive"
+      ]
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 811,
+      "reference_bytes": 207496,
+      "wall_ms": 713,
+      "nodes_completed": 1,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S2",
+    "title": "contract, frontend and backend in one wave, then a join",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "nodes": {
+        "contract": "done",
+        "frontend": "done",
+        "backend": "done",
+        "join": "done"
+      },
+      "start_waves": [
+        [
+          "contract"
+        ],
+        [
+          "backend",
+          "frontend"
+        ],
+        [
+          "join"
+        ]
+      ],
+      "waves_in_order": true,
+      "frontend_and_backend_in_one_wave": true,
+      "peak_concurrency": 2
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 1077,
+      "reference_bytes": 207496,
+      "wall_ms": 1047,
+      "nodes_completed": 4,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S3",
+    "title": "auth-sensitive change: ship-ready needs accepted RED and the risk evidence",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "drive_before_red": {
+        "outcome": "waiting",
+        "red_pending": [
+          "spec"
+        ],
+        "impl_runs": 0
+      },
+      "ship_ready_before_red_with_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "nodes_unfinished",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "authorization-spec",
+          "negative-spec"
+        ]
+      },
+      "red_gate": "red_accepted",
+      "drive_after_red": {
+        "outcome": "done",
+        "nodes": {
+          "spec": "done",
+          "impl": "done"
+        }
+      },
+      "ship_ready_after_red_with_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_local_proof"
+        ],
+        "missing": []
+      },
+      "ship_ready_after_red_no_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "authorization-spec",
+          "negative-spec"
+        ]
+      },
+      "executions": {
+        "red_spec": 1,
+        "proof_command": 0
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 7,
+      "bytes_read": 3226,
+      "reference_bytes": 220053,
+      "wall_ms": 1777,
+      "nodes_completed": 2,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 1,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S4",
+    "title": "six nodes in two waves and a join",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "width": 2,
+      "nodes": {
+        "n1": "done",
+        "n2": "done",
+        "n3": "done",
+        "n4": "done",
+        "n5": "done",
+        "n6": "done"
+      },
+      "peak_concurrency": 2,
+      "start_waves": [
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "waves_in_order": true
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 1222,
+      "reference_bytes": 207496,
+      "wall_ms": 1231,
+      "nodes_completed": 6,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S5",
+    "title": "failure and recovery: provider error, timeout, engine crash, worker crash",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "provider_error": {
+        "node": {
+          "state": "failed",
+          "attempts": 2,
+          "retries": 1
+        },
+        "writer_runs": 2,
+        "judgments": [
+          "node_failed"
+        ],
+        "reason": "provider error (exit 1)"
+      },
+      "timeout": {
+        "node": {
+          "state": "failed",
+          "attempts": 1,
+          "retries": 0
+        },
+        "node_attempts_recorded": 1,
+        "judgments": [
+          "node_failed"
+        ],
+        "reason": "timeout (never retried automatically)"
+      },
+      "engine_crash": {
+        "killed_by": "SIGKILL",
+        "state_after_resume_while_live": "running",
+        "state_after_worker_ended": "done",
+        "final_outcome": "done",
+        "writer_runs": 1
+      },
+      "worker_crash_with_writes": {
+        "outcome": "judgment",
+        "judgments": [
+          "crash_with_writes",
+          "node_failed"
+        ],
+        "writer_runs_after_second_drive": 1,
+        "second_drive_judgments": [
+          "crash_with_writes",
+          "node_failed"
+        ]
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 12,
+      "bytes_read": 5226,
+      "reference_bytes": 207496,
+      "wall_ms": 6599,
+      "nodes_completed": 1,
+      "judgments": 4,
+      "owner_interventions": 4,
+      "proof_runs": 0,
+      "retries": 1
+    }
+  },
+  {
+    "id": "S6",
+    "title": "scope expansion: one undeclared file is an ownership violation and the whole run stops",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "judgment",
+      "judgments": [
+        "ownership_violation",
+        "node_failed"
+      ],
+      "violation_node": "a",
+      "violation_reason": "wrote outside its write set: src/extra.txt",
+      "nodes": {
+        "a": "failed",
+        "b": "pending",
+        "c": "pending"
+      },
+      "nodes_after_second_drive": {
+        "a": "failed",
+        "b": "pending",
+        "c": "pending"
+      },
+      "dependent_runs": 0,
+      "independent_runs": 0,
+      "writer_runs_after_second_drive": 1,
+      "second_drive_judgments": [
+        "ownership_violation",
+        "node_failed"
+      ],
+      "control_without_the_extra_file": {
+        "outcome": "done",
+        "judgments": [],
+        "nodes": {
+          "a": "done",
+          "b": "done",
+          "c": "done"
+        }
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 5,
+      "bytes_read": 3077,
+      "reference_bytes": 207496,
+      "wall_ms": 1659,
+      "nodes_completed": 3,
+      "judgments": 2,
+      "owner_interventions": 2,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S7",
+    "title": "UI change: ship-ready refuses without parity evidence",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "drive_outcome": "done",
+      "ship_ready": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "parity-measurements"
+        ]
+      },
+      "ship_ready_with_parity_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_local_proof"
+        ],
+        "missing": []
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 4,
+      "bytes_read": 1430,
+      "reference_bytes": 215090,
+      "wall_ms": 1090,
+      "nodes_completed": 1,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  }
+]

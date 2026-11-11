@@ -1,0 +1,381 @@
+{
+  "spine": {
+    "file": "SKILL.md",
+    "bytes": 42345
+  },
+  "references": [
+    {
+      "file": "references/brief.md",
+      "bytes": 3720
+    },
+    {
+      "file": "references/codex-cli.md",
+      "bytes": 3393
+    },
+    {
+      "file": "references/cross-model.md",
+      "bytes": 13459
+    },
+    {
+      "file": "references/design-parity.md",
+      "bytes": 7594
+    },
+    {
+      "file": "references/execution-harness.md",
+      "bytes": 40914
+    },
+    {
+      "file": "references/harness-internals.md",
+      "bytes": 12432
+    },
+    {
+      "file": "references/observability.md",
+      "bytes": 19818
+    },
+    {
+      "file": "references/plan.md",
+      "bytes": 25171
+    },
+    {
+      "file": "references/prove.md",
+      "bytes": 16250
+    },
+    {
+      "file": "references/review.md",
+      "bytes": 22526
+    },
+    {
+      "file": "references/security-risk.md",
+      "bytes": 12557
+    },
+    {
+      "file": "references/ship.md",
+      "bytes": 8048
+    },
+    {
+      "file": "references/understand.md",
+      "bytes": 15245
+    },
+    {
+      "file": "references/units.md",
+      "bytes": 30007
+    }
+  ],
+  "total_bytes": 273479,
+  "file_count": 15,
+  "phases": [
+    {
+      "phase": "START",
+      "loads": [
+        {
+          "file": "references/observability.md",
+          "bytes": 19818,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "UNDERSTAND",
+      "loads": [
+        {
+          "file": "references/understand.md",
+          "bytes": 15245,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "PLAN",
+      "loads": [
+        {
+          "file": "references/plan.md",
+          "bytes": 25171,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        },
+        {
+          "file": "references/units.md",
+          "bytes": 30007,
+          "condition": "PLAN when the plan chooses SPLIT",
+          "flag": "split"
+        },
+        {
+          "file": "references/codex-cli.md",
+          "bytes": 3393,
+          "condition": "Codex is the counterpart",
+          "flag": "codex"
+        }
+      ]
+    },
+    {
+      "phase": "BUILD",
+      "loads": [
+        {
+          "file": "references/brief.md",
+          "bytes": 3720,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/units.md",
+          "bytes": 30007,
+          "condition": "BUILD, PROVE or REVIEW when any DAG node has `unit`",
+          "flag": "units"
+        },
+        {
+          "file": "references/harness-internals.md",
+          "bytes": 12432,
+          "condition": "On demand, when the operator card names it",
+          "flag": "internals"
+        },
+        {
+          "file": "references/execution-harness.md",
+          "bytes": 40914,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    },
+    {
+      "phase": "PROVE",
+      "loads": [
+        {
+          "file": "references/prove.md",
+          "bytes": 16250,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/design-parity.md",
+          "bytes": 7594,
+          "condition": "PROVE with UI",
+          "flag": "ui"
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        },
+        {
+          "file": "references/units.md",
+          "bytes": 30007,
+          "condition": "BUILD, PROVE or REVIEW when any DAG node has `unit`",
+          "flag": "units"
+        }
+      ]
+    },
+    {
+      "phase": "REVIEW",
+      "loads": [
+        {
+          "file": "references/review.md",
+          "bytes": 22526,
+          "condition": null,
+          "flag": null
+        },
+        {
+          "file": "references/security-risk.md",
+          "bytes": 12557,
+          "condition": "PLAN, PROVE or REVIEW of security-relevant work",
+          "flag": "security"
+        },
+        {
+          "file": "references/cross-model.md",
+          "bytes": 13459,
+          "condition": "REVIEW with elevated counterpart",
+          "flag": "elevated"
+        },
+        {
+          "file": "references/units.md",
+          "bytes": 30007,
+          "condition": "BUILD, PROVE or REVIEW when any DAG node has `unit`",
+          "flag": "units"
+        },
+        {
+          "file": "references/codex-cli.md",
+          "bytes": 3393,
+          "condition": "Codex is the counterpart",
+          "flag": "codex"
+        }
+      ]
+    },
+    {
+      "phase": "SHIP",
+      "loads": [
+        {
+          "file": "references/ship.md",
+          "bytes": 8048,
+          "condition": null,
+          "flag": null
+        }
+      ]
+    }
+  ],
+  "unit_text": [],
+  "runs": {
+    "without_units": {
+      "flags": {
+        "units": false,
+        "split": false,
+        "internals": false,
+        "ui": false,
+        "security": false,
+        "elevated": false,
+        "codex": false
+      },
+      "files": [
+        "SKILL.md",
+        "references/brief.md",
+        "references/cross-model.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/ship.md",
+        "references/understand.md"
+      ],
+      "bytes": 207496,
+      "phase_bytes": {
+        "START": 19818,
+        "UNDERSTAND": 28704,
+        "PLAN": 38630,
+        "BUILD": 44634,
+        "PROVE": 16250,
+        "REVIEW": 22526,
+        "SHIP": 8048
+      },
+      "unit_text_bytes": 0
+    },
+    "plan_chooses_split": {
+      "flags": {
+        "units": false,
+        "split": true,
+        "internals": false,
+        "ui": false,
+        "security": false,
+        "elevated": false,
+        "codex": false
+      },
+      "files": [
+        "SKILL.md",
+        "references/brief.md",
+        "references/cross-model.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/ship.md",
+        "references/understand.md",
+        "references/units.md"
+      ],
+      "bytes": 237503,
+      "phase_bytes": {
+        "START": 19818,
+        "UNDERSTAND": 28704,
+        "PLAN": 68637,
+        "BUILD": 44634,
+        "PROVE": 16250,
+        "REVIEW": 22526,
+        "SHIP": 8048
+      },
+      "unit_text_bytes": 30007
+    },
+    "with_units": {
+      "flags": {
+        "units": true,
+        "split": true,
+        "internals": false,
+        "ui": false,
+        "security": false,
+        "elevated": false,
+        "codex": false
+      },
+      "files": [
+        "SKILL.md",
+        "references/brief.md",
+        "references/cross-model.md",
+        "references/execution-harness.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/ship.md",
+        "references/understand.md",
+        "references/units.md"
+      ],
+      "bytes": 237503,
+      "phase_bytes": {
+        "START": 19818,
+        "UNDERSTAND": 28704,
+        "PLAN": 68637,
+        "BUILD": 74641,
+        "PROVE": 46257,
+        "REVIEW": 52533,
+        "SHIP": 8048
+      },
+      "unit_text_bytes": 30007
+    },
+    "all_conditions": {
+      "flags": {
+        "units": true,
+        "split": true,
+        "internals": true,
+        "ui": true,
+        "security": true,
+        "elevated": true,
+        "codex": true
+      },
+      "files": [
+        "SKILL.md",
+        "references/brief.md",
+        "references/codex-cli.md",
+        "references/cross-model.md",
+        "references/design-parity.md",
+        "references/execution-harness.md",
+        "references/harness-internals.md",
+        "references/observability.md",
+        "references/plan.md",
+        "references/prove.md",
+        "references/review.md",
+        "references/security-risk.md",
+        "references/ship.md",
+        "references/understand.md",
+        "references/units.md"
+      ],
+      "bytes": 273479,
+      "phase_bytes": {
+        "START": 19818,
+        "UNDERSTAND": 28704,
+        "PLAN": 84587,
+        "BUILD": 87073,
+        "PROVE": 66408,
+        "REVIEW": 81942,
+        "SHIP": 8048
+      },
+      "unit_text_bytes": 30007
+    }
+  }
+}
