@@ -201,9 +201,11 @@ of the archive directory it printed.
 ### Base pin and SHIP_READY cross-check
 
 `base-drift.mjs check --repo <R> --base <SHA> --target <ref> --dag <dag.json>
-[--contract-paths <file>]` exits non-zero and lists changed files that overlap DAG
-`reads`/`writes` or the contract list. `ship-ready-check.mjs check --run-state <plan>
---engine-log <file>` fails for any SHIP_READY without a `GATE ship-ready ok` line of the
+[--contract-paths <file>]` exits 1 and lists changed files that overlap DAG
+`reads`/`writes` or the contract list (exit 3 is a git or input failure, 2 a usage error).
+`ship-ready-check.mjs check --run-state <plan> --engine-log <file>... [--run-id <ID>]`
+matches on the pair (`run_id`, candidate); a SHIP_READY without `run_id` is unmatched, and
+`--run-id` restricts the check to that run. It fails for any SHIP_READY without a `GATE ship-ready ok` line of the
 same candidate. There is no hand-written exception: editing the plan narrative changes
 the approved-plan digest. When the engine cannot write the pair, record `harness degraded`
 ([execution-harness.md](execution-harness.md)) and get explicit user approval

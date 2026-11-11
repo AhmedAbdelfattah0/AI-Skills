@@ -65,7 +65,8 @@ test('ship.md states the ship-ready check; brief.md holds the base-drift placeme
   assert.ok(b.includes('leave `config.base` as is'));
   assert.ok(b.includes('base-drift.mjs check --repo <R> --base <SHA>'));
   assert.ok(!b.includes('or `rebind`'));
-  assert.match(b, /Exit 1: `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA/);
+  assert.match(b, /Exit 1 \(overlap\): `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA/);
+  assert.match(b, /Exit 3 \(git or input failure\): fix the input and rerun; not a user decision/);
 });
 
 test('harness-internals.md names the .attempts copy destination and has no narrative exception', () => {

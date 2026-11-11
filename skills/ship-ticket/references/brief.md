@@ -44,7 +44,8 @@ The Report block is a fenced `ship-ticket-report` example with exactly the keys 
 Record the base SHA at `init`; leave `config.base` as is. At BUILD start, before freeze
 and before SHIP run
 `node scripts/base-drift.mjs check --repo <R> --base <SHA> --target <ref> --dag <dag.json>`.
-Exit 1: `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA.
+Exit 1 (overlap): `WAIT_FOR_USER`; after the user accepts the move, re-record the base SHA.
+Exit 3 (git or input failure): fix the input and rerun; not a user decision.
 
 ## Check a brief
 

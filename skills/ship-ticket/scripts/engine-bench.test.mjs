@@ -32,7 +32,7 @@ test('the bench CLI runs both modes to completion and reports numeric counts', {
   }
 });
 
-// ------------------------------------------------------------------ nine scenarios (engine-bench-scenarios.mjs)
+// ------------------------------------------------------------------ ten scenarios (engine-bench-scenarios.mjs)
 
 const METRICS = ['orchestrator_commands', 'bytes_read', 'reference_bytes', 'wall_ms', 'nodes_completed', 'judgments', 'owner_interventions', 'proof_runs', 'retries'];
 const scenario = async (id) => (await runScenarios(id, { buildNodes }))[0];
@@ -49,9 +49,9 @@ test('the scenario CLI prints one result per scenario and exits 0 when it is ok'
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
   assert.deepEqual(out.map(x => x.id), ['S1']);
-  const bad = spawnSync(process.execPath, [BENCH, '--scenario', 'S10'], { encoding: 'utf8' });
+  const bad = spawnSync(process.execPath, [BENCH, '--scenario', 'S11'], { encoding: 'utf8' });
   assert.equal(bad.status, 1);
-  assert.match(bad.stderr, /unknown scenario S10/);
+  assert.match(bad.stderr, /unknown scenario S11/);
 });
 
 test('S1 one node completes with the smallest command count', { skip: N7_SKIP }, async () => {
@@ -199,6 +199,25 @@ test('S9 baseline: a moved base is not detected by the engine in this world (sin
   assert.equal(red.archive_contains_attempts, false);
   assert.deepEqual(red.archived_files, ['engine.jsonl', 'manifest.json', 'state.json']);
   assert.equal(red.second_run_init.refused, 'state_exists', 'a second run cannot start from the live state; it would have to rely on the archive');
+});
+
+test('S10 baseline: with config.base unset (HEAD) a branch-tip move over a node-owned file does not end the run, change the candidate id or raise a judgment', { skip: N7_SKIP }, async () => {
+  const r = await scenario('S10');
+  assertResult(r, 'S10');
+  const s = r.shows;
+  assert.equal(s.config_base_in_state, false);
+  assert.equal(s.head_moved, true);
+  assert.equal(s.drive_before_move.outcome, 'waiting');
+  assert.equal(s.candidate_id_changed, false, 'the commit is absorbed into the base: the candidate id (changed-path content against HEAD) is unchanged right after the move');
+  assert.equal(s.evidence.final_candidate_differs_from_pre_move, true);
+  assert.equal(s.drive_after_move.outcome, 'done', 'the archived stop (a run ended by a base move) is NOT reproduced: the run finishes');
+  assert.deepEqual(s.drive_after_move.judgments, []);
+  assert.deepEqual(s.drive_after_move.writer_runs, { a: 1, b: 1 }, 'no node is re-run');
+  assert.equal(s.evidence.node_a_state_after, 'done', 'node a evidence is kept');
+  assert.equal(s.evidence.red_invalid_recorded, false);
+  assert.equal(s.evidence.upstream_bytes_overwritten_by_node_b, true, 'node b overwrote the upstream change; nothing flagged it');
+  assert.equal(s.ship_ready.code, 'review_not_accepted', 'ship-ready is refused only for the absent review and proof, not for the base move');
+  assert.equal(r.metrics.reference_bytes, referenceBytes({}));
 });
 
 test('peakConcurrency counts overlapping node attempts and nothing else', () => {

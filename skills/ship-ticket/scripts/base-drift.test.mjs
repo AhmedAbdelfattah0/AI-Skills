@@ -54,7 +54,7 @@ test('a bad ref fails closed and usage error exits 2', () => {
   const fx = fixture();
   try {
     const r = spawnSync(process.execPath, [CLI, 'check', '--repo', fx.repo, '--base', 'nope', '--target', 'main', '--dag', fx.dag], { encoding: 'utf8' });
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 3);
     assert.equal(spawnSync(process.execPath, [CLI, 'check'], { encoding: 'utf8' }).status, 2);
   } finally { rmSync(fx.dir, { recursive: true, force: true }); }
 });
@@ -85,9 +85,17 @@ test('a ref starting with - is refused before git runs (no option injection)', (
       const args = { '--base': fx.base, '--target': 'main' };
       args[which] = `--output=${planted}`;
       const r = spawnSync(process.execPath, [CLI, 'check', '--repo', fx.repo, '--base', args['--base'], '--target', args['--target'], '--dag', fx.dag], { encoding: 'utf8' });
-      assert.equal(r.status, 1, which);
+      assert.equal(r.status, 3, which);
       assert.match(r.stderr, /refused ref: --output=/, which);
       assert.equal(existsSync(planted), false, `${which}: git never wrote the planted file`);
     }
+  } finally { rmSync(fx.dir, { recursive: true, force: true }); }
+});
+
+test('an unreadable dag file is an input failure (exit 3), not an overlap', () => {
+  const fx = fixture();
+  try {
+    const r = spawnSync(process.execPath, [CLI, 'check', '--repo', fx.repo, '--base', fx.base, '--target', 'main', '--dag', join(fx.dir, 'missing.json')], { encoding: 'utf8' });
+    assert.equal(r.status, 3);
   } finally { rmSync(fx.dir, { recursive: true, force: true }); }
 });

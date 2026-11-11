@@ -275,3 +275,14 @@ test('review_usage_share_pct is unknown when a reviewer record has no counters, 
   const ok = evaluate({ runs: [buildRun('T1', 'run-1', rows)], records: [rec('run-1', 'reviewer', 20, 0), rec('run-1', 'builder', 80, 0)] });
   assert.equal(ok.runs[0].review_usage_share_pct, 20);
 });
+
+test('attachUsage carries reviewer_share_pct: unknown when any record lacks counters, 20 when all known', () => {
+  const known = attachUsage(build('T1', 'run-1'), [rec('run-1', 'reviewer', 20, 0), rec('run-1', 'builder', 80, 0)]);
+  assert.equal(known.usage.reviewer_share_pct, 20);
+  assert.equal(evaluateRun(known, {}).review_usage_share_pct, 20, 'evaluateRun reads the field directly');
+  const builderBare = attachUsage(build('T1', 'run-1'), [rec('run-1', 'reviewer', 20, 0), rec('run-1', 'builder', null, null)]);
+  assert.equal(builderBare.usage.reviewer_share_pct, 'unknown');
+  assert.equal(evaluateRun(builderBare, {}).review_usage_share_pct, 'unknown');
+  const noReviewer = attachUsage(build('T1', 'run-1'), [rec('run-1', 'builder', 80, 0)]);
+  assert.equal(noReviewer.usage.reviewer_share_pct, 'unknown');
+});

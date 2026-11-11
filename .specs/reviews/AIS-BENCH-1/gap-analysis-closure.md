@@ -1,0 +1,27 @@
+# AIS-BENCH-1 gap analysis: closure status
+
+Closes the loop on the gap analysis posted on #51, #55 and #49 (2026-11-11), which compared five archived runs of a private project with the harness engine. No private names, ticket keys or numbers appear here. The facts about the archived runs stay in the issue comments; this table records what shipped against each gap and what remains.
+
+Status words: **closed** (the gap no longer exists), **mitigated** (a non-engine control or wording shipped; the engine itself is unchanged), **deferred** (needs an engine change; blocked on decision D2, the engine feature freeze).
+
+| Gap | What it was | Status | Shipped | Evidence | Remaining |
+|---|---|---|---|---|---|
+| G1 | The review record stores only the primary outcome; a primary PASS with a second-opinion `fix` is refused as `outcome_inconsistent` | deferred (wording and a pinning test shipped; the record still cannot reconstruct both reviewers' verdicts) | Wave 2b N3: wording that matches the gate (re-judge, never hand-edit), usage import after each review; `review-wording.test.mjs` pins the refusal; bench S8 records today's behaviour | PR #62, `wave-2b/` | Record fields for both reviewers: W3-record (#55), D2. A real "PASS recorded as FAIL" case was never found in the archives. |
+| G2 | Manual `SHIP_READY` was unverifiable; no owner-exception verb | deferred (verifier shipped; no exception verb) | Wave 2b N1 `ship-ready-check.mjs`: every `SHIP_READY` must match an engine `GATE ship-ready ok` line for the same run and candidate; `--require-event`, `--run-id`; SHIP wording sends a degraded path to explicit user approval | PR #62 | An exception verb with an approver in the record: W3-exception, D2. |
+| G3 | A base move ended runs and discarded evidence | deferred (pre-flight shipped), **cause not reproduced** | Wave 2b N2 `base-drift.mjs` (pre-flight, rename-aware; Wave 2c F4 split the exit codes: 1 overlap, 3 input failure), wording to record the base SHA at `init`; bench S9 and S10 | PR #62, this wave | S9 (named-branch base) and S10 (`HEAD` default) both finish `done` without a judgment; S10 shows the later node silently overwrites the upstream bytes. The stops seen in the archives are therefore not explained by either setup; next step is to replay an archived run's actual base handling. Rebase/delta review: W3-rebase, D2. |
+| G4 | RED provenance across runs: `archive` copies only state, log and usage, not the RED attempt output | deferred (copy procedure shipped; the engine still does not copy it) | Wording: copy `<ticket>.attempts` next to the archive after `archive`; S9 records the missing copy | PR #62 | Engine-side copy and digest binding: W3-red, D2. |
+| G5 | Cost unmetered outside builders | mitigated | `eval.mjs` metrics (retry count, gate calls, proof reruns, review usage share; `unknown`, never 0); this wave moved the review share into `attachUsage`; usage import wording | PR #62, this wave | Orchestration usage is still only as complete as the imports; no engine change needed. |
+| G6 | DB contention and interruption | **open** (nothing shipped) | The database lock wrapper was cut twice from Waves 2b and 2c: review found its exclusivity cannot be guaranteed with Node alone (no `flock`; two reclaimers can both take over a stale lock). The engine's per-run durable resource locks are unchanged | #61 | A cross-process lock primitive, or engine-level locks across runs; also `resolveCommit` null read as "moved" (`engine-attempts.mjs`) and proof resource locks, small engine changes, D2. |
+| G7 | Audit trail: refusal reasons, unit names and timestamps missing; free-text `authorized_by` | deferred | Nothing shipped (record-only engine fields) | n/a | W3-record, D2. |
+| G8 | Finding ids unscoped; candidate id depends on `config.base` | mitigated | Finding-id wording now matches the gate (`finding_id` + `source`); base SHA recorded at `init`; S10 shows the `HEAD` default behaviour | PR #62, this wave | Mandatory `base` at `init`: engine, D2. |
+| G9 | #49: engine suites fail under CPU load | mitigated, **residual** | Handshakes instead of fixed waits in five test files (PR #62); production budgets unchanged | Wave 2c final tree: serial 629/629; four concurrent copies of the harness suite: 3 of 4 with 0 failures, 1 with one failure (`engine-crash.test.mjs`, "a crash at every boundary of the unit repair drive") | That test still fails intermittently under four-fold load; it was never in the fixed set. #49 reopened. Residual production budgets (kill grace, pipe race) are unchanged. |
+
+## Unit-review test confirmation (from #61)
+
+`run-engine-unit-review.test.mjs` is part of the harness suite. On the Wave 2c final tree it passed in the serial run (harness 629/629) and in all four concurrent copies (the one failing test in that load run is in `engine-crash.test.mjs`, not this file). It was not changed by Waves 2b or 2c.
+
+## What this does not close
+
+- G1, G2, G3, G4 and G7 need engine changes (W3-record, -exception, -rebase, -red). G6 (null commit read as "moved", proof resource locks) and G8 (mandatory `base` at `init`) each keep a small engine part. All stay open behind D2. Nothing in Waves 2b or 2c weakened a gate or added a retry cap.
+- Future candidates P1 to P4 (safe DAG amendment, evidence preservation across plan changes, ownership-aware scheduling, isolated parallel builders) are recorded on #55 and need separate approval.
+- Decisions D2, D3 and D5 are still open.

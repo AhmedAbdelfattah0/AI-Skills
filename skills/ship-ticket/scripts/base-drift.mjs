@@ -9,7 +9,7 @@
  * A path entry matches a changed file when equal or when the file is under it as a directory. Renames
  * count on both sides (source and destination).
  * Contract path list: one repo-relative path per line; blank lines and lines starting with # ignored.
- * Exit codes: 0 no overlap, 1 overlap (listed on stdout) or a git/input failure, 2 usage error.
+ * Exit codes: 0 no overlap, 1 overlap (listed on stdout), 2 usage error, 3 git or input failure (bad ref, unreadable dag).
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -74,7 +74,7 @@ function main(argv) {
     if (r.ok) { process.stdout.write(`base-drift: none (${r.changed.length} changed file(s), no overlap)\n`); return 0; }
     process.stdout.write('base-drift: OVERLAP\n' + r.overlaps.map((h) => `  ${h.file} (declared ${h.path}, ${h.source})`).join('\n') + '\n');
     return 1;
-  } catch (e) { process.stderr.write(`base-drift: ${e.message}\n`); return 1; }
+  } catch (e) { process.stderr.write(`base-drift: ${e.message}\n`); return 3; }
 }
 
 if (isEntrypoint(import.meta.url)) process.exitCode = main(process.argv.slice(2));
