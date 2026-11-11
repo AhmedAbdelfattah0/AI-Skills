@@ -1,0 +1,2066 @@
+{
+  "base": "2c5dbd7",
+  "old_files": [
+    "skills/ship-ticket/SKILL.md",
+    "skills/ship-ticket/references/codex-cli.md",
+    "skills/ship-ticket/references/cross-model.md",
+    "skills/ship-ticket/references/design-parity.md",
+    "skills/ship-ticket/references/execution-harness.md",
+    "skills/ship-ticket/references/observability.md",
+    "skills/ship-ticket/references/plan.md",
+    "skills/ship-ticket/references/prove.md",
+    "skills/ship-ticket/references/review.md",
+    "skills/ship-ticket/references/security-risk.md",
+    "skills/ship-ticket/references/ship.md",
+    "skills/ship-ticket/references/understand.md"
+  ],
+  "new_files": [
+    "skills/ship-ticket/SKILL.md",
+    "skills/ship-ticket/references/brief.md",
+    "skills/ship-ticket/references/codex-cli.md",
+    "skills/ship-ticket/references/cross-model.md",
+    "skills/ship-ticket/references/design-parity.md",
+    "skills/ship-ticket/references/execution-harness.md",
+    "skills/ship-ticket/references/harness-internals.md",
+    "skills/ship-ticket/references/observability.md",
+    "skills/ship-ticket/references/plan.md",
+    "skills/ship-ticket/references/prove.md",
+    "skills/ship-ticket/references/review.md",
+    "skills/ship-ticket/references/security-risk.md",
+    "skills/ship-ticket/references/ship.md",
+    "skills/ship-ticket/references/understand.md",
+    "skills/ship-ticket/references/units.md"
+  ],
+  "counts": {
+    "old_units": 1834,
+    "new_units": 1933,
+    "missing": 33,
+    "added": 127,
+    "duplicated": 5,
+    "uncovered_missing": 0,
+    "uncovered_added": 0,
+    "uncovered_duplicated": 0
+  },
+  "missing": [
+    {
+      "text": "| BUILD | this spine |",
+      "kind": "row",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "new_in": [],
+      "covered_by": "load-table row: BUILD now also loads brief.md (fixed row of the Wave 2 plan)"
+    },
+    {
+      "text": "With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only `status`. Record RED, review and ship-ready with `run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>` rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair, which the next `drive` dispatches. With `config.unitReview`, record each unit's independent review with `gate unit-review` first ([review.md](references/review.md), Unit review); unit reviews do not replace the final review, which stays mandatory and names `units_consumed`. Judgment points (`status.judgments`) come back to you or the user. The manual flow below is the documented fallback when the engine or gate module is unavailable (record `harness degraded`). A run that falls back after `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate` it again, since its ledger no longer reflects the work. While that state file exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does not authorize is **WAIT_FOR_USER**, never a hand-edit of the state file.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause (config.unitReview, gate unit-review, units_consumed) replaced by a pointer to units.md; the unit-review and final-review rules are in units.md"
+    },
+    {
+      "text": "`memoryBudgetMb: \"auto\"` takes OS free memory, capped by Node's cgroup-aware `availableMemory()` (Node >= 22). On older Node it is capped by the cgroup limit minus measured cgroup usage (`memory.current` / `memory.usage_in_bytes`). A reserve of 1 GiB or 15% of total, whichever is larger, is subtracted. If a cgroup limit exists but its usage is unreadable, the estimate is `memory_verified: false`. `memory_safety` is `estimated` only when a verified budget applied and **every** node has `estimatedMemoryMb`; otherwise it is `unverified`. Node's available/constrained probes are cgroup-aware only on Linux, so they are consulted only there. On macOS, `os.freemem()` counts only free pages (about 0.7 GB of 24 GB on the host where this was found), so the harness reads `vm_stat` and counts free, inactive, speculative and purgeable pages instead.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "**Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused. `REPAIR` (a review repair writer) routes like BUILD, is recorded as `phase: \"REPAIR\"` in results and usage, and requires `reviewExecution` (the review round being repaired). When the run engine's state file exists, that execution must be an accepted FAIL with a finding-bound write set in its review chain; only without engine state does the run log's REVIEW `start` row decide. It may declare `redSpecs` (repo-relative spec paths); then `redEvidence` must be an absolute path to a non-empty file with the failing-run output, written by the orchestrator, or dispatch is refused.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "**Approval evidence (event binding, not content verification):** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the supplied digest. Plan content drift remains SHIP's approved-plan digest check, because the digest algorithm belongs to PLAN. The carrier reads the plan artifact and never writes it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker cannot forge `START`. The same applies to `ownership.othersOwned`, so a plan change can never be exempted.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "**Billing:** `billing` defaults to `subscription`. The child environment drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches. Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`. Gemini/Antigravity: Google API-key and Vertex variables). The CLI's own status is then checked in that environment: `claude auth status --json` must report `authMethod: \"claude.ai\"` with `apiProvider: \"firstParty\"`, and `codex login status` must report `Logged in using ChatGPT`. Any other answer refuses dispatch before a process starts. Variable names are matched case-insensitively (Windows). `\"billing\": \"api\"` also needs `\"allowApiBilling\": true`, which only the user can authorize.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "**Verified adapters:** Claude and Codex arguments are built from flags checked against Claude Code 2.1.318 and Codex CLI 0.166.0: `claude -p --output-format json --no-session-persistence --permission-mode <acceptEdits|auto|dontAsk|manual> [--model <id>]` and `codex exec --json --ephemeral -s <read-only|workspace-write> [-m <id>] -`. Caller `args` are rejected, so `--model` cannot be smuggled in. `--model`/`-m` is emitted only when `modelMap` maps the routed tier; otherwise the provider default runs (`model: \"provider-default\"`). `bypassPermissions`, `plan` and `danger-full-access` are refused. Hooks are not disabled (no `--bare`), so PostToolUse guards such as nn-guard still run.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "The budget metric is `processed_tokens = input + output + cache_read + cache_write` (or `output_tokens`); see Budgets above.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"see Budgets above\" now reads \"below\" (Budgets follows the usage section in the card)"
+    },
+    {
+      "text": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)\n```",
+      "kind": "fence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this fence exists unchanged in the new files (the fence was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "`config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`, `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready` runs every entry as the local proof), `base`, `riskLabels` (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in, below). Billing is `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with `billing: \"api\"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design; `allowApiBilling` exists only for a library caller the user authorized.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"(opt-in, below)\" now links units.md; rest of the item unchanged"
+    },
+    {
+      "text": "node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`, `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`, `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`), `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see **Units**).",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"(see **Units**)\" now links units.md; rest of the item unchanged"
+    },
+    {
+      "text": "`status` prints the compact `ship-ticket-engine-status-v1` view, including `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state likewise), `unit_reviews_pending` only with `config.unitReview` (`unit_reviews` in state likewise), and `truncated_outputs` only when an attempt's output passed the capture cap (below).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause (units, unit_ceiling, unit_reviews_pending) moved to units.md; the rest, including \"capture cap (below)\", unchanged and the capture-cap paragraph is still below it in the card"
+    },
+    {
+      "text": "**Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own independent review chain. The engine never dispatches a reviewer: the orchestrator relays it ([review.md](review.md), Unit review) and `gate unit-review` validates and records it under the lock, reusing `gate.mjs` `gateReview` (contract, enums, dispositions, builder roster, distinct reviewers). The input is `{unit, review_execution, kind: original|confirmation, approved_plan_digest, dag_digest, base_commit, primary, second_opinion?, reconciliation, graded_artifacts?, repair_ownership?, repair_prompt_file?}`, where the reviewers' `candidate_id` is the unit's evidence id (`status.units.<u>.evidence.id`); `--unit` may name the unit instead. It is accepted only when the unit is `verified`, nothing is live, the digests are the bound ones and the evidence id and base commit are the current evidence's. Refusals record nothing: `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`, `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain), `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`, `repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket has `config.riskLabels`. Its review and its confirmation then need a second opinion (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`; a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a second opinion is optional and validated when given. The record carries each reviewer's provider and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`), the reviewers, findings and outcome. The review state is recomputed at every read against the current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh original is due), `fail` awaiting `repair|recheck|confirmation`, or `fail` terminal (computed judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit. The new evidence becomes the candidate of the one targeted confirmation only when, against the binding the FAIL reviewed, nothing but files inside the repair write set changed (`UNIT_REPAIR_BOUND`). A declared directory is compared file by file against its tree recorded at the FAIL, so a repair writing `src/a.txt` inside a declared `src` binds, while any other changed, added or removed entry inside it is outside the repair. A node re-run, a dependency unit's re-check, an upstream change or a base move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL whose cycle the ceiling cannot carry (`ceiling_refused`, recorded with `repair_opened: false`) and any FAIL after the freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's last execution>, authorized_by}` admits a new original. A re-review, a repair and a confirmation spend the parent-wide ceiling. Opening a repair needs 3 unheld slots: it spends 1 and holds its re-check and confirmation for the unit until the cycle ends or is cancelled (`UNIT_CEILING_RELEASED`). The spends are recorded (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger: stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair). `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current PASS (and `gate review` the two Wave 3 refusals below). The `drive` outcome `done` does not cover pending unit reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section below in units.md"
+    },
+    {
+      "text": "**Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit reviews do not replace the final review ([review.md](review.md), Final review on unit evidence). After the refusals above, `gate review` also refuses, recording nothing: `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose `id` (when that is an acceptance id; else its `criterion`: one row covers one id) is an acceptance id mapped on a node (every id of `config.acceptanceIds`), and `units_consumed_stale` when an original or a confirmation does not name, in the input field `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is refused. The accepted record carries `units_consumed`, and `gate ship-ready` re-checks the record that authorizes ship (the last accepted original or confirmation) by the same rule, refusing `units_consumed_stale` when a unit's evidence moved since (for example the resolved base moved and the units were re-checked and re-reviewed on a byte-identical candidate). `init` refuses (`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without `config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"([review.md](review.md), Final review on unit evidence)\" now names the section below in units.md"
+    },
+    {
+      "text": "It is refused unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: the review saw these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY), and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale), a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`), live attempts (`rebind_attempts_live`) or units (`rebind_units`: unit evidence is not re-bound).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause \"or units (`rebind_units`...)\" moved to units.md"
+    },
+    {
+      "text": "**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair batches per ticket in total; one REVIEW repair and one confirmation per authorized review execution (`rounds.review_repairs[<review_execution>]`; a unit review execution: `rounds.unit_review_repairs[<review_execution>]`, present once one ran).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause (rounds.unit_review_repairs) moved to units.md"
+    },
+    {
+      "text": "**Judgment points** (`status.judgments[].code`) stop the engine and go back to the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`, `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants can outlive the leader: known limit N7 below), `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`, `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`, `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review repair that failed; it is terminal for its review execution, and an owner RETRY of that review cancels it as `superseded by retry`); with units also `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews `unit_review_terminal`.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clauses (unit_check_failed, unit_invalidation_storm, parent_ceiling, unit_review_terminal) moved to units.md"
+    },
+    {
+      "text": "The gate adds unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2); its `units_unverified` and `unit_reviews_missing` refusals are not judgment points (`drive` runs the checks; the orchestrator relays the unit reviews).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause (units_unverified, unit_reviews_missing are not judgment points) moved to units.md"
+    },
+    {
+      "text": "**`gateRed`** is a scheduler prerequisite: a node whose dependency has `redSpecs` is not dispatched until RED is accepted, repairs included. The engine runs the DAG-bound runner itself: `gate red` input is `{node, command?, specs?}`, where `command` only names a formatted `config.testCommands` entry; the command, its format, the timeout and the node's `resources` never come from the input. It runs with a bounded timeout, its own process group and the resource locks under the same durable attempt protocol as workers, so a surviving runner holding a lock is reconciled, not re-run. A runner (RED or proof) is `exited` only after its whole group is proven gone; a group that survives the kill, or whose quiescence is unknown, leaves the attempt `unknown` with its locks held and returns `quiescence_unknown` (judgment point) with no evidence or proof recorded. When a runner changes the approval binding (plan narrative or DAG bytes), its result is dropped (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is re-verified before RED evidence or local proof is committed, so drifted evidence never reaches disk. Runners (RED, proof and unit checks) run repository commands with the engine's own, unmodified environment, API keys included: the billing strip above applies to provider workers only. Runner adapters (`parseRunnerOutput`): `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs every named spec to report an **assertion** failure; import, compile and collection errors do not count. A spec matches a result by name and file; a result without a file counts only when no other result has that name and, if it failed, no other failure carries a location (so another file's same-named failure never makes RED). A runner that rewrites a named spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before the runner starts. Unsupported output cannot establish RED: that is a judgment point and the manual flow applies, marked degraded. Evidence is bound to the spec files' content digests, the baseline candidate and the resolved `config.base` commit, ordered by event sequence, and is refused if recorded after a dependent production dispatch. Before a drive dispatches a dependent (or repair) that needs it, a changed spec digest or a moved `config.base` drops the evidence (`RED_INVALIDATED`, kept in `gates.red_invalid` with the old evidence) and the engine re-runs RED itself with the recorded runner and specs, once per invalidation (`RED_RERUN`; it ignores dispatches before the invalidation). The `red_invalidated` judgment names the re-run's attempt and outcome. Accepted: that drive stops, the next one dispatches. Refused (typically `spec_not_failing`, because dependents already implement the specs): every later `drive` and `status` reports it until `gate red` is accepted, or the spec files and `config.base` are restored to the old evidence's bytes (`RED_RESTORED`); otherwise the owner decides. A dependent's own writes never invalidate it.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "**`gateShipReady`** emits `SHIP_READY` only when the current candidate equals the reviewed one, the exclusions are unaltered, graded artifact digests still match, the review chain is accepted, every required node is done or cancelled, no attempt is live, no repair is open, no judgment is unresolved (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local proof is bound to that candidate, and every required risk evidence is present (a `-spec` kind needs accepted RED on that file; any other kind must name an existing file inside the repository, checked by the engine). Local proof is produced by the engine running every `config.testCommands` entry (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage error. A proof command that changes the work tree is refused as `candidate_mismatch` and its proof is bound to no tree (`local_proof.candidate_id: null`, `dropped: [\"candidate_mismatch\"]`), so a RETRY review of the tree it left still needs a proof of that tree; one that changes the approval binding (the excluded plan narrative or the DAG bytes) is refused with that binding code and its proof dropped; no `SHIP_READY` is recorded. With units, the unit conjuncts are re-checked after the proof ran: a proof command that leaves the tree but makes unit evidence stale (for example an empty commit moving `config.base`) is refused with the existing code (`units_unverified`, `unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive` re-checks the units (spending rechecks), and the proof command must be fixed or it moves the base again on the next ship-ready. A proof runner without proven quiescence records no proof and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful closure is ever synthesized.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "split: every sentence of this item exists unchanged in the new files (the item was divided between the card, harness-internals.md and units.md)"
+    },
+    {
+      "text": "Metrics: tokens by role and by phase (`phase unknown` for records without one) and the orchestrator share, wall clock per phase, review and repair rounds, pre-ship findings by severity (from `gate review` records), resume attempts and outcomes, infra retries, admission refusals, `units` (the per-unit projection above) when the run has units, and `truncated_outputs` when an attempt's output passed the capture cap.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [],
+      "covered_by": "unit clause (\"`units` (the per-unit projection above) when the run has units\") moved to units.md; the sentence otherwise unchanged, now in harness-internals.md"
+    },
+    {
+      "text": "The `unit_review*` activities occur only with `config.unitReview` ([review.md](review.md), Unit review): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/observability.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section in units.md (Timing activities)"
+    },
+    {
+      "text": "When they are present, a unit's checks must pass before another unit's nodes depending on it start and before REVIEW; the rules are in [execution-harness.md](execution-harness.md) (Run engine, **Units**).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: the unit rules are now in units.md"
+    },
+    {
+      "text": "Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each unit need its own independent review before the final review ([review.md](review.md), Unit review).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: Unit review is now in units.md"
+    },
+    {
+      "text": "With unit reviews the final review must grade every id by name (`acceptance_uncovered` otherwise; [review.md](review.md), Final review on unit evidence).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed inside the block moved to units.md: now \"Final review on unit evidence, below\""
+    },
+    {
+      "text": "It is safe but costs ceiling and reviewer time; AIS-HARNESS-3 Wave 4 measures it before any finer binding is built ([execution-harness.md](execution-harness.md), Units).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed inside the block moved to units.md: now \"Engine rules, below\""
+    },
+    {
+      "text": "When the repair touches a `concurrency`-labelled node, or repairs a security or architecture finding (Repair routing, below), the second opinion on the repair (from a provider other than the primary's: Codex for the Opus primary; CodeRabbit if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL` with evidence.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "link re-pointed: \"(Repair routing, below)\" now names the Repair routing section that moved to units.md; the confirmation rule itself is unchanged"
+    },
+    {
+      "text": "**Unit reviews do not replace the final review.** The final review in this file is still mandatory on the exact assembled candidate, with the same Opus primary, the mandatory second opinion and the same repair, confirmation and RETRY policy.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"in this file\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "**Who.** An Opus primary reviewer that is independent of every builder, under the rules in this file. The gate refuses a reviewer whose identity equals a builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node carries a risk label, or the ticket has `config.riskLabels`) also needs a second opinion from a provider other than the primary's (Codex for the Opus primary, whatever the host: on a Codex host the counterpart Claude would share the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit` with identity `coderabbit:<model>`. If neither can run, stop and ask (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the gate requires the second opinion to come from a different provider than the primary (`reviewers_same_provider`) and records each reviewer's provider and model. It does not check model names: assigning Opus as primary and Codex as second is the orchestrator's duty under the owner rule. For a unit that is not risky the second opinion is optional; when it is given, the gate validates it.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"in this file\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "**Input.** Give the reviewer the unit's exact files and diff (its nodes' declared reads and writes), its acceptance ids, the contract versions it reads, its check results, the approved plan and the threat model. The artifact uses the output contract above, with `candidate_id` set to `status.units.<u>.evidence.id`. The gate input adds `unit`, `approved_plan_digest`, `dag_digest` and `base_commit` (`status.units.<u>.evidence.base_commit`). Record it with `run-engine.mjs gate unit-review --input <file>`. Use a unique `review_execution` for each unit review (`review-<opaque>`); the final review may not reuse it.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"the output contract above\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "**FAIL and repair.** Reconcile as above. An accepted FAIL with `fix` findings needs `repair_prompt_file` and opens one repair. Its write set (the fixed findings' paths plus `repair_ownership`) must lie inside the unit's declared writes; anything outside is `repair_outside_unit`, so leave that finding to the final review: record the unit review with that finding dispositioned to the final review (for example `final-review`, never `fix`) and its rows judged on the unit alone, so the unit can PASS (a unit FAIL with nothing to fix is terminal), then carry the finding into the final review as a primary finding to `fix`, whose one repair may cross units. `drive` runs the repair only while the unit's evidence is still the one that was reviewed; otherwise it cancels the repair and the review goes stale. Then `drive` re-checks the unit. The re-checked evidence becomes the repaired candidate only when the repair's own writes are the sole change; a node rebuild, a dependency unit's re-check or any other change makes the review stale instead, so a fresh review is due. The same primary (plus the second opinion when the unit is risky) then gives one targeted confirmation on the repaired evidence (`kind: \"confirmation\"`). Each unit review execution gets one repair and one confirmation. The following are terminal for the unit (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL the ceiling cannot carry, and any unit FAIL after the REVIEW freeze (after the freeze, only the final review's repair may change the candidate). Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues, never an automatic retry.",
+      "kind": "item",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"Reconcile as above\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "When unit reviews exist (`config.unitReview`), the final review in this file is mandatory and runs on the exact assembled candidate, with the same Opus primary, the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit if it is unavailable or out of quota; if none can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and owner-RETRY policy.",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"in this file\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "With the run engine, also evaluate each review artifact through `gate.mjs` (`gateReview` for the original and the confirmation, `gateShipReady` before SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, above).",
+      "kind": "sentence",
+      "old_count": 1,
+      "new_count": 0,
+      "partial": false,
+      "old_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "new_in": [],
+      "covered_by": "position word: \"`gate unit-review`, above\" now links units.md"
+    }
+  ],
+  "added": [
+    {
+      "text": "| BUILD | this spine and [references/brief.md](references/brief.md) |",
+      "kind": "row",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "covered_by": "load-table row: BUILD loads brief.md (fixed row of the Wave 2 plan)"
+    },
+    {
+      "text": "| PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |",
+      "kind": "row",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "covered_by": "load-table row: units.md at PLAN when the plan chooses to split (fixed row)"
+    },
+    {
+      "text": "| BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |",
+      "kind": "row",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "covered_by": "load-table row: units.md at BUILD, PROVE, REVIEW when a node has unit (fixed row)"
+    },
+    {
+      "text": "| On demand, when the operator card names it | [references/harness-internals.md](references/harness-internals.md) |",
+      "kind": "row",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "covered_by": "load-table row: harness-internals.md on demand (fixed row)"
+    },
+    {
+      "text": "With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only `status`. Record RED, review and ship-ready with `run-engine.mjs gate red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>` rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair, which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow [units.md](references/units.md); unit reviews do not replace the final review, which stays mandatory. Judgment points (`status.judgments`) come back to you or the user. The manual flow below is the documented fallback when the engine or gate module is unavailable (record `harness degraded`). A run that falls back after `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate` it again, since its ledger no longer reflects the work. While that state file exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does not authorize is **WAIT_FOR_USER**, never a hand-edit of the state file.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/SKILL.md"
+      ],
+      "covered_by": "unit clause (config.unitReview, gate unit-review, units_consumed) replaced by a pointer to units.md; the unit-review and final-review rules are in units.md"
+    },
+    {
+      "text": "# Worker brief",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Use this at BUILD, when you hand a node to a writing subagent or write the prompt file for an engine node.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`scripts/brief.mjs` builds the brief from the approved DAG and checks it, so every brief carries the same limits and the same completion format.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "It is a tool for you, the orchestrator.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The engine does not call it and does not read the brief.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "## Build a brief",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "```text\nnode scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] --out <file>\n```",
+      "kind": "fence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`--dag` is the bound execution DAG, `--node` the node id, `--plan` the approved plan file.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`--recon` is optional: a JSON array of recon answers with `question`, `answer`, `paths`, `signatures`, `quoted_lines` and `confidence` (the schema in `references/understand.md`). Without it the Reuse inventory section says `none recorded`.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`--notes` is optional: a text file with what only you know. It is copied under Notes as a quotation.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`--out` is the brief file. For an engine node, point the node's `promptFile` at it.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The output is the same every time for the same inputs: no clock, no random value, no absolute path.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Its last line is `brief-digest sha256:<hex>`, the digest of everything above it, taken after line ends become Unix line ends; this is the only place line ends are normalised.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The plan digest in the second section is the engine's own plan digest, over the plan file as it is, so a plan that has no run-state block is refused.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "A DAG or recon field that holds a newline, another control character or, where it is shown in backticks, a backtick is refused with the field named (exit 2).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Free text (the plan step, recon answers, notes) is shown as a quotation, and `lint` also fails on a repeated section or one outside the list.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`build` will not write to a symbolic link or over its own input files.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "## What the brief contains",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "In this order: Task (the node's row from the plan's DAG table), Approved plan and digest, Ownership (the node's `writes`), Forbidden paths (`othersOwned`, plus the rule that other workers are active and nothing outside ownership may be edited), Dependencies and reads, Exclusive resources, Required tests (`redSpecs`, `checks`, and the evidence kinds the node's risk labels require), Reuse inventory, Acceptance ids, Notes, Worker rules (no commit, no branch switch, no install, no whole-repository formatter, no contract change) and Report block.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The Report block is a fenced `ship-ticket-report` example with exactly the keys `tests`, `red_seen`, `blockers` and `needs_outside_ownership`.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The format is the one in `references/execution-harness.md`.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "## Check a brief",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "```text\nnode scripts/brief.mjs lint <brief>\n```",
+      "kind": "fence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "`lint` exits 1 and names the section when Ownership, Forbidden paths, Required tests, Reuse inventory or Report block is missing or empty.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "It also warns, without failing, when the digest line no longer matches the text above it, which means the file was edited after it was built.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Run it on every brief before dispatch.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "## What you still add by hand",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "The tool knows only what is in the DAG, the plan and the recon file.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Put anything else in the notes file: a decision the owner made after the plan was approved, a trap a recon answer did not cover, the exact test command if the plan does not name it, or the reason a path is read-only.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Keep the notes short and factual.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Do not paste secrets, tokens or personal paths into them.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "If a node's `writes` or `othersOwned` is wrong, fix the DAG and rebuild; do not edit the brief to widen what a worker may touch.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "## Source",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Adapted from `strategy/coordination/handoff-templates.md` at commit 8ae6164 of msitarzewski/agency-agents, MIT, Copyright (c) 2025 AgentLand Contributors.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/brief.md"
+      ],
+      "covered_by": "wholly new file"
+    },
+    {
+      "text": "Mechanism and rationale are in [harness-internals.md](harness-internals.md), read on demand; rules for nodes that carry `unit` are in [units.md](units.md).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "new pointer sentence at the top of the card (harness-internals.md and units.md)"
+    },
+    {
+      "text": "`memory_safety` is `estimated` only when a verified budget applied and **every** node has `estimatedMemoryMb`; otherwise it is `unverified`.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "**Phase:** BUILD, PROVE, SHIP and REPAIR only; PLAN and REVIEW are refused. `REPAIR` (a review repair writer) routes like BUILD, is recorded as `phase: \"REPAIR\"` in results and usage, and requires `reviewExecution` (the review round being repaired). It may declare `redSpecs` (repo-relative spec paths); then `redEvidence` must be an absolute path to a non-empty file with the failing-run output, written by the orchestrator, or dispatch is refused.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "**Approval evidence (event binding, not content verification):** `.specs/plans/<TICKET>.md` (or `.spec/plans/`) must hold a RUN-STATE `START` event for `runId` whose `approved_plan_digest` equals the supplied digest. The carrier reads the plan artifact and never writes it, and it refuses any `ownership.writes` covering `.specs`/`.spec`, so a worker cannot forge `START`. The same applies to `ownership.othersOwned`, so a plan change can never be exempted.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "**Billing:** `billing` defaults to `subscription`. The child environment drops the provider's API-routing variables (Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex/Foundry switches. Codex: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`. Gemini/Antigravity: Google API-key and Vertex variables). The CLI's own status is then checked in that environment: `claude auth status --json` must report `authMethod: \"claude.ai\"` with `apiProvider: \"firstParty\"`, and `codex login status` must report `Logged in using ChatGPT`. Any other answer refuses dispatch before a process starts. `\"billing\": \"api\"` also needs `\"allowApiBilling\": true`, which only the user can authorize.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "**Adapter limits:** `bypassPermissions`, `plan` and `danger-full-access` are refused.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "The budget metric is `processed_tokens = input + output + cache_read + cache_write` (or `output_tokens`); see Budgets below.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "position word: \"see Budgets above\" now reads \"below\""
+    },
+    {
+      "text": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`\n```",
+      "kind": "fence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: fence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "`config`: `provider`, `modelMap`, `permissionMode`, `billing`, `width`, `memoryBudgetMb`, `timeoutMs` (clamped to 1 s..1 h for both validation and the timer), `budget` (`{ticket_tokens, phase_tokens}`), `candidateExclusions` (exactly `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready` runs every entry as the local proof), `base`, `riskLabels` (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with `billing: \"api\"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design; `allowApiBilling` exists only for a library caller the user authorized.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "link re-pointed to units.md; rest unchanged"
+    },
+    {
+      "text": "node: `id`, `deps`, `reads`, `writes`, `othersOwned`, `resources`, `risk`, `complexity`, `modelTier`, `estimatedMemoryMb`, `promptFile`, `phase` (`BUILD|PROVE|SHIP`; REPAIR is never a node: the engine dispatches repairs from review records only, so a REPAIR node is `dag_invalid`), `role` (`builder|repair|evidence`), `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see [units.md](units.md)).",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "link re-pointed to units.md; rest unchanged"
+    },
+    {
+      "text": "`acceptance` and `config.acceptanceIds` are legal on a DAG without units; [units.md](units.md) applies only when a node has `unit`.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "new sentence required by the plan: unit-less acceptance/config.acceptanceIds is legal, and units.md applies only when a node has unit"
+    },
+    {
+      "text": "`status` prints the compact `ship-ticket-engine-status-v1` view, including `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "unit clause removed (moved to units.md); \"(below)\" unchanged, the capture-cap paragraph is still below it in the card"
+    },
+    {
+      "text": "On `lock_held` wait for the holder and retry; never delete the lock file by hand.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "new decision sentence required by the repair batch: on lock_held wait and retry, never delete the lock file by hand"
+    },
+    {
+      "text": "**Launch handshake and quiescence:** details and `retire()` in [harness-internals.md](harness-internals.md).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "new pointer sentence for the launch handshake moved to harness-internals.md"
+    },
+    {
+      "text": "RUN-STATE readers split lines on every break a common reader honours (list: [harness-internals.md](harness-internals.md)).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "new pointer sentence: the break list moved to harness-internals.md; keeps the antecedent of \"one of those\" in the next sentence"
+    },
+    {
+      "text": "It is refused unless the work tree is exactly the frozen candidate (`rebind_not_frozen_tree`: the review saw these bytes; an edit after the freeze must be reverted or sent to a new review with a RETRY), and also with no freeze (`rebind_no_freeze`: before the freeze a drifted node re-runs as stale), a drifted path the candidate does not cover (`rebind_uncovered`: e.g. an excluded file such as `session-log.md`, which no review saw), nothing drifted (`rebind_nothing_drifted`) or live attempts (`rebind_attempts_live`).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "clause \"or units (`rebind_units`...)\" removed (moved to units.md); grammar of the list adjusted"
+    },
+    {
+      "text": "**Round counters** follow `SKILL.md`: at most two consolidated PROVE repair batches per ticket in total; one REVIEW repair and one confirmation per authorized review execution (`rounds.review_repairs[<review_execution>]`).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "unit parenthetical removed (moved to units.md)"
+    },
+    {
+      "text": "**Judgment points** (`status.judgments[].code`) stop the engine and go back to the orchestrator or user: `run_mismatch`, `approval_mismatch`, `dag_mismatch`, `crash_with_writes`, `quiescence_unknown` (always on Windows, where descendants can outlive the leader: known limit N7 below), `ownership_violation`, `ownership_unavailable`, `post_freeze_drift`, `repair_outside_findings`, `repair_unauthorized`, `round_limit`, `budget_stop`, `red_invalidated`, `red_required`, `candidate_unavailable` and `repair_failed` (computed: a final-review repair that failed; it is terminal for its review execution, and an owner RETRY of that review cancels it as `superseded by retry`).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "unit clause removed (moved to units.md)"
+    },
+    {
+      "text": "The gate adds unsupported RED runner output, `dispatched_before_red` and a terminal overflow FAIL (`review_terminal`) (all returned with `judgment_point: true`; the CLI exits 2).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "unit clause removed (moved to units.md)"
+    },
+    {
+      "text": "**`gateRed`** is a scheduler prerequisite: a node whose dependency has `redSpecs` is not dispatched until RED is accepted, repairs included. The engine runs the DAG-bound runner itself: `gate red` input is `{node, command?, specs?}`, where `command` only names a formatted `config.testCommands` entry; the command, its format, the timeout and the node's `resources` never come from the input. It runs with a bounded timeout, its own process group and the resource locks under the same durable attempt protocol as workers, so a surviving runner holding a lock is reconciled, not re-run. A runner (RED or proof) is `exited` only after its whole group is proven gone; a group that survives the kill, or whose quiescence is unknown, leaves the attempt `unknown` with its locks held and returns `quiescence_unknown` (judgment point) with no evidence or proof recorded. When a runner changes the approval binding (plan narrative or DAG bytes), its result is dropped (`RED_DROPPED`) and the binding code is returned as a judgment point; the binding is re-verified before RED evidence or local proof is committed, so drifted evidence never reaches disk. Runners (RED, proof and unit checks) run repository commands with the engine's own, unmodified environment, API keys included: the billing strip above applies to provider workers only. Runner adapters (`parseRunnerOutput`): `node --test` TAP (including nested subtests), vitest JSON, jest JSON. RED needs every named spec to report an **assertion** failure; import, compile and collection errors do not count. A runner that rewrites a named spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before the runner starts. Unsupported output cannot establish RED: that is a judgment point and the manual flow applies, marked degraded. Evidence is bound to the spec files' content digests, the baseline candidate and the resolved `config.base` commit, ordered by event sequence, and is refused if recorded after a dependent production dispatch. Before a drive dispatches a dependent (or repair) that needs it, a changed spec digest or a moved `config.base` drops the evidence (`RED_INVALIDATED`, kept in `gates.red_invalid` with the old evidence) and the engine re-runs RED itself with the recorded runner and specs, once per invalidation (`RED_RERUN`; it ignores dispatches before the invalidation). The `red_invalidated` judgment names the re-run's attempt and outcome. Accepted: that drive stops, the next one dispatches. Refused (typically `spec_not_failing`, because dependents already implement the specs): every later `drive` and `status` reports it until `gate red` is accepted, or the spec files and `config.base` are restored to the old evidence's bytes (`RED_RESTORED`); otherwise the owner decides. A dependent's own writes never invalidate it.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/execution-harness.md)"
+    },
+    {
+      "text": "**`gateShipReady`** emits `SHIP_READY` only when the current candidate equals the reviewed one, the exclusions are unaltered, graded artifact digests still match, the review chain is accepted, every required node is done or cancelled, no attempt is live, no repair is open, no judgment is unresolved (`nodes_unfinished`, `attempts_live`, `repairs_open`, `judgments_unresolved`), local proof is bound to that candidate, and every required risk evidence is present (a `-spec` kind needs accepted RED on that file; any other kind must name an existing file inside the repository, checked by the engine). Local proof is produced by the engine running every `config.testCommands` entry (exit 0 = pass) under the runner protocol; an input `local_proof` is a usage error. A proof command that changes the work tree is refused as `candidate_mismatch` and its proof is bound to no tree (`local_proof.candidate_id: null`, `dropped: [\"candidate_mismatch\"]`), so a RETRY review of the tree it left still needs a proof of that tree; one that changes the approval binding (the excluded plan narrative or the DAG bytes) is refused with that binding code and its proof dropped; no `SHIP_READY` is recorded. A proof runner without proven quiescence records no proof and leaves a durable `quiescence_unknown`. Overflow on either reviewer makes PASS `outcome_inconsistent`. Remote CI is still checked afterwards, as today. No successful closure is ever synthesized.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "covered_by": "the gateShipReady item as it was, minus the sentence about unit conjuncts after the proof, which moved to units.md (its old text is covered by its own entry); everything else, including the remote-CI sentence, is unchanged and stays in the card"
+    },
+    {
+      "text": "# Execution harness internals (on demand)",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "title of the new on-demand file"
+    },
+    {
+      "text": "Mechanism and rationale moved out of [execution-harness.md](execution-harness.md), the operator card.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "lead sentence of harness-internals.md"
+    },
+    {
+      "text": "Everything the orchestrator must or must not do stays in the card; open this file when a rule there points here or when a run misbehaves.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "lead sentence of harness-internals.md"
+    },
+    {
+      "text": "Memory probes behind `memoryBudgetMb: \"auto\"` (the `memory_safety` meaning is in the card):",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "`memoryBudgetMb: \"auto\"` takes OS free memory, capped by Node's cgroup-aware `availableMemory()` (Node >= 22). On older Node it is capped by the cgroup limit minus measured cgroup usage (`memory.current` / `memory.usage_in_bytes`). A reserve of 1 GiB or 15% of total, whichever is larger, is subtracted. If a cgroup limit exists but its usage is unreadable, the estimate is `memory_verified: false`. Node's available/constrained probes are cgroup-aware only on Linux, so they are consulted only there. On macOS, `os.freemem()` counts only free pages (about 0.7 GB of 24 GB on the host where this was found), so the harness reads `vm_stat` and counts free, inactive, speculative and purgeable pages instead.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Carrier mechanism that the card summarizes in \"What it enforces\":",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "Phase bullet, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "When the run engine's state file exists, that execution must be an accepted FAIL with a finding-bound write set in its review chain; only without engine state does the run log's REVIEW `start` row decide.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Approval evidence bullet, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "Plan content drift remains SHIP's approved-plan digest check, because the digest algorithm belongs to PLAN.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Billing bullet, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "Variable names are matched case-insensitively (Windows).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Gemini and Antigravity details (the card keeps the template-only and `acknowledgeUnverifiedAuth` rules):",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "**Verified adapters:** Claude and Codex arguments are built from flags checked against Claude Code 2.1.318 and Codex CLI 0.166.0: `claude -p --output-format json --no-session-persistence --permission-mode <acceptEdits|auto|dontAsk|manual> [--model <id>]` and `codex exec --json --ephemeral -s <read-only|workspace-write> [-m <id>] -`. Caller `args` are rejected, so `--model` cannot be smuggled in. `--model`/`-m` is emitted only when `modelMap` maps the routed tier; otherwise the provider default runs (`model: \"provider-default\"`). Hooks are not disabled (no `--bare`), so PostToolUse guards such as nn-guard still run.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: item made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Counter sources and the import details behind the card's usage summary:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "Files paragraph, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "### State ledger format",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "### Lock and persistence",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "Lock and persistence paragraph, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "### Launch handshake and quiescence",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "### Authority lines",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "Ownership paragraph, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "`archive` paragraph, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "### `mark`",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "`mark` paragraph, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "## Gate internals",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new section heading in harness-internals.md"
+    },
+    {
+      "text": "`gateRed` bullet, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "A spec matches a result by name and file; a result without a file counts only when no other result has that name and, if it failed, no other failure carries a location (so another file's same-named failure never makes RED).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/harness-internals.md)"
+    },
+    {
+      "text": "Eval report section, continued:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "new lead-in line for the moved sentences that follow it (harness-internals.md)"
+    },
+    {
+      "text": "Metrics: tokens by role and by phase (`phase unknown` for records without one) and the orchestrator share, wall clock per phase, review and repair rounds, pre-ship findings by severity (from `gate review` records), resume attempts and outcomes, infra retries, admission refusals and `truncated_outputs` when an attempt's output passed the capture cap.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "unit clause removed (moved to units.md); sentence otherwise unchanged"
+    },
+    {
+      "text": "The `unit_review*` activities in the BUILD row occur only with `config.unitReview`; their metrics are in [units.md](units.md), Timing activities.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/observability.md"
+      ],
+      "covered_by": "new pointer sentence in observability.md; the original paragraph moved to units.md (Timing activities)"
+    },
+    {
+      "text": "When they are present, a unit's checks must pass before another unit's nodes depending on it start and before REVIEW; the rules are in [units.md](units.md).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "covered_by": "link re-pointed to units.md"
+    },
+    {
+      "text": "Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each unit need its own independent review before the final review ([units.md](units.md), Unit review).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "covered_by": "link re-pointed to units.md"
+    },
+    {
+      "text": "When the plan chooses to split, read [units.md](units.md) before writing the DAG: it holds the `config.acceptanceIds` declaration, the `config.unitRecheckCeiling` sizing and the known over-review cost.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/plan.md"
+      ],
+      "covered_by": "new pointer sentence in plan.md where the moved blocks stood"
+    },
+    {
+      "text": "When the repair touches a `concurrency`-labelled node, or repairs a security or architecture finding (the security or architecture class of Repair routing in [units.md](units.md)), the second opinion on the repair (from a provider other than the primary's: Codex for the Opus primary; CodeRabbit if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL` with evidence.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "covered_by": "link re-pointed: \"(Repair routing, below)\" now names the Repair routing section that moved to units.md; the confirmation rule itself is unchanged"
+    },
+    {
+      "text": "With `config.unitReview`, the per-unit reviews, the unit repair routing and the final review on unit evidence are in [units.md](units.md); without it none of that applies.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "covered_by": "new pointer sentence in review.md where the unit sections stood"
+    },
+    {
+      "text": "With the run engine, also evaluate each review artifact through `gate.mjs` (`gateReview` for the original and the confirmation, `gateShipReady` before SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, [units.md](units.md)).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/review.md"
+      ],
+      "covered_by": "position word: \"`gate unit-review`, above\" now links units.md"
+    },
+    {
+      "text": "# Units (opt-in)",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "title of the new opt-in file"
+    },
+    {
+      "text": "Load this file when the plan chooses to split the ticket into units (PLAN), and when any node of the bound DAG has `unit` (BUILD, PROVE, REVIEW).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "lead sentence of units.md (load condition)"
+    },
+    {
+      "text": "A run whose DAG has no `unit` field does not need it: [execution-harness.md](execution-harness.md) covers that run on its own.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "lead sentence of units.md"
+    },
+    {
+      "text": "## Planning a split",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new section heading in units.md"
+    },
+    {
+      "text": "These blocks belong to the PLAN step \"Decomposition: split or not\" in [plan.md](plan.md); they apply once the plan chooses to split.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new lead-in line in units.md"
+    },
+    {
+      "text": "With unit reviews the final review must grade every id by name (`acceptance_uncovered` otherwise; Final review on unit evidence, below).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "link re-pointed (same file)"
+    },
+    {
+      "text": "It is safe but costs ceiling and reviewer time; AIS-HARNESS-3 Wave 4 measures it before any finer binding is built (Engine rules, below).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "link re-pointed (same file)"
+    },
+    {
+      "text": "## Engine rules",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new section heading in units.md"
+    },
+    {
+      "text": "The run engine rules for nodes that carry `unit` ([execution-harness.md](execution-harness.md) holds the rest of the Run engine):",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new lead-in line in units.md"
+    },
+    {
+      "text": "**Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a unit; never defaulted, so the DAG digest covers it only when set) makes each unit need its own independent review chain. The engine never dispatches a reviewer: the orchestrator relays it (Unit review, below) and `gate unit-review` validates and records it under the lock, reusing `gate.mjs` `gateReview` (contract, enums, dispositions, builder roster, distinct reviewers). The input is `{unit, review_execution, kind: original|confirmation, approved_plan_digest, dag_digest, base_commit, primary, second_opinion?, reconciliation, graded_artifacts?, repair_ownership?, repair_prompt_file?}`, where the reviewers' `candidate_id` is the unit's evidence id (`status.units.<u>.evidence.id`); `--unit` may name the unit instead. It is accepted only when the unit is `verified`, nothing is live, the digests are the bound ones and the evidence id and base commit are the current evidence's. Refusals record nothing: `unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`, `stale_base`, `stale_evidence`, `chain_broken` (an execution id of another chain), `unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`, `repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket has `config.riskLabels`. Its review and its confirmation then need a second opinion (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`; a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a second opinion is optional and validated when given. The record carries each reviewer's provider and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`), the reviewers, findings and outcome. The review state is recomputed at every read against the current evidence: `unreviewed`, `pass`, `stale` (the reviewed evidence no longer holds: a fresh original is due), `fail` awaiting `repair|recheck|confirmation`, or `fail` terminal (computed judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues `repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's declared writes); `drive` dispatches it only while the unit's evidence is the reviewed one (else `UNIT_REPAIR_CANCELLED`), records it in the unit chain without freezing and re-checks the unit. The new evidence becomes the candidate of the one targeted confirmation only when, against the binding the FAIL reviewed, nothing but files inside the repair write set changed (`UNIT_REPAIR_BOUND`). A declared directory is compared file by file against its tree recorded at the FAIL, so a repair writing `src/a.txt` inside a declared `src` binds, while any other changed, added or removed entry inside it is outside the repair. A node re-run, a dependency unit's re-check, an upstream change or a base move instead marks the repair `unbound` (`UNIT_REPAIR_UNBOUND`) and the review stale. This bookkeeping is idempotent and runs on every `drive`, `resume`, `status` and gate, so a crash between a re-check and its binding is recovered. A failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL whose cycle the ceiling cannot carry (`ceiling_refused`, recorded with `repair_opened: false`) and any FAIL after the freeze are terminal: only a trusted RUN-STATE `RETRY {review_execution, predecessor: <the unit's last execution>, authorized_by}` admits a new original. A re-review, a repair and a confirmation spend the parent-wide ceiling. Opening a repair needs 3 unheld slots: it spends 1 and holds its re-check and confirmation for the unit until the cycle ends or is cancelled (`UNIT_CEILING_RELEASED`). The spends are recorded (`UNIT_REVIEW_CYCLE` with kind `unit_rereview|unit_repair|unit_confirmation` and its trigger: stale evidence and its invalidation causes, the owner RETRY, the fixed findings, the repair). `gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing` until every unit has a current PASS (and `gate review` the two Wave 3 refusals below). The `drive` outcome `done` does not cover pending unit reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also reads the unit chains, but only a FAIL whose repair the engine opened (`repair_opened: true`).",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "link re-pointed: \"([review.md](review.md), Unit review)\" now names the section below in units.md"
+    },
+    {
+      "text": "**Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit reviews do not replace the final review (Final review on unit evidence, below). After the refusals above, `gate review` also refuses, recording nothing: `acceptance_uncovered` when an original's `primary.acceptance_criteria` has no row whose `id` (when that is an acceptance id; else its `criterion`: one row covers one id) is an acceptance id mapped on a node (every id of `config.acceptanceIds`), and `units_consumed_stale` when an original or a confirmation does not name, in the input field `units_consumed: [{unit, evidence_id}]`, every unit exactly once with its current verified evidence id (`status.units.<u>.evidence.id`): a missing, unknown, duplicated or old entry is refused. The accepted record carries `units_consumed`, and `gate ship-ready` re-checks the record that authorizes ship (the last accepted original or confirmation) by the same rule, refusing `units_consumed_stale` when a unit's evidence moved since (for example the resolved base moved and the units were re-checked and re-reviewed on a byte-identical candidate). `init` refuses (`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without `config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the final review is unchanged.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "link re-pointed: now \"(Final review on unit evidence, below)\""
+    },
+    {
+      "text": "The unit commands of the Run engine:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new lead-in line in units.md for the two unit commands"
+    },
+    {
+      "text": "```bash\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs clear-unit --repo <R> --ticket <T> --run-id <ID> --unit <unit>   # needs an owner UNIT_CLEAR (Units)\nnode <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>]   # config.unitReview (Units)\n```",
+      "kind": "fence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "split: fence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/units.md)"
+    },
+    {
+      "text": "### Unit rules inside other engine sections",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new sub-heading in units.md"
+    },
+    {
+      "text": "Each of these completes a section of [execution-harness.md](execution-harness.md) for a DAG with units.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new lead-in line in units.md"
+    },
+    {
+      "text": "`status` prints, besides the fields named in the card, `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state likewise), `unit_reviews_pending` only with `config.unitReview` (`unit_reviews` in state likewise).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit clause moved here from the card status sentence"
+    },
+    {
+      "text": "Round counters (card): a unit review execution: `rounds.unit_review_repairs[<review_execution>]`, present once one ran.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit parenthetical moved here from the card Round counters paragraph"
+    },
+    {
+      "text": "`rebind` (card) is also refused with units (`rebind_units`: unit evidence is not re-bound).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit clause moved here from the card rebind paragraph"
+    },
+    {
+      "text": "Judgment points (card): with units also `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews `unit_review_terminal`.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit clause moved here from the card Judgment points paragraph"
+    },
+    {
+      "text": "Gate refusals: its `units_unverified` and `unit_reviews_missing` refusals are not judgment points (`drive` runs the checks; the orchestrator relays the unit reviews).",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit clause moved here from the card Judgment points paragraph"
+    },
+    {
+      "text": "`gate ship-ready` (card), with units:",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new lead-in line in units.md for the moved ship-ready unit sentence"
+    },
+    {
+      "text": "With units, the unit conjuncts are re-checked after the proof ran: a proof command that leaves the tree but makes unit evidence stale (for example an empty commit moving `config.base`) is refused with the existing code (`units_unverified`, `unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive` re-checks the units (spending rechecks), and the proof command must be fixed or it moves the base again on the next ship-ready.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "split: sentence made only of sentences that exist unchanged in the old files (skills/ship-ticket/references/units.md)"
+    },
+    {
+      "text": "Eval report (card), metrics: `units` (the per-unit projection above) when the run has units.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "unit clause moved here from the card Eval report Metrics sentence"
+    },
+    {
+      "text": "**Unit reviews do not replace the final review.** The final review in [review.md](review.md) is still mandatory on the exact assembled candidate, with the same Opus primary, the mandatory second opinion and the same repair, confirmation and RETRY policy.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "position word: \"in this file\" now links review.md"
+    },
+    {
+      "text": "**Who.** An Opus primary reviewer that is independent of every builder, under the rules in [review.md](review.md). The gate refuses a reviewer whose identity equals a builder's. A **risky** unit (`status.units.<u>.review.risky`: a member node carries a risk label, or the ticket has `config.riskLabels`) also needs a second opinion from a provider other than the primary's (Codex for the Opus primary, whatever the host: on a Codex host the counterpart Claude would share the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit` with identity `coderabbit:<model>`. If neither can run, stop and ask (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the gate requires the second opinion to come from a different provider than the primary (`reviewers_same_provider`) and records each reviewer's provider and model. It does not check model names: assigning Opus as primary and Codex as second is the orchestrator's duty under the owner rule. For a unit that is not risky the second opinion is optional; when it is given, the gate validates it.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "position word: \"in this file\" now links review.md"
+    },
+    {
+      "text": "**Input.** Give the reviewer the unit's exact files and diff (its nodes' declared reads and writes), its acceptance ids, the contract versions it reads, its check results, the approved plan and the threat model. The artifact uses the output contract in [review.md](review.md), with `candidate_id` set to `status.units.<u>.evidence.id`. The gate input adds `unit`, `approved_plan_digest`, `dag_digest` and `base_commit` (`status.units.<u>.evidence.base_commit`). Record it with `run-engine.mjs gate unit-review --input <file>`. Use a unique `review_execution` for each unit review (`review-<opaque>`); the final review may not reuse it.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "position word: \"the output contract above\" now links review.md (block moved to units.md)"
+    },
+    {
+      "text": "**FAIL and repair.** Reconcile as in [review.md](review.md). An accepted FAIL with `fix` findings needs `repair_prompt_file` and opens one repair. Its write set (the fixed findings' paths plus `repair_ownership`) must lie inside the unit's declared writes; anything outside is `repair_outside_unit`, so leave that finding to the final review: record the unit review with that finding dispositioned to the final review (for example `final-review`, never `fix`) and its rows judged on the unit alone, so the unit can PASS (a unit FAIL with nothing to fix is terminal), then carry the finding into the final review as a primary finding to `fix`, whose one repair may cross units. `drive` runs the repair only while the unit's evidence is still the one that was reviewed; otherwise it cancels the repair and the review goes stale. Then `drive` re-checks the unit. The re-checked evidence becomes the repaired candidate only when the repair's own writes are the sole change; a node rebuild, a dependency unit's re-check or any other change makes the review stale instead, so a fresh review is due. The same primary (plus the second opinion when the unit is risky) then gives one targeted confirmation on the repaired evidence (`kind: \"confirmation\"`). Each unit review execution gets one repair and one confirmation. The following are terminal for the unit (`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with nothing to fix, a failed repair, a FAIL the ceiling cannot carry, and any unit FAIL after the REVIEW freeze (after the freeze, only the final review's repair may change the candidate). Only an owner RUN-STATE `RETRY` linked to the unit's last execution continues, never an automatic retry.",
+      "kind": "item",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "position word: \"as above\" now links review.md"
+    },
+    {
+      "text": "When unit reviews exist (`config.unitReview`), the final review in [review.md](review.md) is mandatory and runs on the exact assembled candidate, with the same Opus primary, the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit if it is unavailable or out of quota; if none can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and owner-RETRY policy.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "position word: \"in this file\" now links review.md"
+    },
+    {
+      "text": "## Timing activities",
+      "kind": "heading",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "new section heading in units.md"
+    },
+    {
+      "text": "The `unit_review*` activities occur only with `config.unitReview` (Unit review, above): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`.",
+      "kind": "sentence",
+      "new_count": 1,
+      "new_in": [
+        "skills/ship-ticket/references/units.md"
+      ],
+      "covered_by": "link re-pointed: now \"(Unit review, above)\" (same file)"
+    }
+  ],
+  "duplicated": [
+    {
+      "text": "## Scheduling and admission",
+      "kind": "heading",
+      "old_count": 1,
+      "new_count": 2,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md",
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+    },
+    {
+      "text": "## Writer carrier",
+      "kind": "heading",
+      "old_count": 1,
+      "new_count": 2,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md",
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+    },
+    {
+      "text": "## Provider-reported usage",
+      "kind": "heading",
+      "old_count": 1,
+      "new_count": 2,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md",
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+    },
+    {
+      "text": "## Run engine",
+      "kind": "heading",
+      "old_count": 1,
+      "new_count": 2,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md",
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+    },
+    {
+      "text": "## Eval report",
+      "kind": "heading",
+      "old_count": 1,
+      "new_count": 2,
+      "old_in": [
+        "skills/ship-ticket/references/execution-harness.md"
+      ],
+      "new_in": [
+        "skills/ship-ticket/references/execution-harness.md",
+        "skills/ship-ticket/references/harness-internals.md"
+      ],
+      "covered_by": "same section title in the on-demand harness-internals.md as in the operator card (the section is divided between them)"
+    }
+  ],
+  "allowlist_unused": [],
+  "allowlist_without_reason": 0,
+  "ok": true,
+  "unit_identifier_hits": {
+    "skills/ship-ticket/SKILL.md": {
+      "count": 1,
+      "hits": [
+        {
+          "line": 430,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow"
+        }
+      ]
+    },
+    "skills/ship-ticket/references/brief.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/codex-cli.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/cross-model.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/design-parity.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/execution-harness.md": {
+      "count": 2,
+      "hits": [
+        {
+          "line": 256,
+          "terms": [
+            "unitRecheckCeiling",
+            "unitReview"
+          ],
+          "text": "node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is"
+        },
+        {
+          "line": 578,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "- Gate decisions are recorded with `run-engine.mjs gate red|review|ship-ready|unit-review"
+        }
+      ]
+    },
+    "skills/ship-ticket/references/harness-internals.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/observability.md": {
+      "count": 2,
+      "hits": [
+        {
+          "line": 119,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "| BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join`, `unit_review`, `unit_review_repair`, `unit_review_confirmation` |"
+        },
+        {
+          "line": 124,
+          "terms": [
+            "unit_review",
+            "unitReview"
+          ],
+          "text": "The `unit_review*` activities in the BUILD row occur only with `config.unitReview`; their metrics are in [units.md](units.md), Timing activities."
+        }
+      ]
+    },
+    "skills/ship-ticket/references/plan.md": {
+      "count": 5,
+      "hits": [
+        {
+          "line": 165,
+          "terms": [
+            "unitRecheckCeiling"
+          ],
+          "text": "`config.acceptanceIds`, `config.unitRecheckCeiling` and its reasoning, and whether"
+        },
+        {
+          "line": 166,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "`config.unitReview` is on.>"
+        },
+        {
+          "line": 281,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each"
+        },
+        {
+          "line": 315,
+          "terms": [
+            "unitRecheckCeiling",
+            "unitReview"
+          ],
+          "text": "`config.acceptanceIds`, `config.unitRecheckCeiling`, `config.unitReview`);"
+        },
+        {
+          "line": 318,
+          "terms": [
+            "unitRecheckCeiling"
+          ],
+          "text": "When the plan chooses to split, read [units.md](units.md) before writing the DAG: it holds the `config.acceptanceIds` declaration, the `config.unitRecheckCeilin"
+        }
+      ]
+    },
+    "skills/ship-ticket/references/prove.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/review.md": {
+      "count": 2,
+      "hits": [
+        {
+          "line": 362,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "With `config.unitReview`, the per-unit reviews, the unit repair routing and the final review on unit evidence are in [units.md](units.md); without it none of th"
+        },
+        {
+          "line": 373,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, [units.md](units.md)). They bind the artifact"
+        }
+      ]
+    },
+    "skills/ship-ticket/references/security-risk.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/ship.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/understand.md": {
+      "count": 0,
+      "hits": []
+    },
+    "skills/ship-ticket/references/units.md": {
+      "count": 35,
+      "hits": [
+        {
+          "line": 12,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "by name (`acceptance_uncovered` otherwise; Final review on unit evidence, below). `config.unitReview` therefore requires `config.acceptanceIds`: `init`"
+        },
+        {
+          "line": 16,
+          "terms": [
+            "unitRecheckCeiling"
+          ],
+          "text": "**Set `config.unitRecheckCeiling` for the unit count.** It is one run-wide"
+        },
+        {
+          "line": 24,
+          "terms": [
+            "parent_ceiling"
+          ],
+          "text": "re-check can exhaust the rest and raise a durable `parent_ceiling` that halts all"
+        },
+        {
+          "line": 83,
+          "terms": [
+            "unitRecheckCeiling"
+          ],
+          "text": "- **Parent-wide ceiling.** `config.unitRecheckCeiling` (integer 0..100, needs a unit; default 4,"
+        },
+        {
+          "line": 90,
+          "terms": [
+            "parent_ceiling"
+          ],
+          "text": "is spent, the next re-check raises the durable judgment `parent_ceiling` instead (no automatic"
+        },
+        {
+          "line": 103,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "- **Unit review (opt-in; AIS-HARNESS-3 Wave 2b-ii).** `config.unitReview: true` (boolean, needs a"
+        },
+        {
+          "line": 106,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "(Unit review, below) and `gate unit-review` validates and records it under the"
+        },
+        {
+          "line": 114,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "`unit_review_disabled`, `unknown_unit`, `binding_mismatch`, `attempts_live`, `unit_unverified`,"
+        },
+        {
+          "line": 116,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "`unit_review_current`, `unit_review_open`, `retry_unauthorized`, `repair_outside_unit`,"
+        },
+        {
+          "line": 117,
+          "terms": [
+            "parent_ceiling"
+          ],
+          "text": "`repair_prompt_missing`, `reviewers_same_provider`, `parent_ceiling` (not a durable judgment), and"
+        },
+        {
+          "line": 123,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG"
+        },
+        {
+          "line": 128,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "judgment `unit_review_terminal`). An accepted FAIL with findings to fix, before the freeze, enqueues"
+        },
+        {
+          "line": 129,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "`repair-<rx>` (kind `unit-review`) through the review-repair authorization (the FAIL record in the"
+        },
+        {
+          "line": 130,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "unit's chain, `rounds.unit_review_repairs`, finding-bound writes that must lie inside the unit's"
+        },
+        {
+          "line": 150,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "`gate review` (original and confirmation) and `gate ship-ready` refuse `unit_reviews_missing`"
+        },
+        {
+          "line": 152,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "reviews; `status.unit_reviews_pending` is authoritative. The carrier's REPAIR authorization also"
+        },
+        {
+          "line": 154,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "- **Final review on unit evidence (AIS-HARNESS-3 Wave 3; only with `config.unitReview`).** Unit"
+        },
+        {
+          "line": 166,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "(`dag_invalid`) `config.unitReview: true` without `config.acceptanceIds`. Without"
+        },
+        {
+          "line": 167,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "`config.unitReview` none of this runs and `units_consumed` is a usage error (exit 1), so the"
+        },
+        {
+          "line": 201,
+          "terms": [
+            "unit-review",
+            "unitReview"
+          ],
+          "text": "node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs gate unit-review --repo <R> --ticket <T> --run-id <ID> --input <file> [--unit <unit>] # config.unitReview (Units"
+        },
+        {
+          "line": 208,
+          "terms": [
+            "unit_review",
+            "unitReview"
+          ],
+          "text": "`status` prints, besides the fields named in the card, `units` and `unit_ceiling` only when the DAG has units (`unit_checks` and `unit_ceiling` in state likewis"
+        },
+        {
+          "line": 210,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "Round counters (card): a unit review execution: `rounds.unit_review_repairs[<review_execution>]`, present once one ran."
+        },
+        {
+          "line": 214,
+          "terms": [
+            "parent_ceiling",
+            "unit_review"
+          ],
+          "text": "Judgment points (card): with units also `unit_check_failed`, `unit_invalidation_storm` and `parent_ceiling`, and with unit reviews `unit_review_terminal`. Gate "
+        },
+        {
+          "line": 221,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "`unit_reviews_missing` or `units_consumed_stale`) and its proof dropped; the next `drive`"
+        },
+        {
+          "line": 227,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "## Unit review (opt-in: `config.unitReview`)"
+        },
+        {
+          "line": 229,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "When the approved DAG splits the ticket into units and sets `config.unitReview: true`,"
+        },
+        {
+          "line": 240,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "checks passed) and nothing is live. `status.unit_reviews_pending` lists the"
+        },
+        {
+          "line": 266,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "`run-engine.mjs gate unit-review --input <file>`. Use a unique"
+        },
+        {
+          "line": 291,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "(`unit_review_terminal`): a failed confirmation, an overflow FAIL, a FAIL with"
+        },
+        {
+          "line": 297,
+          "terms": [
+            "unitRecheckCeiling"
+          ],
+          "text": "`config.unitRecheckCeiling`, the same allowance the unit re-checks spend."
+        },
+        {
+          "line": 302,
+          "terms": [
+            "parent_ceiling"
+          ],
+          "text": "the ceiling cannot carry is refused (`parent_ceiling`). Neither raises a"
+        },
+        {
+          "line": 305,
+          "terms": [
+            "unit_review"
+          ],
+          "text": "`gate ship-ready` refuse `unit_reviews_missing` until every unit has a current"
+        },
+        {
+          "line": 316,
+          "terms": [
+            "unit-review"
+          ],
+          "text": "| Local defect inside one unit | that unit's declared writes (a unit FAIL: `gate unit-review`) | that unit's checks and its one targeted confirmation |"
+        },
+        {
+          "line": 329,
+          "terms": [
+            "unitReview"
+          ],
+          "text": "When unit reviews exist (`config.unitReview`), the final review in [review.md](review.md) is"
+        },
+        {
+          "line": 376,
+          "terms": [
+            "unit_review",
+            "unitReview"
+          ],
+          "text": "The `unit_review*` activities occur only with `config.unitReview` (Unit review, above): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`."
+        }
+      ]
+    }
+  }
+}

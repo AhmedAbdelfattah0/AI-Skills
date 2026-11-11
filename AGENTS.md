@@ -298,7 +298,13 @@ contract. Everything a single
 phase consumes lives in `references/<phase>.md` and is loaded when that phase
 starts: `understand`, `plan`, `cross-model`, `codex-cli`, `prove`, `design-parity`,
 `review`, `ship`, with cross-phase operational timing isolated in `observability` and
-the application of the `vapt` control catalog to a ticket (policy 2) in `security-risk`. **Keep
+the application of the `vapt` control catalog to a ticket (policy 2) in `security-risk`. The
+execution harness is split by use: `execution-harness` is the operator card (what the
+orchestrator must and must not do, loaded before BUILD), `harness-internals` holds mechanism
+and rationale and is opened only when the card names it, `units` holds the opt-in unit rules
+and loads only when the plan chooses a split or a DAG node has `unit`, and `brief` (BUILD)
+describes `scripts/brief.mjs`, which builds and lints the worker brief. A rule the
+orchestrator must follow belongs in the card; when unsure, put it there. **Keep
 it that way.** It was a 2359-line monolith and the length was
 itself a defect: policy deleted in one place stayed executable in a dozen others,
 and parallelism decided in one section was ignored 350 lines later. If you add a

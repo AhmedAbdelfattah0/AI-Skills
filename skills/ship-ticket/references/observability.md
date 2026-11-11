@@ -121,10 +121,7 @@ they explain most variance:
 | REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
 | SHIP | `commit_push_pr`, `ci_wait`, `tracker_completion` |
 
-The `unit_review*` activities occur only with `config.unitReview` ([review.md](review.md), Unit
-review): give each the metrics `unit=<u>` and `review_execution=review-<opaque>`. The engine state
-keeps the authoritative record (`status.units.<u>.review`, `UNIT_REVIEW_CYCLE` events with each
-cycle's kind and trigger).
+The `unit_review*` activities in the BUILD row occur only with `config.unitReview`; their metrics are in [units.md](units.md), Timing activities.
 
 Use a unique event ID for every occurrence, for example
 `prove-repository-checks-1`. Do not create an interval for every shell command or

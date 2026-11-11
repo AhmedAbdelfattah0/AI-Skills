@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, cpSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, cpSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep, relative } from 'node:path';
 import { buildNodes } from './engine-bench.mjs';
@@ -186,25 +186,89 @@ test('load record: phases follow the SKILL.md table, with conditions as flags', 
   assert.ok(loads('BUILD').includes('execution-harness.md'), 'the spine says to read it before BUILD');
   assert.ok(loads('PROVE').includes('design-parity.md') && loads('PROVE').includes('security-risk.md'));
   assert.deepEqual(rec.phases.find(p => p.phase === 'PROVE').loads.filter(l => l.condition).map(l => [l.file, l.condition]).sort(),
-    [['references/design-parity.md', 'PROVE with UI'], ['references/security-risk.md', 'PLAN, PROVE or REVIEW of security-relevant work']]);
+    [['references/design-parity.md', 'PROVE with UI'], ['references/security-risk.md', 'PLAN, PROVE or REVIEW of security-relevant work'],
+      ['references/units.md', 'BUILD, PROVE or REVIEW when any DAG node has `unit`']]);
   const base = referenceBytes({}, rec);
   assert.equal(referenceBytes({ ui: true }, rec) - base, rec.references.find(r => r.file === 'references/design-parity.md').bytes);
   assert.equal(referenceBytes({ security: true }, rec) - base, rec.references.find(r => r.file === 'references/security-risk.md').bytes);
   assert.equal(referenceBytes({ codex: true }, rec) - base, rec.references.find(r => r.file === 'references/codex-cli.md').bytes);
 });
 
-test('load record: a run with units loads the same files as one without, because unit text sits inside them', () => {
+test('load record: a run without units loads no unit file, a run with units loads units.md, and no unit text is left in the other files', () => {
   const rec = loadRecord({ skillDir: SKILL_DIR });
-  assert.deepEqual(rec.runs.with_units.files, rec.runs.without_units.files);
-  assert.equal(rec.runs.with_units.bytes, rec.runs.without_units.bytes);
-  assert.equal(rec.runs.without_units.flags.units, false);
+  const without = rec.runs.without_units;
+  assert.equal(without.flags.units, false);
   assert.equal(rec.runs.with_units.flags.units, true);
-  assert.deepEqual(rec.unit_text.map(u => u.file), ['references/execution-harness.md', 'references/review.md']);
-  for (const u of rec.unit_text) {
-    assert.ok(u.bytes > 0 && u.bytes < rec.references.find(r => r.file === u.file).bytes, u.file);
-    assert.ok(u.headings.length > 0);
-    assert.ok(u.headings.every(h => /unit/i.test(h)), u.headings.join());
+  assert.equal(rec.runs.with_units.flags.split, true);
+  assert.equal(rec.runs.plan_chooses_split.flags.units, false);
+  assert.equal(rec.runs.plan_chooses_split.flags.split, true);
+  assert.ok(!without.files.includes('references/units.md'), 'the unit rules stay out of a run that never splits');
+  assert.ok(rec.runs.with_units.files.includes('references/units.md'));
+  assert.ok(rec.runs.plan_chooses_split.files.includes('references/units.md'));
+  assert.ok(without.files.includes('references/brief.md'), 'brief.md loads at BUILD');
+  assert.ok(!without.files.includes('references/harness-internals.md'), 'harness-internals.md is on demand: never in the default run');
+  assert.equal(without.unit_text_bytes, 0, 'no opt-in unit section is left in a file a run without units loads');
+  assert.deepEqual(rec.unit_text, []);
+  assert.equal(rec.runs.with_units.unit_text_bytes, rec.references.find(r => r.file === 'references/units.md').bytes);
+});
+
+// A synthetic skill with known file sizes, so the flag arithmetic is exact and independent of the real text.
+const SYNTH_ROWS = [
+  ['Workflow start', 'observability'], ['UNDERSTAND', 'understand', 'cross-model'], ['PLAN', 'plan', 'cross-model'],
+  ['PLAN when the plan chooses SPLIT', 'units'], ['BUILD', 'brief'], ['BUILD, PROVE or REVIEW when any DAG node has `unit`', 'units'],
+  ['On demand, when the operator card names it', 'harness-internals'], ['PROVE', 'prove'], ['PROVE with UI', 'design-parity'], ['REVIEW', 'review'],
+  ['PLAN, PROVE or REVIEW of security-relevant work', 'security-risk'], ['REVIEW with elevated counterpart', 'cross-model'], ['SHIP', 'ship'],
+];
+const SYNTH_SIZES = { observability: 100, understand: 200, 'cross-model': 300, plan: 400, brief: 50, units: 70, 'harness-internals': 30, prove: 500, 'design-parity': 5,
+  review: 700, 'security-risk': 7, ship: 600, 'execution-harness': 1000, 'codex-cli': 11 };
+function synthSkill(dir, { reviewExtra = '' } = {}) {
+  const link = (n) => `[references/${n}.md](references/${n}.md)`;
+  const rows = SYNTH_ROWS.map(([enter, ...names]) => `| ${enter} | ${names.map(link).join(' and ')} |`);
+  const table = ['| Entering | Load |', '|---|---|', ...rows.map(r => (r.startsWith('| BUILD |') ? r.replace('| BUILD | ', '| BUILD | this spine and ') : r)), ''].join('\n');
+  mkdirSync(join(dir, 'references'), { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'), `# Skill\n\n${table}\n`);
+  for (const [name, size] of Object.entries(SYNTH_SIZES)) {
+    const body = name === 'review' ? `${'r'.repeat(size - reviewExtra.length)}${reviewExtra}` : 'x'.repeat(size);
+    writeFileSync(join(dir, 'references', `${name}.md`), body);
   }
+}
+const withSynth = (opts, fn) => {
+  const dir = mkdtempSync(join(tmpdir(), 'load-record-test-'));
+  try { synthSkill(dir, opts); fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+
+test('load record: the units flag adds units.md at BUILD, PROVE and REVIEW, the split flag adds it at PLAN, internals only when named', () => {
+  withSynth({}, (dir) => {
+    const rec = loadRecord({ skillDir: dir });
+    const S = SYNTH_SIZES;
+    // The default run: the card (execution-harness.md, from the prose load) plus brief.md at BUILD; no units.md, no internals.
+    assert.deepEqual(rec.runs.without_units.phase_bytes, { START: S.observability, UNDERSTAND: S.understand + S['cross-model'], PLAN: S.plan + S['cross-model'],
+      BUILD: S['execution-harness'] + S.brief, PROVE: S.prove, REVIEW: S.review, SHIP: S.ship });
+    assert.ok(!rec.runs.without_units.files.includes('references/units.md'));
+    assert.equal(rec.runs.without_units.unit_text_bytes, 0);
+    // The plan chooses SPLIT: units.md at PLAN only, because no DAG exists yet and no node has a unit.
+    assert.equal(rec.runs.plan_chooses_split.phase_bytes.PLAN, S.plan + S['cross-model'] + S.units);
+    assert.equal(rec.runs.plan_chooses_split.phase_bytes.BUILD, S['execution-harness'] + S.brief);
+    // A DAG with a unit node: units.md at BUILD, PROVE and REVIEW (and at PLAN, because it was chosen there).
+    const w = rec.runs.with_units.phase_bytes;
+    assert.deepEqual([w.PLAN, w.BUILD, w.PROVE, w.REVIEW, w.SHIP], [S.plan + S['cross-model'] + S.units, S['execution-harness'] + S.brief + S.units, S.prove + S.units, S.review + S.units, S.ship]);
+    assert.equal(rec.runs.with_units.unit_text_bytes, S.units);
+    assert.equal(referenceBytes({ units: true }, rec) - referenceBytes({}, rec), S.units, 'counted once, however many phases load it');
+    // On demand: counted only when named.
+    assert.equal(referenceBytes({ internals: true }, rec) - referenceBytes({}, rec), S['harness-internals']);
+    assert.equal(referenceBytes({}, rec), referenceBytes({ internals: false }, rec));
+    assert.ok(rec.runs.all_conditions.files.includes('references/harness-internals.md') && rec.runs.all_conditions.files.includes('references/units.md'));
+  });
+});
+
+test('load record: a unit section left in a loaded file is counted as unit text, and units.md counts whole only when loaded', () => {
+  const extra = '## Unit review (opt-in)\nleftover rules\n';
+  withSynth({ reviewExtra: `\n${extra.trimEnd()}` }, (dir) => {
+    const rec = loadRecord({ skillDir: dir });
+    assert.deepEqual(rec.unit_text.map(u => [u.file, u.bytes]), [['references/review.md', Buffer.byteLength(extra)]]);
+    assert.equal(rec.runs.without_units.unit_text_bytes, Buffer.byteLength(extra), 'review.md is loaded by every run');
+    assert.equal(rec.runs.with_units.unit_text_bytes, Buffer.byteLength(extra) + SYNTH_SIZES.units);
+  });
 });
 
 test('load record: unit text is counted by whole sections (heading level and bold lead rules)', () => {
