@@ -22,10 +22,11 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
 import { truncatedOutputs } from './run-summary.mjs';
+import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
@@ -39,7 +40,7 @@ export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
-  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile']);
+  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now']);
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
@@ -70,10 +71,38 @@ function approvedPlan(ctx, P, S = null) {
   return { text, digest, events, start };
 }
 
+/**
+ * W3-record audit timestamps (config.auditRecord only; never read by a decision). Stamps every event
+ * of `S` that has no `at`, and every terminal attempt (any status outside LIVE: exited, abandoned,
+ * timed_out, crashed, orphaned, spawn_failed, retried; all carry quiesced:true past the persistence
+ * guard) that has no `ended_at`, with `at`. No clock and no I/O: the caller passes the instant. Never
+ * throws on any state shape. `memo` ({ ev, end }: Maps, one per command, never persisted) keeps the
+ * first instant given to each item, so a snapshot that lost the stamp (gateRed commits clones of
+ * its own private copy, gate.mjs) gets the same value again; an item loaded with its stamp keeps it.
+ */
+export function stampAudit(S, at, memo) {
+  const keep = (m, k) => { if (!m.has(k)) m.set(k, at); return m.get(k); };
+  for (const e of Array.isArray(S?.events) ? S.events : []) {
+    if (e && typeof e === 'object' && e.at === undefined) e.at = keep(memo.ev, `${e.seq}\u0000${e.type}`);
+  }
+  for (const a of Array.isArray(S?.attempts) ? S.attempts : []) {
+    if (a && typeof a === 'object' && !LIVE.includes(a.status) && a.quiesced === true && a.ended_at === undefined) a.ended_at = keep(memo.end, a.attempt_id);
+  }
+}
+
+/** The instant commit() stamps with: the in-process test clock `ctx.now` (never set by the CLI), else the wall clock. */
+function auditNow(ctx) {
+  if (ctx.now === undefined) return new Date().toISOString();
+  const at = typeof ctx.now === 'function' ? ctx.now() : undefined;
+  if (typeof at !== 'string') throw coded('bad_context', 'ctx.now must be a function returning an ISO timestamp string');
+  return at;
+}
+
 /** Context for one command: paths, state, serialized commits and live in-process attempts. */
 function open(ctx) {
   const P = locate(ctx);
   const E = { ctx, P, S: null, live: new Map(), refused: new Set(), lock: Promise.resolve(), verifyBinding: () => verifyBinding(E),
+    stamps: { ev: new Map(), end: new Map() },
     alive: (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid),
     load() {
       if (!existsSync(P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
@@ -92,6 +121,12 @@ function open(ctx) {
       // Persistence guard: no attempt leaves the live set except through engine-quiesce.mjs retire().
       const bad = unretired(E.S);
       if (bad.length) throw coded('unquiesced_exit', `attempt(s) ${bad.map(a => `${a.attempt_id}:${a.status}`).join(', ')} left the live set without proven quiescence`);
+      // W3-record: snapshot-preparation time, not decision time. Stamped in place here, before the clone,
+      // the queue and the atomic write, so a commit queued behind this one carries the same values. A
+      // write that fails before its rename persists nothing: the command ends, and the next command's first
+      // commit stamps those items (or the ones that replace them) with its own instant. A failure after the
+      // rename (the directory fsync) leaves this stamped snapshot installed, and its stamps are kept.
+      if (auditOn(E.S)) stampAudit(E.S, auditNow(ctx), E.stamps);
       const data = structuredClone(E.S), prev = E.lock;
       let done; E.lock = new Promise(r => { done = r; });
       await prev;
@@ -199,7 +234,8 @@ async function deliver(E) {
   for (const ev of E.S.outbox) {
     let failed = false;
     await io.boundary(E.ctx.hooks, 'run-log-append', { event_id: ev.event_id });
-    try { io.appendLogOnce(E.P.log, ev); } catch (e) { degrade(E.S, 'engine-log', ev, e); failed = true; }
+    // W3-record: a switch-on GATE row carries untrusted text; eventLine escapes the line breaks JSON.stringify leaves raw.
+    try { io.appendLogOnce(E.P.log, ev, auditOn(E.S) && ev.event === 'GATE' ? eventLine : undefined); } catch (e) { degrade(E.S, 'engine-log', ev, e); failed = true; }
     await io.boundary(E.ctx.hooks, 'run-state-append', { event_id: ev.event_id });
     // gate decisions stay in the engine log; SHIP_READY and MARK reach the plan's RUN-STATE
     if (ev.event !== 'GATE') try { io.appendRunStateOnce(E.P.plan, ev); } catch (e) { degrade(E.S, 'run-state', ev, e); failed = true; }
@@ -483,6 +519,37 @@ export async function archive(ctx) {
 
 const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state']);
 
+/** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
+export const AUDIT_REASONS_MAX = 20;
+export const AUDIT_TEXT_MAX = 500;
+const isRecordObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const boundedText = (v) => typeof v === 'string' && v.length <= AUDIT_TEXT_MAX;
+/** Cut to AUDIT_TEXT_MAX code units without leaving a lone high surrogate at the cut. */
+const cutText = (s) => { const t = s.slice(0, AUDIT_TEXT_MAX); return /[\uD800-\uDBFF]$/.test(t) ? t.slice(0, -1) : t; };
+
+/**
+ * The W3-record fields of one GATE line (config.auditRecord only), built fresh from the decision `v`
+ * and the submitted `input`, neither of which is mutated. Untrusted diagnostic text, never authority:
+ * nothing reads it back. `reasons`: the decision's string reasons, at most 20, each cut to 500
+ * characters (present when there is one). review and unit-review also carry the submitted
+ * `review_execution` and the `primary`/`second_opinion` outcomes as `primary_outcome` and
+ * `second_opinion_outcome`, and unit-review its `unit`: each only when it is a string of at most 500
+ * characters, else omitted (an identifier is never cut, so a cut one cannot pass for another). Total
+ * over any JSON input.
+ */
+export function gateAuditFields(kind, input, v) {
+  const out = {};
+  const reasons = (Array.isArray(v?.reasons) ? v.reasons : []).filter(r => typeof r === 'string').slice(0, AUDIT_REASONS_MAX).map(cutText);
+  if (reasons.length) out.reasons = reasons;
+  if ((kind !== 'review' && kind !== 'unit-review') || !isRecordObj(input)) return out;
+  if (kind === 'unit-review' && boundedText(input.unit)) out.unit = input.unit;
+  if (boundedText(input.review_execution)) out.review_execution = input.review_execution;
+  const p = isRecordObj(input.primary) ? input.primary.outcome : undefined, so = isRecordObj(input.second_opinion) ? input.second_opinion.outcome : undefined;
+  if (boundedText(p)) out.primary_outcome = p;
+  if (boundedText(so)) out.second_opinion_outcome = so;
+  return out;
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -502,9 +569,11 @@ export async function gate(ctx) {
         : c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
       const S = E.S;
-      note(S, 'GATE', { gate: ctx.gate, ok: v.ok, code: v.code });
+      // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
+      const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});
+      note(S, 'GATE', { gate: ctx.gate, ok: v.ok, code: v.code, ...audit() });
       S.outbox.push({ run_id: S.run_id, event: 'GATE', event_id: `gate-${S.run_id}-${S.seq}`, gate: ctx.gate, ok: v.ok, code: v.code,
-        candidate_id: c.candidate_id ?? null, timestamp: new Date().toISOString() });
+        candidate_id: c.candidate_id ?? null, timestamp: new Date().toISOString(), ...audit() });
       await E.commit();
       await deliver(E);
       return { gate: ctx.gate, candidate_id: c.candidate_id ?? null, ...v };

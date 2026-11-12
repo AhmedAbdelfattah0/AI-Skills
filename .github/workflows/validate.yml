@@ -99,6 +99,7 @@ jobs:
           skills/ship-ticket/scripts/ship-ready-check.test.mjs
           skills/ship-ticket/scripts/base-drift.test.mjs
           skills/ship-ticket/scripts/review-wording.test.mjs
+          skills/ship-ticket/scripts/run-engine-record.test.mjs
           skills/ship-ticket/scripts/launcher-sampler.test.mjs
           skills/ship-ticket/scripts/wave1-metrics.test.mjs
           skills/ship-ticket/scripts/engine-explore.test.mjs
@@ -112,7 +113,7 @@ jobs:
   engine-properties:
     runs-on: ubuntu-latest
     # Above the engine mutation test's own 30-minute ceiling (each harness run is killed after 10 minutes)
-    # plus the security mutation step (about 84 s): about 32 minutes of 45.
+    # plus the security (about 84 s) and record (about 143 s) mutation steps: about 35 minutes of 45.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -132,3 +133,9 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-security-mutation.test.mjs
+      - name: Record guard mutation check
+        env:
+          ENGINE_RECORD_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-record-mutation.test.mjs

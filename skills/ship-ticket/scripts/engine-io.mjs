@@ -190,12 +190,16 @@ export function snapshot(root, exclude = []) {
 export const diffSnapshots = (a, b) => [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(p => a[p] !== b[p]).sort();
 
 
-/** Append `event` to the JSONL log unless a row with its event_id is already there. */
-export function appendLogOnce(file, event) {
+/**
+ * Append `event` to the JSONL log unless a row with its event_id is already there. `line` serializes
+ * the row (default JSON.stringify; run-engine.mjs passes run-state.mjs eventLine for switch-on GATE
+ * rows, whose untrusted text may hold U+0085/U+2028/U+2029, line breaks to splitLines).
+ */
+export function appendLogOnce(file, event, line = JSON.stringify) {
   mkdirSync(dirname(file), { recursive: true });
   const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
   if (text.split('\n').some(l => { try { return JSON.parse(l).event_id === event.event_id; } catch { return false; } })) return;
-  appendFileSync(file, (text && !text.endsWith('\n') ? '\n' : '') + JSON.stringify(event) + '\n', { mode: 0o600 });
+  appendFileSync(file, (text && !text.endsWith('\n') ? '\n' : '') + line(event) + '\n', { mode: 0o600 });
 }
 
 /**

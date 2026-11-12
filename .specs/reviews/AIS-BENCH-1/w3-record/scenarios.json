@@ -1,0 +1,745 @@
+[
+  {
+    "id": "S1",
+    "title": "one node",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "nodes": {
+        "a": "done"
+      },
+      "writer_runs": 1,
+      "commands": [
+        "init",
+        "drive"
+      ]
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 811,
+      "reference_bytes": 208719,
+      "wall_ms": 646,
+      "nodes_completed": 1,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S2",
+    "title": "contract, frontend and backend in one wave, then a join",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "nodes": {
+        "contract": "done",
+        "frontend": "done",
+        "backend": "done",
+        "join": "done"
+      },
+      "start_waves": [
+        [
+          "contract"
+        ],
+        [
+          "backend",
+          "frontend"
+        ],
+        [
+          "join"
+        ]
+      ],
+      "waves_in_order": true,
+      "frontend_and_backend_in_one_wave": true,
+      "peak_concurrency": 2
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 1077,
+      "reference_bytes": 208719,
+      "wall_ms": 951,
+      "nodes_completed": 4,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S3",
+    "title": "auth-sensitive change: ship-ready needs accepted RED and the risk evidence",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "drive_before_red": {
+        "outcome": "waiting",
+        "red_pending": [
+          "spec"
+        ],
+        "impl_runs": 0
+      },
+      "ship_ready_before_red_with_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "nodes_unfinished",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "authorization-spec",
+          "negative-spec"
+        ]
+      },
+      "red_gate": "red_accepted",
+      "drive_after_red": {
+        "outcome": "done",
+        "nodes": {
+          "spec": "done",
+          "impl": "done"
+        }
+      },
+      "ship_ready_after_red_with_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_local_proof"
+        ],
+        "missing": []
+      },
+      "ship_ready_after_red_no_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "authorization-spec",
+          "negative-spec"
+        ]
+      },
+      "executions": {
+        "red_spec": 1,
+        "proof_command": 0
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 7,
+      "bytes_read": 3226,
+      "reference_bytes": 221276,
+      "wall_ms": 1692,
+      "nodes_completed": 2,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 1,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S4",
+    "title": "six nodes in two waves and a join",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "done",
+      "width": 2,
+      "nodes": {
+        "n1": "done",
+        "n2": "done",
+        "n3": "done",
+        "n4": "done",
+        "n5": "done",
+        "n6": "done"
+      },
+      "peak_concurrency": 2,
+      "start_waves": [
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "waves_in_order": true
+    },
+    "metrics": {
+      "orchestrator_commands": 2,
+      "bytes_read": 1222,
+      "reference_bytes": 208719,
+      "wall_ms": 1149,
+      "nodes_completed": 6,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S5",
+    "title": "failure and recovery: provider error, timeout, engine crash, worker crash",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "provider_error": {
+        "node": {
+          "state": "failed",
+          "attempts": 2,
+          "retries": 1
+        },
+        "writer_runs": 2,
+        "judgments": [
+          "node_failed"
+        ],
+        "reason": "provider error (exit 1)"
+      },
+      "timeout": {
+        "node": {
+          "state": "failed",
+          "attempts": 1,
+          "retries": 0
+        },
+        "node_attempts_recorded": 1,
+        "judgments": [
+          "node_failed"
+        ],
+        "reason": "timeout (never retried automatically)"
+      },
+      "engine_crash": {
+        "killed_by": "SIGKILL",
+        "state_after_resume_while_live": "running",
+        "state_after_worker_ended": "done",
+        "final_outcome": "done",
+        "writer_runs": 1
+      },
+      "worker_crash_with_writes": {
+        "outcome": "judgment",
+        "judgments": [
+          "crash_with_writes",
+          "node_failed"
+        ],
+        "writer_runs_after_second_drive": 1,
+        "second_drive_judgments": [
+          "crash_with_writes",
+          "node_failed"
+        ]
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 12,
+      "bytes_read": 5226,
+      "reference_bytes": 208719,
+      "wall_ms": 6148,
+      "nodes_completed": 1,
+      "judgments": 4,
+      "owner_interventions": 4,
+      "proof_runs": 0,
+      "retries": 1
+    }
+  },
+  {
+    "id": "S6",
+    "title": "scope expansion: one undeclared file is an ownership violation and the whole run stops",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "outcome": "judgment",
+      "judgments": [
+        "ownership_violation",
+        "node_failed"
+      ],
+      "violation_node": "a",
+      "violation_reason": "wrote outside its write set: src/extra.txt",
+      "nodes": {
+        "a": "failed",
+        "b": "pending",
+        "c": "pending"
+      },
+      "nodes_after_second_drive": {
+        "a": "failed",
+        "b": "pending",
+        "c": "pending"
+      },
+      "dependent_runs": 0,
+      "independent_runs": 0,
+      "writer_runs_after_second_drive": 1,
+      "second_drive_judgments": [
+        "ownership_violation",
+        "node_failed"
+      ],
+      "control_without_the_extra_file": {
+        "outcome": "done",
+        "judgments": [],
+        "nodes": {
+          "a": "done",
+          "b": "done",
+          "c": "done"
+        }
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 5,
+      "bytes_read": 3077,
+      "reference_bytes": 208719,
+      "wall_ms": 1582,
+      "nodes_completed": 3,
+      "judgments": 2,
+      "owner_interventions": 2,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S7",
+    "title": "UI change: ship-ready refuses without parity evidence",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "drive_outcome": "done",
+      "ship_ready": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_risk_evidence",
+          "missing_local_proof"
+        ],
+        "missing": [
+          "parity-measurements"
+        ]
+      },
+      "ship_ready_with_parity_evidence": {
+        "exit": 2,
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_local_proof"
+        ],
+        "missing": []
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 4,
+      "bytes_read": 1430,
+      "reference_bytes": 216313,
+      "wall_ms": 968,
+      "nodes_completed": 1,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S8",
+    "title": "evidence integrity (baseline plus the auditRecord rows): second-opinion fixes and failures, reused finding ids, a moving candidate",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "primary_pass_with_second_opinion_fix": {
+        "refusal": {
+          "exit": 2,
+          "ok": false,
+          "code": "outcome_inconsistent",
+          "reasons": [
+            "PASS with findings to fix"
+          ]
+        },
+        "chain_after": []
+      },
+      "primary_pass_with_second_opinion_fail_not_applicable": {
+        "result": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "recorded_outcome": "PASS",
+        "recorded_second_opinion_route": "codex",
+        "recorded_has_second_opinion_outcome": false,
+        "chain_after": [
+          {
+            "review_execution": "rx-1",
+            "kind": "original",
+            "outcome": "PASS",
+            "source_keys": [
+              "candidate_id",
+              "findings",
+              "fix_findings",
+              "graded_artifacts",
+              "kind",
+              "outcome",
+              "overflow",
+              "review_execution",
+              "reviewer_identity",
+              "second_opinion_route",
+              "write_set"
+            ],
+            "findings": [
+              {
+                "id": "S1",
+                "source": "codex",
+                "severity": "major",
+                "disposition": "not applicable"
+              }
+            ],
+            "second_opinion_route": "codex",
+            "second_opinion_outcome": null
+          }
+        ]
+      },
+      "finding_ids_reused_across_executions": {
+        "first": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "second_without_retry": {
+          "exit": 2,
+          "ok": false,
+          "code": "retry_unauthorized",
+          "reasons": [
+            "review rx-1 already ran; a new original review needs a RUN-STATE RETRY { review_execution: rx-2, predecessor: rx-1, authorized_by } (a fresh id alone is refused)"
+          ]
+        },
+        "second_with_owner_retry": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "chain_after": [
+          {
+            "review_execution": "rx-1",
+            "kind": "original",
+            "outcome": "PASS",
+            "source_keys": [
+              "candidate_id",
+              "findings",
+              "fix_findings",
+              "graded_artifacts",
+              "kind",
+              "outcome",
+              "overflow",
+              "review_execution",
+              "reviewer_identity",
+              "second_opinion_route",
+              "write_set"
+            ],
+            "findings": [
+              {
+                "id": "F1",
+                "source": "primary",
+                "severity": "minor",
+                "disposition": "not applicable"
+              }
+            ],
+            "second_opinion_route": "codex",
+            "second_opinion_outcome": null
+          },
+          {
+            "review_execution": "rx-2",
+            "kind": "retry",
+            "outcome": null,
+            "source_keys": [
+              "authorized_by",
+              "kind",
+              "predecessor",
+              "review_execution"
+            ],
+            "findings": [],
+            "second_opinion_route": null,
+            "second_opinion_outcome": null
+          },
+          {
+            "review_execution": "rx-2",
+            "kind": "original",
+            "outcome": "PASS",
+            "source_keys": [
+              "candidate_id",
+              "findings",
+              "fix_findings",
+              "graded_artifacts",
+              "kind",
+              "outcome",
+              "overflow",
+              "review_execution",
+              "reviewer_identity",
+              "second_opinion_route",
+              "write_set"
+            ],
+            "findings": [
+              {
+                "id": "F1",
+                "source": "primary",
+                "severity": "minor",
+                "disposition": "not applicable"
+              }
+            ],
+            "second_opinion_route": "codex",
+            "second_opinion_outcome": null
+          }
+        ],
+        "finding_ids_in_chain": [
+          "rx-1:F1",
+          "rx-2:F1"
+        ]
+      },
+      "candidate_moves_before_confirmation": {
+        "original_fail": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "tree_moved_after_repair": true,
+        "frozen_after_repair": true,
+        "confirm_on_pre_repair_candidate": {
+          "exit": 2,
+          "ok": false,
+          "code": "stale_candidate",
+          "reasons": [
+            "the work tree is <digest>, frozen is <digest>: unexpected drift after the freeze"
+          ]
+        },
+        "confirm_on_moved_tree": {
+          "exit": 2,
+          "ok": false,
+          "code": "stale_candidate",
+          "reasons": [
+            "the work tree is <digest>, frozen is <digest>: unexpected drift after the freeze"
+          ]
+        },
+        "confirm_on_repaired_candidate_after_restoring_the_tree": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "chain_after": [
+          {
+            "review_execution": "rx-1",
+            "kind": "original",
+            "outcome": "FAIL"
+          },
+          {
+            "review_execution": "rx-1",
+            "kind": "repair",
+            "outcome": null
+          },
+          {
+            "review_execution": "rx-1",
+            "kind": "confirmation",
+            "outcome": "PASS"
+          }
+        ]
+      },
+      "audit_record_enabled": {
+        "config_audit_record": true,
+        "refusal": {
+          "exit": 2,
+          "ok": false,
+          "code": "outcome_inconsistent",
+          "reasons": [
+            "PASS with findings to fix"
+          ]
+        },
+        "accepted": {
+          "exit": 0,
+          "ok": true,
+          "code": "review_accepted",
+          "reasons": []
+        },
+        "recorded_outcome": "PASS",
+        "recorded_primary_outcome": "PASS",
+        "recorded_second_opinion_outcome": "FAIL",
+        "recorded_second_opinion_identity_present": true,
+        "recorded_reconciliation": "S1 is not applicable to this change",
+        "refused_gate_event": {
+          "review_execution": "rx-0",
+          "reasons": [
+            "PASS with findings to fix"
+          ]
+        },
+        "accepted_gate_event": {
+          "review_execution": "rx-1",
+          "primary_outcome": "PASS",
+          "second_opinion_outcome": "FAIL"
+        },
+        "events_with_at": 3,
+        "events_total": 3,
+        "reader_can_reconstruct": true
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 22,
+      "bytes_read": 10872,
+      "reference_bytes": 208719,
+      "wall_ms": 5860,
+      "nodes_completed": 5,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S9",
+    "title": "cross-run recovery (baseline): base moves mid-run, RED provenance after archive",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "base_moves_mid_run": {
+        "drive_before_move": {
+          "outcome": "waiting",
+          "nodes": {
+            "a": "done",
+            "b": "pending"
+          }
+        },
+        "base_drift_report": {
+          "exit": 1,
+          "stdout": [
+            "base-drift: OVERLAP",
+            "  src/b.txt (declared src/b.txt, node b writes)"
+          ]
+        },
+        "drive_after_move": {
+          "exit": 0,
+          "outcome": "done",
+          "nodes": {
+            "a": "done",
+            "b": "done"
+          },
+          "judgments": [],
+          "writer_runs": {
+            "a": 1,
+            "b": 1
+          }
+        }
+      },
+      "red_provenance_in_a_later_run": {
+        "after_base_move": {
+          "drive_exit": 0,
+          "drive_outcome": "done",
+          "judgments": [],
+          "red_invalidated": false,
+          "base_moved": null,
+          "red_still_accepted": true,
+          "ship_ready_reasons": [
+            "review_not_accepted",
+            "missing_local_proof"
+          ],
+          "ship_ready_code": "review_not_accepted"
+        },
+        "red_attempt_output_live": true,
+        "red_gate": "red_accepted",
+        "red_evidence_keys": [
+          "attempt_id",
+          "base_commit",
+          "baseline_candidate",
+          "command",
+          "format",
+          "node",
+          "seq",
+          "spec_digests",
+          "specs"
+        ],
+        "attempt_files_before_archive": true,
+        "archive_exit": 0,
+        "archived_files": [
+          "engine.jsonl",
+          "manifest.json",
+          "state.json"
+        ],
+        "archive_contains_attempts": false,
+        "attempt_files_after_archive": true,
+        "second_run_init": {
+          "exit": 1,
+          "code": null,
+          "refused": "state_exists"
+        }
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 10,
+      "bytes_read": 3702,
+      "reference_bytes": 208719,
+      "wall_ms": 2325,
+      "nodes_completed": 3,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 1,
+      "retries": 0
+    }
+  },
+  {
+    "id": "S10",
+    "title": "cross-run recovery (baseline): config.base unset (HEAD) and the branch tip moves over a node-owned file mid-run",
+    "limits": "fake provider: mechanism and orchestration overhead only",
+    "ok": true,
+    "shows": {
+      "config_base_in_state": false,
+      "head_moved": true,
+      "candidate_id_changed": false,
+      "drive_before_move": {
+        "outcome": "waiting",
+        "nodes": {
+          "a": "done",
+          "b": "pending"
+        }
+      },
+      "drive_after_move": {
+        "exit": 0,
+        "outcome": "done",
+        "nodes": {
+          "a": "done",
+          "b": "done"
+        },
+        "judgments": [],
+        "writer_runs": {
+          "a": 1,
+          "b": 1
+        }
+      },
+      "evidence": {
+        "frozen_candidate_recorded": false,
+        "final_candidate_differs_from_pre_move": true,
+        "upstream_bytes_overwritten_by_node_b": true,
+        "node_a_state_after": "done",
+        "red_invalid_recorded": false
+      },
+      "ship_ready": {
+        "code": "review_not_accepted",
+        "reasons": [
+          "review_not_accepted",
+          "missing_local_proof"
+        ]
+      }
+    },
+    "metrics": {
+      "orchestrator_commands": 4,
+      "bytes_read": 1694,
+      "reference_bytes": 208719,
+      "wall_ms": 1276,
+      "nodes_completed": 2,
+      "judgments": 0,
+      "owner_interventions": 0,
+      "proof_runs": 0,
+      "retries": 0
+    }
+  }
+]

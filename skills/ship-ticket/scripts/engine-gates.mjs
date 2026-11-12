@@ -14,7 +14,7 @@ import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
 import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey } from './engine-dag.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
@@ -190,8 +190,10 @@ async function reviewGate(E, input, candidate) {
   }
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
   const { units_consumed: consumedUnits, ...review } = input;
+  // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
+  const recording = auditOn(S) ? { recordVerdicts: true } : {};
   const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } },
-    input.kind === 'confirmation' ? { confirmationSecondOpinion: confirmationPolicy(S, input.review_execution) } : {});
+    input.kind === 'confirmation' ? { confirmationSecondOpinion: confirmationPolicy(S, input.review_execution), ...recording } : { ...recording });
   if (!v.ok) return { judgment_point: false, ...v };
   if (unitReviewOn(S)) {
     const stale = finalReviewRefusal(S, input);

@@ -42,7 +42,14 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord'];
+
+/**
+ * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
+ * when set): `true` makes the engine record more (review verdicts and reconciliation text); it never
+ * changes a gate decision. Absent or false, every record, event and log line is as before.
+ */
+export const auditOn = (S) => S?.config?.auditRecord === true;
 
 // ---- security policy 2 (AIS-HARNESS-4 Wave B) -------------------------------------------------
 
@@ -208,6 +215,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
   } catch (e) { bad(e.message); }
   validateUnits(nodes, c, bad);
   validateSecurity(nodes, c, bad);
+  if (c.auditRecord !== undefined && typeof c.auditRecord !== 'boolean') bad('config.auditRecord must be a boolean');
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }
