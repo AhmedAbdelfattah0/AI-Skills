@@ -8,7 +8,7 @@
  */
 import { readFileSync, writeFileSync, cpSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
+import { fixture, warmFakeClaude, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
 import { Oracle, cliAsync } from './engine-oracle.test-helper.mjs';
 
 const J = JSON.stringify;
@@ -86,6 +86,7 @@ export class Driver {
   restore(s) {
     rmSync(this.fx.root, { recursive: true, force: true });
     cpSync(join(this.snapDir, s.id), this.fx.root, { recursive: true });
+    warmFakeClaude(join(this.fx.root, 'bin'), this.fx.env); // the rebuilt executable is a new file: pay its first-exec stall here
     this.mem = structuredClone(s.mem);
     this.oracle.mem = structuredClone(s.oracle);
     this.lastStatus = s.status;
