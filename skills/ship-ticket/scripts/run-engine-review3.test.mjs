@@ -316,8 +316,13 @@ test('G an automatic infra retry of a review repair re-dispatches within its rou
   assert.equal(second.out.rounds.review_repairs['rx-1'], 1, 'the retry spent no second round');
 });
 
+// Issue #49: under four concurrent harness copies the fixture's default per-attempt timeoutMs
+// (10 s) killed both workers before either had even logged its run (a and c 'timed_out', no
+// EISDIR, drive resolved). The bound below is a failure bound, not a wait: a is released by c's
+// committed settle, never by a timer. A timed-out attempt fails the test by name instead of
+// surfacing as a bare "Missing expected rejection".
 test('G a throw inside the dispatch loop still waits for every running sibling before the lock is released', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { config: { budget: { ticket_tokens: 1e9 }, width: 2 },
+  const fx = fixture(t, { config: { budget: { ticket_tokens: 1e9 }, width: 2, timeoutMs: WORKER_FAILURE_BOUND_MS },
     nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'c', writes: ['src/c.txt'] }, { id: 'b', writes: ['src/b.txt'] }] });
   const flag = join(fx.root, 'release-a');
   const usageDir = relative(fx.repo, fx.usageFile()) + '/x';
@@ -329,7 +334,11 @@ test('G a throw inside the dispatch loop still waits for every running sibling b
     if (name !== 'dir-fsync' || existsSync(flag)) return;
     if (JSON.parse(readFileSync(fx.stateFile(), 'utf8')).attempts.some(x => x.node === 'c' && x.status === 'exited')) writeFileSync(flag, '');
   } };
-  await assert.rejects(async () => drive(fx.ctx({ hooks })), { code: 'EISDIR' });
+  let thrown = null, result = null;
+  try { result = await drive(fx.ctx({ hooks })); } catch (e) { thrown = e; }
+  const timedOut = fx.readState().attempts.filter(x => x.status === 'timed_out').map(x => `${x.node} (${x.attempt_id})`);
+  assert.deepEqual(timedOut, [], `attempt(s) exceeded the ${WORKER_FAILURE_BOUND_MS} ms failure bound (slow machine, or a release that never happened)`);
+  assert.equal(thrown?.code, 'EISDIR', thrown ? String(thrown.stack ?? thrown) : `drive resolved without the expected EISDIR: ${JSON.stringify(result?.judgments ?? result)}`);
   assert.equal(existsSync(fx.lockFile()), false, 'the lock is released on the way out');
   assert.equal(fx.readState().nodes.a.state, 'done', 'the running sibling settled and committed before the rethrow');
   assert.equal(fx.runs('b').length, 0);

@@ -4,8 +4,8 @@
  *
  * 1. Deterministic exceptions: the unit-repair drive (repair dispatch, post-repair re-check,
  *    binding) and the unit-review FAIL gate are run in-process with a `boundary` hook (the
- *    engine's existing persistence and launch boundaries; none is added) that throws at hit k, for
- *    every k of the uncrashed reference run. The pipes of the launchers it spawned are then closed,
+ *    engine's existing persistence and launch boundaries; none is added) that throws at one hit of
+ *    the uncrashed reference run, keyed by boundary name and ordinal, for every hit. The pipes of the launchers it spawned are then closed,
  *    as a process exit would close them. Recovery is what an orchestrator does: `resume`, re-issue
  *    the interrupted command, continue. The oracle checks every step; the final accounting and
  *    authorization must equal the reference, or end in a disclosed known limit (D5, D6).
@@ -50,10 +50,31 @@ async function groupsGone(d) {
   assert.ok(await waitUntil(gone, 20000), 'every process group left by the crash ended');
 }
 
-/** A boundary hook that records every hit, and throws at hit `at` (1-based) when given. */
-function hook(hits, at = 0) {
-  return { boundary: async (name, info) => { hits.push(name + (info?.unit ? `:${info.unit}` : '')); if (hits.length === at) throw new Error(`crash at ${hits.length} ${name}`); } };
+/**
+ * A boundary hook that records every hit and throws at the crash point `at` when given. A crash
+ * point is keyed by its boundary name and that name's ordinal (`rename[11]`), not by a global hit
+ * count, so a hit of another name can never move it; `fired` is the 1-based hit at which it threw (#49).
+ */
+function hook(hits, at = null) {
+  const count = {}, h = { fired: 0, boundary: async (name, info) => {
+    const n = name + (info?.unit ? `:${info.unit}` : '');
+    count[n] = (count[n] ?? 0) + 1;
+    hits.push(n);
+    if (`${n}[${count[n]}]` === at) { h.fired = hits.length; throw new Error(`crash at ${at} (hit ${hits.length})`); }
+  } };
+  return h;
 }
+/** The crash-point key of every hit of a run, in order: name[ordinal]. */
+const keysOf = (hits) => { const c = {}; return hits.map(n => `${n}[${(c[n] = (c[n] ?? 0) + 1)}]`); };
+
+/**
+ * Attempt and runner budget of the lanes. The fixture default (10 s) was exceeded under 4x suite load:
+ * the repair worker had not even run when it was killed as timed out, so the drive legitimately took
+ * the 28-hit timeout path and crash points after it were never reached (#49, wave-2d README). A
+ * timeout is a different path, not a recovery result, so every run asserts that none occurred.
+ */
+const BUDGET_MS = 120000;
+const timedOut = (d) => (d.raw()?.attempts ?? []).filter(a => a.status === 'timed_out').map(a => `${a.kind} ${a.node}`);
 
 /** Recovery as an orchestrator does it, then the rest of the unit cycle; returns how the run ended. */
 async function recoverAndFinish(d, reissue) {
@@ -81,7 +102,7 @@ function classify(d, got, ref) {
 
 /** One lane: its own fixture, prefix snapshot and reference; then its share of the crash points. */
 async function lane(t, lanes, index, family) {
-  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4 }, { strictRuns: false });
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, timeoutMs: BUDGET_MS }, { strictRuns: false });
   await d.apply({ kind: 'drive' });
   if (family === 'drive') await d.apply({ kind: 'ufail', unit: 'uA' });
   const prefix = d.snapshot();
@@ -91,40 +112,62 @@ async function lane(t, lanes, index, family) {
     : gate(d.fx.ctx({ gate: g.kind, input: g.input, hooks: h })));
   const r0 = await d.inProcess({ kind: `${family}-reference`, cmd: family === 'drive' ? 'drive' : 'gate unit-review', unit: 'uA', rx: g?.action.rx }, () => run(hook(hits), []));
   assert.equal(r0.error, null);
+  assert.deepEqual(timedOut(d), [], `the reference ran within the ${BUDGET_MS} ms budget`);
   if (family === 'gate') await d.apply({ kind: 'drive' });
   if (d.lastStatus.units.uA.review.awaiting === 'confirmation') await d.apply({ kind: 'uconf', unit: 'uA' });
   const ref = summary(d);
   assert.equal(ref.reviews.uA, 'verified/pass', `the reference completes the cycle: ${J(ref)}`);
   assert.deepEqual(d.violations, [], shown(d.violations));
-  const out = [];
-  for (let k = 1 + index; k <= hits.length; k += lanes) {
-    d.restore(prefix);
-    if (g) await d.prepare({ kind: 'ufail', unit: 'uA' }); // the same input (same rx), as before the crash
-    const spawned = [], seen = [];
-    const r = await d.inProcess({ kind: `${family}-crash@${k}:${hits[k - 1]}`, cmd: family === 'drive' ? 'drive' : 'gate unit-review', crashed: true, unit: 'uA', rx: g?.action.rx },
-      () => run(hook(seen, k), spawned));
+  const keys = keysOf(hits), out = [];
+  for (let k = 1 + index; k <= keys.length; k += lanes) {
+    const key = keys[k - 1];
+    // One crashed run from the prefix snapshot: the hook state, the hits seen and the result.
+    const attempt = async () => {
+      d.restore(prefix);
+      if (g) await d.prepare({ kind: 'ufail', unit: 'uA' }); // the same input (same rx), as before the crash
+      const spawned = [], seen = [], h = hook(seen, key);
+      const r = await d.inProcess({ kind: `${family}-crash@${k}:${key}`, cmd: family === 'drive' ? 'drive' : 'gate unit-review', crashed: true, unit: 'uA', rx: g?.action.rx },
+        () => run(h, spawned));
+      for (const c of spawned) c.stdin?.destroy(); // a process exit closes the launchers' release pipes
+      await groupsGone(d);
+      return { r, seen, fired: h.fired, late: timedOut(d) };
+    };
+    const trace = (x) => `${x.seen.join(' ')} | attempts: ${(d.raw()?.attempts ?? []).map(a => `${a.kind}/${a.node}/${a.status}`).join(' ')}`;
+    let x = await attempt(), retried = null;
+    // Not reached: the run ended before this point. Retried once on the same snapshot; a second miss fails.
+    if (!x.fired) {
+      retried = `${k}:${key} (${x.seen.length} hits${x.late.length ? `, timed out: ${x.late.join(', ')}` : ''})`;
+      // A timeout in the discarded first run must still fail: it left the reference path.
+      assert.deepEqual(x.late, [], `crash point ${k} (${key}): an attempt timed out (budget ${BUDGET_MS} ms) in the first run, so it left the reference path: ${trace(x)}`);
+      x = await attempt();
+      assert.ok(x.fired, `crash point ${k} (${key}) was not reached on two runs: ${trace(x)}`);
+    }
+    assert.deepEqual(x.late, [], `crash point ${k} (${key}): an attempt timed out (budget ${BUDGET_MS} ms), so the run left the reference path: ${trace(x)}`);
+    assert.deepEqual(x.seen.slice(0, x.fired), hits.slice(0, k), `crash point ${k} (${key}) fired on a path that differs from the reference: ${trace(x)}`);
     // An exception inside unit-check runCheck's launch try block (its 'running' commit, the
     // unit-check-running hook) is absorbed as a runner start failure: the unreleased runner is
     // killed and the check retried once (UNIT_CHECK_RETRY, no recheck spent). Not a crash.
-    const absorbed = !r.error;
-    if (absorbed) assert.ok(d.raw().events.some(e => e.type === 'UNIT_CHECK_RETRY'), `hit ${k} (${hits[k - 1]}) neither crashed nor was absorbed: ${seen.join(' ')}`);
-    else assert.match(r.error.message, /crash at/);
-    for (const c of spawned) c.stdin?.destroy(); // a process exit closes the launchers' release pipes
-    await groupsGone(d);
+    const absorbed = !x.r.error;
+    if (absorbed) assert.ok(d.raw().events.some(e => e.type === 'UNIT_CHECK_RETRY'), `crash point ${k} (${key}) fired but neither crashed nor was absorbed: ${trace(x)}`);
+    else assert.match(x.r.error.message, /crash at/);
     const got = await recoverAndFinish(d, g);
-    out.push({ k, at: hits[k - 1], outcome: classify(d, got, ref), absorbed });
+    assert.deepEqual(timedOut(d), [], `crash point ${k} (${key}): recovery ran within the ${BUDGET_MS} ms budget`);
+    out.push({ k, at: key, outcome: classify(d, got, ref), absorbed, retried });
   }
-  return { hits, out, violations: d.violations };
+  return { keys, out, violations: d.violations };
 }
 
 for (const family of ['drive', 'gate']) {
   test(`exceptions: a crash at every boundary of the unit ${family === 'drive' ? 'repair drive (repair, re-check, binding)' : 'review FAIL gate'} recovers to the reference accounting or a disclosed limit`, { skip: WIN_SKIP, concurrency: LANES }, async (t) => {
     const results = await Promise.all(Array.from({ length: LANES }, (_, i) => lane(t, LANES, i, family)));
     const cases = results.flatMap(r => r.out).sort((x, y) => x.k - y.k);
-    t.diagnostic(J({ family, boundaries: results[0].hits.length, cases: cases.length,
+    const keys = results[0].keys;
+    t.diagnostic(J({ family, boundaries: keys.length, cases: cases.length,
       outcomes: cases.reduce((m, c) => ({ ...m, [c.outcome.startsWith('DIFF') ? 'different' : c.outcome]: (m[c.outcome.startsWith('DIFF') ? 'different' : c.outcome] ?? 0) + 1 }), {}),
-      d6: cases.filter(c => c.outcome === 'D6').map(c => `${c.k}:${c.at}`), absorbed: cases.filter(c => c.absorbed).map(c => `${c.k}:${c.at}`) }));
-    assert.equal(cases.length, results[0].hits.length, 'every boundary hit of the reference was crashed once');
+      d6: cases.filter(c => c.outcome === 'D6').map(c => `${c.k}:${c.at}`), absorbed: cases.filter(c => c.absorbed).map(c => `${c.k}:${c.at}`),
+      retried: cases.filter(c => c.retried).map(c => c.retried) }));
+    for (const r of results) assert.deepEqual(r.keys, keys, 'every lane recorded the same reference boundaries');
+    assert.deepEqual(cases.map(c => c.at), keys, 'every boundary hit of the reference was crashed once');
     for (const r of results) assert.deepEqual(r.violations, [], shown(r.violations));
     const different = cases.filter(c => !['equivalent', 'D6'].includes(c.outcome));
     assert.deepEqual(different, []);
