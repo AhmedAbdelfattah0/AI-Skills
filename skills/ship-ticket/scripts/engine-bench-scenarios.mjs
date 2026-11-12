@@ -281,8 +281,8 @@ const refusalOf = (r) => ({ exit: r.status, ok: r.out?.ok ?? null, code: r.out?.
 const chainOf = (w) => (w.fx.readState().review_chain ?? []).map(r => ({ review_execution: r.review_execution, kind: r.kind, outcome: r.outcome ?? null,
   source_keys: Object.keys(r).sort(), findings: (r.findings ?? []).map(f => ({ id: f.id, source: f.source, severity: f.severity, disposition: f.disposition })),
   second_opinion_route: r.second_opinion_route ?? null, second_opinion_outcome: r.second_opinion_outcome ?? null }));
-const builtWorld = (meter) => {
-  const w = world(meter, { nodes: [node('a')] });
+const builtWorld = (meter, config = {}) => {
+  const w = world(meter, { config, nodes: [node('a')] });
   w.fx.behave({ ...plain('a'), fix: writeOf('a') });
   w.init(); w.cli('drive');
   return w;
@@ -334,15 +334,43 @@ async function s8(meter) {
     confirm_on_pre_repair_candidate: refusalOf(staleOnReview), confirm_on_moved_tree: refusalOf(onMoved), confirm_on_repaired_candidate_after_restoring_the_tree: refusalOf(onRepaired),
     chain_after: chainOf(w4).map(r => ({ review_execution: r.review_execution, kind: r.kind, outcome: r.outcome })) };
 
+  // (5) W3-record: the case-2 input again, in a run whose DAG sets config.auditRecord: what the record and the GATE events now hold.
+  // reader_can_reconstruct is derived from the fields found in the persisted state, never asserted.
+  const w5 = builtWorld(meter, { auditRecord: true }), c5 = w5.fx.candidate();
+  const bad5 = w5.gate('review', passReview('rx-0', c5, {
+    second_opinion: secondOpinion(c5, { findings: [{ id: 'S1', severity: 'minor', path: 'src/a.txt' }] }),
+    reconciliation: { dispositions: [dispose('S1', 'codex', 'fix')] } }));
+  const r5 = w5.gate('review', passReview('rx-1', c5, {
+    second_opinion: secondOpinion(c5, { outcome: 'FAIL', findings: [{ id: 'S1', severity: 'major', path: 'src/a.txt' }] }),
+    reconciliation: { summary: 'S1 is not applicable to this change', dispositions: [dispose('S1', 'codex', 'not applicable')] } }));
+  const st5 = w5.fx.readState();
+  const rec5 = (st5.review_chain ?? [])[0] ?? {};
+  const gates5 = (st5.events ?? []).filter(e => e.type === 'GATE' && e.gate === 'review');
+  const accepted = gates5.find(e => e.code === 'review_accepted'), refused = gates5.find(e => e.code === 'outcome_inconsistent');
+  const reconstruct = rec5.primary_outcome === 'PASS' && rec5.second_opinion_outcome === 'FAIL' && Boolean(rec5.second_opinion_identity)
+    && typeof rec5.reconciliation === 'string' && rec5.reconciliation.length > 0
+    && accepted?.review_execution === 'rx-1' && accepted?.second_opinion_outcome === 'FAIL';
+  const auditRecorded = { config_audit_record: st5.config?.auditRecord ?? null, refusal: refusalOf(bad5), accepted: refusalOf(r5),
+    recorded_outcome: rec5.outcome ?? null, recorded_primary_outcome: rec5.primary_outcome ?? null,
+    recorded_second_opinion_outcome: rec5.second_opinion_outcome ?? null, recorded_second_opinion_identity_present: Boolean(rec5.second_opinion_identity),
+    recorded_reconciliation: rec5.reconciliation ?? null,
+    refused_gate_event: refused ? { review_execution: refused.review_execution ?? null, reasons: (refused.reasons ?? []).map(stable) } : null,
+    accepted_gate_event: accepted ? { review_execution: accepted.review_execution ?? null, primary_outcome: accepted.primary_outcome ?? null,
+      second_opinion_outcome: accepted.second_opinion_outcome ?? null } : null,
+    events_with_at: (st5.events ?? []).filter(e => typeof e.at === 'string').length, events_total: (st5.events ?? []).length,
+    reader_can_reconstruct: reconstruct };
+
   const shows = { primary_pass_with_second_opinion_fix: fixPass, primary_pass_with_second_opinion_fail_not_applicable: soFail,
-    finding_ids_reused_across_executions: reused, candidate_moves_before_confirmation: movingCandidate };
+    finding_ids_reused_across_executions: reused, candidate_moves_before_confirmation: movingCandidate, audit_record_enabled: auditRecorded };
   return { shows, ok: fixPass.refusal.code === 'outcome_inconsistent' && fixPass.chain_after.length === 0
     && soFail.result.code === 'review_accepted' && soFail.recorded_outcome === 'PASS' && soFail.recorded_has_second_opinion_outcome === false
     && soFail.chain_after[0]?.findings[0]?.disposition === 'not applicable'
     && reused.first.code === 'review_accepted' && reused.second_without_retry.code === 'retry_unauthorized' && reused.second_with_owner_retry.code === 'review_accepted'
     && reused.finding_ids_in_chain.join() === 'rx-1:F1,rx-2:F1'
     && movingCandidate.confirm_on_pre_repair_candidate.code === 'stale_candidate' && movingCandidate.confirm_on_moved_tree.code === 'stale_candidate'
-    && movingCandidate.confirm_on_repaired_candidate_after_restoring_the_tree.code === 'review_accepted' };
+    && movingCandidate.confirm_on_repaired_candidate_after_restoring_the_tree.code === 'review_accepted'
+    && auditRecorded.config_audit_record === true && auditRecorded.refusal.code === 'outcome_inconsistent' && auditRecorded.accepted.code === 'review_accepted'
+    && auditRecorded.reader_can_reconstruct === true && auditRecorded.events_with_at === auditRecorded.events_total };
 }
 
 async function s9(meter) {
@@ -441,7 +469,7 @@ export const SCENARIOS = [
   { id: 'S5', title: 'failure and recovery: provider error, timeout, engine crash, worker crash', run: s5, flags: {} },
   { id: 'S6', title: 'scope expansion: one undeclared file is an ownership violation and the whole run stops', run: s6, flags: {} },
   { id: 'S7', title: 'UI change: ship-ready refuses without parity evidence', run: s7, flags: { ui: true } },
-  { id: 'S8', title: 'evidence integrity (baseline): second-opinion fixes and failures, reused finding ids, a moving candidate', run: s8, flags: {} },
+  { id: 'S8', title: 'evidence integrity (baseline plus the auditRecord rows): second-opinion fixes and failures, reused finding ids, a moving candidate', run: s8, flags: {} },
   { id: 'S9', title: 'cross-run recovery (baseline): base moves mid-run, RED provenance after archive', run: s9, flags: {} },
   { id: 'S10', title: 'cross-run recovery (baseline): config.base unset (HEAD) and the branch tip moves over a node-owned file mid-run', run: s10, flags: {} },
 ];

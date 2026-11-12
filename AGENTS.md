@@ -609,7 +609,9 @@ matching pattern when extending them:
   needs project-local setup, so symlink and copy installs behave the same. Orchestrator
   checks outside the engine: `scripts/ship-ready-check.mjs` (a hand-written `SHIP_READY`
   must match an engine `GATE ship-ready` line), `scripts/base-drift.mjs` (base against
-  target tip, overlap with declared paths).
+  target tip, overlap with declared paths). The engine's opt-in audit trail (`config.auditRecord`, W3-record) only adds fields to review
+  records, gate lines and events; `run-engine-record.test.mjs` pins that no decision, authority or
+  digest changes, and `engine-record-mutation.test.mjs` plants each guard's mutant.
 - **`project-audit`** — *executes its bundled dependency-free Node continuity
   checker in place*. It reads current/prior manifests without writing to the
   audited repositories; structural accounting does not replace evidence review.

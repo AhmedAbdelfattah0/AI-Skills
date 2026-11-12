@@ -180,6 +180,21 @@ test('S8 baseline: what the review gate records and refuses for evidence-integri
   assert.deepEqual([moving.confirm_on_pre_repair_candidate.code, moving.confirm_on_moved_tree.code], ['stale_candidate', 'stale_candidate']);
   assert.equal(moving.confirm_on_repaired_candidate_after_restoring_the_tree.code, 'review_accepted');
   assert.deepEqual(moving.chain_after.map(x => x.kind), ['original', 'repair', 'confirmation']);
+  // (5) with config.auditRecord the same input leaves the verdicts, the reconciliation and the GATE fields in the persisted state.
+  const audit = s.audit_record_enabled;
+  assert.equal(audit.config_audit_record, true, 'the persisted config carries the switch');
+  assert.equal(audit.refusal.code, 'outcome_inconsistent', 'the refusal is unchanged');
+  assert.equal(audit.accepted.code, 'review_accepted');
+  assert.equal(audit.recorded_outcome, 'PASS');
+  assert.equal(audit.recorded_primary_outcome, 'PASS');
+  assert.equal(audit.recorded_second_opinion_outcome, 'FAIL');
+  assert.equal(audit.recorded_second_opinion_identity_present, true);
+  assert.equal(typeof audit.recorded_reconciliation, 'string');
+  assert.equal(audit.refused_gate_event.review_execution, 'rx-0');
+  assert.deepEqual(audit.refused_gate_event.reasons, ['PASS with findings to fix']);
+  assert.deepEqual(audit.accepted_gate_event, { review_execution: 'rx-1', primary_outcome: 'PASS', second_opinion_outcome: 'FAIL' });
+  assert.ok(audit.events_total > 0 && audit.events_with_at === audit.events_total, 'every event is stamped');
+  assert.equal(audit.reader_can_reconstruct, true);
   assert.equal(r.metrics.reference_bytes, referenceBytes({}));
 });
 

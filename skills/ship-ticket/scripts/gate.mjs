@@ -396,13 +396,19 @@ const builderOf = (state, identity) => (state.builders ?? []).find((b) => sameId
  * `policy` is set by the engine, never by an input: `secondOpinion` 'required' (default) or 'optional'
  * (validated when present: a unit review of a unit that is not risky), and `confirmationSecondOpinion`
  * 'none' (default: not read), 'optional' or 'required' (a risky unit's targeted confirmation).
+ * `recordVerdicts` (engine-set from config.auditRecord, W3-record) only adds keys to an accepted
+ * record, after the existing ones: an original gets primary_outcome, second_opinion_outcome,
+ * second_opinion_identity and reconciliation (reconciliation.summary normalized by boundedSummary,
+ * never refused); a confirmation gets primary_outcome. It never changes a decision.
  */
 export function gateReview(input, policy = {}) {
   const state = input?.state ?? {};
   const rx = input?.review_execution;
   const chain = state.review_chain ?? [];
   if (!nonEmpty(rx)) return no('incomplete_contract', ['missing review_execution']);
-  if (input.kind === 'confirmation') return confirm(input, state, rx, chain, policy.confirmationSecondOpinion ?? 'none');
+  if (input.kind === 'confirmation') {
+    return confirm(input, state, rx, chain, policy.confirmationSecondOpinion ?? 'none', { recordVerdicts: policy.recordVerdicts === true });
+  }
   if (input.kind !== 'original') return no('incomplete_contract', [`unknown review kind: ${String(input.kind)}`]);
 
   const p = input.primary;
@@ -459,7 +465,9 @@ export function gateReview(input, policy = {}) {
   const findings = all.map(([f, pr]) => ({ id: f.id, source: pr ? 'primary' : so.route, severity: nonEmpty(f.severity) ? f.severity : 'unknown',
     paths: [...pathsOf(f)], disposition: dispOf(f.id, pr).disposition }));
   const record = { review_execution: rx, kind: 'original', outcome: p.outcome, candidate_id: p.candidate_id, reviewer_identity: p.reviewer_identity,
-    second_opinion_route: hasSo ? so.route : null, graded_artifacts: { ...(input.graded_artifacts ?? {}) }, fix_findings: fixes.map((f) => f.id), findings, write_set, overflow };
+    second_opinion_route: hasSo ? so.route : null, graded_artifacts: { ...(input.graded_artifacts ?? {}) }, fix_findings: fixes.map((f) => f.id), findings, write_set, overflow,
+    ...(policy.recordVerdicts === true ? { primary_outcome: p.outcome, second_opinion_outcome: hasSo ? so.outcome : null,
+      second_opinion_identity: hasSo ? so.reviewer_identity : null, reconciliation: boundedSummary(input.reconciliation.summary) } : {}) };
   if (overflow) {
     return { ok: true, code: 'review_terminal', judgment_point: true, terminal: true, record,
       reasons: ['overflow FAIL is terminal: no repair opens; continuing needs an explicitly authorized retry (RUN-STATE RETRY linked to this execution)'] };
@@ -469,6 +477,11 @@ export function gateReview(input, policy = {}) {
   return out;
 }
 
+/** Longest reconciliation.summary a record keeps (W3-record); untrusted diagnostic text, never authority. */
+export const SUMMARY_MAX = 2000;
+/** reconciliation.summary as recorded: a string cut to SUMMARY_MAX characters, anything else null (normalized, never refused). */
+export const boundedSummary = (v) => (typeof v === 'string' ? v.slice(0, SUMMARY_MAX) : null);
+
 const confirmationOk = (c) => isObj(c) && nonEmpty(c.reviewer_identity) && nonEmpty(c.candidate_id) && Array.isArray(c.checked_findings)
   && OUTCOMES.has(c.outcome) && nonEmpty(c.evidence);
 
@@ -476,9 +489,10 @@ const confirmationOk = (c) => isObj(c) && nonEmpty(c.reviewer_identity) && nonEm
  * Targeted confirmation of a repair within the same review_execution. With `secondOpinion`
  * 'required' (or 'optional' and present) a second confirmation of the same shape plus `route`, by a
  * different non-builder reviewer on the same candidate, is validated too; the record's outcome is
- * PASS only when both are.
+ * PASS only when both are. `recording.recordVerdicts` (a recording policy, separate from the
+ * second-opinion policy) appends the primary's own outcome as primary_outcome.
  */
-function confirm(input, state, rx, chain, secondOpinion = 'none') {
+function confirm(input, state, rx, chain, secondOpinion = 'none', recording = {}) {
   const p = input.primary;
   if (!confirmationOk(p)) {
     return no('incomplete_contract', ['confirmation needs reviewer_identity, candidate_id, checked_findings, outcome and evidence']);
@@ -511,6 +525,7 @@ function confirm(input, state, rx, chain, secondOpinion = 'none') {
     reviewer_identity: p.reviewer_identity, checked_findings: [...p.checked_findings] };
   if (hasSo) Object.assign(record, { outcome: p.outcome === 'PASS' && so.outcome === 'PASS' ? 'PASS' : 'FAIL',
     second_opinion_route: so.route, second_opinion_identity: so.reviewer_identity, second_opinion_outcome: so.outcome });
+  if (recording.recordVerdicts === true) record.primary_outcome = p.outcome;
   return { ok: true, code: 'review_accepted', reasons: [], record };
 }
 

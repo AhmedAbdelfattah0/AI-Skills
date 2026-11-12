@@ -281,6 +281,7 @@ split a ticket into units is the planner's recorded judgment, approved with the 
 Adding `config.unitReview: true` (also opt-in, and approved with the plan) makes each
 unit need its own independent review before the final review
 ([units.md](units.md), Unit review).
+New runs may set `config.auditRecord: true` to keep both reviewers' verdicts and timestamps (opt-in, off by default; see harness-internals.md).
 
 ### Decomposition: split or not
 

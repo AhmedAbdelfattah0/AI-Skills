@@ -70,6 +70,10 @@
  *     'optional' validates a second opinion only when present (record.second_opinion_route null
  *     without one); a confirmation second opinion has the confirmation shape plus `route`, and the
  *     record's outcome is PASS only when both are (engine-unit-review.mjs unit reviews).
+ *     `recordVerdicts: true` (W3-record, engine-set from config.auditRecord) only appends keys to an
+ *     accepted record: an original gets primary_outcome, second_opinion_outcome,
+ *     second_opinion_identity and reconciliation (reconciliation.summary, a string cut to 2000
+ *     characters, else null); a confirmation gets primary_outcome. Decisions never change.
  *   input (kind 'original'): { state, review_execution, kind, primary (the full
  *     review.md output contract), second_opinion:{route,reviewer_identity,
  *     candidate_id,findings,overflow,outcome}, reconciliation:{dispositions:
@@ -672,6 +676,21 @@ test('PASS with a failed triggered sub-outcome or overflow is inconsistent', () 
   assert.equal(gateReview(reviewInput({ primary: primary({ security_outcome: 'FAIL' }) })).code, 'outcome_inconsistent');
   assert.equal(gateReview(reviewInput({ primary: primary({ parity_outcome: 'FAIL' }) })).code, 'outcome_inconsistent');
   assert.equal(gateReview(reviewInput({ primary: primary({ overflow: true }) })).code, 'outcome_inconsistent');
+});
+
+test('[R6] gate refuses a primary PASS with a second-opinion finding disposed fix (PASS with findings to fix), with or without recordVerdicts', () => {
+  const input = () => reviewInput({
+    second_opinion: second({ findings: [{ ...FINDING, id: 'S1' }], outcome: 'FAIL' }),
+    reconciliation: { dispositions: [{ finding_id: 'S1', source: 'codex', disposition: 'fix' }], summary: 'S1 must be fixed' },
+  });
+  for (const policy of [undefined, {}, { recordVerdicts: false }, { recordVerdicts: true }]) {
+    const r = gateReview(input(), policy);
+    assert.deepEqual(r, { ok: false, code: 'outcome_inconsistent', reasons: ['PASS with findings to fix'] }, `policy ${JSON.stringify(policy)}: refused, nothing recorded`);
+  }
+  // The same finding disposed fix under a primary FAIL is accepted (the refusal is about the PASS, not the finding).
+  const fail = input();
+  fail.primary = primary({ outcome: 'FAIL' });
+  assert.equal(gateReview(fail, { recordVerdicts: true }).code, 'review_accepted');
 });
 
 test('an accepted FAIL opens exactly one finding-bound repair', () => {

@@ -20,7 +20,7 @@ import { isAbsolute } from 'node:path';
 import { gateReview } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { LIVE } from './engine-quiesce.mjs';
-import { note, judgment, normDigest, under } from './engine-dag.mjs';
+import { note, judgment, normDigest, under, auditOn } from './engine-dag.mjs';
 import { retryEvent } from './engine-authority.mjs';
 import { unitStates, spendCeiling, ceiling, dict, releaseHold, releaseSlot, ceilingHolds } from './engine-units.mjs';
 
@@ -163,6 +163,7 @@ export function unitReviewGate(E, input, candidate) {
   if (nonEmpty(rx) && usedElsewhere(S, rx, u)) return no('chain_broken', [`review_execution ${rx} already belongs to another review chain`]);
   const risk = riskOf(S, u);
   const policy = risk.risky ? { secondOpinion: 'required', confirmationSecondOpinion: 'required' } : { secondOpinion: 'optional', confirmationSecondOpinion: 'optional' };
+  if (auditOn(S)) policy.recordVerdicts = true; // W3-record: engine-set from the bound DAG, never from the input
   const R = S.unit_reviews[u], rv = reviewStates(S, states)[u];
   const { approved_plan_digest: _a, dag_digest: _d, base_commit: _b, unit: _u, ...review } = input;
   const v = gateReview({ ...review, state: { builders: S.builders, frozen_candidate: ev.id, review_chain: R.chain } }, policy);

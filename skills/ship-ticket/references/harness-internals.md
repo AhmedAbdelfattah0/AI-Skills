@@ -249,3 +249,13 @@ the same `source_execution_id` in several `--usage` files counts once (the recor
 tokens); a usage line that is not JSON is skipped and counted in `skipped_usage_lines` (with a
 warning on stderr; the exit code is unchanged). `run-log.mjs` refuses a ticket id ending in
 `.engine` (its timing log would be that ticket's engine event file).
+
+## Audit record (`config.auditRecord`)
+
+Opt-in boolean in the DAG config; absent or false changes nothing. Old records stay valid, and a new run may set it to true in the plan's DAG config (no default change). When true:
+
+- An original review record also keeps `primary_outcome`, `second_opinion_outcome`, `second_opinion_identity` and `reconciliation`; on an original `outcome` is the primary's (equal to `primary_outcome`). A confirmation's `outcome` is the reconciled one (FAIL unless both reviewers PASS) and it keeps `primary_outcome`.
+- GATE lines and events gain `reasons`, `unit`, `review_execution` and the submitted outcomes.
+- Events get `at` and terminal attempts `ended_at`: the time the snapshot was prepared, not when the decision was made. `ctx.now` is in-process only. A write that fails before its rename persists no stamps; one that fails after it (directory sync) leaves the stamped snapshot installed.
+- Binding-drift and lock refusals are not recorded.
+- Reasons and `reconciliation` are untrusted diagnostic text, never authority; log rows with the switch on escape U+0085, U+2028 and U+2029 like RUN-STATE lines. The `outcome_inconsistent` refusal for a primary PASS with a finding disposed `fix` is unchanged.
