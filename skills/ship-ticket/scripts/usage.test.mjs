@@ -119,7 +119,7 @@ test('RED usage: import-session keeps the last revision per message id, assigns 
   assert.equal(m['sess-1:msg_a'].cache_write_tokens, 20);
   assert.equal(m['agent-x:msg_c'].output_tokens, 4);
   assert.equal(m['sess-1:msg_a'].role, 'orchestrator');
-  assert.equal(m['agent-x:msg_c'].role, 'reviewer');
+  assert.equal(m['agent-x:msg_c'].role, 'unattributed', 'no explicit subagent role => unattributed, never guessed as reviewer');
   for (const r of records) {
     assert.equal(r.source, 'session');
     assert.equal(r.provider, 'claude');
@@ -130,6 +130,9 @@ test('RED usage: import-session keeps the last revision per message id, assigns 
   const custom = byId(importSessionUsage(join(root, 'sess-1.jsonl'), { runId: 'run-1', role: 'reviewer', subagentRole: 'orchestrator', ...WINDOW }));
   assert.equal(custom['sess-1:msg_a'].role, 'reviewer');
   assert.equal(custom['agent-x:msg_c'].role, 'orchestrator');
+  const explicit = byId(importSessionUsage(join(root, 'sess-1.jsonl'), { runId: 'run-1', subagentRole: 'reviewer', ...WINDOW }));
+  assert.equal(explicit['agent-x:msg_c'].role, 'reviewer', 'an explicit subagentRole is still honoured');
+  assert.throws(() => importSessionUsage(join(root, 'sess-1.jsonl'), { runId: 'run-1', subagentRole: 'builder', ...WINDOW }), /subagentRole must be/);
   assert.equal(importSessionUsage(join(root, 'sess-1.jsonl'), { runId: 'run-1' }).length, 4, 'no window => msg_old included');
 });
 
@@ -284,4 +287,44 @@ test('I7 usage: --phase tags imported records; without it the record has no phas
   assert.equal(v.ticket.used, 50 + 300 + records.slice(0, 3).reduce((a, r) => a + r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens, 0));
   assert.deepEqual(v.phase_unknown, { records: 1, tokens: 300 });
   assert.equal(evaluateBudget(withBuild, { ticket_tokens: 10000, phase_tokens: 100 }, { phase: 'REVIEW' }).phase.state, 'stop_dispatch');
+});
+
+// ---- Phase 0 slice 1: api_ms / num_turns telemetry (non-counters) and the unattributed role
+
+test('P0 usage: claude api_ms and num_turns are parsed when reported and absent (never 0) when not; never counters', () => {
+  const extractUsage = fn('extractUsage');
+  const base = { usage: { input_tokens: 5, output_tokens: 1 } };
+  const withTimes = extractUsage('claude', JSON.stringify({ ...base, duration_api_ms: 4321, num_turns: 3 }));
+  assert.equal(withTimes.api_ms, 4321);
+  assert.equal(withTimes.num_turns, 3);
+  const without = extractUsage('claude', JSON.stringify(base));
+  assert.equal('api_ms' in without, false, 'not reported => key absent, so reports show unknown');
+  assert.equal('num_turns' in without, false);
+  const bad = extractUsage('claude', JSON.stringify({ ...base, duration_api_ms: -1, num_turns: 'x' }));
+  assert.equal('api_ms' in bad || 'num_turns' in bad, false, 'invalid values are dropped, not coerced to 0');
+  assert.equal('num_turns' in extractUsage('claude', JSON.stringify({ ...base, num_turns: 2.5 })), false, 'a non-integer num_turns is dropped, not rounded');
+  assert.equal(extractUsage('claude', JSON.stringify({ ...base, duration_api_ms: 0 })).api_ms, 0, 'a reported 0 is kept');
+  assert.ok(!U.COUNTERS.includes('api_ms') && !U.COUNTERS.includes('num_turns'));
+  const codex = extractUsage('codex', '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":1},"duration_ms":9}');
+  assert.equal('api_ms' in codex, false, 'codex api time is not reported by the CLI: never invented');
+  // budgets ignore the new fields entirely
+  const evaluateBudget = fn('evaluateBudget');
+  const r = rec({ input_tokens: 10, output_tokens: 0, api_ms: 99999, num_turns: 50 });
+  assert.equal(evaluateBudget([r], { ticket_tokens: 100 }).used, 10);
+});
+
+test('P0 usage: import-session records the role unattributed unless one is named; the CLI accepts unattributed and --subagent-role', (t) => {
+  const root = session(t);
+  const out = join(root, 'u.jsonl');
+  const cli = (...a) => spawnSync(process.execPath, [USAGE_CLI, ...a], { encoding: 'utf8' });
+  const args = ['import-session', join(root, 'sess-1.jsonl'), '--run-id', 'run-1', '--out', out, '--since', WINDOW.since, '--until', WINDOW.until];
+  assert.equal(cli(...args).status, 0);
+  const roles = Object.fromEntries(readFileSync(out, 'utf8').trim().split('\n').map(JSON.parse).map(r => [r.source_execution_id, r.role]));
+  assert.equal(roles['agent-x:msg_c'], 'unattributed');
+  assert.equal(roles['sess-1:msg_a'], 'orchestrator');
+  const out2 = join(root, 'u2.jsonl');
+  const second = cli(...args.map(a => (a === out ? out2 : a)), '--subagent-role', 'reviewer', '--role', 'unattributed');
+  assert.equal(second.status, 0, second.stderr);
+  const r2 = Object.fromEntries(readFileSync(out2, 'utf8').trim().split('\n').map(JSON.parse).map(r => [r.source_execution_id, r.role]));
+  assert.deepEqual([r2['agent-x:msg_c'], r2['sess-1:msg_a']], ['reviewer', 'unattributed']);
 });

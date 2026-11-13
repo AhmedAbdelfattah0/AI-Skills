@@ -235,7 +235,7 @@ async function runProof(E) {
   const run = runnerDeps(E).spawnRunner;
   const commands = [], runs = [];
   for (const [name, c] of Object.entries(E.S.config.testCommands ?? {})) {
-    const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent' };
+    const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent', started_at: new Date().toISOString() }; // started_at: telemetry only (eval proof wall)
     E.S.attempts.push(a);
     await E.commit();
     let result;

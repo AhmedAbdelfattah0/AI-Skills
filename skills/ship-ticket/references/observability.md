@@ -25,7 +25,7 @@ log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it
 
 Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`carrier`,
 `engine`, `session` or `codex`; one source per execution, never double-counted) and `role`
-(`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`). Per-role totals and
+(`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`, `unattributed`: an import given no role). Per-role totals and
 the orchestrator share come from `eval.mjs report`.
 
 ### Resource and cost metrics (`eval.mjs report`)
@@ -55,6 +55,14 @@ Read-only; each prints `unknown` where its source lacks data, never 0, and none 
   with no reported cost. `cross_run` keeps the per-basis averages.
 - `tokens_by_phase`: processed tokens per usage phase; records without a phase (imports without
   `--phase`) are the `phase unknown` bucket, counted against the ticket budget only.
+- `attempt_timing`: per engine attempt `wall_ms`, `api_ms` (provider-reported API time, from the engine
+  state's usage record with the attempt id, or a `--usage` record) and `other_ms = wall - api_ms`. Worker
+  attempts of claude carry `api_ms`; review executions do not (session and codex imports carry none), so
+  review `api_ms` is `unknown`. `proof_wall_ms`: the sum over exited proof attempts of `started_at` to
+  `ended_at`; `unknown` when none exists or any lacks either stamp (never a partial sum). A proof
+  attempt's `ended_at` exists only with `config.auditRecord: true`, so Phase-0 plans set it.
+  `unattributed_share_pct`: processed-token share of records whose role is `unattributed` (imports given
+  no role).
 - `truncated_outputs` (present only when any): attempts whose launcher output passed the 32 MiB
   capture cap (`{attempt_id, kind, node, stdout_bytes}`); a flag, never a changed outcome.
 - `orchestrator_share_pct` is `unknown` when any usage record of the run lacks counters; a
