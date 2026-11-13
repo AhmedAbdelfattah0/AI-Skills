@@ -6,6 +6,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildRun } from './run-summary.mjs';
+import { verifyReviewExecution } from './carrier.mjs';
+import { REVIEW_ROLE_OF, IDENTITY_ACTIVITIES, GAP_REASONS, CEILING_METRICS, STRING_METRICS } from './review-intervals.mjs';
+import { readFileSync as readText } from 'node:fs';
 
 const script = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 const schema = 'ship-ticket-run-log-v1';
@@ -30,7 +33,7 @@ function fixture(t, rows = []) {
   };
   return { repo, path, cli, summary };
 }
-const eventArgs = ['--run-id', 'run-1', '--kind', 'activity', '--name', 'primary_review', '--event-id', 'review-1'];
+const eventArgs = ['--run-id', 'run-1', '--kind', 'activity', '--name', 'contract_review', '--event-id', 'review-1'];
 
 test('legacy raw v1: repeated phases summed, observed counts do not overwrite declarations', (t) => {
   const f = fixture(t, [
@@ -336,4 +339,173 @@ test('summary --all skips the engine event file <ticket>.engine.jsonl', (t) => {
   const s = JSON.parse(result.stdout);
   assert.deepEqual(s.runs.map((r) => r.ticket), ['T1']);
   assert.deepEqual(s.integrity_warnings, []);
+});
+
+// ---- A0.1: review-pipeline timing --------------------------------------------------------
+const rid = (...rest) => ['--run-id', 'run-1', ...rest];
+const ident = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
+const reviewPhase = ['--metric', 'skill_revision=abc1234', '--metric', 'primary_ceiling_ms=720000', '--metric', 'recovery_ceiling_ms=180000',
+  '--metric', 'optional_ceiling_ms=600000', '--metric', 'confirmation_ceiling_ms=360000'];
+
+test('review activity start refuses missing candidate_id or review_execution and writes nothing', (t) => {
+  const f = fixture(t);
+  for (const name of ['primary_review', 'optional_review', 'review_repair', 'review_confirmation', 'review_reconcile']) {
+    const args = rid('--kind', 'activity', '--name', name, '--event-id', `${name}-1`);
+    for (const partial of [[], ['--metric', 'candidate_id=sha-1'], ['--metric', 'review_execution=review-1']]) {
+      const r = f.cli('start', ...args, ...partial);
+      assert.equal(r.status, 1, name);
+      assert.match(r.stderr, /requires a (candidate_id|review_execution)/);
+    }
+    assert.equal(f.cli('start', ...args, ...ident).status, 0, name);
+  }
+  assert.equal(readFileSync(f.path, 'utf8').trim().split('\n').length, 5);
+});
+
+test('REVIEW phase start: identity is refused when missing, telemetry is recorded unknown and never refused', (t) => {
+  const f = fixture(t);
+  const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'phase-review');
+  for (const partial of [[], ['--metric', 'candidate_id=sha-1'], ['--metric', 'review_execution=review-1']]) {
+    const r = f.cli('start', ...args, ...partial, ...reviewPhase);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /requires a (candidate_id|review_execution)/);
+  }
+  assert.equal(readFileSync(f.path, 'utf8'), '');
+  const bad = f.cli('start', ...args, ...ident, '--metric', 'primary_ceiling_ms=720000', '--metric', 'recovery_ceiling_ms=-1', '--metric', 'optional_ceiling_ms=soon');
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.match(bad.stderr, /recorded as unknown/);
+  const m = JSON.parse(bad.stdout).metrics;
+  assert.equal(m.skill_revision, 'unknown');
+  assert.equal(m.primary_ceiling_ms, 720000);
+  for (const key of ['recovery_ceiling_ms', 'optional_ceiling_ms', 'confirmation_ceiling_ms']) assert.equal(Object.hasOwn(m, key), false, key);
+});
+
+test('REVIEW phase start with every field keeps strings as strings, including digit-only and sha256 revisions', (t) => {
+  const f = fixture(t);
+  const sha = `sha256:${'a1'.repeat(32)}`;
+  const withRevision = (id, rev, cand) => f.cli('start', ...rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', id), '--metric', `candidate_id=${cand}`,
+    '--metric', `review_execution=review-${id}`, '--metric', `skill_revision=${rev}`, ...reviewPhase.slice(2));
+  const a = withRevision('a', sha, '1234567');
+  assert.equal(a.status, 0, a.stderr);
+  assert.equal(a.stderr, '');
+  assert.deepEqual([JSON.parse(a.stdout).metrics.skill_revision, JSON.parse(a.stdout).metrics.candidate_id], [sha, '1234567']);
+  assert.equal(JSON.parse(withRevision('b', '1234567', 'sha-1').stdout).metrics.skill_revision, '1234567');
+  assert.equal(JSON.parse(withRevision('c', 'x'.repeat(81), 'sha-1').stdout).metrics.skill_revision, 'unknown');
+});
+
+test('a REVIEW start lacking skill_revision and ceilings still authorizes carrier REPAIR', (t) => {
+  const f = fixture(t);
+  const started = f.cli('start', ...rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'phase-review'), ...ident);
+  assert.equal(started.status, 0, started.stderr);
+  const approval = { ticket: 'T1', run_id: 'run-1' };
+  assert.equal(verifyReviewExecution(f.repo, approval, 'review-1', []), 'run-log');
+  assert.throws(() => verifyReviewExecution(f.repo, approval, 'review-2', []), /no REVIEW phase start/);
+});
+
+test('optional_review with --carrier-result imports relay timing, the positive second-opinion path', (t) => {
+  const f = fixture(t);
+  const resultPath = join(f.repo, 'optional.json');
+  const args = rid('--kind', 'activity', '--name', 'optional_review', '--event-id', 'optional-1');
+  const startedRow = f.cli('start', ...args, ...ident, '--carrier-result', resultPath);
+  assert.equal(startedRow.status, 0, startedRow.stderr);
+  const stamp = JSON.parse(startedRow.stdout).timestamp;
+  writeFileSync(resultPath, JSON.stringify({ schema: 'delegate-relay.result.v1', codexVersion: 'test', sandbox: 'read-only', workdir: f.repo,
+    status: 'completed', startedAt: stamp, finishedAt: stamp }));
+  const ended = f.cli('end', ...args, '--carrier-result', resultPath, '--outcome', 'pass');
+  assert.equal(ended.status, 0, ended.stderr);
+  const timing = JSON.parse(ended.stdout).carrier_timing;
+  assert.deepEqual([timing.tool, timing.source, timing.review_execution], ['codex', 'relay_result', 'review-1']);
+  assert.ok(timing.collection_delay_ms >= 0);
+});
+
+test('gap_reason accepts only the enum', (t) => {
+  const f = fixture(t);
+  const start = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1');
+  assert.equal(f.cli('start', ...start).status, 0);
+  assert.equal(f.cli('end', ...start, '--metric', 'gap_reason=forgot').status, 1);
+  for (const reason of ['no_start_stamp', 'wait', 'unknown']) {
+    const args = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', `gap-${reason}`);
+    assert.equal(f.cli('start', ...args).status, 0);
+    const ended = f.cli('end', ...args, '--metric', `gap_reason=${reason}`);
+    assert.equal(ended.status, 0, ended.stderr);
+    assert.equal(JSON.parse(ended.stdout).metrics.gap_reason, reason);
+  }
+});
+
+const roundRows = (id, { drop = [], open = [], extra = [], phaseMetrics = { repair_batches: 1, confirmation_count: 1 } } = {}) => {
+  const m = { review_execution: `review-${id}`, candidate_id: 'sha-1' };
+  const roles = [['primary_review', 10, 100], ['optional_review', 20, 120], ['review_reconcile', 130, 150], ['review_repair', 160, 200], ['review_confirmation', 210, 300]];
+  return [...pair(`ph-${id}`, 'phase', 'REVIEW', 0, 500, { ...m, ...phaseMetrics }),
+    ...extra.flatMap((name) => pair(`${name}-${id}`, 'activity', name, 10, 100, m)),
+    ...roles.filter(([name]) => !drop.includes(name)).flatMap(([name, a, b]) => {
+      const rows = pair(`${name}-${id}`, 'activity', name, a, b, m);
+      return open.includes(name) ? rows.slice(0, 1) : rows;
+    })];
+};
+
+test('summary: a complete round reports 0 missing intervals (positive, with ids recorded)', (t) => {
+  const f = fixture(t, roundRows('a'));
+  const s = f.summary();
+  assert.deepEqual(s.runs[0].missing_review_intervals, { count: 0, items: [] });
+  assert.equal(s.aggregate.missing_review_intervals, 0);
+  assert.equal(s.aggregate.missing_review_intervals_unknown_runs, 0);
+});
+
+test('summary: an absent pair and an unended start are each flagged with their role and reason', (t) => {
+  const f = fixture(t, roundRows('a', { drop: ['review_reconcile', 'optional_review'], open: ['review_repair'] }));
+  const run = f.summary().runs[0];
+  assert.equal(run.missing_review_intervals.count, 3);
+  assert.deepEqual(run.missing_review_intervals.items.map((i) => `${i.role}:${i.reason}`).sort(),
+    ['reconcile:no_start_end_pair', 'repair:open_without_end', 'second_opinion:no_start_end_pair']);
+  assert.equal(f.summary().aggregate.missing_review_intervals, 3);
+});
+
+test('summary: repair and confirmation are expected only when the REVIEW phase declares them', (t) => {
+  const f = fixture(t, roundRows('a', { drop: ['review_repair', 'review_confirmation'], phaseMetrics: { repair_batches: 0, confirmation_count: 0 } }));
+  assert.equal(f.summary().runs[0].missing_review_intervals.count, 0);
+  writeFileSync(f.path, roundRows('a', { drop: ['review_repair', 'review_confirmation'], phaseMetrics: { repair_batches: 1, confirmation_count: 1 } }).map((r) => JSON.stringify(r) + '\n').join(''));
+  assert.deepEqual(f.summary().runs[0].missing_review_intervals.items.map((i) => i.role).sort(), ['confirmation', 'repair']);
+});
+
+test('summary: no recorded review_execution is unknown, never 0', (t) => {
+  const f = fixture(t, [...pair('ph', 'phase', 'REVIEW', 0, 100, { repair_batches: 0 }), ...pair('p', 'activity', 'primary_review', 0, 10)]);
+  const s = f.summary();
+  assert.equal(s.runs[0].missing_review_intervals.count, 'unknown');
+  assert.equal(s.aggregate.missing_review_intervals, 'unknown');
+  assert.equal(s.aggregate.missing_review_intervals_unknown_runs, 1);
+});
+
+test('summary: BUILD-phase unit_review activities never create or affect a review round', (t) => {
+  const u = { review_execution: 'review-u1', candidate_id: 'sha-u' };
+  const f = fixture(t, [...roundRows('a'), ...pair('u1', 'activity', 'unit_review', 20, 40, u), ...pair('u2', 'activity', 'unit_review_repair', 40, 50, u)]);
+  const s = f.summary();
+  assert.deepEqual(s.runs[0].missing_review_intervals, { count: 0, items: [] });
+  // Alone, they leave the run unknown instead of inventing a round that is missing everything.
+  const g = fixture(t, pair('u1', 'activity', 'unit_review', 20, 40, u));
+  assert.equal(g.summary().runs[0].missing_review_intervals.count, 'unknown');
+});
+
+test('summary: partition reviewers satisfy the primary role', (t) => {
+  const f = fixture(t, roundRows('a', { drop: ['primary_review'], extra: ['frontend_review', 'backend_review'] }));
+  assert.deepEqual(f.summary().runs[0].missing_review_intervals, { count: 0, items: [] });
+});
+
+test('summary aggregate: unknown runs make the sum a lower bound, never a bare number; no known run is unknown', (t) => {
+  const rowsFor = (run, rows) => rows.map((r) => ({ ...r, run_id: run, event_id: `${run}-${r.event_id}` }));
+  const f = fixture(t, [...rowsFor('run-1', roundRows('a', { drop: ['review_reconcile'] })),
+    ...rowsFor('run-2', [...pair('ph', 'phase', 'REVIEW', 0, 100, { repair_batches: 0 })])]);
+  const a = f.summary().aggregate;
+  assert.deepEqual([a.missing_review_intervals, a.missing_review_intervals_known_sum, a.missing_review_intervals_unknown_runs], ['at_least', 1, 1]);
+  const g = fixture(t, rowsFor('run-1', roundRows('a')));
+  assert.deepEqual([g.summary().aggregate.missing_review_intervals, g.summary().aggregate.missing_review_intervals_unknown_runs], [0, 0]);
+});
+
+test('run-log and eval import one review-interval table', () => {
+  const dir = dirname(script);
+  for (const file of ['run-log.mjs', 'eval.mjs']) {
+    const text = readText(join(dir, file), 'utf8');
+    assert.match(text, /from '\.\/review-intervals\.mjs'/, file);
+    assert.doesNotMatch(text, /primary_review|optional_review|review_reconcile|recovery_ceiling_ms/, `${file} must not repeat the table`);
+  }
+  assert.equal(REVIEW_ROLE_OF.contract_review, 'primary');
+  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 3 && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
 });

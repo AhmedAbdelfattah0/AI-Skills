@@ -126,7 +126,7 @@ they explain most variance:
 | PLAN | `native_plan_mode` (its end metrics carry provider/consumer contract outcomes) |
 | BUILD | `contract_materialization`, `frontend_build`, `backend_build`, `integration_join`, `unit_review`, `unit_review_repair`, `unit_review_confirmation` |
 | PROVE | `frontend_proof`, `backend_proof`, `shared_proof`, `runtime_attacks`, `ui_evidence` |
-| REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_repair`, `review_confirmation` |
+| REVIEW | `frontend_review`, `backend_review`, `contract_review`, `primary_review`, `optional_review`, `review_reconcile`, `review_repair`, `review_confirmation` |
 | SHIP | `commit_push_pr`, `ci_wait`, `tracker_completion` |
 
 The `unit_review*` activities in the BUILD row occur only with `config.unitReview`; their metrics are in [units.md](units.md), Timing activities.
@@ -177,6 +177,19 @@ Use metrics `candidate_id`, `host_agent`, `counterpart_agent`, `skill_revision`,
 phase start; put the ID and current candidate on each activity. Confirmation
 binds the repaired candidate, not the initial candidate; never change identity
 inside an already-started activity.
+
+Review timing calls, per round: `start` the REVIEW phase with `candidate_id` and
+`review_execution`, plus `skill_revision` and the four `*_ceiling_ms`. Then `start` each
+of `primary_review` (or its partition reviews), `optional_review` (also when degraded
+or unavailable), `review_reconcile`, and `review_repair` / `review_confirmation` when run,
+with `candidate_id` and `review_execution`; `end` each when it actually ends. Missing
+identity metrics, an invalid `gap_reason` or an oversized value refuse a start; a refusal writes nothing. A missing or invalid
+`skill_revision` or ceiling never refuses: it is recorded as `unknown` and reported
+`unknown`; do not retry or wait on it, because the REVIEW phase start row is what
+authorizes a REPAIR. Time covered by no interval: end the phase with
+`--metric gap_reason=no_start_stamp|wait|unknown`. `summary` reports
+`missing_review_intervals` (a count; `unknown` without execution IDs; `at_least` with a
+known sum when some runs are unknown).
 
 Logger timestamps describe when records were appended. They must not be backdated
 to make delayed result collection look like prompt completion. When the detected

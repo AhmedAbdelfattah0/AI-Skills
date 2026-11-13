@@ -12,6 +12,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
+import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
 
 const SCHEMA = 'ship-ticket-run-log-v1';
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
@@ -30,6 +31,10 @@ function usage() {
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
+Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
+review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
+metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|unknown
+names unaccounted time. Summary reports missing_review_intervals (count or "unknown").
 Optional start/end: --carrier-result <result.json> binds a fresh relay result at
 dispatch and imports its timing on completion. Start requires candidate_id and
 review_execution=review-<id> metrics. Summary schema v2; raw events stay v1.
@@ -102,6 +107,11 @@ function parseMetricValue(raw) {
   return raw;
 }
 
+function stringMetric(raw) {
+  if (raw.includes('\n') || raw.includes('\r') || raw.length > 512) fail('metric values must be single-line and at most 512 characters');
+  return raw;
+}
+
 function parseMetrics(values) {
   const metrics = {};
   for (const item of values) {
@@ -111,7 +121,8 @@ function parseMetrics(values) {
     const value = item.slice(separator + 1);
     if (!SAFE_METRIC.test(key)) fail(`invalid metric key: ${key}`);
     if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
-    metrics[key] = parseMetricValue(value);
+    metrics[key] = STRING_METRICS.includes(key) ? stringMetric(value) : parseMetricValue(value);
+    if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
     if (['review_execution', 'previous_review_execution'].includes(key)
       && (typeof metrics[key] !== 'string' || !/^review-[A-Za-z0-9._-]+$/.test(metrics[key]))) {
       fail(`${key} must be a prefixed review-<opaque> ID`);
@@ -253,6 +264,46 @@ function intervalOptions(options) {
   return { ticket, runId, kind, name, eventId };
 }
 
+/**
+ * Review-start metrics (A0.1). Only the identity binding (candidate_id, review_execution) is refused when missing:
+ * REPAIR authorization reads the REVIEW phase start row, so telemetry must never stop that row from being written.
+ * A REVIEW phase start with a missing or invalid skill_revision or ceiling is written with skill_revision=unknown
+ * and the bad ceilings absent; summary and eval then report them as unknown.
+ */
+function validateReviewStart(interval, metrics) {
+  const activity = interval.kind === 'activity' && IDENTITY_ACTIVITIES.includes(interval.name);
+  const phase = interval.kind === 'phase' && interval.name === 'REVIEW';
+  if (!activity && !phase) return;
+  const label = `${interval.kind} ${interval.name}`;
+  if (typeof metrics.candidate_id !== 'string' || !SAFE_ID.test(metrics.candidate_id)) fail(`${label} start requires a candidate_id metric`);
+  if (typeof metrics.review_execution !== 'string') fail(`${label} start requires a review_execution=review-<id> metric`);
+  if (!phase) return;
+  const noted = [];
+  if (typeof metrics.skill_revision !== 'string' || !SKILL_REVISION.test(metrics.skill_revision)) {
+    noted.push('skill_revision');
+    metrics.skill_revision = 'unknown';
+  }
+  for (const key of CEILING_METRICS) {
+    if (Number.isInteger(metrics[key]) && metrics[key] >= 0) continue;
+    noted.push(key);
+    delete metrics[key];
+  }
+  if (noted.length) process.stderr.write(`run-log: recorded as unknown (not refused): ${noted.join(', ')}\n`);
+}
+
+/** Review intervals with no closed start/end pair; `unknown` without review_execution ids (built on review-intervals.mjs). */
+function missingReviewIntervals(run) {
+  const rounds = expectedReviewRoles(run);
+  if (rounds === 'unknown') return { count: 'unknown', items: [] };
+  const items = [];
+  for (const { review_execution: id, roles } of rounds) {
+    for (const { role, expected, closed, open } of roles) {
+      for (let k = closed; k < expected; k += 1) items.push({ review_execution: id, role, reason: k - closed < open ? 'open_without_end' : 'no_start_end_pair' });
+    }
+  }
+  return { count: items.length, items };
+}
+
 function start(options) {
   const repo = requireOption(options, 'repo');
   const { directory } = locations(repo);
@@ -264,6 +315,7 @@ function start(options) {
   if (duplicate) fail(`event ${interval.eventId} already exists in run ${interval.runId}`);
 
   const metrics = parseMetrics(options.metric);
+  validateReviewStart(interval, metrics);
   const binding = carrierBinding(options, metrics);
   const row = {
     schema: SCHEMA,
@@ -331,6 +383,13 @@ function end(options) {
   appendRow(directory, interval.ticket, row);
   process.stdout.write(`${JSON.stringify(row)}\n`);
 }
+/** No known run: `unknown`. Some unknown runs: only a known sum (a lower bound) next to unknown_runs, never a bare total. */
+function missingTotal(counted, total) {
+  const sum = counted.reduce((a, b) => a + b, 0), unknownRuns = total - counted.length;
+  if (!counted.length) return { missing_review_intervals: 'unknown', missing_review_intervals_unknown_runs: unknownRuns };
+  return unknownRuns ? { missing_review_intervals: 'at_least', missing_review_intervals_known_sum: sum, missing_review_intervals_unknown_runs: unknownRuns }
+    : { missing_review_intervals: sum, missing_review_intervals_unknown_runs: 0 };
+}
 function summary(options) {
   const repo = requireOption(options, 'repo');
   const { directory } = locations(repo);
@@ -363,11 +422,14 @@ function summary(options) {
     }
     for (const [runId, runRows] of byRun) {
       const runWarnings = warnings.filter((warning) => warning.run_id === undefined || warning.run_id === runId);
-      runs.push(buildRun(ticket, runId, runRows, runWarnings));
+      const run = buildRun(ticket, runId, runRows, runWarnings);
+      runs.push({ ...run, missing_review_intervals: missingReviewIntervals(run) });
     }
   }
 
-  const result = { schema: SUMMARY_SCHEMA, event_schema: SCHEMA, integrity_warnings: integrityWarnings, aggregate: aggregate(runs), runs };
+  const counted = runs.map((r) => r.missing_review_intervals.count).filter(Number.isInteger);
+  const result = { schema: SUMMARY_SCHEMA, event_schema: SCHEMA, integrity_warnings: integrityWarnings,
+    aggregate: { ...aggregate(runs), ...missingTotal(counted, runs.length) }, runs };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
