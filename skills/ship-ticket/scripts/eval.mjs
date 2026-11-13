@@ -24,6 +24,10 @@
  * - `attempts[].envelope.truncated` (launcher output past 32 MiB): printed as `truncated_outputs`
  *   only when any exists. Usage records without a `phase` are the `phase unknown` bucket of
  *   `tokens_by_phase`.
+ * - `attempts[]` (`started_at`, `envelope.ended_at`/`ended_at`) and usage records' optional `api_ms` (joined by
+ *   `attempt_id` from the engine state's `usage` and from --usage files): `attempt_timing` per attempt `{wall_ms, api_ms, other_ms = wall - api}` and `proof_wall_ms`
+ *   (exited proof attempts' started_at..ended_at; unknown if any lacks one). `unattributed_share_pct`: share of processed tokens whose role is
+ *   `unattributed` (imports given no role). Each is `unknown` when its source is missing, never 0.
  * The engine's own event file `<ticket>.engine.jsonl` is never read as a ticket.
  *
  * Run-log marker: any interval with the metric `ui_ticket=true` marks a UI ticket.
@@ -75,6 +79,49 @@ function reviewUsageShare(run) {
   return run.usage?.reviewer_share_pct ?? UNKNOWN;
 }
 
+const ms = (iso) => (typeof iso === 'string' ? Date.parse(iso) : NaN);
+const TOKENS = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'];
+const processedOf = (r) => (TOKENS.some((k) => known(r?.[k])) ? TOKENS.reduce((a, k) => a + (known(r[k]) ? r[k] : 0), 0) : null);
+
+/** Usage records the engine kept in its state (extractUsage output, joined by attempt id). */
+const stateUsage = (state) => (Array.isArray(state?.usage) ? state.usage.filter((r) => r && typeof r === 'object') : []);
+
+/**
+ * Per-attempt wall (started_at to the envelope's or the attempt's ended_at), the provider-reported API time
+ * (`api_ms` of the usage record with the attempt's id) and `other_ms = wall - api_ms`. Each is `unknown`
+ * when its source is absent (never 0); `unknown` overall without attempts.
+ */
+function attemptTiming(state, records) {
+  const attempts = (Array.isArray(state?.attempts) ? state.attempts : []).filter((a) => a && typeof a.attempt_id === 'string');
+  if (!attempts.length) return UNKNOWN;
+  return attempts.map((a) => {
+    const s = ms(a.started_at), e = ms(a.envelope?.ended_at ?? a.ended_at);
+    const wall = Number.isFinite(s) && Number.isFinite(e) && e >= s ? e - s : UNKNOWN;
+    const api = [...stateUsage(state), ...records].find((r) => known(r?.api_ms) && (r.attempt_id === a.attempt_id || r.source_execution_id === a.attempt_id))?.api_ms;
+    return { attempt_id: a.attempt_id, kind: a.kind ?? UNKNOWN, node: a.node ?? UNKNOWN, wall_ms: wall, api_ms: known(api) ? api : UNKNOWN,
+      other_ms: known(wall) && known(api) ? wall - api : UNKNOWN };
+  });
+}
+
+/**
+ * Sum of the wall of exited proof attempts (started_at to ended_at); abandoned or crashed attempts are
+ * not counted. `unknown` when there is none, or when any exited proof attempt lacks a valid
+ * started_at/ended_at (never a silent partial sum).
+ */
+function proofWall(state) {
+  const exited = (Array.isArray(state?.attempts) ? state.attempts : []).filter((a) => a?.kind === 'proof' && a.status === 'exited');
+  const walls = exited.map((a) => ms(a.ended_at) - ms(a.started_at));
+  return exited.length && walls.every((d) => Number.isFinite(d) && d >= 0) ? walls.reduce((a, b) => a + b, 0) : UNKNOWN;
+}
+
+/** Share (one decimal) of processed tokens in `unattributed`-role records; `unknown` without usage or when any record lacks counters. */
+function unattributedShare(records) {
+  if (!records.length || records.some((r) => processedOf(r) === null)) return UNKNOWN;
+  const total = records.reduce((a, r) => a + processedOf(r), 0);
+  const un = records.filter((r) => r.role === 'unattributed').reduce((a, r) => a + processedOf(r), 0);
+  return total > 0 ? Math.round(un / total * 1000) / 10 : UNKNOWN;
+}
+
 function findingsBySeverity(chain) {
   const withFindings = chain.filter((r) => Array.isArray(r?.findings));
   if (!withFindings.length) return UNKNOWN;
@@ -99,7 +146,8 @@ function acceptedCost(run) {
  * @param {object} run
  * @param {{state?: object}} [sources]
  */
-export function evaluateRun(run, { state, repoRoot = null } = {}) {
+export function evaluateRun(run, { state, repoRoot = null, records = [] } = {}) {
+  const mine = (Array.isArray(records) ? records : []).filter((r) => r && r.run_id === run.run_id);
   const matched = state && state.run_id === run.run_id ? state : null;
   const chain = Array.isArray(matched?.review_chain) ? matched.review_chain : null;
   const hasReview = run.intervals.some((i) => i.kind === 'phase' && i.name === 'REVIEW');
@@ -128,6 +176,9 @@ export function evaluateRun(run, { state, repoRoot = null } = {}) {
     gate_calls: countEvents(matched, 'GATE'),
     proof_reruns: proofReruns(matched),
     review_usage_share_pct: reviewUsageShare(run),
+    unattributed_share_pct: unattributedShare(mine),
+    attempt_timing: attemptTiming(matched, mine),
+    proof_wall_ms: proofWall(matched),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
     ...(matched?.unit_checks ? { units: withReviews(matched, unitProjection(matched, repoRoot), repoRoot ? unitStates(matched, repoRoot) : null) } : {}),
@@ -196,7 +247,7 @@ const median = (values) => {
 export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   const joined = runs.map((r) => attachUsage(r, records));
   const metrics = joined.map((r) => {
-    const m = evaluateRun(r, { state: states[r.ticket], repoRoot });
+    const m = evaluateRun(r, { state: states[r.ticket], repoRoot, records });
     return { ...m, suggestions: suggest(m, rawValues(r)) };
   });
   const fired = {};

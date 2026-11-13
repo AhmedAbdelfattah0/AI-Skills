@@ -286,3 +286,49 @@ test('attachUsage carries reviewer_share_pct: unknown when any record lacks coun
   const noReviewer = attachUsage(build('T1', 'run-1'), [rec('run-1', 'builder', 80, 0)]);
   assert.equal(noReviewer.usage.reviewer_share_pct, 'unknown');
 });
+
+// ---- Phase 0 slice 1: api_ms / other_ms, proof wall, unattributed share (unknown, never 0)
+
+test('P0 eval: per-attempt api_ms and other_ms = wall - api_ms; proof wall from started_at/ended_at; unattributed share', () => {
+  const state = { run_id: 'run-1', attempts: [
+    { attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(10 * SEC) } },
+    { attempt_id: 'att-2', kind: 'node', node: 'b', started_at: iso(0), envelope: { ended_at: iso(4 * SEC) } },
+    { attempt_id: 'att-3', kind: 'proof', node: 'p', status: 'exited', started_at: iso(20 * SEC), ended_at: iso(27 * SEC) },
+    { attempt_id: 'att-4', kind: 'proof', node: 'q', status: 'exited', started_at: iso(30 * SEC), ended_at: iso(33 * SEC) }] };
+  const records = [rec('run-1', 'builder', 50, 0, { attempt_id: 'att-1', api_ms: 6000 }), rec('run-1', 'unattributed', 25, 0), rec('run-1', 'reviewer', 25, 0)];
+  const m = evaluateRun(attachUsage(build('T1', 'run-1'), records), { state, records });
+  const by = Object.fromEntries(m.attempt_timing.map((a) => [a.attempt_id, a]));
+  assert.deepEqual([by['att-1'].wall_ms, by['att-1'].api_ms, by['att-1'].other_ms], [10000, 6000, 4000]);
+  assert.deepEqual([by['att-2'].wall_ms, by['att-2'].api_ms, by['att-2'].other_ms], [4000, 'unknown', 'unknown'], 'api time missing => unknown, not 0');
+  assert.equal(m.proof_wall_ms, 10000);
+  assert.equal(m.unattributed_share_pct, 25);
+});
+
+test('P0 eval: new metrics are unknown, never 0, without their sources', () => {
+  const bare = evaluateRun(build('T1', 'run-1'), {});
+  for (const k of ['attempt_timing', 'proof_wall_ms', 'unattributed_share_pct']) assert.equal(bare[k], 'unknown', k);
+  const noEnd = evaluateRun(build('T1', 'run-1'), { state: { run_id: 'run-1', attempts: [{ attempt_id: 'p', kind: 'proof', started_at: iso(0) }] } });
+  assert.equal(noEnd.proof_wall_ms, 'unknown', 'a proof attempt without ended_at (no auditRecord) has no wall');
+  assert.equal(noEnd.attempt_timing[0].wall_ms, 'unknown');
+  const partial = [rec('run-1', 'unattributed', 10, 0), rec('run-1', 'builder', null, null)];
+  assert.equal(evaluateRun(build('T1', 'run-1'), { records: partial }).unattributed_share_pct, 'unknown', 'a record without counters makes the share unknowable');
+  const none = [rec('run-1', 'builder', 10, 0)];
+  assert.equal(evaluateRun(build('T1', 'run-1'), { records: none }).unattributed_share_pct, 0, 'complete usage with no unattributed tokens is a measured 0');
+});
+
+test('P0 eval: api_ms is joined from the engine state usage by attempt id (no --usage file needed)', () => {
+  const state = { run_id: 'run-1', usage: [{ run_id: 'run-1', attempt_id: 'att-1', source: 'engine', source_execution_id: 'att-1', input_tokens: 2, output_tokens: 4, api_ms: 3000 }],
+    attempts: [{ attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(5 * SEC) } }] };
+  const m = evaluateRun(build('T1', 'run-1'), { state });
+  assert.deepEqual([m.attempt_timing[0].api_ms, m.attempt_timing[0].other_ms], [3000, 2000]);
+});
+
+test('P0 eval: proof_wall_ms counts exited attempts only and is unknown (not a partial sum) when any exited one lacks a stamp', () => {
+  const at = (id, status, s, e) => ({ attempt_id: id, kind: 'proof', node: id, status, ...(s === null ? {} : { started_at: iso(s * SEC) }), ...(e === null ? {} : { ended_at: iso(e * SEC) }) });
+  const wall = (...attempts) => evaluateRun(build('T1', 'run-1'), { state: { run_id: 'run-1', attempts } }).proof_wall_ms;
+  assert.equal(wall(at('a', 'exited', 0, 4), at('b', 'exited', 10, 13)), 7000);
+  assert.equal(wall(at('a', 'exited', 0, 4), at('b', 'exited', 10, null)), 'unknown', 'one incomplete exited attempt: no partial sum');
+  assert.equal(wall(at('a', 'exited', 0, 4), at('b', 'exited', null, null)), 'unknown', 'pre-change attempt without started_at');
+  assert.equal(wall(at('a', 'exited', 0, 4), at('b', 'abandoned', 10, 99), at('c', 'unknown', 20, null)), 4000, 'abandoned and unknown attempts are excluded');
+  assert.equal(wall(at('b', 'abandoned', 10, 99)), 'unknown', 'no exited attempt');
+});

@@ -764,6 +764,7 @@
     "kind": "proof",
     "node": "proof",
     "status": "exited",
+    "started_at": "<ts>",
     "pid": "<pid>",
     "pgid": "<pgid>",
     "leader_start": "<leader_start>",

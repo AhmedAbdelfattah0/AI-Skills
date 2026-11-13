@@ -88,7 +88,7 @@ reported that counter, so a total backed by fewer events than `events` is partia
 - Codex `exec --json` sums `turn.completed.usage` over all turns. Codex reports no
   cost, so cost stays `null`.
 - Every usage record carries `source` (`carrier|engine|session|codex`),
-  `source_execution_id` and `role` (`builder|repair|evidence|orchestrator|reviewer`).
+  `source_execution_id` and `role` (`builder|repair|evidence|orchestrator|reviewer|unattributed`).
   Carrier events (or, for engine-run workers, the engine's own `source: "engine"`
   record) are the only source for worker processes (one aggregate per
   `attempt_id`); session import covers only the host session and its in-process
@@ -102,8 +102,8 @@ reported that counter, so a total backed by fewer events than `events` is partia
   ÷ all prompt tokens) is the measured token-optimization signal.
 
 `import-session` reads the main session and its `subagents/*.jsonl`, keeps the
-last revision per message id, and assigns `role` to the main file and `reviewer`
-to subagent files. `import-codex` records `usage_status: "unknown"` with null
+last revision per message id, and assigns `role` to the main file and `--subagent-role`
+(default `unattributed`, never a guessed `reviewer`) to subagent files. `import-codex` records `usage_status: "unknown"` with null
 counters when the relay reports no usage; nothing is invented. `--phase`
 (`PLAN|BUILD|PROVE|REVIEW|REPAIR|SHIP`) tags every imported record with that phase; without it
 the record carries no phase: it is **phase unknown**, counted against the ticket budget only (never

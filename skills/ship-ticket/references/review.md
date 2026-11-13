@@ -267,7 +267,10 @@ route); `id`s are unique per reviewer.
 The gate stores only the primary `outcome`, refusing a primary `PASS` with a finding
 disposed `fix` (`outcome_inconsistent`). The reviewer re-judges the outcome; never edit it by hand. Repair and
 confirmation follow. Run `usage.mjs import-session` (and `import-codex`)
-after every review execution (reviews are unmetered).
+after every review execution (reviews are unmetered), naming `--subagent-role reviewer` when the
+subagents reviewed (an unnamed import is `unattributed`). Phase-0 plans set `config.auditRecord: true` and
+record per review: wall, tokens by role, findings by severity, repairs and confirmations (review
+`api_ms` has no source: `unknown`).
 
 A rejected second-opinion finding that could affect correctness, security or
 parity must be included in the targeted confirmation even when no bytes change.

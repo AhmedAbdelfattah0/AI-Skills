@@ -39,6 +39,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { gateReview } from './gate.mjs';
+import { evaluateRun } from './eval.mjs';
+import { buildRun } from './run-summary.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath } from './engine-test-fixture.mjs';
 
@@ -297,10 +299,10 @@ function goldenRun(t, config) {
   return normalizer(fx.root)({ outputs: outs, state: fx.readState(), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
 }
 
-test('[R9] the golden file is untouched, and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {
+test('[R9] the golden file hash is pinned (main plus the one proof started_at line), and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {
   const text = readFileSync(GOLDEN, 'utf8').replace(/\r\n/g, '\n');
-  assert.equal(createHash('sha256').update(text).digest('hex'), 'faee39c604715a7fa9227ad8876218b330bb5663ef89bd5820eb0b5153a6fcf3',
-    'run-engine-units.golden.json is byte-identical to main@888df9e');
+  assert.equal(createHash('sha256').update(text).digest('hex'), 'd4a6ad070760758cb7bac18a95591b997a335ad3cffec2e81e8a103bcbe56d94',
+    'run-engine-units.golden.json is main@888df9e plus the one proof-attempt started_at line (Phase 0 slice 1 telemetry)');
   const got = goldenRun(t, { auditRecord: false });
   assert.equal(got.state.config.auditRecord, false, 'the bound config records the explicit false');
   delete got.state.config.auditRecord;
@@ -999,4 +1001,46 @@ test('a CLI killed by its spawn timeout surfaces as an INFRA error, never as a s
   ok(fx.cli('init', { dag: fx.dagFile }));
   assert.throws(() => fx.cli('drive', {}, { timeout: 1 }), (e) => e.message.startsWith(`${INFRA_MARK} engine CLI 'drive' ended without an exit status`));
   assert.throws(() => fx.gate('ship-ready', {}, { timeout: 1 }), (e) => e.message.startsWith(INFRA_MARK), 'gate goes through the same helper');
+});
+
+// ---- Phase 0 slice 1: proof attempts carry started_at (telemetry only)
+
+test('[P0] a proof attempt records started_at; the verdicts are the same with and without the audit switch', { skip: WIN_SKIP, timeout: 120000 }, (t) => {
+  const run = (mode) => {
+    const fx = baseFixture(t, { commit: true, config: { ...BOUND, width: 1, testCommands: { proof: PASS_CMD }, ...auditCfg(mode) },
+      behaviour: { a: { write: { 'src/a.txt': 'a1' } } } });
+    ok(fx.cli('init', { dag: fx.dagFile }));
+    ok(fx.cli('drive'));
+    ok(fx.gate('review', passReview('rx-1', fx.candidate())));
+    const r = fx.gate('ship-ready', {});
+    return { r, state: fx.readState() };
+  };
+  const off = run('absent'), on = run(true);
+  for (const { state } of [off, on]) {
+    const proofs = state.attempts.filter(a => a.kind === 'proof');
+    assert.equal(proofs.length, 1);
+    assert.match(proofs[0].started_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/, 'same ISO format as worker attempts');
+  }
+  assert.equal(off.r.out.code, 'ship_ready');
+  assert.equal(on.r.out.code, off.r.out.code, 'decision unchanged');
+  assert.equal(J(off.state.local_proof.commands), J(on.state.local_proof.commands));
+  assert.equal(off.state.attempts.find(a => a.kind === 'proof').ended_at, undefined, 'ended_at stays audit-only');
+  assert.equal(typeof on.state.attempts.find(a => a.kind === 'proof').ended_at, 'string');
+});
+
+test('[P0] real path: a claude worker\'s duration_api_ms reaches state.usage and eval reports api_ms and other_ms for that attempt', { skip: WIN_SKIP, timeout: 120000 }, (t) => {
+  const fx = baseFixture(t, { commit: true, config: { ...BOUND, width: 1, testCommands: { proof: PASS_CMD }, auditRecord: true },
+    behaviour: { a: { write: { 'src/a.txt': 'a1' }, apiMs: 1234 } } });
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  ok(fx.cli('drive'));
+  const state = fx.readState();
+  const worker = state.attempts.find(a => a.kind === 'node' && a.node === 'a');
+  const row = state.usage.find(r => r.attempt_id === worker.attempt_id);
+  assert.equal(row.api_ms, 1234, 'extractUsage output is kept in the engine state');
+  assert.equal(row.num_turns, 3);
+  const m = evaluateRun(buildRun('T-1', 'run-1', []), { state });
+  const timing = m.attempt_timing.find(a => a.attempt_id === worker.attempt_id);
+  assert.equal(timing.api_ms, 1234);
+  assert.equal(timing.other_ms, timing.wall_ms - 1234);
+  assert.equal(typeof timing.wall_ms, 'number');
 });

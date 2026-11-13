@@ -12,6 +12,8 @@
  * - Codex CLI 0.166 `exec --json`: JSONL; each `turn.completed` carries `usage`
  *   {input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens,
  *   reasoning_output_tokens}. Codex reports no cost.
+ * - Claude also reports `duration_api_ms` and `num_turns` (read as optional `api_ms`, `num_turns`; not in
+ *   a repo fixture, so parsed defensively). Codex `turn.completed` carries no time: no codex api_ms.
  * Gemini and Antigravity output was not available to verify; they are not parsed.
  */
 import { readFileSync, readdirSync, existsSync, appendFileSync, writeFileSync, renameSync } from 'node:fs';
@@ -24,6 +26,8 @@ export const COUNTERS = Object.freeze(['input_tokens', 'output_tokens', 'cache_r
   'cache_write_tokens', 'reasoning_tokens', 'reported_cost_usd']);
 
 const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+/** Optional non-counter telemetry (`api_ms`, `num_turns`): the key is present only when the provider reported a valid value. */
+const optional = (key, value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? { [key]: Math.round(value) } : {});
 
 function sumInto(target, key, value) {
   if (value === null) return;
@@ -46,6 +50,8 @@ export function extractUsage(provider, stdout) {
       reasoning_tokens: count(u.output_tokens_details?.thinking_tokens),
       reported_cost_usd: typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost : null,
       cost_basis: bases.length && bases.every(b => b === bases[0]) && /^[a-z_]{1,32}$/.test(bases[0]) ? bases[0] : null,
+      // Non-counters, absent (reported `unknown`, never 0) unless the CLI carried them; never summed into a budget.
+      ...optional('api_ms', parsed.duration_api_ms), ...(count(parsed.num_turns) === null ? {} : { num_turns: parsed.num_turns }),
     };
   }
   if (provider === 'codex') {
@@ -116,7 +122,7 @@ export function readEvents(path) {
 }
 
 const TOKEN_COUNTERS = Object.freeze(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']);
-const IMPORT_ROLES = new Set(['orchestrator', 'reviewer']);
+const IMPORT_ROLES = new Set(['orchestrator', 'reviewer', 'unattributed']);
 /** Phases an imported record may name (`--phase`); without one its phase is unknown: ticket budget only. */
 export const IMPORT_PHASES = Object.freeze(['PLAN', 'BUILD', 'PROVE', 'REVIEW', 'REPAIR', 'SHIP']);
 const METRICS = Object.freeze({
@@ -162,9 +168,9 @@ export function totalsByBasis(records, runId = null) {
     note: 'Partitioned by cost_basis; bases are never added together. null means no event in the basis reported the counter.' };
 }
 
-/** Throws unless `role` is a host-session role (orchestrator|reviewer). */
+/** Throws unless `role` is a host-session role (orchestrator|reviewer|unattributed). */
 function checkRole(role, label) {
-  if (!IMPORT_ROLES.has(role)) throw new Error(label + ' must be orchestrator or reviewer');
+  if (!IMPORT_ROLES.has(role)) throw new Error(label + ' must be orchestrator, reviewer or unattributed');
 }
 
 /** `{ phase }` for an imported record when `phase` is given (one of IMPORT_PHASES), else `{}` (phase unknown); throws otherwise. */
@@ -184,12 +190,13 @@ function parseWindow(value, label) {
 
 /**
  * Import host-session usage: the main `<dir>/<sid>.jsonl` (role `role`) and its
- * in-process subagents `<dir>/<sid>/subagents/*.jsonl` (role `subagentRole`).
+ * in-process subagents `<dir>/<sid>/subagents/*.jsonl` (role `subagentRole`, default `unattributed`:
+ * a subagent file does not say whether it reviewed, so the role is never guessed).
  * Assistant lines inside the inclusive [since, until] window are kept; a
  * message id that repeats (streaming revisions) keeps only its last revision.
  * Returns one record per message with `source:'session'`, carrying `phase` only when given.
  */
-export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator', subagentRole = 'reviewer', since, until, phase } = {}) {
+export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator', subagentRole = 'unattributed', since, until, phase } = {}) {
   if (typeof runId !== 'string' || !SAFE.test(runId)) throw new Error('import-session needs a safe run_id');
   const tag = phaseField(phase);
   checkRole(role, 'role');
@@ -369,7 +376,7 @@ function importInto(out, incoming) {
 }
 
 const USAGE_TEXT = 'Usage: usage.mjs summary <events.json|events.jsonl> [--run-id <id>]\n'
-  + '       usage.mjs import-session <session.jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer] [--phase <PHASE>]\n'
+  + '       usage.mjs import-session <session.jsonl> --run-id <id> --out <usage.jsonl> [--since iso] [--until iso] [--role orchestrator|reviewer|unattributed] [--subagent-role orchestrator|reviewer|unattributed] [--phase <PHASE>]\n'
   + '       usage.mjs import-codex <relay-result.json> --run-id <id> --out <usage.jsonl> [--role reviewer] [--phase <PHASE>]';
 
 /** CLI entry: summary, import-session, import-codex. */
@@ -382,10 +389,10 @@ function main(argv) {
   }
   if (cmd === 'import-session' || cmd === 'import-codex') {
     const f = parseFlags(rest, cmd === 'import-session'
-      ? ['--run-id', '--out', '--since', '--until', '--role', '--phase'] : ['--run-id', '--out', '--role', '--phase']);
+      ? ['--run-id', '--out', '--since', '--until', '--role', '--subagent-role', '--phase'] : ['--run-id', '--out', '--role', '--phase']);
     if (!f['--run-id'] || !f['--out']) throw new Error(USAGE_TEXT);
     if (cmd === 'import-codex' && f['--role'] !== undefined && f['--role'] !== 'reviewer') throw new Error('import-codex role must be reviewer');
-    const opts = { runId: f['--run-id'], ...(f['--role'] ? { role: f['--role'] } : {}), ...(f['--phase'] ? { phase: f['--phase'] } : {}) };
+    const opts = { runId: f['--run-id'], ...(f['--role'] ? { role: f['--role'] } : {}), ...(f['--subagent-role'] ? { subagentRole: f['--subagent-role'] } : {}), ...(f['--phase'] ? { phase: f['--phase'] } : {}) };
     const incoming = cmd === 'import-session'
       ? importSessionUsage(file, { ...opts, since: f['--since'], until: f['--until'] })
       : [importCodexRelay(file, opts)];

@@ -71,7 +71,7 @@ function finish() {
   if (b.appendLate) writeFileSync(PLAN, readFileSync(PLAN, 'utf8').replace('${END}', JSON.stringify(b.appendLate) + '\\n${END}'));
   if (b.killGroup) process.kill(0, 'SIGKILL');
   if (b.exit) { process.stdout.write(JSON.stringify({ type: 'result', is_error: true, result: 'provider error' })); process.exit(b.exit); }
-  process.stdout.write(${JSON.stringify(CLAUDE_OUT)});
+  process.stdout.write(b.apiMs === undefined ? ${JSON.stringify(CLAUDE_OUT)} : JSON.stringify({ ...JSON.parse(${JSON.stringify(CLAUDE_OUT)}), duration_api_ms: b.apiMs, num_turns: 3 }));
 }
 if (b.hang) setInterval(() => {}, 1000);
 else if (b.waitFor) { const t = setInterval(() => { if (existsSync(b.waitFor)) { clearInterval(t); finish(); } }, 50); }
