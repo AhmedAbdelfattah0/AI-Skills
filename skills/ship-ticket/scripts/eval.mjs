@@ -30,6 +30,13 @@
  *   `unattributed` (imports given no role). Each is `unknown` when its source is missing, never 0.
  * The engine's own event file `<ticket>.engine.jsonl` is never read as a ticket.
  *
+ * `review_rounds` (A0.1): per `review_execution` the review-pipeline timeline from the run log: the interval list
+ * (primary reviewer, second opinion, repair, confirmation, reconcile; relay carrier times when imported), the roles
+ * with no closed start/end pair (`missing_roles`), the primary/second-opinion overlap (`concurrency_ratio` =
+ * overlap / the shorter of the two) and the `unaccounted_gap_ms` of the round with its `gap_reason`. `unknown`
+ * without a recorded review_execution. `cross_run.review_round_wall_ms`: P50 only from 5 rounds, P95 only
+ * from 20, else `insufficient_n` (a round is one observation; rounds of one ticket may be correlated).
+ *
  * Run-log marker: any interval with the metric `ui_ticket=true` marks a UI ticket.
  *
  * Exactly three suggestion rules exist; they are printed, never applied.
@@ -38,9 +45,10 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { aggregateUsage, attachUsage, buildRun, engineResources, truncatedOutputs } from './run-summary.mjs';
+import { aggregateUsage, attachUsage, buildRun, engineResources, truncatedOutputs, union } from './run-summary.mjs';
 import { unitProjection, unitStates } from './engine-units.mjs';
 import { withReviews } from './engine-unit-review.mjs';
+import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } from './review-intervals.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -140,6 +148,50 @@ function acceptedCost(run) {
   return Object.fromEntries(bases.map(([b, c]) => [b, c.reported_cost_usd]));
 }
 
+const spanOf = (i) => (i.carrier_timing ? [ms(i.carrier_timing.started_at), ms(i.carrier_timing.ended_at)] : [ms(i.started_at), ms(i.ended_at)]);
+const spanLength = (spans) => union(spans).reduce((n, [a, b]) => n + b - a, 0);
+
+/**
+ * Timeline of every review round (one per `review_execution`) of a run; `unknown` when the log records none.
+ * Round ids and expected roles come from review-intervals.mjs, the same table run-log.mjs summary uses.
+ */
+function reviewRounds(run) {
+  const rounds = expectedReviewRoles(run);
+  if (rounds === 'unknown') return UNKNOWN;
+  return rounds.map(({ review_execution: id, phase, roles: expected }) => {
+    const roles = run.intervals.filter((i) => i.kind === 'activity' && REVIEW_ROLE_OF[i.name] && i.metrics?.review_execution === id)
+      .sort((a, b) => ms(a.started_at) - ms(b.started_at));
+    const missing = expected.flatMap(({ role, expected: n, closed }) => Array.from({ length: Math.max(0, n - closed) }, () => role));
+    const valid = roles.map(spanOf).filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e >= s);
+    const all = [...valid, ...(phase ? [spanOf(phase)] : [])];
+    // wall and covered time share one range: the phase when present, else the hull of the intervals.
+    const lo = all.length ? Math.min(...all.map((x) => x[0])) : NaN, hi = all.length ? Math.max(...all.map((x) => x[1])) : NaN;
+    const wall = all.length ? hi - lo : UNKNOWN;
+    const covered = spanLength(valid.map(([s, e]) => [Math.max(s, lo), Math.min(e, hi)]));
+    const gap = known(wall) ? Math.max(0, wall - covered) : UNKNOWN;
+    const side = (role) => roles.filter((i) => REVIEW_ROLE_OF[i.name] === role).map(spanOf);
+    const [p, o] = [side('primary'), side('second_opinion')];
+    const overlap = p.length && o.length ? union(p).reduce((n, [a, b]) => n + union(o).reduce((m, [c, d]) => m + Math.max(0, Math.min(b, d) - Math.max(a, c)), 0), 0) : UNKNOWN;
+    const shorter = p.length && o.length ? Math.min(spanLength(p), spanLength(o)) : 0;
+    const declared = phase?.metrics.gap_reason;
+    const ceilings = Object.fromEntries(CEILING_METRICS.map((k) => [k, known(phase?.metrics[k]) ? phase.metrics[k] : UNKNOWN]));
+    return { review_execution: id, skill_revision: phase?.metrics.skill_revision ?? UNKNOWN, ceilings,
+      intervals: roles.map((i) => ({ role: REVIEW_ROLE_OF[i.name], event_id: i.event_id, started_at: new Date(spanOf(i)[0]).toISOString(),
+        ended_at: new Date(spanOf(i)[1]).toISOString(), duration_ms: spanOf(i)[1] - spanOf(i)[0],
+        basis: i.carrier_timing ? 'carrier' : 'logger', collection_delay_ms: i.carrier_timing?.collection_delay_ms ?? UNKNOWN })),
+      missing_roles: missing, wall_ms: wall, unaccounted_gap_ms: gap,
+      gap_reason: !known(gap) ? UNKNOWN : gap === 0 ? 'none' : GAP_REASONS.includes(declared) ? declared : UNKNOWN,
+      overlap_ms: overlap, concurrency_ratio: known(overlap) && shorter > 0 ? Math.round(overlap / shorter * 1000) / 1000 : UNKNOWN };
+  });
+}
+
+/** Nearest-rank percentile of `values`, or `insufficient_n` below `minimum` observations (never a guess). */
+function percentile(values, q, minimum) {
+  if (values.length < minimum) return 'insufficient_n';
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)];
+}
+
 /**
  * Metrics for one run. `run` is a `buildRun` result, optionally passed through
  * `attachUsage`; `state` is the ticket's engine state, if any.
@@ -179,6 +231,7 @@ export function evaluateRun(run, { state, repoRoot = null, records = [] } = {}) 
     unattributed_share_pct: unattributedShare(mine),
     attempt_timing: attemptTiming(matched, mine),
     proof_wall_ms: proofWall(matched),
+    review_rounds: reviewRounds(run),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
     ...(matched?.unit_checks ? { units: withReviews(matched, unitProjection(matched, repoRoot), repoRoot ? unitStates(matched, repoRoot) : null) } : {}),
@@ -252,9 +305,13 @@ export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   });
   const fired = {};
   for (const s of metrics.flatMap((m) => m.suggestions)) fired[s.rule] = (fired[s.rule] ?? 0) + 1;
+  const walls = metrics.flatMap((m) => (Array.isArray(m.review_rounds) ? m.review_rounds : [])).map((r) => r.wall_ms);
+  const roundWalls = walls.filter(known);
   return { schema: EVAL_SCHEMA, runs: metrics,
     cross_run: { runs: metrics.length, orchestrator_share_pct_median: median(metrics.map((m) => m.orchestrator_share_pct)),
       review_repairs_median: median(metrics.map((m) => m.review_repairs)),
+      review_round_wall_ms: { n: roundWalls.length, excluded_unknown: walls.length - roundWalls.length,
+        p50: percentile(roundWalls, 0.5, 5), p95: percentile(roundWalls, 0.95, 20) },
       peak_rss_mb_max: metrics.map((m) => m.peak_rss_mb).filter(known).reduce((a, b) => Math.max(a, b), -1) >= 0
         ? Math.max(...metrics.map((m) => m.peak_rss_mb).filter(known)) : UNKNOWN, suggestions_fired: fired,
       ...aggregateUsage(joined) },

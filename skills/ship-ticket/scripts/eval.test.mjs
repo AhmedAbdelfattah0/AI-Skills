@@ -332,3 +332,124 @@ test('P0 eval: proof_wall_ms counts exited attempts only and is unknown (not a p
   assert.equal(wall(at('a', 'exited', 0, 4), at('b', 'abandoned', 10, 99), at('c', 'unknown', 20, null)), 4000, 'abandoned and unknown attempts are excluded');
   assert.equal(wall(at('b', 'abandoned', 10, 99)), 'unknown', 'no exited attempt');
 });
+
+// ---- A0.1: review-round timeline, concurrency, percentiles ------------------------------
+/** One review round: REVIEW phase 0..500 s plus the given [name, start s, end s, extra metrics] activities. */
+function roundOf(runId, id, activities, phaseMetrics = {}, phase = [0, 500]) {
+  const m = { review_execution: `review-${id}`, candidate_id: 'sha-1' };
+  return [...pair('T', runId, `${runId}-${id}-ph`, 'phase', 'REVIEW', phase[0] * SEC, phase[1] * SEC, { ...m, ...phaseMetrics }),
+    ...activities.flatMap(([name, a, b, extra = {}]) => pair('T', runId, `${runId}-${id}-${name}`, 'activity', name, a * SEC, b * SEC, { ...m, ...extra }))];
+}
+const roundsOf = (rows) => evaluate({ runs: [buildRun('T', 'run-1', rows)] }).runs[0].review_rounds;
+
+test('review round: concurrency ratio is overlap over the shorter of primary and second opinion', () => {
+  const [r] = roundsOf(roundOf('run-1', 'a', [['primary_review', 10, 110], ['optional_review', 60, 160], ['review_reconcile', 170, 190]], { repair_batches: 0, confirmation_count: 0 }));
+  assert.equal(r.overlap_ms, 50 * SEC);
+  assert.equal(r.concurrency_ratio, 0.5);
+  assert.deepEqual(r.intervals.map((i) => i.role), ['primary', 'second_opinion', 'reconcile']);
+  assert.deepEqual(r.missing_roles, []);
+  // Fully serial reviewers overlap by exactly 0 (a measured zero, not unknown).
+  const [serial] = roundsOf(roundOf('run-1', 'b', [['primary_review', 10, 60], ['optional_review', 60, 100], ['review_reconcile', 100, 110]], { repair_batches: 0, confirmation_count: 0 }));
+  assert.equal(serial.concurrency_ratio, 0);
+  // A second opinion nested inside the primary overlaps for its whole (shorter) length.
+  const [nested] = roundsOf(roundOf('run-1', 'c', [['primary_review', 10, 110], ['optional_review', 30, 60], ['review_reconcile', 110, 120]], { repair_batches: 0, confirmation_count: 0 }));
+  assert.equal(nested.concurrency_ratio, 1);
+});
+
+test('review round: no second-opinion interval gives unknown concurrency and a named missing role, never 0', () => {
+  const [r] = roundsOf(roundOf('run-1', 'a', [['primary_review', 10, 110], ['review_reconcile', 120, 130]], { repair_batches: 0, confirmation_count: 0 }));
+  assert.equal(r.concurrency_ratio, 'unknown');
+  assert.equal(r.overlap_ms, 'unknown');
+  assert.deepEqual(r.missing_roles, ['second_opinion']);
+});
+
+test('review round: unaccounted gap is wall minus covered time; its reason is the declared enum, else unknown', () => {
+  const acts = [['primary_review', 100, 200], ['optional_review', 100, 200], ['review_reconcile', 300, 400]];
+  const base = { repair_batches: 0, confirmation_count: 0 };
+  const [none] = roundsOf(roundOf('run-1', 'a', acts, base, [100, 400]));
+  assert.equal(none.wall_ms, 300 * SEC);
+  assert.equal(none.unaccounted_gap_ms, 100 * SEC);
+  assert.equal(none.gap_reason, 'unknown');
+  const [declared] = roundsOf(roundOf('run-1', 'a', acts, { ...base, gap_reason: 'no_start_stamp' }, [100, 400]));
+  assert.equal(declared.gap_reason, 'no_start_stamp');
+  const [bogus] = roundsOf(roundOf('run-1', 'a', acts, { ...base, gap_reason: 'because' }, [100, 400]));
+  assert.equal(bogus.gap_reason, 'unknown');
+  const [tight] = roundsOf(roundOf('run-1', 'a', [['primary_review', 100, 200], ['optional_review', 100, 200], ['review_reconcile', 200, 400]], base, [100, 400]));
+  assert.equal(tight.unaccounted_gap_ms, 0);
+  assert.equal(tight.gap_reason, 'none');
+});
+
+test('review round: carrier timing replaces logger time and reports its collection delay; ceilings and revision are echoed', () => {
+  const rows = roundOf('run-1', 'a', [['primary_review', 10, 110], ['optional_review', 10, 110], ['review_reconcile', 120, 130]],
+    { repair_batches: 0, confirmation_count: 0, skill_revision: 'abc1234', primary_ceiling_ms: 720000 });
+  const end = rows.find((r) => r.event === 'end' && r.name === 'optional_review');
+  end.carrier_timing = { source: 'relay_result', tool: 'codex', status: 'completed', result_sha256: 'a'.repeat(64), candidate_id: 'sha-1',
+    review_execution: 'review-a', started_at: iso(10 * SEC), ended_at: iso(40 * SEC), duration_ms: 30 * SEC, collection_delay_ms: 70 * SEC };
+  const [r] = roundsOf(rows);
+  const second = r.intervals.find((i) => i.role === 'second_opinion');
+  assert.deepEqual([second.basis, second.duration_ms, second.collection_delay_ms], ['carrier', 30 * SEC, 70 * SEC]);
+  assert.equal(r.intervals.find((i) => i.role === 'primary').collection_delay_ms, 'unknown');
+  assert.equal(r.concurrency_ratio, 1);
+  assert.equal(r.skill_revision, 'abc1234');
+  assert.deepEqual([r.ceilings.primary_ceiling_ms, r.ceilings.optional_ceiling_ms], [720000, 'unknown']);
+});
+
+test('review round: a run with no recorded review_execution has unknown rounds', () => {
+  const m = evaluate({ runs: [buildRun('T', 'run-1', [...pair('T', 'run-1', 'ph', 'phase', 'REVIEW', 0, 100 * SEC), ...pair('T', 'run-1', 'p', 'activity', 'primary_review', 0, 10 * SEC)])] });
+  assert.equal(m.runs[0].review_rounds, 'unknown');
+  assert.deepEqual(m.cross_run.review_round_wall_ms, { n: 0, excluded_unknown: 0, p50: 'insufficient_n', p95: 'insufficient_n' });
+});
+
+test('percentiles: P50 needs 5 rounds and P95 needs 20, otherwise insufficient_n', () => {
+  const walls = (n) => Array.from({ length: n }, (_, i) => i + 1);
+  const wallsOf = (n) => evaluate({ runs: walls(n).map((w, i) => buildRun('T', `run-${i}`, roundOf(`run-${i}`, 'a', [['primary_review', 0, w]], {}, [0, w]))) }).cross_run.review_round_wall_ms;
+  const four = wallsOf(4);
+  assert.deepEqual([four.n, four.p50, four.p95], [4, 'insufficient_n', 'insufficient_n']);
+  const five = wallsOf(5);
+  assert.deepEqual([five.n, five.p50, five.p95], [5, 3 * SEC, 'insufficient_n']);
+  const nineteen = wallsOf(19);
+  assert.equal(nineteen.p95, 'insufficient_n');
+  assert.equal(nineteen.p50, 10 * SEC);
+  const twenty = wallsOf(20);
+  assert.deepEqual([twenty.n, twenty.p50, twenty.p95], [20, 10 * SEC, 19 * SEC]);
+});
+
+test('percentiles: rounds with unknown wall are excluded and counted, not zeroed', () => {
+  const runs = Array.from({ length: 5 }, (_, i) => buildRun('T', `run-${i}`, roundOf(`run-${i}`, 'a', [['primary_review', 0, i + 1]], {}, [0, i + 1])));
+  const dangling = buildRun('T', 'run-x', [pair('T', 'run-x', 's', 'activity', 'primary_review', 0, 1, { review_execution: 'review-z', candidate_id: 'sha-1' })[0]]);
+  const w = evaluate({ runs: [...runs, dangling] }).cross_run.review_round_wall_ms;
+  assert.deepEqual([w.n, w.excluded_unknown], [5, 1]);
+});
+
+test('review round: BUILD-phase unit_review activities never create or join a round', () => {
+  const base = { repair_batches: 0, confirmation_count: 0 };
+  const rows = [...roundOf('run-1', 'a', [['primary_review', 10, 110], ['optional_review', 10, 110], ['review_reconcile', 110, 120]], base),
+    ...pair('T', 'run-1', 'u1', 'activity', 'unit_review', 20 * SEC, 40 * SEC, { review_execution: 'review-u1', candidate_id: 'sha-u' })];
+  const rounds = roundsOf(rows);
+  assert.deepEqual(rounds.map((r) => r.review_execution), ['review-a']);
+  const alone = roundsOf(pair('T', 'run-1', 'u1', 'activity', 'unit_review', 20 * SEC, 40 * SEC, { review_execution: 'review-u1', candidate_id: 'sha-u' }));
+  assert.equal(alone, 'unknown');
+});
+
+test('review round: partition reviewers form the primary role (union of their spans) and satisfy it', () => {
+  const [r] = roundsOf(roundOf('run-1', 'a', [['frontend_review', 10, 60], ['backend_review', 40, 100], ['optional_review', 50, 150], ['review_reconcile', 150, 160]],
+    { repair_batches: 0, confirmation_count: 0 }, [10, 160]));
+  assert.deepEqual(r.missing_roles, []);
+  assert.equal(r.intervals.filter((i) => i.role === 'primary').length, 2);
+  assert.equal(r.overlap_ms, 50 * SEC); // union primary 10..100 against second opinion 50..150
+  assert.equal(r.concurrency_ratio, 0.556); // 50 / the shorter, 90
+});
+
+test('review round: an activity outside the phase is neither a gap nor ignored (phase 0-100 s, reconcile 100-200 s)', () => {
+  const [r] = roundsOf(roundOf('run-1', 'a', [['primary_review', 0, 100], ['optional_review', 0, 100], ['review_reconcile', 100, 200]],
+    { repair_batches: 0, confirmation_count: 0 }, [0, 100]));
+  assert.equal(r.wall_ms, 200 * SEC);
+  assert.equal(r.unaccounted_gap_ms, 0);
+  assert.equal(r.gap_reason, 'none');
+});
+
+test('review round: gap_reason is unknown when the gap is unknown', () => {
+  const rows = [pair('T', 'run-1', 's', 'activity', 'primary_review', 0, 1, { review_execution: 'review-z', candidate_id: 'sha-1' })[0]];
+  const [r] = roundsOf(rows);
+  assert.deepEqual([r.wall_ms, r.unaccounted_gap_ms, r.gap_reason], ['unknown', 'unknown', 'unknown']);
+});

@@ -105,6 +105,12 @@ Recovery and schema correction remain in this execution and its original budget.
 A user-authorized retry gets a new ID with its predecessor under the same workflow
 run; a new ID is not permission to retry or reset limits.
 
+Time the round with `run-log.mjs` as [observability.md](observability.md) lists: a
+`start`/`end` pair per primary reviewer, second opinion, repair, confirmation and
+`review_reconcile`, each at the real start and end, never backfilled. Missing ceilings or
+revision are recorded `unknown` and never block the round or its repair. `summary` flags
+`missing_review_intervals`; `eval.mjs` reports the round timeline and concurrency.
+
 Give every initial reviewer the same `candidate_id`, changed-path list, retrieval
 recipe, ticket, acceptance criteria, approved plan, Integration Contract, Design
 Contract, deterministic results and applicable parity/VAPT evidence. Candidate
