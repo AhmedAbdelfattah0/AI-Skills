@@ -8,6 +8,10 @@
  *      engine-bench.mjs --scenario <S1..S10|all> [--json]     one result per scenario (engine-bench-scenarios.mjs);
  *                                                             exit 0 only when every scenario is ok; on Windows every
  *                                                             scenario is skipped (limit N7) with ok false, so it exits 1
+ *
+ * Warm-up: each sandbox runs the fake `claude auth status` once (no timeout) right after creating it, so the
+ * first-exec stall of a new executable (measured up to ~13 s on macOS) is not charged to the engine's 15 s
+ * subscription check. This happens in sandbox(), before any measured timing starts, so it is excluded from wall time.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { planNarrativeDigest } from './run-engine.mjs';
 import { isEntrypoint } from './harness.mjs';
+import { warmFakeClaude } from './engine-test-fixture.mjs';
 import { runScenarios } from './engine-bench-scenarios.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -53,6 +58,7 @@ function sandbox(root, label, nodes) {
   else writeFileSync(join(bin, 'claude.cmd'), `@node "%~dp0fake.mjs" %*\r\n`);
   const sep = POSIX ? ':' : ';';
   const env = { ...process.env, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH) };
+  warmFakeClaude(bin, env); // one-time, untimed: sandbox() runs before manual()/engine start their clocks
   const prompts = {};
   for (const n of nodes) { prompts[n.id] = join(dir, `prompt-${n.id}.txt`); writeFileSync(prompts[n.id], `NODE=${n.id}\n`); }
   const dag = { schema: 'ship-ticket-engine-dag-v1',

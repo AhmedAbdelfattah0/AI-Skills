@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { spawnSpec } from './provider-env.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -89,6 +90,21 @@ const ENGINE_CLI = fileURLToPath(new URL('./run-engine.mjs', import.meta.url));
 const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
 
 /**
+ * Warm-up: the first exec of a freshly created executable can stall up to ~13 s under load on macOS
+ * (likely a Gatekeeper/AMFI scan of the new file; the stall was measured, the cause was not). Pay that
+ * here, once, synchronously and with no timeout, so the engine's 15 s subscription check does not.
+ * The production budget is intentionally unchanged. The fake's `auth` path exits 0 at once and writes
+ * no runs.log line or state, so behaviour is unaffected. Call it again after any rebuild of the file.
+ * Windows: the .cmd is spawned the way production does (spawnSpec, which adds a shell for .cmd/.bat).
+ * Returns true only when the warm-up really ran and exited 0.
+ */
+export function warmFakeClaude(bin, env) {
+  const spec = spawnSpec(join(bin, POSIX ? 'claude' : 'claude.cmd'), ['auth', 'status', '--json'], process.platform, env);
+  const warm = spawnSync(spec.file, spec.args, { env, stdio: 'ignore', shell: spec.shell });
+  return !warm.error && warm.status === 0;
+}
+
+/**
  * Temp git repo with an approved plan, a DAG file, prompts and a fake `claude` on PATH.
  * bind: 'plan' lists the DAG digest in the narrative; 'dag_bound' records one DAG_BOUND event;
  * 'none' binds nothing. extraEvents(dagDigest) appends further RUN-STATE events.
@@ -114,6 +130,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const sep = POSIX ? ':' : ';';
   const { NODE_TEST_CONTEXT: _nested, ...base } = process.env; // a nested `node --test` must not report to this runner
   const env = { ...base, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH) };
+  const warmedUp = warmFakeClaude(bin, env);
 
   const promptFor = (id) => { const p = join(root, `prompt-${id}.txt`); writeFileSync(p, `NODE=${id}\n`); return p; };
   const dag = {
@@ -146,7 +163,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
 
   let inputSeq = 0;
   const fx = {
-    root, repo, dagFile, dagDigest, planFile, env,
+    root, repo, dagFile, dagDigest, planFile, env, warmedUp,
     ctx: (extra = {}) => ({ repoRoot: repo, ticket: 'T-1', runId: 'run-1', dagFile, env, verifySubscription: () => true,
       handleSignals: false, ...extra }),
     stateFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'),

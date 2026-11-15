@@ -100,6 +100,7 @@ jobs:
           skills/ship-ticket/scripts/base-drift.test.mjs
           skills/ship-ticket/scripts/review-wording.test.mjs
           skills/ship-ticket/scripts/run-engine-record.test.mjs
+          skills/ship-ticket/scripts/engine-fixture-warmup.test.mjs
           skills/ship-ticket/scripts/launcher-sampler.test.mjs
           skills/ship-ticket/scripts/wave1-metrics.test.mjs
           skills/ship-ticket/scripts/engine-explore.test.mjs
