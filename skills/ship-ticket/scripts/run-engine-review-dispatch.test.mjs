@@ -394,4 +394,6 @@ test('more refusals: unmapped builders make the opus primary a builder (refused 
   assert.equal(fx.cli('next').out.next_action.reason, 'review_dispatch_failed');
   fx.relayBehave({ 'claude-delegate': { final: final(RELAY_PRIMARY()) } });
   assert.equal(fx.dispatch('primary').out.code, 'review_dispatched', 'a failed reviewer may be dispatched again');
+  // Let the relaunched reviewer finish before teardown (the relay now also resolves and runs the reviewer CLI, R0-S batch 2).
+  await waitFor(() => fx.readState().attempts.filter(x => x.kind === 'review' && ['intent', 'launched', 'running'].includes(x.status)).every(x => existsSync(x.envelope_file)), 'the relaunched reviewer envelope');
 });
