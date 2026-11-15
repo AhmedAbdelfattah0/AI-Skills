@@ -85,6 +85,12 @@ function manual(sb, nodes) {
   const t0 = Date.now(); let commands = 0, bytes = 0, completed = 0;
   const logArgs = (verb, id, extra = []) => [SCRIPT('run-log.mjs'), verb, '--repo', sb.repo, '--ticket', TICKET, '--run-id', RUN,
     '--kind', 'phase', '--name', 'BUILD', '--event-id', `${id}-build`, ...extra];
+  // carrier.mjs run dispatches only for an admitted run (P0 E1): init, enroll and the build context come first.
+  for (const [verb, ...extra] of [['init', '--dag', sb.dagFile], ['enroll'], ['context', '--phase', 'build']]) {
+    commands++;
+    const r = spawnSync(process.execPath, [SCRIPT('run-engine.mjs'), verb, '--repo', sb.repo, '--ticket', TICKET, '--run-id', RUN, ...extra], { env: sb.env, encoding: 'utf8', timeout: 120000 });
+    if (r.status !== 0) process.stderr.write(`manual ${verb} exit ${r.status}: ${r.stderr}\n`);
+  }
   for (const n of nodes) {
     const resultFile = join(sb.dir, `${n.id}.message.json`), config = join(sb.dir, `${n.id}.dispatch.json`);
     writeFileSync(config, JSON.stringify({ phase: 'BUILD', provider: 'claude', nodeId: n.id, workdir: sb.repo, repoRoot: sb.repo,
@@ -105,9 +111,10 @@ function manual(sb, nodes) {
 
 function engine(sb, nodes) {
   const t0 = Date.now(); let commands = 0, bytes = 0, last = null;
-  for (const verb of ['init', 'drive', 'status']) {
+  // The supported path: init, enroll, the build context, then drive (P0 E1: drive refuses an un-admitted run).
+  for (const [verb, ...extra] of [['init'], ['enroll'], ['context', '--phase', 'build'], ['drive'], ['status']]) {
     commands++;
-    const flags = ['--repo', sb.repo, '--ticket', TICKET, '--run-id', RUN, ...(verb === 'init' || verb === 'drive' ? ['--dag', sb.dagFile] : [])];
+    const flags = ['--repo', sb.repo, '--ticket', TICKET, '--run-id', RUN, ...(verb === 'init' || verb === 'drive' ? ['--dag', sb.dagFile] : []), ...extra];
     const r = run(SCRIPT('run-engine.mjs'), [verb, ...flags], sb.env, sb.repo);
     if (verb === 'status') { bytes += Buffer.byteLength(r.stdout ?? ''); try { last = JSON.parse(r.stdout); } catch { /* reported below */ } }
     else if (r.status !== 0) process.stderr.write(`engine ${verb} exit ${r.status}: ${r.stderr}${r.stdout}\n`);

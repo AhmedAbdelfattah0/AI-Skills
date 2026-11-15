@@ -574,7 +574,6 @@ export async function enroll(ctx) {
     if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));
     const r = enrollIn(E);
     await E.commit();
-    if (!r.already) try { io.appendLogOnce(E.P.log, { run_id: E.S.run_id, event: 'ENROLLED', event_id: `enrolled-${E.S.run_id}`, ...r.enrollment }); } catch { /* telemetry */ }
     return { enrolled: true, run_id: E.S.run_id, already: r.already, lifecycle: lifecycle(E.S), enrollment: r.enrollment };
   });
 }
@@ -601,7 +600,6 @@ async function recordPublished(ctx, entry) {
   return locked(ctx, async (E) => {
     E.S.published = [...(E.S.published ?? []), entry];
     await E.commit();
-    try { io.appendLogOnce(E.P.log, { run_id: E.S.run_id, event: 'PUBLISHED', event_id: `published-${E.S.run_id}-${entry.head}-${E.S.published.length}`, ...entry }); } catch { /* telemetry */ }
   });
 }
 
