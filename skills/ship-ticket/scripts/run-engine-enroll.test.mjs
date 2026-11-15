@@ -7,7 +7,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, appendFileSync, unlinkSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, appendFileSync, unlinkSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -70,14 +71,15 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   fx.commitAll(); // config.base HEAD: the merge base recorded with SHIP_READY keeps the candidate computable after the commit
   const a = authorize(fx, 'publish');
   allowed(a, 'publication');
-  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch']);
+  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base']);
+  assert.equal(a.out.binding.base, fx.defaultBranch, 'the remote default branch is the PR base');
   denied(authorize(fx, 'complete'), 'publish_evidence_missing');
   const body = join(fx.root, 'pr.md');
   writeFileSync(body, 'PR body');
   const p = spawnCli(fx, ['publish', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--pr-title', 'T-1: ship', '--pr-body-file', body, '--draft']);
   assert.equal(p.status, 0, p.stdout + p.stderr);
   assert.equal(fx.remoteHead(), fx.head());
-  assert.deepEqual(fx.ghLog(), [['pr', 'create', '--head', 'T-1-work', '--title', 'T-1: ship', '--body-file', body, '--draft']]);
+  assert.deepEqual(fx.ghLog(), [['pr', 'create', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft']]);
   assert.equal(fx.readState().published.at(-1).head, fx.head());
   const done = authorize(fx, 'complete');
   denied(done, 'ci_evidence_unavailable', 'publication');
@@ -278,9 +280,12 @@ test('migration: a run without enrollment (any state created before this change)
   fx.editState(S => { delete S.enrollment; delete S.contexts; }); // the legacy shape: no enrollment keys at all
   assert.equal(fx.cli('status').status, 0);
   assert.equal(fx.cli('resume').status, 0);
+  const idle = fx.cli('drive'); // nothing left to dispatch: only the entry check can refuse
+  assert.equal(idle.status, 2, idle.stdout);
+  assert.ok(idle.out.judgments.some(j => j.code === 'not_enrolled'));
   assert.equal(fx.cli('context', { phase: 'review' }).status, 0, 'context still delivers (unrecorded)');
   assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).out.code, 'not_enrolled');
-  // a git install may enroll a legacy run after its attempts (the pin is a commit, no worker can rewrite it)
+  // a git install may enroll a legacy run after its attempts (the pin is a commit; residual: when the target repo IS the skill repo, a worker can commit there)
   const e = fx.cli('enroll');
   assert.equal(e.status, 0, e.stderr);
   assert.equal(e.out.enrollment.attempts_before, 1);
@@ -293,7 +298,7 @@ test('migration: a run without enrollment (any state created before this change)
   g.editState(S => { S.attempts.push({ attempt_id: 'att-old', node: 'a', status: 'exited', quiesced: true }); });
   const refused = s.cli('enroll');
   assert.equal(refused.status, 2);
-  assert.match(refused.stderr, /enrollment_after_execution/);
+  assert.match(refused.stderr, /enrollment_after_execution: this run already executed 1 attempt\(s\).*operator path: start a new run/);
 });
 
 test('two runs and two tickets never authorize each other; read-only commands are never blocked', { skip: WIN_SKIP }, (t) => {
@@ -324,4 +329,147 @@ test('forged records: ENROLLED lines in RUN-STATE and the engine log are inert; 
   writeFileSync(fx.stateFile(), '{');
   assert.equal(authorize(fx, 'build').out.code, 'state_unreadable', 'a malformed state fails closed');
   assert.ok(existsSync(fx.stateFile()));
+});
+
+// ------------------------------------------------------------------ review repair (M1, M2, M4, M6, LOWs)
+
+/** Run the carrier for node a, expecting a refusal with `code` and no worker. */
+const carrierRefused = (fx, code) => {
+  const r = carrierRun(fx);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, new RegExp(code));
+  assert.deepEqual(fx.runs(), [], `${code}: no worker launched`);
+};
+
+test('carrier dispatch applies the full authorize build: REAPPROVAL, a changed plan narrative and a changed DAG refuse the worker', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  fx.editState(S => { S.config.securityPolicy = 2; S.security = { reapproval: { candidate_id: 'c-1' } }; });
+  carrierRefused(fx, 'security_reapproval');
+  fx.editState(S => { delete S.config.securityPolicy; delete S.security; });
+  const plan = readFileSync(fx.planFile, 'utf8');
+  writeFileSync(fx.planFile, plan.replace('Approved narrative.', 'Changed narrative.'));
+  carrierRefused(fx, 'approval_mismatch');
+  writeFileSync(fx.planFile, plan);
+  writeFileSync(fx.dagFile, readFileSync(fx.dagFile, 'utf8') + ' ');
+  carrierRefused(fx, 'dag_mismatch');
+});
+
+test('drive re-checks admission before every dispatch: a reference changed by the first worker stops the second', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t, { admit: false, nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', deps: ['a'], writes: ['src/b.txt'] }] });
+  const s = skillCopy(fx);
+  fx.behave({ a: { write: { 'src/a.txt': 'a1', [join(s.dir, 'references', 'brief.md')]: 'rewritten by a worker\n' } }, b: { write: { 'src/b.txt': 'b1' } } });
+  for (const [cmd, f] of [['init', { dag: fx.dagFile }], ['enroll', {}], ['context', { phase: 'build' }]]) assert.equal(s.cli(cmd, f).status, 0, cmd);
+  const d = s.cli('drive');
+  assert.equal(d.status, 2, d.stdout);
+  assert.ok(d.out.judgments.some(j => j.code === 'reference_changed'), d.stdout);
+  assert.deepEqual(fx.runs(), ['a'], 'b was never dispatched');
+});
+
+test('publish binds the PR base and the history: a reused branch with earlier commits is base_mismatch', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  writeFileSync(join(fx.repo, 'docs', 'wip.txt'), 'earlier WIP on the reused branch');
+  fx.okGit(['add', 'docs/wip.txt']); fx.okGit(['commit', '-q', '-m', 'old wip']);
+  fx.toShipReady(); // config.base HEAD: the candidate is relative to the WIP commit, so the WIP is unreviewed
+  fx.commitAll();
+  denied(authorize(fx, 'publish'), 'base_mismatch');
+  assert.equal(fx.cli('publish').status, 2);
+  assert.equal(fx.remoteHead(), null);
+});
+
+test('publish refuses history outside the candidate: an extra commit later reverted is history_outside_candidate', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  allowed(authorize(fx, 'publish'));
+  writeFileSync(join(fx.repo, 'secret.txt'), 'token');
+  fx.commitAll('oops');
+  fx.okGit(['revert', '--no-edit', 'HEAD']);
+  const r = authorize(fx, 'publish');
+  denied(r, 'history_outside_candidate');
+  assert.match(r.out.reasons[0], /secret\.txt/);
+});
+
+test('M4: a pre-change SHIP_READY needs a re-gate; a skill update that changes PHASE_REFS or SKILL.md is skill_drift with the operator path', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  fx.editState(S => { delete S.ship_ready.merge_base; });
+  const r = authorize(fx, 'publish');
+  denied(r, 'ship_ready_regate');
+  assert.match(r.out.reasons[0], /run gate ship-ready again/);
+  const g = enrollFixture(t, { admit: false });
+  const s = skillCopy(g);
+  for (const [cmd, f] of [['init', { dag: g.dagFile }], ['enroll', {}], ['context', { phase: 'build' }]]) assert.equal(s.cli(cmd, f).status, 0, cmd);
+  const cm = join(s.dir, 'scripts', 'context-manifest.mjs');
+  const code = readFileSync(cm, 'utf8');
+  writeFileSync(cm, code.replace("review: ['references/review.md'],", "review: ['references/review.md', 'references/units.md'],"));
+  const p = s.cli('authorize', { stage: 'build' });
+  assert.equal(p.out.code, 'skill_drift', p.stdout);
+  assert.match(p.out.reasons[0], /PHASE_REFS.*operator path: start a new run/);
+  writeFileSync(cm, code);
+  writeFileSync(join(s.dir, 'SKILL.md'), readFileSync(join(s.dir, 'SKILL.md'), 'utf8') + '\nedited\n');
+  const k = s.cli('authorize', { stage: 'build' });
+  assert.equal(k.out.code, 'skill_drift');
+  assert.match(k.out.reasons[0], /SKILL\.md is not the one this run enrolled.*start a new run/);
+});
+
+test('ship_ready_unbacked: a RUN-STATE without the engine-backed SHIP_READY line', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  const plan = readFileSync(fx.planFile, 'utf8');
+  writeFileSync(fx.planFile, plan.split('\n').filter(l => !l.includes('"SHIP_READY"')).join('\n'));
+  denied(authorize(fx, 'publish'), 'ship_ready_unbacked');
+});
+
+test('each SHIP_READY supersession conjunct alone denies publish', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  allowed(authorize(fx, 'publish'));
+  const S0 = fx.readState();
+  const cases = {
+    'a repair is open': (S) => { S.repairs.push({ id: 'repair-x', state: 'pending' }); },
+    'judgments are unresolved': (S) => { S.judgments.push({ code: 'x', reason: 'x' }); },
+    'attempts may still run': (S) => { S.attempts.push({ attempt_id: 'att-live', node: 'a', status: 'running' }); },
+    'the local proof is not of the ship-ready candidate': (S) => { S.local_proof.candidate_id = 'other'; },
+    'the last review is not a PASS of the ship-ready candidate': (S) => { S.review_chain.at(-1).outcome = 'FAIL'; },
+  };
+  for (const [reason, edit] of Object.entries(cases)) {
+    writeFileSync(fx.stateFile(), JSON.stringify(S0));
+    fx.editState(edit);
+    const r = authorize(fx, 'publish');
+    denied(r, 'ship_ready_superseded');
+    assert.deepEqual(r.out.reasons, [reason]);
+  }
+});
+
+test('enroll is refused while an attempt may run (attempts_live)', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t, { admit: false });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  fx.editState(S => { S.attempts.push({ attempt_id: 'att-live', node: 'a', status: 'running' }); });
+  const r = fx.cli('enroll');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /attempts_live/);
+});
+
+test('push_failed and remote_mismatch: publish records nothing unless the remote holds the authorized commit', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  const hook = (name, body) => { mkdirSync(join(fx.remote, 'hooks'), { recursive: true }); writeFileSync(join(fx.remote, 'hooks', name), body); chmodSync(join(fx.remote, 'hooks', name), 0o755); };
+  hook('pre-receive', '#!/bin/sh\necho "rejected by the remote" >&2\nexit 1\n');
+  const f = fx.cli('publish');
+  assert.equal(f.status, 1, f.stdout + f.stderr);
+  assert.equal(f.out.code, 'push_failed');
+  unlinkSync(join(fx.remote, 'hooks', 'pre-receive'));
+  const init = fx.okGit(['rev-list', '--max-parents=0', 'HEAD']).stdout.trim();
+  hook('post-receive', `#!/bin/sh\ngit update-ref refs/heads/T-1-work ${init}\n`);
+  const m = fx.cli('publish');
+  assert.equal(m.status, 1, m.stdout + m.stderr);
+  assert.equal(m.out.code, 'remote_mismatch');
+  assert.equal(fx.readState().published ?? null, null, 'nothing recorded');
+});
+
+test('LOW: the ticket must be a whole token of the branch (T-1 is not in T-10-x), and publish waits for the run lock', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  fx.okGit(['checkout', '-q', '-b', 'T-10-x']);
+  denied(authorize(fx, 'publish'), 'branch_not_ticket');
+  fx.okGit(['checkout', '-q', 'T-1-work']);
+  writeFileSync(fx.lockFile(), JSON.stringify({ pid: process.pid, process_start_time: null, host: hostname(), run_id: 'run-1', nonce: 'held' }));
+  const p = fx.cli('publish');
+  assert.equal(p.status, 2, p.stdout + p.stderr);
+  assert.match(p.stderr, /lock_held/);
+  assert.equal(fx.remoteHead(), null, 'nothing was pushed while another engine command held the run');
 });

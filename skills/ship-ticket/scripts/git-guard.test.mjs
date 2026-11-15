@@ -6,7 +6,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, chmodSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -21,11 +21,11 @@ const installed = (fx, extra = []) => { const r = guard(fx, ['install', ...extra
 const push = (fx, args, env = fx.env) => spawnSync('git', ['push', ...args], { cwd: fx.repo, encoding: 'utf8', env });
 const blocked = (r, code) => { assert.notEqual(r.status, 0, r.stdout + r.stderr); assert.match(r.stderr, new RegExp(`git-guard: push of refs/heads/\\S+ blocked \\(T-1\\): ${code}`)); };
 
-test('ticketOf: default pattern, capture groups and safe keys', () => {
-  assert.equal(ticketOf('T-1-work', TICKET_PATTERN), 'T-1');
-  assert.equal(ticketOf('SCRUM-140', TICKET_PATTERN), 'SCRUM-140');
-  assert.equal(ticketOf('feature-x', TICKET_PATTERN), null);
-  assert.equal(ticketOf('feat/AIS-12-x', TICKET_PATTERN), null, 'the default is anchored');
+test('ticketOf: the default pattern finds the ticket in every documented branch shape', () => {
+  const shapes = { 'T-1-work': 'T-1', 'SCRUM-140': 'SCRUM-140', 'feat/SCRUM-140-x': 'SCRUM-140', 'feature/AB-1': 'AB-1',
+    'AIS-BENCH-1-x': 'AIS-BENCH-1', 'fix/AIS-BENCH-1-phase0-slice2': 'AIS-BENCH-1', 'SCRUM-140-fix-2': 'SCRUM-140', 'feat/AIS-12-x': 'AIS-12',
+    'feature-x': null, main: null, 'release/v2': null };
+  for (const [branch, ticket] of Object.entries(shapes)) assert.equal(ticketOf(branch, TICKET_PATTERN), ticket, branch);
   assert.equal(ticketOf('feat/AIS-12-x', '^feat/([A-Z]+-[0-9]+)'), 'AIS-12');
 });
 
@@ -68,6 +68,7 @@ test('install refuses a shared (global) core.hooksPath and uses a repository-loc
   assert.equal(existsSync(join(fx.root, 'shared-hooks', 'pre-push')), false);
   writeFileSync(fx.env.GIT_CONFIG_GLOBAL, '');
   fx.okGit(['config', '--local', 'core.hooksPath', '.githooks']);
+  appendFileSync(join(fx.repo, '.git', 'info', 'exclude'), '.githooks/\n'); // an in-tree hooks dir must be ignored (M3)
   const ok = installed(fx);
   assert.equal(ok.hook, join(fx.repo, '.githooks', 'pre-push'));
   assert.equal(existsSync(join(fx.repo, '.git', 'hooks', 'pre-push')), false);
@@ -116,6 +117,7 @@ test('wrapped pushes still run the hook and are blocked; the documented bypasses
   // a guard installed into a repository core.hooksPath is dropped by unsetting it
   assert.equal(guard(fx, ['uninstall']).status, 0);
   fx.okGit(['config', '--local', 'core.hooksPath', '.githooks']);
+  appendFileSync(join(fx.repo, '.git', 'info', 'exclude'), '.githooks/\n');
   installed(fx);
   blocked(push(fx, ['origin', 'T-1-work']), 'not_enrolled');
   fx.okGit(['config', '--local', '--unset', 'core.hooksPath']);
@@ -159,4 +161,77 @@ test('linked worktrees: installed from a linked worktree the hook lands in the c
   const other = spawnSync('git', ['push', 'origin', 'T-1-other'], { cwd: wt, encoding: 'utf8', env: fx.env });
   blocked(other, 'not_enrolled');
   assert.equal(fx.remoteHead('T-1-other'), null);
+});
+
+// ------------------------------------------------------------------ review repair (H1, M3, M6, LOWs)
+
+test('H1: a branch naming a ticket that has engine state is guarded whatever the pattern', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  installed(fx, ['--pattern', '^never-matches$']);
+  blocked(push(fx, ['origin', 'T-1-work']), 'ship_ready_missing');
+  fx.okGit(['branch', 'feat/T-1-more']);
+  blocked(push(fx, ['origin', 'feat/T-1-more']), 'ship_ready_missing');
+  fx.okGit(['branch', 'T-10-other']);
+  assert.equal(push(fx, ['origin', 'T-10-other']).status, 0, 'T-10 is another ticket, not T-1');
+});
+
+test('M3: a hooks directory inside the work tree is refused unless ignored (.githooks, .husky; husky\'s ignored .husky/_ is fine)', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  for (const dir of ['.githooks', '.husky']) {
+    fx.okGit(['config', '--local', 'core.hooksPath', dir]);
+    const r = guard(fx, ['install']);
+    assert.equal(r.status, 1, dir);
+    assert.match(r.stderr, /hooks_dir_in_worktree/, dir);
+    assert.equal(existsSync(join(fx.repo, dir, 'pre-push')), false, dir);
+  }
+  mkdirSync(join(fx.repo, '.husky', '_'), { recursive: true });
+  writeFileSync(join(fx.repo, '.husky', '_', '.gitignore'), '*\n');
+  fx.okGit(['config', '--local', 'core.hooksPath', '.husky/_']);
+  installed(fx);
+  assert.equal(fx.git(['status', '--porcelain']).stdout.includes('.husky/_'), false, 'the candidate stays clean');
+});
+
+test('M6: backup_exists refuses to overwrite an earlier backup', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  const hooks = join(fx.repo, '.git', 'hooks');
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(join(hooks, 'pre-push'), '#!/bin/sh\nexit 0\n');
+  writeFileSync(join(hooks, BACKUP), '#!/bin/sh\nexit 0\n');
+  const r = guard(fx, ['install']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /backup_exists/);
+});
+
+test('LOW: a sh backup hook keeps its $0 semantics (basename pre-push, the hooks dir), like husky expects', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  const hooks = join(fx.repo, '.git', 'hooks');
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(join(hooks, 'pre-push'), '#!/bin/sh\necho "name=$(basename "$0") dir=$(dirname "$0") remote=$1" >&2\nexit 0\n');
+  chmodSync(join(hooks, 'pre-push'), 0o755);
+  installed(fx);
+  fx.okGit(['branch', 'feature-x']);
+  const p = push(fx, ['origin', 'feature-x']);
+  assert.equal(p.status, 0, p.stderr);
+  assert.match(p.stderr, /name=pre-push dir=\S*\.git\/hooks remote=origin/);
+});
+
+test('LOW: a moved guard script blocks only ticket-like branches, with the reinstall instruction', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  const r = installed(fx);
+  writeFileSync(r.hook, readFileSync(r.hook, 'utf8').replace(GUARD, join(fx.root, 'moved', 'git-guard.mjs')));
+  fx.okGit(['branch', 'feature-x']);
+  assert.equal(push(fx, ['origin', 'feature-x']).status, 0, 'a non-ticket push is never blocked');
+  const p = push(fx, ['origin', 'T-1-work']);
+  assert.notEqual(p.status, 0);
+  assert.match(p.stderr, /missing; run git-guard\.mjs install again/);
+  assert.equal(fx.remoteHead(), null);
+});
+
+test('documented bypass: HEAD:refs/heads/<name without a ticket> is not guarded', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  installed(fx);
+  const p = push(fx, ['origin', 'HEAD:refs/heads/shipped']);
+  assert.equal(p.status, 0, p.stderr);
+  assert.equal(fx.remoteHead('shipped'), fx.head(), 'the unauthorized commit reached the remote under another name');
 });

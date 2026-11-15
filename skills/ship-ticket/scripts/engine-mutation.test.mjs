@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { POSIX } from './engine-test-fixture.mjs';
 
@@ -54,7 +54,7 @@ export const MUTANTS = [
  * Copy the scripts dir, apply `mutant` (null: the control), run the target test files (default: the
  * property harness); resolve its exit code and failing test names.
  */
-export async function runHarness(t, mutant, { tests = ['engine-explore.test.mjs'] } = {}) {
+export async function runHarness(t, mutant, { tests = ['engine-explore.test.mjs'], git = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'engine-mutant-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dir = join(root, 'scripts');
@@ -62,6 +62,9 @@ export async function runHarness(t, mutant, { tests = ['engine-explore.test.mjs'
   // The skill around the scripts: enrollment pins SKILL.md and references/ (engine-enroll.mjs).
   cpSync(join(HERE, '..', 'references'), join(root, 'references'), { recursive: true });
   cpSync(join(HERE, '..', 'SKILL.md'), join(root, 'SKILL.md'));
+  // A git install of the copy (the supported install the enrollment tests assume), committed BEFORE the mutant.
+  if (git) for (const a of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'skill']])
+    assert.equal(spawnSync('git', a, { cwd: root }).status, 0, `git ${a.join(' ')}`);
   if (mutant) {
     const file = join(dir, mutant.file), text = readFileSync(file, 'utf8');
     assert.equal(text.split(mutant.from).length, 2, `mutant "${mutant.name}": its target text occurs exactly once in ${mutant.file}`);
@@ -98,4 +101,32 @@ test('mutation: the property harness passes on the unpatched copy and fails on e
   const survivors = mutants.filter(r => !caught(r)).map(r => `${r.m.name} (exit ${r.code}, violated ${r.violations.join(',') || 'none'})`);
   assert.deepEqual(survivors, [], 'every mutant is caught by an oracle verdict on its own property');
   assert.ok(mutants.length >= 8, 'the freshness, quiescence, retry-authorization, ceiling and drift guards are all mutated');
+});
+
+/**
+ * P0 E1 admission guards: each mutant deletes one enforcement line, and the enrollment tests that
+ * exercise that entry point must fail on it (the control, unpatched, passes them).
+ */
+export const ADMISSION_MUTANTS = [
+  { name: 'drive entry: an un-enrolled run is driven', file: 'run-engine.mjs', tests: 'migration',
+    from: "    if (!transient.length) { const a = admission(E.S, 'build'); if (!a.ok) transient.push(judgment(a.code, null, a.reasons.join('; '))); }\n", to: '' },
+  { name: 'per-dispatch: admission is not re-checked before a dispatch', file: 'engine-attempts.mjs', tests: 're-checks admission',
+    from: '  if (refusedAdmission) { E.admissionRefused = refusedAdmission; return false; }\n', to: '' },
+  { name: 'gate: a decision is recorded without enrollment or phase context', file: 'run-engine.mjs', tests: 'un-enrolled protected|gate never issues',
+    from: '      if (!adm.ok) return { gate: ctx.gate, candidate_id: null, lifecycle: adm.lifecycle,', to: '      if (false) return { gate: ctx.gate, candidate_id: null, lifecycle: adm.lifecycle,' },
+  { name: 'carrier: a worker is dispatched without authorize build', file: 'carrier.mjs', tests: 'carrier dispatch',
+    from: '  await (deps.verifyAdmission ?? verifyAdmission)(plan.repoRoot, approval);\n', to: '' },
+];
+
+test('P0 admission mutation: the enrollment tests pass unpatched and fail on each deleted admission guard', { skip: SKIP, timeout: 30 * 60 * 1000 }, async (t) => {
+  const pattern = (p) => [`--test-name-pattern=${p}`, 'run-engine-enroll.test.mjs'];
+  const control = await runHarness(t, null, { git: true, tests: pattern(ADMISSION_MUTANTS.map(m => m.tests).join('|')) });
+  assert.equal(control.code, 0, `the control passes the selected enrollment tests:\n${control.tail}`);
+  const survivors = [];
+  for (const m of ADMISSION_MUTANTS) {
+    const r = await runHarness(t, m, { git: true, tests: pattern(m.tests) });
+    t.diagnostic(JSON.stringify({ mutant: m.name, exit: r.code, failing_tests: r.failed }));
+    if (r.timedOut || r.code === 0) survivors.push(m.name);
+  }
+  assert.deepEqual(survivors, [], 'every admission mutant fails an enrollment test');
 });

@@ -21,8 +21,8 @@ node -e 'require("fs").appendFileSync(${JSON.stringify(join(root, 'gh.log'))}, J
 echo https://example.invalid/pr/1
 `;
 
-export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true } = {}) {
-  const fx = fixture(t, { commit: true, admit, config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
+export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true, nodes, behaviour } = {}) {
+  const fx = fixture(t, { commit: true, admit, ...(nodes ? { nodes } : {}), ...(behaviour ? { behaviour } : {}), config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
   const home = join(fx.root, 'home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), '');
@@ -33,12 +33,16 @@ export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = 
   const g = (args, opts = {}) => spawnSync('git', args, { cwd: opts.cwd ?? fx.repo, encoding: 'utf8', env: opts.env ?? fx.env });
   const ok = (r) => { assert.equal(r.status, 0, `${r.stdout}${r.stderr}`); return r; };
   if (base !== 'HEAD') ok(g(['branch', base]));
-  ok(g(['checkout', '-q', '-b', branch]));
+  const defaultBranch = ok(g(['symbolic-ref', '--short', 'HEAD'])).stdout.trim();
   const remote = join(fx.root, 'remote.git');
   ok(spawnSync('git', ['init', '-q', '--bare', remote], { encoding: 'utf8', env: fx.env }));
   ok(g(['remote', 'add', 'origin', remote]));
+  // The remote's default branch is the PR base authorize publish resolves when the DAG's base is HEAD.
+  ok(g(['push', '-q', 'origin', defaultBranch]));
+  ok(g(['remote', 'set-head', 'origin', defaultBranch]));
+  ok(g(['checkout', '-q', '-b', branch]));
   Object.assign(fx, {
-    remote, git: g, okGit: (args, opts) => ok(g(args, opts)),
+    remote, defaultBranch, git: g, okGit: (args, opts) => ok(g(args, opts)),
     head: () => ok(g(['rev-parse', 'HEAD'])).stdout.trim(),
     remoteHead: (b = branch) => { const r = spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`], { encoding: 'utf8', env: fx.env }); return r.status === 0 ? r.stdout.trim() : null; },
     commitAll: (msg = 'ship') => { ok(g(['add', '-A'])); ok(g(['commit', '-q', '-m', msg])); },
@@ -71,7 +75,7 @@ export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = 
  */
 export function skillCopy(fx, { git = false } = {}) {
   const dir = join(fx.root, git ? 'skill-git' : 'skill-copy');
-  cpSync(SKILL, dir, { recursive: true });
+  cpSync(SKILL, dir, { recursive: true, filter: (src) => !/[\\/]\.git$/.test(src) }); // a copy install never carries the source's git metadata
   if (git) for (const a of [['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'skill']]) assert.equal(spawnSync('git', a, { cwd: dir, env: fx.env }).status, 0);
   return { dir, cli: (cmd, flags = {}, runId = 'run-1') => {
     const r = spawnSync(process.execPath, [join(dir, 'scripts', 'run-engine.mjs'), ...cmd.split(' '), '--repo', fx.repo, '--ticket', 'T-1', '--run-id', runId,
