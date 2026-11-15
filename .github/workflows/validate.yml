@@ -90,6 +90,9 @@ jobs:
           skills/ship-ticket/scripts/run-engine-cr38.test.mjs
           skills/ship-ticket/scripts/run-engine-rebind.test.mjs
           skills/ship-ticket/scripts/run-engine-gap23.test.mjs
+          skills/ship-ticket/scripts/run-engine-enroll.test.mjs
+          skills/ship-ticket/scripts/git-guard.test.mjs
+          skills/ship-ticket/scripts/context-manifest.test.mjs
           skills/ship-ticket/scripts/gate-security.test.mjs
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs

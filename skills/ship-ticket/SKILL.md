@@ -63,6 +63,21 @@ target repository's Git metadata and never changes candidate identity.
 Telemetry is best effort. A missing or failed logger is a declared degradation
 and execution continues; measurement must never become a new blocker.
 
+## Enrollment
+
+The first action of the workflow, right after creating the run ID, is
+`run-engine.mjs enroll --repo <R> --ticket <T> --run-id <ID>`; enrollment is not
+telemetry and is never skipped. Start every phase with `run-engine.mjs context
+--phase <phase>` (UNDERSTAND and PLAN before entering native Plan Mode): it prints
+the phase's mandatory references after verifying their exact bytes. BUILD and SHIP
+go through the engine: `authorize --stage build` before BUILD, and `publish` is
+the only supported push and PR path. The manual flow is allowed only for read-only
+planning and diagnostics. Any degraded shipping needs `DEGRADED_APPROVED`: record
+`degrade --reason`, use **WAIT_FOR_USER** for the owner's decision, then record
+it verbatim with `approve-degraded --owner-quote`. Commands and limits:
+[references/execution-harness.md](references/execution-harness.md), Enrollment
+and authorization.
+
 ## Lifecycle
 
 | Phase | Outcome |
@@ -429,8 +444,9 @@ Read the plan and Design Contract from disk before writing.
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
   which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow
   [units.md](references/units.md); unit reviews do not replace the final review, which stays mandatory. Judgment points (`status.judgments`) come back to you or the
-  user. The manual flow below is the documented fallback when the engine or gate
-  module is unavailable (record `harness degraded`). A run that falls back after
+  user. When the engine or gate module is unavailable, record `harness degraded`
+  and `degrade --reason`; the manual flow below then stays read-only until the
+  owner's `DEGRADED_APPROVED` is recorded, and `publish` still ships it. A run that falls back after
   `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`
   it again, since its ledger no longer reflects the work. While that state file
   exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does

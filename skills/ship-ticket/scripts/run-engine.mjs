@@ -16,6 +16,9 @@
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
+ *      run-engine.mjs enroll|context|authorize|degrade|approve-degraded|publish ...: mandatory enrollment, trusted
+ *        context delivery, stage authorization and the supported publish path (engine-enroll.mjs owns them).
+ *        An ENROLLED run's `init` needs its plan context and its `drive` its build context (enrolledContextJudgments).
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -33,6 +36,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
+import { enrollCli, ENROLL_COMMANDS, enrolledContextJudgments } from './engine-enroll.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -286,6 +290,8 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
 export async function init(ctx) {
   return locked(ctx, async (E) => {
     if (existsSync(E.P.state)) throw coded('state_exists', `${E.P.state} already exists`);
+    const unread = enrolledContextJudgments(ctx, 'plan');
+    if (unread.length) throw coded(unread[0].code, unread[0].reason);
     const { text, digest, events, start } = approvedPlan(ctx, E.P);
     let raw;
     try { raw = readFileSync(ctx.dagFile); } catch { throw coded('dag_invalid', 'dagFile unreadable'); }
@@ -345,6 +351,7 @@ export async function resume(ctx) {
 export async function drive(ctx) {
   return locked(ctx, async (E) => {
     const transient = verifyBinding(E);
+    if (!transient.length) transient.push(...enrolledContextJudgments(ctx, 'build'));
     if (transient.length) return { ...view(E, transient), outcome: 'judgment' };
     await deliver(E);
     const live = await reconcile(E, 0);
@@ -550,6 +557,18 @@ export function gateAuditFields(kind, input, v) {
   return out;
 }
 
+/**
+ * Read-only, lock-free engine view for authorize/approve-degraded (engine-enroll.mjs): the state and
+ * its binding judgments ({ S, unbound }), or the refusal code that loading or verifying raised.
+ */
+export function readEngine(ctx) {
+  try {
+    const E = open(ctx);
+    E.load();
+    return { S: E.S, unbound: verifyBinding(E) };
+  } catch (e) { return { code: e.code ?? 'state_unreadable', reasons: [e.message] }; }
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -612,7 +631,10 @@ async function main(argv) {
   return commands[cmd](ctx);
 }
 
-if (isEntrypoint(import.meta.url)) {
+if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) {
+  enrollCli(process.argv.slice(2), readEngine).then(code => { process.exitCode = code; })
+    .catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
+} else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true))) process.exitCode = 2;
