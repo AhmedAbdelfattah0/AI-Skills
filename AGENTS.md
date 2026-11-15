@@ -455,6 +455,14 @@ narrative, while compact append-only events record PROVE, REVIEW, repair,
 confirmation and SHIP readiness without invalidating reviewed code. SHIP
 recomputes the candidate ID before commit and on resume. Commit, push, PR, CI and
 tracker outcomes are external facts and never cause a second repository write.
+Each accepted review is also bound to the merge base its candidate was computed
+against (`engine-freshness.mjs`). It stays valid while the candidate recomputed
+there is unchanged, so a commit, push, rename or excluded-path edit never
+invalidates it. Any byte change (`review_stale`) or a base merged or rebased in
+(`review_base_moved`) refuses ship-ready and publish until the current candidate
+is reviewed. `run-engine.mjs next` (`engine-next.mjs`) derives one disposition
+per stage and the one `next_action` from existing records; the skill follows it
+after every tool return.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

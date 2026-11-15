@@ -680,6 +680,7 @@ export async function gate(ctx) {
       reconcileReviews(E);
       const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
+      E.candidateMergeBase = c.merge_base ?? null; // E3: the merge base an accepted review is bound to
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
       const v = drifted.length ? gateNo(drifted[0].code, drifted.map(j => `${j.node}: ${j.reason}`), { judgment_point: true })

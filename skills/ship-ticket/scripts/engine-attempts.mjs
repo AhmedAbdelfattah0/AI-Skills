@@ -17,6 +17,7 @@ import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
+import { bindReview } from './engine-freshness.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -191,6 +192,7 @@ function completeRepair(E, repair, a, paths) {
   if (!c.candidate_id) { pushJudgment(S, 'candidate_unavailable', repair.id, `repaired candidate not computable: ${c.reason}`); return; }
   S.review_chain.push({ review_execution: repair.review_execution, kind: 'repair', old_candidate: repair.old_candidate ?? null,
     new_candidate: c.candidate_id, write_set: [...repair.writes], attempt_id: a.attempt_id });
+  bindReview(S, { review_execution: repair.review_execution, kind: 'repair', candidate_id: c.candidate_id, merge_base: c.merge_base ?? null });
   note(S, 'REPAIR_RECORDED', { review_execution: repair.review_execution, new_candidate: c.candidate_id });
   S.freeze = { candidate: c.candidate_id, seq: S.seq };
   S.frozen_candidate = c.candidate_id;

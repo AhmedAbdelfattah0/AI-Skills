@@ -41,6 +41,7 @@ import { trustedEvents } from './engine-authority.mjs';
 import { REVIEW_ROLE_OF } from './review-intervals.mjs';
 import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
+import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
@@ -185,6 +186,7 @@ export const RULES = Object.freeze([
   // REVIEW
   { id: 'review.retry', stage: 'REVIEW', when: (S, f, x) => x.retry && x.authorizing?.review_execution !== x.retry.review_execution
     && reviewOf(S, f, x, x.retry.review_execution) },
+  { id: 'review.stale', stage: 'REVIEW', when: (S, f, x) => x.authorizing && x.authorizing === x.O && f.freshness?.fresh === false && staleResult(f) },
   { id: 'review.terminal', stage: 'REVIEW', when: (S, f, x) => x.O && x.O.outcome === 'FAIL' && !x.repair
     && res('NEEDS_APPROVAL', 'review_terminal', 'owner_retry', { reasons: [`review ${x.rx} FAILED with no repair (overflow or nothing to fix): only an owner RETRY linked to it continues`] }) },
   { id: 'review.recorded', stage: 'REVIEW', when: (S, f, x) => x.O && done(x.O.outcome === 'PASS' ? 'review_passed' : 'review_failed_repair_owed', { review_execution: x.rx, candidate_id: x.O.candidate_id }) },
@@ -206,6 +208,7 @@ export const RULES = Object.freeze([
   { id: 'confirmation.not_needed', stage: 'CONFIRMATION', when: (S, f, x) => !x.repairRecord && done('not_needed') },
   { id: 'confirmation.failed', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation?.outcome === 'FAIL'
     && res('FAILED', 'confirmation_failed', 'none', { owner: 'human', reasons: [`the targeted confirmation of ${x.rx} FAILED: that is the result (never a new review cycle); only an owner RETRY continues`] }) },
+  { id: 'confirmation.stale', stage: 'CONFIRMATION', when: (S, f, x) => x.authorizing && x.authorizing === x.confirmation && f.freshness?.fresh === false && staleResult(f) },
   { id: 'confirmation.recorded', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation && done('confirmed', { review_execution: x.rx, candidate_id: x.confirmation.candidate_id }) },
   { id: 'confirmation.context', stage: 'CONFIRMATION', when: (S, f) => f.admission?.review && !f.admission.review.ok
     && res(CONTEXT_CODES.includes(f.admission.review.code) ? 'READY' : 'BLOCKED', f.admission.review.code, CONTEXT_CODES.includes(f.admission.review.code) ? 'context' : 'resolve',
@@ -243,6 +246,13 @@ export const RULES = Object.freeze([
   { id: 'ci.owed', stage: 'CI', when: (S, f) => res('BLOCKED', f.completeAuth?.code ?? 'ci_evidence_unavailable', 'collect_ci',
     { reasons: f.completeAuth?.reasons?.length ? f.completeAuth.reasons : ['CI evidence is not recorded by the engine yet (slice E6)'] }) },
 ]);
+
+/**
+ * E3: the authorizing review no longer covers the candidate bytes. Under the gate's rules a new original needs a trusted
+ * owner RETRY (a confirmation exists only for a repair), so this is the owner's stop; a RETRY makes review.retry READY.
+ */
+const staleResult = (f) => res(FRESHNESS_CODES.includes(f.freshness.code) ? 'NEEDS_APPROVAL' : 'BLOCKED', f.freshness.code,
+  FRESHNESS_CODES.includes(f.freshness.code) ? 'owner_retry' : 'resolve', { owner: 'human', reasons: f.freshness.reasons });
 
 /** A trusted, unconsumed owner RETRY of the last review: the new original review of the current candidate is owed. */
 function reviewOf(S, f, x, rx) {
@@ -284,7 +294,7 @@ export function derive(S, f, { omit = [] } = {}) {
   const { rule: _r, disposition, code, action, owner, reasons, ...details } = s ?? {};
   const next_action = current ? { stage: current, action, reason: code, owner, disposition, reasons, ...details }
     : { stage: null, action: 'none', reason: 'completed', owner: 'orchestrator', disposition: 'COMPLETED', reasons: [] };
-  return { disposition: next_action.disposition, next_action, stages };
+  return { disposition: next_action.disposition, next_action, stages, review_freshness: f.freshness ?? null };
 }
 
 // ---- facts from disk ---------------------------------------------------------------------------
@@ -361,6 +371,7 @@ export async function gather(E, ext) {
     candidate: { id: candidate.candidate_id ?? null, reason: candidate.reason ?? null, merge_base: candidate.merge_base ?? null },
     tree: dirty === null ? { dirty: null, paths: [] } : { dirty: Object.keys(dirty).length > 0, paths: Object.keys(dirty).sort() },
     head, dispatches: reviewDispatches(ctx.repoRoot, S.ticket, S.run_id, now), lastGate: lastGates(ctx.repoRoot, S.ticket, S.run_id),
+    freshness: reviewFreshness(S, ctx.repoRoot),
     confirmationPolicy: rx && (S.review_chain ?? []).some(r => r.review_execution === rx && r.kind === 'repair') ? confirmationPolicy(S, rx) : null };
   if (S.ship_ready?.candidate_id && f.tree.dirty === false && !(S.published ?? []).some(p => p.head === head)) f.publishAuth = await ext.authorize('publish');
   if ((S.published ?? []).some(p => p.head === head)) f.completeAuth = await ext.authorize('complete');

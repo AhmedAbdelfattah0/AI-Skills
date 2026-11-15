@@ -458,6 +458,27 @@ writes (existence, type, mode, content hash; never mtime). On `drive` or
 `resume`, a changed input or output marks the node and its dependency closure
 `stale`; stale nodes re-run automatically only before the REVIEW freeze.
 
+**Review freshness (candidate-bound).** Every accepted original and
+confirmation, and every repair record, is bound in `state.review_bindings` to its
+candidate and the merge base that candidate was computed against. A confirmation
+is bound to its repaired candidate's frozen base. The `review_chain` records are
+unchanged. The authorizing review (the last chain record, a PASS) is fresh while
+the candidate recomputed against that merge base is still its candidate. A commit,
+push, fetch, branch rename, excluded-path edit or commit, or a rebase that keeps
+base and tree never invalidates it. Any change to the candidate bytes does:
+`review_stale` (same base: an edit, an amend of content) or `review_base_moved` (a
+`config.base` branch merged or rebased in; with `config.base` HEAD only
+`review_stale` is reported). **Enforced:** `gate ship-ready` refuses to record
+`SHIP_READY`; `gate review` refuses a confirmation whose base branch moved since
+the repair; `authorize publish` (and so `publish` and the guard) refuses with
+the same code. All three hold until an accepted review of the current candidate
+exists: the repair's one targeted confirmation, or an original after an owner
+`RETRY`. **Detected:** `next`/`status` report `review_freshness`. A stale review
+is `NEEDS_APPROVAL` `owner_retry`, because the gate accepts a new original only
+after a trusted `RETRY`, and the `RETRY` then makes the new review `READY`. Not
+covered: a review file that names the current candidate id is accepted whatever
+its reviewer read (slice E7).
+
 **REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
 records the frozen candidate), drift is a judgment point (`post_freeze_drift`).
 `gate ship-ready` refuses with it too (exit 2, a judgment point) while any done node's declared

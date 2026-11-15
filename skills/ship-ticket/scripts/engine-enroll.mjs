@@ -40,6 +40,7 @@ import * as io from './engine-io.mjs';
 import { coded } from './engine-dag.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
+import { reviewFreshness } from './engine-freshness.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -234,6 +235,9 @@ export async function authorize(ctx, readEngine) {
   const cand = io.candidateId(ctx.repoRoot, S.ship_ready.merge_base ?? S.config?.base ?? 'HEAD', S.pinned_exclusions ?? []);
   if (!cand.candidate_id) return deny('candidate_unavailable', [cand.reason], 'evidence');
   if (cand.candidate_id !== S.ship_ready.candidate_id) return deny('candidate_stale', [`SHIP_READY is for ${S.ship_ready.candidate_id}, the candidate now is ${cand.candidate_id}`], 'admitted');
+  // E3: and against the merge base the authorizing review was bound to (a review is valid only for the bytes it covered).
+  const fresh = reviewFreshness(S, ctx.repoRoot);
+  if (fresh && !fresh.fresh) return deny(fresh.code, fresh.reasons, 'admitted');
   // History, not only the final tree: every path any commit since the merge base touched is a reviewed candidate path
   // (or an excluded one), so a later-reverted commit cannot carry unreviewed bytes to the remote.
   const covered = new Set([...(cand.paths ?? []), ...(S.pinned_exclusions ?? [])]);

@@ -272,14 +272,14 @@ export const admittedInit = (initFn) => async (ctx, ...rest) => { const out = aw
  * the engine behaviour from before enrollment; run-engine-enroll.test.mjs covers the additions.
  */
 export function preEnrollmentState(S) {
-  const { enrollment: _e, contexts: _c, publish_intent: _p, ...rest } = S;
+  const { enrollment: _e, contexts: _c, publish_intent: _p, review_bindings: _b, ...rest } = S;
   if (rest.ship_ready) { const { merge_base: _m, ...sr } = rest.ship_ready; rest.ship_ready = sr; }
   return rest;
 }
 
-/** A status output without the keys P0 E2-min added (disposition, next_action, stages): the goldens pin the view from before. */
+/** A status output without the keys P0 E2-min and E3 added (disposition, next_action, stages, review_freshness): the goldens pin the view from before. */
 export function preNextStatus(out) {
   if (!out || typeof out !== 'object') return out;
-  const { disposition: _d, next_action: _n, stages: _s, ...rest } = out;
+  const { disposition: _d, next_action: _n, stages: _s, review_freshness: _f, ...rest } = out;
   return rest;
 }

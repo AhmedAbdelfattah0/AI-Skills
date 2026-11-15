@@ -253,7 +253,9 @@ table, and an in-flight worker is not one of them.
 - Preserve user work. Never reset, stash, overwrite or delete unrelated changes.
 - After REVIEW passes, candidate bytes do not change. The execution record and
   predeclared session-log entry may be appended before the commit because they are
-  excluded from the reviewed candidate identity.
+  excluded from the reviewed candidate identity. A review is valid only for the
+  bytes it covered: any later change is `review_stale` or `review_base_moved`, and
+  ship-ready and publish refuse until the current candidate is reviewed.
 
 ## Preflight the review before building
 

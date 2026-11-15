@@ -18,6 +18,7 @@ import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
+import { bindReview, bindingOf, reviewFreshness } from './engine-freshness.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -188,6 +189,12 @@ async function reviewGate(E, input, candidate) {
   if (S.freeze && !retry && candidate !== S.freeze.candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
+  // E3: a confirmation reviews the repaired candidate as frozen; a config.base branch that moved under the branch since the repair
+  // (a merge or rebase) leaves the same id against the new merge base but ships another tree.
+  const repaired = input.kind === 'confirmation' ? S.review_chain.findLast(r => r.review_execution === input.review_execution && r.kind === 'repair') : null;
+  const frozenBase = repaired ? bindingOf(S, repaired)?.merge_base ?? null : null;
+  if (frozenBase && S.config.base && S.config.base !== 'HEAD' && E.candidateMergeBase && E.candidateMergeBase !== frozenBase)
+    return gateNo('review_base_moved', [`${S.config.base} moved under the branch since repair ${input.review_execution} (merge base ${frozenBase} -> ${E.candidateMergeBase}); revert it, or the owner appends a RETRY`]);
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
   const { units_consumed: consumedUnits, ...review } = input;
   // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
@@ -216,6 +223,8 @@ async function reviewGate(E, input, candidate) {
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
+  bindReview(S, { review_execution: v.record.review_execution, kind: v.record.kind, candidate_id: v.record.candidate_id,
+    merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(typeof input.second_opinion?.candidate_id === 'string' ? { second_opinion_candidate_id: input.second_opinion.candidate_id } : {}) });
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,
@@ -354,6 +363,9 @@ async function shipReadyGate(E, input, candidate) {
     note(S, 'LOCAL_PROOF', { candidate_id: candidate, passed: commands.length > 0 && commands.every(c => c.result === 'pass') });
     v = gateShipReady({ state: E.S, current });
   }
+  // E3: the accepted review must still cover these bytes against the merge base it was bound to (a moved base ships another tree).
+  const stale = v.ok ? reviewFreshness(S, E.ctx.repoRoot) : null;
+  if (stale && !stale.fresh) return gateNo(stale.code, stale.reasons);
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
     S.ship_ready = { candidate_id: candidate, seq: S.seq };
