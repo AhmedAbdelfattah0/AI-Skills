@@ -11,6 +11,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSpec } from './provider-env.mjs';
+import { ADMIT_CLI, admitRun } from './engine-admit.test-helper.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -114,7 +115,7 @@ export function warmFakeClaude(bin, env) {
  * narrativeExtra: text appended to the approved narrative (e.g. a plan §3a security block).
  */
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
-  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '' } = {}) {
+  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '', admit = true } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, 'repo');
@@ -183,7 +184,13 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
       const r = spawnSync(process.execPath, args, { encoding: 'utf8', env, timeout });
       let out = null;
       try { out = JSON.parse(r.stdout); } catch { /* not JSON */ }
+      if (cmd === 'init' && r.status === 0 && admit) fx.admit(runId);
       return { status: r.status, out, stderr: r.stderr, stdout: r.stdout };
+    },
+    /** Enroll the run and record its build, review and ship contexts (done after every successful cli init unless `admit: false`). */
+    admit: (runId = 'run-1') => {
+      const a = spawnSync(process.execPath, [ADMIT_CLI, repo, 'T-1', runId], { encoding: 'utf8', env });
+      assert.equal(a.status, 0, `admit ${runId}: ${a.stderr}`);
     },
     /** `run-engine.mjs gate <kind> --input <file>` with `input` written to a temp file. */
     gate: (kind, input, opts) => {
@@ -256,3 +263,6 @@ export const failReview = (rx, candidate, path, promptFile) => ({ review_executi
 /** A targeted confirmation of `rx` on the repaired candidate. */
 export const confirmReview = (rx, candidate) => ({ review_execution: rx, kind: 'confirmation',
   primary: { reviewer_identity: 'opus:review', candidate_id: candidate, checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed' } });
+
+/** An in-process `init` that admits the run afterwards (the supported init -> enroll -> context steps). */
+export const admittedInit = (initFn) => async (ctx, ...rest) => { const out = await initFn(ctx, ...rest); await admitRun(ctx); return out; };

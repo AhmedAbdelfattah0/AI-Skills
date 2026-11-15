@@ -120,6 +120,9 @@ async function runMutant(t, mutant) {
   const dir = join(root, 'skills', 'ship-ticket', 'scripts');
   mkdirSync(dir, { recursive: true });
   cpSync(HERE, dir, { recursive: true });
+  // The skill around the scripts: enrollment pins SKILL.md and references/ (engine-enroll.mjs).
+  cpSync(join(HERE, '..', 'references'), join(dir, '..', 'references'), { recursive: true });
+  cpSync(join(HERE, '..', 'SKILL.md'), join(dir, '..', 'SKILL.md'));
   cpSync(VAPT, join(root, 'skills', 'vapt'), { recursive: true });
   if (mutant) {
     const file = join(dir, mutant.file), text = readFileSync(file, 'utf8');

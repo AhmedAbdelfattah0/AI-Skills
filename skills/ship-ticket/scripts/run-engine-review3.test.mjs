@@ -33,7 +33,9 @@ import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { init, drive, gate } from './run-engine.mjs';
+import { init as initRaw, drive, gate } from './run-engine.mjs';
+import { admittedInit } from './engine-test-fixture.mjs';
+const init = admittedInit(initRaw);
 import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
   primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';

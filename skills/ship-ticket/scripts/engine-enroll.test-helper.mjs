@@ -1,15 +1,16 @@
 /**
  * Shared fixture for run-engine-enroll.test.mjs and git-guard.test.mjs (not a test file). Builds on
  * engine-test-fixture.mjs: a temp repo with an approved plan, a fake `claude` and a fake `gh` on
- * PATH, a base branch `ship-base` bound as config.base, a ticket branch `T-1-work`, and a local bare
- * remote `origin`. Git runs with an isolated global config (no user hooksPath, signing or aliases).
+ * PATH, a ticket branch `T-1-work`, and a local bare remote `origin`. The DAG is the standard fixture
+ * DAG (config.base HEAD) unless `base` names a branch. Git runs with an isolated global config.
+ * `admit` (default true) is the fixture's: a successful `init` is followed by enroll + contexts.
  */
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { fixture, passReview, gitPath } from './engine-test-fixture.mjs';
+import { fixture, passReview } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 export const SKILL = fileURLToPath(new URL('..', import.meta.url));
@@ -20,8 +21,8 @@ node -e 'require("fs").appendFileSync(${JSON.stringify(join(root, 'gh.log'))}, J
 echo https://example.invalid/pr/1
 `;
 
-export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', config = {} } = {}) {
-  const fx = fixture(t, { commit: true, config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
+export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true } = {}) {
+  const fx = fixture(t, { commit: true, admit, config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
   const home = join(fx.root, 'home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), '');
@@ -29,7 +30,7 @@ export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', conf
   chmodSync(join(fx.root, 'bin', 'gh'), 0o755);
   Object.assign(fx.env, { HOME: home, GIT_CONFIG_GLOBAL: join(home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' });
-  const g = (args, opts = {}) => spawnSync('git', args, { cwd: fx.repo, encoding: 'utf8', env: opts.env ?? fx.env, ...opts });
+  const g = (args, opts = {}) => spawnSync('git', args, { cwd: opts.cwd ?? fx.repo, encoding: 'utf8', env: opts.env ?? fx.env });
   const ok = (r) => { assert.equal(r.status, 0, `${r.stdout}${r.stderr}`); return r; };
   if (base !== 'HEAD') ok(g(['branch', base]));
   ok(g(['checkout', '-q', '-b', branch]));
@@ -41,12 +42,10 @@ export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', conf
     head: () => ok(g(['rev-parse', 'HEAD'])).stdout.trim(),
     remoteHead: (b = branch) => { const r = spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`], { encoding: 'utf8', env: fx.env }); return r.status === 0 ? r.stdout.trim() : null; },
     commitAll: (msg = 'ship') => { ok(g(['add', '-A'])); ok(g(['commit', '-q', '-m', msg])); },
-    ledgerFile: () => gitPath(fx.repo, 'ai-skills/ship-ticket/T-1.enrollment.json'),
-    ledger: () => JSON.parse(readFileSync(fx.ledgerFile(), 'utf8')),
     ghLog: () => (existsSync(join(fx.root, 'gh.log')) ? readFileSync(join(fx.root, 'gh.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []),
-    /** enroll, plan context, init, build context, drive, a PASS review, ship-ready: the engine path up to SHIP. */
+    /** init (the fixture admits it), drive, a PASS review, ship-ready: the engine path up to SHIP. */
     toShipReady: () => {
-      for (const [cmd, f] of [['enroll', {}], ['context', { phase: 'plan' }], ['init', { dag: fx.dagFile }], ['context', { phase: 'build' }], ['drive', {}]]) {
+      for (const [cmd, f] of [['init', { dag: fx.dagFile }], ['drive', {}]]) {
         const r = fx.cli(cmd, f);
         assert.equal(r.status, 0, `${cmd}: ${r.stdout.slice(0, 400)}${r.stderr}`);
       }
@@ -56,7 +55,7 @@ export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', conf
       assert.equal(sr.status, 0, sr.stdout + sr.stderr);
     },
   });
-  // The fixture's candidate helper uses base HEAD; with a base branch the engine's candidate is relative to it.
+  // The fixture's candidate helper uses base HEAD; a base branch shifts the merge base.
   fx.candidate = () => {
     const r = spawnSync(process.execPath, [join(SKILL, 'scripts', 'candidate-id.mjs'), '--repo', fx.repo, '--base', base,
       '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'], { encoding: 'utf8' });
@@ -66,10 +65,14 @@ export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', conf
   return fx;
 }
 
-/** A private copy of the whole skill (scripts, references, SKILL.md) whose references a test may edit. */
-export function skillCopy(fx) {
-  const dir = join(fx.root, 'skill-copy');
-  cpSync(SKILL, dir, { recursive: true, filter: (src) => !src.includes(`${'/'}node_modules`) });
+/**
+ * A private copy of the whole skill whose files a test may edit, as a copy install (`git: false`) or
+ * as a git install (`git: true`: its own repository with one commit). `cli` runs the copy's engine.
+ */
+export function skillCopy(fx, { git = false } = {}) {
+  const dir = join(fx.root, git ? 'skill-git' : 'skill-copy');
+  cpSync(SKILL, dir, { recursive: true });
+  if (git) for (const a of [['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'skill']]) assert.equal(spawnSync('git', a, { cwd: dir, env: fx.env }).status, 0);
   return { dir, cli: (cmd, flags = {}, runId = 'run-1') => {
     const r = spawnSync(process.execPath, [join(dir, 'scripts', 'run-engine.mjs'), ...cmd.split(' '), '--repo', fx.repo, '--ticket', 'T-1', '--run-id', runId,
       ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { encoding: 'utf8', env: fx.env, timeout: 60000 });

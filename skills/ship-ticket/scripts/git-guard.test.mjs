@@ -82,12 +82,11 @@ test('fail closed: a ticket branch with no enrollment cannot be pushed; other br
   assert.equal(push(fx, ['origin', 'v1']).status, 0, 'tags pass');
   fx.okGit(['branch', 'feature-x']);
   assert.equal(push(fx, ['origin', 'feature-x']).status, 0, 'non-ticket branches pass');
-  // an enrolled run with no engine SHIP_READY is denied by authorize itself
-  assert.equal(fx.cli('enroll', {}).status, 0);
-  assert.equal(fx.cli('context', { phase: 'ship' }).status, 0);
-  blocked(push(fx, ['origin', 'T-1-work']), 'engine_not_initialized');
-  // a malformed ledger fails closed
-  writeFileSync(fx.ledgerFile(), '{');
+  // an admitted run with no engine SHIP_READY is denied by authorize itself
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  blocked(push(fx, ['origin', 'T-1-work']), 'ship_ready_missing');
+  // a malformed engine state fails closed
+  writeFileSync(fx.stateFile(), '{');
   blocked(push(fx, ['origin', 'T-1-work']), 'not_enrolled');
 });
 
@@ -127,7 +126,6 @@ test('an authorized run: publish pushes through the installed guard (no lock re-
   const fx = enrollFixture(t);
   fx.toShipReady();
   fx.commitAll();
-  assert.equal(fx.cli('context', { phase: 'ship' }).status, 0);
   installed(fx);
   // pushing an older sha to the ticket branch is not the authorized HEAD
   blocked(push(fx, ['origin', 'HEAD~1:refs/heads/T-1-work']), 'push_not_head');
@@ -143,4 +141,22 @@ test('an authorized run: publish pushes through the installed guard (no lock re-
   fx.commitAll('unreviewed');
   blocked(push(fx, ['origin', 'T-1-work']), 'candidate_stale');
   assert.notEqual(fx.remoteHead(), fx.head());
+});
+
+test('linked worktrees: installed from a linked worktree the hook lands in the common hooks dir and judges each work tree by its own engine state', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  fx.toShipReady();
+  fx.commitAll();
+  const wt = join(fx.root, 'wt');
+  fx.okGit(['worktree', 'add', '-q', '-b', 'T-1-other', wt, 'HEAD']);
+  const r = guard({ ...fx, repo: wt }, ['install']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).hook, join(fx.repo, '.git', 'hooks', 'pre-push'), 'the common hooks directory');
+  // the main work tree has an admitted, ship-ready run: its push is authorized
+  assert.equal(push(fx, ['origin', 'T-1-work']).status, 0);
+  assert.equal(fx.remoteHead(), fx.head());
+  // the linked work tree has no engine state of its own (state is per work tree): fail closed
+  const other = spawnSync('git', ['push', 'origin', 'T-1-other'], { cwd: wt, encoding: 'utf8', env: fx.env });
+  blocked(other, 'not_enrolled');
+  assert.equal(fx.remoteHead('T-1-other'), null);
 });

@@ -108,8 +108,10 @@ import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { planNarrativeDigest, validateEngineDag, init, status, drive, resume, mark, acquireLock,
+import { planNarrativeDigest, validateEngineDag, init as initRaw, status, drive, resume, mark, acquireLock,
   writeStateAtomic } from './run-engine.mjs';
+import { admittedInit } from './engine-test-fixture.mjs';
+const init = admittedInit(initRaw);
 import { gateReview, gateShipReady } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';

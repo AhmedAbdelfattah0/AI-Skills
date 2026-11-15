@@ -4,8 +4,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
+import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch as carrierDispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
   ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
+/** The carrier's mechanics under test; its enrollment boundary (verifyAdmission) is covered by run-engine-enroll.test.mjs. */
+const dispatch = (config, deps = {}) => carrierDispatch(config, { verifyAdmission: () => ({ ok: true }), ...deps });
 import { extractUsage, summarizeUsage } from './usage.mjs';
 import { WORKER_FAILURE_BOUND_MS, waitFor, waitForFile, processGone } from './test-wait.test-helper.mjs';
 

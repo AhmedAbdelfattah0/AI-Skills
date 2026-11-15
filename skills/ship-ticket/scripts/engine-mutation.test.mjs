@@ -59,6 +59,9 @@ export async function runHarness(t, mutant, { tests = ['engine-explore.test.mjs'
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dir = join(root, 'scripts');
   cpSync(HERE, dir, { recursive: true });
+  // The skill around the scripts: enrollment pins SKILL.md and references/ (engine-enroll.mjs).
+  cpSync(join(HERE, '..', 'references'), join(root, 'references'), { recursive: true });
+  cpSync(join(HERE, '..', 'SKILL.md'), join(root, 'SKILL.md'));
   if (mutant) {
     const file = join(dir, mutant.file), text = readFileSync(file, 'utf8');
     assert.equal(text.split(mutant.from).length, 2, `mutant "${mutant.name}": its target text occurs exactly once in ${mutant.file}`);

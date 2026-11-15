@@ -17,6 +17,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { ADMIT_CLI } from './engine-admit.test-helper.mjs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -47,6 +48,10 @@ export function cliAsync(fx, cmd, flags = {}, { timeout = 60000 } = {}) {
       clearTimeout(timer);
       let out = null;
       try { out = JSON.parse(stdout); } catch { /* not JSON */ }
+      if (cmd === 'init' && status === 0 && !timedOut) {
+        const a = spawnSync(process.execPath, [ADMIT_CLI, fx.repo, 'T-1', 'run-1'], { encoding: 'utf8', env: fx.env });
+        if (a.status !== 0) stderr += `\nadmit failed: ${a.stderr}`;
+      }
       resolve({ status: timedOut ? null : status, out, stdout, stderr, timedOut });
     });
   });

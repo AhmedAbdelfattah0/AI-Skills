@@ -38,7 +38,9 @@ import * as DAG from './engine-dag.mjs';
 // The one cutoff constant (never a copy of its value here: it is finalized at merge).
 const SECURITY_POLICY_CUTOFF = DAG.SECURITY_POLICY_CUTOFF;
 const ENGINE_SECURITY_CODES = DAG.ENGINE_SECURITY_CODES ?? [];
-import { init, gate as gateCmd } from './run-engine.mjs';
+import { init as initRaw, gate as gateCmd } from './run-engine.mjs';
+import { admittedInit } from './engine-test-fixture.mjs';
+const init = admittedInit(initRaw);
 import { securityRefusal, reassessRefusal, coverageRefusal, securityRowsRefusal } from './engine-gates.mjs';
 import * as AUTH from './engine-authority.mjs';
 import { gateShipReady } from './gate.mjs';

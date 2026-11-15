@@ -420,7 +420,9 @@ test('[R3] engine: a final and a unit confirmation with primary PASS and second-
 // Section B imports (ES imports are hoisted; kept here so section A's lines stay as builder A left them).
 import { writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { init, drive, resume, status, mark, gate, rebind, archive, clearUnitCmd, stampAudit, gateAuditFields, AUDIT_REASONS_MAX, AUDIT_TEXT_MAX } from './run-engine.mjs';
+import { init as initRaw, drive, resume, status, mark, gate, rebind, archive, clearUnitCmd, stampAudit, gateAuditFields, AUDIT_REASONS_MAX, AUDIT_TEXT_MAX } from './run-engine.mjs';
+import { admittedInit } from './engine-test-fixture.mjs';
+const init = admittedInit(initRaw);
 import { LIVE } from './engine-quiesce.mjs';
 import { reviewStates } from './engine-unit-review.mjs';
 import { verifyReviewExecution } from './carrier.mjs';

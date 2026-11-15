@@ -60,7 +60,9 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync
 import { join, dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { init, drive, acquireLock, planNarrativeDigest } from './run-engine.mjs';
+import { init as initRaw, drive, acquireLock, planNarrativeDigest } from './run-engine.mjs';
+import { admittedInit } from './engine-test-fixture.mjs';
+const init = admittedInit(initRaw);
 import { verifyReviewExecution } from './carrier.mjs';
 import { POSIX, fixture, codes, runStateEvents, runLogEvents, waitUntil, delay, passReview, failReview,
   confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
