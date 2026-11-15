@@ -21,6 +21,7 @@
  * host can durably record the process group before any worker code runs. If
  * stdin closes without the release byte the launcher exits and the worker never starts.
  */
+import { verifyAdmission } from './engine-enroll.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -381,6 +382,10 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
+  // Enrollment boundary (P0 E1): the approval's run must be ADMITTED in its engine state (enrolled, build
+  // context delivered from the pinned skill) before any worker starts. `deps.verifyAdmission` is an
+  // in-process seam like verifyApproval; the CLI (`carrier.mjs run`) always uses the real check.
+  (deps.verifyAdmission ?? verifyAdmission)(plan.repoRoot, approval);
   if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';

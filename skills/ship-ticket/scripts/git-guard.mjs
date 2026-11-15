@@ -7,12 +7,13 @@
  * It never touches global or system configuration and refuses a core.hooksPath that comes from
  * outside the repository's local config (a shared hooks directory). An existing pre-push hook is
  * moved to `pre-push.ship-ticket-backup`, still runs first on every push, and is restored by
- * `uninstall`. The pattern (default TICKET_PATTERN) is stored in the repository's LOCAL config key
+ * `uninstall`. In a linked worktree the hooks directory is the repository's common one, so the guard
+ * covers every work tree of the repository; each push is judged against its own work tree's engine state. The pattern (default TICKET_PATTERN) is stored in the repository's LOCAL config key
  * `shipTicket.guardPattern`; the ticket key is its first capture group, else the whole match.
  *
  * On push, for every ref whose remote or local branch matches the pattern, the hook runs
- * `authorize publish` for that ticket's latest ENROLLED run (engine-enroll.mjs) and requires the
- * pushed sha to be the authorized HEAD. No ledger, no run, an unreadable ledger, a deny, or any
+ * `authorize publish` for that ticket's engine run in this work tree (engine-enroll.mjs) and requires the
+ * pushed sha to be the authorized HEAD. No engine state, an unreadable one, a deny, or any
  * error blocks the push (fail closed). Other branches, tags and branch deletions pass untouched.
  *
  * This is a GUARDRAIL, not a boundary. Bypasses, recorded as expected by git-guard.test.mjs:
@@ -115,10 +116,10 @@ export function ticketOf(branch, pattern) {
   return key && SAFE_ID.test(key) ? key : null;
 }
 
-/** The latest ENROLLED run id of `ticket`, read through the engine's own reader (null when none or unreadable). */
+/** The run id of `ticket`'s engine state in this work tree (null when none or unreadable): authorize then judges it. */
 function latestRun(repo, ticket) {
-  const file = resolve(repo, out(git(repo, ['rev-parse', '--git-path', `ai-skills/ship-ticket/${ticket}.enrollment.json`])) ?? '');
-  try { return JSON.parse(readFileSync(file, 'utf8')).events.filter(e => e.type === 'ENROLLED').at(-1)?.run_id ?? null; } catch { return null; }
+  const file = resolve(repo, out(git(repo, ['rev-parse', '--git-path', `ai-skills/ship-ticket/${ticket}.state.json`])) ?? '');
+  try { const id = JSON.parse(readFileSync(file, 'utf8')).run_id; return typeof id === 'string' && SAFE_ID.test(id) ? id : null; } catch { return null; }
 }
 
 /**
@@ -140,11 +141,11 @@ export async function check(repo, stdin, { authorizeFn } = {}) {
     if (ZERO.test(localSha ?? '')) { decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: 'branch_delete' }); continue; }
     const deny = (code, reason) => decisions.push({ ref: remoteRef, guarded: true, ticket, allow: false, code, reason });
     const runId = latestRun(repo, ticket);
-    if (!runId) { deny('not_enrolled', `no readable enrollment for ${ticket}; ship through run-engine.mjs enroll ... publish`); continue; }
+    if (!runId) { deny('not_enrolled', `no readable engine run for ${ticket} in this work tree; ship through run-engine.mjs publish`); continue; }
     let a;
     try { a = await authorize({ repoRoot: repo, ticket, runId, stage: 'publish' }); } catch (e) { deny('authorize_error', e.message); continue; }
     if (!a.allow) { deny(a.code, a.reasons?.[0] ?? ''); continue; }
-    if (a.head !== localSha) { deny('push_not_head', `pushing ${localSha}, but ${a.head} (HEAD) is what was authorized`); continue; }
+    if (a.binding?.head !== localSha) { deny('push_not_head', `pushing ${localSha}, but ${a.binding?.head} (HEAD) is what was authorized`); continue; }
     decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: a.code });
   }
   return { ok: decisions.every(d => d.allow), decisions };

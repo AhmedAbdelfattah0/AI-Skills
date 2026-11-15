@@ -16,9 +16,9 @@
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
- *      run-engine.mjs enroll|context|authorize|degrade|approve-degraded|publish ...: mandatory enrollment, trusted
- *        context delivery, stage authorization and the supported publish path (engine-enroll.mjs owns them).
- *        An ENROLLED run's `init` needs its plan context and its `drive` its build context (enrolledContextJudgments).
+ *      run-engine.mjs enroll|context|authorize|publish ...: enrollment after init, trusted context delivery,
+ *        stage authorization and the supported publish path (engine-enroll.mjs: lifecycle, admission). `drive`
+ *        needs an admitted run and `gate` its phase context; a refused gate records no decision.
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -36,7 +36,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { enrollCli, ENROLL_COMMANDS, enrolledContextJudgments } from './engine-enroll.mjs';
+import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, STAGE_PHASE } from './engine-enroll.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -290,8 +290,6 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
 export async function init(ctx) {
   return locked(ctx, async (E) => {
     if (existsSync(E.P.state)) throw coded('state_exists', `${E.P.state} already exists`);
-    const unread = enrolledContextJudgments(ctx, 'plan');
-    if (unread.length) throw coded(unread[0].code, unread[0].reason);
     const { text, digest, events, start } = approvedPlan(ctx, E.P);
     let raw;
     try { raw = readFileSync(ctx.dagFile); } catch { throw coded('dag_invalid', 'dagFile unreadable'); }
@@ -351,7 +349,7 @@ export async function resume(ctx) {
 export async function drive(ctx) {
   return locked(ctx, async (E) => {
     const transient = verifyBinding(E);
-    if (!transient.length) transient.push(...enrolledContextJudgments(ctx, 'build'));
+    if (!transient.length) { const a = admission(E.S, 'build'); if (!a.ok) transient.push(judgment(a.code, null, a.reasons.join('; '))); }
     if (transient.length) return { ...view(E, transient), outcome: 'judgment' };
     await deliver(E);
     const live = await reconcile(E, 0);
@@ -558,7 +556,7 @@ export function gateAuditFields(kind, input, v) {
 }
 
 /**
- * Read-only, lock-free engine view for authorize/approve-degraded (engine-enroll.mjs): the state and
+ * Read-only, lock-free engine view for authorize and publish (engine-enroll.mjs): the state and
  * its binding judgments ({ S, unbound }), or the refusal code that loading or verifying raised.
  */
 export function readEngine(ctx) {
@@ -569,6 +567,44 @@ export function readEngine(ctx) {
   } catch (e) { return { code: e.code ?? 'state_unreadable', reasons: [e.message] }; }
 }
 
+/** `enroll` (after init): re-verify the approval binding and pin the skill to the run (engine-enroll.mjs enrollIn). */
+export async function enroll(ctx) {
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) throw coded(unbound[0].code, unbound.map(j => j.reason).join('; '));
+    const r = enrollIn(E);
+    await E.commit();
+    if (!r.already) try { io.appendLogOnce(E.P.log, { run_id: E.S.run_id, event: 'ENROLLED', event_id: `enrolled-${E.S.run_id}`, ...r.enrollment }); } catch { /* telemetry */ }
+    return { enrolled: true, run_id: E.S.run_id, already: r.already, lifecycle: lifecycle(E.S), enrollment: r.enrollment };
+  });
+}
+
+/**
+ * `context --phase <p>`: deliver the phase's verified references (never blocked). Recorded in the state
+ * only for an enrolled run with no live attempt; without state or enrollment it delivers unrecorded.
+ */
+export async function context(ctx) {
+  let S = null;
+  try { const E = open(ctx); E.load(); S = E.S; } catch (e) { if (e.code !== 'no_state') throw e; }
+  const d = deliverContext(S?.enrollment && S.run_id === ctx.runId ? S : null, ctx.phase);
+  if (!d.ok) return { delivered: false, recorded: false, code: d.code, reasons: d.reasons };
+  if (!S || !S.enrollment || S.run_id !== ctx.runId) return { delivered: true, recorded: false, code: S ? 'not_enrolled' : 'no_state', reasons: [], text: d.text };
+  return locked(ctx, async (E) => {
+    try { recordContext(E.S, ctx.phase, d.record); } catch (e) { return { delivered: true, recorded: false, code: e.code, reasons: [e.message], text: d.text }; }
+    await E.commit();
+    return { delivered: true, recorded: true, code: 'delivered', reasons: [], lifecycle: lifecycle(E.S), text: d.text };
+  });
+}
+
+/** Append a PUBLISHED record (publish, after the push was verified). */
+async function recordPublished(ctx, entry) {
+  return locked(ctx, async (E) => {
+    E.S.published = [...(E.S.published ?? []), entry];
+    await E.commit();
+    try { io.appendLogOnce(E.P.log, { run_id: E.S.run_id, event: 'PUBLISHED', event_id: `published-${E.S.run_id}-${entry.head}-${E.S.published.length}`, ...entry }); } catch { /* telemetry */ }
+  });
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -576,6 +612,9 @@ export async function gate(ctx) {
     return await locked(ctx, async (E) => {
       const unbound = verifyBinding(E);
       if (unbound.length) return { gate: ctx.gate, candidate_id: null, ...gateNo(unbound[0].code, unbound.map(j => j.reason), { judgment_point: true }) };
+      // Never an authoritative decision without enrollment and the gate's phase context: refused, nothing recorded.
+      const adm = admission(E.S, ctx.gate);
+      if (!adm.ok) return { gate: ctx.gate, candidate_id: null, lifecycle: adm.lifecycle, ...gateNo(adm.code, adm.reasons, { judgment_point: true }) };
       if (ctx.gate === 'review' && input.units_consumed !== undefined && !unitReviewOn(E.S)) throw coded('bad_input', 'gate review: units_consumed needs a DAG with config.unitReview');
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
       await deliver(E);
@@ -588,6 +627,8 @@ export async function gate(ctx) {
         : c.candidate_id ? await GATES[ctx.gate](E, input, c.candidate_id)
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
       const S = E.S;
+      // The merge base the candidate was computed against: authorize publish recomputes against it after the commit.
+      if (ctx.gate === 'ship-ready' && v.ok && S.ship_ready?.candidate_id === c.candidate_id) S.ship_ready.merge_base = c.merge_base;
       // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
       const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});
       note(S, 'GATE', { gate: ctx.gate, ok: v.ok, code: v.code, ...audit() });
@@ -632,7 +673,7 @@ async function main(argv) {
 }
 
 if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) {
-  enrollCli(process.argv.slice(2), readEngine).then(code => { process.exitCode = code; })
+  enrollCli(process.argv.slice(2), { readEngine, enroll, context, recordPublished }).then(code => { process.exitCode = code; })
     .catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 } else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
