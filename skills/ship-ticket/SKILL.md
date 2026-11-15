@@ -69,10 +69,10 @@ Start every phase with `run-engine.mjs context --phase <phase>` (UNDERSTAND and
 PLAN before entering native Plan Mode): it prints the phase's mandatory references
 after verifying their exact bytes, and records the delivery once the run is
 enrolled. Right after approval, `init` creates the run and the next action is
-`run-engine.mjs enroll`, then `context --phase build`. Nothing executes or ships
-without enrollment: `drive`, carrier dispatch and every `gate` refuse an
-un-enrolled run or a missing phase context, and `publish` is the only supported
-push and PR path. The manual flow is allowed only for read-only planning and
+`run-engine.mjs enroll`, then `context --phase build`. The engine's entry points
+refuse an un-enrolled run or a missing phase context: `drive`, carrier dispatch
+and every `gate`; `publish` is the only supported push and PR path. Plain `git`
+and `gh`, and repositories without the opt-in guard, are outside the engine. The manual flow is allowed only for read-only planning and
 diagnostics. There is no degraded shipping path: when the engine cannot be used,
 record `harness degraded` and use **WAIT_FOR_USER** with the blocker. Commands and
 limits: [references/execution-harness.md](references/execution-harness.md),

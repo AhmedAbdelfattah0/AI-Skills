@@ -236,16 +236,26 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   context delivered) → `evidence` (an engine `SHIP_READY` that still holds) →
   `publication` (`authorize publish` allows). The records are `enrollment`,
   `contexts` and `published` in the engine state, so `resume` and `archive` keep
-  them. A state without `enrollment`, including one created before this existed, is
-  diagnostic-only until enrolled.
+  them.
+- **Migration.** A state without `enrollment` (a run created before this existed) is
+  diagnostic-only until `enroll`. A git install can enroll it even after attempts;
+  a copy install that already ran attempts cannot (`enrollment_after_execution`),
+  and a skill update that changes the mandatory references or `SKILL.md` stops a
+  run with `skill_drift`; in both cases the operator path is a new run (new run
+  ID, START, `init`, `enroll`). A pre-change `SHIP_READY` needs `gate ship-ready`
+  again (`ship_ready_regate`).
 - **Enforced:** `drive` and `carrier.mjs run` need `admitted`; a `gate` needs its
   phase context (`red` build, `review`/`unit-review`/`reassess` review, `ship-ready`
   ship) and otherwise refuses without recording a decision; `publish` needs
   `publication`. `init`, `status`, `resume`, `mark`, `rebind`, `archive` and
   `context` are not gated.
-- **The skill pin.** A git install pins the skill commit, and every `context` reads
-  that commit's blobs, so a later work-tree edit or commit to the skill changes
-  nothing that is delivered. A copy install pins the manifest digest, and every
+- **The skill pin covers only `references/` (through the manifest) and the
+  `SKILL.md` digest.** The engine's scripts run unpinned from disk, and the trust
+  anchor is `state.json`, which any process of the same user can write. A git
+  install pins the skill commit, and every `context` reads that commit's blobs, so
+  a later work-tree edit or commit to the skill changes nothing that is delivered;
+  when the target repository is the skill repository itself, a worker can commit
+  there before enrollment pins it. A copy install pins the manifest digest, and every
   delivery re-verifies the files: a changed, missing or extra reference or a rebuilt
   manifest is refused (`reference_*`, `manifest_drift`). A run enrolls once, never
   while an attempt may run, and a copy install never after an attempt ran; a skill
@@ -256,24 +266,33 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   line on stderr. `publish` also needs a `SHIP_READY` whose state conditions still
   hold (`ship_ready_superseded`), a clean tree, a branch naming the ticket, the
   candidate recomputed against the merge base recorded with `SHIP_READY`, and a
-  RUN-STATE `SHIP_READY` backed by its engine line. Its allow binds head, tree,
-  candidate and branch. `complete` needs `PUBLISHED` for HEAD and then stops at
+  RUN-STATE `SHIP_READY` backed by its engine line. The PR base (`--base`, else a
+  `config.base` branch, else the remote's HEAD) must give the merge base recorded
+  with `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits), and
+  no commit since it may touch a path outside the candidate
+  (`history_outside_candidate`: e.g. an extra commit later reverted). A `SHIP_READY`
+  recorded before the merge base existed needs `gate ship-ready` again
+  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch and base. `complete` needs `PUBLISHED` for HEAD and then stops at
   `ci_evidence_unavailable` until the engine records CI.
-- **`publish`** authorizes, authorizes again immediately before the push and requires
-  the same binding (`authorization_moved`), pushes `<sha>:refs/heads/<branch>`, checks
-  the remote ref, opens the PR only when a title and body file are given, and records
-  `PUBLISHED`. The remote can still move after that check.
+- **`publish`** holds the run lock throughout: it authorizes, authorizes again
+  immediately before the push and requires the same binding (`authorization_moved`),
+  pushes `<sha>:refs/heads/<branch>`, checks the remote ref, opens the PR with
+  `--base` only when a title and body file are given, and records `PUBLISHED`
+  (`published_unrecorded` if that record fails after a successful push). The remote
+  can still move after the check, and direct `git push`/`gh` never pass through it.
 - **No degraded bypass.** The engine cannot prove a human said anything (START and
   RETRY are orchestrator-appended), so there is no owner-approval override: a
   degradation is **WAIT_FOR_USER**, and the skill does not ship.
 - **git-guard is a guardrail, not a boundary.** It blocks `git push` of a branch
-  matching the pattern (default `^[A-Za-z][A-Za-z0-9]*-[0-9]+`) unless `authorize
+  matching the pattern (default `(?:^|/)([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*?-[0-9]+)`) unless `authorize
   publish` allows the pushed sha, including pushes wrapped in a script, `sh -c` or
-  `execSync`. In a linked worktree it installs into the shared hooks directory and
-  judges each push by that work tree's engine state. `--no-verify`, `-c
-  core.hooksPath=...`, the `GIT_CONFIG_*` override, unsetting a repository
-  `core.hooksPath` and pushing with `gh` or another clone bypass it, as does any
-  process of the same user rewriting the engine state.
+  `execSync`. It also guards any branch naming a ticket that has engine state. It
+  refuses a hooks directory inside the work tree unless ignored. In a linked worktree
+  it installs into the shared hooks directory and judges each push by that work
+  tree's engine state. `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*`
+  override, unsetting a repository `core.hooksPath`, `git push origin
+  HEAD:refs/heads/<name without a ticket>` and pushing with `gh` or another clone
+  bypass it, as does any process of the same user rewriting the engine state.
 
 ## Run engine
 
