@@ -465,6 +465,12 @@ per stage and the one `next_action` from existing records; the skill follows it
 after every tool return. `run-engine.mjs ci` (`engine-ci.mjs`) records the check runs of
 the exact published head; `authorize complete`, and so `next`'s `COMPLETED`,
 needs its `PASS`, and zero checks after the window is `NO_CHECKS`, never green.
+`run-engine.mjs review-dispatch` / `review-collect` (`engine-review-dispatch.mjs`)
+make the engine launch the read-only reviewer relays itself (receipt before launch,
+collection once) and `gate review` accept only a collected output for the current
+candidate, with identity and role from the receipt. It is not cryptographic (the
+same user can rewrite the ledger or stub the relay); native reviews stay unbound
+and need the owner's `config.acceptNativeReview`; Codex unavailable is `BLOCKED`.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

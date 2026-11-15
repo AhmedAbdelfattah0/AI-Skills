@@ -19,8 +19,8 @@
  * branch base moved since the repair, and authorize publish refuses (so publish and the pre-push guard do),
  * until an accepted review of the CURRENT candidate (the targeted confirmation of a repair, or an
  * owner-RETRY original) exists. DETECTED: `next`/`status` report it (`review_freshness`) and make the owner
- * RETRY the next action. Not covered: a review file that names the current candidate id is accepted
- * whatever its reviewer read (slice E7 binds the reviewer's output to an engine dispatch).
+ * RETRY the next action. A review file that only names the current candidate id is not enough: slice E7
+ * (engine-review-dispatch.mjs) binds the reviewer's output to an engine dispatch for that candidate.
  */
 import { spawnSync } from 'node:child_process';
 import * as io from './engine-io.mjs';

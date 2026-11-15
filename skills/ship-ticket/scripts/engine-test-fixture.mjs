@@ -138,7 +138,9 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     schema: 'ship-ticket-engine-dag-v1',
     config: { provider: 'claude', modelMap: {}, permissionMode: 'acceptEdits', billing: 'subscription', width: 2,
       memoryBudgetMb: 4096, timeoutMs: 10000, budget: null, candidateExclusions: ['.specs/plans/T-1.md', 'session-log.md'],
-      testCommands: {}, base: commit ? 'HEAD' : 'main', ...config },
+      // P0 E7: these fixtures submit hand-written review JSON, so they carry the owner opt-out of receipt-bound review
+      // (the pre-E7 gate); run-engine-review-dispatch.test.mjs drops it to test the default ('engine').
+      testCommands: {}, base: commit ? 'HEAD' : 'main', reviewProvenance: 'unbound', ...config },
     nodes: nodes.map(n => ({ deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'low',
       modelTier: 'inherit', estimatedMemoryMb: 64, promptFile: promptFor(n.id), phase: 'BUILD', role: 'builder',
       evidence: [], redSpecs: [], ...n })),
@@ -268,12 +270,14 @@ export const confirmReview = (rx, candidate) => ({ review_execution: rx, kind: '
 export const admittedInit = (initFn) => async (ctx, ...rest) => { const out = await initFn(ctx, ...rest); await admitRun(ctx); return out; };
 
 /**
- * The state without the keys P0 E1/E4 added (enrollment, contexts, ship_ready.merge_base): the golden pins
- * the engine behaviour from before enrollment; run-engine-enroll.test.mjs covers the additions.
+ * The state without the keys P0 E1/E4 added (enrollment, contexts, ship_ready.merge_base), E3's review_bindings, and
+ * E7's review_dispatches and the fixture's config.reviewProvenance 'unbound': the golden pins the engine behaviour
+ * from before enrollment; run-engine-enroll.test.mjs and run-engine-review-dispatch.test.mjs cover the additions.
  */
 export function preEnrollmentState(S) {
-  const { enrollment: _e, contexts: _c, publish_intent: _p, review_bindings: _b, ...rest } = S;
+  const { enrollment: _e, contexts: _c, publish_intent: _p, review_bindings: _b, review_dispatches: _d, ...rest } = S;
   if (rest.ship_ready) { const { merge_base: _m, ...sr } = rest.ship_ready; rest.ship_ready = sr; }
+  if (rest.config?.reviewProvenance === 'unbound') { const { reviewProvenance: _r, ...config } = rest.config; rest.config = config; }
   return rest;
 }
 

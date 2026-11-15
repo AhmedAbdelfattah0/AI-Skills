@@ -166,13 +166,16 @@ test('a stale review needs the owner: an owner RETRY makes the new original revi
   publishOwed(fx, 'the RETRY review of the current candidate');
 });
 
-test('residual (slice E7): a review file that names the current candidate id is accepted whatever its reviewer read', { skip: WIN_SKIP }, (t) => {
-  const fx = enrollFixture(t);
-  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
-  assert.equal(fx.cli('drive').status, 0);
-  const copied = fx.candidate(); // e.g. copied from status, not computed by the reviewer
-  const g = fx.gate('review', { review_execution: 'rx-1', kind: 'original', primary: primaryReview(copied), second_opinion: secondOpinion(copied), reconciliation: { dispositions: [] } });
-  assert.equal(g.out.code, 'review_accepted', 'freshness binds the record to the candidate; it cannot prove what the reviewer saw');
+test('closed by slice E7: a review file that only names the current candidate id is refused (review_unbound) unless the owner opted the run out', { skip: WIN_SKIP }, (t) => {
+  for (const [mode, want] of [[undefined, 'review_unbound'], ['unbound', 'review_accepted']]) {
+    const fx = enrollFixture(t, { config: { reviewProvenance: mode } });
+    assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+    assert.equal(fx.cli('drive').status, 0);
+    const copied = fx.candidate(); // e.g. copied from status, not computed by the reviewer
+    const g = fx.gate('review', { review_execution: 'rx-1', kind: 'original', primary: primaryReview(copied), second_opinion: secondOpinion(copied), reconciliation: { dispositions: [] } });
+    assert.equal(g.out.code, want, `reviewProvenance ${mode ?? '(default engine)'}: ${g.stdout}`);
+    if (mode === 'unbound') assert.equal(fx.readState().review_bindings[0].provenance, 'unbound', 'the opt-out is labelled, never silent');
+  }
 });
 
 test('a confirmation is judged against the merge base its repaired candidate was frozen at: the base branch merged in after the repair is review_base_moved', { skip: WIN_SKIP }, (t) => {

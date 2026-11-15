@@ -93,7 +93,7 @@ Enrollment and authorization.
 | **PLAN** | cross-model debated, human-approved plan and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
-| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (host counterpart, CodeRabbit fallback); at most one repair and targeted confirmation |
+| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (with the run engine: its own Codex relay dispatch, never substituted; without it: host counterpart, CodeRabbit fallback); at most one repair and targeted confirmation |
 | **SHIP** | one commit, one push, one PR, green CI and completed tracker item |
 
 Phases are ordered, but independent work inside every phase is dependency-driven
@@ -203,8 +203,8 @@ table, and an in-flight worker is not one of them.
 - **On re-invocation, validate before advancing.** This covers a watcher exit, a
   host wake-up (date jump, `sleep` errors) or a user "status?". Run
   `run-engine.mjs next` first: it collects finished engine work from disk and
-  returns `collect_review` for a review result file already on disk, with no
-  notification needed. A marker only lets you *collect* the result. The phase advances only
+  returns `review_collect` (or, with `reviewProvenance: "unbound"`, `collect_review`) for a
+  finished reviewer already on disk, with no notification needed. A marker only lets you *collect* the result. The phase advances only
   after the substantive result passes its normal exit conditions: the REVIEW
   schema and PASS rules in [references/review.md](references/review.md), or the
   PROVE gate rules. A missing or invalid result uses that phase's bounded recovery
@@ -242,7 +242,7 @@ table, and an in-flight worker is not one of them.
 - Coverage is applicability-driven. Every ticket checks every applicable rule,
   screen and trust boundary, and every ticket gets the mandatory opposite-model
   second opinion (the host's counterpart — Codex for a Claude host, Claude for a
-  Codex host; CodeRabbit when it is unavailable or out of quota) —
+  Codex host; without the run engine, CodeRabbit when it is unavailable or out of quota) —
   a second opinion, not a second rule catalogue.
 - Runtime attacks target only a local disposable instance. Never production or
   shared staging.
@@ -281,7 +281,9 @@ recorded uncertainty.
 
 If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
-begins. A missing counterpart falls back to CodeRabbit; if both are missing, use
+begins. With the run engine a missing Codex relay is `BLOCKED` `review_relay_unavailable`,
+then **WAIT_FOR_USER** (CodeRabbit never satisfies `gate review`). Without it, a missing
+counterpart falls back to CodeRabbit; if both are missing, use
 **WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
 serializes the two reviews.
 
@@ -362,7 +364,7 @@ critical.
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
 | selected counterpart or its PLAN carrier | bounded recovery, then **WAIT_FOR_USER** for restored CLI access or an explicit solo-planning waiver; never silently present solo work as a completed debate |
-| selected counterpart during REVIEW (unavailable, failed, or usage limit reached) | run CodeRabbit on the same candidate; if CodeRabbit is also unavailable, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped |
+| selected counterpart during REVIEW (unavailable, failed, or usage limit reached) | with the run engine: `BLOCKED` (`review_relay_unavailable` / `review_dispatch_failed`), then **WAIT_FOR_USER** for a working Codex relay, never CodeRabbit; without it, run CodeRabbit on the same candidate; if CodeRabbit is also unavailable, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | review concurrency | run the primary review and the second opinion one after the other; both are still required |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
@@ -455,7 +457,10 @@ Read the plan and Design Contract from disk before writing.
 - With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the
   approved DAG at approval (`DAG_BOUND`), run `init`, `enroll` and
   `context --phase build`, then follow `run-engine.mjs next`. Its `drive`, `gate_*`,
-  `dispatch_review`, `collect_review`, `commit` and `publish` actions are the run.
+  `review_dispatch`, `review_collect` (or, with `reviewProvenance: "unbound"`,
+  `dispatch_review`, `collect_review`), `commit` and `publish` actions are the run.
+  Reviewers are launched by the engine (`run-engine.mjs review-dispatch`), never by
+  you: `gate review` refuses a review file the engine did not collect.
   Record RED, review and ship-ready with `run-engine.mjs gate
   red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>`
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
@@ -606,7 +611,7 @@ dependencies:
   ordering (state machines, optimistic concurrency or CAS, request ordering,
   client-side async state with races) carries the `concurrency` risk label and
   routes `strong`. Its repair gets the second opinion from the host's counterpart
-  (Codex for a Claude host, Claude for a Codex host; CodeRabbit fallback) before
+  (Codex for a Claude host, Claude for a Codex host; with the run engine `review-dispatch --role second`, else CodeRabbit fallback) before
   the primary confirmation, not after it; it returns `PASS` or `FAIL`. Record it as
   the confirmation's `second_opinion`: `gate review` requires it when the repair
   overlaps a `concurrency`- or `security`-labelled node, and counts it whenever supplied.

@@ -18,6 +18,7 @@ import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeou
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
 import { bindReview } from './engine-freshness.mjs';
+import { REVIEW_KIND, settleReview } from './engine-review-dispatch.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -276,6 +277,9 @@ export async function reconcile(E, wait) {
   let live = false;
   for (const a of E.S.attempts) {
     if (E.live.has(a.attempt_id)) continue;
+    // P0 E7: an engine-dispatched reviewer is collected by its own settle (envelope -> REVIEW_COLLECTED once), never
+    // retired as an orphan worker or an abandoned runner (either would kill a live reviewer or drop its output).
+    if (a.kind === REVIEW_KIND) { if (LIVE.includes(a.status) && (await settleReview(E, a)) === 'live') live = true; continue; }
     const runner = RUNNER_KINDS.includes(a.kind);
     // A worker left 'unknown' (its item already failed with a judgment) is retired, releasing its
     // locks, once its group is proven gone (retire kills survivors). Until then it is live: keeps its

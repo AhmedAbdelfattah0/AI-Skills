@@ -11,7 +11,7 @@ names. Record the selection once:
 | Orchestrator | PLAN counterpart | REVIEW second opinion (mandatory) |
 |---|---|---|
 | Claude | Codex | fresh Codex session |
-| Codex | Claude | fresh Claude session (but a gate-recorded second opinion must come from a provider other than the primary's: with the Opus primary use Codex, else CodeRabbit) |
+| Codex | Claude | fresh Claude session (but a gate-recorded second opinion must come from a provider other than the primary's: with the Opus primary use Codex; with the run engine only its Codex relay dispatch counts, otherwise CodeRabbit) |
 | another known host | available different model family, preferring Codex | fresh session of that family |
 | unknown | explicitly configured counterpart, otherwise declare identity unavailable | do not claim cross-model independence |
 
@@ -117,7 +117,9 @@ run Git or tests. Supply the actual merge-base-to-working-tree diff (including
 staged changes), changed-path list, deleted/renamed paths, untracked-file contents
 or readable paths, and proof results. A diff command alone is insufficient.
 Include load-bearing AGENTS.md constraints because Claude does not generically
-load that file. For large diffs use a readable temporary artifact; do not omit
+load that file. With the run engine, `review-dispatch` builds this brief itself
+(plan, acceptance inventory, AGENTS.md/CLAUDE.md, paths, diff, untracked contents;
+no proof results: a known limit, [review.md](review.md)). For large diffs use a readable temporary artifact; do not omit
 changes to fit the prompt. See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
 for the underlying permission and tool flags.
 
@@ -210,17 +212,24 @@ It returns at most twelve actionable findings, at most three minors, each with
 `file:line`, quoted evidence, consequence and fix shape. Excess material findings
 set `overflow: true`.
 
-The counterpart (Codex for a Claude host, Claude for a Codex host) gets a
-10-minute budget. The CodeRabbit fallback runs after it, on its own separate
-10-minute budget, when the counterpart is unavailable, fails, times out, or
-reports its usage limit. The second opinion is mandatory on every ticket: if the
+With the run engine (default `config.reviewProvenance`), the second opinion is
+`run-engine.mjs review-dispatch --role second`: the engine launches the installed
+`codex-delegate` relay read-only with its own prompt and records the receipt
+([review.md](review.md), Engine-dispatched reviewers). An unavailable or failed
+relay is `BLOCKED` (`review_relay_unavailable`, `review_dispatch_failed`), then
+`WAIT_FOR_USER`; it is never waived and CodeRabbit never substitutes for it.
+
+Without the engine, the counterpart (Codex for a Claude host, Claude for a Codex
+host) gets a 10-minute budget. The CodeRabbit fallback runs after it, on its own
+separate 10-minute budget, when the counterpart is unavailable, fails, times out,
+or reports its usage limit. The second opinion is mandatory on every ticket: if the
 primary finishes first, wait for the counterpart within its budget; if neither
 the counterpart nor CodeRabbit can produce a result, `WAIT_FOR_USER`. Name
 CodeRabbit as a fallback, not as Claude/Codex agreement.
 
 Verify the cancellation route before launch; an advisory prompt is not a
 watchdog. If the counterpart's carrier cannot enforce its budget or be stopped,
-treat the counterpart as unavailable and run the CodeRabbit fallback; if
+treat the counterpart as unavailable and (without the engine) run the CodeRabbit fallback; if
 CodeRabbit cannot produce a result either, `WAIT_FOR_USER`. Never continue on
 primary coverage alone.
 

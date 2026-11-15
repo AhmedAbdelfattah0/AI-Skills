@@ -19,6 +19,7 @@ import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 import { bindReview, bindingOf, reviewFreshness } from './engine-freshness.mjs';
+import { provenanceMode, provenanceVerdict } from './engine-review-dispatch.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -196,7 +197,11 @@ async function reviewGate(E, input, candidate) {
   if (frozenBase && S.config.base && S.config.base !== 'HEAD' && E.candidateMergeBase && E.candidateMergeBase !== frozenBase)
     return gateNo('review_base_moved', [`${S.config.base} moved under the branch since repair ${input.review_execution} (merge base ${frozenBase} -> ${E.candidateMergeBase}); revert it, or the owner appends a RETRY`]);
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
-  const { units_consumed: consumedUnits, ...review } = input;
+  // P0 E7: only the collected output of an engine-dispatched reviewer counts (identity and role from the receipt);
+  // config.reviewProvenance 'unbound' (an owner opt-out bound in the DAG) keeps the pre-E7 gate, labelled unbound.
+  const prov = provenanceMode(S) === 'engine' ? provenanceVerdict({ S, input, frozen }) : null;
+  if (prov && !prov.ok) return gateNo(prov.code, prov.reasons);
+  const { units_consumed: consumedUnits, ...review } = prov ? prov.input : input;
   // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
   const recording = auditOn(S) ? { recordVerdicts: true } : {};
   const v = gateReview({ ...review, state: { ...S, frozen_candidate: frozen, builders: S.builders } },
@@ -223,8 +228,11 @@ async function reviewGate(E, input, candidate) {
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
+  for (const d of S.review_dispatches ?? []) if (prov?.used.includes(d.attempt_id)) d.consumed_by = v.record.review_execution;
+  const so = prov ? prov.input.second_opinion : input.second_opinion;
   bindReview(S, { review_execution: v.record.review_execution, kind: v.record.kind, candidate_id: v.record.candidate_id,
-    merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(typeof input.second_opinion?.candidate_id === 'string' ? { second_opinion_candidate_id: input.second_opinion.candidate_id } : {}) });
+    merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(typeof so?.candidate_id === 'string' ? { second_opinion_candidate_id: so.candidate_id } : {}),
+    provenance: prov ? prov.provenance : 'unbound' });
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,

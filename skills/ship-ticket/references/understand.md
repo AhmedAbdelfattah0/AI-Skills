@@ -77,9 +77,11 @@ decision.
    [cross-model.md](cross-model.md): Claude host uses Codex; Codex host uses Claude.
    For every ticket, also check its REVIEW second-opinion carrier (the same
    host counterpart: Codex for a Claude host, Claude for a Codex host), the
-   CodeRabbit fallback and whether the second opinion can run concurrently, and
-   record the selected carrier. Missing primary capability, or both the
-   counterpart and CodeRabbit unavailable, is `WAIT_FOR_USER`.
+   CodeRabbit fallback (without the run engine only; with it, the installed
+   `claude-delegate` and `codex-delegate` relays the engine dispatches) and whether
+   the second opinion can run concurrently, and record the selected carrier.
+   Missing primary capability, or both the counterpart and CodeRabbit unavailable
+   (with the engine: a missing relay), is `WAIT_FOR_USER`.
 8. **A terminal decision here cancels concurrent work.** If triage cannot
    continue, cancel the design read rather than letting it finish into a run that
    will not happen.

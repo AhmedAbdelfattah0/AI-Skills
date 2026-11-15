@@ -23,6 +23,9 @@
  *        BLOCKED, NEEDS_APPROVAL and FAILED.
  *      run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]: collect and record the CI evidence of the
  *        published head (engine-ci.mjs); exit 0 PASS, 2 any other state or a refusal (nothing recorded), 1 usage error.
+ *      run-engine.mjs review-dispatch --role primary|second|confirmation --candidate <id> ... | review-collect ...: the engine
+ *        launches the read-only reviewer relay and collects its output (engine-review-dispatch.mjs); exit 0 dispatched /
+ *        collected, 2 a refusal, 1 usage error.
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -44,6 +47,7 @@ import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconci
 import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
 import { collect as collectCi, ghProvider, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
+import { dispatchReview, collectReviews, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -53,7 +57,7 @@ const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
   'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now', 'ciProvider']);
 /** Outbox events that stay in the engine log and never reach the plan's RUN-STATE. */
-const ENGINE_LOG_ONLY = ['GATE', 'CI_EVIDENCE'];
+const ENGINE_LOG_ONLY = ['GATE', 'CI_EVIDENCE', 'REVIEW_DISPATCHED', 'REVIEW_COLLECTED', 'REVIEW_UNAVAILABLE'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
@@ -703,6 +707,47 @@ export async function ci(ctx) {
   });
 }
 
+/**
+ * `review-dispatch` (P0 E7): under the run lock, re-verify the binding and the review admission, refuse while any other
+ * engine work is live (the candidate is still moving), then launch one read-only reviewer through the installed relay
+ * (engine-review-dispatch.mjs dispatchReview: receipt committed before launch). Returns once the reviewer is released.
+ */
+export async function reviewDispatch(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && !['role', 'candidate'].includes(k));
+  if (extra.length || !REVIEW_ROLES.includes(ctx.role) || typeof ctx.candidate !== 'string' || !ctx.candidate)
+    throw coded('bad_input', `review-dispatch takes --role ${REVIEW_ROLES.join('|')} and --candidate <id>${extra.length ? ` (got ${extra})` : ''}`);
+  const refuse = (code, reasons) => ({ schema: REVIEW_SCHEMA, dispatched: false, code, reasons });
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) return refuse(unbound[0].code, unbound.map(j => j.reason));
+    const adm = admission(E.S, 'review');
+    if (!adm.ok) return refuse(adm.code, adm.reasons);
+    await deliver(E);
+    await collectReviews(E); // a finished reviewer is collected first, so its role is never dispatched twice
+    const busy = E.S.attempts.filter(a => LIVE.includes(a.status) && a.kind !== REVIEW_KIND).map(a => a.attempt_id);
+    if (busy.length) return refuse('review_build_live', [`engine work is still live (${busy.join(', ')}): the candidate may still change; let it finish first`]);
+    const r = await dispatchReview(E, { role: ctx.role, candidate: ctx.candidate });
+    await E.commit();
+    await deliver(E);
+    return r;
+  });
+}
+
+/** `review-collect` (P0 E7): settle every finished engine-dispatched reviewer and record REVIEW_COLLECTED exactly once. */
+export async function reviewCollect(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k));
+  if (extra.length) throw coded('bad_input', `review-collect takes no fields (got ${extra})`);
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) return { schema: REVIEW_SCHEMA, collected: [], live: [], code: unbound[0].code, reasons: unbound.map(j => j.reason) };
+    const r = await collectReviews(E);
+    await E.commit();
+    await deliver(E);
+    return { schema: REVIEW_SCHEMA, code: r.live.length ? 'review_live' : 'collected', reasons: [], ...r,
+      dispatches: (E.S.review_dispatches ?? []).map(({ argv: _a, ...d }) => d) };
+  });
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -751,10 +796,11 @@ async function main(argv) {
     if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'pr'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'pr', 'role', 'candidate'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
   if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)
-    || (flags.pr !== undefined && (cmd !== 'ci' || !/^[1-9][0-9]{0,9}$/.test(flags.pr)))) throw new Error('Usage: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+    || (flags.pr !== undefined && (cmd !== 'ci' || !/^[1-9][0-9]{0,9}$/.test(flags.pr)))
+    || ((flags.role !== undefined || flags.candidate !== undefined) && cmd !== 'review-dispatch')) throw new Error('Usage: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]\n       run-engine.mjs review-dispatch --repo <dir> --ticket <key> --run-id <id> --role primary|second|confirmation --candidate <id>\n       run-engine.mjs review-collect --repo <dir> --ticket <key> --run-id <id>\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume, next,
@@ -762,6 +808,8 @@ async function main(argv) {
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
     ci: () => ci({ ...ctx, ...(flags.pr !== undefined ? { pr: Number(flags.pr) } : {}) }),
+    'review-dispatch': () => reviewDispatch({ ...ctx, role: flags.role, candidate: flags.candidate }),
+    'review-collect': () => reviewCollect(ctx),
     archive: () => archive({ ...ctx, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id'].includes(k)) ? { extra: 1 } : {}) }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
@@ -780,6 +828,6 @@ if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) 
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
     if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && NEXT_STOP.includes(r.disposition))
-      || (r?.schema === CI_SCHEMA && r.state !== 'PASS')) process.exitCode = 2;
+      || (r?.schema === CI_SCHEMA && r.state !== 'PASS') || (r?.schema === REVIEW_SCHEMA && (r.dispatched === false || (r.dispatched === undefined && !['collected', 'review_live'].includes(r.code))))) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }

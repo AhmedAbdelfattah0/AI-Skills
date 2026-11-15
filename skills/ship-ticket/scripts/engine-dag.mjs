@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'ciRequiredChecks', 'ciNoChecksMinutes'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'ciRequiredChecks', 'ciNoChecksMinutes', 'reviewProvenance', 'acceptNativeReview'];
 
 /**
  * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
@@ -222,6 +222,10 @@ export function validateEngineDag(doc, { ticket } = {}) {
     bad('config.ciRequiredChecks must be 1..50 unique non-empty check-run names');
   if (c.ciNoChecksMinutes !== undefined && !(Number.isInteger(c.ciNoChecksMinutes) && c.ciNoChecksMinutes >= 1 && c.ciNoChecksMinutes <= 120))
     bad('config.ciNoChecksMinutes must be an integer 1..120');
+  // P0 E7 (engine-review-dispatch.mjs), owner settings bound by the DAG digest, never defaulted here: 'unbound' opts this run out of
+  // receipt-bound review (the pre-E7 gate); acceptNativeReview accepts a native Agent-tool primary or confirmation (native_unbound).
+  if (c.reviewProvenance !== undefined && !['engine', 'unbound'].includes(c.reviewProvenance)) bad('config.reviewProvenance must be engine or unbound');
+  if (c.acceptNativeReview !== undefined && typeof c.acceptNativeReview !== 'boolean') bad('config.acceptNativeReview must be a boolean');
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }

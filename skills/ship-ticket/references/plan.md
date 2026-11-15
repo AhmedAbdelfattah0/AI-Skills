@@ -215,7 +215,7 @@ needed; or none>. Model agreement is advice, not approval.
 | parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
 | attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
 | rule coverage | <frontend/backend/shared families and specialist selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
-| second opinion (mandatory) | every ticket | host counterpart (CodeRabbit fallback), concurrent with the primary workflow when possible |
+| second opinion (mandatory) | every ticket | with the run engine: its Codex relay dispatch (never substituted); without it: host counterpart (CodeRabbit fallback); concurrent with the primary workflow when possible |
 
 **Ship threshold:** <which residual findings ship with a follow-up ticket instead of another round. Default: display-only stale-state or cosmetic issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. Reconciliation applies this without asking the human.>
 

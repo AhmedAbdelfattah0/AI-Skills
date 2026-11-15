@@ -13,7 +13,7 @@ own bookkeeping.
 ```text
 preflight     prove the candidate and required reviewers are ready
 review        one independent checklist-backed review
-second        one mandatory opposite-model opinion (host counterpart; CodeRabbit fallback)
+second        one mandatory opposite-model opinion (engine run: the Codex relay only; manual: host counterpart, CodeRabbit fallback)
 clean         record PASS and continue to SHIP
 findings      reconcile once, then apply at most one repair batch
 confirmation  check only repaired findings and their affected closure
@@ -55,12 +55,18 @@ Finish these checks before announcing REVIEW or appending its start event:
 - formatters, generators, comments and ticket-produced docs are already current;
 - one independent primary-reviewer route can enforce its deadline and cancel
   unfinished work, including all partitions;
-- the review profile, time ceilings and the second-opinion route (the host's
-  counterpart, else CodeRabbit) are recorded and preflighted.
+- the review profile, time ceilings and the second-opinion route (with the run
+  engine: the installed `codex-delegate` relay, nothing else; without it: the
+  host's counterpart, else CodeRabbit) are recorded and preflighted.
 
 An unavailable primary reviewer is `WAIT_FOR_USER` here. Do not enter REVIEW and
 invalidate otherwise usable work merely to discover that required capability is
-missing. The second opinion is required too: the host's counterpart first (Codex
+missing. With the run engine (the default `config.reviewProvenance`), the
+reviewers are the engine's own dispatches (below) and an unavailable Codex relay is
+`BLOCKED` `review_relay_unavailable`, then `WAIT_FOR_USER`: CodeRabbit may still run
+as advisory input, but it never satisfies `gate review`. Without the engine, or
+with the owner opt-out `config.reviewProvenance: "unbound"`, the second opinion is
+required too: the host's counterpart first (Codex
 for a Claude host, Claude for a Codex host); if it is unavailable or its usage
 limit is reached, CodeRabbit on the same candidate; if neither is available,
 `WAIT_FOR_USER`. Run CodeRabbit over the whole candidate, including untracked
@@ -75,6 +81,76 @@ relay with its watchdog and the complete coverage packet below. Do not build a
 second delegation framework. If neither route is available, use `WAIT_FOR_USER`
 for restored capability or an explicit advisory-only deadline exception. Record
 that exception; never silently claim an advisory ceiling was enforced.
+
+## Engine-dispatched reviewers (receipt-bound)
+
+With the run engine and the default `config.reviewProvenance` (`engine`), the
+gate does not accept an agent-authored review file as proof of an independent
+review (`engine-review-dispatch.mjs`). The supported path is the relay route:
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-dispatch --repo <R> --ticket <T> --run-id <ID> --role primary --candidate <candidate_id>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-dispatch --repo <R> --ticket <T> --run-id <ID> --role second  --candidate <candidate_id>
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --ticket <T> --run-id <ID>   # or just `next`
+```
+
+- **The engine launches the reviewer.** `primary` and `confirmation` run the
+  installed `claude-delegate` relay read-only with model `opus`
+  (`claude:opus`); `second` runs the `codex-delegate` relay read-only with the
+  CLI's default model (`codex:provider-default`). Relays are found by name under
+  `$HOME/.agents/skills`, then `$HOME/.claude/skills`. The engine builds the
+  argv array and the prompt itself: the frozen candidate id, the approved plan
+  narrative, the acceptance inventory, the candidate's paths, diff and untracked
+  contents, and the output contract. Nothing of the command comes from you.
+- **The receipt comes first.** `REVIEW_DISPATCHED` `{attempt_id, role,
+  requested_identity, candidate_id, argv_sha256, prompt_sha256, started_at}` is
+  committed before the launcher starts, then the durable attempt handshake
+  runs (intent, spawn, pid, release). The command returns while the detached
+  reviewer runs; dispatch `primary` and `second` back to back so they overlap.
+  Refusals: `review_candidate_mismatch` (not the current candidate),
+  `review_role_mismatch` (not the role owed: `confirmation` only after the
+  repair), `review_not_owed`, `review_dispatch_live` (never a second launch),
+  `review_already_collected`, `review_identity_shared`, `review_build_live`,
+  `review_launch_failed`, and `review_relay_unavailable` (recorded: the stage is
+  `BLOCKED`, never waived).
+- **Collection.** `review-collect`, `next`, `resume` and `drive` settle a finished
+  reviewer once: the whole process group is retired, the relay's `result.json`
+  is read from the engine-chosen directory, the last fenced JSON object in its
+  final message is the review, and `reviewer_identity`, `candidate_id` and
+  `route` are overwritten from the receipt (a different claim is kept as
+  `claimed_*`, detected only). `REVIEW_COLLECTED` `{attempt_id, exit_code,
+  output_sha256, completed_at, parsed_result_sha256}` is recorded and the parsed
+  file is listed in `next`'s `gate_review` `results`. A relay exit 127 or an
+  `*_unavailable` status is `review_relay_unavailable`; any other failure is
+  `review_dispatch_failed`. Both are `BLOCKED` for the owner: fix the relay or the
+  CLI login, then dispatch that role again.
+- **The gate.** Submit the parsed files as `primary` and `second_opinion` (add
+  the reconciliation as before). `gate review` matches each to a collection by
+  its content digest and refuses `review_unbound` (a hand-written or edited file,
+  including one that only copies the current candidate id; a native review
+  without the owner key; any second opinion the engine's Codex relay did not
+  produce), `review_role_mismatch`, `review_receipt_candidate` (a receipt for
+  another candidate: dispatch again for the current one), `review_receipt_spent`,
+  `review_identity_shared`, `review_identity_spoofed` (the file names another
+  identity, candidate or route than its receipt) and `review_output_changed`. The
+  identity, role and candidate it judges come from the receipt, never from the
+  review JSON. The review binding records `provenance` per slot.
+- **Native reviews.** A native Agent-tool (subagent) review cannot be bound by
+  this mechanism. It is refused unless the owner set `config.acceptNativeReview:
+  true` in the approved DAG for this run; then a primary or confirmation that
+  matches no collection is accepted and labelled `native_unbound` (detected
+  only). The second opinion is never native.
+- **Builders.** A builder recorded as `<provider>:provider-default` counts as every
+  model of its provider, so with unmapped Claude builders the `claude:opus`
+  primary is refused at dispatch (`reviewer_is_builder`); map the builders' tier in
+  `config.modelMap`.
+- **Honest limits.** The brief does not attach rule catalogues, UI captures or
+  proof evidence (see Bind reviewers to one candidate). None of this is cryptographic. A process of the same user
+  can rewrite the engine state and the relay output together, or install a stub
+  relay under `$HOME`; the receipt then proves only which file the engine
+  started. `gate unit-review` is not covered. `config.reviewProvenance:
+  "unbound"` (owner-set, bound by the DAG digest) restores the earlier gate for
+  that run, with every binding labelled `unbound`.
 
 ## Bind reviewers to one candidate
 
@@ -124,7 +200,12 @@ classify why:
 When a relay replaces a native primary, preserve the whole checklist: supply the
 actual diff including staged/untracked/deleted paths, repository instructions,
 applicable rule catalogues, pinned UI inputs and frozen proof/security evidence.
-A carrier that cannot retrieve these inputs is not a valid primary route. A
+A carrier that cannot retrieve these inputs is not a valid primary route. The
+engine-built brief (`review-dispatch`) carries only the plan narrative, the
+acceptance inventory, `AGENTS.md`/`CLAUDE.md`, the candidate paths, diff and
+untracked contents: the read-only reviewer runs in the repository and can read
+catalogues and evidence files, but nothing in the brief makes it. That is a
+known coverage limit of the engine route, not a waiver of the checklist. A
 short free-form counterpart prompt is not a substitute for primary coverage.
 
 ## Select the profile
@@ -147,10 +228,12 @@ profile.
 | `STANDARD` | the Opus primary workflow plus the mandatory second opinion |
 | `ELEVATED` | the same, with partitioned primary coverage when the diff is material and the security outcome required |
 
-Both reviews run concurrently when possible, otherwise one after the other. A
-missing or timed-out counterpart route falls back to CodeRabbit on the same candidate;
-if CodeRabbit is also unavailable, `WAIT_FOR_USER`. Record which route ran
-(`second_opinion: codex | claude | coderabbit`).
+Both reviews run concurrently when possible, otherwise one after the other. With
+the run engine the second opinion is the engine-dispatched Codex relay and nothing
+substitutes for it (`review_relay_unavailable` is `BLOCKED`, then `WAIT_FOR_USER`).
+Without the engine, a missing or timed-out counterpart route falls back to
+CodeRabbit on the same candidate; if CodeRabbit is also unavailable,
+`WAIT_FOR_USER`. Record which route ran (`second_opinion: codex | claude | coderabbit`).
 
 ## The primary review workflow
 
@@ -215,9 +298,10 @@ unbounded catalogue.
 On every ticket, start Codex for a Claude host or Claude for a Codex host,
 concurrently with the primary workflow in a fresh session. It is a free-form
 second opinion, not another rule pass or approver. The counterpart has a
-10-minute budget; the CodeRabbit fallback (used when the counterpart is
-unavailable, fails, times out or is out of quota) runs after it on its own
-10-minute budget. It is mandatory: when the primary finishes first, wait for it
+10-minute budget; without the run engine, the CodeRabbit fallback (used when the
+counterpart is unavailable, fails, times out or is out of quota) runs after it on
+its own 10-minute budget. With the engine there is no fallback: the stage is
+`BLOCKED` until the Codex relay produces a usable result. It is mandatory: when the primary finishes first, wait for it
 within its budget. Follow [cross-model.md](cross-model.md) for carrier, cancellation and
 fallback; do not import the PLAN debate into REVIEW.
 
@@ -245,7 +329,8 @@ outcome: PASS | FAIL
 
 Allow one schema-only correction using the completed analysis. A correction does
 not reopen the repository or restart review. A still-unusable primary result is
-`WAIT_FOR_USER`; a still-unusable second opinion falls back to CodeRabbit once,
+`WAIT_FOR_USER`; a still-unusable second opinion falls back to CodeRabbit once
+(without the run engine; with it, dispatch the Codex relay again or `WAIT_FOR_USER`),
 then `WAIT_FOR_USER`. A second opinion with `outcome: FAIL` and an empty
 `findings[]` is unusable: there is nothing to reconcile, so it follows the same
 single CodeRabbit fallback, then `WAIT_FOR_USER`.
@@ -356,8 +441,8 @@ reruns and UI slice. It checks only:
 Pass it only the captures of screens the repair changed. When the repair
 touches a `concurrency`-labelled node, or repairs a security or architecture
 finding (the security or architecture class of Repair routing in [units.md](units.md)), the second opinion on the repair (from a provider
-other than the primary's: Codex for the Opus primary; CodeRabbit if it is
-unavailable) runs before this confirmation and returns `PASS` or `FAIL`
+other than the primary's: Codex for the Opus primary, dispatched by the engine as
+`--role second`; without the engine, CodeRabbit if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL`
 with evidence. Record it as the confirmation's `second_opinion` (`route`,
 `reviewer_identity`, `candidate_id`, `checked_findings`, `outcome`, `evidence`): the
 gate counts a supplied one (the confirmation is PASS only when both are), and
@@ -389,7 +474,9 @@ With the run engine, also evaluate each review artifact through `gate.mjs`
 SHIP), recorded with `run-engine.mjs gate review|ship-ready` (unit reviews: `gate unit-review`, [units.md](units.md)). They bind the artifact
 chain, reviewer identity, candidate ID and second opinion, and refuse an incomplete or
 stale record; a refusal is a failed review step, not something to patch by hand.
-Write `reviewer_identity` as `<provider>:<model>` (a suffix may follow): the gate
+With engine-dispatched reviewers the identity is the receipt's (`claude:opus`,
+`codex:provider-default`), never the file's. Otherwise write `reviewer_identity` as
+`<provider>:<model>` (a suffix may follow): the gate
 refuses a reviewer equal to any builder the engine dispatched and a second opinion
 equal to the primary (also when only the suffix differs). A builder recorded as
 `<provider>:provider-default` ran the CLI's unresolved default model, so it counts

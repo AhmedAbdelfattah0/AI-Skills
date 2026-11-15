@@ -349,6 +349,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> -
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'pending->cancelled' --reason <text>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs rebind --repo <R> --ticket <T> --run-id <ID> --reason <text>   # accept hand edits to done nodes, only when the tree is the frozen candidate
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs archive --repo <R> --ticket <T> --run-id <ID>   # copy state, engine log, usage and a sha256 manifest to the git common dir; run BEFORE `git worktree remove`
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-dispatch --repo <R> --ticket <T> --run-id <ID> --role primary|second|confirmation --candidate <id>   # the engine launches the read-only reviewer relay
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --ticket <T> --run-id <ID>   # record REVIEW_COLLECTED for finished reviewers (next does it too)
 ```
 
 The engine runs the process (dispatch, retries, staleness, resume) and leaves
@@ -376,7 +378,11 @@ are refused, never dropped.
   node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)), and
   `ciRequiredChecks` (check-run names CI `PASS` requires) and `ciNoChecksMinutes`
   (the `NO_CHECKS` window, 1..120, default 5), both opt-in and never defaulted
-  into the DAG. Billing is
+  into the DAG; `reviewProvenance` (`engine`, the behaviour when absent: `gate review`
+  accepts only engine-dispatched, collected reviews; `unbound`: the owner opts the
+  run out, the earlier gate) and `acceptNativeReview` (boolean: the owner accepts a
+  native Agent-tool primary or confirmation, labelled `native_unbound`), both owner
+  settings bound by the DAG digest ([review.md](review.md), Engine-dispatched reviewers). Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -412,15 +418,22 @@ command: `drive`, `resume`) or `human` (only the owner continues). Rules:
   (`config.timeoutMs` + 60 s). Past the deadline it is `BLOCKED`
   `attempt_overdue` (`recover_attempt`: confirm its process group is gone, then
   `resume`). Nothing is killed.
-- Review dispatches are DETECTED, not authority. They are the `run-log.mjs`
-  `primary_review`, `optional_review` and `review_confirmation` starts of the
-  candidate under review; the `--carrier-result` path is the marker. A marker on
-  disk is `collect_review` (`run-log end --carrier-result`), with or without a
-  notification. Once every role is collected, the action is `gate_review`. The
-  deadline is the REVIEW phase ceiling (default 20 min); past it the stage is
-  `BLOCKED` `review_overdue`. Rows of another candidate are ignored. Without the
-  rows, `next` keeps offering `dispatch_review`. A refused gate after collection
-  is `BLOCKED` with the gate's code. Acceptance stays with `gate review`.
+- Review dispatches (default `config.reviewProvenance` `engine`) are the engine's
+  own receipts: the latest one per role for the candidate under review. None is
+  `READY` `review_dispatch` with `roles` (run `review-dispatch --role <r>
+  --candidate <candidate_id>` for each); a reviewer whose envelope is on disk is
+  `review_collect` (or the next `next` collects it, once, and lists it in
+  `collected`); a missing or failed relay is `BLOCKED` `review_relay_unavailable`
+  or `review_dispatch_failed` (owner; never waived); past the relay watchdog plus
+  2 min it is `BLOCKED` `review_overdue`. Once every role is collected, the action
+  is `gate_review` with `results` (the parsed files to submit). A dispatch that
+  never launched is abandoned and owed again. With `reviewProvenance: "unbound"`
+  they are, as before, DETECTED telemetry: the `run-log.mjs` `primary_review`,
+  `optional_review` and `review_confirmation` starts of the candidate under
+  review, the `--carrier-result` path as the marker (`collect_review`), and
+  `dispatch_review` while there are no rows. Rows of another candidate are
+  ignored. A refused gate after collection is `BLOCKED` with the gate's code.
+  Acceptance stays with `gate review`.
 - An un-enrolled run is `ENROLL` `BLOCKED` `not_enrolled`
   (`diagnostic: NEEDS_ENROLLMENT`, action `enroll`): nothing advances.
 - `PUBLISH` reads `authorize publish` (any deny is `BLOCKED` with its code).
@@ -518,9 +531,11 @@ the same code. All three hold until an accepted review of the current candidate
 exists: the repair's one targeted confirmation, or an original after an owner
 `RETRY`. **Detected:** `next`/`status` report `review_freshness`. A stale review
 is `NEEDS_APPROVAL` `owner_retry`, because the gate accepts a new original only
-after a trusted `RETRY`, and the `RETRY` then makes the new review `READY`. Not
-covered: a review file that names the current candidate id is accepted whatever
-its reviewer read (slice E7).
+after a trusted `RETRY`, and the `RETRY` then makes the new review `READY`. A
+review file that only names the current candidate id is no longer enough: the
+gate needs the engine's receipt and collection for that candidate
+(`review_unbound`, `review_receipt_candidate`; [review.md](review.md),
+Engine-dispatched reviewers), unless the owner set `reviewProvenance: "unbound"`.
 
 **REVIEW freeze versus finding-bound REPAIR.** After the freeze (`gate review`
 records the frozen candidate), drift is a judgment point (`post_freeze_drift`).

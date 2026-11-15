@@ -33,6 +33,7 @@ const att = (over = {}) => ({ attempt_id: 'att-1', kind: 'node', node: 'a', stat
   started_at: '2026-11-15T00:00:00.000Z', envelope_file: '/x/att-1.envelope.json', envelope: false, deadline: 'd', deadline_ms: 20000, pgid: 42, ...over });
 const disp = (role, over = {}) => ({ role, event_id: `e-${role}`, review_execution: 'review-1', candidate_id: 'C1', started_at: 't', ended: false,
   ended_ms: null, marker: `/m/${role}.json`, marker_exists: false, deadline: 'd', deadline_ms: 20000, ...over });
+const rcpt = (role, over = {}) => ({ ...disp(role), review_execution: null, kind: 'original', status: 'dispatched', consumed: false, event_id: `att-${role}`, parsed_file: null, ...over });
 const PASS_O = { review_execution: 'review-1', kind: 'original', outcome: 'PASS', candidate_id: 'C1' };
 const FAIL_O = { review_execution: 'review-1', kind: 'original', outcome: 'FAIL', candidate_id: 'C0', fix_findings: ['F1'] };
 const REPAIR_REC = { review_execution: 'review-1', kind: 'repair', old_candidate: 'C0', new_candidate: 'C1', write_set: ['src/a.txt'] };
@@ -128,6 +129,14 @@ const SCENARIOS = [
   ['recorded PASS that authorize complete refuses', PUBLISHED, baseF({ completeAuth: ciDeny('ci_evidence_inconsistent'), ci: ciEv('PASS', 'ci_passed') }),
     ['CI', 'BLOCKED', 'ci_evidence_inconsistent', 'resolve']],
   ['complete: authorize complete allows', PUBLISHED, baseF({ completeAuth: { allow: true }, ci: ciEv('PASS', 'ci_passed') }), [null, 'COMPLETED', 'completed', 'none']],
+  // P0 E7: the engine's own receipts (config.reviewProvenance engine) replace the run-log rows.
+  ['E7 review owed: the engine dispatches it', baseS(), baseF({ reviewMode: 'engine', dispatches: [disp('primary', { marker_exists: true })] }), ['REVIEW', 'READY', 'review_owed', 'review_dispatch']],
+  ['E7 reviewer finished, not collected', baseS(), baseF({ reviewMode: 'engine', receipts: [rcpt('primary', { marker_exists: true }), rcpt('second_opinion')] }), ['REVIEW', 'READY', 'result_uncollected', 'review_collect']],
+  ['E7 Codex relay unavailable', baseS(), baseF({ reviewMode: 'engine', receipts: [rcpt('primary'), rcpt('second_opinion', { status: 'unavailable' })] }), ['REVIEW', 'BLOCKED', 'review_relay_unavailable', 'review_dispatch']],
+  ['E7 an abandoned dispatch is owed again', baseS(), baseF({ reviewMode: 'engine', receipts: [rcpt('primary', { status: 'abandoned' }), rcpt('second_opinion')] }), ['REVIEW', 'READY', 'review_owed', 'review_dispatch']],
+  ['E7 receipts consumed by an earlier review are not this review', baseS(), baseF({ reviewMode: 'engine', receipts: [rcpt('primary', { consumed: true, ended: true }), rcpt('second_opinion', { consumed: true, ended: true })] }), ['REVIEW', 'READY', 'review_owed', 'review_dispatch']],
+  ['E7 every role collected', baseS(), baseF({ reviewMode: 'engine', receipts: [rcpt('primary', { status: 'collected', ended: true }), rcpt('second_opinion', { status: 'collected', ended: true })] }), ['REVIEW', 'READY', 'results_collected', 'gate_review']],
+  ['E7 confirmation reviewer failed', confirming(), baseF({ reviewMode: 'engine', receipts: [rcpt('confirmation', { kind: 'confirmation', status: 'failed' })] }), ['CONFIRMATION', 'BLOCKED', 'review_dispatch_failed', 'review_dispatch']],
 ];
 
 const brief = (d) => [d.next_action.stage, d.next_action.disposition, d.next_action.reason, d.next_action.action];

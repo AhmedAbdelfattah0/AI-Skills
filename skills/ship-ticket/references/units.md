@@ -328,8 +328,9 @@ repair still spends the run's ceilings; routing never adds a repair round.
 
 When unit reviews exist (`config.unitReview`), the final review in [review.md](review.md) is
 mandatory and runs on the exact assembled candidate, with the same Opus primary,
-the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit
-if it is unavailable or out of quota; if none can run, stop and ask with
+the mandatory opposite-model second opinion (Codex for a Claude host; with the run
+engine its `review-dispatch --role second` relay only, never substituted; without it
+CodeRabbit if it is unavailable or out of quota; if none can run, stop and ask with
 `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
 owner-RETRY policy. Unit reviews do not replace it, and aggregated unit PASSes are
 never accepted in its place.

@@ -25,10 +25,14 @@
  * BLOCKED, NEEDS_APPROVAL (only a human can continue: the engine never invents approval), COMPLETED,
  * FAILED. The supported path stops only on NEEDS_APPROVAL, BLOCKED, COMPLETED and FAILED (STOP).
  *
- * DETECTED, not authority: review dispatches are the run-log.mjs review activity rows (`primary_review`,
- * `optional_review`, `review_confirmation`, with `--carrier-result` as the marker). They only move a stage
- * between READY, WAITING and BLOCKED; acceptance stays with `gate review`. Without those rows `next` keeps
- * offering `dispatch_review`. Review deadlines come from the REVIEW phase start ceilings (default 20 min);
+ * Review dispatches (P0 E7): with config.reviewProvenance 'engine' (the default) they are the engine's own
+ * REVIEW_DISPATCHED receipts (engine-review-dispatch.mjs): the latest receipt per role for the candidate under
+ * review. None is READY `review_dispatch` (run-engine.mjs review-dispatch --role <r> --candidate <id>), a finished
+ * reviewer is READY `review_collect`, a relay that is missing or failed is BLOCKED (`review_relay_unavailable`,
+ * `review_dispatch_failed`: owner, never waived), every role collected is READY `gate_review` with the parsed result
+ * files. With the owner opt-out 'unbound' they are, as before, DETECTED telemetry: the run-log.mjs review activity
+ * rows (`primary_review`, `optional_review`, `review_confirmation`, with `--carrier-result` as the marker), and
+ * `next` offers `dispatch_review` / `collect_review`. Either way acceptance stays with `gate review`. Review deadlines come from the REVIEW phase start ceilings (default 20 min);
  * attempt deadlines from config.timeoutMs plus ATTEMPT_GRACE_MS. Nothing kills an overdue item: it is BLOCKED
  * with a recovery action.
  *
@@ -50,6 +54,7 @@ import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
 import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
 import { latestEvidence } from './engine-ci.mjs';
+import { REVIEW_KIND, provenanceMode } from './engine-review-dispatch.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
@@ -61,6 +66,7 @@ export const ACTIONS = Object.freeze({
   reapprove: 'human', new_run: 'human', owner_retry: 'human', recover_attempt: 'human', resolve: 'orchestrator',
   init: 'orchestrator', enroll: 'orchestrator', context: 'orchestrator', gate_red: 'orchestrator', unit_review: 'orchestrator',
   dispatch_review: 'orchestrator', collect_review: 'orchestrator', gate_review: 'orchestrator', recover_review: 'orchestrator',
+  review_dispatch: 'orchestrator', review_collect: 'orchestrator',
   gate_ship_ready: 'orchestrator', commit: 'orchestrator', publish: 'orchestrator', none: 'orchestrator',
   drive: 'engine', resume: 'engine', wait: 'engine', collect_ci: 'engine',
 });
@@ -137,19 +143,32 @@ function reviewRules(stage, kind, want) {
   const p = stage.toLowerCase();
   const rows = (S, f, x) => {
     const w = want(S, f, x);
+    if (f.reviewMode === 'engine') { // E7: the latest unconsumed receipt per role of this review kind and candidate (abandoned: owed again)
+      const mine = w.roles.map(r => (f.receipts ?? []).filter(d => d.kind === kind && !d.consumed && d.candidate_id === w.candidate && d.role === r).at(-1))
+        .filter(d => d && d.status !== 'abandoned');
+      return { ...w, engine: true, mine };
+    }
     const mine = (f.dispatches ?? []).filter(d => d.candidate_id === w.candidate && w.roles.includes(d.role)
       && (w.rx ? d.review_execution === w.rx : !x.inChain.has(d.review_execution)));
     const rx = w.rx ?? mine.at(-1)?.review_execution ?? null;
     return { ...w, rx, mine: mine.filter(d => !rx || d.review_execution === rx) };
   };
+  const cli = (role) => (role === 'second_opinion' ? 'second' : role);
   const item = (d) => ({ role: d.role, event_id: d.event_id, review_execution: d.review_execution, candidate_id: d.candidate_id,
     started_at: d.started_at, marker: d.marker, deadline: d.deadline });
   return [
-    { id: `${p}.collect`, stage, when: (S, f, x) => { const d = rows(S, f, x).mine.find(y => !y.ended && y.marker_exists);
-      return d && res('READY', 'result_uncollected', 'collect_review', { reasons: [`${d.role} result ${d.marker} exists: collect it (run-log end --carrier-result), no re-dispatch`], item: item(d) }); } },
+    { id: `${p}.collect`, stage, when: (S, f, x) => { const w = rows(S, f, x), d = w.mine.find(y => !y.ended && y.marker_exists);
+      return d && res('READY', 'result_uncollected', w.engine ? 'review_collect' : 'collect_review', { reasons: [w.engine
+        ? `${d.role} reviewer ${d.event_id} finished (${d.marker}): run review-collect, no re-dispatch`
+        : `${d.role} result ${d.marker} exists: collect it (run-log end --carrier-result), no re-dispatch`], item: item(d) }); } },
+    { id: `${p}.relay_blocked`, stage, when: (S, f, x) => { const d = rows(S, f, x).mine.find(y => ['unavailable', 'failed'].includes(y.status));
+      return d && res('BLOCKED', d.status === 'unavailable' ? 'review_relay_unavailable' : 'review_dispatch_failed', 'review_dispatch', { owner: 'human', kind,
+        roles: [cli(d.role)], candidate_id: d.candidate_id, reasons: [`the ${d.role} reviewer ${d.event_id} ${d.status === 'unavailable' ? 'relay is unavailable' : `failed (${d.detail ?? 'no usable review'})`}: `
+          + 'the review stage never proceeds without it (never waived; CodeRabbit never substitutes). Fix the relay or the CLI login, then run review-dispatch again'], item: item(d) }); } },
     { id: `${p}.owed`, stage, when: (S, f, x) => { const w = rows(S, f, x), missing = w.roles.filter(r => !w.mine.some(d => d.role === r));
-      return missing.length > 0 && res('READY', kind === 'original' ? 'review_owed' : 'confirmation_owed', 'dispatch_review',
-        { reasons: [`dispatch ${missing.join(' and ')} for candidate ${w.candidate}`], kind, roles: missing, candidate_id: w.candidate, review_execution: w.rx }); } },
+      return missing.length > 0 && res('READY', kind === 'original' ? 'review_owed' : 'confirmation_owed', w.engine ? 'review_dispatch' : 'dispatch_review',
+        { reasons: [w.engine ? `run review-dispatch --role ${missing.map(cli).join(' and --role ')} --candidate ${w.candidate}` : `dispatch ${missing.join(' and ')} for candidate ${w.candidate}`],
+          kind, roles: w.engine ? missing.map(cli) : missing, candidate_id: w.candidate, review_execution: w.rx }); } },
     { id: `${p}.overdue`, stage, when: (S, f, x) => { const d = rows(S, f, x).mine.find(y => !y.ended && f.now > y.deadline_ms);
       return d && res('BLOCKED', 'review_overdue', 'recover_review', { reasons: [`${d.role} (${d.event_id}) has no result past ${d.deadline}: check the carrier, cancel it, and use REVIEW's bounded recovery (review.md)`], item: item(d) }); } },
     { id: `${p}.waiting`, stage, when: (S, f, x) => { const d = rows(S, f, x).mine.find(y => !y.ended);
@@ -159,7 +178,8 @@ function reviewRules(stage, kind, want) {
         && res('BLOCKED', g.code, 'gate_review', { reasons: [`gate review refused (${g.code}) after these results were collected: correct the input or recover, then run gate review`], kind, review_execution: w.rx }); } },
     { id: `${p}.gate`, stage, when: (S, f, x) => { const w = rows(S, f, x);
       return w.mine.length > 0 && w.mine.every(d => d.ended)
-        && res('READY', 'results_collected', 'gate_review', { reasons: [`every ${kind} result for ${w.candidate} is collected: reconcile and run gate review`], kind, review_execution: w.rx, candidate_id: w.candidate }); } },
+        && res('READY', 'results_collected', 'gate_review', { reasons: [`every ${kind} result for ${w.candidate} is collected: reconcile and run gate review`], kind, review_execution: w.rx, candidate_id: w.candidate,
+          ...(w.engine ? { results: w.mine.map(d => ({ role: cli(d.role), attempt_id: d.event_id, parsed_file: d.parsed_file })) } : {}) }); } },
   ];
 }
 
@@ -359,6 +379,22 @@ export function reviewDispatches(repoRoot, ticket, runId, now) {
   return out;
 }
 
+/**
+ * The engine's review receipts as dispatch rows (P0 E7): one per REVIEW_DISPATCHED / REVIEW_UNAVAILABLE record, with
+ * its attempt's envelope as the marker (a finished reviewer that is not collected yet).
+ */
+export function reviewReceipts(S, now) {
+  return (S.review_dispatches ?? []).map(d => {
+    const a = (S.attempts ?? []).find(x => x.attempt_id === d.attempt_id);
+    const deadline = ms(d.deadline);
+    return { role: d.role === 'second' ? 'second_opinion' : d.role, kind: d.kind, event_id: d.attempt_id, review_execution: null, candidate_id: d.candidate_id,
+      started_at: d.started_at, status: d.status, consumed: Boolean(d.consumed_by), ended: d.status === 'collected', ended_ms: ms(d.collected?.collected_at),
+      marker: a?.envelope_file ?? null, marker_exists: d.status === 'dispatched' && Boolean(a?.envelope_file && existsSync(a.envelope_file)),
+      deadline: d.deadline ?? null, deadline_ms: deadline ?? Infinity, overdue: deadline !== null && now > deadline, parsed_file: d.collected?.parsed_file ?? null,
+      detail: d.collected?.parse_error ?? d.code ?? null };
+  });
+}
+
 /** The last GATE line per gate kind of this run in the engine log ({ ok, code, candidate_id, at_ms }). */
 function lastGates(repoRoot, ticket, runId) {
   const text = readSink(io.gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.engine.jsonl`));
@@ -377,7 +413,7 @@ export async function gather(E, ext) {
   const { S, ctx } = E;
   const now = typeof ctx.now === 'function' ? ms(ctx.now()) ?? Date.now() : Date.now();
   const timeout = clampTimeout(S.config?.timeoutMs ?? 0);
-  const attempts = (S.attempts ?? []).filter(a => LIVE.includes(a.status)).map(a => {
+  const attempts = (S.attempts ?? []).filter(a => LIVE.includes(a.status) && a.kind !== REVIEW_KIND).map(a => {
     const deadline = (ms(a.started_at) ?? now) + timeout + ATTEMPT_GRACE_MS;
     return { ...a, envelope: Boolean(a.envelope_file && existsSync(a.envelope_file)), deadline: iso(deadline), deadline_ms: deadline };
   });
@@ -391,6 +427,7 @@ export async function gather(E, ext) {
     candidate: { id: candidate.candidate_id ?? null, reason: candidate.reason ?? null, merge_base: candidate.merge_base ?? null },
     tree: dirty === null ? { dirty: null, paths: [] } : { dirty: Object.keys(dirty).length > 0, paths: Object.keys(dirty).sort() },
     head, dispatches: reviewDispatches(ctx.repoRoot, S.ticket, S.run_id, now), lastGate: lastGates(ctx.repoRoot, S.ticket, S.run_id),
+    reviewMode: provenanceMode(S), receipts: reviewReceipts(S, now),
     freshness: reviewFreshness(S, ctx.repoRoot),
     confirmationPolicy: rx && (S.review_chain ?? []).some(r => r.review_execution === rx && r.kind === 'repair') ? confirmationPolicy(S, rx) : null };
   if (S.ship_ready?.candidate_id && f.tree.dirty === false && !(S.published ?? []).some(p => p.head === head)) f.publishAuth = await ext.authorize('publish');
