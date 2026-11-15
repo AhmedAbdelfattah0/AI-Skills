@@ -42,7 +42,7 @@ import { gateReview } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
-import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath } from './engine-test-fixture.mjs';
+import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath, preEnrollmentState } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;
@@ -296,7 +296,7 @@ function goldenRun(t, config) {
   step('ship-ready', fx.gate('ship-ready', {}));
   step('resume', fx.cli('resume'));
   step('status-2', fx.cli('status'));
-  return normalizer(fx.root)({ outputs: outs, state: fx.readState(), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
+  return normalizer(fx.root)({ outputs: outs, state: preEnrollmentState(fx.readState()), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
 }
 
 test('[R9] the golden file hash is pinned (main plus the one proof started_at line), and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {

@@ -266,3 +266,13 @@ export const confirmReview = (rx, candidate) => ({ review_execution: rx, kind: '
 
 /** An in-process `init` that admits the run afterwards (the supported init -> enroll -> context steps). */
 export const admittedInit = (initFn) => async (ctx, ...rest) => { const out = await initFn(ctx, ...rest); await admitRun(ctx); return out; };
+
+/**
+ * The state without the keys P0 E1/E4 added (enrollment, contexts, ship_ready.merge_base): the golden pins
+ * the engine behaviour from before enrollment; run-engine-enroll.test.mjs covers the additions.
+ */
+export function preEnrollmentState(S) {
+  const { enrollment: _e, contexts: _c, ...rest } = S;
+  if (rest.ship_ready) { const { merge_base: _m, ...sr } = rest.ship_ready; rest.ship_ready = sr; }
+  return rest;
+}

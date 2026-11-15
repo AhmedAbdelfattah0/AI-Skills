@@ -58,7 +58,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents } from './engine-test-fixture.mjs';
+import { POSIX, fixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, preEnrollmentState } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;
@@ -114,7 +114,7 @@ function goldenRun(t) {
   step('ship-ready', fx.gate('ship-ready', {}));
   step('resume', fx.cli('resume'));
   step('status-2', fx.cli('status'));
-  return { fx, record: { outputs: outs, state: fx.readState(), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) } };
+  return { fx, record: { outputs: outs, state: preEnrollmentState(fx.readState()), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) } };
 }
 
 test('golden: a v1 DAG without unit fields yields the pre-Wave-2a state, events and outputs', { skip: WIN_SKIP }, (t) => {
