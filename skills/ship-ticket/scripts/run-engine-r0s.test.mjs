@@ -62,7 +62,7 @@ test('A2: the guard validates the destination: T-1\'s sha to T-2\'s branch, to m
   assert.equal(g.status, 0, g.stderr);
   const push = (args) => spawnSync('git', ['push', ...args], { cwd: fx.repo, encoding: 'utf8', env: fx.env });
   const blocked = (r, code, why) => { assert.notEqual(r.status, 0, `${why}: ${r.stderr}`); assert.match(r.stderr, new RegExp(code), why); };
-  blocked(push(['origin', 'T-1-work:refs/heads/T-2-work']), 'not_enrolled|cross_ticket_push', 'T-1 sha to the unenrolled T-2 branch');
+  blocked(push(['origin', 'T-1-work:refs/heads/T-2-work']), 'cross_ticket_push', 'T-1 sha to the unenrolled T-2 branch (exactly: the destination check runs before enrollment)');
   assert.equal(fx.remoteHead('T-2-work'), null);
   blocked(push(['origin', `T-1-work:refs/heads/${fx.defaultBranch}`]), 'push_to_default_branch', 'T-1 sha to the default branch');
   blocked(push(['origin', `HEAD:refs/heads/${fx.defaultBranch}`]), 'push_to_default_branch', 'HEAD to the default branch');
@@ -106,7 +106,7 @@ test('A1: the reviewer brief never launches on a failed or overflowing git call 
 
 // ------------------------------------------------------------------ A4 (N1 + Codex HIGH 1): no policy downgrade
 
-test('A4: relaxed assurance needs the human-approved plan binding AND the policy line; a DAG_BOUND or line-less relaxed DAG is refused at init (policy_unapproved)', { skip: WIN_SKIP }, (t) => {
+test('A4: relaxed assurance needs the plan binding (the DAG digest in the START-digested narrative: placement, not proof a human read it) AND the policy line; a DAG_BOUND or line-less relaxed DAG is refused at init (policy_unapproved)', { skip: WIN_SKIP }, (t) => {
   for (const config of [{ reviewProvenance: 'unbound' }, { acceptNativeReview: true }, { ciRequiredChecks: ['build'] }, { ciNoChecksMinutes: 60 }]) {
     const noLine = enrollFixture(t, { config, approvePolicy: false, admit: false });
     const r = noLine.cli('init', { dag: noLine.dagFile });
@@ -166,10 +166,12 @@ test('A4: under the strict policy a review the engine did not dispatch never aut
   assert.equal(nat.cli('init', { dag: nat.dagFile }).status, 0);
   assert.equal(nat.cli('drive').status, 0);
   const c = nat.candidate();
+  writeFileSync(join(nat.root, 'relay-behaviour.json'), J({ 'codex-delegate': { final: finalMessage(reviewBody(secondOpinion(c))) } }));
   assert.equal(nat.dispatch('second', c).out.code, 'review_dispatched');
-  const collected = nat.engineReview({ review_execution: 'rx-1', kind: 'original', second_opinion: secondOpinion(c) }).input; // collects the second
+  await waitFor(() => nat.readState().attempts.filter(a => a.kind === 'review').every(a => existsSync(a.envelope_file)), 'envelope');
+  assert.equal(nat.cli('review-collect').status, 0);
   const g = nat.gate('review', { review_execution: 'rx-1', kind: 'original', primary: primaryReview(c, { reviewer_identity: 'claude:native' }),
-    second_opinion: collected.second_opinion ?? JSON.parse(readFileSync(nat.readState().review_dispatches[0].collected.parsed_file, 'utf8')), reconciliation: { dispositions: [] } }, { raw: true });
+    second_opinion: JSON.parse(readFileSync(nat.readState().review_dispatches[0].collected.parsed_file, 'utf8')), reconciliation: { dispositions: [] } }, { raw: true });
   assert.equal(g.out.code, 'review_accepted', g.stdout);
   assert.equal(nat.gate('ship-ready', {}).out.ok, true);
   nat.commitAll();

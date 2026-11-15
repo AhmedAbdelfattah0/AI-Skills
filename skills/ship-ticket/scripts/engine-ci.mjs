@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { statSync, realpathSync, readFileSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { createHash } from 'node:crypto';
+import { userInfo } from 'node:os';
 
 export const CI_SCHEMA = 'ship-ticket-ci-evidence-v1';
 export const CI_STATES = Object.freeze(['PASS', 'PENDING', 'FAIL', 'NO_CHECKS', 'STALE', 'UNAVAILABLE']);
@@ -203,10 +204,73 @@ export function pinnedTool(pin, name = 'gh') {
   return { ok: true, path: pin.path };
 }
 
-/** The real adapter: the pinned `gh` (`bin`) in the repository (its {owner}/{repo} placeholders resolve from the git remote). */
-export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin = 'gh' }) {
+// ---- repository identity (R0-S batch 2, item 3) -----------------------------------------------------
+
+/**
+ * The GitHub repository a remote URL names: { host, owner, repo, slug: 'host/owner/repo' } or null (a local path, a URL with
+ * no owner/repo). https://host/owner/repo(.git), ssh://[user@]host[:port]/owner/repo(.git) and [user@]host:owner/repo(.git).
+ */
+export function repositoryOf(url) {
+  const u = String(url ?? '').trim();
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(u)
+    ?? /^(?:[^@/\s]+@)?([A-Za-z0-9.-]+):([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(u);
+  if (!m || /^[A-Za-z]$/.test(m[1])) return null; // C:\path is a Windows path, not host C
+  const [host, owner, repo] = [m[1].toLowerCase(), m[2], m[3]];
+  if (![owner, repo].every(x => /^[A-Za-z0-9_.-]+$/.test(x))) return null;
+  return { host, owner, repo, slug: `${host}/${owner}/${repo}` };
+}
+
+/**
+ * The repository identity of remote `remote` as CONFIGURED (remote.<name>.url, before any insteadOf rewrite): { url, ...repositoryOf }
+ * or null. `publish` records it in PUBLISHED; `ci` re-reads it and refuses ci_repo_mismatch when it moved, and asks gh for exactly it.
+ * A configured pushurl naming another repository is not this identity (null: the push and the CI would be different repositories).
+ */
+export function remoteRepository(repoRoot, remote = 'origin') {
+  const cfg = (k) => { const r = spawnSync('git', ['config', '--get', `remote.${remote}.${k}`], { cwd: repoRoot, encoding: 'utf8', timeout: 30000 }); return r.status === 0 ? r.stdout.trim() : null; };
+  const url = cfg('url');
+  const id = repositoryOf(url);
+  if (!id) return null;
+  const push = cfg('pushurl');
+  if (push !== null && repositoryOf(push)?.slug?.toLowerCase() !== id.slug.toLowerCase()) return null;
+  return { url, ...id };
+}
+
+/** Whether two repository identities are the same repository (GitHub names are case-insensitive). */
+export const sameRepository = (a, b) => Boolean(a?.slug && b?.slug) && a.slug.toLowerCase() === b.slug.toLowerCase();
+
+/** The repository a github.com-style html URL (https://host/owner/repo/...) belongs to, or null. */
+export function repositoryOfHtml(url) {
+  const m = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\//i.exec(String(url ?? ''));
+  return m ? { slug: `${m[1].toLowerCase()}/${m[2]}/${m[3]}` } : null;
+}
+
+/**
+ * The environment gh runs with (R0-S batch 2, item 3): every GH_* and GITHUB_* variable removed (GH_REPO and GH_HOST select
+ * another repository or host, GH_CONFIG_DIR another configuration, GH_TOKEN / GITHUB_TOKEN / *_ENTERPRISE_TOKEN another identity),
+ * HOME and XDG_CONFIG_HOME set to the OS account's (os.userInfo, never $HOME), prompts off. gh therefore runs as the account's
+ * stored login, and the repository and host are explicit on every call. An environment-token-only setup fails closed
+ * (ci_provider_unavailable). Not removed (residual): proxy and TLS variables (HTTPS_PROXY, SSL_CERT_FILE), which need a
+ * trusted interception certificate to fabricate answers.
+ */
+export function ghEnv(env = process.env) {
+  const out = Object.fromEntries(Object.entries(env).filter(([k]) => !/^(?:GH|GITHUB)_/i.test(k) && k.toUpperCase() !== 'XDG_CONFIG_HOME'));
+  let home = null;
+  try { home = userInfo().homedir || null; } catch { home = null; }
+  if (home) { out.HOME = home; if (process.platform === 'win32') out.USERPROFILE = home; }
+  out.GH_PROMPT_DISABLED = '1';
+  return out;
+}
+
+/**
+ * The real adapter: the pinned `gh` (`bin`) asked about exactly `repository` (the PUBLISHED identity: explicit repos/<owner>/<repo>
+ * API paths and --hostname, -R host/owner/repo for pr and run), with ghEnv. Without a repository it answers ci_repo_unknown.
+ */
+export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin = 'gh', repository = null }) {
+  const id = repository?.owner && repository?.repo && repository?.host ? repository : null;
+  const genv = ghEnv(env);
   const run = (args) => {
-    const r = spawn(bin, args, { cwd: repoRoot, encoding: 'utf8', env, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
+    if (!id) return unavailable('ci_repo_unknown', 'no repository identity: CI is read only from the repository publish recorded');
+    const r = spawn(bin, args, { cwd: repoRoot, encoding: 'utf8', env: genv, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
     return r.status === 0 ? { ok: true, stdout: r.stdout } : unavailable('ci_provider_unavailable', (r.stderr || r.error?.message || `gh exited ${r.status}`).trim());
   };
   const json = (r) => { if (!r.ok) return r; try { return { ok: true, data: JSON.parse(r.stdout) }; } catch { return unavailable('ci_provider_unavailable', 'gh output is not JSON'); } };
@@ -214,19 +278,20 @@ export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin
     name: 'gh',
     checkRuns(sha) {
       if (!SHA_RE.test(sha)) return unavailable('ci_provider_unavailable', `not a commit SHA: ${sha}`);
-      const r = run(['api', '-X', 'GET', `repos/{owner}/{repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '--paginate', '--jq',
-        '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, check_suite: .check_suite.id, url: .html_url})']);
+      const r = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '--paginate', '--jq',
+        '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, check_suite: .check_suite.id, url: .html_url})',
+        '--hostname', id?.host ?? '']);
       return r.ok ? parseCheckRuns(r.stdout) : r;
     },
     pullRequest(n) {
-      const r = json(run(['pr', 'view', String(n), '--json', 'number,headRefOid,headRefName,baseRefName,mergeable,mergeStateStatus,state,url']));
+      const r = json(run(['pr', 'view', String(n), '-R', id?.slug ?? '', '--json', 'number,headRefOid,headRefName,baseRefName,mergeable,mergeStateStatus,state,url']));
       if (!r.ok) return r;
       const d = r.data ?? {};
       return { ok: true, pr: { number: d.number ?? n, head_sha: d.headRefOid ?? null, head_branch: d.headRefName ?? null, base: d.baseRefName ?? null,
         mergeable: d.mergeable ?? null, merge_state: d.mergeStateStatus ?? null, state: d.state ?? null, url: d.url ?? null } };
     },
     recentRuns(branch) {
-      const r = json(run(['run', 'list', '--branch', branch, '--limit', '10', '--json', 'databaseId,headSha,status,conclusion,event,workflowName,createdAt']));
+      const r = json(run(['run', 'list', '-R', id?.slug ?? '', '--branch', branch, '--limit', '10', '--json', 'databaseId,headSha,status,conclusion,event,workflowName,createdAt']));
       if (!r.ok) return r;
       return { ok: true, runs: (Array.isArray(r.data) ? r.data : []).map(x => ({ id: x.databaseId ?? null, head_sha: x.headSha ?? null, status: x.status ?? null,
         conclusion: x.conclusion ?? null, event: x.event ?? null, workflow: x.workflowName ?? null, created_at: x.createdAt ?? null })) };
@@ -333,15 +398,21 @@ export function remoteHeadOf(repoRoot, pub, env) {
   return { ok: true, head: r.stdout.trim().split(/\s+/)[0] || null };
 }
 
-export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub) }) {
+export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub), repository = null }) {
   const prNumber = pr ?? prNumberOf(pub.pr?.url);
   const view = prNumber ? provider.pullRequest(prNumber) : null;
   const runs = provider.checkRuns(pub.head);
   const collectedMs = now();
-  const head = { schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: prNumber ?? null, provider: provider.name ?? 'custom' };
+  const head = { schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: prNumber ?? null, provider: provider.name ?? 'custom',
+    ...(repository ? { repository: repository.slug } : {}) };
   const timing = (t = {}) => ({ dispatched_at: pub.at ?? null, first_check_started_at: t.first_check_started_at ?? null,
     checks_completed_at: t.checks_completed_at ?? null, collected_at: iso(collectedMs) });
-  const failure = [view && !view.ok ? view : null, !runs.ok ? runs : null, !remote.ok ? { code: 'ci_remote_unavailable', error: `the published branch could not be read: ${cut(remote.error)}` } : null].find(Boolean);
+  // R0-S batch 2 (item 3): every answer must be of the published repository (each check run's and the PR's html URL), or the
+  // evidence is ci_repo_mismatch: checks of the same sha in a fork (GH_REPO, a gh that ignored -R) never authorize complete.
+  const foreign = repository ? [...(runs.ok ? runs.runs.map(c => c.url) : []), ...(view?.ok ? [view.pr.url] : [])]
+    .filter(u => !sameRepository(repositoryOfHtml(u), repository)) : [];
+  const failure = [view && !view.ok ? view : null, !runs.ok ? runs : null, !remote.ok ? { code: 'ci_remote_unavailable', error: `the published branch could not be read: ${cut(remote.error)}` } : null,
+    foreign.length ? { code: 'ci_repo_mismatch', error: `${foreign.length} answer(s) are not of the published repository ${repository.slug}: ${foreign.slice(0, 3).map(u => u ?? 'no URL').join(', ')}` } : null].find(Boolean);
   if (failure) return { ...head, state: 'UNAVAILABLE', code: failure.code ?? 'ci_provider_unavailable', reasons: [failure.error ?? 'provider failed'],
     checks: [], collected_at: iso(collectedMs), timing: timing() };
   const v = verdict({ sha: pub.head, branch: pub.branch, checks: runs.runs, required: S.config?.ciRequiredChecks, windowMs: noChecksWindowMs(S.config),

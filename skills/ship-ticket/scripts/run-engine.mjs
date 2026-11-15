@@ -37,7 +37,7 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, policyApproval, configDrift, ASSURANCE_KEYS } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, policyApproval, configDrift, ASSURANCE_KEYS, narrativeListsDigest, relaxedPolicy } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
@@ -46,7 +46,7 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
-import { collect as collectCi, ghProvider, pinnedTool, remoteHeadOf, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
+import { collect as collectCi, ghProvider, pinnedTool, resolveTool, remoteHeadOf, remoteRepository, sameRepository, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
 import { dispatchReview, collectReviews, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
@@ -340,7 +340,7 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
-    const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
+    const listed = narrativeListsDigest(narrative, dagDigest); // a visible line, never inside an HTML comment or a code fence
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
     if (!binding) throw coded('dag_unbound', 'the DAG digest is neither in the approved plan nor in exactly one DAG_BOUND of this run');
     const policy = policyApproval({ config: dag.config, narrative, dagDigest });
@@ -428,14 +428,39 @@ export async function next(ctx) {
       return { ...head, ...(await deriveNext(E, drift(E, { mutate: false }), 'mine')), collected };
     });
   } catch (e) {
-    if (e.code === 'no_state') return { ...head, disposition: 'BLOCKED', stop: false, stages: {}, collected: [],
-      next_action: { stage: 'ENROLL', action: 'init', reason: 'no_state', owner: 'orchestrator', disposition: 'BLOCKED', reasons: [e.message] } };
+    if (e.code === 'no_state') {
+      const pre = preInitPolicy(ctx);
+      if (pre) return { ...head, disposition: pre.disposition, stop: pre.disposition === 'NEEDS_APPROVAL', stages: {}, collected: [], next_action: pre };
+      return { ...head, disposition: 'BLOCKED', stop: false, stages: {}, collected: [],
+        next_action: { stage: 'ENROLL', action: 'init', reason: 'no_state', owner: 'orchestrator', disposition: 'BLOCKED',
+          reasons: [e.message, ...(ctx.dagFile ? [] : ['pass --dag <file> to next before init to check the DAG\'s assurance policy against the approved plan'])] } };
+    }
     if (e.code !== 'lock_held') throw e;
     const E = open(ctx);
     E.load();
     reconcileReviews(E);
     return { ...head, ...(await deriveNext(E, drift(E, { mutate: false }), 'held')), collected: [] };
   }
+}
+
+/**
+ * R0-S batch 2 (item 5): before init, with --dag, the DAG's assurance policy against the approved plan. A relaxed policy the
+ * narrative does not approve (visible digest and the exact policy line) is NEEDS_APPROVAL listing the relaxed values and the
+ * line the plan must carry, so `next` never offers an init that refuses policy_unapproved. An approved relaxed policy is the
+ * init action labelled RELAXED. null: no --dag, an unreadable DAG or plan (init reports those), or the strict policy.
+ */
+function preInitPolicy(ctx) {
+  if (!ctx.dagFile) return null;
+  let config, text, raw;
+  try { raw = readFileSync(ctx.dagFile); config = validateEngineDag(JSON.parse(raw), { ticket: ctx.ticket }).config; text = readFileSync(locate(ctx).plan, 'utf8'); } catch { return null; }
+  const relaxed = relaxedPolicy(config);
+  if (!Object.keys(relaxed).length || text.indexOf(BEGIN) < 0 || text.indexOf(END) < 0) return null;
+  const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
+  const a = policyApproval({ config, narrative, dagDigest: sha(raw) });
+  if (!a.ok) return { stage: 'APPROVAL', action: 'reapprove', reason: a.code, owner: 'human', disposition: 'NEEDS_APPROVAL', relaxed: a.relaxed,
+    required_line: a.required_line, reasons: [a.reason, `the DAG relaxes: ${JSON.stringify(a.relaxed)}; only the human approves that (or drop the settings: strict)`], assurance: 'RELAXED' };
+  return { stage: 'ENROLL', action: 'init', reason: 'no_state', owner: 'orchestrator', disposition: 'BLOCKED', relaxed: a.relaxed, assurance: 'RELAXED',
+    reasons: ['no engine state: run init', `the approved plan relaxes assurance: ${JSON.stringify(a.relaxed)}`] };
 }
 
 /** Re-verify the binding, reconcile, then dispatch ready nodes and authorized repairs until done or a judgment point. */
@@ -728,15 +753,36 @@ export async function ci(ctx) {
     const head = r.status === 0 ? r.stdout.trim() : null;
     const pub = (E.S.published ?? []).findLast(p => p.head === head);
     if (!pub) return refuse('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}: CI is collected only for a head run-engine.mjs publish pushed`]);
-    // R0-S N4: the real provider runs exactly the gh pinned at enroll (a PATH stub added later is never run); ctx.ciProvider is in-process only.
-    let provider = ctx.ciProvider;
-    if (!provider) {
-      const gh = pinnedTool(E.S.enrollment?.tools?.gh);
-      if (!gh.ok) return refuse(gh.code, [gh.reason]);
-      provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path });
-    }
     const now = () => Date.parse(auditNow(ctx));
-    const ev = collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now, remote: remoteHeadOf(ctx.repoRoot, pub, ctx.env) });
+    const remote = remoteHeadOf(ctx.repoRoot, pub, ctx.env);
+    // R0-S batch 2 (items 3, 6): a refusal past this point is RECORDED as UNAVAILABLE evidence with its code (never a silent
+    // return that `next` would re-offer forever); engine-next.mjs gives each code its owner and recovery.
+    const unavailableEv = (code, reason) => ({ schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: ctx.pr ?? null, provider: 'gh', state: 'UNAVAILABLE',
+      code, reasons: [reason], checks: [], collected_at: new Date(now()).toISOString(), timing: { dispatched_at: pub.at ?? null, collected_at: new Date(now()).toISOString() } });
+    let provider = ctx.ciProvider, repository = null, ev = null;
+    if (!provider) {
+      // Item 3: CI is read from exactly the repository publish recorded (its configured remote URL), and that remote must still name it.
+      repository = pub.repository ?? null;
+      const nowRepo = remoteRepository(ctx.repoRoot, pub.remote ?? 'origin');
+      if (!repository) ev = unavailableEv('ci_repo_unknown', `the PUBLISHED record of ${pub.head} names no GitHub repository (a remote that is no GitHub URL, or a publish before R0-S batch 2): CI evidence is read only from the published repository; publish again or start a new run`);
+      else if (!sameRepository(repository, nowRepo)) ev = unavailableEv('ci_repo_mismatch', `remote ${pub.remote ?? 'origin'} now names ${nowRepo?.slug ?? 'no GitHub repository'}, publish pushed to ${repository.slug}: restore the remote URL`);
+      // R0-S N4: the real provider runs exactly the gh pinned at enroll (a PATH stub added later is never run); ctx.ciProvider is in-process only.
+      // Item 6: a run enrolled with no gh on PATH pins gh at its first ci, and only after the published branch is verified at the
+      // published head (the same pre-pin residual as enroll: it trusts that moment's PATH). A drifted pin is never re-pinned.
+      let pin = E.S.enrollment?.tools?.gh ?? null;
+      if (!ev && !pin?.path) {
+        const found = resolveTool('gh', ctx.env ?? process.env);
+        if (!found) ev = unavailableEv('gh_unpinned', 'no gh was pinned at enroll and none is on PATH now: install gh (logged in), then run run-engine.mjs ci again');
+        else if (!remote.ok || remote.head !== pub.head) ev = unavailableEv('ci_head_unverified', `gh would be pinned at this first ci, but the published branch is ${remote.ok ? remote.head ?? 'gone' : `unreadable (${remote.error})`}, not ${pub.head}: nothing is pinned or collected`);
+        else { pin = { ...found, pinned_at: 'ci', at: new Date().toISOString() }; E.S.enrollment.tools = { ...(E.S.enrollment.tools ?? {}), gh: pin }; }
+      }
+      if (!ev) {
+        const gh = pinnedTool(pin);
+        if (!gh.ok) ev = unavailableEv(gh.code, gh.reason);
+        else provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path, repository });
+      }
+    }
+    ev ??= collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now, remote, repository });
     E.S.ci_evidence = [...(E.S.ci_evidence ?? []), ev].slice(-CI_EVIDENCE_KEEP);
     note(E.S, 'CI_EVIDENCE', { head_sha: ev.head_sha, state: ev.state, code: ev.code });
     E.S.outbox.push({ run_id: E.S.run_id, event: 'CI_EVIDENCE', event_id: `ci-${E.S.run_id}-${E.S.seq}`, head_sha: ev.head_sha, pr: ev.pr, state: ev.state,

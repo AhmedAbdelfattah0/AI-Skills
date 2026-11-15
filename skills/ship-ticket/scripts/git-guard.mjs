@@ -28,11 +28,10 @@
  * branch deletions pass. If node or this script has moved, the hook blocks only branches matching the
  * default pattern and says how to reinstall.
  *
- * The PR base the hook's authorize judges is the one `publish` used: publish records an explicit
- * --base in the engine state for the HEAD it pushes (PUBLISH_INTENT) before the push, so a stacked
- * PR's own push is not refused as base_mismatch. A push to a URL (`git push <url>`, where git passes
- * the URL as $1) is judged as the configured remote with that url or pushurl; a URL no remote has is
- * `remote_unconfigured` unless a PR base is known without it (config.base, a recorded --base).
+ * The PR base the hook's authorize judges is the bound one (config.base, else the remote default branch:
+ * engine-enroll.mjs authorize, R0-S batch 2), the same one `publish` used; a stacked PR binds its parent as
+ * config.base. A push to a URL (`git push <url>`, where git passes the URL as $1) is judged as the configured
+ * remote with that url or pushurl; a URL no remote has is `remote_unconfigured` unless config.base binds the base.
  *
  * Pattern limits, pinned by git-guard.test.mjs. False positives (fail closed, never a bypass): the
  * default pattern also reads `fix/issue-42` as ticket `issue-42` and `release-2026-11` as
@@ -185,6 +184,9 @@ export function remoteName(repo, given) {
     const name = key.replace(/^remote\./, '').replace(/\.(url|pushurl)$/, '');
     if (!names.has(value)) names.set(value, name);
     if (name === given) return given;
+    // The URL git pushes to after url.<base>.insteadOf / pushInsteadOf rewriting (what git passes the hook as $1 for a URL push).
+    for (const args of [['remote', 'get-url', '--all', name], ['remote', 'get-url', '--push', '--all', name]])
+      for (const u of (out(git(repo, args)) ?? '').split('\n').filter(Boolean)) if (!names.has(u)) names.set(u, name);
   }
   return names.get(given) ?? given;
 }

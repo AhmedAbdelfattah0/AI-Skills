@@ -54,13 +54,18 @@
  * merge base is not the one the review binds to), review_output_substituted (result.json is not the bytes the launcher
  * hashed at the reviewer's exit).
  *
+ * R0-S batch 2: review_fail_unconsumed also for the same candidate id under another merge base; review_dispatch_live also for a
+ * reviewer of the same owed review still running for another candidate or base (both enforced at dispatch, gate review, gate
+ * ship-ready and authorize publish); review_cli_drift / review_cli_unavailable (the pinned reviewer CLI, launched through an
+ * engine shim first on PATH); the uncorrectable refusals are recorded (state.review_refusals) for `next`.
+ *
  * Honest limits: this is not cryptographic. A process running as the same user can rewrite the engine state (the
  * ledger), the relay output and the launcher envelope together, replace the relay before its first-dispatch pin, or
  * import this module and pass ctx.relayHome; the receipt then proves only that the engine started that file. Native
  * Agent-tool reviews cannot be bound by this mechanism. `gate unit-review` is not covered.
  */
-import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
+import { join, delimiter } from 'node:path';
 import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -69,6 +74,7 @@ import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
 import { note, judgment, sha, coded, BEGIN, END } from './engine-dag.mjs';
 import { childEnv, spawnSpec } from './provider-env.mjs';
 import { trustedEvents } from './engine-authority.mjs';
+import { resolveTool } from './engine-ci.mjs';
 
 export const REVIEW_SCHEMA = 'ship-ticket-review-dispatch-v1';
 export const REVIEW_KIND = 'review';
@@ -132,14 +138,54 @@ export const sameReviewed = (d, candidate, mergeBase) => d.candidate_id === cand
 export const latestDispatch = (S, role, kind, candidate, mergeBase = null) =>
   (S.review_dispatches ?? []).findLast(d => d.role === role && d.kind === kind && sameReviewed(d, candidate, mergeBase)) ?? null;
 
+const released = (S, x) => trustedEvents(S, 'RETRY').some(e => e.run_id === S.run_id && e.predecessor === x.attempt_id && typeof e.authorized_by === 'string' && e.authorized_by.length > 0);
+const sameOwed = (x, kind, reviewExecution) => x.kind === kind && (x.review_execution ?? null) === (reviewExecution ?? null);
+
 /**
- * R0-S N2: the reviewer FAIL (collected) or failed reviewer of the owed review `kind`/`reviewExecution` for ANOTHER candidate
- * that no owner RETRY released (a trusted RETRY whose predecessor is its attempt id), or null. Shared by dispatch and `next`.
+ * R0-S N2 + batch 2 (item 2b): the reviewer FAIL (collected) or failed reviewer of the owed review `kind`/`reviewExecution` for
+ * ANOTHER candidate OR the same candidate id against another merge base (the id excludes the base: moving the base must not
+ * escape a FAIL), that no owner RETRY released (a trusted RETRY whose predecessor is its attempt id), or null. Exactly the
+ * same candidate and base is exempt: that FAIL is the one to gate, and a failed reviewer of it may be launched again.
+ * Shared by dispatch, gate review, gate ship-ready, authorize publish and `next`.
  */
-export function unconsumedFail(S, kind, reviewExecution, candidate) {
-  return (S.review_dispatches ?? []).find(x => x.kind === kind && (x.review_execution ?? null) === (reviewExecution ?? null) && !x.consumed_by
-    && x.candidate_id !== candidate && (x.status === 'failed' || (x.status === 'collected' && x.collected?.outcome === 'FAIL'))
-    && !trustedEvents(S, 'RETRY').some(e => e.run_id === S.run_id && e.predecessor === x.attempt_id && typeof e.authorized_by === 'string' && e.authorized_by.length > 0)) ?? null;
+export function unconsumedFail(S, kind, reviewExecution, candidate, mergeBase = null) {
+  return (S.review_dispatches ?? []).find(x => sameOwed(x, kind, reviewExecution) && !x.consumed_by
+    && !(x.candidate_id === candidate && (x.merge_base ?? null) === (mergeBase ?? null))
+    && (x.status === 'failed' || (x.status === 'collected' && x.collected?.outcome === 'FAIL')) && !released(S, x)) ?? null;
+}
+
+/**
+ * R0-S batch 2 (item 2a): a reviewer of the same owed review still running (status dispatched) for another candidate or merge
+ * base, or null: its verdict is not in yet, so no reviewer of another candidate is launched or gated beside it (parallel
+ * shopping: dispatch c1, edit to c2, dispatch and gate c2 while c1's FAIL is still coming).
+ */
+export function liveSibling(S, kind, reviewExecution, candidate, mergeBase = null) {
+  return (S.review_dispatches ?? []).find(x => sameOwed(x, kind, reviewExecution) && x.status === 'dispatched'
+    && !(x.candidate_id === candidate && (x.merge_base ?? null) === (mergeBase ?? null))) ?? null;
+}
+
+/**
+ * The receipt group (`review_execution` as receipts record it) of accepted chain record `rec`: a confirmation and a RETRY original
+ * carry their execution id; the first original was dispatched before any id existed (null).
+ */
+const receiptGroup = (S, rec) => (rec.kind === 'confirmation' || (S.review_chain ?? []).some(r => r.kind === 'retry' && r.review_execution === rec.review_execution) ? rec.review_execution : null);
+
+/**
+ * R0-S batch 2 (item 2c): for the authorizing review (the last chain record, an original or confirmation PASS), an unconsumed
+ * FAIL or a still-running reviewer of its owed review for another candidate or base: { code, reason } or null. gate ship-ready
+ * and authorize publish refuse on it (review_fail_unconsumed / review_dispatch_live): only an owner RETRY naming it releases.
+ */
+export function openReviewFail(S) {
+  const last = (S.review_chain ?? []).at(-1);
+  if (!last || !['original', 'confirmation'].includes(last.kind) || last.outcome !== 'PASS') return null;
+  const base = (S.review_bindings ?? []).findLast(b => b.review_execution === last.review_execution && b.kind === last.kind)?.merge_base ?? null;
+  const group = receiptGroup(S, last);
+  const f = unconsumedFail(S, last.kind, group, last.candidate_id, base);
+  if (f) return { code: 'review_fail_unconsumed', reason: `${f.role} ${f.attempt_id} ${f.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${f.candidate_id} (merge base ${f.merge_base ?? 'unknown'}) `
+    + `and was never gated: ${last.kind} ${last.review_execution} of ${last.candidate_id} does not outvote it; only an owner RETRY { predecessor: ${f.attempt_id} } releases it (no review shopping)` };
+  const l = liveSibling(S, last.kind, group, last.candidate_id, base);
+  if (l) return { code: 'review_dispatch_live', reason: `${l.role} ${l.attempt_id} is still reviewing candidate ${l.candidate_id}: its verdict decides before anything ships; collect it (next / review-collect)` };
+  return null;
 }
 
 /**
@@ -236,6 +282,57 @@ export function buildPrompt({ S, repoRoot, planText, role, owed, candidate, merg
 const iso = (ms) => new Date(ms).toISOString();
 const refuse = (code, reasons, extra = {}) => ({ schema: REVIEW_SCHEMA, dispatched: false, code, reasons, ...extra });
 
+/** Dispatch refusals the orchestrator cannot correct (R0-S batch 2, item 6): recorded in state.review_refusals, BLOCKED for the human in `next`. */
+export const RECORDED_REFUSALS = Object.freeze(['reviewer_is_builder', 'review_relay_drift', 'review_cli_drift', 'review_cli_unavailable', 'review_diff_unavailable']);
+const REFUSALS_KEEP = 20;
+function recordRefusal(S, r, { role, kind, candidate, mergeBase, now }) {
+  S.review_refusals = [...(S.review_refusals ?? []), { code: r.code, role, kind, candidate_id: candidate, merge_base: mergeBase ?? null, reasons: r.reasons,
+    after_dispatches: (S.review_dispatches ?? []).length, at: iso(now) }].slice(-REFUSALS_KEEP);
+  note(S, 'REVIEW_DISPATCH_REFUSED', { code: r.code, role, kind, candidate_id: candidate });
+  return { ...r, recorded: true };
+}
+
+/**
+ * The recorded refusal that still blocks a dispatch of `role` for `kind` on `candidate`/`mergeBase`: the latest one, when no dispatch of
+ * that role and kind was recorded after it (a later successful dispatch clears it). -> the refusal record or null. Read by `next`.
+ */
+export function dispatchRefusal(S, kind, role, candidate, mergeBase = null) {
+  const r = (S.review_refusals ?? []).findLast(x => x.kind === kind && x.role === role && x.candidate_id === candidate && (x.merge_base ?? null) === (mergeBase ?? null));
+  if (!r) return null;
+  return (S.review_dispatches ?? []).slice(r.after_dispatches).some(d => d.role === role && d.kind === kind) ? null : r;
+}
+
+/**
+ * R0-S batch 2 (item 4): the reviewer CLI (`claude` / `codex`) the relay will launch. The installed relays resolve it by NAME through
+ * PATH (claude-delegate resolveClaudeLauncher, codex-delegate spawn('codex')); neither honours a binary override. So the first
+ * dispatch of each provider pins the CLI found on PATH then (realpath + sha256, state.review_cli_pins), and every dispatch launches the
+ * relay with an engine-owned shim directory FIRST on PATH whose `<provider>` entry links to exactly that pinned file, after
+ * re-verifying its bytes (review_cli_drift). A stub put earlier on the caller's PATH after the pin is never resolved by the relay.
+ * Residual: the pin covers the entry file only (not the packages or native binaries it loads), trusts that first moment's PATH,
+ * and the check-to-exec window; on Windows no shim is built (the PATH is not steered; the pin is still verified).
+ */
+function reviewerCli(S, provider, env) {
+  const pin = S.review_cli_pins?.[provider];
+  if (pin) {
+    let digest = null;
+    try { digest = 'sha256:' + sha(readFileSync(pin.path)).replace(/^sha256:/, ''); } catch { digest = null; }
+    if (digest !== pin.sha256) return { code: 'review_cli_drift', reasons: [`${pin.path} is not the ${provider} CLI this run pinned at its first ${provider} review (${pin.sha256}, now ${digest ?? 'missing'}): `
+      + 'a replaced reviewer CLI never reviews this run'] };
+    return { pin, fresh: false };
+  }
+  const found = resolveTool(provider, env);
+  if (!found) return { code: 'review_cli_unavailable', reasons: [`no ${provider} CLI on PATH: the ${provider} reviewer cannot run (the review stage is BLOCKED, never waived)`] };
+  return { pin: { path: found.path, sha256: found.sha256 }, fresh: true };
+}
+
+/** The relay's environment: billing variables stripped (childEnv), NODE_OPTIONS / NODE_PATH removed (no preload into the relay), and the shim first on PATH. */
+function reviewerEnv(base, shimDir) {
+  const env = Object.fromEntries(Object.entries(base).filter(([k]) => !['NODE_OPTIONS', 'NODE_PATH'].includes(k.toUpperCase())));
+  if (shimDir) for (const k of Object.keys(env).filter(k => k.toUpperCase() === 'PATH')) env[k] = shimDir + delimiter + env[k];
+  if (shimDir && !Object.keys(env).some(k => k.toUpperCase() === 'PATH')) env.PATH = shimDir;
+  return env;
+}
+
 /**
  * Dispatch one reviewer for `role` on `candidate` (E.S loaded, binding and admission already verified by the
  * caller, under the run lock). Returns { schema, dispatched, code, reasons, receipt? }; a refusal records nothing
@@ -255,10 +352,14 @@ export async function dispatchReview(E, { role, candidate }) {
   // R0-S N2: a reviewer FAIL (collected) or a failed reviewer of this owed review, for ANOTHER candidate, binds what follows: the
   // FAIL is submitted to gate review on its candidate (its repair is the path), or the owner appends a RETRY naming that dispatch
   // (predecessor: its attempt id). Editing the candidate never buys a fresh reviewer.
-  const prior = unconsumedFail(S, owed.kind, owed.review_execution, candidate);
-  if (prior) return refuse('review_fail_unconsumed', [`${prior.role} ${prior.attempt_id} ${prior.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${prior.candidate_id}; the work tree is now ${candidate}: `
-    + 'restore that candidate and submit the FAIL to gate review (its repair is the only path), or the owner appends a RETRY { review_execution, predecessor: '
+  const prior = unconsumedFail(S, owed.kind, owed.review_execution, candidate, c.merge_base ?? null);
+  if (prior) return refuse('review_fail_unconsumed', [`${prior.role} ${prior.attempt_id} ${prior.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${prior.candidate_id} `
+    + `(merge base ${prior.merge_base ?? 'unknown'}); the work tree is now ${candidate} (merge base ${c.merge_base ?? 'unknown'}): `
+    + 'restore that candidate and base and submit the FAIL to gate review (its repair is the only path), or the owner appends a RETRY { review_execution, predecessor: '
     + `${prior.attempt_id}, authorized_by } (no review shopping)`]);
+  const sibling = liveSibling(S, owed.kind, owed.review_execution, candidate, c.merge_base ?? null);
+  if (sibling) return refuse('review_dispatch_live', [`${sibling.role} ${sibling.attempt_id} is still reviewing candidate ${sibling.candidate_id} (merge base ${sibling.merge_base ?? 'unknown'}) for this owed review: `
+    + 'its verdict comes first; no reviewer of another candidate or base is launched beside it (collect it: next / review-collect)']);
   const latest = latestDispatch(S, role, owed.kind, candidate, c.merge_base ?? null);
   if (latest?.status === 'dispatched') return refuse('review_dispatch_live', [`${role} ${latest.attempt_id} is still running for ${candidate}: collect it (review-collect or next), never a second launch`]);
   if (latest?.status === 'collected' && !latest.consumed_by) return refuse('review_already_collected', [`${role} ${latest.attempt_id} is collected for ${candidate}: submit it to gate review`]);
@@ -267,8 +368,10 @@ export async function dispatchReview(E, { role, candidate }) {
   // gate refuse this reviewer after the whole review ran; refuse before launching it.
   const builder = (S.builders ?? []).find(b => b?.identity === identity
     || (typeof b?.identity === 'string' && b.identity.endsWith(':provider-default') && identity.startsWith(b.identity.slice(0, -'provider-default'.length))));
-  if (builder) return refuse('reviewer_is_builder', [`${identity} would review work built by ${builder.identity} (node ${builder.node}): map the builders' tier in config.modelMap `
-    + '(a provider-default builder counts as every model of its provider), or start a new run']);
+  const nowMs = Date.parse(ctx.now?.() ?? new Date().toISOString());
+  const keep = (r) => recordRefusal(S, r, { role, kind: owed.kind, candidate, mergeBase: c.merge_base, now: nowMs });
+  if (builder) return keep(refuse('reviewer_is_builder', [`${identity} would review work built by ${builder.identity} (node ${builder.node}): map the builders' tier in config.modelMap `
+    + '(a provider-default builder counts as every model of its provider), or start a new run']));
   const twin = (S.review_dispatches ?? []).find(d => d.kind === owed.kind && sameReviewed(d, candidate, c.merge_base ?? null) && d.role !== role && !d.consumed_by
     && ['dispatched', 'collected'].includes(d.status) && d.requested_identity === identity);
   if (twin) return refuse('review_identity_shared', [`${twin.role} ${twin.attempt_id} already runs as ${identity}: two roles never share an identity`]);
@@ -281,9 +384,11 @@ export async function dispatchReview(E, { role, candidate }) {
   if (relay && pin) {
     let digest = null;
     try { digest = sha(readFileSync(relay)); } catch { digest = null; }
-    if (relay !== pin.path || digest !== pin.sha256) return refuse('review_relay_drift', [`the ${route.skill} relay is ${relay} (${digest}); this run pinned ${pin.path} (${pin.sha256}) at its first dispatch: `
-      + 'a changed or redirected relay never reviews this run (restore it, or start a new run)']);
+    if (relay !== pin.path || digest !== pin.sha256) return keep(refuse('review_relay_drift', [`the ${route.skill} relay is ${relay} (${digest}); this run pinned ${pin.path} (${pin.sha256}) at its first dispatch: `
+      + 'a changed or redirected relay never reviews this run (restore it, or start a new run)']));
   }
+  const cli = relay ? reviewerCli(S, route.provider, env) : null;
+  if (cli?.code) return keep(refuse(cli.code, cli.reasons));
   const now = Date.parse(ctx.now?.() ?? new Date().toISOString());
   if (!relay) {
     const id = 'unavail-' + randomUUID();
@@ -302,7 +407,7 @@ export async function dispatchReview(E, { role, candidate }) {
   const promptFile = join(P.attempts, id + '.prompt');
   let prompt;
   try { prompt = buildPrompt({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] }); }
-  catch (e) { if (e.code !== 'review_diff_unavailable') throw e; return refuse(e.code, [e.message]); }
+  catch (e) { if (e.code !== 'review_diff_unavailable') throw e; return keep(refuse(e.code, [e.message])); }
   writeFileSync(promptFile, prompt, { mode: 0o600 });
   const argv = [process.execPath, relay, '--cd', ctx.repoRoot, '--read-only', '--effort', 'high', '--timeout', `${route.timeout_min}m`, '--out-dir', outDir,
     ...(route.model ? ['--model', route.model] : [])];
@@ -310,12 +415,13 @@ export async function dispatchReview(E, { role, candidate }) {
   const receipt = { attempt_id: id, role, kind: owed.kind, ...(owed.review_execution ? { review_execution: owed.review_execution } : {}),
     requested_identity: identity, provider: route.provider, candidate_id: candidate, merge_base: c.merge_base ?? null,
     argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), started_at: iso(now), deadline: iso(deadline),
-    relay, relay_sha256: sha(readFileSync(relay)), argv, prompt_file: promptFile, out_dir: outDir, result_file: join(outDir, 'result.json'),
+    relay, relay_sha256: sha(readFileSync(relay)), cli: { path: cli.pin.path, sha256: cli.pin.sha256 }, argv, prompt_file: promptFile, out_dir: outDir, result_file: join(outDir, 'result.json'),
     status: 'dispatched' };
   const a = { attempt_id: id, kind: REVIEW_KIND, node: `review-${role}`, role, provider: route.provider, model: route.model ?? 'provider-default',
     status: 'intent', resources: [], envelope_file: join(P.attempts, id + '.envelope.json'), out_file: join(P.attempts, id + '.out'), started_at: iso(now), deadline_ms: deadline };
   S.review_dispatches.push(receipt);
   S.relay_pins = { ...(S.relay_pins ?? {}), ...(pin ? {} : { [route.skill]: { path: relay, sha256: receipt.relay_sha256, at: iso(now) } }) };
+  if (cli.fresh) S.review_cli_pins = { ...(S.review_cli_pins ?? {}), [route.provider]: { ...cli.pin, at: iso(now) } };
   S.attempts.push(a);
   note(S, 'REVIEW_DISPATCHED', { attempt_id: id, role, kind: owed.kind, candidate_id: candidate });
   const { argv: _argv, ...line } = receipt;
@@ -324,7 +430,14 @@ export async function dispatchReview(E, { role, candidate }) {
   await E.commit();
   await io.boundary(ctx.hooks, 'review-after-receipt', { attempt_id: id });
   const platform = ctx.platform ?? process.platform;
-  const childEnvVars = childEnv(route.provider, S.config.billing ?? 'subscription', env);
+  // Item 4: the relay resolves `<provider>` through PATH: an engine-owned shim directory first on it links exactly the pinned CLI.
+  let shimDir = null;
+  if (platform !== 'win32') {
+    shimDir = join(P.attempts, id + '.bin');
+    mkdirSync(shimDir, { recursive: true });
+    symlinkSync(cli.pin.path, join(shimDir, route.provider));
+  }
+  const childEnvVars = reviewerEnv(childEnv(route.provider, S.config.billing ?? 'subscription', env), shimDir);
   const spec = spawnSpec(argv[0], argv.slice(1), platform, childEnvVars);
   const child = io.startLauncher({ spawnFn: ctx.spawn, spec, cwd: ctx.repoRoot, env: childEnvVars, platform,
     files: { promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id, digestFiles: [receipt.result_file] } });

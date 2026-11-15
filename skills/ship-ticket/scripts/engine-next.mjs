@@ -55,7 +55,7 @@ import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
 import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
 import { latestEvidence } from './engine-ci.mjs';
-import { REVIEW_KIND, provenanceMode, sameReviewed, unconsumedFail } from './engine-review-dispatch.mjs';
+import { REVIEW_KIND, provenanceMode, sameReviewed, unconsumedFail, liveSibling, dispatchRefusal } from './engine-review-dispatch.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
@@ -85,6 +85,21 @@ export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', '
   'budget_stop', 'billing_unverified', 'addendum_required', 'addendum_conflict', 'addendum_outside_contract', 'waiver_unauthorized', 'retry_unauthorized']);
 const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ceiling_ms', confirmation: 'confirmation_ceiling_ms' };
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
+/** CI UNAVAILABLE codes another collection cannot cure (R0-S batch 2, item 6): BLOCKED for the human. */
+export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified']);
+/** Gate refusal codes the orchestrator cannot correct by resubmitting (item 6): BLOCKED for the human at once. Any other refusal is the
+ * orchestrator's to correct ONCE: the same refusal twice in a row for the same candidate is the human's (no endless gate loop). */
+export const GATE_HUMAN = Object.freeze(['review_fail_unconsumed', 'review_output_changed', 'review_receipt_spent', 'review_identity_spoofed', 'review_identity_shared',
+  'review_base_moved', 'review_stale', 'stale_candidate', 'post_freeze_drift', 'review_binding_missing', 'review_provenance_unbound', 'quiescence_unknown']);
+const refusalOwner = (g) => (GATE_HUMAN.includes(g.code) || HUMAN_CODES.includes(g.code) || (g.repeat ?? 1) > 1 ? 'human' : 'orchestrator');
+/** The recovery each recorded dispatch refusal names (item 6). */
+const RECOVERY = Object.freeze({
+  reviewer_is_builder: 'map the builders to another tier in config.modelMap and start a new run (the reviewer identity is fixed per role)',
+  review_relay_drift: 'restore the pinned relay bytes, or start a new run',
+  review_cli_drift: 'restore the pinned reviewer CLI (same path and bytes), or start a new run',
+  review_cli_unavailable: 'install the reviewer CLI (claude or codex) on PATH, logged in, then run review-dispatch again',
+  review_diff_unavailable: 'fix the git failure the reason names (the brief needs the full diff), then run review-dispatch again',
+});
 /** The poll interval `next` suggests while CI is PENDING (a hint: nothing waits on it). */
 export const CI_POLL_MS = 30 * 1000;
 
@@ -169,15 +184,28 @@ function reviewRules(stage, kind, want) {
       return d && res('READY', 'result_uncollected', w.engine ? 'review_collect' : 'collect_review', { reasons: [w.engine
         ? `${d.role} reviewer ${d.event_id} finished (${d.marker}): run review-collect, no re-dispatch`
         : `${d.role} result ${d.marker} exists: collect it (run-log end --carrier-result), no re-dispatch`], item: item(d) }); } },
+    // R0-S batch 2 (item 6): a dispatch refusal the orchestrator cannot correct (recorded by review-dispatch) blocks the stage for the human
+    // until a later dispatch of that role succeeds; offering the dispatch again would only repeat it.
+    { id: `${p}.dispatch_refused`, stage, when: (S, f, x) => { const w = rows(S, f, x); if (!w.engine) return false;
+      const r = w.roles.map(role => dispatchRefusal(S, kind, cli(role), w.candidate, f.candidate?.merge_base ?? null)).find(Boolean);
+      return r && res('BLOCKED', r.code, 'review_dispatch', { owner: 'human', kind, roles: [r.role], candidate_id: w.candidate, reasons: [...r.reasons, RECOVERY[r.code] ?? 'fix the cause, then run review-dispatch again'] }); } },
     { id: `${p}.relay_blocked`, stage, when: (S, f, x) => { const d = rows(S, f, x).mine.find(y => ['unavailable', 'failed'].includes(y.status));
       return d && res('BLOCKED', d.status === 'unavailable' ? 'review_relay_unavailable' : 'review_dispatch_failed', 'review_dispatch', { owner: 'human', kind,
         roles: [cli(d.role)], candidate_id: d.candidate_id, reasons: [`the ${d.role} reviewer ${d.event_id} ${d.status === 'unavailable' ? 'relay is unavailable' : `failed (${d.detail ?? 'no usable review'})`}: `
           + 'the review stage never proceeds without it (never waived; CodeRabbit never substitutes). Fix the relay or the CLI login, then run review-dispatch again'], item: item(d) }); } },
     // R0-S N2: a FAIL (or failed reviewer) of an earlier candidate binds this review: the owner decides (restore and gate it, or RETRY).
     { id: `${p}.fail_unconsumed`, stage, when: (S, f, x) => { const w = rows(S, f, x); if (!w.engine) return false;
-      const d = unconsumedFail(S, kind, w.rx ?? null, w.candidate);
+      const d = unconsumedFail(S, kind, w.rx ?? null, w.candidate, f.candidate?.merge_base ?? null);
       return d && res('BLOCKED', 'review_fail_unconsumed', 'owner_retry', { owner: 'human', reasons: [`${d.role} ${d.attempt_id} ${d.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${d.candidate_id}; the work tree is ${w.candidate}: `
         + `restore that candidate and submit the FAIL to gate review, or the owner appends a RETRY with predecessor ${d.attempt_id} (no review shopping)`] }); } },
+    // R0-S batch 2 (item 2a): a reviewer of this owed review still running for another candidate or base: collect or wait for it
+    // (a dispatch or gate for the work tree is refused review_dispatch_live; offering it would loop).
+    { id: `${p}.sibling_live`, stage, when: (S, f, x) => { const w = rows(S, f, x); if (!w.engine) return false;
+      const d = liveSibling(S, kind, w.rx ?? null, w.candidate, f.candidate?.merge_base ?? null);
+      if (!d) return false;
+      const row = (f.receipts ?? []).find(r => r.event_id === d.attempt_id);
+      return row?.marker_exists ? res('READY', 'result_uncollected', 'review_collect', { reasons: [`${d.role} reviewer ${d.attempt_id} of candidate ${d.candidate_id} finished: run review-collect (its verdict comes first)`], item: item(row) })
+        : res('WAITING', 'review_sibling_in_flight', 'wait', { owner: 'orchestrator', reasons: [`${d.role} reviewer ${d.attempt_id} is still reviewing candidate ${d.candidate_id} (the work tree is ${w.candidate}): wait for it, then restore that candidate or let its verdict decide`], item: row ? item(row) : { role: d.role, event_id: d.attempt_id } }); } },
     { id: `${p}.owed`, stage, when: (S, f, x) => { const w = rows(S, f, x), missing = w.roles.filter(r => !w.mine.some(d => d.role === r));
       return missing.length > 0 && res('READY', kind === 'original' ? 'review_owed' : 'confirmation_owed', w.engine ? 'review_dispatch' : 'dispatch_review',
         { reasons: [w.engine ? `run review-dispatch --role ${missing.map(cli).join(' and --role ')} --candidate ${w.candidate}` : `dispatch ${missing.join(' and ')} for candidate ${w.candidate}`],
@@ -188,7 +216,8 @@ function reviewRules(stage, kind, want) {
       return d && res('WAITING', 'review_in_flight', 'wait', { owner: 'orchestrator', reasons: [`${d.role} (${d.event_id}) has no result marker yet`], item: item(d) }); } },
     { id: `${p}.gate_refused`, stage, when: (S, f, x) => { const w = rows(S, f, x), g = f.lastGate?.review;
       return g && !g.ok && g.candidate_id === f.candidate?.id && w.mine.length > 0 && w.mine.every(d => d.ended && d.ended_ms <= g.at_ms)
-        && res('BLOCKED', g.code, 'gate_review', { reasons: [`gate review refused (${g.code}) after these results were collected: correct the input or recover, then run gate review`], kind, review_execution: w.rx }); } },
+        && res('BLOCKED', g.code, 'gate_review', { owner: refusalOwner(g), reasons: [`gate review refused (${g.code}) after these results were collected: `
+          + (refusalOwner(g) === 'human' ? `the orchestrator cannot correct it${g.repeat > 1 ? ` (refused ${g.repeat} times in a row)` : ''}: the owner decides (fix the cause, or a RETRY)` : 'correct the input or recover, then run gate review')], kind, review_execution: w.rx }); } },
     { id: `${p}.gate`, stage, when: (S, f, x) => { const w = rows(S, f, x);
       return w.mine.length > 0 && w.mine.every(d => d.ended)
         && res('READY', 'results_collected', 'gate_review', { reasons: [`every ${kind} result for ${w.candidate} is collected: reconcile and run gate review`], kind, review_execution: w.rx, candidate_id: w.candidate,
@@ -271,7 +300,8 @@ export const RULES = Object.freeze([
       { phase: 'ship', reasons: f.admission.ship.reasons, ...(CONTEXT_CODES.includes(f.admission.ship.code) ? {} : { owner: 'human' }) }) },
   { id: 'ship_ready.refused', stage: 'SHIP_READY', when: (S, f) => { const g = f.lastGate?.['ship-ready'], r = f.lastGate?.review;
     return g && !g.ok && g.candidate_id === f.candidate?.id && (!r || g.at_ms >= r.at_ms)
-      && res('BLOCKED', g.code, 'gate_ship_ready', { reasons: [`gate ship-ready refused (${g.code}) for this candidate: resolve it, then run gate ship-ready`] }); } },
+      && res('BLOCKED', g.code, 'gate_ship_ready', { owner: refusalOwner(g), reasons: [`gate ship-ready refused (${g.code}) for this candidate: `
+        + (refusalOwner(g) === 'human' ? `the orchestrator cannot correct it${g.repeat > 1 ? ` (refused ${g.repeat} times in a row)` : ''}: the owner decides` : 'resolve it, then run gate ship-ready')] }); } },
   { id: 'ship_ready.owed', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && res('READY', 'ship_ready_owed', 'gate_ship_ready', { candidate_id: x.authorizing.candidate_id,
     reasons: [`the accepted review of ${x.authorizing.candidate_id} has no current SHIP_READY`] }) },
   // PUBLISH
@@ -290,8 +320,12 @@ export const RULES = Object.freeze([
     { head: f.head, reasons: [`no CI evidence for the published head ${f.head}: run run-engine.mjs ci`] }) },
   { id: 'ci.pending', stage: 'CI', when: (S, f) => f.ci?.state === 'PENDING' && res('WAITING', f.ci.code, 'collect_ci',
     { head: f.head, poll_after_ms: CI_POLL_MS, timing: f.ci.timing, reasons: f.ci.reasons }) },
+  // R0-S batch 2 (item 6): an UNAVAILABLE the engine cannot cure by collecting again (gh unpinned or drifted, another repository, an
+  // unverified head) is the human's; a provider failure is retried once by the engine, the human's when it repeats.
   { id: 'ci.unavailable', stage: 'CI', when: (S, f) => f.ci?.state === 'UNAVAILABLE' && res('BLOCKED', f.ci.code, 'collect_ci',
-    { head: f.head, reasons: [...f.ci.reasons, 'the provider failed (never zero checks): fix gh access, then run run-engine.mjs ci again'] }) },
+    { owner: CI_HUMAN.includes(f.ci.code) || f.ci.repeat > 1 ? 'human' : 'engine', head: f.head,
+      reasons: [...f.ci.reasons, CI_HUMAN.includes(f.ci.code) || f.ci.repeat > 1 ? `the owner fixes the cause${f.ci.repeat > 1 ? ` (UNAVAILABLE ${f.ci.repeat} times in a row)` : ''}, then runs run-engine.mjs ci again`
+        : 'the provider failed (never zero checks): fix gh access, then run run-engine.mjs ci again'] }) },
   { id: 'ci.failed', stage: 'CI', when: (S, f) => f.ci?.state === 'FAIL' && res('FAILED', f.ci.code, 'none',
     { owner: 'human', head: f.head, reasons: f.ci.reasons }) },
   { id: 'ci.blocked', stage: 'CI', when: (S, f) => ['NO_CHECKS', 'STALE'].includes(f.ci?.state) && res('BLOCKED', f.ci.code, 'resolve',
@@ -416,7 +450,14 @@ function lastGates(repoRoot, ticket, runId) {
   const text = readSink(io.gitPath(repoRoot, `ai-skills/ship-ticket/${ticket}.engine.jsonl`));
   const out = {};
   for (const line of text.split('\n')) {
-    try { const e = JSON.parse(line); if (e?.event === 'GATE' && e.run_id === runId) out[e.gate] = { ok: e.ok, code: e.code, candidate_id: e.candidate_id, at_ms: ms(e.timestamp) ?? 0 }; } catch { /* skip */ }
+    try {
+      const e = JSON.parse(line);
+      if (e?.event !== 'GATE' || e.run_id !== runId) continue;
+      const p = out[e.gate];
+      // repeat: how many times in a row this gate refused with this code for this candidate (R0-S batch 2, item 6)
+      const repeat = !e.ok && p && !p.ok && p.code === e.code && p.candidate_id === e.candidate_id ? p.repeat + 1 : 1;
+      out[e.gate] = { ok: e.ok, code: e.code, candidate_id: e.candidate_id, at_ms: ms(e.timestamp) ?? 0, repeat };
+    } catch { /* skip */ }
   }
   return out;
 }
@@ -450,7 +491,9 @@ export async function gather(E, ext) {
   if ((S.published ?? []).some(p => p.head === head)) {
     f.completeAuth = await ext.authorize('complete');
     const ev = latestEvidence(S, head);
-    f.ci = ev && { state: ev.state, code: ev.code, reasons: ev.reasons ?? [], timing: ev.timing ?? null, ...(ev.diagnostic ? { diagnostic: ev.diagnostic } : {}) };
+    let repeat = 0;
+    for (const e of [...(S.ci_evidence ?? [])].reverse()) { if (e?.head_sha !== head) continue; if (e.state !== 'UNAVAILABLE') break; repeat++; }
+    f.ci = ev && { state: ev.state, code: ev.code, reasons: ev.reasons ?? [], timing: ev.timing ?? null, repeat, ...(ev.diagnostic ? { diagnostic: ev.diagnostic } : {}) };
   }
   return f;
 }

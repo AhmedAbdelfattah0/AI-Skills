@@ -150,6 +150,18 @@ SCENARIOS.push(
   ['a confirmation FAIL of an earlier candidate binds the confirmation', confirming({ review_dispatches: [{ attempt_id: 'att-c', role: 'confirmation', kind: 'confirmation', review_execution: 'review-1',
     candidate_id: 'C0', status: 'collected', collected: { outcome: 'FAIL' } }] }), baseF({ reviewMode: 'engine', receipts: [] }), ['CONFIRMATION', 'BLOCKED', 'review_fail_unconsumed', 'owner_retry']],
   ['review without engine provenance', shipping(shipped), baseF({ freshness: { fresh: false, code: 'review_provenance_unbound', reasons: ['r'] } }), ['REVIEW', 'NEEDS_APPROVAL', 'review_provenance_unbound', 'owner_retry']],
+  // R0-S batch 2: a reviewer still running for another candidate is waited for (never a re-offered dispatch); a recorded uncorrectable
+  // dispatch refusal stops for the human; a FAIL of the same id under another merge base still binds.
+  ['a reviewer of another candidate is still running (parallel shopping)', baseS({ review_dispatches: [{ attempt_id: 'att-p', role: 'primary', kind: 'original', candidate_id: 'C0', merge_base: 'M1', status: 'dispatched' }] }),
+    baseF({ reviewMode: 'engine', receipts: [], candidate: { id: 'C1', merge_base: 'M1' } }), ['REVIEW', 'WAITING', 'review_sibling_in_flight', 'wait']],
+  ['a confirmation reviewer of another base is still running', confirming({ review_dispatches: [{ attempt_id: 'att-c', role: 'confirmation', kind: 'confirmation', review_execution: 'review-1', candidate_id: 'C1', merge_base: 'M0', status: 'dispatched' }] }),
+    baseF({ reviewMode: 'engine', receipts: [rcpt('confirmation', { kind: 'confirmation', event_id: 'att-c', merge_base: 'M0', marker_exists: true })], candidate: { id: 'C1', merge_base: 'M1' } }), ['CONFIRMATION', 'READY', 'result_uncollected', 'review_collect']],
+  ['a FAIL of the same candidate id under another merge base binds the review', baseS({ review_dispatches: [{ attempt_id: 'att-p', role: 'primary', kind: 'original', candidate_id: 'C1', merge_base: 'M0', status: 'collected', collected: { outcome: 'FAIL' } }] }),
+    baseF({ reviewMode: 'engine', receipts: [], candidate: { id: 'C1', merge_base: 'M1' } }), ['REVIEW', 'BLOCKED', 'review_fail_unconsumed', 'owner_retry']],
+  ['a recorded uncorrectable dispatch refusal (relay drift) stops for the human', baseS({ review_refusals: [{ code: 'review_relay_drift', role: 'second', kind: 'original', candidate_id: 'C1', merge_base: null, reasons: ['r'], after_dispatches: 0 }] }),
+    baseF({ reviewMode: 'engine', receipts: [] }), ['REVIEW', 'BLOCKED', 'review_relay_drift', 'review_dispatch']],
+  ['a recorded dispatch refusal of the confirmation (reviewer is a builder)', confirming({ review_refusals: [{ code: 'reviewer_is_builder', role: 'confirmation', kind: 'confirmation', candidate_id: 'C1', merge_base: null, reasons: ['r'], after_dispatches: 0 }] }),
+    baseF({ reviewMode: 'engine', receipts: [] }), ['CONFIRMATION', 'BLOCKED', 'reviewer_is_builder', 'review_dispatch']],
 );
 
 const brief = (d) => [d.next_action.stage, d.next_action.disposition, d.next_action.reason, d.next_action.action];
@@ -275,7 +287,7 @@ const failThenPass = {
 
 /** A check run of the fake gh ('$SHA': the requested commit). */
 const checkRun = (status, conclusion = null, over = {}) => ({ id: 1, name: 'test', head_sha: '$SHA', status, conclusion,
-  started_at: '2026-11-15T00:00:01.000Z', completed_at: status === 'completed' ? '2026-11-15T00:00:09.000Z' : null, app: 'github-actions', url: 'https://example.invalid/run/1', ...over });
+  started_at: '2026-11-15T00:00:01.000Z', completed_at: status === 'completed' ? '2026-11-15T00:00:09.000Z' : null, app: 'github-actions', url: 'https://github.com/acme/t-1/runs/1', ...over }); // the published repository (R0-S batch 2: answers of another one are ci_repo_mismatch)
 /** The fake gh's CI: the checks of the published head are running at the first collection and green at the next. */
 const CI_RUNNING_THEN_GREEN = { checkRuns: [{ runs: [checkRun('in_progress')] }, { runs: [checkRun('completed', 'success')] }] };
 

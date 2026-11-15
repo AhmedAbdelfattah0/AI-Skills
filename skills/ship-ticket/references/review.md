@@ -101,7 +101,15 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   the account's home directory as the OS reports it (`os.userInfo`, never
   `$HOME`): `<home>/.agents/skills`, then `<home>/.claude/skills`. The first
   dispatch pins each relay's path and sha256; a later dispatch of another file or
-  other bytes is `review_relay_drift`. The engine builds the
+  other bytes is `review_relay_drift`. The relays find `claude` / `codex` by name
+  on PATH (they honour no binary override), so the first dispatch of each
+  provider also pins that CLI (path and sha256), every dispatch re-verifies it
+  (`review_cli_drift`; none on PATH is `review_cli_unavailable`) and launches the
+  relay with an engine-owned directory first on PATH that links exactly the
+  pinned file, without `NODE_OPTIONS` / `NODE_PATH`: a stub put earlier on PATH
+  after the pin never runs. The pin covers the entry file only (not the packages
+  or native binaries it loads) and trusts the PATH of that first dispatch; on
+  Windows the PATH is not steered (the pin is still verified). The engine builds the
   argv array and the prompt itself: the frozen candidate id, the approved plan
   narrative, the acceptance inventory, the candidate's paths, diff and untracked
   contents, and the output contract. Nothing of the command comes from you.
@@ -116,11 +124,20 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   `review_already_collected`, `review_identity_shared`, `review_build_live`,
   `review_launch_failed`, `review_relay_drift`, `review_diff_unavailable` (a git
   call for the brief failed or overflowed: no reviewer launches on a partial
-  diff), `review_fail_unconsumed` (a reviewer FAIL, or a failed reviewer, for an
-  earlier candidate of this owed review: submit that FAIL to `gate review` on its
-  candidate, or the owner appends a `RETRY` whose `predecessor` is that dispatch's
-  attempt id; editing the candidate never buys a fresh reviewer), and
+  diff), `review_fail_unconsumed` (a reviewer FAIL, or a failed reviewer, of this
+  owed review for another candidate OR for the same candidate id against another
+  merge base: submit that FAIL to `gate review` on its candidate and base, or the
+  owner appends a `RETRY` whose `predecessor` is that dispatch's attempt id;
+  editing the candidate or moving the base never buys a fresh reviewer),
+  `review_dispatch_live` also for a reviewer of this owed review still running
+  for another candidate or base (no parallel shopping; `next` waits for it), and
   `review_relay_unavailable` (recorded: the stage is `BLOCKED`, never waived).
+  `gate review`, `gate ship-ready` and `authorize publish` enforce the same
+  ungated-FAIL and running-reviewer rule. The refusals the orchestrator cannot
+  correct (`reviewer_is_builder`, `review_relay_drift`, `review_cli_drift`,
+  `review_cli_unavailable`, `review_diff_unavailable`) are recorded
+  (`state.review_refusals`) and make `next` a human-owned `BLOCKED` until a later
+  dispatch of that role succeeds.
 - **Collection.** `review-collect`, `next`, `resume` and `drive` settle a finished
   reviewer once: the whole process group is retired, the relay's `result.json`
   is read from the engine-chosen directory, the last fenced JSON object in its
@@ -161,10 +178,11 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   with no freshness binding (`review_binding_missing`): both need an owner
   `RETRY` and a new review. `reviewProvenance` and `acceptNativeReview` are
   assurance settings: `init` accepts a relaxing value only when the DAG is bound
-  by the approved plan narrative itself (its digest listed there, never a
-  `DAG_BOUND` line; the engine verifies placement in the text START's digest
-  covers, not that a human read it) and the narrative carries the exact
-  `ship-ticket-assurance-policy: {...}` line of the relaxed values
+  by the approved plan narrative itself (its digest on a visible line there,
+  never a `DAG_BOUND` line; the engine verifies placement in the text START's
+  digest covers, not that a human read it) and the narrative carries the exact
+  `ship-ticket-assurance-policy: {...}` line of the relaxed values as a visible
+  line of its own, never inside an HTML comment or a code fence
   (`policy_unapproved`). Before every command the engine compares the state's
   config with the bound DAG (`policy_drift`, `config_drift`: a same-user edit of
   the state file is DETECTED and refused, not prevented).

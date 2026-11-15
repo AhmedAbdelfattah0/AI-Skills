@@ -246,27 +246,33 @@ test('R0-S A2: HEAD:refs/heads/<name without a ticket> is guarded by the checked
 
 // ------------------------------------------------------------------ E1 follow-up (stacked base, URL remote, pattern limits)
 
-test('stacked PR: publish --base <parent> passes its own hook (the recorded base), while a hook authorize without it would be base_mismatch', { skip: WIN_SKIP }, (t) => {
-  const fx = enrollFixture(t);
-  // The parent ticket's commit sits under this ticket's branch: the reviewed merge base is the parent, not the remote HEAD.
+test('stacked PR: the parent branch bound as config.base passes its own hook; --base naming any other ref is pr_base_unbound (R0-S batch 2: no --base laundering)', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t, { base: 'T-0-parent' });
+  // The parent ticket's commit sits under this ticket's branch, and the approved DAG binds the parent as config.base.
   writeFileSync(join(fx.repo, 'docs', 'parent.txt'), 'parent work');
   fx.commitAll('parent ticket');
-  fx.okGit(['branch', 'T-0-parent']);
+  fx.okGit(['branch', '-f', 'T-0-parent', 'HEAD']);
   fx.toShipReady();
   fx.commitAll();
   installed(fx);
-  const plain = fx.cli('authorize', { stage: 'publish' });
-  assert.equal(plain.out.code, 'base_mismatch', 'the hook gets no --base: before the fix it judged the remote HEAD and refused');
-  assert.equal(fx.cli('authorize', { stage: 'publish', base: 'T-0-parent' }).out.allow, true);
+  assert.equal(fx.cli('authorize', { stage: 'publish' }).out.binding.base, 'T-0-parent', 'the hook (no --base) judges the bound base');
+  assert.equal(fx.cli('authorize', { stage: 'publish', base: fx.defaultBranch }).out.code, 'pr_base_unbound', 'a --base other than the bound one');
   const p = fx.cli('publish', { base: 'T-0-parent' });
   assert.equal(p.status, 0, p.stdout + p.stderr);
   assert.equal(p.out.code, 'published');
   assert.equal(fx.remoteHead(), fx.head(), 'the hook allowed the stacked push');
   assert.deepEqual([fx.readState().publish_intent.base, fx.readState().publish_intent.head], ['T-0-parent', fx.head()]);
-  // The recorded base binds only that HEAD: a new commit falls back to the remote HEAD and is refused again.
-  writeFileSync(join(fx.repo, 'session-log.md'), 'note');
-  fx.commitAll('log');
-  assert.equal(fx.cli('authorize', { stage: 'publish' }).out.code, 'base_mismatch');
+  // With config.base HEAD a --base at the parent is refused before anything else: it would launder the parent commit.
+  const h = enrollFixture(t);
+  writeFileSync(join(h.repo, 'docs', 'parent.txt'), 'parent work');
+  h.commitAll('parent ticket');
+  h.okGit(['branch', 'T-0-parent']);
+  h.toShipReady();
+  h.commitAll();
+  assert.equal(h.cli('authorize', { stage: 'publish' }).out.code, 'base_mismatch', 'the remote default branch: the parent commit is unreviewed');
+  assert.equal(h.cli('authorize', { stage: 'publish', base: 'T-0-parent' }).out.code, 'pr_base_unbound');
+  assert.equal(h.cli('publish', { base: 'T-0-parent' }).out.code, 'pr_base_unbound');
+  assert.equal(h.remoteHead(), null);
 });
 
 test('git push <url>: the URL of a configured remote is judged as that remote; an unknown URL is remote_unconfigured, never refs/remotes/<url>/HEAD', { skip: WIN_SKIP }, (t) => {

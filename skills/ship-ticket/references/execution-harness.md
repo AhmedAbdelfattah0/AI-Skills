@@ -226,7 +226,7 @@ that file before every dispatch.
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs context   --repo <R> --ticket <T> --run-id <ID> --phase understand|plan|build|review|ship
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs enroll    --repo <R> --ticket <T> --run-id <ID>          # right after init; idempotent
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs authorize --repo <R> --ticket <T> --run-id <ID> --stage build|publish|complete
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--base <branch>] [--pr-title <t> --pr-body-file <f> [--draft]]
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--base <the bound base only>] [--pr-title <t> --pr-body-file <f> [--draft]]
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs ci        --repo <R> --ticket <T> --run-id <ID> [--pr <n>]   # collect CI of the published head
 node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <R> [--pattern <regex>]   # opt-in pre-push hook, this repository only
 ```
@@ -267,10 +267,14 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   line on stderr. `publish` also needs a `SHIP_READY` whose state conditions still
   hold (`ship_ready_superseded`), a clean tree, a branch naming the ticket, the
   candidate recomputed against the merge base recorded with `SHIP_READY`, and a
-  RUN-STATE `SHIP_READY` backed by its engine line. The PR base (`--base`, else a
-  `config.base` branch, else the remote's HEAD) must give the merge base recorded
-  with `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits), and
-  no commit since it may touch a path outside the candidate
+  RUN-STATE `SHIP_READY` backed by its engine line. The PR base is bound, never
+  chosen on the command line: the approved DAG's `config.base` branch, else the
+  remote's default branch. A `--base` naming any other ref is `pr_base_unbound` (a
+  `--base` at a local ref carrying unreviewed commits would otherwise give the
+  reviewed merge base and launder them; a stacked PR binds its parent as
+  `config.base`). The bound base must give the merge base recorded with
+  `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits), and
+  no commit since that merge base may touch a path outside the candidate
   (`history_outside_candidate`: e.g. an extra commit later reverted; paths are
   checked, not bytes: an intermediate commit may hold other bytes of a reviewed
   path). A history listing that fails or overflows is `history_unavailable`, never
@@ -292,12 +296,29 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   binding and the `ship` context are re-verified, it asks `gh` for the check runs
   of the head `publish` pushed for HEAD. The `gh` it runs is the one `enroll`
   pinned (absolute path and sha256 resolved from that moment's PATH): a stub put
-  earlier on PATH later is never run, changed bytes are `gh_drift`, none pinned is
-  `gh_unpinned` (`publish --pr-title` uses the same pin). That SHA comes from the `PUBLISHED`
+  earlier on PATH later is never run, changed bytes are `gh_drift`
+  (`publish --pr-title` uses the same pin). A run enrolled with no `gh` on PATH
+  pins one at its first `ci`, only after the published branch is verified at the
+  published head (`ci_head_unverified` otherwise; the same pre-pin residual as
+  enroll); none on PATH then is `gh_unpinned`. `gh` runs with every `GH_*` and
+  `GITHUB_*` variable removed (`GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, tokens) and
+  the OS account's `HOME`, so it uses the account's stored login (an
+  environment-token-only setup fails closed), and every call names the repository
+  `publish` recorded in `PUBLISHED` (`repository`: the remote's configured URL,
+  before `insteadOf`) explicitly (`repos/<owner>/<repo>/...`, `--hostname`, `-R`).
+  A remote that names no GitHub repository is `ci_repo_unknown`; a remote URL
+  changed since `publish`, or any check run or PR answer whose html URL is of
+  another repository, is `ci_repo_mismatch` (also at `authorize complete`). Not
+  removed: proxy and TLS variables (a residual that needs a trusted interception
+  certificate). That SHA comes from the `PUBLISHED`
   record, never from the caller. It records `CI_EVIDENCE` `{head_sha, checks[],
-  collected_at, state, code, timing}` in the state and the engine log, never in
-  RUN-STATE. Exit 0 is `PASS`. Exit 2 is any other state or a refusal, which
-  records nothing: `publish_evidence_missing` or the binding and context codes.
+  collected_at, state, code, timing, repository}` in the state and the engine log, never in
+  RUN-STATE. Exit 0 is `PASS`. Exit 2 is any other state or a refusal. A refusal
+  before the provider (`publish_evidence_missing`, the binding and context codes)
+  records nothing; one after it (`gh_unpinned`, `gh_drift`, `ci_repo_unknown`,
+  `ci_repo_mismatch`, `ci_head_unverified`) is recorded as `UNAVAILABLE` evidence
+  with its code, so `next` reports it as the human's `BLOCKED` instead of
+  offering `ci` again.
   States:
   - `PASS`: at least one required check, every one `completed` with `success`, on
     that SHA. `skipped` and `neutral` are not success.
@@ -337,8 +358,8 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   matching does not authenticate evidence (no server attestation in R0-S).
 - **`publish`** holds the run lock throughout: it authorizes, authorizes again
   immediately before the push and requires the same binding (`authorization_moved`),
-  records an explicit `--base` for the HEAD it pushes (`publish_intent`, so the
-  guard's hook judges a stacked PR against that base, not the remote HEAD),
+  records the bound PR base for the HEAD it pushes (`publish_intent`; the guard's
+  hook re-derives the same bound base and refuses a recorded one that differs),
   pushes `<sha>:refs/heads/<branch>`, checks the remote ref, opens the PR with
   `--base` only when a title and body file are given, and records `PUBLISHED`
   (`published_unrecorded` if that record fails after a successful push). The remote
@@ -418,10 +439,14 @@ are refused, never dropped.
   release policy. A relaxing value is accepted only when it is written into the
   approved plan narrative (what the trusted `START` digest covers; START is
   orchestrator-appended, so the engine verifies placement, not that a human read
-  it): the DAG digest is listed in that narrative (binding `plan`; a
-  `DAG_BOUND` line never approves a relaxation) AND the narrative carries the
-  exact line `ship-ticket-assurance-policy: <the relaxed values as sorted-key
-  JSON>`, else `init` refuses `policy_unapproved`. Before every command the engine
+  it): the DAG digest is listed on a VISIBLE line of that narrative (binding
+  `plan`; a `DAG_BOUND` line never approves a relaxation) AND the narrative
+  carries the exact line `ship-ticket-assurance-policy: <the relaxed values as
+  sorted-key JSON>` as a visible line of its own, from its first column. Text in
+  an HTML comment (an unterminated `<!--` hides the rest) or a code fence is not
+  visible. Else `init` refuses `policy_unapproved`, and `next --dag <file>`
+  before `init` answers `NEEDS_APPROVAL` (`policy_unapproved`) with the `relaxed`
+  values and the `required_line`. Before every command the engine
   re-validates the digest-verified DAG and refuses a state whose config differs
   (`policy_drift` for these keys, `config_drift` for any other: DETECTED, a
   same-user edit of the state file is refused, not prevented). A relaxed run is
@@ -454,7 +479,14 @@ command: `drive`, `resume`) or `human` (only the owner continues). Rules:
   is `human` (exit 2 for all but `COMPLETED`). An orchestrator- or engine-owned
   `BLOCKED` (`enroll`, `recover_review`, a refused `gate_review` or
   `gate_ship_ready`, `resolve` of an engine judgment, `collect_ci` after a provider
-  failure) exits 0 and is owed work. ADVISORY: R0-S has no turn-end (Stop hook)
+  failure) exits 0 and is owed work, but only ONCE: the same gate refusal twice in
+  a row for the same candidate, a second consecutive `UNAVAILABLE` collection, and
+  any refusal the orchestrator cannot correct (an ungated reviewer FAIL, changed
+  receipts or outputs, a moved base, a recorded dispatch refusal, `gh_unpinned`,
+  `gh_drift`, `ci_repo_*`, `ci_head_unverified`) are the human's (`stop: true`), so
+  no refusal is re-offered as the same action forever. Before `init`,
+  `next --dag <file>` answers `NEEDS_APPROVAL` for a relaxed policy the plan does
+  not approve. ADVISORY: R0-S has no turn-end (Stop hook)
   enforcement, so an orchestrator can still end its turn early; `stop` only says
   when it may.
 - Every answer carries `assurance` (`STRICT`, or `RELAXED` with the approved relaxed

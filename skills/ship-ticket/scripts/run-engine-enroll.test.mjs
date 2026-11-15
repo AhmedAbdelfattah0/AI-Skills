@@ -80,7 +80,8 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   const p = spawnCli(fx, ['publish', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--pr-title', 'T-1: ship', '--pr-body-file', body, '--draft']);
   assert.equal(p.status, 0, p.stdout + p.stderr);
   assert.equal(fx.remoteHead(), fx.head());
-  assert.deepEqual(fx.ghLog(), [['pr', 'create', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft']]);
+  assert.deepEqual(fx.ghLog(), [['pr', 'create', '-R', 'github.com/acme/t-1', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft']]);
+  assert.equal(fx.readState().published.at(-1).repository.slug, 'github.com/acme/t-1', 'PUBLISHED records the repository identity');
   assert.equal(fx.readState().published.at(-1).head, fx.head());
   const done = authorize(fx, 'complete');
   denied(done, 'ci_evidence_missing', 'publication');

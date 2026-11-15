@@ -25,6 +25,8 @@ export const SKILL = fileURLToPath(new URL('..', import.meta.url));
 const FAKE_GH_JS = (root) => `const fs = require('fs'), { execFileSync } = require('child_process');
 const root = ${JSON.stringify(root)}, argv = process.argv.slice(2);
 fs.appendFileSync(root + '/gh.log', JSON.stringify(argv) + '\\n');
+fs.appendFileSync(root + '/gh-env.log', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(GH|GITHUB)_|^HOME$/.test(k)))) + '\\n');
+const flag = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 const die = (m) => { process.stderr.write('fake gh: ' + m + '\\n'); process.exit(1); };
 if (argv[0] === 'pr' && argv[1] === 'create') { console.log('https://example.invalid/pr/1'); process.exit(0); }
 let script = null;
@@ -32,21 +34,27 @@ try { script = JSON.parse(fs.readFileSync(root + '/gh-ci.json', 'utf8')); } catc
 const head = () => execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 if (argv[0] === 'api' && /\\/check-runs$/.test(argv[3] ?? '')) {
   const sha = /commits\\/([0-9a-f]+)\\//.exec(argv[3])[1];
+  // A real gh answers for the repository in the path: html URLs carry it (script.htmlRepo simulates answers from another one).
+  const repo = script.htmlRepo ?? ((flag('--hostname') ?? 'github.com') + '/' + /^repos\\/([^/]+\\/[^/]+)\\//.exec(argv[3])[1]);
   const steps = script.checkRuns ?? die('no checkRuns script');
   const n = Number((() => { try { return fs.readFileSync(root + '/gh-ci.count', 'utf8'); } catch { return '0'; } })());
   fs.writeFileSync(root + '/gh-ci.count', String(n + 1));
   const step = steps[Math.min(n, steps.length - 1)];
   if (step.fail) die(step.fail);
-  const runs = step.runs.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha }));
+  const runs = step.runs.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha, url: r.url ?? 'https://' + repo + '/runs/' + (r.id ?? 0) }));
   console.log(JSON.stringify({ total_count: step.total ?? runs.length }));
   for (const r of runs) console.log(JSON.stringify(r));
 } else if (argv[0] === 'pr' && argv[1] === 'view') {
   if (!script.pr || script.pr.fail) die(script.pr?.fail ?? 'no pr script');
-  console.log(JSON.stringify({ ...script.pr, headRefOid: script.pr.headRefOid === '$HEAD' ? head() : script.pr.headRefOid }));
+  console.log(JSON.stringify({ url: 'https://' + (script.htmlRepo ?? flag('-R')) + '/pull/' + argv[2], ...script.pr, headRefOid: script.pr.headRefOid === '$HEAD' ? head() : script.pr.headRefOid }));
 } else if (argv[0] === 'run' && argv[1] === 'list') {
   console.log(JSON.stringify(script.runs ?? []));
 } else die('unscripted call ' + argv.join(' '));
 `;
+
+/** The GitHub URL the fixture's origin is configured with (insteadOf maps it to the local bare remote). */
+export const GITHUB_URL = 'https://github.com/acme/t-1.git';
+export const GITHUB_SLUG = 'github.com/acme/t-1';
 
 export function enrollFixture(t, opts = {}) {
   const { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true, nodes, behaviour } = opts;
@@ -67,7 +75,10 @@ export function enrollFixture(t, opts = {}) {
   const defaultBranch = ok(g(['symbolic-ref', '--short', 'HEAD'])).stdout.trim();
   const remote = join(fx.root, 'remote.git');
   ok(spawnSync('git', ['init', '-q', '--bare', remote], { encoding: 'utf8', env: fx.env }));
-  ok(g(['remote', 'add', 'origin', remote]));
+  // origin is CONFIGURED as a GitHub URL (the repository identity publish records and ci asks gh about, R0-S batch 2 item 3) and
+  // rewritten by insteadOf to the local bare repository, so every push, fetch and ls-remote stays local.
+  ok(g(['remote', 'add', 'origin', GITHUB_URL]));
+  ok(g(['config', '--local', `url.${remote}.insteadOf`, GITHUB_URL]));
   // The remote's default branch is the PR base authorize publish resolves when the DAG's base is HEAD.
   ok(g(['push', '-q', 'origin', defaultBranch]));
   ok(g(['remote', 'set-head', 'origin', defaultBranch]));
@@ -79,6 +90,7 @@ export function enrollFixture(t, opts = {}) {
     commitAll: (msg = 'ship') => { ok(g(['add', '-A'])); ok(g(['commit', '-q', '-m', msg])); },
     /** Script the fake gh's CI answers (see FAKE_GH_JS) and reset its check-runs step counter. */
     scriptCi: (script) => { writeFileSync(join(fx.root, 'gh-ci.json'), JSON.stringify(script)); writeFileSync(join(fx.root, 'gh-ci.count'), '0'); },
+    ghEnvLog: () => (existsSync(join(fx.root, 'gh-env.log')) ? readFileSync(join(fx.root, 'gh-env.log'), 'utf8').split('\\n').filter(Boolean).map(l => JSON.parse(l)) : []),
     ghLog: () => (existsSync(join(fx.root, 'gh.log')) ? readFileSync(join(fx.root, 'gh.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []),
     /** init (the fixture admits it), drive, a PASS review (engine-dispatched under the strict default), ship-ready: the engine path up to SHIP. */
     toShipReady: () => {

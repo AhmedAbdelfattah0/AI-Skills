@@ -46,6 +46,10 @@
  *   gh_unpinned / gh_drift     `ci` and `publish --pr-title` run only the gh pinned at enroll (path + sha256)
  *   ci_head_unverified / ci_remote_moved   complete needs CI evidence that verified the branch head, and the remote
  *                              branch still at that head
+ * R0-S batch 2: pr_base_unbound (a --base or recorded intent base other than the bound one: config.base, else the remote default
+ * branch; the history check runs from the SHIP_READY merge base), review_fail_unconsumed / review_dispatch_live at authorize publish
+ * (engine-review-dispatch.mjs openReviewFail), ci_repo_mismatch at complete (PUBLISHED.repository, engine-ci.mjs), pr_repo_unknown.
+ * Not closed (reported): a LOCAL config.base branch moved onto unreviewed commits before the review is trusted as the base.
  * Still the same-user residual (documented, not closed): rewriting state.json, the ledgers, a relay or launcher output
  * TOGETHER with the digests that bind them; replacing the relay or gh BEFORE their pin (the pin trusts that moment's
  * home and PATH); importing the modules and calling the in-process seams (ctx.ciProvider, ctx.relayHome); `git` itself
@@ -59,7 +63,8 @@ import { coded, assuranceOf } from './engine-dag.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
 import { reviewFreshness } from './engine-freshness.mjs';
-import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf } from './engine-ci.mjs';
+import { openReviewFail } from './engine-review-dispatch.mjs';
+import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf, remoteRepository, ghEnv } from './engine-ci.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -232,6 +237,10 @@ export async function authorize(ctx, readEngine) {
     // P0 E6-min: CI PASS recorded by run-engine.mjs ci for exactly the published head (engine-ci.mjs ciAuthorize).
     const c = ciAuthorize(S, pub);
     if (!c.ok) return deny(c.code, c.reasons, 'publication');
+    // R0-S batch 2 (item 3): the evidence is of the published repository, and the remote still names it.
+    if (pub.repository && ((c.evidence.repository && c.evidence.repository.toLowerCase() !== pub.repository.slug.toLowerCase())
+      || remoteRepository(ctx.repoRoot, pub.remote ?? 'origin')?.slug?.toLowerCase() !== pub.repository.slug.toLowerCase()))
+      return deny('ci_repo_mismatch', [`the CI evidence (${c.evidence.repository ?? 'in-process provider'}) or remote ${pub.remote ?? 'origin'} is not the published repository ${pub.repository.slug}`], 'publication');
     // R0-S N3: and the published branch still points at that head now (a push after the collection moved what the PR ships).
     const now = remoteHeadOf(ctx.repoRoot, pub);
     if (!now.ok) return deny('remote_unavailable', [`the published branch could not be read: ${now.error}`], 'publication');
@@ -243,6 +252,9 @@ export async function authorize(ctx, readEngine) {
   if (!S.ship_ready.merge_base) return deny('ship_ready_regate', ['this SHIP_READY predates the recorded merge base (an engine update); run gate ship-ready again'], lifecycle(S));
   const superseded = supersededBy(S);
   if (superseded.length) return deny('ship_ready_superseded', superseded, lifecycle(S));
+  // R0-S batch 2 (item 2c): an ungated reviewer FAIL (or a running reviewer) of the authorizing review's owed review blocks publish.
+  const open = openReviewFail(S);
+  if (open) return deny(open.code, [open.reason], 'evidence');
   const top = gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']);
   // R0-S N7: an enrollment whose repository or branch was not captured is never a wildcard.
   if (!S.enrollment.repo) return deny('enrollment_repo_unknown', ['the enrollment recorded no repository (git failed at enroll): start a new run'], 'evidence');
@@ -253,19 +265,23 @@ export async function authorize(ctx, readEngine) {
   if (!S.enrollment.branch) return deny('enrollment_branch_unknown', ['the enrollment recorded no branch (a detached HEAD or a git failure at enroll): enroll on the ticket branch in a new run'], 'evidence');
   if (branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
     return deny('branch_mismatch', [`the run enrolled on ${S.enrollment.branch}, HEAD is ${branch}`], 'evidence');
-  // The PR base: --base, else the --base `publish` recorded for this HEAD before its push (so the pre-push hook's
-  // authorize, which gets no --base, judges a stacked PR against the base publish used), else config.base (a
-  // branch), else the remote's default branch. Every source still has to give the merge base recorded with
-  // SHIP_READY (base_mismatch below), so none of them can widen what is allowed.
+  // R0-S batch 2 (item 1): the PR base is BOUND, never chosen on the command line: the approved DAG's config.base when it
+  // names a branch, else the remote's default branch. A --base (or a recorded PUBLISH_INTENT base) may only name that same
+  // base (pr_base_unbound otherwise): a --base at a local ref carrying unreviewed commits once laundered them, because
+  // merge-base(<that ref>, HEAD) equalled the reviewed merge base. The history check runs from the SHIP_READY merge base.
   const remote = ctx.remote ?? 'origin';
-  const intent = S.publish_intent?.head === head && typeof S.publish_intent.base === 'string' ? S.publish_intent.base : null;
-  const explicit = ctx.base ?? intent ?? (S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null);
+  const configured = S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null;
   // A remote given as a URL (`git push <url>`) has no refs/remotes/<url>/HEAD: never build one (the hook maps a URL to its configured remote first).
-  if (!explicit && !SAFE_REMOTE.test(remote)) return deny('remote_unconfigured', [`the push names ${remote}, which is no configured remote, and no PR base is given: add it as a remote, pass --base, or ship through run-engine.mjs publish`], 'evidence');
-  const remoteHead = explicit ? null : gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
-  const baseRef = explicit ?? remoteHead;
-  if (!baseRef) return deny('pr_base_required', ['no PR base: pass --base <branch>, bind a base branch as config.base, or set the remote HEAD'], 'evidence');
+  if (!configured && !SAFE_REMOTE.test(remote)) return deny('remote_unconfigured', [`the push names ${remote}, which is no configured remote, and no PR base is bound: add it as a remote, bind config.base, or ship through run-engine.mjs publish`], 'evidence');
+  const remoteHead = configured ? null : gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
+  const baseRef = configured ?? remoteHead;
+  if (!baseRef) return deny('pr_base_required', ['no PR base: bind a base branch as config.base in the approved DAG, or set the remote HEAD'], 'evidence');
   const prBase = baseRef === remoteHead && remoteHead.startsWith(`${remote}/`) ? remoteHead.slice(remote.length + 1) : baseRef; // the name gh expects
+  const intent = S.publish_intent?.head === head && typeof S.publish_intent.base === 'string' ? S.publish_intent.base : null;
+  for (const [src, given] of [['--base', ctx.base], ['the recorded publish intent', intent]]) {
+    if (given != null && given !== prBase && given !== baseRef)
+      return deny('pr_base_unbound', [`${src} names ${given}; the PR base bound at review is ${prBase} (config.base, else the remote default branch): a PR base is never chosen on the command line`], 'evidence');
+  }
   const mb = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
   if (mb !== S.ship_ready.merge_base) return deny('base_mismatch', [`the reviewed candidate is relative to ${S.ship_ready.merge_base}, but merge-base(${baseRef}, HEAD) is ${mb}: the branch carries history the review did not cover`], 'evidence');
   const dirty = io.snapshot(ctx.repoRoot, S.pinned_exclusions ?? []);
@@ -283,7 +299,7 @@ export async function authorize(ctx, readEngine) {
   // not bytes: an intermediate commit may still hold other, unreviewed bytes of a reviewed path (the final tree is
   // the reviewed one). A git log that fails or overflows its buffer is history_unavailable, never an empty history.
   const covered = new Set([...(cand.paths ?? []), ...(S.pinned_exclusions ?? [])]);
-  const hist = historyPaths(ctx.repoRoot, `${mb}..HEAD`);
+  const hist = historyPaths(ctx.repoRoot, `${S.ship_ready.merge_base}..HEAD`); // from the frozen review base, never a recomputed one
   if (!hist.ok) return deny('history_unavailable', [`the history since the merge base could not be inspected (${hist.reason}): nothing is published without it`], 'evidence');
   const outside = [...new Set(hist.paths.filter(p => !covered.has(p)))].sort();
   if (outside.length) return deny('history_outside_candidate', [`commits since the merge base touch ${outside.length} path(s) outside the reviewed candidate: `
@@ -323,7 +339,11 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   // R0-S N4: a PR is opened only with the gh pinned at enroll (checked before anything is pushed).
   const gh = ctx.prTitle !== undefined ? pinnedTool(readEngine(ctx).S?.enrollment?.tools?.gh) : null;
   if (gh && !gh.ok) return { published: false, allow: false, code: gh.code, reasons: [gh.reason], lifecycle: a.lifecycle };
-  await recordIntent(ctx, { head, branch, base: ctx.base ?? null, remote, at: new Date().toISOString() });
+  // R0-S batch 2 (item 3): the repository the remote's configured URL names is recorded in PUBLISHED; `ci` reads CI only from it,
+  // and the PR is opened in exactly it (-R, gh's environment sanitized: GH_REPO / GH_HOST / tokens never select another one).
+  const repository = remoteRepository(ctx.repoRoot, remote);
+  if (gh && !repository) return { published: false, allow: false, code: 'pr_repo_unknown', reasons: [`remote ${remote} names no GitHub repository (remote.${remote}.url, and a pushurl naming the same one): no PR is opened in a repository the engine cannot name`], lifecycle: a.lifecycle };
+  await recordIntent(ctx, { head, branch, base: a.binding.base, remote, at: new Date().toISOString() });
   const env = ctx.env ?? process.env;
   const push = spawnSync('git', ['push', remote, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
   if (push.status !== 0) return { published: false, allow: true, code: 'push_failed', reasons: [(push.stderr || push.error?.message || '').trim()] };
@@ -331,12 +351,12 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   if (remoteHead !== head) return { published: false, allow: true, code: 'remote_mismatch', reasons: [`pushed ${head}, the remote branch is ${remoteHead}; nothing recorded`] };
   let pr = null, prError = null;
   if (ctx.prTitle !== undefined) {
-    const r = spawnSync(gh.path, ['pr', 'create', '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
-      { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 300000 });
+    const r = spawnSync(gh.path, ['pr', 'create', '-R', repository.slug, '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
+      { cwd: ctx.repoRoot, encoding: 'utf8', env: ghEnv(env), timeout: 300000 });
     if (r.status === 0) pr = { url: r.stdout.trim().split('\n').at(-1) ?? '' };
     else prError = (r.stderr || r.error?.message || 'gh pr create failed').trim();
   }
-  const entry = { ...a.binding, remote, pr, ...(prError ? { pr_error: prError } : {}), at: new Date().toISOString() };
+  const entry = { ...a.binding, remote, repository, pr, ...(prError ? { pr_error: prError } : {}), at: new Date().toISOString() };
   let recorded = true;
   try { await recordPublished(ctx, entry); } catch { recorded = false; }
   if (!recorded) return { published: true, code: 'published_unrecorded', reasons: ['the push succeeded but PUBLISHED could not be recorded; complete stays unauthorized'], run_id: ctx.runId, ...entry };

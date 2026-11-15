@@ -25,7 +25,7 @@ export const REVIEW_CLI = fileURLToPath(import.meta.url);
 const J = JSON.stringify;
 
 /** The fake relay: one file serves both skills (its skill is its install directory's name). */
-export const FAKE_RELAY = (root) => `import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+export const FAKE_RELAY = (root) => `import { readFileSync, writeFileSync, appendFileSync, statSync, realpathSync } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -40,8 +40,15 @@ const rel = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket/
 let receipt = null;
 try { receipt = (JSON.parse(readFileSync(resolve(cd, rel), 'utf8')).review_dispatches ?? []).find(d => d.out_dir === outDir) ?? null; } catch {}
 const briefSha = 'sha256:' + createHash('sha256').update(brief).digest('hex');
+// Like the real relays: resolve the provider CLI by NAME through this process's PATH, and run it (claude 'auth status', which the fake
+// answers without logging a run): cli_path is the file the relay would launch, so a test can prove which one ran.
+const provider = skill === 'codex-delegate' ? 'codex' : 'claude';
+let cliPath = null;
+for (const d of (process.env.PATH ?? '').split(':').filter(Boolean)) { try { const p = join(d, provider); if (statSync(p).isFile()) { cliPath = realpathSync(p); break; } } catch {} }
+const cliRun = cliPath ? spawnSync(cliPath, provider === 'claude' ? ['auth', 'status', '--json'] : ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) : null;
 appendFileSync(${J(join(root, 'relay.log'))}, JSON.stringify({ skill, args, receipt_seen: Boolean(receipt), brief_matches: receipt?.prompt_sha256 === briefSha,
-  brief_has_candidate: Boolean(receipt && brief.includes(receipt.candidate_id)) }) + '\\n');
+  brief_has_candidate: Boolean(receipt && brief.includes(receipt.candidate_id)), cli_path: cliPath, cli_status: cliRun?.status ?? null,
+  path_head: (process.env.PATH ?? '').split(':')[0], node_options: process.env.NODE_OPTIONS ?? null }) + '\\n');
 let all = {};
 try { all = JSON.parse(readFileSync(${J(join(root, 'relay-behaviour.json'))}, 'utf8')); } catch {}
 const b = all[skill] ?? {};

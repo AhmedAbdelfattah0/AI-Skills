@@ -134,7 +134,9 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const bin = join(root, 'bin');
   mkdirSync(bin);
   writeFileSync(join(bin, 'fake-claude.mjs'), FAKE_CLI(root));
-  if (POSIX) { writeFileSync(join(bin, 'claude'), `#!/bin/sh\nexec node "${join(bin, 'fake-claude.mjs')}" "$@"\n`); chmodSync(join(bin, 'claude'), 0o755); }
+  if (POSIX) { writeFileSync(join(bin, 'claude'), `#!/bin/sh\nexec node "${join(bin, 'fake-claude.mjs')}" "$@"\n`); chmodSync(join(bin, 'claude'), 0o755);
+    // A fake `codex` (never the real one): the engine pins the reviewer CLI of each provider at its first dispatch (R0-S batch 2, item 4).
+    writeFileSync(join(bin, 'codex'), '#!/bin/sh\necho "codex fake"\n'); chmodSync(join(bin, 'codex'), 0o755); }
   else writeFileSync(join(bin, 'claude.cmd'), `@node "%~dp0fake-claude.mjs" %*\r\n`);
   const sep = POSIX ? ':' : ';';
   const { NODE_TEST_CONTEXT: _nested, ...base } = process.env; // a nested `node --test` must not report to this runner

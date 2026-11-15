@@ -456,17 +456,46 @@ export function relaxedPolicy(config) {
 export const policyLine = (relaxed) => POLICY_LINE_PREFIX + JSON.stringify(Object.fromEntries(Object.keys(relaxed).sort().map(k => [k, relaxed[k]])));
 
 /**
+ * The VISIBLE lines of a plan narrative (R0-S batch 2, item 5): the text a reader of the rendered plan sees. HTML comments
+ * (`<!-- ... -->`; an unterminated one hides everything after it) and fenced code blocks (``` or ~~~; an unterminated one
+ * hides everything after it) are removed, so a policy line or a DAG digest placed inside either never counts as approved.
+ */
+export function visibleLines(narrative) {
+  const text = String(narrative ?? '').replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+  const out = [];
+  let fence = null;
+  for (const line of text.split('\n')) {
+    const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) { if (m && m[1][0] === fence[0] && m[1].length >= fence.length && !line.slice(m[0].length).trim()) fence = null; continue; }
+    if (m) { fence = m[1]; continue; }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Whether the DAG digest (either spelling) appears in a visible line of the narrative (init's `plan` binding, the policy approval). */
+export function narrativeListsDigest(narrative, dagDigest) {
+  if (!dagDigest) return false;
+  const forms = [String(dagDigest), String(dagDigest).replace(/^sha256:/, 'sha256-')];
+  return visibleLines(narrative).some(l => forms.some(f => l.includes(f)));
+}
+
+/** Whether `line` is a standalone visible line of the narrative (exactly, from its first column). */
+export const narrativeHasLine = (narrative, line) => visibleLines(narrative).some(l => l.trimEnd() === line);
+
+/**
  * Whether the relaxed values of `config` are approved in the plan narrative: { ok: true, relaxed } (strict: always) or
- * { ok: false, code: 'policy_unapproved', reason, relaxed }. `narrative` is the approved plan text outside RUN-STATE.
+ * { ok: false, code: 'policy_unapproved', reason, relaxed, required_line }. `narrative` is the approved plan text outside RUN-STATE.
+ * The DAG digest must appear on a visible line and the policy line must BE a visible line (not inside an HTML comment or a
+ * code fence): this verifies placement in the approved text, never that a human read it.
  */
 export function policyApproval({ config, narrative, dagDigest }) {
   const relaxed = relaxedPolicy(config);
   if (!Object.keys(relaxed).length) return { ok: true, relaxed };
-  const text = String(narrative ?? '');
-  const listed = Boolean(dagDigest) && (text.includes(dagDigest) || text.includes(String(dagDigest).replace(/^sha256:/, 'sha256-')));
-  if (!listed) return { ok: false, code: 'policy_unapproved', relaxed, reason: `the DAG relaxes assurance (${Object.keys(relaxed).join(', ')}) but is not bound by the approved plan narrative `
-    + '(a DAG_BOUND line is orchestrator-written): list the DAG digest and the policy line in the plan and have it approved, or drop the settings (strict)' };
-  if (!text.includes(policyLine(relaxed))) return { ok: false, code: 'policy_unapproved', relaxed, reason: `the DAG relaxes assurance but the approved narrative does not carry exactly \`${policyLine(relaxed)}\`` };
+  const required_line = policyLine(relaxed);
+  if (!narrativeListsDigest(narrative, dagDigest)) return { ok: false, code: 'policy_unapproved', relaxed, required_line, reason: `the DAG relaxes assurance (${Object.keys(relaxed).join(', ')}) but is not bound by the approved plan narrative `
+    + '(a DAG_BOUND line is orchestrator-written; a digest inside an HTML comment or a code fence is not visible): list the DAG digest and the policy line in the plan and have it approved, or drop the settings (strict)' };
+  if (!narrativeHasLine(narrative, required_line)) return { ok: false, code: 'policy_unapproved', relaxed, required_line, reason: `the DAG relaxes assurance but the approved narrative does not carry exactly \`${required_line}\` as a visible line of its own (not in an HTML comment or a code fence)` };
   return { ok: true, relaxed };
 }
 

@@ -120,13 +120,18 @@ test('parseCheckRuns: page totals must add up; non-JSON or a missing total is a 
 
 test('ghProvider: an invalid SHA is never interpolated; a gh failure is ci_provider_unavailable (spawn seam, no gh run)', () => {
   const calls = [];
-  const p = ghProvider({ repoRoot: '/nowhere', spawn: (...a) => { calls.push(a); return { status: 1, stderr: 'HTTP 401' }; } });
+  const repository = { host: 'github.com', owner: 'acme', repo: 't-1', slug: 'github.com/acme/t-1' };
+  const p = ghProvider({ repoRoot: '/nowhere', repository, env: { GH_REPO: 'evil/fork', GH_HOST: 'evil.example', GITHUB_TOKEN: 'x', PATH: '/bin' },
+    spawn: (...a) => { calls.push(a); return { status: 1, stderr: 'HTTP 401' }; } });
+  assert.equal(ghProvider({ repoRoot: '/nowhere', spawn: () => assert.fail('no repository: never spawned') }).checkRuns(SHA).code, 'ci_repo_unknown');
   assert.equal(p.checkRuns('HEAD; rm -rf /').code, 'ci_provider_unavailable');
   assert.equal(calls.length, 0, 'refused before any spawn');
   const r = p.checkRuns(SHA);
   assert.deepEqual([r.ok, r.code, r.error], [false, 'ci_provider_unavailable', 'HTTP 401']);
   assert.deepEqual(calls[0].slice(0, 1), ['gh']);
-  assert.ok(calls[0][1].includes(`repos/{owner}/{repo}/commits/${SHA}/check-runs`), J(calls[0][1]));
+  assert.ok(calls[0][1].includes(`repos/acme/t-1/commits/${SHA}/check-runs`), J(calls[0][1]));
+  assert.deepEqual(calls[0][1].slice(-2), ['--hostname', 'github.com'], 'the host is explicit');
+  assert.deepEqual(Object.keys(calls[0][2].env).filter(k => /^(GH|GITHUB)_/.test(k)), ['GH_PROMPT_DISABLED'], 'every GH_/GITHUB_ selector and token is stripped');
   assert.equal(p.pullRequest(3).code, 'ci_provider_unavailable');
 });
 
@@ -364,7 +369,7 @@ test('CLI ci through the fake gh: the published head is queried, a short page is
   assert.deepEqual([r.status, r.out.state, r.out.code], [2, 'UNAVAILABLE', 'ci_provider_incomplete'], r.stdout + r.stderr);
   const calls = fx.ghLog().filter(a => a[0] === 'api');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0][3], `repos/{owner}/{repo}/commits/${head}/check-runs`, 'the exact published head, by commit SHA');
+  assert.equal(calls[0][3], `repos/acme/t-1/commits/${head}/check-runs`, 'the exact published head, by commit SHA, in the published repository');
   assert.ok(calls[0].includes('--paginate'));
   fx.editState(S => { S.published.at(-1).at = new Date(Date.now() - 10 * MIN).toISOString(); });
   fx.scriptCi({ checkRuns: [{ runs: [] }], pr: { number: 1, headRefOid: '$HEAD', headRefName: 'T-1-work', baseRefName: fx.defaultBranch, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY', state: 'OPEN' },

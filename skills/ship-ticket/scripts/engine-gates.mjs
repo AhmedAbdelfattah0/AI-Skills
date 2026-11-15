@@ -19,7 +19,7 @@ import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 import { bindReview, bindingOf, reviewFreshness } from './engine-freshness.mjs';
-import { provenanceMode, provenanceVerdict } from './engine-review-dispatch.mjs';
+import { provenanceMode, provenanceVerdict, owedReview, unconsumedFail, liveSibling, openReviewFail } from './engine-review-dispatch.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
@@ -197,6 +197,17 @@ async function reviewGate(E, input, candidate) {
   if (frozenBase && S.config.base && S.config.base !== 'HEAD' && E.candidateMergeBase && E.candidateMergeBase !== frozenBase)
     return gateNo('review_base_moved', [`${S.config.base} moved under the branch since repair ${input.review_execution} (merge base ${frozenBase} -> ${E.candidateMergeBase}); revert it, or the owner appends a RETRY`]);
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
+  // R0-S batch 2 (item 2c): no review is accepted while a FAIL of the same owed review (another candidate or merge base) is
+  // ungated, or a reviewer of it is still running: only the owner RETRY naming that dispatch releases it (no review shopping).
+  const owed = owedReview(S);
+  if (!owed.code && owed.kind === input.kind) {
+    const mb = frozenBase ?? E.candidateMergeBase ?? null;
+    const f = unconsumedFail(S, owed.kind, owed.review_execution, frozen, mb);
+    if (f) return gateNo('review_fail_unconsumed', [`${f.role} ${f.attempt_id} ${f.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${f.candidate_id} (merge base ${f.merge_base ?? 'unknown'}) and was never gated: `
+      + `a review of ${frozen} (merge base ${mb ?? 'unknown'}) never outvotes it; restore that candidate and gate the FAIL, or the owner appends a RETRY { predecessor: ${f.attempt_id} }`]);
+    const l = liveSibling(S, owed.kind, owed.review_execution, frozen, mb);
+    if (l) return gateNo('review_dispatch_live', [`${l.role} ${l.attempt_id} is still reviewing candidate ${l.candidate_id} for this owed review: collect its verdict first (next / review-collect)`]);
+  }
   // P0 E7: only the collected output of an engine-dispatched reviewer counts (identity and role from the receipt);
   // config.reviewProvenance 'unbound' (an opt-out approved in the plan narrative, engine-dag.mjs policyApproval) keeps the pre-E7 gate, labelled unbound.
   const prov = provenanceMode(S) === 'engine' ? provenanceVerdict({ S, input, frozen, mergeBase: frozenBase ?? E.candidateMergeBase ?? null }) : null;
@@ -375,6 +386,9 @@ async function shipReadyGate(E, input, candidate) {
   // E3: the accepted review must still cover these bytes against the merge base it was bound to (a moved base ships another tree).
   const stale = v.ok ? reviewFreshness(S, E.ctx.repoRoot) : null;
   if (stale && !stale.fresh) return gateNo(stale.code, stale.reasons);
+  // R0-S batch 2 (item 2c): an ungated FAIL (or a running reviewer) of the authorizing review's owed review is never outvoted.
+  const open = v.ok ? openReviewFail(S) : null;
+  if (open) return gateNo(open.code, [open.reason]);
   if (v.ok && S.ship_ready?.candidate_id !== candidate) {
     note(S, 'SHIP_READY', { candidate_id: candidate });
     S.ship_ready = { candidate_id: candidate, seq: S.seq };
