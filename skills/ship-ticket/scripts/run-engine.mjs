@@ -21,10 +21,13 @@
  *        needs an admitted run and `gate` its phase context; a refused gate records no decision.
  *      `status` and `next` print the stage dispositions and the one next_action (engine-next.mjs); `next` exits 2 on
  *        BLOCKED, NEEDS_APPROVAL and FAILED.
+ *      run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]: collect and record the CI evidence of the
+ *        published head (engine-ci.mjs); exit 0 PASS, 2 any other state or a refusal (nothing recorded), 1 usage error.
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { isEntrypoint } from './harness.mjs';
 import { truncatedOutputs } from './run-summary.mjs';
 import { eventLine } from './run-state.mjs';
@@ -40,6 +43,7 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
+import { collect as collectCi, ghProvider, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -47,7 +51,9 @@ export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
-  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now']);
+  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now', 'ciProvider']);
+/** Outbox events that stay in the engine log and never reach the plan's RUN-STATE. */
+const ENGINE_LOG_ONLY = ['GATE', 'CI_EVIDENCE'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
@@ -246,8 +252,8 @@ async function deliver(E) {
     // W3-record: a switch-on GATE row carries untrusted text; eventLine escapes the line breaks JSON.stringify leaves raw.
     try { io.appendLogOnce(E.P.log, ev, auditOn(E.S) && ev.event === 'GATE' ? eventLine : undefined); } catch (e) { degrade(E.S, 'engine-log', ev, e); failed = true; }
     await io.boundary(E.ctx.hooks, 'run-state-append', { event_id: ev.event_id });
-    // gate decisions stay in the engine log; SHIP_READY and MARK reach the plan's RUN-STATE
-    if (ev.event !== 'GATE') try { io.appendRunStateOnce(E.P.plan, ev); } catch (e) { degrade(E.S, 'run-state', ev, e); failed = true; }
+    // gate decisions and CI evidence stay in the engine log; SHIP_READY and MARK reach the plan's RUN-STATE
+    if (!ENGINE_LOG_ONLY.includes(ev.event)) try { io.appendRunStateOnce(E.P.plan, ev); } catch (e) { degrade(E.S, 'run-state', ev, e); failed = true; }
     if (failed) kept.push(ev);
     else E.S.telemetry_degraded = E.S.telemetry_degraded.filter(d => d.event_id !== ev.event_id);
   }
@@ -664,6 +670,39 @@ export async function publish(ctx) {
   }, async (_c, intent) => { E.S.publish_intent = intent; await E.commit(); }));
 }
 
+/**
+ * `ci` (P0 E6-min): under the run lock, re-verify the binding and the ship context, then collect the check runs of
+ * the head `publish` pushed for HEAD (the PUBLISHED record, never a SHA from the caller) through the provider
+ * (`ctx.ciProvider`, in-process only; else `gh`), and record CI_EVIDENCE (state.ci_evidence and the engine log).
+ * A refusal records nothing: { schema, recorded: false, code, reasons }.
+ */
+export async function ci(ctx) {
+  const extra = Object.keys(ctx ?? {}).filter(k => !CTX_KEYS.has(k) && k !== 'pr');
+  if (extra.length) throw coded('bad_input', `ci takes --pr and no other fields (got ${extra})`);
+  if (ctx.pr !== undefined && !(Number.isInteger(ctx.pr) && ctx.pr > 0)) throw coded('bad_input', '--pr must be a positive integer');
+  const refuse = (code, reasons) => ({ schema: CI_SCHEMA, recorded: false, code, reasons });
+  return locked(ctx, async (E) => {
+    const unbound = verifyBinding(E);
+    if (unbound.length) return refuse(unbound[0].code, unbound.map(j => j.reason));
+    const adm = admission(E.S, 'complete');
+    if (!adm.ok) return refuse(adm.code, adm.reasons);
+    const r = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], { cwd: ctx.repoRoot, encoding: 'utf8', timeout: 30000 });
+    const head = r.status === 0 ? r.stdout.trim() : null;
+    const pub = (E.S.published ?? []).findLast(p => p.head === head);
+    if (!pub) return refuse('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}: CI is collected only for a head run-engine.mjs publish pushed`]);
+    const provider = ctx.ciProvider ?? ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env });
+    const now = () => Date.parse(auditNow(ctx));
+    const ev = collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now });
+    E.S.ci_evidence = [...(E.S.ci_evidence ?? []), ev].slice(-CI_EVIDENCE_KEEP);
+    note(E.S, 'CI_EVIDENCE', { head_sha: ev.head_sha, state: ev.state, code: ev.code });
+    E.S.outbox.push({ run_id: E.S.run_id, event: 'CI_EVIDENCE', event_id: `ci-${E.S.run_id}-${E.S.seq}`, head_sha: ev.head_sha, pr: ev.pr, state: ev.state,
+      code: ev.code, checks: ev.checks.length, timing: ev.timing, timestamp: new Date().toISOString() });
+    await E.commit();
+    await deliver(E);
+    return { recorded: true, ...ev };
+  });
+}
+
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
 export async function gate(ctx) {
   const input = gateInput(ctx.gate, ctx.input);
@@ -712,15 +751,17 @@ async function main(argv) {
     if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
   }
-  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
+  const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit', 'pr'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)
+    || (flags.pr !== undefined && (cmd !== 'ci' || !/^[1-9][0-9]{0,9}$/.test(flags.pr)))) throw new Error('Usage: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
   const commands = { init, status, drive, resume, next,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
+    ci: () => ci({ ...ctx, ...(flags.pr !== undefined ? { pr: Number(flags.pr) } : {}) }),
     archive: () => archive({ ...ctx, ...(Object.keys(flags).some(k => !['repo', 'ticket', 'run-id'].includes(k)) ? { extra: 1 } : {}) }),
     gate: () => { let input; try { input = JSON.parse(readFileSync(flags.input, 'utf8')); } catch (e) { throw new Error(`gate input ${flags.input}: ${e.message}`); }
       if (flags.unit !== undefined) { // gate unit-review only: --unit names (or must equal) the input's unit
@@ -738,6 +779,7 @@ if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) 
 } else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && NEXT_STOP.includes(r.disposition))) process.exitCode = 2;
+    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && NEXT_STOP.includes(r.disposition))
+      || (r?.schema === CI_SCHEMA && r.state !== 'PASS')) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }

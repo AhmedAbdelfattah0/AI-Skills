@@ -17,7 +17,8 @@
  *   CONFIRMATION  the one targeted confirmation                           gate review records
  *   SHIP_READY    engine SHIP_READY of the reviewed candidate              gate ship-ready
  *   PUBLISH       commit, then run-engine.mjs publish (authorize publish)  PUBLISHED records
- *   CI            authorize complete (stops at ci_evidence_unavailable until slice E6)
+ *   CI            CI_EVIDENCE of the published head (run-engine.mjs ci) and authorize complete; COMPLETED only when
+ *                 authorize complete allows
  *
  * Dispositions: READY (an action can run now), RUNNING (an engine command holds the run lock), WAITING (a
  * dispatched item has no completion marker yet; carries identity, start time, marker path and deadline),
@@ -30,6 +31,12 @@
  * offering `dispatch_review`. Review deadlines come from the REVIEW phase start ceilings (default 20 min);
  * attempt deadlines from config.timeoutMs plus ATTEMPT_GRACE_MS. Nothing kills an overdue item: it is BLOCKED
  * with a recovery action.
+ *
+ * CI (P0 E6-min) is derived from the latest CI_EVIDENCE of the published head: none is READY `ci_owed`
+ * (collect_ci: run-engine.mjs ci), PENDING is WAITING with action collect_ci (poll again after poll_after_ms;
+ * PENDING has no deadline), a provider failure is BLOCKED collect_ci, FAIL is FAILED, NO_CHECKS and STALE are
+ * BLOCKED for the owner with the evidence's diagnostic. COMPLETED needs authorize complete to allow (ENFORCED
+ * there); any other deny is BLOCKED with its code.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -42,6 +49,7 @@ import { REVIEW_ROLE_OF } from './review-intervals.mjs';
 import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
 import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
+import { latestEvidence } from './engine-ci.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
@@ -63,6 +71,8 @@ export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', '
   'budget_stop', 'billing_unverified', 'addendum_required', 'addendum_conflict', 'addendum_outside_contract', 'waiver_unauthorized', 'retry_unauthorized']);
 const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ceiling_ms', confirmation: 'confirmation_ceiling_ms' };
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
+/** The poll interval `next` suggests while CI is PENDING (a hint: nothing waits on it). */
+export const CI_POLL_MS = 30 * 1000;
 
 // ---- results ----------------------------------------------------------------------------------
 
@@ -241,10 +251,20 @@ export const RULES = Object.freeze([
     && res('BLOCKED', f.publishAuth.code, 'resolve', { owner: 'human', reasons: f.publishAuth.reasons ?? [] }) },
   { id: 'publish.owed', stage: 'PUBLISH', when: (S, f) => f.publishAuth?.allow && res('READY', 'publish_owed', 'publish', { binding: f.publishAuth.binding,
     reasons: ['authorize publish allows: run run-engine.mjs publish (the only supported push and PR path)'] }) },
-  // CI (slice E6 replaces the placeholder: until then a published run stops here, never COMPLETED)
-  { id: 'ci.passed', stage: 'CI', when: (S, f) => f.completeAuth?.allow === true && done('ci_passed') },
-  { id: 'ci.owed', stage: 'CI', when: (S, f) => res('BLOCKED', f.completeAuth?.code ?? 'ci_evidence_unavailable', 'collect_ci',
-    { reasons: f.completeAuth?.reasons?.length ? f.completeAuth.reasons : ['CI evidence is not recorded by the engine yet (slice E6)'] }) },
+  // CI (P0 E6-min): from the CI_EVIDENCE of the published head; COMPLETED only when authorize complete allows.
+  { id: 'ci.passed', stage: 'CI', when: (S, f) => f.completeAuth?.allow === true && done('ci_passed', { head: f.head }) },
+  { id: 'ci.owed', stage: 'CI', when: (S, f) => !f.ci && res('READY', 'ci_owed', 'collect_ci',
+    { head: f.head, reasons: [`no CI evidence for the published head ${f.head}: run run-engine.mjs ci`] }) },
+  { id: 'ci.pending', stage: 'CI', when: (S, f) => f.ci?.state === 'PENDING' && res('WAITING', f.ci.code, 'collect_ci',
+    { head: f.head, poll_after_ms: CI_POLL_MS, timing: f.ci.timing, reasons: f.ci.reasons }) },
+  { id: 'ci.unavailable', stage: 'CI', when: (S, f) => f.ci?.state === 'UNAVAILABLE' && res('BLOCKED', f.ci.code, 'collect_ci',
+    { head: f.head, reasons: [...f.ci.reasons, 'the provider failed (never zero checks): fix gh access, then run run-engine.mjs ci again'] }) },
+  { id: 'ci.failed', stage: 'CI', when: (S, f) => f.ci?.state === 'FAIL' && res('FAILED', f.ci.code, 'none',
+    { owner: 'human', head: f.head, reasons: f.ci.reasons }) },
+  { id: 'ci.blocked', stage: 'CI', when: (S, f) => ['NO_CHECKS', 'STALE'].includes(f.ci?.state) && res('BLOCKED', f.ci.code, 'resolve',
+    { owner: 'human', head: f.head, reasons: f.ci.reasons, ...(f.ci.diagnostic ? { diagnostic: f.ci.diagnostic } : {}) }) },
+  { id: 'ci.denied', stage: 'CI', when: (S, f) => res('BLOCKED', f.completeAuth?.code ?? 'underived', 'resolve',
+    { owner: 'human', head: f.head, reasons: f.completeAuth?.reasons ?? [] }) },
 ]);
 
 /**
@@ -374,6 +394,10 @@ export async function gather(E, ext) {
     freshness: reviewFreshness(S, ctx.repoRoot),
     confirmationPolicy: rx && (S.review_chain ?? []).some(r => r.review_execution === rx && r.kind === 'repair') ? confirmationPolicy(S, rx) : null };
   if (S.ship_ready?.candidate_id && f.tree.dirty === false && !(S.published ?? []).some(p => p.head === head)) f.publishAuth = await ext.authorize('publish');
-  if ((S.published ?? []).some(p => p.head === head)) f.completeAuth = await ext.authorize('complete');
+  if ((S.published ?? []).some(p => p.head === head)) {
+    f.completeAuth = await ext.authorize('complete');
+    const ev = latestEvidence(S, head);
+    f.ci = ev && { state: ev.state, code: ev.code, reasons: ev.reasons ?? [], timing: ev.timing ?? null, ...(ev.diagnostic ? { diagnostic: ev.diagnostic } : {}) };
+  }
   return f;
 }

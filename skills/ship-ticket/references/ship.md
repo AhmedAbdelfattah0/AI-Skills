@@ -138,7 +138,10 @@ PR exists, link/comment it in the tracker while polling the required CI checks;
 these operations are independent and may overlap. Use the tracker's supported
 artifact link, development-panel integration or description/comment convention.
 
-Wait for the CI commands enumerated from the repository configuration during
+With the engine, collect CI through `run-engine.mjs ci` whenever `next` returns
+`collect_ci`. It records the checks of the exact published head, and `CI` is
+`COMPLETED` only on its `PASS`; `NO_CHECKS` is `BLOCKED` with a diagnostic, never
+green ([execution-harness.md](execution-harness.md)). Wait for the CI commands enumerated from the repository configuration during
 UNDERSTAND. Do not wait for optional PR review bots. A missing artifact-specific
 check is a previously declared degradation, not a check to poll forever.
 

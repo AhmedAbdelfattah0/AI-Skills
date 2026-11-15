@@ -15,10 +15,37 @@ import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 export const SKILL = fileURLToPath(new URL('..', import.meta.url));
 
-/** Fake `gh`: records its argv as JSON lines in <root>/gh.log and prints a PR URL. */
-const FAKE_GH = (root) => `#!/bin/sh
-node -e 'require("fs").appendFileSync(${JSON.stringify(join(root, 'gh.log'))}, JSON.stringify(process.argv.slice(1)) + "\\n")' -- "$@"
-echo https://example.invalid/pr/1
+/**
+ * Fake `gh` (never the real one): records its argv as JSON lines in <root>/gh.log. `pr create` prints a PR URL.
+ * The CI calls `run-engine.mjs ci` makes are served from <root>/gh-ci.json (`fx.scriptCi`): `checkRuns` is a
+ * sequence of steps, one per call (the last repeats): { runs: [...], total?: n } or { fail: 'stderr text' }; a
+ * run's head_sha '$SHA' is the requested commit. `pr` is the `gh pr view` JSON ('$HEAD' is the work tree's HEAD)
+ * or { fail }, `runs` the `gh run list` JSON. Any other call, or a CI call with no script, exits 1.
+ */
+const FAKE_GH_JS = (root) => `const fs = require('fs'), { execFileSync } = require('child_process');
+const root = ${JSON.stringify(root)}, argv = process.argv.slice(2);
+fs.appendFileSync(root + '/gh.log', JSON.stringify(argv) + '\\n');
+const die = (m) => { process.stderr.write('fake gh: ' + m + '\\n'); process.exit(1); };
+if (argv[0] === 'pr' && argv[1] === 'create') { console.log('https://example.invalid/pr/1'); process.exit(0); }
+let script = null;
+try { script = JSON.parse(fs.readFileSync(root + '/gh-ci.json', 'utf8')); } catch { die('unscripted call ' + argv.join(' ')); }
+const head = () => execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+if (argv[0] === 'api' && /\\/check-runs$/.test(argv[3] ?? '')) {
+  const sha = /commits\\/([0-9a-f]+)\\//.exec(argv[3])[1];
+  const steps = script.checkRuns ?? die('no checkRuns script');
+  const n = Number((() => { try { return fs.readFileSync(root + '/gh-ci.count', 'utf8'); } catch { return '0'; } })());
+  fs.writeFileSync(root + '/gh-ci.count', String(n + 1));
+  const step = steps[Math.min(n, steps.length - 1)];
+  if (step.fail) die(step.fail);
+  const runs = step.runs.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha }));
+  console.log(JSON.stringify({ total_count: step.total ?? runs.length }));
+  for (const r of runs) console.log(JSON.stringify(r));
+} else if (argv[0] === 'pr' && argv[1] === 'view') {
+  if (!script.pr || script.pr.fail) die(script.pr?.fail ?? 'no pr script');
+  console.log(JSON.stringify({ ...script.pr, headRefOid: script.pr.headRefOid === '$HEAD' ? head() : script.pr.headRefOid }));
+} else if (argv[0] === 'run' && argv[1] === 'list') {
+  console.log(JSON.stringify(script.runs ?? []));
+} else die('unscripted call ' + argv.join(' '));
 `;
 
 export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true, nodes, behaviour } = {}) {
@@ -26,7 +53,8 @@ export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = 
   const home = join(fx.root, 'home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), '');
-  writeFileSync(join(fx.root, 'bin', 'gh'), FAKE_GH(fx.root));
+  writeFileSync(join(fx.root, 'fake-gh.cjs'), FAKE_GH_JS(fx.root));
+  writeFileSync(join(fx.root, 'bin', 'gh'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(fx.root, 'fake-gh.cjs'))} "$@"\n`);
   chmodSync(join(fx.root, 'bin', 'gh'), 0o755);
   Object.assign(fx.env, { HOME: home, GIT_CONFIG_GLOBAL: join(home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' });
@@ -46,6 +74,8 @@ export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = 
     head: () => ok(g(['rev-parse', 'HEAD'])).stdout.trim(),
     remoteHead: (b = branch) => { const r = spawnSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`], { encoding: 'utf8', env: fx.env }); return r.status === 0 ? r.stdout.trim() : null; },
     commitAll: (msg = 'ship') => { ok(g(['add', '-A'])); ok(g(['commit', '-q', '-m', msg])); },
+    /** Script the fake gh's CI answers (see FAKE_GH_JS) and reset its check-runs step counter. */
+    scriptCi: (script) => { writeFileSync(join(fx.root, 'gh-ci.json'), JSON.stringify(script)); writeFileSync(join(fx.root, 'gh-ci.count'), '0'); },
     ghLog: () => (existsSync(join(fx.root, 'gh.log')) ? readFileSync(join(fx.root, 'gh.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []),
     /** init (the fixture admits it), drive, a PASS review, ship-ready: the engine path up to SHIP. */
     toShipReady: () => {

@@ -42,6 +42,9 @@ const repairing = (state, over = {}) => baseS({ review_chain: [FAIL_O], repairs:
 const confirming = (over = {}) => baseS({ review_chain: [FAIL_O, REPAIR_REC], repairs: [repair('done')], ...over });
 const shipping = (over = {}) => baseS({ review_chain: [PASS_O], ...over });
 const shipped = { ship_ready: { candidate_id: 'C1' }, local_proof: { candidate_id: 'C1', commands: [{ cmd: 'node', result: 'pass' }] } };
+const PUBLISHED = shipping({ ...shipped, published: [{ head: 'H1' }] });
+const ciDeny = (code) => ({ allow: false, code, reasons: ['r'] });
+const ciEv = (state, code, over = {}) => ({ state, code, reasons: ['r'], timing: null, ...over });
 const RETRY = J({ event: 'RETRY', run_id: 'run-1', review_execution: 'review-2', predecessor: 'review-1', authorized_by: 'owner' });
 
 /** [name, S, facts, expected next_action { stage, disposition, reason, action }] — together they exercise every rule. */
@@ -114,8 +117,17 @@ const SCENARIOS = [
   ['publish owed', shipping(shipped), baseF({ publishAuth: { allow: true, binding: {} } }), ['PUBLISH', 'READY', 'publish_owed', 'publish']],
   ['publish denied', shipping(shipped), baseF({ publishAuth: { allow: false, code: 'branch_mismatch', reasons: [] } }), ['PUBLISH', 'BLOCKED', 'branch_mismatch', 'resolve']],
   ['publish started, nothing recorded', shipping({ ...shipped, publish_intent: { head: 'H1' } }), baseF({ publishAuth: { allow: true } }), ['PUBLISH', 'BLOCKED', 'publish_unfinished', 'publish']],
-  ['published, CI placeholder', shipping({ ...shipped, published: [{ head: 'H1' }] }), baseF({ completeAuth: { allow: false, code: 'ci_evidence_unavailable', reasons: ['E6'] } }), ['CI', 'BLOCKED', 'ci_evidence_unavailable', 'collect_ci']],
-  ['complete (synthetic CI pass: slice E6)', shipping({ ...shipped, published: [{ head: 'H1' }] }), baseF({ completeAuth: { allow: true } }), [null, 'COMPLETED', 'completed', 'none']],
+  ['published, CI evidence owed', PUBLISHED, baseF({ completeAuth: ciDeny('ci_evidence_missing') }), ['CI', 'READY', 'ci_owed', 'collect_ci']],
+  ['CI checks running: collect again', PUBLISHED, baseF({ completeAuth: ciDeny('ci_pending'), ci: ciEv('PENDING', 'ci_pending') }), ['CI', 'WAITING', 'ci_pending', 'collect_ci']],
+  ['CI provider failed (never zero checks)', PUBLISHED, baseF({ completeAuth: ciDeny('ci_provider_unavailable'), ci: ciEv('UNAVAILABLE', 'ci_provider_unavailable') }),
+    ['CI', 'BLOCKED', 'ci_provider_unavailable', 'collect_ci']],
+  ['CI red on the published head', PUBLISHED, baseF({ completeAuth: ciDeny('ci_failed'), ci: ciEv('FAIL', 'ci_failed') }), ['CI', 'FAILED', 'ci_failed', 'none']],
+  ['no check run after the window', PUBLISHED, baseF({ completeAuth: ciDeny('ci_no_checks'), ci: ciEv('NO_CHECKS', 'ci_no_checks', { diagnostic: { pr: null } }) }),
+    ['CI', 'BLOCKED', 'ci_no_checks', 'resolve']],
+  ['the PR head moved past the published head', PUBLISHED, baseF({ completeAuth: ciDeny('ci_head_moved'), ci: ciEv('STALE', 'ci_head_moved') }), ['CI', 'BLOCKED', 'ci_head_moved', 'resolve']],
+  ['recorded PASS that authorize complete refuses', PUBLISHED, baseF({ completeAuth: ciDeny('ci_evidence_inconsistent'), ci: ciEv('PASS', 'ci_passed') }),
+    ['CI', 'BLOCKED', 'ci_evidence_inconsistent', 'resolve']],
+  ['complete: authorize complete allows', PUBLISHED, baseF({ completeAuth: { allow: true }, ci: ciEv('PASS', 'ci_passed') }), [null, 'COMPLETED', 'completed', 'none']],
 ];
 
 const brief = (d) => [d.next_action.stage, d.next_action.disposition, d.next_action.reason, d.next_action.action];
@@ -199,6 +211,7 @@ function orchestrator(fx, script) {
     gate_ship_ready: () => fx.gate('ship-ready', {}),
     commit: (a) => { fx.okGit(['add', '--', ...a.paths]); fx.okGit(['commit', '-q', '-m', 'T-1: ship']); },
     publish: () => fx.cli('publish'),
+    collect_ci: () => fx.cli('ci'),
   };
   return {
     log,
@@ -226,29 +239,44 @@ const failThenPass = {
       : secondOpinion(candidate)),
 };
 
+/** A check run of the fake gh ('$SHA': the requested commit). */
+const checkRun = (status, conclusion = null, over = {}) => ({ id: 1, name: 'test', head_sha: '$SHA', status, conclusion,
+  started_at: '2026-11-15T00:00:01.000Z', completed_at: status === 'completed' ? '2026-11-15T00:00:09.000Z' : null, app: 'github-actions', url: 'https://example.invalid/run/1', ...over });
+/** The fake gh's CI: the checks of the published head are running at the first collection and green at the next. */
+const CI_RUNNING_THEN_GREEN = { checkRuns: [{ runs: [checkRun('in_progress')] }, { runs: [checkRun('completed', 'success')] }] };
+
 function nextFixture(t, opts = {}) {
   const fx = enrollFixture(t, { behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' } } }, ...opts });
+  fx.scriptCi(CI_RUNNING_THEN_GREEN);
   return fx;
 }
+const checkRunCalls = (fx) => fx.ghLog().filter(a => a[0] === 'api' && /\/check-runs$/.test(a[3] ?? '')).map(a => /commits\/([0-9a-f]+)\//.exec(a[3])[1]);
 
-test('supported path: a fake orchestrator that only calls next ships FAIL -> repair -> confirmation -> publish, collecting review results with no notification', { skip: WIN_SKIP }, async (t) => {
+test('supported path: a fake orchestrator that only calls next ships FAIL -> repair -> confirmation -> publish -> CI and reaches COMPLETED, collecting review results with no notification', { skip: WIN_SKIP }, async (t) => {
   const fx = nextFixture(t);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   const o = orchestrator(fx, failThenPass);
   let collectedWithoutNotice = 0;
   const end = await o.run({ onStep: (out) => { if (out.next_action.action === 'collect_review') collectedWithoutNotice++; } });
-  // Until slice E6 records CI evidence the run stops at the CI placeholder, never COMPLETED.
-  assert.deepEqual([end.next_action.stage, end.disposition, end.next_action.reason], ['CI', 'BLOCKED', 'ci_evidence_unavailable']);
-  for (const st of STAGES.filter(s => s !== 'CI')) assert.equal(end.stages[st].disposition, 'COMPLETED', `${st}: ${J(end.stages[st])}`);
+  // P0 E6-min: COMPLETED through next only, once the engine recorded CI PASS for the published head.
+  assert.deepEqual([end.next_action.stage, end.disposition, end.next_action.reason], [null, 'COMPLETED', 'completed']);
+  for (const st of STAGES) assert.equal(end.stages[st].disposition, 'COMPLETED', `${st}: ${J(end.stages[st])}`);
+  assert.equal(end.stages.CI.code, 'ci_passed');
   assert.equal(collectedWithoutNotice, 3, 'primary, second opinion and confirmation were each collected from the marker on disk');
   t.diagnostic(o.log.map(l => `${l.stage}:${l.action}:${l.reason}`).join(' > '));
   const actions = o.log.map(l => l.action);
-  for (const a of ['drive', 'dispatch_review', 'collect_review', 'gate_review', 'gate_ship_ready', 'commit', 'publish']) assert.ok(actions.includes(a), `${a} in ${actions}`);
+  for (const a of ['drive', 'dispatch_review', 'collect_review', 'gate_review', 'gate_ship_ready', 'commit', 'publish', 'collect_ci']) assert.ok(actions.includes(a), `${a} in ${actions}`);
+  assert.deepEqual(o.log.filter(l => l.stage === 'CI').map(l => [l.disposition, l.reason]), [['READY', 'ci_owed'], ['WAITING', 'ci_pending']],
+    'CI: owed, then running (collect again)');
   const S = fx.readState();
   assert.deepEqual(S.review_chain.map(r => [r.kind, r.outcome ?? null]), [['original', 'FAIL'], ['repair', null], ['confirmation', 'PASS']]);
   assert.deepEqual([fx.runs('a').length, fx.runs('fix').length], [1, 1], 'nothing was dispatched twice');
   assert.equal(fx.remoteHead(), fx.head(), 'published through run-engine.mjs publish');
-  assert.equal(fx.cli('status').out.next_action.reason, 'ci_evidence_unavailable', 'status derives the same next action');
+  assert.deepEqual(checkRunCalls(fx), [fx.head(), fx.head()], 'the fake gh was asked for the check runs of exactly the published head, twice');
+  assert.deepEqual(S.ci_evidence.map(e => [e.head_sha, e.state]), [[fx.head(), 'PENDING'], [fx.head(), 'PASS']]);
+  const st = fx.cli('status').out;
+  assert.deepEqual([st.disposition, st.next_action.reason], ['COMPLETED', 'completed'], 'status derives the same next action');
+  assert.equal(fx.cli('authorize', { stage: 'complete' }).out.allow, true);
 });
 
 test('killed mid-stage: a fresh orchestrator finds the in-flight worker WAITING (identity, start, marker), status offers resume, and the finished worker is collected once', { skip: WIN_SKIP }, async (t) => {
@@ -278,7 +306,7 @@ test('killed mid-stage: a fresh orchestrator finds the in-flight worker WAITING 
   assert.equal(fx.cli('resume').status, 0);
   assert.equal(fx.readState().nodes.a.state, 'done', 'resume recorded the finished worker');
   const end = await orchestrator(fx, failThenPass).run();
-  assert.deepEqual([end.next_action.stage, end.next_action.reason], ['CI', 'ci_evidence_unavailable']);
+  assert.deepEqual([end.next_action.stage, end.disposition], [null, 'COMPLETED']);
   assert.equal(fx.runs('a').length, 1, 'the killed stage was collected, never re-dispatched');
 });
 

@@ -13,7 +13,8 @@
  *   publication   `authorize publish` allows (computed, never stored)
  * Enforced entry points: drive and carrier.mjs dispatch need `admitted` (stage build); gate needs
  * the gate's phase context (red: build, review/unit-review/reassess: review, ship-ready: ship) and
- * otherwise returns a refusal that records no decision; publish needs `publication`. `init` is the
+ * otherwise returns a refusal that records no decision; publish needs `publication`; `authorize complete`
+ * needs a PUBLISHED record for HEAD and a CI_EVIDENCE PASS of exactly that head (engine-ci.mjs). `init` is the
  * bootstrap and needs only the approved plan. status, resume, mark, rebind, archive and `context`
  * are not gated.
  *
@@ -41,6 +42,7 @@ import { coded } from './engine-dag.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
 import { reviewFreshness } from './engine-freshness.mjs';
+import { ciAuthorize } from './engine-ci.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -48,8 +50,6 @@ export const STAGES = Object.freeze(['build', 'publish', 'complete']);
 /** The context phase each stage and gate needs, delivered from the pinned skill. */
 export const STAGE_PHASE = Object.freeze({ build: 'build', publish: 'ship', complete: 'ship',
   red: 'build', review: 'review', 'unit-review': 'review', reassess: 'review', 'ship-ready': 'ship' });
-/** `complete` stops here until slice E6 records CI evidence: explicit, never a silent allow. */
-export const CI_PLACEHOLDER = 'ci_evidence_unavailable';
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -199,8 +199,13 @@ export async function authorize(ctx, readEngine) {
   if (ctx.stage === 'build') return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: lifecycle(S) };
   const head = gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (ctx.stage === 'complete') {
-    if (!(S.published ?? []).some(p => p.head === head)) return deny('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}; ship through run-engine.mjs publish`], lifecycle(S));
-    return deny(CI_PLACEHOLDER, ['CI evidence is not recorded by the engine yet (slice E6), so complete cannot be authorized'], 'publication');
+    const pub = (S.published ?? []).findLast(p => p.head === head);
+    if (!pub) return deny('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}; ship through run-engine.mjs publish`], lifecycle(S));
+    // P0 E6-min: CI PASS recorded by run-engine.mjs ci for exactly the published head (engine-ci.mjs ciAuthorize).
+    const c = ciAuthorize(S, pub);
+    if (!c.ok) return deny(c.code, c.reasons, 'publication');
+    return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
+      binding: { head, ci: { state: c.evidence.state, collected_at: c.evidence.collected_at, checks: c.evidence.checks.length, required: c.evidence.required } } };
   }
   if (!S.ship_ready?.candidate_id) return deny('ship_ready_missing', ['no engine SHIP_READY for this run; run gate ship-ready'], lifecycle(S));
   if (!S.ship_ready.merge_base) return deny('ship_ready_regate', ['this SHIP_READY predates the recorded merge base (an engine update); run gate ship-ready again'], lifecycle(S));

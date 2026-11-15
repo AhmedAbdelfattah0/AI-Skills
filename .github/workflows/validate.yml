@@ -93,6 +93,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-enroll.test.mjs
           skills/ship-ticket/scripts/run-engine-next.test.mjs
           skills/ship-ticket/scripts/run-engine-freshness.test.mjs
+          skills/ship-ticket/scripts/run-engine-ci.test.mjs
           skills/ship-ticket/scripts/git-guard.test.mjs
           skills/ship-ticket/scripts/context-manifest.test.mjs
           skills/ship-ticket/scripts/gate-security.test.mjs

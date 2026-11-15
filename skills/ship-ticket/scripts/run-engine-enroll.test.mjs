@@ -48,7 +48,7 @@ function carrierRun(fx) {
   return spawnSync(process.execPath, [CARRIER, 'run', cfg], { encoding: 'utf8', env: fx.env, cwd: fx.repo, timeout: 90000 });
 }
 
-test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publication, then complete stops at the CI placeholder', { skip: WIN_SKIP }, (t) => {
+test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publication, then complete needs CI evidence of the published head', { skip: WIN_SKIP }, (t) => {
   const fx = enrollFixture(t, { admit: false });
   denied(authorize(fx, 'build'), 'not_enrolled', 'none');
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0, 'init is the bootstrap: it needs only the approved plan');
@@ -82,8 +82,8 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   assert.deepEqual(fx.ghLog(), [['pr', 'create', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft']]);
   assert.equal(fx.readState().published.at(-1).head, fx.head());
   const done = authorize(fx, 'complete');
-  denied(done, 'ci_evidence_unavailable', 'publication');
-  assert.match(done.out.reasons[0], /slice E6/);
+  denied(done, 'ci_evidence_missing', 'publication');
+  assert.match(done.out.reasons[0], /run run-engine\.mjs ci/);
   assert.equal(fx.git(['status', '--porcelain']).stdout, '', 'publish wrote nothing into the work tree');
 });
 

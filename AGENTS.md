@@ -462,7 +462,9 @@ invalidates it. Any byte change (`review_stale`) or a base merged or rebased in
 (`review_base_moved`) refuses ship-ready and publish until the current candidate
 is reviewed. `run-engine.mjs next` (`engine-next.mjs`) derives one disposition
 per stage and the one `next_action` from existing records; the skill follows it
-after every tool return.
+after every tool return. `run-engine.mjs ci` (`engine-ci.mjs`) records the check runs of
+the exact published head; `authorize complete`, and so `next`'s `COMPLETED`,
+needs its `PASS`, and zero checks after the window is `NO_CHECKS`, never green.
 
 **The ticket pair (`generate-ticket` → tracker → `ship-ticket`):** `generate-ticket`
 writes ticket **content only** (per-ticket `.md` + a bulk-import CSV + `INDEX.md`)

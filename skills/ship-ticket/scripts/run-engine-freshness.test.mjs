@@ -145,7 +145,7 @@ test('forged candidate ids and a confirmation of an older candidate are refused;
   commitAs(fx, 'ship', '--amend');
   const p = fx.cli('publish');
   assert.equal(p.out.code, 'published', p.stdout + p.stderr);
-  assert.deepEqual(brief(nextOf(fx)), ['CI', 'BLOCKED', 'ci_evidence_unavailable']);
+  assert.deepEqual(brief(nextOf(fx)), ['CI', 'READY', 'ci_owed'], 'published: the CI evidence of the published head is owed');
 });
 
 test('a stale review needs the owner: an owner RETRY makes the new original review owed, and its PASS of the current candidate re-authorizes ship', { skip: WIN_SKIP }, (t) => {

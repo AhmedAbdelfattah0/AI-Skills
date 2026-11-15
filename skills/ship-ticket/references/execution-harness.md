@@ -227,6 +227,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs context   --repo <R> --ticket <T
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs enroll    --repo <R> --ticket <T> --run-id <ID>          # right after init; idempotent
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs authorize --repo <R> --ticket <T> --run-id <ID> --stage build|publish|complete
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--base <branch>] [--pr-title <t> --pr-body-file <f> [--draft]]
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs ci        --repo <R> --ticket <T> --run-id <ID> [--pr <n>]   # collect CI of the published head
 node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <R> [--pattern <regex>]   # opt-in pre-push hook, this repository only
 ```
 
@@ -272,8 +273,43 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   no commit since it may touch a path outside the candidate
   (`history_outside_candidate`: e.g. an extra commit later reverted). A `SHIP_READY`
   recorded before the merge base existed needs `gate ship-ready` again
-  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch and base. `complete` needs `PUBLISHED` for HEAD and then stops at
-  `ci_evidence_unavailable` until the engine records CI.
+  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch and base. `complete` needs `PUBLISHED` for HEAD
+  and CI `PASS` recorded by `ci` for exactly that head (below).
+- **`ci`** (ENFORCED for `authorize complete`). Under the run lock, after the
+  binding and the `ship` context are re-verified, it asks `gh` for the check runs
+  of the head `publish` pushed for HEAD. That SHA comes from the `PUBLISHED`
+  record, never from the caller. It records `CI_EVIDENCE` `{head_sha, checks[],
+  collected_at, state, code, timing}` in the state and the engine log, never in
+  RUN-STATE. Exit 0 is `PASS`. Exit 2 is any other state or a refusal, which
+  records nothing: `publish_evidence_missing` or the binding and context codes.
+  States:
+  - `PASS`: at least one required check, every one `completed` with `success`, on
+    that SHA. `skipped` and `neutral` are not success.
+  - `PENDING` (`ci_pending`, `ci_no_checks_yet`, `ci_required_pending`).
+  - `FAIL` (`ci_failed`).
+  - `NO_CHECKS`: zero check runs (`ci_no_checks`) or a required name with none
+    (`ci_required_missing`), from a collection made `config.ciNoChecksMinutes`
+    (default 5) or more after the push.
+  - `STALE`: the PR head is not the published head (`ci_head_moved`), or the PR
+    is another branch (`ci_pr_mismatch`).
+  - `UNAVAILABLE`: a `gh` failure (`ci_provider_unavailable`) or a page count that
+    does not add up (`ci_provider_incomplete`). This is never zero checks.
+
+  Runs of another SHA are ignored. The required set is `config.ciRequiredChecks`
+  when the approved DAG names it, else every check run on the SHA. `authorize
+  complete` reads only the latest evidence for the published head. It re-judges
+  the recorded checks under the bound config (`ci_evidence_missing`, the
+  evidence's own code, `ci_evidence_inconsistent`), and it never calls `gh`.
+  `--pr` (else the PR URL `publish` recorded) adds the PR view. `NO_CHECKS`
+  carries a DETECTED diagnostic, never part of the verdict: the PR's mergeable and
+  merge state, each workflow's `on:` triggers with branch and path filters against
+  the files changed since the merge base (a line-based reading, `parsed: false`
+  where it cannot tell), and recent runs on the branch. Timing is captured
+  separately: `dispatched_at` (the push), `first_check_started_at`,
+  `checks_completed_at` and `collected_at`. Limits: legacy commit statuses are not
+  read, so status-only CI is `NO_CHECKS` (fail closed). The required set is the
+  DAG's, not branch protection's. A `PENDING` check has no deadline. The evidence
+  is the engine's state file, which any same-user process can write.
 - **`publish`** holds the run lock throughout: it authorizes, authorizes again
   immediately before the push and requires the same binding (`authorization_moved`),
   records an explicit `--base` for the HEAD it pushes (`publish_intent`, so the
@@ -337,7 +373,10 @@ are refused, never dropped.
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
   runs every entry as the local proof), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
-  node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is
+  node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)), and
+  `ciRequiredChecks` (check-run names CI `PASS` requires) and `ciNoChecksMinutes`
+  (the `NO_CHECKS` window, 1..120, default 5), both opt-in and never defaulted
+  into the DAG. Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -385,8 +424,12 @@ command: `drive`, `resume`) or `human` (only the owner continues). Rules:
 - An un-enrolled run is `ENROLL` `BLOCKED` `not_enrolled`
   (`diagnostic: NEEDS_ENROLLMENT`, action `enroll`): nothing advances.
 - `PUBLISH` reads `authorize publish` (any deny is `BLOCKED` with its code).
-  `CI` reads `authorize complete`, so until slice E6 a published run stops at
-  `BLOCKED` `ci_evidence_unavailable`, never `COMPLETED`.
+  `CI` derives from the latest `CI_EVIDENCE` of the published head. With none, it
+  is `READY` `ci_owed` (`collect_ci`: run `ci`). `PENDING` is `WAITING`
+  `collect_ci`: collect again after `poll_after_ms`. A provider failure is
+  `BLOCKED` `collect_ci`, `FAIL` is `FAILED`, and `NO_CHECKS` and `STALE` are
+  `BLOCKED` for the owner with the diagnostic. It is `COMPLETED` only when
+  `authorize complete` allows; any other deny is `BLOCKED` with its code.
 - Judgment codes that only a human resolves (approval, authority, budget, billing)
   are `NEEDS_APPROVAL`. Every other code is `BLOCKED`, and a stage no rule decides
   is `BLOCKED` `underived` (fail closed).

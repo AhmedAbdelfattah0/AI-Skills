@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'ciRequiredChecks', 'ciNoChecksMinutes'];
 
 /**
  * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
@@ -216,6 +216,12 @@ export function validateEngineDag(doc, { ticket } = {}) {
   validateUnits(nodes, c, bad);
   validateSecurity(nodes, c, bad);
   if (c.auditRecord !== undefined && typeof c.auditRecord !== 'boolean') bad('config.auditRecord must be a boolean');
+  // P0 E6-min (engine-ci.mjs), never defaulted here: the check names CI PASS requires, and the NO_CHECKS window.
+  const req = c.ciRequiredChecks;
+  if (req !== undefined && !(Array.isArray(req) && req.length > 0 && req.length <= 50 && req.every(n => typeof n === 'string' && n.trim() && n.length <= 200) && new Set(req).size === req.length))
+    bad('config.ciRequiredChecks must be 1..50 unique non-empty check-run names');
+  if (c.ciNoChecksMinutes !== undefined && !(Number.isInteger(c.ciNoChecksMinutes) && c.ciNoChecksMinutes >= 1 && c.ciNoChecksMinutes <= 120))
+    bad('config.ciNoChecksMinutes must be an integer 1..120');
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }

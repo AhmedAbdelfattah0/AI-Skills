@@ -38,10 +38,10 @@ recorded next action is the engine's: after every tool or agent return, and befo
 any turn end, run `run-engine.mjs next` and execute its `next_action`. Stop only
 when its disposition is `NEEDS_APPROVAL` (**WAIT_FOR_USER**), `BLOCKED` (resolve it
 if `owner` is `orchestrator`, else **WAIT_FOR_USER**), `FAILED` (**FAIL**) or
-`COMPLETED`. A `READY` stage is owed work, never a reason to end the turn. Until
-the engine records CI, a published run stops at `CI` `BLOCKED`
-(`ci_evidence_unavailable`): finish SHIP's CI and tracker steps in
-[references/ship.md](references/ship.md). End the assistant turn only in one of these states:
+`COMPLETED`. A `READY` stage is owed work, never a reason to end the turn. A published run's `CI` stage is
+`READY`/`WAITING` `collect_ci` (run `run-engine.mjs ci`) until the engine records
+CI `PASS` for the exact published head; `COMPLETED` then means CI passed, and
+SHIP's tracker steps in [references/ship.md](references/ship.md) remain. End the assistant turn only in one of these states:
 
 | State | Meaning | End the turn? |
 |---|---|---|
