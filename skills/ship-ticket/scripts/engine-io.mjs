@@ -249,6 +249,15 @@ export function resolveCommit(repoRoot, ref) {
 
 const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
 
+/**
+ * The base a run's candidate is computed against (R0-S C6). A config.base branch is used as is (its merge base does not move
+ * on a commit). With config.base HEAD the merge base would move on every commit, so once the review froze a candidate the
+ * candidate is computed against the merge base recorded with that freeze: committing the reviewed (or repaired) bytes before
+ * ship-ready or before the confirmation leaves the candidate id unchanged, while any content change still changes it. A freeze
+ * recorded before this change has no merge base and keeps HEAD.
+ */
+export const candidateBase = (S) => (S?.config?.base && S.config.base !== 'HEAD' ? S.config.base : S?.freeze?.merge_base ?? 'HEAD');
+
 /** Candidate id of the work tree via candidate-id.mjs: `{ candidate_id }` or `{ reason }`; never throws. */
 export function candidateId(repoRoot, base, excludes) {
   const args = [CANDIDATE_CLI, '--repo', repoRoot, '--base', base, ...[...new Set(excludes)].flatMap(e => ['--exclude', e])];

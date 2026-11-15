@@ -14,11 +14,14 @@
  *   recentRuns(branch)-> { ok, runs: [{ id, head_sha, status, conclusion, event, workflow, created_at }] } | { ok: false, code, error }
  *
  * Verdict (`verdict`, one pure function shared by `ci` and `authorize complete`; each check has an id the
- * mutation test omits): STALE (the PR head is not the published head, or the PR is another branch), PENDING,
- * FAIL, NO_CHECKS, PASS. Only check runs whose head_sha is the published head count. The required set is
- * config.ciRequiredChecks when the approved DAG names it, else every check run reported on that head. PASS
- * needs at least one required check and every one completed with conclusion `success` (`skipped` and
- * `neutral` are not success). Zero check runs, or a required name with none, is PENDING until
+ * mutation test omits): STALE (the PR head is not the published head, the PR is another branch, or the remote
+ * branch, read at collection, no longer points at the head), PENDING, FAIL, NO_CHECKS, PASS. Only check runs
+ * whose head_sha is the published head count. A re-run replaces the earlier run of the same check (same app,
+ * check suite and name); same-named runs of another app or workflow are independent checks. ANY failed check
+ * on the head (failure, cancelled, timed_out, action_required, startup_failure, stale) is FAIL, required or not.
+ * The required set (what must PASS) is config.ciRequiredChecks when the approved DAG names it (an assurance
+ * setting: approved in the plan, R0-S A4), else every check run reported on that head. PASS needs at least one
+ * required check and every one completed with conclusion `success` (`skipped` and `neutral` are not success). Zero check runs, or a required name with none, is PENDING until
  * config.ciNoChecksMinutes (default 5) after the push and NO_CHECKS from a collection made after it.
  * A provider failure or a page count that does not add up is UNAVAILABLE, never zero checks.
  *
@@ -31,15 +34,20 @@
  * closed); the required set is the DAG's, not the branch protection's; a PENDING check has no deadline.
  */
 import { spawnSync } from 'node:child_process';
+import { statSync, realpathSync, readFileSync } from 'node:fs';
+import { join, delimiter } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export const CI_SCHEMA = 'ship-ticket-ci-evidence-v1';
 export const CI_STATES = Object.freeze(['PASS', 'PENDING', 'FAIL', 'NO_CHECKS', 'STALE', 'UNAVAILABLE']);
 export const DEFAULT_NO_CHECKS_MINUTES = 5;
 export const CI_EVIDENCE_KEEP = 20;
 /** The verdict's removable checks (mutation test: omitting any one changes a pinned verdict). */
-export const VERDICT_CHECKS = Object.freeze(['head_moved', 'pr_branch', 'exact_sha', 'at_least_one', 'conclusion', 'required_present', 'all_complete']);
+export const VERDICT_CHECKS = Object.freeze(['head_moved', 'pr_branch', 'remote_moved', 'exact_sha', 'at_least_one', 'conclusion', 'any_failed', 'independent_runs', 'required_present', 'all_complete']);
+/** Conclusions that are a failed check wherever it runs (required or not); `skipped` and `neutral` fail only a required check. */
+export const FAILING = Object.freeze(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
 /** authorize complete's removable checks. */
-export const AUTHORIZE_CHECKS = Object.freeze(['evidence_present', 'state_pass', 'recheck']);
+export const AUTHORIZE_CHECKS = Object.freeze(['evidence_present', 'state_pass', 'head_verified', 'recheck']);
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_TEXT = 500;
 
@@ -66,7 +74,7 @@ const later = (a, b) => (ms(a.started_at) ?? -1) > (ms(b.started_at) ?? -1) || (
  */
 export function verdict(input, { omit = [] } = {}) {
   const on = (id) => !omit.includes(id);
-  const { sha, branch, checks = [], required, windowMs, dispatchMs, collectedMs, pr = null } = input;
+  const { sha, branch, checks = [], required, windowMs, dispatchMs, collectedMs, pr = null } = input; // input.remoteHead: the branch's remote head at collection (undefined: not read)
   const onSha = on('exact_sha') ? checks.filter(c => c.head_sha === sha) : checks;
   const firstStart = Math.min(...onSha.map(c => ms(c.started_at) ?? Infinity));
   const base = { considered: onSha.length, ignored_other_sha: checks.length - onSha.length };
@@ -81,16 +89,24 @@ export function verdict(input, { omit = [] } = {}) {
   if (on('at_least_one') && onSha.length === 0) return windowOver
     ? out('NO_CHECKS', 'ci_no_checks', [`no check run on ${sha} ${after}${base.ignored_other_sha ? ` (${base.ignored_other_sha} run(s) of other SHAs ignored)` : ''}`])
     : out('PENDING', 'ci_no_checks_yet', [`no check run on ${sha} yet; NO_CHECKS from ${iso(dispatchMs + windowMs)}`]);
+  if (on('remote_moved') && input.remoteHead !== undefined && input.remoteHead !== sha)
+    return out('STALE', 'ci_remote_moved', [`the remote branch ${branch ?? ''} is ${input.remoteHead ?? 'gone'}, the published head is ${sha}: checks of a moved branch are never this head's success`]);
+  // A re-run replaces the earlier run of the SAME check (same app, same check suite, same name); runs of another app or
+  // workflow (another check suite) that share a name are independent checks, and each must pass (R0-S, Codex MEDIUM).
+  const keyOf = (c) => (on('independent_runs') ? `${c.app ?? ''}\u0000${c.check_suite ?? ''}\u0000${c.name}` : c.name);
   const latest = new Map();
-  for (const c of onSha) { const p = latest.get(c.name); if (!p || later(c, p)) latest.set(c.name, c); }
+  for (const c of onSha) { const k = keyOf(c), p = latest.get(k); if (!p || later(c, p)) latest.set(k, c); }
+  const runs = [...latest.values()];
   const configured = Array.isArray(required) && required.length > 0;
-  const names = configured ? [...required] : [...latest.keys()];
+  const names = configured ? [...required] : [...new Set(runs.map(c => c.name))];
   const more = { required: names, required_source: configured ? 'config' : 'all_on_sha' };
-  const req = names.filter(n => latest.has(n)).map(n => latest.get(n));
-  const failed = req.filter(c => c.status === 'completed' && c.conclusion !== 'success');
+  const req = runs.filter(c => names.includes(c.name));
+  // FAIL on any failed check on the exact SHA, required or not: a configured set narrows what must PASS, never what may fail.
+  const failed = [...new Set([...req.filter(c => c.status === 'completed' && c.conclusion !== 'success'),
+    ...(on('any_failed') ? runs.filter(c => c.status === 'completed' && (c.conclusion === null || FAILING.includes(c.conclusion))) : [])])];
   if (on('conclusion') && failed.length)
-    return out('FAIL', 'ci_failed', failed.map(c => `${c.name}: ${c.conclusion ?? 'no conclusion'}${c.url ? ` (${c.url})` : ''}`), { more: { ...more, failed: failed.map(c => c.name) } });
-  const missing = names.filter(n => !latest.has(n));
+    return out('FAIL', 'ci_failed', failed.map(c => `${c.name}${c.app ? ` (${c.app})` : ''}: ${c.conclusion ?? 'no conclusion'}${c.url ? ` (${c.url})` : ''}`), { more: { ...more, failed: failed.map(c => c.name) } });
+  const missing = names.filter(n => !runs.some(c => c.name === n));
   if (on('required_present') && missing.length) return windowOver
     ? out('NO_CHECKS', 'ci_required_missing', [`required check(s) ${missing.join(', ')} never ran on ${sha} ${after}`], { more: { ...more, missing } })
     : out('PENDING', 'ci_required_pending', [`required check(s) ${missing.join(', ')} have not started on ${sha}`], { more: { ...more, missing } });
@@ -114,9 +130,13 @@ export function ciAuthorize(S, pub, { omit = [] } = {}) {
   if (on('evidence_present') && !ev) return { ok: false, code: 'ci_evidence_missing', reasons: [`no CI evidence for the published head ${pub.head}: run run-engine.mjs ci`] };
   if (on('state_pass') && ev?.state !== 'PASS')
     return { ok: false, code: typeof ev?.code === 'string' && ev.code !== 'ci_passed' ? ev.code : 'ci_not_passed', reasons: Array.isArray(ev?.reasons) && ev.reasons.length ? ev.reasons : [`CI is ${ev?.state} on ${pub.head}`] };
+  // R0-S N3: the evidence must have verified the published branch still pointed at the head (the remote ref read at
+  // collection, or the PR head): without a PR nothing else ties the checks of this sha to what the branch ships.
+  if (on('head_verified') && ev && ev.remote_head !== pub.head && ev.pr_view?.head_sha !== pub.head)
+    return { ok: false, code: 'ci_head_unverified', reasons: [`the CI evidence for ${pub.head} verified neither the remote branch (${ev.remote_head ?? 'not read'}) nor a PR head at this sha: collect again with run-engine.mjs ci`] };
   if (on('recheck')) {
     const v = verdict({ sha: pub.head, branch: pub.branch, checks: Array.isArray(ev?.checks) ? ev.checks : [], required: S.config?.ciRequiredChecks,
-      windowMs: 0, dispatchMs: 0, collectedMs: 0, pr: ev?.pr_view ?? null });
+      windowMs: 0, dispatchMs: 0, collectedMs: 0, pr: ev?.pr_view ?? null, ...(ev && Object.hasOwn(ev, 'remote_head') ? { remoteHead: ev.remote_head } : {}) });
     if (v.state !== 'PASS') return { ok: false, code: 'ci_evidence_inconsistent', reasons: [`the recorded checks do not give PASS under the bound config (${v.code}): collect again with run-engine.mjs ci`] };
   }
   return { ok: true, evidence: ev };
@@ -137,7 +157,7 @@ function jsonLines(text) {
 }
 
 const normRun = (r) => ({ id: r.id ?? null, name: String(r.name ?? ''), head_sha: r.head_sha ?? null, status: r.status ?? null, conclusion: r.conclusion ?? null,
-  started_at: r.started_at ?? null, completed_at: r.completed_at ?? null, app: r.app ?? null, url: r.url ?? null });
+  started_at: r.started_at ?? null, completed_at: r.completed_at ?? null, app: r.app ?? null, check_suite: r.check_suite ?? null, url: r.url ?? null });
 
 /**
  * Parse the check-runs output: one `{ total_count }` line per page followed by that page's runs (gh api --paginate --jq).
@@ -154,10 +174,39 @@ export function parseCheckRuns(stdout) {
   return { ok: true, runs, total };
 }
 
-/** The real adapter: `gh` in the repository (its {owner}/{repo} placeholders resolve from the git remote). */
-export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync }) {
+/**
+ * R0-S N4: the absolute path and sha256 of the first executable `name` on PATH (realpath), or null. `enroll` pins `gh` this way
+ * (state.enrollment.tools.gh), and `ci` and `publish` run exactly that file: a stub put earlier on PATH later changes nothing.
+ * The resolution at enroll itself trusts that moment's PATH (residual).
+ */
+export function resolveTool(name, env = process.env) {
+  const names = process.platform === 'win32' ? [`${name}.exe`, `${name}.cmd`, name] : [name];
+  for (const dir of String(env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean)) {
+    for (const n of names) {
+      try {
+        const p = join(dir, n);
+        if (!statSync(p).isFile()) continue;
+        const real = realpathSync(p);
+        return { path: real, sha256: 'sha256:' + createHash('sha256').update(readFileSync(real)).digest('hex') };
+      } catch { /* not here */ }
+    }
+  }
+  return null;
+}
+
+/** The pinned tool, verified: { ok: true, path } | { ok: false, code: 'gh_unpinned' | 'gh_drift', reason }. */
+export function pinnedTool(pin, name = 'gh') {
+  if (!pin?.path) return { ok: false, code: `${name}_unpinned`, reason: `no ${name} was pinned at enroll (none on PATH then): start a new run with ${name} installed` };
+  let digest = null;
+  try { digest = 'sha256:' + createHash('sha256').update(readFileSync(pin.path)).digest('hex'); } catch { digest = null; }
+  if (digest !== pin.sha256) return { ok: false, code: `${name}_drift`, reason: `${pin.path} is not the ${name} this run pinned at enroll (${pin.sha256}, now ${digest ?? 'missing'}): restore it or start a new run` };
+  return { ok: true, path: pin.path };
+}
+
+/** The real adapter: the pinned `gh` (`bin`) in the repository (its {owner}/{repo} placeholders resolve from the git remote). */
+export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin = 'gh' }) {
   const run = (args) => {
-    const r = spawn('gh', args, { cwd: repoRoot, encoding: 'utf8', env, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
+    const r = spawn(bin, args, { cwd: repoRoot, encoding: 'utf8', env, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
     return r.status === 0 ? { ok: true, stdout: r.stdout } : unavailable('ci_provider_unavailable', (r.stderr || r.error?.message || `gh exited ${r.status}`).trim());
   };
   const json = (r) => { if (!r.ok) return r; try { return { ok: true, data: JSON.parse(r.stdout) }; } catch { return unavailable('ci_provider_unavailable', 'gh output is not JSON'); } };
@@ -166,7 +215,7 @@ export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync }) {
     checkRuns(sha) {
       if (!SHA_RE.test(sha)) return unavailable('ci_provider_unavailable', `not a commit SHA: ${sha}`);
       const r = run(['api', '-X', 'GET', `repos/{owner}/{repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '--paginate', '--jq',
-        '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, url: .html_url})']);
+        '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, check_suite: .check_suite.id, url: .html_url})']);
       return r.ok ? parseCheckRuns(r.stdout) : r;
     },
     pullRequest(n) {
@@ -277,7 +326,14 @@ export function workflowDiagnostic(repoRoot, { head, mergeBase, branch, prBase }
  * One collection for the published entry `pub` -> the CI_EVIDENCE record. `now()` returns epoch ms.
  * Order: the PR view (when a PR is known), then the check runs, then (NO_CHECKS only) the diagnostic.
  */
-export function collect({ S, repoRoot, provider, pub, pr, now }) {
+/** The commit `refs/heads/<branch>` points at on the published remote ({ ok, head: sha | null } or { ok: false, error }). */
+export function remoteHeadOf(repoRoot, pub, env) {
+  const r = spawnSync('git', ['ls-remote', pub.remote ?? 'origin', `refs/heads/${pub.branch}`], { cwd: repoRoot, encoding: 'utf8', timeout: 60000, ...(env ? { env } : {}) });
+  if (r.status !== 0) return { ok: false, error: (r.stderr || r.error?.message || `git ls-remote exited ${r.status}`).trim() };
+  return { ok: true, head: r.stdout.trim().split(/\s+/)[0] || null };
+}
+
+export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub) }) {
   const prNumber = pr ?? prNumberOf(pub.pr?.url);
   const view = prNumber ? provider.pullRequest(prNumber) : null;
   const runs = provider.checkRuns(pub.head);
@@ -285,13 +341,13 @@ export function collect({ S, repoRoot, provider, pub, pr, now }) {
   const head = { schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: prNumber ?? null, provider: provider.name ?? 'custom' };
   const timing = (t = {}) => ({ dispatched_at: pub.at ?? null, first_check_started_at: t.first_check_started_at ?? null,
     checks_completed_at: t.checks_completed_at ?? null, collected_at: iso(collectedMs) });
-  const failure = [view && !view.ok ? view : null, !runs.ok ? runs : null].find(Boolean);
+  const failure = [view && !view.ok ? view : null, !runs.ok ? runs : null, !remote.ok ? { code: 'ci_remote_unavailable', error: `the published branch could not be read: ${cut(remote.error)}` } : null].find(Boolean);
   if (failure) return { ...head, state: 'UNAVAILABLE', code: failure.code ?? 'ci_provider_unavailable', reasons: [failure.error ?? 'provider failed'],
     checks: [], collected_at: iso(collectedMs), timing: timing() };
   const v = verdict({ sha: pub.head, branch: pub.branch, checks: runs.runs, required: S.config?.ciRequiredChecks, windowMs: noChecksWindowMs(S.config),
-    dispatchMs: ms(pub.at), collectedMs, pr: view?.pr ?? null });
+    dispatchMs: ms(pub.at), collectedMs, pr: view?.pr ?? null, remoteHead: remote.head });
   const { timing: vt, ...rest } = v;
-  const ev = { ...head, ...rest, checks: runs.runs.filter(c => c.head_sha === pub.head), ...(view?.pr ? { pr_view: view.pr } : {}),
+  const ev = { ...head, ...rest, remote_head: remote.head, checks: runs.runs.filter(c => c.head_sha === pub.head), ...(view?.pr ? { pr_view: view.pr } : {}),
     collected_at: iso(collectedMs), timing: timing(vt) };
   if (v.state === 'NO_CHECKS') {
     const recent = pub.branch ? provider.recentRuns(pub.branch) : { ok: false, error: 'no branch recorded' };

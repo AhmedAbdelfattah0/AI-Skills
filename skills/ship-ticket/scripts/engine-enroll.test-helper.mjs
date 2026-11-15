@@ -48,8 +48,11 @@ if (argv[0] === 'api' && /\\/check-runs$/.test(argv[3] ?? '')) {
 } else die('unscripted call ' + argv.join(' '));
 `;
 
-export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true, nodes, behaviour } = {}) {
-  const fx = fixture(t, { commit: true, admit, ...(nodes ? { nodes } : {}), ...(behaviour ? { behaviour } : {}), config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
+export function enrollFixture(t, opts = {}) {
+  const { base = 'HEAD', branch = 'T-1-work', config = {}, admit = true, nodes, behaviour } = opts;
+  // modelMap: the builders are claude:sonnet, so the strict policy's engine reviewer (claude:opus) is never a builder.
+  const fx = fixture(t, { commit: true, admit, ...(nodes ? { nodes } : {}), ...(behaviour ? { behaviour } : {}), ...(opts.approvePolicy === false ? { approvePolicy: false } : {}), ...(opts.bind ? { bind: opts.bind } : {}),
+    config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, modelMap: { inherit: 'sonnet' }, ...config } });
   const home = join(fx.root, 'home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), '');
@@ -77,7 +80,7 @@ export function enrollFixture(t, { base = 'HEAD', branch = 'T-1-work', config = 
     /** Script the fake gh's CI answers (see FAKE_GH_JS) and reset its check-runs step counter. */
     scriptCi: (script) => { writeFileSync(join(fx.root, 'gh-ci.json'), JSON.stringify(script)); writeFileSync(join(fx.root, 'gh-ci.count'), '0'); },
     ghLog: () => (existsSync(join(fx.root, 'gh.log')) ? readFileSync(join(fx.root, 'gh.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []),
-    /** init (the fixture admits it), drive, a PASS review, ship-ready: the engine path up to SHIP. */
+    /** init (the fixture admits it), drive, a PASS review (engine-dispatched under the strict default), ship-ready: the engine path up to SHIP. */
     toShipReady: () => {
       for (const [cmd, f] of [['init', { dag: fx.dagFile }], ['drive', {}]]) {
         const r = fx.cli(cmd, f);

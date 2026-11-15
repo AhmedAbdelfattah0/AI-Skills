@@ -11,9 +11,10 @@
  * Bytes are read through a READER: `fsReader` (the files on disk) or `gitReader` (the blobs of one
  * commit of the skill's own git repository, which a work-tree edit does not change; a new commit
  * does not either, but whoever can commit to that repository can create the commit that gets pinned). The engine
- * pins the reader at enrollment (engine-enroll.mjs) and delivers through it. What delivery proves is
- * only that `context` emitted the verified bytes to stdout. Not that a model received, read,
- * understood or followed them.
+ * pins the reader at enrollment (engine-enroll.mjs) and delivers through it. What a recorded delivery
+ * proves is only that the `context` CLI handed the verified bytes to its stdout and the write completed
+ * (R0-S C4: recorded after the write, never before; an in-process `context()` call without `emit` records
+ * preparation only). Not that a model received, read, understood or followed them.
  *
  * CLI: context-manifest.mjs build|verify [--skill <dir>]   (default: the skill folder holding this script)
  * Exit codes: 0 ok, 1 verify failed, 2 usage error.
@@ -34,6 +35,7 @@ export const PHASE_REFS = Object.freeze({
   understand: ['references/observability.md', 'references/understand.md', 'references/cross-model.md'],
   plan: ['references/plan.md', 'references/cross-model.md'],
   build: ['references/execution-harness.md', 'references/brief.md'],
+  prove: ['references/prove.md'],
   review: ['references/review.md'],
   ship: ['references/ship.md'],
 });

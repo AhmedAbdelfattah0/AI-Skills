@@ -135,9 +135,10 @@ test('an authorized run: publish pushes through the installed guard (no lock re-
   assert.equal(p.status, 0, p.stdout + p.stderr);
   assert.equal(p.out.code, 'published');
   assert.equal(fx.remoteHead(), fx.head());
-  // a plain git push of the authorized HEAD is allowed by the guard too
+  // a plain git push of the authorized HEAD to the bound branch is allowed by the guard too; to another ticket-named branch it is not (R0-S A2)
+  assert.equal(push(fx, ['origin', 'T-1-work']).status, 0);
   fx.okGit(['branch', 'T-1-copy']);
-  assert.equal(push(fx, ['origin', 'T-1-copy']).status, 0);
+  blocked(push(fx, ['origin', 'T-1-copy']), 'push_destination_mismatch');
   // a new unreviewed commit is blocked at the hook
   writeFileSync(join(fx.repo, 'src', 'a.txt'), 'after review');
   fx.commitAll('unreviewed');
@@ -172,7 +173,10 @@ test('H1: a branch naming a ticket that has engine state is guarded whatever the
   blocked(push(fx, ['origin', 'T-1-work']), 'ship_ready_missing');
   fx.okGit(['branch', 'feat/T-1-more']);
   blocked(push(fx, ['origin', 'feat/T-1-more']), 'ship_ready_missing');
-  fx.okGit(['branch', 'T-10-other']);
+  // T-10 is another ticket, not T-1 (a branch at another commit: T-1's checked-out HEAD under any name is T-1's, R0-S A2).
+  fx.okGit(['checkout', '-q', '-b', 'T-10-other']);
+  fx.okGit(['commit', '-q', '--allow-empty', '-m', 'T-10 work']);
+  fx.okGit(['checkout', '-q', 'T-1-work']);
   assert.equal(push(fx, ['origin', 'T-10-other']).status, 0, 'T-10 is another ticket, not T-1');
 });
 
@@ -228,12 +232,16 @@ test('LOW: a moved guard script blocks only ticket-like branches, with the reins
   assert.equal(fx.remoteHead(), null);
 });
 
-test('documented bypass: HEAD:refs/heads/<name without a ticket> is not guarded', { skip: WIN_SKIP }, (t) => {
+test('R0-S A2: HEAD:refs/heads/<name without a ticket> is guarded by the checked-out ticket branch; a copy branch remains the documented bypass', { skip: WIN_SKIP }, (t) => {
   const fx = enrollFixture(t);
   installed(fx);
   const p = push(fx, ['origin', 'HEAD:refs/heads/shipped']);
-  assert.equal(p.status, 0, p.stderr);
-  assert.equal(fx.remoteHead('shipped'), fx.head(), 'the unauthorized commit reached the remote under another name');
+  assert.notEqual(p.status, 0, p.stderr);
+  assert.equal(fx.remoteHead('shipped'), null, 'the unauthorized commit never reached the remote under another name');
+  fx.okGit(['branch', 'copy']);
+  const c = push(fx, ['origin', 'copy:refs/heads/shipped']);
+  assert.equal(c.status, 0, c.stderr);
+  assert.equal(fx.remoteHead('shipped'), fx.head(), 'documented bypass: a source branch naming no ticket, pushed to a name with none');
 });
 
 // ------------------------------------------------------------------ E1 follow-up (stacked base, URL remote, pattern limits)

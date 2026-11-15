@@ -71,7 +71,8 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   fx.commitAll(); // config.base HEAD: the merge base recorded with SHIP_READY keeps the candidate computable after the commit
   const a = authorize(fx, 'publish');
   allowed(a, 'publication');
-  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base']);
+  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base', 'assurance']);
+  assert.equal(a.out.binding.assurance, 'STRICT', 'the production policy is what this run authorizes');
   assert.equal(a.out.binding.base, fx.defaultBranch, 'the remote default branch is the PR base');
   denied(authorize(fx, 'complete'), 'publish_evidence_missing');
   const body = join(fx.root, 'pr.md');
@@ -344,8 +345,9 @@ const carrierRefused = (fx, code) => {
 test('carrier dispatch applies the full authorize build: REAPPROVAL, a changed plan narrative and a changed DAG refuse the worker', { skip: WIN_SKIP }, (t) => {
   const fx = enrollFixture(t);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  // A state edit that turns policy 2 on (to fake a REAPPROVAL) is itself refused first: the config is not the bound DAG's (R0-S A4).
   fx.editState(S => { S.config.securityPolicy = 2; S.security = { reapproval: { candidate_id: 'c-1' } }; });
-  carrierRefused(fx, 'security_reapproval');
+  carrierRefused(fx, 'config_drift: .*securityPolicy.*REAPPROVAL');
   fx.editState(S => { delete S.config.securityPolicy; delete S.security; });
   const plan = readFileSync(fx.planFile, 'utf8');
   writeFileSync(fx.planFile, plan.replace('Approved narrative.', 'Changed narrative.'));

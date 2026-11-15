@@ -28,6 +28,8 @@
  *   already holds (never 'round_limit').
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -36,7 +38,7 @@ import { spawnSync } from 'node:child_process';
 import { init as initRaw, drive, gate } from './run-engine.mjs';
 import { admittedInit } from './engine-test-fixture.mjs';
 const init = admittedInit(initRaw);
-import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
+import { POSIX, unboundFixture as fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
   primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 

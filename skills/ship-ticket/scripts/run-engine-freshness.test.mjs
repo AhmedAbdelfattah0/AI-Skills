@@ -115,8 +115,8 @@ test('forged candidate ids and a confirmation of an older candidate are refused;
   const fail = failReview('rx-1', c1, 'src/a.txt', fx.prompt('fix'));
   for (const [name, input] of [['primary', { ...fail, primary: { ...fail.primary, candidate_id: 'sha256:forged' } }],
     ['second opinion', { ...fail, second_opinion: { ...fail.second_opinion, candidate_id: 'sha256:forged' } }]]) {
-    const g = fx.gate('review', input);
-    assert.deepEqual([g.out.ok, g.out.code], [false, 'stale_candidate'], `${name}: ${g.stdout}`);
+    const g = fx.gate('review', input, { raw: true }); // as submitted: a hand-edited review file
+    assert.deepEqual([g.out.ok, g.out.code], [false, 'review_unbound'], `${name}: ${g.stdout}`);
   }
   assert.deepEqual([fx.readState().review_chain.length, fx.readState().review_bindings ?? []], [0, []], 'nothing recorded or bound');
   assert.equal(fx.gate('review', fail).out.code, 'review_accepted');
@@ -124,13 +124,13 @@ test('forged candidate ids and a confirmation of an older candidate are refused;
   const c2 = fx.candidate();
   assert.notEqual(c2, c1);
   for (const [name, input] of [['older candidate', confirmReview('rx-1', c1)], ['forged id', confirmReview('rx-1', 'sha256:forged')]]) {
-    const g = fx.gate('review', input);
-    assert.deepEqual([g.out.ok, g.out.code], [false, 'stale_candidate'], `${name}: ${g.stdout}`);
+    const g = fx.gate('review', input, { raw: true }); // no engine collection has it (a dispatch for an older candidate is refused, run-engine-review-dispatch.test.mjs)
+    assert.deepEqual([g.out.ok, g.out.code], [false, 'review_unbound'], `${name}: ${g.stdout}`);
   }
   const owed = nextOf(fx).next_action;
-  assert.deepEqual([owed.stage, owed.action, owed.candidate_id], ['CONFIRMATION', 'dispatch_review', c2], 'the confirmation of the CURRENT candidate is owed');
+  assert.deepEqual([owed.stage, owed.action, owed.candidate_id], ['CONFIRMATION', 'review_dispatch', c2], 'the confirmation of the CURRENT candidate is owed');
   assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out.code, 'review_accepted');
-  assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out.code, 'confirmation_spent', 'one targeted confirmation');
+  assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out.code, 'review_receipt_spent', 'one targeted confirmation: its receipt is spent, and no second one is owed');
   const S = fx.readState();
   assert.deepEqual(S.review_bindings.map(b => [b.kind, b.candidate_id]), [['original', c1], ['repair', c2], ['confirmation', c2]]);
   assert.equal(S.review_bindings[2].merge_base, S.review_bindings[1].merge_base, 'the confirmation is bound to the merge base its candidate was frozen at');
@@ -157,7 +157,7 @@ test('a stale review needs the owner: an owner RETRY makes the new original revi
   assert.equal(sr.out.ok, false, 'no SHIP_READY for unreviewed bytes');
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
   const owed = nextOf(fx).next_action;
-  assert.deepEqual([owed.stage, owed.disposition, owed.action, owed.review_execution], ['REVIEW', 'READY', 'dispatch_review', 'rx-2']);
+  assert.deepEqual([owed.stage, owed.disposition, owed.action, owed.retry?.review_execution], ['REVIEW', 'READY', 'review_dispatch', 'rx-2']);
   const c = fx.candidate();
   assert.equal(fx.gate('review', passReview('rx-2', c)).out.code, 'review_accepted');
   assert.equal(nextOf(fx).review_freshness.code, 'review_fresh');
@@ -172,7 +172,7 @@ test('closed by slice E7: a review file that only names the current candidate id
     assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
     assert.equal(fx.cli('drive').status, 0);
     const copied = fx.candidate(); // e.g. copied from status, not computed by the reviewer
-    const g = fx.gate('review', { review_execution: 'rx-1', kind: 'original', primary: primaryReview(copied), second_opinion: secondOpinion(copied), reconciliation: { dispositions: [] } });
+    const g = fx.gate('review', { review_execution: 'rx-1', kind: 'original', primary: primaryReview(copied), second_opinion: secondOpinion(copied), reconciliation: { dispositions: [] } }, { raw: true });
     assert.equal(g.out.code, want, `reviewProvenance ${mode ?? '(default engine)'}: ${g.stdout}`);
     if (mode === 'unbound') assert.equal(fx.readState().review_bindings[0].provenance, 'unbound', 'the opt-out is labelled, never silent');
   }

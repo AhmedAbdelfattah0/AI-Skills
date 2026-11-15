@@ -130,7 +130,7 @@ export async function refreshRed(E, transient) {
       continue;
     }
     const before = E.S.attempts.length;
-    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const c = io.candidateId(E.ctx.repoRoot, io.candidateBase(E.S), E.S.pinned_exclusions);
     const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
       : gateNo('candidate_unavailable', [c.reason]);
     const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
@@ -198,8 +198,8 @@ async function reviewGate(E, input, candidate) {
     return gateNo('review_base_moved', [`${S.config.base} moved under the branch since repair ${input.review_execution} (merge base ${frozenBase} -> ${E.candidateMergeBase}); revert it, or the owner appends a RETRY`]);
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
   // P0 E7: only the collected output of an engine-dispatched reviewer counts (identity and role from the receipt);
-  // config.reviewProvenance 'unbound' (an owner opt-out bound in the DAG) keeps the pre-E7 gate, labelled unbound.
-  const prov = provenanceMode(S) === 'engine' ? provenanceVerdict({ S, input, frozen }) : null;
+  // config.reviewProvenance 'unbound' (an opt-out approved in the plan narrative, engine-dag.mjs policyApproval) keeps the pre-E7 gate, labelled unbound.
+  const prov = provenanceMode(S) === 'engine' ? provenanceVerdict({ S, input, frozen, mergeBase: frozenBase ?? E.candidateMergeBase ?? null }) : null;
   if (prov && !prov.ok) return gateNo(prov.code, prov.reasons);
   const { units_consumed: consumedUnits, ...review } = prov ? prov.input : input;
   // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
@@ -233,7 +233,8 @@ async function reviewGate(E, input, candidate) {
   bindReview(S, { review_execution: v.record.review_execution, kind: v.record.kind, candidate_id: v.record.candidate_id,
     merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(typeof so?.candidate_id === 'string' ? { second_opinion_candidate_id: so.candidate_id } : {}),
     provenance: prov ? prov.provenance : 'unbound' });
-  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
+  // R0-S C6: the freeze records the merge base its candidate was computed against (io.candidateBase uses it with config.base HEAD).
+  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0, ...(E.candidateMergeBase ? { merge_base: E.candidateMergeBase } : {}) }; S.frozen_candidate = candidate; }
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,
       writes: [...v.repair.write_set], promptFile: brief, state: 'pending', old_candidate: candidate });
@@ -348,7 +349,7 @@ async function shipReadyGate(E, input, candidate) {
     }
     // ...and the tree must be the one the commands ran on: a proof that changed it (codegen, --fix)
     // tested neither tree, so it is bound to none (a RETRY review of the new tree needs a new proof).
-    const after = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    const after = io.candidateId(E.ctx.repoRoot, io.candidateBase(S), S.pinned_exclusions);
     if (after.candidate_id !== candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);

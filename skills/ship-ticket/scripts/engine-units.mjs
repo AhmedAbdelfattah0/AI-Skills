@@ -350,7 +350,7 @@ export async function runUnitChecks(E, transient = []) {
     const touched = watched.filter(p => post[p] !== pre[p]);
     const moved = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD') !== preBase;
     const passed = !touched.length && !moved && results.every(r => r.result === 'pass');
-    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const c = io.candidateId(E.ctx.repoRoot, io.candidateBase(E.S), E.S.pinned_exclusions);
     note(E.S, 'UNIT_CHECKED', { unit: u, state: passed ? 'verified' : 'failed', checks: results.map(r => ({ name: r.name, result: r.result })) });
     const reason = passed ? null : touched.length ? `checks changed declared files: ${touched.join(', ')}`
       : moved ? 'checks moved the config.base commit'

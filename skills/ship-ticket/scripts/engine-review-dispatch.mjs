@@ -15,8 +15,10 @@
  *     The REVIEW_DISPATCHED receipt { attempt_id, role, requested_identity, candidate_id, argv_sha256,
  *     prompt_sha256, started_at, ... } is committed BEFORE the launcher starts; the launch then follows the
  *     durable attempt handshake (intent, spawn, pid commit, release byte) and the command returns while the
- *     detached reviewer runs. The relay is found by name under $HOME/.agents/skills, then $HOME/.claude/skills;
- *     none installed is REVIEW_UNAVAILABLE (recorded): the stage is BLOCKED, never waived.
+ *     detached reviewer runs. The relay is found by name under the account's home directory (os.userInfo, never $HOME):
+ *     <home>/.agents/skills, then <home>/.claude/skills; none installed is REVIEW_UNAVAILABLE (recorded): the stage is
+ *     BLOCKED, never waived. The first dispatch pins each relay's path and sha256 (state.relay_pins); a later dispatch of
+ *     another file or other bytes is review_relay_drift.
  *   run-engine.mjs review-collect (and `next`, `resume`, `drive` through reconcile)
  *     Settles every review attempt whose launcher wrote its envelope (whole group retired first), reads the relay's
  *     result.json in the engine-chosen out-dir, extracts the reviewer's JSON object, OVERWRITES reviewer_identity,
@@ -33,6 +35,7 @@
  *                             the engine's Codex relay (CodeRabbit never substitutes)
  *   review_role_mismatch      the matched collection is another role's or another review kind's
  *   review_receipt_candidate  the receipt is for another candidate than the one under review
+ *   review_receipt_base       the receipt's merge base is not the one the review binds to (a base moved since the dispatch)
  *   review_receipt_spent      the receipt was already consumed by an accepted review
  *   review_identity_shared    the primary and the second opinion receipts name the same identity
  *   review_identity_spoofed   the file claims another identity, candidate or route than its receipt
@@ -45,19 +48,25 @@
  * diff and untracked contents; it does not attach rule catalogues, UI captures or proof/security evidence (the read-only reviewer
  * runs in the repository and can Read them, but nothing makes it).
  *
+ * R0-S: review_relay_drift (the pinned relay changed), review_diff_unavailable (a failed or overflowing brief git call:
+ * nothing launches on a partial diff), review_fail_unconsumed (no review shopping: a FAIL or failed reviewer of an
+ * earlier candidate binds this owed review until gated or an owner RETRY names it), review_receipt_base (the receipt's
+ * merge base is not the one the review binds to), review_output_substituted (result.json is not the bytes the launcher
+ * hashed at the reviewer's exit).
+ *
  * Honest limits: this is not cryptographic. A process running as the same user can rewrite the engine state (the
- * ledger) and the relay output together, or install a stub relay under $HOME; the receipt then proves only that
- * the engine started that file. Native Agent-tool reviews cannot be bound by this mechanism. `gate unit-review`
- * is not covered.
+ * ledger), the relay output and the launcher envelope together, replace the relay before its first-dispatch pin, or
+ * import this module and pass ctx.relayHome; the receipt then proves only that the engine started that file. Native
+ * Agent-tool reviews cannot be bound by this mechanism. `gate unit-review` is not covered.
  */
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
-import { note, judgment, sha, BEGIN, END } from './engine-dag.mjs';
+import { note, judgment, sha, coded, BEGIN, END } from './engine-dag.mjs';
 import { childEnv, spawnSpec } from './provider-env.mjs';
 import { trustedEvents } from './engine-authority.mjs';
 
@@ -75,13 +84,13 @@ export const INJECTED = Object.freeze(['reviewer_identity', 'candidate_id', 'rou
 /** How long past the relay watchdog a review attempt may run before `next` reports it overdue. */
 export const REVIEW_GRACE_MS = 2 * 60 * 1000;
 /** The gate's removable provenance checks (the mutation test omits each and a pinned verdict changes). */
-export const PROVENANCE_CHECKS = Object.freeze(['bound', 'native_key', 'second_native', 'role', 'kind', 'candidate', 'spent',
+export const PROVENANCE_CHECKS = Object.freeze(['bound', 'native_key', 'second_native', 'role', 'kind', 'candidate', 'receipt_base', 'spent',
   'shared_identity', 'identity_claim', 'output_integrity']);
 /** Dispatch statuses: dispatched (live), collected, failed, unavailable, abandoned (never released; owed again). */
 export const DISPATCH_STATUSES = Object.freeze(['dispatched', 'collected', 'failed', 'unavailable', 'abandoned']);
 
 export const identityOf = (role) => `${RELAYS[role].provider}:${RELAYS[role].model ?? 'provider-default'}`;
-/** config.reviewProvenance: 'engine' (default: receipts required) or 'unbound' (owner opt-out: the pre-E7 gate, DETECTED only). */
+/** config.reviewProvenance: 'engine' (default: receipts required) or 'unbound' (an opt-out approved in the plan narrative: the pre-E7 gate, DETECTED only). */
 export const provenanceMode = (S) => S?.config?.reviewProvenance ?? 'engine';
 /** config.acceptNativeReview: the owner accepts a native Agent-tool primary or confirmation for this run (labelled native_unbound). */
 export const nativeAccepted = (S) => S?.config?.acceptNativeReview === true;
@@ -100,9 +109,16 @@ export const contentDigest = (o) => sha(canonical(strip(o)));
 const readBytes = (f) => { try { return readFileSync(f); } catch { return null; } };
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** The installed relay of `skill` ($HOME/.agents/skills, then $HOME/.claude/skills), resolved through symlinks; null when none. */
-export function relayPath(skill, env = process.env) {
-  const home = env.HOME || env.USERPROFILE || homedir();
+/**
+ * The user's home for relay resolution: the account's home directory from the OS (os.userInfo), never $HOME, so an
+ * environment override cannot point the engine at another relay (R0-S N4). `ctx.relayHome` is the in-process test seam
+ * (no CLI flag or environment variable sets it).
+ */
+export const relayHome = (ctx = {}) => ctx.relayHome ?? (() => { try { return userInfo().homedir || null; } catch { return null; } })(); // never os.homedir() ($HOME)
+
+/** The installed relay of `skill` (<home>/.agents/skills, then <home>/.claude/skills), resolved through symlinks; null when none. */
+export function relayPath(skill, home = relayHome()) {
+  if (!home) return null;
   for (const root of [join(home, '.agents', 'skills'), join(home, '.claude', 'skills')]) {
     const p = join(root, skill, 'scripts', 'relay.mjs');
     try { if (statSync(p).isFile()) return realpathSync(p); } catch { /* not installed here */ }
@@ -110,9 +126,21 @@ export function relayPath(skill, env = process.env) {
   return null;
 }
 
-/** The latest dispatch record of `role` for `kind` and `candidate`, or null. */
-export const latestDispatch = (S, role, kind, candidate) =>
-  (S.review_dispatches ?? []).findLast(d => d.role === role && d.kind === kind && d.candidate_id === candidate) ?? null;
+/** Whether receipt `d` reviewed `candidate` against `mergeBase` (a receipt without a recorded base matches any: pre-R0-S). */
+export const sameReviewed = (d, candidate, mergeBase) => d.candidate_id === candidate && (d.merge_base == null || mergeBase == null || d.merge_base === mergeBase);
+/** The latest dispatch record of `role` for `kind` and `candidate` (and its merge base, R0-S B6), or null. */
+export const latestDispatch = (S, role, kind, candidate, mergeBase = null) =>
+  (S.review_dispatches ?? []).findLast(d => d.role === role && d.kind === kind && sameReviewed(d, candidate, mergeBase)) ?? null;
+
+/**
+ * R0-S N2: the reviewer FAIL (collected) or failed reviewer of the owed review `kind`/`reviewExecution` for ANOTHER candidate
+ * that no owner RETRY released (a trusted RETRY whose predecessor is its attempt id), or null. Shared by dispatch and `next`.
+ */
+export function unconsumedFail(S, kind, reviewExecution, candidate) {
+  return (S.review_dispatches ?? []).find(x => x.kind === kind && (x.review_execution ?? null) === (reviewExecution ?? null) && !x.consumed_by
+    && x.candidate_id !== candidate && (x.status === 'failed' || (x.status === 'collected' && x.collected?.outcome === 'FAIL'))
+    && !trustedEvents(S, 'RETRY').some(e => e.run_id === S.run_id && e.predecessor === x.attempt_id && typeof e.authorized_by === 'string' && e.authorized_by.length > 0)) ?? null;
+}
 
 /**
  * The review the engine may dispatch now, from the review chain: an original (first, or after a trusted unconsumed
@@ -139,6 +167,13 @@ export function owedReview(S) {
 // ---- prompt ---------------------------------------------------------------------------------------
 
 const git = (repo, args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+/** stdout of a brief git call, or a thrown review_diff_unavailable: a failed or overflowing call never becomes an empty diff. */
+export function briefGit(repo, args, run = git) {
+  const r = run(repo, args);
+  if (r.error || r.status !== 0) throw coded('review_diff_unavailable', `git ${args.find(a => !a.startsWith('-')) ?? ''} for the reviewer brief failed `
+    + `(${(r.error?.code ?? r.error?.message ?? (r.stderr || `exit ${r.status}`)).toString().trim()}): no reviewer is launched on a partial brief`);
+  return r.stdout ?? '';
+}
 const MAX_UNTRACKED_BYTES = 256 * 1024;
 
 const CONTRACTS = {
@@ -151,11 +186,12 @@ const CONTRACTS = {
 };
 
 /** The engine-built reviewer brief: deterministic for one candidate, plan and role. */
-export function buildPrompt({ S, repoRoot, planText, role, owed, candidate, mergeBase, paths }) {
+export function buildPrompt({ S, repoRoot, planText, role, owed, candidate, mergeBase, paths, run = git }) {
   const narrative = planText ? planText.slice(0, planText.indexOf(BEGIN)) + planText.slice(planText.indexOf(END) + END.length) : '(plan unreadable)';
   const acceptance = { ids: S.config?.acceptanceIds ?? [], nodes: Object.fromEntries(Object.entries(S.nodes ?? {}).map(([id, n]) => [id, n.acceptance ?? []])) };
-  const diff = mergeBase ? git(repoRoot, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', mergeBase, '--', ...paths]).stdout ?? '' : '';
-  const untracked = (git(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']).stdout ?? '').split('\0').filter(p => p && paths.includes(p));
+  if (!mergeBase) throw coded('review_diff_unavailable', 'the candidate has no merge base: no reviewer is launched without its diff');
+  const diff = briefGit(repoRoot, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', mergeBase, '--', ...paths], run);
+  const untracked = briefGit(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z'], run).split('\0').filter(p => p && paths.includes(p));
   const shape = role === 'second' && owed.kind === 'confirmation' ? CONTRACTS.confirmation : CONTRACTS[role];
   const lines = [
     `# ship-ticket ${owed.kind} review, role ${role} (built by the run engine)`,
@@ -207,7 +243,7 @@ const refuse = (code, reasons, extra = {}) => ({ schema: REVIEW_SCHEMA, dispatch
  */
 export async function dispatchReview(E, { role, candidate }) {
   const { S, ctx, P } = E;
-  const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+  const c = io.candidateId(ctx.repoRoot, io.candidateBase(S), S.pinned_exclusions);
   if (!c.candidate_id) return refuse('candidate_unavailable', [c.reason ?? 'candidate not computable']);
   if (candidate !== c.candidate_id) return refuse('review_candidate_mismatch', [`--candidate ${candidate} is not the current candidate ${c.candidate_id}`]);
   const owed = owedReview(S);
@@ -216,7 +252,14 @@ export async function dispatchReview(E, { role, candidate }) {
   if (!roles.includes(role)) return refuse('review_role_mismatch', [`an ${owed.kind} review is owed: dispatch ${roles.join(' or ')}, not ${role}`]);
   if (owed.kind === 'confirmation' && owed.candidate !== candidate)
     return refuse('review_candidate_mismatch', [`the confirmation reviews the repaired candidate ${owed.candidate}; the work tree is ${candidate}`]);
-  const latest = latestDispatch(S, role, owed.kind, candidate);
+  // R0-S N2: a reviewer FAIL (collected) or a failed reviewer of this owed review, for ANOTHER candidate, binds what follows: the
+  // FAIL is submitted to gate review on its candidate (its repair is the path), or the owner appends a RETRY naming that dispatch
+  // (predecessor: its attempt id). Editing the candidate never buys a fresh reviewer.
+  const prior = unconsumedFail(S, owed.kind, owed.review_execution, candidate);
+  if (prior) return refuse('review_fail_unconsumed', [`${prior.role} ${prior.attempt_id} ${prior.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${prior.candidate_id}; the work tree is now ${candidate}: `
+    + 'restore that candidate and submit the FAIL to gate review (its repair is the only path), or the owner appends a RETRY { review_execution, predecessor: '
+    + `${prior.attempt_id}, authorized_by } (no review shopping)`]);
+  const latest = latestDispatch(S, role, owed.kind, candidate, c.merge_base ?? null);
   if (latest?.status === 'dispatched') return refuse('review_dispatch_live', [`${role} ${latest.attempt_id} is still running for ${candidate}: collect it (review-collect or next), never a second launch`]);
   if (latest?.status === 'collected' && !latest.consumed_by) return refuse('review_already_collected', [`${role} ${latest.attempt_id} is collected for ${candidate}: submit it to gate review`]);
   const identity = identityOf(role);
@@ -226,13 +269,21 @@ export async function dispatchReview(E, { role, candidate }) {
     || (typeof b?.identity === 'string' && b.identity.endsWith(':provider-default') && identity.startsWith(b.identity.slice(0, -'provider-default'.length))));
   if (builder) return refuse('reviewer_is_builder', [`${identity} would review work built by ${builder.identity} (node ${builder.node}): map the builders' tier in config.modelMap `
     + '(a provider-default builder counts as every model of its provider), or start a new run']);
-  const twin = (S.review_dispatches ?? []).find(d => d.kind === owed.kind && d.candidate_id === candidate && d.role !== role && !d.consumed_by
+  const twin = (S.review_dispatches ?? []).find(d => d.kind === owed.kind && sameReviewed(d, candidate, c.merge_base ?? null) && d.role !== role && !d.consumed_by
     && ['dispatched', 'collected'].includes(d.status) && d.requested_identity === identity);
   if (twin) return refuse('review_identity_shared', [`${twin.role} ${twin.attempt_id} already runs as ${identity}: two roles never share an identity`]);
   const route = RELAYS[role];
   const env = ctx.env ?? process.env;
-  const relay = relayPath(route.skill, env);
+  const relay = relayPath(route.skill, relayHome(ctx));
   S.review_dispatches ??= [];
+  // R0-S N4: the relay a run first dispatched (path and bytes) is pinned; any later dispatch must launch exactly it.
+  const pin = S.relay_pins?.[route.skill];
+  if (relay && pin) {
+    let digest = null;
+    try { digest = sha(readFileSync(relay)); } catch { digest = null; }
+    if (relay !== pin.path || digest !== pin.sha256) return refuse('review_relay_drift', [`the ${route.skill} relay is ${relay} (${digest}); this run pinned ${pin.path} (${pin.sha256}) at its first dispatch: `
+      + 'a changed or redirected relay never reviews this run (restore it, or start a new run)']);
+  }
   const now = Date.parse(ctx.now?.() ?? new Date().toISOString());
   if (!relay) {
     const id = 'unavail-' + randomUUID();
@@ -241,7 +292,7 @@ export async function dispatchReview(E, { role, candidate }) {
     note(S, 'REVIEW_UNAVAILABLE', { role, kind: owed.kind, candidate_id: candidate, skill: route.skill });
     S.outbox.push({ run_id: S.run_id, event: 'REVIEW_UNAVAILABLE', event_id: `review-unavailable-${id}`, role, kind: owed.kind, candidate_id: candidate,
       skill: route.skill, timestamp: iso(now) });
-    return refuse('review_relay_unavailable', [`no ${route.skill} relay is installed ($HOME/.agents/skills or $HOME/.claude/skills): the ${role} review cannot run;`
+    return refuse('review_relay_unavailable', [`no ${route.skill} relay is installed (<account home>/.agents/skills or <account home>/.claude/skills; the home comes from the OS, never $HOME): the ${role} review cannot run;`
       + ' the review stage is BLOCKED (never waived; CodeRabbit never substitutes). Install the relay, then dispatch again'], { recorded: true });
   }
   mkdirSync(P.attempts, { recursive: true });
@@ -249,7 +300,9 @@ export async function dispatchReview(E, { role, candidate }) {
   const outDir = join(P.attempts, id + '.relay');
   mkdirSync(outDir, { recursive: true });
   const promptFile = join(P.attempts, id + '.prompt');
-  const prompt = buildPrompt({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] });
+  let prompt;
+  try { prompt = buildPrompt({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] }); }
+  catch (e) { if (e.code !== 'review_diff_unavailable') throw e; return refuse(e.code, [e.message]); }
   writeFileSync(promptFile, prompt, { mode: 0o600 });
   const argv = [process.execPath, relay, '--cd', ctx.repoRoot, '--read-only', '--effort', 'high', '--timeout', `${route.timeout_min}m`, '--out-dir', outDir,
     ...(route.model ? ['--model', route.model] : [])];
@@ -262,6 +315,7 @@ export async function dispatchReview(E, { role, candidate }) {
   const a = { attempt_id: id, kind: REVIEW_KIND, node: `review-${role}`, role, provider: route.provider, model: route.model ?? 'provider-default',
     status: 'intent', resources: [], envelope_file: join(P.attempts, id + '.envelope.json'), out_file: join(P.attempts, id + '.out'), started_at: iso(now), deadline_ms: deadline };
   S.review_dispatches.push(receipt);
+  S.relay_pins = { ...(S.relay_pins ?? {}), ...(pin ? {} : { [route.skill]: { path: relay, sha256: receipt.relay_sha256, at: iso(now) } }) };
   S.attempts.push(a);
   note(S, 'REVIEW_DISPATCHED', { attempt_id: id, role, kind: owed.kind, candidate_id: candidate });
   const { argv: _argv, ...line } = receipt;
@@ -273,7 +327,7 @@ export async function dispatchReview(E, { role, candidate }) {
   const childEnvVars = childEnv(route.provider, S.config.billing ?? 'subscription', env);
   const spec = spawnSpec(argv[0], argv.slice(1), platform, childEnvVars);
   const child = io.startLauncher({ spawnFn: ctx.spawn, spec, cwd: ctx.repoRoot, env: childEnvVars, platform,
-    files: { promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id } });
+    files: { promptFile, outFile: a.out_file, envelopeFile: a.envelope_file, attemptId: id, digestFiles: [receipt.result_file] } });
   child.on('error', () => {});
   child.stdin.on('error', () => {});
   if (!child.pid) {
@@ -316,7 +370,14 @@ function recordCollection(E, d, a, env) {
   const exit = env?.exit_code ?? null;
   const unavailable = exit === 127 || result?.exitCode === 127 || /_unavailable$/.test(relayStatus ?? '');
   let parsed = null, parse_error = null, claimed = {};
-  if (!unavailable && exit === 0 && relayStatus === 'completed') {
+  // R0-S B10: the launcher hashed result.json when the reviewer exited; a file replaced between that exit and this collection
+  // (by the orchestrator, before it could be recorded) is not the reviewer's output. DETECTED: a same-user process can also
+  // rewrite the envelope.
+  const atExit = env?.file_digests?.[d.result_file];
+  const substituted = env && !unavailable && (atExit === undefined || atExit !== (bytes ? sha(bytes) : 'missing'));
+  if (substituted) parse_error = atExit === undefined ? 'review_output_unverified: the envelope carries no digest of result.json taken at the reviewer\'s exit'
+    : `review_output_substituted: result.json is ${bytes ? sha(bytes) : 'missing'}, the reviewer exited with ${atExit}`;
+  else if (!unavailable && exit === 0 && relayStatus === 'completed') {
     const x = extractReview(result.finalMessage);
     if (x.error) parse_error = x.error;
     else {
@@ -328,7 +389,8 @@ function recordCollection(E, d, a, env) {
   if (parsed) writeFileSync(parsedFile, JSON.stringify(parsed, null, 2) + '\n', { mode: 0o600 });
   const at = new Date(Date.parse(ctx.now?.() ?? new Date().toISOString())).toISOString();
   d.status = unavailable ? 'unavailable' : parsed ? 'collected' : 'failed';
-  d.collected = { exit_code: exit, relay_status: relayStatus, output_sha256: bytes ? sha(bytes) : null, completed_at: env?.ended_at ?? null, collected_at: at,
+  d.collected = { exit_code: exit, relay_status: relayStatus, output_sha256: bytes ? sha(bytes) : null, output_sha256_at_exit: atExit ?? null, completed_at: env?.ended_at ?? null, collected_at: at,
+    ...(parsed && typeof parsed.outcome === 'string' ? { outcome: parsed.outcome } : {}),
     parsed_result_sha256: parsed ? sha(canonical(parsed)) : null, content_sha256: parsed ? contentDigest(parsed) : null, parsed_file: parsedFile,
     ...(parse_error ? { parse_error } : {}), ...claimed };
   note(S, 'REVIEW_COLLECTED', { attempt_id: d.attempt_id, role: d.role, status: d.status });
@@ -388,7 +450,7 @@ const no = (code, reasons) => ({ ok: false, code, reasons });
  * The provenance verdict of a `gate review` input under config.reviewProvenance 'engine'. Pure apart from `read`
  * (path -> Buffer | null). -> { ok: true, input (engine identities substituted), provenance, used } | { ok: false, code, reasons }
  */
-export function provenanceVerdict({ S, input, frozen, read = readBytes }, { omit = [] } = {}) {
+export function provenanceVerdict({ S, input, frozen, mergeBase, read = readBytes }, { omit = [] } = {}) {
   const on = (id) => !omit.includes(id);
   const kind = input.kind;
   const slots = ['primary', 'second_opinion'].filter(s => isObj(input[s]));
@@ -415,6 +477,11 @@ export function provenanceVerdict({ S, input, frozen, read = readBytes }, { omit
     if (on('kind')) { pool = pool.filter(d => d.kind === kind); if (!pool.length) return no('review_role_mismatch', [`${slot} was dispatched for a ${matches[0].kind} review; this is a ${kind}`]); }
     if (on('candidate')) { pool = pool.filter(d => d.candidate_id === frozen); if (!pool.length)
       return no('review_receipt_candidate', [`${slot}'s receipt is for candidate ${matches[0].candidate_id}; the candidate under review is ${frozen}: dispatch again for the current candidate`]); }
+    // R0-S B6: the receipt's merge base must be the one this review binds to: the candidate id excludes the base, so after a
+    // rebase or merge that leaves the id unchanged an old receipt would otherwise pass and its binding take the new base.
+    if (on('receipt_base') && mergeBase !== undefined) { pool = pool.filter(d => d.merge_base === mergeBase); if (!pool.length)
+      return no('review_receipt_base', [`${slot}'s receipt reviewed candidate ${frozen} against merge base ${matches[0].merge_base ?? 'unknown'}; this review binds it to ${mergeBase}: `
+        + 'the base moved since the dispatch (the shipped tree differs); dispatch again']); }
     if (on('spent')) { pool = pool.filter(d => !d.consumed_by); if (!pool.length) return no('review_receipt_spent', [`${slot}'s receipt was consumed by review ${matches[0].consumed_by}`]); }
     bound[slot] = pool.at(-1);
   }

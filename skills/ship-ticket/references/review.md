@@ -65,7 +65,7 @@ missing. With the run engine (the default `config.reviewProvenance`), the
 reviewers are the engine's own dispatches (below) and an unavailable Codex relay is
 `BLOCKED` `review_relay_unavailable`, then `WAIT_FOR_USER`: CodeRabbit may still run
 as advisory input, but it never satisfies `gate review`. Without the engine, or
-with the owner opt-out `config.reviewProvenance: "unbound"`, the second opinion is
+with the approved opt-out `config.reviewProvenance: "unbound"`, the second opinion is
 required too: the host's counterpart first (Codex
 for a Claude host, Claude for a Codex host); if it is unavailable or its usage
 limit is reached, CodeRabbit on the same candidate; if neither is available,
@@ -98,7 +98,10 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   installed `claude-delegate` relay read-only with model `opus`
   (`claude:opus`); `second` runs the `codex-delegate` relay read-only with the
   CLI's default model (`codex:provider-default`). Relays are found by name under
-  `$HOME/.agents/skills`, then `$HOME/.claude/skills`. The engine builds the
+  the account's home directory as the OS reports it (`os.userInfo`, never
+  `$HOME`): `<home>/.agents/skills`, then `<home>/.claude/skills`. The first
+  dispatch pins each relay's path and sha256; a later dispatch of another file or
+  other bytes is `review_relay_drift`. The engine builds the
   argv array and the prompt itself: the frozen candidate id, the approved plan
   narrative, the acceptance inventory, the candidate's paths, diff and untracked
   contents, and the output contract. Nothing of the command comes from you.
@@ -111,8 +114,13 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   `review_role_mismatch` (not the role owed: `confirmation` only after the
   repair), `review_not_owed`, `review_dispatch_live` (never a second launch),
   `review_already_collected`, `review_identity_shared`, `review_build_live`,
-  `review_launch_failed`, and `review_relay_unavailable` (recorded: the stage is
-  `BLOCKED`, never waived).
+  `review_launch_failed`, `review_relay_drift`, `review_diff_unavailable` (a git
+  call for the brief failed or overflowed: no reviewer launches on a partial
+  diff), `review_fail_unconsumed` (a reviewer FAIL, or a failed reviewer, for an
+  earlier candidate of this owed review: submit that FAIL to `gate review` on its
+  candidate, or the owner appends a `RETRY` whose `predecessor` is that dispatch's
+  attempt id; editing the candidate never buys a fresh reviewer), and
+  `review_relay_unavailable` (recorded: the stage is `BLOCKED`, never waived).
 - **Collection.** `review-collect`, `next`, `resume` and `drive` settle a finished
   reviewer once: the whole process group is retired, the relay's `result.json`
   is read from the engine-chosen directory, the last fenced JSON object in its
@@ -123,34 +131,58 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   file is listed in `next`'s `gate_review` `results`. A relay exit 127 or an
   `*_unavailable` status is `review_relay_unavailable`; any other failure is
   `review_dispatch_failed`. Both are `BLOCKED` for the owner: fix the relay or the
-  CLI login, then dispatch that role again.
+  CLI login, then dispatch that role again. The launcher hashes `result.json` when
+  the reviewer exits and writes the digest into its envelope; a file replaced
+  between that exit and the collection is `review_output_substituted` (an
+  envelope without the digest: `review_output_unverified`), collected as a
+  failure and never as a review.
 - **The gate.** Submit the parsed files as `primary` and `second_opinion` (add
   the reconciliation as before). `gate review` matches each to a collection by
   its content digest and refuses `review_unbound` (a hand-written or edited file,
   including one that only copies the current candidate id; a native review
   without the owner key; any second opinion the engine's Codex relay did not
   produce), `review_role_mismatch`, `review_receipt_candidate` (a receipt for
-  another candidate: dispatch again for the current one), `review_receipt_spent`,
+  another candidate: dispatch again for the current one), `review_receipt_base`
+  (the receipt's merge base is not the one the review binds to: a rebase or merge
+  that left the candidate id unchanged; dispatch again), `review_receipt_spent`,
   `review_identity_shared`, `review_identity_spoofed` (the file names another
   identity, candidate or route than its receipt) and `review_output_changed`. The
   identity, role and candidate it judges come from the receipt, never from the
   review JSON. The review binding records `provenance` per slot.
 - **Native reviews.** A native Agent-tool (subagent) review cannot be bound by
-  this mechanism. It is refused unless the owner set `config.acceptNativeReview:
-  true` in the approved DAG for this run; then a primary or confirmation that
-  matches no collection is accepted and labelled `native_unbound` (detected
-  only). The second opinion is never native.
+  this mechanism. It is refused unless `config.acceptNativeReview: true` is approved
+  in the plan narrative for this run (below); then a primary or confirmation that matches no
+  collection is accepted and labelled `native_unbound` (detected only), and the
+  run is `RELAXED` on every `next`, `status` and `authorize` answer. The second
+  opinion is never native.
+- **Strict is the release policy.** `gate ship-ready` and `authorize publish`
+  refuse an authorizing review whose binding is not engine-dispatched for every
+  slot (`review_provenance_unbound`, also a binding from before receipts), and one
+  with no freshness binding (`review_binding_missing`): both need an owner
+  `RETRY` and a new review. `reviewProvenance` and `acceptNativeReview` are
+  assurance settings: `init` accepts a relaxing value only when the DAG is bound
+  by the approved plan narrative itself (its digest listed there, never a
+  `DAG_BOUND` line; the engine verifies placement in the text START's digest
+  covers, not that a human read it) and the narrative carries the exact
+  `ship-ticket-assurance-policy: {...}` line of the relaxed values
+  (`policy_unapproved`). Before every command the engine compares the state's
+  config with the bound DAG (`policy_drift`, `config_drift`: a same-user edit of
+  the state file is DETECTED and refused, not prevented).
 - **Builders.** A builder recorded as `<provider>:provider-default` counts as every
   model of its provider, so with unmapped Claude builders the `claude:opus`
   primary is refused at dispatch (`reviewer_is_builder`); map the builders' tier in
   `config.modelMap`.
 - **Honest limits.** The brief does not attach rule catalogues, UI captures or
-  proof evidence (see Bind reviewers to one candidate). None of this is cryptographic. A process of the same user
-  can rewrite the engine state and the relay output together, or install a stub
-  relay under `$HOME`; the receipt then proves only which file the engine
-  started. `gate unit-review` is not covered. `config.reviewProvenance:
-  "unbound"` (owner-set, bound by the DAG digest) restores the earlier gate for
-  that run, with every binding labelled `unbound`.
+  proof evidence (see Bind reviewers to one candidate). None of this is
+  cryptographic or server-attested. A process of the same user can rewrite the
+  engine state, the relay output and the launcher envelope together, replace the
+  relay before its first dispatch, or import the engine modules and call them
+  with the in-process seams (`ctx.relayHome`, `ctx.ciProvider`); the receipt then
+  proves only which file the engine started. The relay contracts (the claude and
+  codex argv, `result.json`) are verified against fakes here, not in functional
+  qualification. `gate unit-review` is not covered. An approved
+  `config.reviewProvenance: "unbound"` restores the earlier gate for that run,
+  with every binding labelled `unbound` and the run `RELAXED`.
 
 ## Bind reviewers to one candidate
 

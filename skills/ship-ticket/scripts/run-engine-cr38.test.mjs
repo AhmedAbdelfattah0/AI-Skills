@@ -14,6 +14,8 @@
  *   (review.md Targeted confirmation) (4507607914).
  * ==============================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, renameSync, realpathSync } from 'node:fs';
@@ -21,7 +23,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion, runStateEvents } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion, runStateEvents } from './engine-test-fixture.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { gateRed, gateReview } from './gate.mjs';
 import { snapshot, fingerprint, repoFileDigest } from './engine-io.mjs';

@@ -36,6 +36,19 @@ test('every phase lists only existing references, and each phase delivers exactl
   assert.equal(deliverPhase('prove-everything').code, 'phase_unknown');
 });
 
+test('R0-S C3: every lifecycle phase SKILL.md starts with `context --phase` has a delivery (the required list comes from SKILL.md, not PHASE_REFS)', () => {
+  const skill = readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(skill, /Start every phase with `run-engine\.mjs context --phase <phase>`/);
+  const table = skill.slice(skill.indexOf('## Lifecycle'), skill.indexOf('\n## ', skill.indexOf('## Lifecycle') + 3));
+  const required = [...table.matchAll(/^\| \*\*([A-Z_]+)\*\* \|/gm)].map(m => m[1].toLowerCase());
+  assert.deepEqual(required, ['understand', 'plan', 'build', 'prove', 'review', 'ship'], 'the lifecycle table as SKILL.md states it');
+  for (const phase of required) {
+    assert.ok(Object.hasOwn(PHASE_REFS, phase), `phase ${phase} has no mandatory references (context --phase ${phase} would fail)`);
+    assert.equal(deliverPhase(phase).ok, true, phase);
+  }
+  assert.ok(PHASE_REFS.prove.includes('references/prove.md'));
+});
+
 function copy(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'context-manifest-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

@@ -26,6 +26,8 @@
  * Legacy runs: no new key, event or output (C3).
  * ======================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, copyFileSync, rmSync, realpathSync } from 'node:fs';
@@ -33,7 +35,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, runStateEvents, runLogEvents, codes } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, passReview, failReview, confirmReview, primaryReview, runStateEvents, runLogEvents, codes } from './engine-test-fixture.mjs';
 import * as DAG from './engine-dag.mjs';
 // The one cutoff constant (never a copy of its value here: it is finalized at merge).
 const SECURITY_POLICY_CUTOFF = DAG.SECURITY_POLICY_CUTOFF;

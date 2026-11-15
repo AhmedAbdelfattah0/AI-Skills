@@ -283,7 +283,7 @@ export function unitRepairCurrent(E, r) {
 /** After a unit repair: its record in the unit chain; the repaired evidence is bound once the unit is verified again (reconcileReviews). */
 export function recordUnitRepair(E, repair, a) {
   const { S } = E;
-  const c = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+  const c = io.candidateId(E.ctx.repoRoot, io.candidateBase(S), S.pinned_exclusions);
   S.unit_reviews[repair.unit].chain.push({ review_execution: repair.review_execution, kind: 'repair', unit: repair.unit, old_candidate: repair.old_candidate ?? null,
     tree_candidate: c.candidate_id ?? null, new_candidate: null, write_set: [...repair.writes], attempt_id: a.attempt_id, seq: S.seq });
   note(S, 'UNIT_REPAIR_RECORDED', { unit: repair.unit, review_execution: repair.review_execution });

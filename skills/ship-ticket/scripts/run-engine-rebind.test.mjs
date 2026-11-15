@@ -10,11 +10,13 @@
  * startsFromFreeze or the ship-ready conjunction. A REBIND event with each node's path deltas and
  * the reason reaches RUN-STATE.
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { POSIX, fixture, runStateEvents, failReview } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, runStateEvents, failReview } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups';

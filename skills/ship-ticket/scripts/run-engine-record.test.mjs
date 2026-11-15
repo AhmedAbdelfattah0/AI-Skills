@@ -33,6 +33,8 @@
  *
  * Tags: [R1] [R2] [R3] [R6] [R9] (builder A, section A below); [R4] [R5] [R7] [R8] (section B).
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -42,7 +44,7 @@ import { gateReview } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
-import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath, preEnrollmentState, preNextStatus } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath, preEnrollmentState, preNextStatus } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;

@@ -23,14 +23,15 @@
  * Dispositions: READY (an action can run now), RUNNING (an engine command holds the run lock), WAITING (a
  * dispatched item has no completion marker yet; carries identity, start time, marker path and deadline),
  * BLOCKED, NEEDS_APPROVAL (only a human can continue: the engine never invents approval), COMPLETED,
- * FAILED. The supported path stops only on NEEDS_APPROVAL, BLOCKED, COMPLETED and FAILED (STOP).
+ * FAILED. The supported path stops only when `stops(next_action)`: NEEDS_APPROVAL, COMPLETED, FAILED, or a BLOCKED the human
+ * owns (R0-S C7); an orchestrator- or engine-owned BLOCKED is owed work (advisory: no turn-end hook enforces it).
  *
  * Review dispatches (P0 E7): with config.reviewProvenance 'engine' (the default) they are the engine's own
  * REVIEW_DISPATCHED receipts (engine-review-dispatch.mjs): the latest receipt per role for the candidate under
  * review. None is READY `review_dispatch` (run-engine.mjs review-dispatch --role <r> --candidate <id>), a finished
  * reviewer is READY `review_collect`, a relay that is missing or failed is BLOCKED (`review_relay_unavailable`,
  * `review_dispatch_failed`: owner, never waived), every role collected is READY `gate_review` with the parsed result
- * files. With the owner opt-out 'unbound' they are, as before, DETECTED telemetry: the run-log.mjs review activity
+ * files. With the approved opt-out 'unbound' they are, as before, DETECTED telemetry: the run-log.mjs review activity
  * rows (`primary_review`, `optional_review`, `review_confirmation`, with `--carrier-result` as the marker), and
  * `next` offers `dispatch_review` / `collect_review`. Either way acceptance stays with `gate review`. Review deadlines come from the REVIEW phase start ceilings (default 20 min);
  * attempt deadlines from config.timeoutMs plus ATTEMPT_GRACE_MS. Nothing kills an overdue item: it is BLOCKED
@@ -47,19 +48,26 @@ import { spawnSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import * as io from './engine-io.mjs';
 import { LIVE } from './engine-quiesce.mjs';
-import { clampTimeout } from './engine-dag.mjs';
+import { clampTimeout, assuranceOf } from './engine-dag.mjs';
 import { trustedEvents } from './engine-authority.mjs';
 import { REVIEW_ROLE_OF } from './review-intervals.mjs';
 import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
 import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
 import { latestEvidence } from './engine-ci.mjs';
-import { REVIEW_KIND, provenanceMode } from './engine-review-dispatch.mjs';
+import { REVIEW_KIND, provenanceMode, sameReviewed, unconsumedFail } from './engine-review-dispatch.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
-/** The dispositions at which the supported path stops (the turn may end). */
+/** The dispositions at which the supported path may stop. BLOCKED stops only when its owner is the human (R0-S C7): see `stops`. */
 export const STOP = Object.freeze(['NEEDS_APPROVAL', 'BLOCKED', 'COMPLETED', 'FAILED']);
+/**
+ * Whether the orchestrator may end its turn on this next_action: NEEDS_APPROVAL, COMPLETED and FAILED always; BLOCKED only when
+ * the human owns it. An orchestrator-owned (or engine-owned) BLOCKED action (recover_review, enroll, gate_review after a refusal,
+ * gate_ship_ready refused, resolve of an engine judgment, collect_ci after a provider failure) is owed work: act, then ask `next`.
+ * ADVISORY: nothing in R0-S enforces this at turn end (no Stop hook); the loop and the skill text follow it.
+ */
+export const stops = (a) => ['NEEDS_APPROVAL', 'COMPLETED', 'FAILED'].includes(a?.disposition) || (a?.disposition === 'BLOCKED' && a?.owner === 'human');
 export const STAGES = Object.freeze(['APPROVAL', 'ENROLL', 'BUILD', 'REVIEW', 'REPAIR', 'CONFIRMATION', 'SHIP_READY', 'PUBLISH', 'CI']);
 /** The closed action vocabulary and each action's owner (orchestrator runs it, engine command, or human only). */
 export const ACTIONS = Object.freeze({
@@ -73,7 +81,7 @@ export const ACTIONS = Object.freeze({
 export const DEFAULT_REVIEW_CEILING_MS = 20 * 60 * 1000;
 export const ATTEMPT_GRACE_MS = 60 * 1000;
 /** Judgment codes only a human resolves (approval, authority, budget, billing): NEEDS_APPROVAL; every other code is BLOCKED (fail closed). */
-export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', 'security_reapproval', 'security_policy_required', 'repair_failed', 'round_limit',
+export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', 'policy_drift', 'config_drift', 'policy_unapproved', 'security_reapproval', 'security_policy_required', 'repair_failed', 'round_limit',
   'budget_stop', 'billing_unverified', 'addendum_required', 'addendum_conflict', 'addendum_outside_contract', 'waiver_unauthorized', 'retry_unauthorized']);
 const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ceiling_ms', confirmation: 'confirmation_ceiling_ms' };
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
@@ -144,7 +152,7 @@ function reviewRules(stage, kind, want) {
   const rows = (S, f, x) => {
     const w = want(S, f, x);
     if (f.reviewMode === 'engine') { // E7: the latest unconsumed receipt per role of this review kind and candidate (abandoned: owed again)
-      const mine = w.roles.map(r => (f.receipts ?? []).filter(d => d.kind === kind && !d.consumed && d.candidate_id === w.candidate && d.role === r).at(-1))
+      const mine = w.roles.map(r => (f.receipts ?? []).filter(d => d.kind === kind && !d.consumed && sameReviewed(d, w.candidate, f.candidate?.merge_base ?? null) && d.role === r).at(-1))
         .filter(d => d && d.status !== 'abandoned');
       return { ...w, engine: true, mine };
     }
@@ -165,6 +173,11 @@ function reviewRules(stage, kind, want) {
       return d && res('BLOCKED', d.status === 'unavailable' ? 'review_relay_unavailable' : 'review_dispatch_failed', 'review_dispatch', { owner: 'human', kind,
         roles: [cli(d.role)], candidate_id: d.candidate_id, reasons: [`the ${d.role} reviewer ${d.event_id} ${d.status === 'unavailable' ? 'relay is unavailable' : `failed (${d.detail ?? 'no usable review'})`}: `
           + 'the review stage never proceeds without it (never waived; CodeRabbit never substitutes). Fix the relay or the CLI login, then run review-dispatch again'], item: item(d) }); } },
+    // R0-S N2: a FAIL (or failed reviewer) of an earlier candidate binds this review: the owner decides (restore and gate it, or RETRY).
+    { id: `${p}.fail_unconsumed`, stage, when: (S, f, x) => { const w = rows(S, f, x); if (!w.engine) return false;
+      const d = unconsumedFail(S, kind, w.rx ?? null, w.candidate);
+      return d && res('BLOCKED', 'review_fail_unconsumed', 'owner_retry', { owner: 'human', reasons: [`${d.role} ${d.attempt_id} ${d.status === 'failed' ? 'failed' : 'returned FAIL'} for candidate ${d.candidate_id}; the work tree is ${w.candidate}: `
+        + `restore that candidate and submit the FAIL to gate review, or the owner appends a RETRY with predecessor ${d.attempt_id} (no review shopping)`] }); } },
     { id: `${p}.owed`, stage, when: (S, f, x) => { const w = rows(S, f, x), missing = w.roles.filter(r => !w.mine.some(d => d.role === r));
       return missing.length > 0 && res('READY', kind === 'original' ? 'review_owed' : 'confirmation_owed', w.engine ? 'review_dispatch' : 'dispatch_review',
         { reasons: [w.engine ? `run review-dispatch --role ${missing.map(cli).join(' and --role ')} --candidate ${w.candidate}` : `dispatch ${missing.join(' and ')} for candidate ${w.candidate}`],
@@ -185,7 +198,7 @@ function reviewRules(stage, kind, want) {
 
 // ---- the rule table ---------------------------------------------------------------------------
 
-const BINDING_HUMAN = ['approval_mismatch', 'dag_mismatch', 'security_reapproval', 'security_policy_required'];
+const BINDING_HUMAN = ['approval_mismatch', 'dag_mismatch', 'policy_drift', 'config_drift', 'policy_unapproved', 'security_reapproval', 'security_policy_required'];
 const CONTEXT_CODES = ['context_missing', 'context_stale'];
 
 /** Ordered rules: per stage, the first that matches decides; a stage no rule decides is BLOCKED `underived` (fail closed). */
@@ -222,8 +235,8 @@ export const RULES = Object.freeze([
   { id: 'review.recorded', stage: 'REVIEW', when: (S, f, x) => x.O && done(x.O.outcome === 'PASS' ? 'review_passed' : 'review_failed_repair_owed', { review_execution: x.rx, candidate_id: x.O.candidate_id }) },
   { id: 'review.context', stage: 'REVIEW', when: (S, f) => f.admission?.review && !f.admission.review.ok
     && (CONTEXT_CODES.includes(f.admission.review.code) ? res('READY', f.admission.review.code, 'context', { phase: 'review', reasons: f.admission.review.reasons })
-      : res('BLOCKED', f.admission.review.code, 'resolve', { reasons: f.admission.review.reasons })) },
-  { id: 'review.candidate', stage: 'REVIEW', when: (S, f) => !f.candidate?.id && res('BLOCKED', 'candidate_unavailable', 'resolve', { reasons: [f.candidate?.reason ?? 'candidate not computable'] }) },
+      : res('BLOCKED', f.admission.review.code, 'resolve', { owner: 'human', reasons: f.admission.review.reasons })) },
+  { id: 'review.candidate', stage: 'REVIEW', when: (S, f) => !f.candidate?.id && res('BLOCKED', 'candidate_unavailable', 'resolve', { owner: 'human', reasons: [f.candidate?.reason ?? 'candidate not computable'] }) },
   ...reviewRules('REVIEW', 'original', (S, f) => ({ candidate: f.candidate?.id, rx: null, roles: ['primary', 'second_opinion'] })),
   // REPAIR
   { id: 'repair.not_needed', stage: 'REPAIR', when: (S, f, x) => (!x.O || x.O.outcome === 'PASS' || !x.repair) && done('not_needed') },
@@ -242,20 +255,20 @@ export const RULES = Object.freeze([
   { id: 'confirmation.recorded', stage: 'CONFIRMATION', when: (S, f, x) => x.confirmation && done('confirmed', { review_execution: x.rx, candidate_id: x.confirmation.candidate_id }) },
   { id: 'confirmation.context', stage: 'CONFIRMATION', when: (S, f) => f.admission?.review && !f.admission.review.ok
     && res(CONTEXT_CODES.includes(f.admission.review.code) ? 'READY' : 'BLOCKED', f.admission.review.code, CONTEXT_CODES.includes(f.admission.review.code) ? 'context' : 'resolve',
-      { phase: 'review', reasons: f.admission.review.reasons }) },
+      { phase: 'review', reasons: f.admission.review.reasons, ...(CONTEXT_CODES.includes(f.admission.review.code) ? {} : { owner: 'human' }) }) },
   { id: 'confirmation.drift', stage: 'CONFIRMATION', when: (S, f, x) => x.repairRecord && f.candidate?.id !== x.repairRecord.new_candidate
     && res('BLOCKED', 'post_freeze_drift', 'resolve', { owner: 'human', reasons: [`the work tree is ${f.candidate?.id ?? f.candidate?.reason}, the repaired candidate is ${x.repairRecord.new_candidate}: revert the drift, or the owner appends a RETRY`] }) },
   ...reviewRules('CONFIRMATION', 'confirmation', (S, f, x) => ({ candidate: x.repairRecord?.new_candidate, rx: x.rx,
     roles: ['confirmation', ...(f.confirmationPolicy === 'required' ? ['second_opinion'] : [])] })),
   // SHIP_READY
   { id: 'ship_ready.unreviewed', stage: 'SHIP_READY', when: (S, f, x) => !x.authorizing
-    && res('BLOCKED', 'review_not_accepted', 'resolve', { reasons: ['the last review record is not an accepted PASS'] }) },
+    && res('BLOCKED', 'review_not_accepted', 'resolve', { owner: 'human', reasons: ['the last review record is not an accepted PASS'] }) },
   ...attemptRules('SHIP_READY'),
   { id: 'ship_ready.recorded', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && S.ship_ready?.candidate_id === x.authorizing.candidate_id && supersededBy(S).length === 0
     && done('ship_ready', { candidate_id: S.ship_ready.candidate_id }) },
   { id: 'ship_ready.context', stage: 'SHIP_READY', when: (S, f) => f.admission?.ship && !f.admission.ship.ok
     && res(CONTEXT_CODES.includes(f.admission.ship.code) ? 'READY' : 'BLOCKED', f.admission.ship.code, CONTEXT_CODES.includes(f.admission.ship.code) ? 'context' : 'resolve',
-      { phase: 'ship', reasons: f.admission.ship.reasons }) },
+      { phase: 'ship', reasons: f.admission.ship.reasons, ...(CONTEXT_CODES.includes(f.admission.ship.code) ? {} : { owner: 'human' }) }) },
   { id: 'ship_ready.refused', stage: 'SHIP_READY', when: (S, f) => { const g = f.lastGate?.['ship-ready'], r = f.lastGate?.review;
     return g && !g.ok && g.candidate_id === f.candidate?.id && (!r || g.at_ms >= r.at_ms)
       && res('BLOCKED', g.code, 'gate_ship_ready', { reasons: [`gate ship-ready refused (${g.code}) for this candidate: resolve it, then run gate ship-ready`] }); } },
@@ -323,7 +336,7 @@ export function derive(S, f, { omit = [] } = {}) {
       const out = rule.when(S, f, x);
       if (out) { r = { rule: rule.id, ...out }; break; }
     }
-    r ??= { rule: `${st.toLowerCase()}.underived`, ...res('BLOCKED', 'underived', 'resolve', { reasons: [`no derivation rule decided ${st} (fail closed)`] }) };
+    r ??= { rule: `${st.toLowerCase()}.underived`, ...res('BLOCKED', 'underived', 'resolve', { owner: 'human', reasons: [`no derivation rule decided ${st} (fail closed)`] }) };
     if (!omit.includes(LOOSE_JUDGMENT_RULE) && ['READY', 'WAITING'].includes(r.disposition) && x.judgments.loose.length) r = { rule: LOOSE_JUDGMENT_RULE, ...judged(x.judgments.loose) };
     if (!omit.includes(LOCK_HELD_RULE) && r.disposition === 'READY' && f.lock === 'held')
       r = { rule: LOCK_HELD_RULE, ...res('RUNNING', 'engine_running', 'wait', { reasons: [`an engine command holds the run lock; ${r.action} follows once it returns`], then: r.action }) };
@@ -332,9 +345,12 @@ export function derive(S, f, { omit = [] } = {}) {
   }
   const s = current ? stages[current] : null;
   const { rule: _r, disposition, code, action, owner, reasons, ...details } = s ?? {};
-  const next_action = current ? { stage: current, action, reason: code, owner, disposition, reasons, ...details }
-    : { stage: null, action: 'none', reason: 'completed', owner: 'orchestrator', disposition: 'COMPLETED', reasons: [] };
-  return { disposition: next_action.disposition, next_action, stages, review_freshness: f.freshness ?? null };
+  // R0-S A4: a relaxed run (an approved opt-out, or a native receipt-less review) is labelled on every answer, never silent.
+  const assurance = assuranceOf(S);
+  const label = assurance.level === 'RELAXED' ? { assurance: 'RELAXED' } : {};
+  const next_action = current ? { stage: current, action, reason: code, owner, disposition, reasons, ...details, ...label }
+    : { stage: null, action: 'none', reason: 'completed', owner: 'orchestrator', disposition: 'COMPLETED', reasons: [], ...label };
+  return { disposition: next_action.disposition, next_action, stop: stops(next_action), stages, review_freshness: f.freshness ?? null, assurance };
 }
 
 // ---- facts from disk ---------------------------------------------------------------------------
@@ -387,7 +403,7 @@ export function reviewReceipts(S, now) {
   return (S.review_dispatches ?? []).map(d => {
     const a = (S.attempts ?? []).find(x => x.attempt_id === d.attempt_id);
     const deadline = ms(d.deadline);
-    return { role: d.role === 'second' ? 'second_opinion' : d.role, kind: d.kind, event_id: d.attempt_id, review_execution: null, candidate_id: d.candidate_id,
+    return { role: d.role === 'second' ? 'second_opinion' : d.role, kind: d.kind, event_id: d.attempt_id, review_execution: null, candidate_id: d.candidate_id, merge_base: d.merge_base ?? null,
       started_at: d.started_at, status: d.status, consumed: Boolean(d.consumed_by), ended: d.status === 'collected', ended_ms: ms(d.collected?.collected_at),
       marker: a?.envelope_file ?? null, marker_exists: d.status === 'dispatched' && Boolean(a?.envelope_file && existsSync(a.envelope_file)),
       deadline: d.deadline ?? null, deadline_ms: deadline ?? Infinity, overdue: deadline !== null && now > deadline, parsed_file: d.collected?.parsed_file ?? null,
@@ -417,7 +433,7 @@ export async function gather(E, ext) {
     const deadline = (ms(a.started_at) ?? now) + timeout + ATTEMPT_GRACE_MS;
     return { ...a, envelope: Boolean(a.envelope_file && existsSync(a.envelope_file)), deadline: iso(deadline), deadline_ms: deadline };
   });
-  const candidate = io.candidateId(ctx.repoRoot, S.config?.base ?? 'HEAD', S.pinned_exclusions ?? []);
+  const candidate = io.candidateId(ctx.repoRoot, io.candidateBase(S), S.pinned_exclusions ?? []);
   const dirty = io.snapshot(ctx.repoRoot, S.pinned_exclusions ?? []);
   const head = gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   const rx = (S.review_chain ?? []).filter(r => r.kind === 'original').at(-1)?.review_execution;

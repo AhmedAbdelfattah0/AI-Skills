@@ -27,6 +27,8 @@
  *   drain, even when a descendant keeps stdout open; the engine then retires the whole group.
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, readFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
@@ -41,7 +43,7 @@ import { observeAuthority, malformedRunState } from './engine-authority.mjs';
 import { verifyApproval, gitDirty } from './carrier.mjs';
 import { boundRiskEvidence } from './engine-dag.mjs';
 import { gateShipReady } from './gate.mjs';
-import { POSIX, fixture, waitUntil, passReview, failReview, codes } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, waitUntil, passReview, failReview, codes } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const FORGED = { run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' };

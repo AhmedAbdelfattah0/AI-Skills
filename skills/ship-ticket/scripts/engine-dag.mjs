@@ -222,7 +222,7 @@ export function validateEngineDag(doc, { ticket } = {}) {
     bad('config.ciRequiredChecks must be 1..50 unique non-empty check-run names');
   if (c.ciNoChecksMinutes !== undefined && !(Number.isInteger(c.ciNoChecksMinutes) && c.ciNoChecksMinutes >= 1 && c.ciNoChecksMinutes <= 120))
     bad('config.ciNoChecksMinutes must be an integer 1..120');
-  // P0 E7 (engine-review-dispatch.mjs), owner settings bound by the DAG digest, never defaulted here: 'unbound' opts this run out of
+  // P0 E7 (engine-review-dispatch.mjs), assurance settings (accepted only as approved in the plan narrative: policyApproval below), never defaulted here: 'unbound' opts this run out of
   // receipt-bound review (the pre-E7 gate); acceptNativeReview accepts a native Agent-tool primary or confirmation (native_unbound).
   if (c.reviewProvenance !== undefined && !['engine', 'unbound'].includes(c.reviewProvenance)) bad('config.reviewProvenance must be engine or unbound');
   if (c.acceptNativeReview !== undefined && typeof c.acceptNativeReview !== 'boolean') bad('config.acceptNativeReview must be a boolean');
@@ -425,3 +425,68 @@ export function redRunner(config, name) {
 export const boundRiskEvidence = (S, list, exists) => list.map(e => ({ ...e,
   red_accepted: Object.values(S.gates?.red ?? {}).some(ev => (ev.specs ?? []).some(s => s.file === e.path)),
   exists: typeof e.path === 'string' && e.path.length > 0 && exists(e.path) }));
+
+// ---- assurance policy (R0-S A4) --------------------------------------------------------------------
+
+/**
+ * The assurance settings of a bound DAG. Their absence is the STRICT release policy, which is the default and the
+ * enforced one: engine-bound review provenance (receipts), no native review, CI PASS over every check run on the exact
+ * published head, NO_CHECKS after the default window. Any other value RELAXES assurance and is accepted only when the
+ * plan narrative approves it (the text the trusted START digest covers; START is orchestrator-appended, so this verifies placement,
+ * not that a human read it): the DAG is bound by the approved plan narrative itself (binding 'plan', the DAG digest listed in
+ * the narrative, never a later DAG_BOUND line) AND the narrative carries the exact `policyLine` of the relaxed values.
+ * `init` refuses anything else (policy_unapproved); verifyBinding re-derives the same verdict from the DAG bytes and the
+ * approved narrative before every command, and refuses a state whose config is not the bound DAG's (policy_drift for
+ * these keys, config_drift for the rest: a same-user edit of state.json is DETECTED, not prevented).
+ */
+export const ASSURANCE_KEYS = Object.freeze(['reviewProvenance', 'acceptNativeReview', 'ciRequiredChecks', 'ciNoChecksMinutes']);
+export const POLICY_LINE_PREFIX = 'ship-ticket-assurance-policy: ';
+
+/** The relaxing values of `config` ({} under the strict policy). `reviewProvenance: 'engine'` and `acceptNativeReview: false` are strict. */
+export function relaxedPolicy(config) {
+  const c = config ?? {}, out = {};
+  if (c.reviewProvenance !== undefined && c.reviewProvenance !== 'engine') out.reviewProvenance = c.reviewProvenance;
+  if (c.acceptNativeReview === true) out.acceptNativeReview = true;
+  if (c.ciRequiredChecks !== undefined) out.ciRequiredChecks = c.ciRequiredChecks;
+  if (c.ciNoChecksMinutes !== undefined) out.ciNoChecksMinutes = c.ciNoChecksMinutes;
+  return out;
+}
+
+/** The one line the approved plan narrative must carry for a relaxed policy: the relaxed values as sorted-key JSON. */
+export const policyLine = (relaxed) => POLICY_LINE_PREFIX + JSON.stringify(Object.fromEntries(Object.keys(relaxed).sort().map(k => [k, relaxed[k]])));
+
+/**
+ * Whether the relaxed values of `config` are approved in the plan narrative: { ok: true, relaxed } (strict: always) or
+ * { ok: false, code: 'policy_unapproved', reason, relaxed }. `narrative` is the approved plan text outside RUN-STATE.
+ */
+export function policyApproval({ config, narrative, dagDigest }) {
+  const relaxed = relaxedPolicy(config);
+  if (!Object.keys(relaxed).length) return { ok: true, relaxed };
+  const text = String(narrative ?? '');
+  const listed = Boolean(dagDigest) && (text.includes(dagDigest) || text.includes(String(dagDigest).replace(/^sha256:/, 'sha256-')));
+  if (!listed) return { ok: false, code: 'policy_unapproved', relaxed, reason: `the DAG relaxes assurance (${Object.keys(relaxed).join(', ')}) but is not bound by the approved plan narrative `
+    + '(a DAG_BOUND line is orchestrator-written): list the DAG digest and the policy line in the plan and have it approved, or drop the settings (strict)' };
+  if (!text.includes(policyLine(relaxed))) return { ok: false, code: 'policy_unapproved', relaxed, reason: `the DAG relaxes assurance but the approved narrative does not carry exactly \`${policyLine(relaxed)}\`` };
+  return { ok: true, relaxed };
+}
+
+/** Canonical JSON (sorted keys) for config comparison. */
+const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v !== null && typeof v === 'object'
+  ? `{${Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v ?? null));
+
+/** The keys whose value in the state config `stateConfig` differs from the bound DAG's validated config `dagConfig`. */
+export function configDrift(stateConfig, dagConfig) {
+  const keys = [...new Set([...Object.keys(stateConfig ?? {}), ...Object.keys(dagConfig ?? {})])];
+  return keys.filter(k => canon(stateConfig?.[k]) !== canon(dagConfig?.[k])).sort();
+}
+
+/**
+ * The run's assurance for next/status/authorize: { level: 'STRICT' | 'RELAXED', relaxed, native_reviews }. RELAXED names the
+ * (approved) relaxed values and every accepted review a native, receipt-less reviewer produced (DETECTED only). Never silent.
+ */
+export function assuranceOf(S) {
+  const relaxed = relaxedPolicy(S?.config);
+  const native = (S?.review_bindings ?? []).filter(b => b?.provenance === 'unbound' || (b?.provenance && typeof b.provenance === 'object'
+    && Object.values(b.provenance).some(p => p?.provenance !== 'engine_relay'))).map(b => `${b.kind} ${b.review_execution}`);
+  return { level: Object.keys(relaxed).length || native.length ? 'RELAXED' : 'STRICT', relaxed, unbound_reviews: native };
+}

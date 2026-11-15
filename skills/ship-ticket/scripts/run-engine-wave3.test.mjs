@@ -22,11 +22,13 @@
  *   absent (acceptance coverage would pass vacuously).
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);

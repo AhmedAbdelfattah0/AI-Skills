@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { POSIX, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { enrollFixture } from './engine-enroll.test-helper.mjs';
+import { installRelays, RELAY_SKILLS } from './engine-review.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
 import { reviewDispatch } from './run-engine.mjs';
 import { provenanceVerdict, PROVENANCE_CHECKS, contentDigest, canonical, owedReview, extractReview } from './engine-review-dispatch.mjs';
@@ -22,33 +23,6 @@ import { provenanceVerdict, PROVENANCE_CHECKS, contentDigest, canonical, owedRev
 const WIN_SKIP = POSIX ? false : 'POSIX process groups (engine) and sh fakes';
 const J = JSON.stringify;
 const sha = (b) => 'sha256:' + createHash('sha256').update(b).digest('hex');
-
-/** The fake relay: one file serves both skills (its skill is its install directory's name). */
-const FAKE_RELAY = (root) => `import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join, dirname, basename, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-const skill = basename(dirname(dirname(fileURLToPath(import.meta.url))));
-const args = process.argv.slice(2);
-const val = (f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
-const outDir = val('--out-dir'), cd = val('--cd');
-const brief = readFileSync(0, 'utf8');
-const rel = spawnSync('git', ['rev-parse', '--git-path', 'ai-skills/ship-ticket/T-1.state.json'], { cwd: cd, encoding: 'utf8' }).stdout.trim();
-let receipt = null;
-try { receipt = (JSON.parse(readFileSync(resolve(cd, rel), 'utf8')).review_dispatches ?? []).find(d => d.out_dir === outDir) ?? null; } catch {}
-const briefSha = 'sha256:' + createHash('sha256').update(brief).digest('hex');
-appendFileSync(${J(join(root, 'relay.log'))}, JSON.stringify({ skill, args, receipt_seen: Boolean(receipt), brief_matches: receipt?.prompt_sha256 === briefSha,
-  brief_has_candidate: Boolean(receipt && brief.includes(receipt.candidate_id)) }) + '\\n');
-let all = {};
-try { all = JSON.parse(readFileSync(${J(join(root, 'relay-behaviour.json'))}, 'utf8')); } catch {}
-const b = all[skill] ?? {};
-if (b.sleep_ms) await new Promise(r => setTimeout(r, b.sleep_ms));
-const exitCode = b.exit ?? 0;
-writeFileSync(join(outDir, 'result.json'), JSON.stringify({ schema: 'delegate-relay.result.v1', status: b.status ?? 'completed', exitCode,
-  finalMessage: b.final ?? '' }));
-process.exit(exitCode);
-`;
 
 /** A primary review as the reviewer writes it (no engine fields). */
 const primaryBody = (over = {}) => { const { reviewer_identity: _i, candidate_id: _c, ...p } = primaryReview('x', over); return p; };
@@ -61,15 +35,17 @@ const otherSecond = (c, over = {}) => secondOpinion(c, { findings: [{ id: 'X1', 
 
 /** enrollFixture with the default (engine) review provenance, a mapped builder model (claude:sonnet) and fake relays. */
 function e7Fixture(t, { relays = ['claude-delegate', 'codex-delegate'], config = {}, behaviour } = {}) {
-  const fx = enrollFixture(t, { config: { reviewProvenance: undefined, modelMap: { inherit: 'sonnet' }, ...config }, ...(behaviour ? { behaviour } : {}) });
-  const home = fx.env.HOME;
-  fx.installRelay = (skill) => { const d = join(home, '.agents', 'skills', skill, 'scripts'); mkdirSync(d, { recursive: true }); writeFileSync(join(d, 'relay.mjs'), FAKE_RELAY(fx.root)); };
+  const fx = enrollFixture(t, { config: { modelMap: { inherit: 'sonnet' }, ...config }, ...(behaviour ? { behaviour } : {}) });
+  const home = fx.relayHome; // the fixture's relay home (ctx.relayHome, in process): never $HOME
+  fx.installRelay = (skill) => installRelays(fx.root, home, [skill]);
   fx.removeRelay = (skill) => rmSync(join(home, '.agents', 'skills', skill), { recursive: true, force: true });
-  for (const r of relays) fx.installRelay(r);
+  for (const s of RELAY_SKILLS) if (!relays.includes(s)) fx.removeRelay(s);
+  // These tests submit exactly what they mean (collected files, forged or edited ones): no automatic engine review.
+  const gate = fx.gate;
+  fx.gate = (kind, input, opts = {}) => gate(kind, input, { ...opts, raw: true });
   fx.relayBehave = (b) => writeFileSync(join(fx.root, 'relay-behaviour.json'), J(b));
   fx.relayBehave({ 'claude-delegate': { final: final(RELAY_PRIMARY()) }, 'codex-delegate': { final: final(secondBody()) } });
   fx.relayLog = () => (existsSync(join(fx.root, 'relay.log')) ? readFileSync(join(fx.root, 'relay.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
-  fx.dispatch = (role, candidate = fx.candidate()) => fx.cli('review-dispatch', { role, candidate });
   fx.dispatches = () => fx.readState().review_dispatches ?? [];
   /** Wait for every dispatched reviewer's envelope, then review-collect. */
   fx.collectAll = async () => {
@@ -119,7 +95,7 @@ test('dispatch -> collect -> gate PASS: the receipt is durable before launch, th
     assert.equal(d.prompt_sha256, sha(readFileSync(d.prompt_file)), 'prompt_sha256 hashes the brief file');
     assert.equal(d.collected.output_sha256, sha(readFileSync(d.result_file)), 'output_sha256 hashes the relay result');
     assert.equal(d.collected.parsed_result_sha256, sha(canonical(JSON.parse(readFileSync(d.collected.parsed_file, 'utf8')))));
-    assert.ok(d.relay.startsWith(fx.env.HOME), 'the relay was found by name under $HOME');
+    assert.ok(d.relay.startsWith(fx.relayHome), 'the relay was found by name under the relay home');
   }
   assert.equal(fx.parsed('primary').reviewer_identity, 'claude:opus', 'identity written from the receipt');
   const g = fx.gate('review', fx.original('rx-1'));
@@ -337,7 +313,7 @@ test('the confirmation is engine-dispatched too: role confirmation on the repair
 
 // ------------------------------------------------------------------ the verdict, in process (mutation)
 
-const D = (over = {}) => ({ attempt_id: 'att-p', role: 'primary', kind: 'original', requested_identity: 'claude:opus', provider: 'claude', candidate_id: 'C1', status: 'collected',
+const D = (over = {}) => ({ attempt_id: 'att-p', role: 'primary', kind: 'original', requested_identity: 'claude:opus', provider: 'claude', candidate_id: 'C1', merge_base: 'M1', status: 'collected',
   result_file: '/r/p.json', collected: { content_sha256: contentDigest(primaryReview('x')), output_sha256: sha('OUT-p'), parsed_file: '/r/p.parsed', parsed_result_sha256: null }, ...over });
 const P_OBJ = { ...primaryReview('C1'), reviewer_identity: 'claude:opus' };
 const S_OBJ = { ...secondOpinion('C1'), reviewer_identity: 'codex:provider-default', route: 'codex' };
@@ -358,6 +334,7 @@ const VERDICTS = [
   ['the second opinion\'s output as the primary', S0([prim({ role: 'second' }), SECOND()]), input(), 'C1', 'review_role_mismatch', 'role'],
   ['a confirmation output in an original', S0([prim({ kind: 'confirmation' }), SECOND()]), input(), 'C1', 'review_role_mismatch', 'kind'],
   ['receipt for another candidate', S0([prim({ candidate_id: 'C0' }), SECOND()]), input(), 'C1', 'review_receipt_candidate', 'candidate'],
+  ['receipt of the same candidate id against another merge base (R0-S B6)', S0([prim({ merge_base: 'M0' }), SECOND()]), input(), 'C1', 'review_receipt_base', 'receipt_base'],
   ['consumed receipt', S0([prim({ consumed_by: 'rx-0' }), SECOND()]), input(), 'C1', 'review_receipt_spent', 'spent'],
   ['two roles, one identity', S0([prim({ requested_identity: 'codex:provider-default' }), SECOND()]), input({ primary: { ...P_OBJ, reviewer_identity: undefined } }), 'C1', 'review_identity_shared', 'shared_identity'],
   ['spoofed identity', S0([prim(), SECOND()]), input({ second_opinion: { ...S_OBJ, reviewer_identity: 'opus:review' } }), 'C1', 'review_identity_spoofed', 'identity_claim'],
@@ -366,13 +343,13 @@ const VERDICTS = [
 
 test('provenance verdict: every pinned case decides by its check, and deleting any check changes a pinned verdict (mutation)', () => {
   const codeOf = (v) => (v.ok ? 'ok' : v.code);
-  for (const [name, S, inp, frozen, want] of VERDICTS) assert.equal(codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, read })), want, name);
+  for (const [name, S, inp, frozen, want] of VERDICTS) assert.equal(codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', read })), want, name);
   for (const id of PROVENANCE_CHECKS) {
-    const flipped = VERDICTS.filter(([, S, inp, frozen, want]) => codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, read }, { omit: [id] })) !== want);
+    const flipped = VERDICTS.filter(([, S, inp, frozen, want]) => codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', read }, { omit: [id] })) !== want);
     assert.ok(flipped.length > 0, `omitting ${id} changes no pinned verdict`);
     assert.ok(flipped.some(([, , , , , by]) => by === id), `omitting ${id} flips its own case`);
   }
-  const ok = provenanceVerdict({ S: S0([prim(), SECOND()]), input: input({ primary: { ...P_OBJ, reviewer_identity: undefined } }), frozen: 'C1', read });
+  const ok = provenanceVerdict({ S: S0([prim(), SECOND()]), input: input({ primary: { ...P_OBJ, reviewer_identity: undefined } }), frozen: 'C1', mergeBase: 'M1', read });
   assert.equal(ok.input.primary.reviewer_identity, 'claude:opus', 'the gate judges the receipt identity, not the file\'s');
   assert.deepEqual(ok.used.sort(), ['att-p', 'att-s']);
 });

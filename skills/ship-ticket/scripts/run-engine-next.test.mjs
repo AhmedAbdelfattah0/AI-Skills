@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { POSIX, primaryReview, secondOpinion, runStateEvents } from './engine-test-fixture.mjs';
 import { enrollFixture } from './engine-enroll.test-helper.mjs';
 import { waitFor } from './test-wait.test-helper.mjs';
-import { derive, RULES, STAGES, STOP, ACTIONS, DISPOSITIONS, LOOSE_JUDGMENT_RULE, LOCK_HELD_RULE } from './engine-next.mjs';
+import { derive, RULES, STAGES, STOP, ACTIONS, DISPOSITIONS, LOOSE_JUDGMENT_RULE, LOCK_HELD_RULE, stops } from './engine-next.mjs';
+import { finalMessage, reviewBody } from './engine-review.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups (engine) and sh fakes';
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
@@ -139,7 +140,34 @@ const SCENARIOS = [
   ['E7 confirmation reviewer failed', confirming(), baseF({ reviewMode: 'engine', receipts: [rcpt('confirmation', { kind: 'confirmation', status: 'failed' })] }), ['CONFIRMATION', 'BLOCKED', 'review_dispatch_failed', 'review_dispatch']],
 ];
 
+// R0-S: binding and freshness refusals added by the repair batch route to the owner.
+SCENARIOS.push(
+  ['state config edited (policy drift)', baseS(), baseF({ unbound: [{ code: 'policy_drift', reason: 'r' }] }), ['APPROVAL', 'NEEDS_APPROVAL', 'policy_drift', 'reapprove']],
+  ['relaxed policy not approved', baseS(), baseF({ unbound: [{ code: 'policy_unapproved', reason: 'r' }] }), ['APPROVAL', 'NEEDS_APPROVAL', 'policy_unapproved', 'reapprove']],
+  ['review without a freshness binding', shipping(shipped), baseF({ freshness: { fresh: false, code: 'review_binding_missing', reasons: ['r'] } }), ['REVIEW', 'NEEDS_APPROVAL', 'review_binding_missing', 'owner_retry']],
+  ['a reviewer FAIL of an earlier candidate binds the review (no shopping)', baseS({ review_dispatches: [{ attempt_id: 'att-p', role: 'primary', kind: 'original', candidate_id: 'C0',
+    status: 'collected', collected: { outcome: 'FAIL' } }] }), baseF({ reviewMode: 'engine', receipts: [] }), ['REVIEW', 'BLOCKED', 'review_fail_unconsumed', 'owner_retry']],
+  ['a confirmation FAIL of an earlier candidate binds the confirmation', confirming({ review_dispatches: [{ attempt_id: 'att-c', role: 'confirmation', kind: 'confirmation', review_execution: 'review-1',
+    candidate_id: 'C0', status: 'collected', collected: { outcome: 'FAIL' } }] }), baseF({ reviewMode: 'engine', receipts: [] }), ['CONFIRMATION', 'BLOCKED', 'review_fail_unconsumed', 'owner_retry']],
+  ['review without engine provenance', shipping(shipped), baseF({ freshness: { fresh: false, code: 'review_provenance_unbound', reasons: ['r'] } }), ['REVIEW', 'NEEDS_APPROVAL', 'review_provenance_unbound', 'owner_retry']],
+);
+
 const brief = (d) => [d.next_action.stage, d.next_action.disposition, d.next_action.reason, d.next_action.action];
+
+test('R0-S C7: stop is true only for NEEDS_APPROVAL, FAILED, COMPLETED and a human-owned BLOCKED; every orchestrator-owned BLOCKED is owed work', () => {
+  let blockedOwed = 0;
+  for (const [name, S, f] of SCENARIOS) {
+    const d = derive(S, f), a = d.next_action;
+    assert.equal(d.stop, stops(a), name);
+    if (a.disposition === 'BLOCKED') { assert.equal(d.stop, a.owner === 'human', `${name}: ${a.owner}`); if (!d.stop) blockedOwed++; }
+    if (['NEEDS_APPROVAL', 'FAILED', 'COMPLETED'].includes(a.disposition)) assert.equal(d.stop, true, name);
+    if (['READY', 'WAITING', 'RUNNING'].includes(a.disposition)) assert.equal(d.stop, false, name);
+  }
+  assert.ok(blockedOwed >= 5, `orchestrator-owned BLOCKED scenarios: ${blockedOwed}`);
+  for (const [action, owner] of [['recover_review', 'orchestrator'], ['enroll', 'orchestrator'], ['gate_review', 'orchestrator'], ['gate_ship_ready', 'orchestrator'], ['resolve', 'orchestrator']])
+    assert.equal(stops({ disposition: 'BLOCKED', action, owner }), false, action);
+  assert.equal(stops({ disposition: 'BLOCKED', action: 'review_dispatch', owner: 'human' }), true);
+});
 
 test('derive: every scenario yields its pinned next_action; one disposition per stage; later stages are prerequisite_open', () => {
   for (const [name, S, f, want] of SCENARIOS) {
@@ -171,51 +199,45 @@ test('never invents approval: no derivation hands a human-owned stop to the orch
 
 // ------------------------------------------------------------------ the fake orchestrator (supported path)
 
-const ROLE_ACTIVITY = { primary: 'primary_review', second_opinion: 'optional_review', confirmation: 'review_confirmation' };
-
 /**
- * A fake orchestrator that ONLY calls `next` and performs the returned action. It keeps no memory between
- * steps: every name it needs (event ids, marker paths) is derived from the action itself, so a fresh instance
- * after a kill continues the same run. `script.review(kind, role, candidate)` is what the fake reviewer returns.
+ * A fake orchestrator that ONLY calls `next` and performs the returned action, under the STRICT (default) review policy:
+ * reviews are engine-dispatched (`review_dispatch`, in process with the fixture's relay home), collected by `next` or
+ * `review_collect`, and gated from the parsed result files `next` names. It keeps no memory between steps, so a fresh
+ * instance after a kill continues the same run. `script.review(kind, role, candidate)` is what the fake reviewer returns.
+ * It stops ONLY when `next` says the turn may stop (`stop`: NEEDS_APPROVAL, FAILED, COMPLETED, or a BLOCKED the human
+ * owns); every orchestrator- or engine-owned action, BLOCKED ones included, is performed (R0-S C7).
  */
 function orchestrator(fx, script) {
-  const markers = join(fx.root, 'markers');
-  mkdirSync(markers, { recursive: true });
-  const runLog = (args) => {
-    const r = spawnSync(process.execPath, [RUN_LOG, ...args, '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1'], { encoding: 'utf8', env: fx.env });
-    assert.equal(r.status, 0, `run-log ${args.join(' ')}: ${r.stderr}`);
-  };
-  const id = (rx, kind, role) => `${rx}-${kind}-${role}`;
-  const markerOf = (rx, kind, role) => join(markers, `${id(rx, kind, role)}.json`);
   const log = [];
+  const relayOf = (role) => (role === 'second' ? 'codex-delegate' : 'claude-delegate');
   const act = {
     drive: () => fx.cli('drive'),
     resume: () => fx.cli('resume'),
+    enroll: () => fx.cli('enroll'),
     context: (a) => fx.cli('context', { phase: a.phase }),
     wait: async () => { await new Promise(r => setTimeout(r, 100)); },
-    /** Record the dispatch (the marker next reads), then launch a background reviewer and do NOT wait for it. */
-    dispatch_review: (a) => {
-      const rx = a.review_execution ?? 'review-1';
-      for (const role of a.roles) {
-        const marker = markerOf(rx, a.kind, role);
-        runLog(['start', '--kind', 'activity', '--name', ROLE_ACTIVITY[role], '--event-id', id(rx, a.kind, role),
-          '--metric', `candidate_id=${a.candidate_id}`, '--metric', `review_execution=${rx}`, '--carrier-result', marker]);
-        const result = { schema: 'delegate-relay.result.v1', tool: 'claude', readOnly: true, status: 'completed', workdir: fx.repo,
-          review: script.review(a.kind, role, a.candidate_id) };
-        const writer = `const fs=require('fs');setTimeout(()=>{const r=JSON.parse(process.argv[2]);r.startedAt=r.finishedAt=new Date().toISOString();`
-          + `fs.writeFileSync(process.argv[1]+'.tmp',JSON.stringify(r));fs.renameSync(process.argv[1]+'.tmp',process.argv[1]);},150);`;
-        spawn(process.execPath, ['-e', writer, marker, J(result)], { detached: true, stdio: 'ignore' }).unref();
-      }
+    /** The engine launches the reviewers; the orchestrator never waits for them (next collects). */
+    review_dispatch: (a) => {
+      const behaviour = {};
+      for (const role of a.roles) behaviour[relayOf(role)] = { final: finalMessage(reviewBody(script.review(a.kind, role === 'second' ? 'second_opinion' : role, a.candidate_id))), ...(script.relay?.(role) ?? {}) };
+      writeFileSync(join(fx.root, 'relay-behaviour.json'), J(behaviour));
+      for (const role of a.roles) { const d = fx.dispatch(role, a.candidate_id); assert.equal(d.out?.code, 'review_dispatched', d.stdout + d.stderr); }
     },
-    collect_review: (a) => runLog(['end', '--kind', 'activity', '--name', ROLE_ACTIVITY[a.item.role], '--event-id', a.item.event_id,
-      '--outcome', 'complete', '--carrier-result', a.item.marker]),
+    review_collect: () => fx.cli('review-collect'),
+    /** An overdue reviewer: stop its process group, then collect what it left (the bounded recovery). */
+    recover_review: async (a) => {
+      const at = fx.readState().attempts.find(x => x.attempt_id === a.item.event_id);
+      try { process.kill(-at.pgid, 'SIGKILL'); } catch { /* already gone */ }
+      await waitFor(() => { try { process.kill(-at.pgid, 0); return false; } catch { return true; } }, 'reviewer group gone');
+      fx.cli('review-collect');
+    },
     gate_review: (a) => {
-      const rx = a.review_execution, read = (role) => JSON.parse(readFileSync(markerOf(rx, a.kind, role), 'utf8')).review;
-      if (a.kind === 'confirmation') return fx.gate('review', { review_execution: rx, kind: 'confirmation', primary: read('confirmation') });
+      const read = (role) => JSON.parse(readFileSync(a.results.find(r => r.role === role).parsed_file, 'utf8'));
+      if (a.kind === 'confirmation') return fx.gate('review', { review_execution: a.review_execution ?? 'review-1', kind: 'confirmation', primary: read('confirmation') }, { raw: true });
       const primary = read('primary');
       const fix = primary.findings.map(f => ({ finding_id: f.id, source: 'primary', disposition: 'fix' }));
-      return fx.gate('review', { review_execution: rx, kind: 'original', primary, second_opinion: read('second_opinion'),
-        reconciliation: { dispositions: fix }, ...(fix.length ? { repair_prompt_file: fx.prompt('fix') } : {}) });
+      return fx.gate('review', { review_execution: a.retry?.review_execution ?? 'review-1', kind: 'original', primary, second_opinion: read('second'),
+        reconciliation: { dispositions: fix }, ...(fix.length ? { repair_prompt_file: fx.prompt('fix') } : {}) }, { raw: true });
     },
     gate_ship_ready: () => fx.gate('ship-ready', {}),
     commit: (a) => { fx.okGit(['add', '--', ...a.paths]); fx.okGit(['commit', '-q', '-m', 'T-1: ship']); },
@@ -224,15 +246,18 @@ function orchestrator(fx, script) {
   };
   return {
     log,
-    /** Run until a STOP disposition; returns the last `next` output. */
+    /** Run until `next` says stop; returns the last `next` output. */
     async run({ max = 150, onStep } = {}) {
       for (let i = 0; i < max; i++) {
         const n = fx.cli('next');
         assert.ok(n.out?.next_action, `next printed no next_action: ${n.stdout}${n.stderr}`);
         const a = n.out.next_action;
-        if (log.at(-1)?.action !== a.action || a.action !== 'wait') log.push({ stage: a.stage, action: a.action, reason: a.reason, disposition: a.disposition });
-        if (STOP.includes(a.disposition)) return n.out;
-        assert.ok(Object.hasOwn(act, a.action), `unknown or human-owned action ${a.action} (${a.reason}) at ${a.stage}`);
+        if (log.at(-1)?.action !== a.action || a.action !== 'wait') log.push({ stage: a.stage, action: a.action, reason: a.reason, disposition: a.disposition, owner: a.owner });
+        assert.equal(n.out.stop, stops(a), 'next reports stop exactly when the turn may end');
+        if (a.owner === 'human') assert.equal(n.out.stop, true, `a human-owned action is a stop: ${J(a)}`);
+        if (n.out.stop) { assert.equal(n.status, a.disposition === 'COMPLETED' ? 0 : 2, 'next exits 2 on a stop short of COMPLETED'); return n.out; }
+        assert.equal(n.status, 0, `an owed action exits 0: ${J(a)}`);
+        assert.ok(Object.hasOwn(act, a.action), `unknown action ${a.action} (${a.reason}, ${a.owner}) at ${a.stage}`);
         await act[a.action](a);
         await onStep?.(n.out);
       }
@@ -265,16 +290,20 @@ test('supported path: a fake orchestrator that only calls next ships FAIL -> rep
   const fx = nextFixture(t);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   const o = orchestrator(fx, failThenPass);
-  let collectedWithoutNotice = 0;
-  const end = await o.run({ onStep: (out) => { if (out.next_action.action === 'collect_review') collectedWithoutNotice++; } });
+  let collectedByNext = 0;
+  const end = await o.run({ onStep: (out) => { collectedByNext += out.collected.filter(c => c.kind === 'review').length; } });
   // P0 E6-min: COMPLETED through next only, once the engine recorded CI PASS for the published head.
   assert.deepEqual([end.next_action.stage, end.disposition, end.next_action.reason], [null, 'COMPLETED', 'completed']);
   for (const st of STAGES) assert.equal(end.stages[st].disposition, 'COMPLETED', `${st}: ${J(end.stages[st])}`);
   assert.equal(end.stages.CI.code, 'ci_passed');
-  assert.equal(collectedWithoutNotice, 3, 'primary, second opinion and confirmation were each collected from the marker on disk');
+  const S0 = fx.readState();
+  assert.deepEqual(S0.review_dispatches.map(d => [d.role, d.status, Boolean(d.consumed_by)]), [['primary', 'collected', true], ['second', 'collected', true], ['confirmation', 'collected', true]],
+    'primary, second opinion and confirmation were each engine-dispatched, collected once and consumed by the gate');
+  assert.ok(collectedByNext + o.log.filter(l => l.action === 'review_collect').length >= 1, 'finished reviewers were collected with no notification');
+  assert.equal(end.assurance.level, 'STRICT', 'the production policy, end to end');
   t.diagnostic(o.log.map(l => `${l.stage}:${l.action}:${l.reason}`).join(' > '));
   const actions = o.log.map(l => l.action);
-  for (const a of ['drive', 'dispatch_review', 'collect_review', 'gate_review', 'gate_ship_ready', 'commit', 'publish', 'collect_ci']) assert.ok(actions.includes(a), `${a} in ${actions}`);
+  for (const a of ['drive', 'review_dispatch', 'gate_review', 'gate_ship_ready', 'commit', 'publish', 'collect_ci']) assert.ok(actions.includes(a), `${a} in ${actions}`);
   assert.deepEqual(o.log.filter(l => l.stage === 'CI').map(l => [l.disposition, l.reason]), [['READY', 'ci_owed'], ['WAITING', 'ci_pending']],
     'CI: owed, then running (collect again)');
   const S = fx.readState();
@@ -333,7 +362,7 @@ test('next collects a background worker itself: the envelope on disk is recorded
   await waitFor(() => existsSync(marker), 'the worker envelope');
   const n = fx.cli('next').out;
   assert.deepEqual(n.collected.map(c => [c.node, c.status]), [['a', 'exited']]);
-  assert.deepEqual([n.next_action.stage, n.next_action.action], ['REVIEW', 'dispatch_review']);
+  assert.deepEqual([n.next_action.stage, n.next_action.action], ['REVIEW', 'review_dispatch']);
   assert.equal(fx.runs('a').length, 1);
 });
 
@@ -356,29 +385,31 @@ test('NEEDS_APPROVAL stops the loop and never invents approval: a terminal revie
   // The owner's RETRY (appended while nothing runs) makes the new original review owed: approval came from the owner, not the loop.
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'review-2', predecessor: 'review-1', authorized_by: 'owner' });
   const owed = fx.cli('next').out.next_action;
-  assert.deepEqual([owed.stage, owed.action, owed.review_execution], ['REVIEW', 'dispatch_review', 'review-2']);
+  assert.deepEqual([owed.stage, owed.action, owed.retry?.review_execution], ['REVIEW', 'review_dispatch', 'review-2']);
 });
 
-test('un-enrolled: next returns the NEEDS_ENROLLMENT diagnostic (BLOCKED, enroll) and nothing advances', { skip: WIN_SKIP }, (t) => {
+test('un-enrolled: next returns the NEEDS_ENROLLMENT diagnostic (BLOCKED, enroll), which the orchestrator owns (no stop), and nothing advances until it enrolls', { skip: WIN_SKIP }, (t) => {
   const fx = nextFixture(t, { admit: false });
   const none = fx.cli('next');
-  assert.deepEqual([none.status, none.out.next_action.action, none.out.next_action.reason], [2, 'init', 'no_state']);
+  assert.deepEqual([none.status, none.out.stop, none.out.next_action.action, none.out.next_action.reason], [0, false, 'init', 'no_state']);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   for (let i = 0; i < 2; i++) {
     const n = fx.cli('next');
-    assert.equal(n.status, 2, n.stdout);
-    assert.deepEqual([n.out.next_action.stage, n.out.disposition, n.out.next_action.action, n.out.next_action.diagnostic], ['ENROLL', 'BLOCKED', 'enroll', 'NEEDS_ENROLLMENT']);
+    assert.equal(n.status, 0, n.stdout);
+    assert.deepEqual([n.out.next_action.stage, n.out.disposition, n.out.next_action.action, n.out.next_action.owner, n.out.stop, n.out.next_action.diagnostic],
+      ['ENROLL', 'BLOCKED', 'enroll', 'orchestrator', false, 'NEEDS_ENROLLMENT']);
   }
   assert.deepEqual([fx.readState().attempts.length, fx.runs().length], [0, 0], 'no worker ran');
   assert.equal(fx.cli('enroll').status, 0);
   assert.deepEqual([fx.cli('next').out.next_action.action, fx.cli('next').out.next_action.phase], ['context', 'build']);
 });
 
-test('the skill instructs next after every tool or agent return, stops only on the four STOP dispositions, and no longer ends a turn on "still running"', () => {
+test('the skill instructs next after every tool or agent return, stops only when next says stop (a human-owned BLOCKED, never an orchestrator-owned one), and no longer ends a turn on "still running"', () => {
   const read = (rel) => readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n').replace(/\s+/g, ' ');
   const skill = read('SKILL.md'), card = read('references/execution-harness.md');
   assert.match(skill, /after every tool or agent return, and before any turn end, run `run-engine\.mjs next` and execute its `next_action`/);
-  assert.match(skill, /Stop only when its disposition is `NEEDS_APPROVAL` \(\*\*WAIT_FOR_USER\*\*\), `BLOCKED` .* `FAILED` \(\*\*FAIL\*\*\) or `COMPLETED`/);
+  assert.match(skill, /Stop only when `next` says `stop: true`: its disposition is `NEEDS_APPROVAL` \(\*\*WAIT_FOR_USER\*\*\), `BLOCKED` with `owner` `human` \(\*\*WAIT_FOR_USER\*\*\), `FAILED` \(\*\*FAIL\*\*\) or `COMPLETED`/);
+  assert.match(skill, /A `BLOCKED` action the orchestrator or engine owns .* is owed work: perform it, then run `next` again\. This is advisory: no turn-end hook enforces it\./);
   assert.match(skill, /A `READY` stage is owed work, never a reason to end the turn/);
   assert.match(skill, /then follow `run-engine\.mjs next`/);
   assert.doesNotMatch(skill, /A reply of "still running" is valid/);
@@ -386,4 +417,21 @@ test('the skill instructs next after every tool or agent return, stops only on t
   assert.match(card, /\*\*`next` is the supported path\*\*/);
   assert.doesNotMatch(card, /the only thing the orchestrator reads/);
   for (const d of STOP) assert.ok(card.includes(`\`${d}\``), d);
+});
+
+test('R0-S C7: the loop performs an orchestrator-owned BLOCKED recover_review (an overdue reviewer) and stops only at the human-owned failure it leaves', { skip: WIN_SKIP }, async (t) => {
+  const fx = nextFixture(t);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const slow = { ...failThenPass, relay: (role) => (role === 'primary' ? { sleep_ms: 120000 } : {}) };
+  const o = orchestrator(fx, slow);
+  let aged = false;
+  const end = await o.run({ onStep: (out) => {
+    if (aged || out.next_action.action !== 'review_dispatch') return;
+    aged = true; // the primary reviewer is past its watchdog: its receipt deadline is in the past
+    fx.editState(S => { S.review_dispatches.find(d => d.role === 'primary').deadline = '2000-01-01T00:00:00.000Z'; });
+  } });
+  const recover = o.log.find(l => l.action === 'recover_review');
+  assert.deepEqual([recover?.disposition, recover?.owner, recover?.reason], ['BLOCKED', 'orchestrator', 'review_overdue'], J(o.log));
+  assert.deepEqual([end.next_action.disposition, end.next_action.owner, end.next_action.reason, end.stop], ['BLOCKED', 'human', 'review_dispatch_failed', true], J(end.next_action));
+  assert.equal(fx.readState().review_dispatches.find(d => d.role === 'primary').status, 'failed', 'the recovery collected the killed reviewer');
 });

@@ -18,9 +18,15 @@
  * `feat/SCRUM-140-x`, `feature/AB-1`, `AIS-BENCH-1-x`; LOCAL config key `shipTicket.guardPattern`;
  * the ticket is its first capture group, else the whole match). For a guarded branch the hook runs
  * `authorize publish` for that ticket's run (engine-enroll.mjs) and requires the pushed sha to be the
- * authorized HEAD. No engine state, an unreadable one, a deny, or any error blocks the push (fail
- * closed). Other branches, tags and branch deletions pass. If node or this script has moved, the hook
- * blocks only branches matching the default pattern and says how to reinstall.
+ * authorized HEAD and the DESTINATION ref to be exactly `refs/heads/<the authorized branch>`. The ticket
+ * is taken from the destination first, then from the source: the local branch, or, for `HEAD` or a sha,
+ * the checked-out branch when its commit is the one pushed (any source, a copy branch too, whose commit is the checked-out
+ * HEAD of a ticket branch with engine state here). So `T-1-work:refs/heads/T-2-work` is
+ * `cross_ticket_push` (or T-2's own refusal), and T-1's commit to the default branch or to a name with
+ * no ticket (`HEAD:refs/heads/x`) is `push_to_default_branch` / `push_destination_mismatch`. No engine
+ * state, an unreadable one, a deny, or any error blocks the push (fail closed). Other branches, tags and
+ * branch deletions pass. If node or this script has moved, the hook blocks only branches matching the
+ * default pattern and says how to reinstall.
  *
  * The PR base the hook's authorize judges is the one `publish` used: publish records an explicit
  * --base in the engine state for the HEAD it pushes (PUBLISH_INTENT) before the push, so a stacked
@@ -38,9 +44,10 @@
  * This is a GUARDRAIL, not a boundary. Bypasses, recorded as expected by git-guard.test.mjs:
  * `git push --no-verify`, `git -c core.hooksPath=/dev/null push`, the GIT_CONFIG_COUNT/KEY/VALUE
  * environment override of core.hooksPath, unsetting a repository core.hooksPath the hook was
- * installed into, editing or deleting the hook, `git push origin HEAD:refs/heads/<other-name>` (a
- * detached or renamed source to a branch that names no ticket), and pushing with any tool that is not
- * git (gh api, a second clone). A push wrapped in a script, `sh -c`/`bash -c` or node execSync still runs the
+ * installed into, editing or deleting the hook, a source the guard cannot tie to a ticket pushed to a
+ * branch that names none (a commit that is not the checked-out HEAD of a ticket branch with engine state:
+ * an older commit, another work tree's, a detached HEAD, any commit before `init`), and pushing with any
+ * tool that is not git (gh api, a second clone). A push wrapped in a script, `sh -c`/`bash -c` or node execSync still runs the
  * hook and is blocked.
  *
  * CLI: git-guard.mjs install|uninstall|status --repo <dir> [--pattern <regex>]
@@ -200,20 +207,38 @@ export async function check(repo, stdin, { authorizeFn, remote } = {}) {
   const pattern = guardPattern(repo), withState = stateTickets(repo);
   remote = remoteName(repo, remote);
   const decisions = [];
+  const ticketIn = (b) => (b ? withState.find(t => branchNames(b, t)) ?? ticketOf(b, pattern) : null);
+  const head = out(git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD']));
+  const current = out(git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD']));
+  const defaultRef = remote ? out(git(repo, ['symbolic-ref', '--quiet', `refs/remotes/${remote}/HEAD`])) : null;
+  const defaultBranch = defaultRef?.startsWith(`refs/remotes/${remote}/`) ? defaultRef.slice(`refs/remotes/${remote}/`.length) : null;
   for (const line of stdin.split('\n').map(l => l.trim()).filter(Boolean)) {
     const [localRef, localSha, remoteRef] = line.split(/\s+/);
     const branchOf = (r) => (r?.startsWith('refs/heads/') ? r.slice('refs/heads/'.length) : null);
-    const branches = [branchOf(remoteRef), branchOf(localRef)].filter(Boolean);
-    const ticket = withState.find(t => branches.some(b => branchNames(b, t))) ?? branches.map(b => ticketOf(b, pattern)).find(Boolean) ?? null;
+    // The destination decides first; the source is the local branch, or (HEAD, a sha) the checked-out branch whose commit is pushed.
+    const destTicket = ticketIn(branchOf(remoteRef));
+    const srcBranch = branchOf(localRef) ?? (!localRef?.startsWith('refs/') && current && localSha === head ? current : null);
+    // Any source (a copy branch too) whose commit is the checked-out HEAD of a ticket branch with engine state is that ticket's.
+    const atHead = current && localSha === head ? withState.find(t => branchNames(current, t)) ?? null : null;
+    const srcTicket = ticketIn(srcBranch) ?? atHead;
+    const ticket = destTicket ?? srcTicket;
     if (!ticket) { decisions.push({ ref: remoteRef, guarded: false, allow: true, code: 'not_a_ticket_branch' }); continue; }
     if (ZERO.test(localSha ?? '')) { decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: 'branch_delete' }); continue; }
     const deny = (code, reason) => decisions.push({ ref: remoteRef, guarded: true, ticket, allow: false, code, reason });
+    if (destTicket && srcTicket && destTicket.toUpperCase() !== srcTicket.toUpperCase()) { deny('cross_ticket_push', `pushing ${srcBranch} (${srcTicket}) to ${remoteRef} (${destTicket}): one ticket's authorization never covers another's branch`); continue; }
     const runId = latestRun(repo, ticket);
     if (!runId) { deny('not_enrolled', `no readable engine run for ${ticket} in this work tree; ship through run-engine.mjs publish`); continue; }
     let a;
     try { a = await authorize({ repoRoot: repo, ticket, runId, stage: 'publish', ...(remote ? { remote } : {}) }); } catch (e) { deny('authorize_error', e.message); continue; }
     if (!a.allow) { deny(a.code, a.reasons?.[0] ?? ''); continue; }
     if (a.binding?.head !== localSha) { deny('push_not_head', `pushing ${localSha}, but ${a.binding?.head} (HEAD) is what was authorized`); continue; }
+    // The authorization names one branch: the destination must be exactly it (never the default branch, never another name).
+    const want = `refs/heads/${a.binding?.branch}`;
+    if (remoteRef !== want) {
+      const toDefault = branchOf(remoteRef) && (branchOf(remoteRef) === defaultBranch || branchOf(remoteRef) === a.binding?.base);
+      deny(toDefault ? 'push_to_default_branch' : 'push_destination_mismatch', `${ticket} is authorized to push ${want} only, not ${remoteRef}`);
+      continue;
+    }
     decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: a.code });
   }
   return { ok: decisions.every(d => d.allow), decisions };

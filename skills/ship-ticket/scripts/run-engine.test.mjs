@@ -100,6 +100,8 @@
  *   rounds: { prove_repair_batches, review_repairs: { [review_execution]: n } }
  * ==================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync,
@@ -115,7 +117,7 @@ const init = admittedInit(initRaw);
 import { gateReview, gateShipReady } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
-import { POSIX, BEGIN, END, narrativeDigest, delay, codes, fixture, spawnSpy, runStateEvents, runLogEvents, waitUntil,
+import { POSIX, BEGIN, END, narrativeDigest, delay, codes, unboundFixture as fixture, spawnSpy, runStateEvents, runLogEvents, waitUntil,
   STAGED, STAGED_BEHAVIOUR, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { HANDSHAKE_BOUND_MS, waitFor } from './test-wait.test-helper.mjs';
 

@@ -19,8 +19,8 @@
  *      run-engine.mjs enroll|context|authorize|publish ...: enrollment after init, trusted context delivery,
  *        stage authorization and the supported publish path (engine-enroll.mjs: lifecycle, admission). `drive`
  *        needs an admitted run and `gate` its phase context; a refused gate records no decision.
- *      `status` and `next` print the stage dispositions and the one next_action (engine-next.mjs); `next` exits 2 on
- *        BLOCKED, NEEDS_APPROVAL and FAILED.
+ *      `status` and `next` print the stage dispositions and the one next_action (engine-next.mjs) with `stop`; `next` exits 2
+ *        when the turn may stop short of COMPLETED (NEEDS_APPROVAL, FAILED, a human-owned BLOCKED); an orchestrator-owned BLOCKED exits 0.
  *      run-engine.mjs ci --repo <dir> --ticket <key> --run-id <id> [--pr <n>]: collect and record the CI evidence of the
  *        published head (engine-ci.mjs); exit 0 PASS, 2 any other state or a refusal (nothing recorded), 1 usage error.
  *      run-engine.mjs review-dispatch --role primary|second|confirmation --candidate <id> ... | review-collect ...: the engine
@@ -37,7 +37,7 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, policyApproval, configDrift, ASSURANCE_KEYS } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
@@ -46,7 +46,7 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
-import { collect as collectCi, ghProvider, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
+import { collect as collectCi, ghProvider, pinnedTool, remoteHeadOf, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
 import { dispatchReview, collectReviews, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
@@ -55,7 +55,7 @@ export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
-  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now', 'ciProvider']);
+  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now', 'ciProvider', 'relayHome']);
 /** Outbox events that stay in the engine log and never reach the plan's RUN-STATE. */
 const ENGINE_LOG_ONLY = ['GATE', 'CI_EVIDENCE', 'REVIEW_DISPATCHED', 'REVIEW_COLLECTED', 'REVIEW_UNAVAILABLE'];
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
@@ -182,8 +182,10 @@ function verifyBinding(E) {
   const { S, ctx } = E;
   if (S.run_id !== ctx.runId) return [judgment('run_mismatch', null, `engine state belongs to run ${S.run_id}, not ${ctx.runId}`)];
   const out = [];
+  let narrative = null;
   try {
     const approved = approvedPlan(ctx, E.P, S);
+    narrative = approved.text.slice(0, approved.text.indexOf(BEGIN)) + approved.text.slice(approved.text.indexOf(END));
     if (approved.digest !== S.plan_digest) out.push(judgment('approval_mismatch', null, 'plan narrative differs from the one bound at init'));
     // Grandfathering is by the trusted START's approval time, never by a missing field (AIS-HARNESS-4 Wave B).
     else if (!securityOn(S) && !legacyApproval(approved.start)) out.push(judgment('security_policy_required', null,
@@ -195,8 +197,31 @@ function verifyBinding(E) {
   }
   const raw = io.readIfExists(ctx.dagFile ?? S.dag_file);
   if (raw === null || sha(raw) !== S.dag_digest) out.push(judgment('dag_mismatch', null, 'DAG bytes differ from the bound digest'));
+  else out.push(...policyJudgments(S, raw, narrative));
   if (securityOn(S) && S.security?.reapproval) out.push(judgment('security_reapproval', null,
     `reassessment of ${S.security.reapproval.candidate_id} needs REAPPROVAL (a new START and plan digest; WAIT_FOR_USER)`));
+  return out;
+}
+
+/**
+ * R0-S A4: the state's config must be the bound DAG's (validated again from the digest-verified bytes) and a relaxed
+ * assurance policy must be approved by the narrative (engine-dag.mjs policyApproval). A same-user edit of state.json's
+ * config is DETECTED here before every command: policy_drift (an assurance key), config_drift (any other key).
+ */
+function policyJudgments(S, raw, narrative) {
+  let dag;
+  try { dag = validateEngineDag(JSON.parse(raw), { ticket: S.ticket }).config; } catch (e) { return [judgment('config_drift', null, `the bound DAG no longer validates: ${e.message}`)]; }
+  const out = [];
+  const drift = configDrift(S.config, dag);
+  const policy = drift.filter(k => ASSURANCE_KEYS.includes(k));
+  // The candidate exclusions every candidate computation reads are a state copy of the DAG's: compare them too.
+  if (JSON.stringify([...(S.pinned_exclusions ?? [])].sort()) !== JSON.stringify([...(dag.candidateExclusions ?? [])].sort())) drift.push('pinned_exclusions');
+  if (policy.length) out.push(judgment('policy_drift', null, `the run's assurance settings (${policy.join(', ')}) differ from the bound DAG's: a state edit; the bound DAG decides, nothing proceeds until state and DAG agree (new run)`));
+  else if (drift.length) out.push(judgment('config_drift', null, `the run's config (${drift.join(', ')}) differs from the bound DAG's: a state edit; nothing proceeds until state and DAG agree (new run)`));
+  if (narrative !== null) {
+    const a = policyApproval({ config: dag, narrative, dagDigest: S.dag_digest });
+    if (!a.ok) out.push(judgment(a.code, null, a.reason));
+  }
   return out;
 }
 
@@ -318,6 +343,8 @@ export async function init(ctx) {
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
     if (!binding) throw coded('dag_unbound', 'the DAG digest is neither in the approved plan nor in exactly one DAG_BOUND of this run');
+    const policy = policyApproval({ config: dag.config, narrative, dagDigest });
+    if (!policy.ok) throw coded(policy.code, policy.reason);
     E.S = { schema: STATE_SCHEMA, ticket: ctx.ticket, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding,
       dag_file: resolve(ctx.dagFile), created_at: new Date().toISOString(), seq: 0, config: dag.config,
       pinned_exclusions: [...dag.config.candidateExclusions], risk_labels: [...new Set([...dag.config.riskLabels, ...dag.nodes.flatMap(n => n.risk)])],
@@ -377,7 +404,6 @@ export async function resume(ctx) {
   });
 }
 
-const NEXT_STOP = ['BLOCKED', 'NEEDS_APPROVAL', 'FAILED'];
 
 /**
  * `next`: the supported path's one question (P0 E2-min). Under the run lock it first collects work that
@@ -402,7 +428,7 @@ export async function next(ctx) {
       return { ...head, ...(await deriveNext(E, drift(E, { mutate: false }), 'mine')), collected };
     });
   } catch (e) {
-    if (e.code === 'no_state') return { ...head, disposition: 'BLOCKED', stages: {}, collected: [],
+    if (e.code === 'no_state') return { ...head, disposition: 'BLOCKED', stop: false, stages: {}, collected: [],
       next_action: { stage: 'ENROLL', action: 'init', reason: 'no_state', owner: 'orchestrator', disposition: 'BLOCKED', reasons: [e.message] } };
     if (e.code !== 'lock_held') throw e;
     const E = open(ctx);
@@ -526,7 +552,7 @@ export async function rebind(ctx) {
     if (hasUnits(S)) throw coded('rebind_units', 'rebind does not cover runs with units (their evidence bindings are not re-bound)');
     const live = S.attempts.filter(a => LIVE.includes(a.status)).map(a => a.attempt_id);
     if (live.length) throw coded('rebind_attempts_live', `attempts still live: ${live.join(', ')}`);
-    const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    const c = io.candidateId(ctx.repoRoot, io.candidateBase(S), S.pinned_exclusions);
     if (!c.candidate_id || c.candidate_id !== S.freeze.candidate)
       throw coded('rebind_not_frozen_tree', `work tree is ${c.candidate_id ?? c.reason}, frozen is ${S.freeze.candidate}: revert the edit or record an owner RETRY for a new review`);
     const nodes = [];
@@ -649,17 +675,25 @@ export async function enroll(ctx) {
 /**
  * `context --phase <p>`: deliver the phase's verified references (never blocked). Recorded in the state
  * only for an enrolled run with no live attempt; without state or enrollment it delivers unrecorded.
+ * `ctx.emit(text)` (the CLI: a stdout write that resolves once the write completed) runs BEFORE the record: a failed
+ * emission (EPIPE, a closed stdout) records nothing (context_emit_failed). Without `emit` the record is of preparation.
  */
 export async function context(ctx) {
   let S = null;
+  const { emit, ...rest } = ctx;
+  ctx = rest;
   try { const E = open(ctx); E.load(); S = E.S; } catch (e) { if (e.code !== 'no_state') throw e; }
   const d = deliverContext(S?.enrollment && S.run_id === ctx.runId ? S : null, ctx.phase);
   if (!d.ok) return { delivered: false, recorded: false, code: d.code, reasons: d.reasons };
-  if (!S || !S.enrollment || S.run_id !== ctx.runId) return { delivered: true, recorded: false, code: S ? 'not_enrolled' : 'no_state', reasons: [], text: d.text };
+  if (emit) {
+    try { await emit(d.text); } catch (e) { return { delivered: false, recorded: false, emitted: false, code: 'context_emit_failed', reasons: [`the references were not written (${e.code ?? e.message}): nothing recorded`] }; }
+  }
+  const sent = emit ? { emitted: true } : { text: d.text };
+  if (!S || !S.enrollment || S.run_id !== ctx.runId) return { delivered: true, recorded: false, code: S ? 'not_enrolled' : 'no_state', reasons: [], ...sent };
   return locked(ctx, async (E) => {
-    try { recordContext(E.S, ctx.phase, d.record); } catch (e) { return { delivered: true, recorded: false, code: e.code, reasons: [e.message], text: d.text }; }
+    try { recordContext(E.S, ctx.phase, d.record); } catch (e) { return { delivered: true, recorded: false, code: e.code, reasons: [e.message], ...sent }; }
     await E.commit();
-    return { delivered: true, recorded: true, code: 'delivered', reasons: [], lifecycle: lifecycle(E.S), text: d.text };
+    return { delivered: true, recorded: true, code: 'delivered', reasons: [], lifecycle: lifecycle(E.S), ...sent };
   });
 }
 
@@ -694,9 +728,15 @@ export async function ci(ctx) {
     const head = r.status === 0 ? r.stdout.trim() : null;
     const pub = (E.S.published ?? []).findLast(p => p.head === head);
     if (!pub) return refuse('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}: CI is collected only for a head run-engine.mjs publish pushed`]);
-    const provider = ctx.ciProvider ?? ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env });
+    // R0-S N4: the real provider runs exactly the gh pinned at enroll (a PATH stub added later is never run); ctx.ciProvider is in-process only.
+    let provider = ctx.ciProvider;
+    if (!provider) {
+      const gh = pinnedTool(E.S.enrollment?.tools?.gh);
+      if (!gh.ok) return refuse(gh.code, [gh.reason]);
+      provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path });
+    }
     const now = () => Date.parse(auditNow(ctx));
-    const ev = collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now });
+    const ev = collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now, remote: remoteHeadOf(ctx.repoRoot, pub, ctx.env) });
     E.S.ci_evidence = [...(E.S.ci_evidence ?? []), ev].slice(-CI_EVIDENCE_KEEP);
     note(E.S, 'CI_EVIDENCE', { head_sha: ev.head_sha, state: ev.state, code: ev.code });
     E.S.outbox.push({ run_id: E.S.run_id, event: 'CI_EVIDENCE', event_id: `ci-${E.S.run_id}-${E.S.seq}`, head_sha: ev.head_sha, pr: ev.pr, state: ev.state,
@@ -762,7 +802,7 @@ export async function gate(ctx) {
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
       await deliver(E);
       reconcileReviews(E);
-      const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+      const c = io.candidateId(ctx.repoRoot, io.candidateBase(E.S), E.S.pinned_exclusions);
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       E.candidateMergeBase = c.merge_base ?? null; // E3: the merge base an accepted review is bound to
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
@@ -827,7 +867,7 @@ if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) 
 } else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && NEXT_STOP.includes(r.disposition))
+    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && r.stop === true && r.disposition !== 'COMPLETED')
       || (r?.schema === CI_SCHEMA && r.state !== 'PASS') || (r?.schema === REVIEW_SCHEMA && (r.dispatched === false || (r.dispatched === undefined && !['collected', 'review_live'].includes(r.code))))) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }

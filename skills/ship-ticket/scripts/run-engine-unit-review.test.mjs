@@ -45,11 +45,13 @@
  *   the engine opened (repair_opened). `drive` `done` excludes pending unit reviews.
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { POSIX, fixture as baseFixture, passReview, failReview, confirmReview, waitUntil } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as baseFixture, passReview, failReview, confirmReview, waitUntil } from './engine-test-fixture.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { evaluateRun } from './eval.mjs';

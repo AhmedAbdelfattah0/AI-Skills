@@ -20,13 +20,15 @@
  *   field existed) is refused at load with 'legacy_state' and an instruction, never half-run.
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { drive } from './run-engine.mjs';
 import { groupAlive } from './engine-io.mjs';
-import { POSIX, fixture, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const END = '<!-- RUN-STATE:END -->';

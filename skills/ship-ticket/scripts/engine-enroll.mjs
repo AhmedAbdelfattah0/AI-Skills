@@ -33,16 +33,33 @@
  *
  * Residual (same user, not a boundary): a process running as the user can rewrite the engine state
  * or the skill's git history, import these modules and call the seams directly, or push with git/gh.
+ *
+ * R0-S repair batch. Closed or refused on the SUPPORTED paths (commands, config files, HOME, PATH, ordering):
+ *   history_unavailable        a failed or overflowing history listing (never read as empty; 256 MiB buffer)
+ *   push_destination_mismatch / push_to_default_branch / cross_ticket_push   git-guard binds the destination ref
+ *   review_binding_missing / review_provenance_unbound   an authorizing review without a freshness binding, or not
+ *                              engine-dispatched under the strict policy, never authorizes publish
+ *   policy_unapproved          a relaxed assurance setting (reviewProvenance, acceptNativeReview, ciRequiredChecks,
+ *                              ciNoChecksMinutes) without the plan binding and the approved policy line (engine-dag.mjs)
+ *   policy_drift / config_drift  the state's config is not the bound DAG's (DETECTED before every command)
+ *   enrollment_repo_unknown / enrollment_branch_unknown   no captured repository or branch is never a wildcard
+ *   gh_unpinned / gh_drift     `ci` and `publish --pr-title` run only the gh pinned at enroll (path + sha256)
+ *   ci_head_unverified / ci_remote_moved   complete needs CI evidence that verified the branch head, and the remote
+ *                              branch still at that head
+ * Still the same-user residual (documented, not closed): rewriting state.json, the ledgers, a relay or launcher output
+ * TOGETHER with the digests that bind them; replacing the relay or gh BEFORE their pin (the pin trusts that moment's
+ * home and PATH); importing the modules and calling the in-process seams (ctx.ciProvider, ctx.relayHome); `git` itself
+ * is resolved through PATH everywhere; the git-guard bypasses in git-guard.mjs; turn-end enforcement (no Stop hook in R0-S).
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as io from './engine-io.mjs';
-import { coded } from './engine-dag.mjs';
+import { coded, assuranceOf } from './engine-dag.mjs';
 import { LIVE } from './engine-quiesce.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
 import { reviewFreshness } from './engine-freshness.mjs';
-import { ciAuthorize } from './engine-ci.mjs';
+import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf } from './engine-ci.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -57,6 +74,17 @@ const gitOut = (repo, args, env) => {
   const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 30000, ...(env ? { env } : {}) });
   return r.status === 0 ? r.stdout.trim() : null;
 };
+/** The history listing's buffer: far above any real branch; past it the call fails and the caller refuses. */
+export const HISTORY_MAX_BUFFER = 256 * 1024 * 1024;
+/**
+ * The paths every commit of `range` touched (NUL-separated, no renames) -> { ok: true, paths } | { ok: false, reason }.
+ * A non-zero exit, a spawn error or a buffer overflow (ENOBUFS) is { ok: false }: never read as an empty history.
+ */
+export function historyPaths(repo, range, { spawn = spawnSync, maxBuffer = HISTORY_MAX_BUFFER } = {}) {
+  const r = spawn('git', ['log', '--format=', '--name-only', '--no-renames', '-z', range], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer });
+  if (r.error || r.status !== 0) return { ok: false, reason: (r.error?.code ?? r.error?.message ?? (r.stderr || `git log exited ${r.status}`)).toString().trim() };
+  return { ok: true, paths: r.stdout.split('\0').map(p => p.replace(/^\n/, '')).filter(Boolean) };
+}
 const refusal = (code, reason, lifecycle) => ({ ok: false, code, reasons: [reason], lifecycle });
 const NEW_RUN = 'operator path: start a new run (new run id, START, init, enroll)';
 
@@ -122,7 +150,7 @@ export function enrollIn(E, skillDir = SKILL_DIR) {
     throw coded('enrollment_after_execution', `this run already executed ${S.attempts.length} attempt(s) without enrollment and the skill is a copy install, whose files those attempts could have written; ${NEW_RUN}`);
   S.enrollment = { run_id: S.run_id, ticket: S.ticket, repo: gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']),
     branch: gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']), head: gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']),
-    ...pin, attempts_before: (S.attempts ?? []).length, at: new Date().toISOString() };
+    tools: { gh: resolveTool('gh', ctx.env ?? process.env) }, ...pin, attempts_before: (S.attempts ?? []).length, at: new Date().toISOString() };
   S.contexts = {};
   return { already: false, enrollment: S.enrollment };
 }
@@ -204,19 +232,26 @@ export async function authorize(ctx, readEngine) {
     // P0 E6-min: CI PASS recorded by run-engine.mjs ci for exactly the published head (engine-ci.mjs ciAuthorize).
     const c = ciAuthorize(S, pub);
     if (!c.ok) return deny(c.code, c.reasons, 'publication');
+    // R0-S N3: and the published branch still points at that head now (a push after the collection moved what the PR ships).
+    const now = remoteHeadOf(ctx.repoRoot, pub);
+    if (!now.ok) return deny('remote_unavailable', [`the published branch could not be read: ${now.error}`], 'publication');
+    if (now.head !== pub.head) return deny('ci_remote_moved', [`the remote branch ${pub.branch} is ${now.head ?? 'gone'}, the published (and CI-verified) head is ${pub.head}: publish the new head and collect its CI`], 'publication');
     return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-      binding: { head, ci: { state: c.evidence.state, collected_at: c.evidence.collected_at, checks: c.evidence.checks.length, required: c.evidence.required } } };
+      binding: { head, assurance: assuranceOf(S).level, ci: { state: c.evidence.state, collected_at: c.evidence.collected_at, checks: c.evidence.checks.length, required: c.evidence.required } } };
   }
   if (!S.ship_ready?.candidate_id) return deny('ship_ready_missing', ['no engine SHIP_READY for this run; run gate ship-ready'], lifecycle(S));
   if (!S.ship_ready.merge_base) return deny('ship_ready_regate', ['this SHIP_READY predates the recorded merge base (an engine update); run gate ship-ready again'], lifecycle(S));
   const superseded = supersededBy(S);
   if (superseded.length) return deny('ship_ready_superseded', superseded, lifecycle(S));
   const top = gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']);
-  if (S.enrollment.repo && S.enrollment.repo !== top) return deny('enrollment_repo_mismatch', [`enrolled in ${S.enrollment.repo}, authorizing in ${top}`], 'evidence');
+  // R0-S N7: an enrollment whose repository or branch was not captured is never a wildcard.
+  if (!S.enrollment.repo) return deny('enrollment_repo_unknown', ['the enrollment recorded no repository (git failed at enroll): start a new run'], 'evidence');
+  if (S.enrollment.repo !== top) return deny('enrollment_repo_mismatch', [`enrolled in ${S.enrollment.repo}, authorizing in ${top}`], 'evidence');
   const branch = gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (!branch) return deny('branch_detached', ['HEAD is detached; publish pushes the ticket branch'], 'evidence');
   if (!branchNames(branch, ctx.ticket)) return deny('branch_not_ticket', [`branch ${branch} does not name ticket ${ctx.ticket} as a whole token`], 'evidence');
-  if (S.enrollment.branch && branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
+  if (!S.enrollment.branch) return deny('enrollment_branch_unknown', ['the enrollment recorded no branch (a detached HEAD or a git failure at enroll): enroll on the ticket branch in a new run'], 'evidence');
+  if (branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
     return deny('branch_mismatch', [`the run enrolled on ${S.enrollment.branch}, HEAD is ${branch}`], 'evidence');
   // The PR base: --base, else the --base `publish` recorded for this HEAD before its push (so the pre-push hook's
   // authorize, which gets no --base, judges a stacked PR against the base publish used), else config.base (a
@@ -243,19 +278,23 @@ export async function authorize(ctx, readEngine) {
   // E3: and against the merge base the authorizing review was bound to (a review is valid only for the bytes it covered).
   const fresh = reviewFreshness(S, ctx.repoRoot);
   if (fresh && !fresh.fresh) return deny(fresh.code, fresh.reasons, 'admitted');
-  // History, not only the final tree: every path any commit since the merge base touched is a reviewed candidate path
-  // (or an excluded one), so a later-reverted commit cannot carry unreviewed bytes to the remote.
+  // History, not only the final tree: every PATH any commit since the merge base touched is a reviewed candidate path
+  // (or an excluded one), so a later-reverted commit cannot carry an unreviewed path to the remote. This checks paths,
+  // not bytes: an intermediate commit may still hold other, unreviewed bytes of a reviewed path (the final tree is
+  // the reviewed one). A git log that fails or overflows its buffer is history_unavailable, never an empty history.
   const covered = new Set([...(cand.paths ?? []), ...(S.pinned_exclusions ?? [])]);
-  const touched = (gitOut(ctx.repoRoot, ['log', '--format=', '--name-only', '--no-renames', `${mb}..HEAD`]) ?? '').split('\n').filter(Boolean);
-  const outside = [...new Set(touched.filter(p => !covered.has(p)))].sort();
-  if (outside.length) return deny('history_outside_candidate', [`commits since the merge base touch paths outside the reviewed candidate: ${outside.join(', ')}`], 'evidence');
+  const hist = historyPaths(ctx.repoRoot, `${mb}..HEAD`);
+  if (!hist.ok) return deny('history_unavailable', [`the history since the merge base could not be inspected (${hist.reason}): nothing is published without it`], 'evidence');
+  const outside = [...new Set(hist.paths.filter(p => !covered.has(p)))].sort();
+  if (outside.length) return deny('history_outside_candidate', [`commits since the merge base touch ${outside.length} path(s) outside the reviewed candidate: `
+    + `${outside.slice(0, 20).join(', ')}${outside.length > 20 ? `, ... (${outside.length - 20} more)` : ''}`], 'evidence');
   const plan = io.readIfExists(join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md')) ?? '';
   const log = io.readIfExists(io.gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.engine.jsonl`)) ?? '';
   const backed = checkShipReady(plan, log, { runId: ctx.runId, requireEvent: true });
   if (!backed.ok || !backed.shipReady.includes(cand.candidate_id))
     return deny('ship_ready_unbacked', [backed.reason || `RUN-STATE has no SHIP_READY for ${cand.candidate_id}; run resume to deliver the engine outbox`], 'evidence');
   return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb } };
+    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb, assurance: assuranceOf(S).level } };
 }
 
 /**
@@ -281,6 +320,9 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   if (JSON.stringify(again.binding) !== JSON.stringify(a.binding))
     return { published: false, allow: false, code: 'authorization_moved', reasons: [`authorized ${JSON.stringify(a.binding)}, now ${JSON.stringify(again.binding)}`], lifecycle: again.lifecycle };
   const { head, branch } = a.binding;
+  // R0-S N4: a PR is opened only with the gh pinned at enroll (checked before anything is pushed).
+  const gh = ctx.prTitle !== undefined ? pinnedTool(readEngine(ctx).S?.enrollment?.tools?.gh) : null;
+  if (gh && !gh.ok) return { published: false, allow: false, code: gh.code, reasons: [gh.reason], lifecycle: a.lifecycle };
   await recordIntent(ctx, { head, branch, base: ctx.base ?? null, remote, at: new Date().toISOString() });
   const env = ctx.env ?? process.env;
   const push = spawnSync('git', ['push', remote, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
@@ -289,7 +331,7 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   if (remoteHead !== head) return { published: false, allow: true, code: 'remote_mismatch', reasons: [`pushed ${head}, the remote branch is ${remoteHead}; nothing recorded`] };
   let pr = null, prError = null;
   if (ctx.prTitle !== undefined) {
-    const r = spawnSync('gh', ['pr', 'create', '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
+    const r = spawnSync(gh.path, ['pr', 'create', '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
       { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 300000 });
     if (r.status === 0) pr = { url: r.stdout.trim().split('\n').at(-1) ?? '' };
     else prError = (r.stderr || r.error?.message || 'gh pr create failed').trim();
@@ -328,8 +370,9 @@ export async function enrollCli(argv, cmds) {
   const json = (r) => process.stdout.write(JSON.stringify(r, null, 2) + '\n');
   try {
     if (cmd === 'context') {
-      const r = await cmds.context({ ...ctx, phase: flags.phase });
-      if (r.text !== undefined) process.stdout.write(r.text);
+      // R0-S C4: the bytes are written (the write callback completed) before the delivery is recorded.
+      const emit = (text) => new Promise((res, rej) => { process.stdout.once('error', rej); process.stdout.write(text, (e) => (e ? rej(e) : res())); });
+      const r = await cmds.context({ ...ctx, phase: flags.phase, emit });
       const { text: _t, ...summary } = r;
       process.stderr.write(`context: ${JSON.stringify(summary)}\n`);
       return r.delivered ? 0 : 2;

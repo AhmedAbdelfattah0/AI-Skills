@@ -53,12 +53,14 @@
  *   budget only, status.budget.phase_unknown {records, tokens}, eval tokens_by_phase['phase unknown'].
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POSIX, fixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, preEnrollmentState, preNextStatus } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, preEnrollmentState, preNextStatus } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;

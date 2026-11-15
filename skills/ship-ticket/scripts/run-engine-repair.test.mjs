@@ -54,6 +54,8 @@
  * mark failed->pending that clears a judgment records cleared_judgments [{ code, node }] on its MARK event.
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
@@ -64,7 +66,7 @@ import { init as initRaw, drive, acquireLock, planNarrativeDigest } from './run-
 import { admittedInit } from './engine-test-fixture.mjs';
 const init = admittedInit(initRaw);
 import { verifyReviewExecution } from './carrier.mjs';
-import { POSIX, fixture, codes, runStateEvents, runLogEvents, waitUntil, delay, passReview, failReview,
+import { POSIX, unboundFixture as fixture, codes, runStateEvents, runLogEvents, waitUntil, delay, passReview, failReview,
   confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import { WORKER_FAILURE_BOUND_MS, processGone } from './test-wait.test-helper.mjs';
 

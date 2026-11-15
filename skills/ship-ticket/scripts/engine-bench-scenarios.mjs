@@ -22,13 +22,15 @@
  *                          executions and RED spec executions both count
  *   retries                automatic retries the engine made (nodes[*].retries in the last status; nothing here marks a retry)
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { fixture, POSIX, codes, waitUntil, primaryReview, secondOpinion, passReview, failReview, confirmReview } from './engine-test-fixture.mjs';
+import { unboundFixture as fixture, POSIX, codes, waitUntil, primaryReview, secondOpinion, passReview, failReview, confirmReview } from './engine-test-fixture.mjs';
 import { loadRecord, referenceBytes } from './load-record.mjs';
 
 export const LIMITS = 'fake provider: mechanism and orchestration overhead only';

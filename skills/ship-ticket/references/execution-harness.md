@@ -271,13 +271,29 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `config.base` branch, else the remote's HEAD) must give the merge base recorded
   with `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits), and
   no commit since it may touch a path outside the candidate
-  (`history_outside_candidate`: e.g. an extra commit later reverted). A `SHIP_READY`
+  (`history_outside_candidate`: e.g. an extra commit later reverted; paths are
+  checked, not bytes: an intermediate commit may hold other bytes of a reviewed
+  path). A history listing that fails or overflows is `history_unavailable`, never
+  an empty history. An enrollment with no captured repository or branch is
+  `enrollment_repo_unknown` / `enrollment_branch_unknown`. The candidate is
+  computed against the merge base recorded with the review freeze when
+  `config.base` is `HEAD`, so committing the reviewed (or repaired) bytes before
+  `gate ship-ready` or before the confirmation keeps the candidate: content, not
+  commit metadata, decides. A review with no freshness binding is
+  `review_binding_missing`, one that is not engine-dispatched under the strict
+  policy `review_provenance_unbound`. A `SHIP_READY`
   recorded before the merge base existed needs `gate ship-ready` again
-  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch and base. `complete` needs `PUBLISHED` for HEAD
-  and CI `PASS` recorded by `ci` for exactly that head (below).
+  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch, base and the
+  run's `assurance` (`STRICT` or `RELAXED`). `complete` needs `PUBLISHED` for HEAD,
+  CI `PASS` recorded by `ci` for exactly that head (below), evidence that verified
+  the branch head (`ci_head_unverified`), and the remote branch still at that head
+  now (`ci_remote_moved`, `remote_unavailable`).
 - **`ci`** (ENFORCED for `authorize complete`). Under the run lock, after the
   binding and the `ship` context are re-verified, it asks `gh` for the check runs
-  of the head `publish` pushed for HEAD. That SHA comes from the `PUBLISHED`
+  of the head `publish` pushed for HEAD. The `gh` it runs is the one `enroll`
+  pinned (absolute path and sha256 resolved from that moment's PATH): a stub put
+  earlier on PATH later is never run, changed bytes are `gh_drift`, none pinned is
+  `gh_unpinned` (`publish --pr-title` uses the same pin). That SHA comes from the `PUBLISHED`
   record, never from the caller. It records `CI_EVIDENCE` `{head_sha, checks[],
   collected_at, state, code, timing}` in the state and the engine log, never in
   RUN-STATE. Exit 0 is `PASS`. Exit 2 is any other state or a refusal, which
@@ -290,13 +306,20 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   - `NO_CHECKS`: zero check runs (`ci_no_checks`) or a required name with none
     (`ci_required_missing`), from a collection made `config.ciNoChecksMinutes`
     (default 5) or more after the push.
-  - `STALE`: the PR head is not the published head (`ci_head_moved`), or the PR
-    is another branch (`ci_pr_mismatch`).
+  - `STALE`: the PR head is not the published head (`ci_head_moved`), the PR is
+    another branch (`ci_pr_mismatch`), or the remote branch read at collection
+    (`git ls-remote`, recorded as `remote_head`) is not the head (`ci_remote_moved`).
+    A branch that cannot be read is `UNAVAILABLE` `ci_remote_unavailable`.
   - `UNAVAILABLE`: a `gh` failure (`ci_provider_unavailable`) or a page count that
     does not add up (`ci_provider_incomplete`). This is never zero checks.
 
-  Runs of another SHA are ignored. The required set is `config.ciRequiredChecks`
-  when the approved DAG names it, else every check run on the SHA. `authorize
+  Runs of another SHA are ignored. A re-run replaces the earlier run of the same
+  check (same app, check suite and name); a same-named run of another app or
+  workflow is an independent check. ANY failed check on the SHA (`failure`,
+  `cancelled`, `timed_out`, `action_required`, `startup_failure`, `stale`) is
+  `FAIL`, required or not. The required set (what must pass) is
+  `config.ciRequiredChecks` when the approved DAG names it, else every check run on
+  the SHA; a `skipped` or `neutral` check outside it does not block. `authorize
   complete` reads only the latest evidence for the published head. It re-judges
   the recorded checks under the bound config (`ci_evidence_missing`, the
   evidence's own code, `ci_evidence_inconsistent`), and it never calls `gh`.
@@ -309,7 +332,9 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `checks_completed_at` and `collected_at`. Limits: legacy commit statuses are not
   read, so status-only CI is `NO_CHECKS` (fail closed). The required set is the
   DAG's, not branch protection's. A `PENDING` check has no deadline. The evidence
-  is the engine's state file, which any same-user process can write.
+  is the engine's state file, which any same-user process can write, and an
+  in-process caller can pass its own provider (`ctx.ciProvider`): exact-SHA
+  matching does not authenticate evidence (no server attestation in R0-S).
 - **`publish`** holds the run lock throughout: it authorizes, authorizes again
   immediately before the push and requires the same binding (`authorization_moved`),
   records an explicit `--base` for the HEAD it pushes (`publish_intent`, so the
@@ -323,8 +348,12 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   degradation is **WAIT_FOR_USER**, and the skill does not ship.
 - **git-guard is a guardrail, not a boundary.** It blocks `git push` of a branch
   matching the pattern (default `(?:^|/)([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*?-[0-9]+)`) unless `authorize
-  publish` allows the pushed sha, including pushes wrapped in a script, `sh -c` or
-  `execSync`. It also guards any branch naming a ticket that has engine state. It
+  publish` allows the pushed sha AND the destination is exactly the authorized branch,
+  including pushes wrapped in a script, `sh -c` or `execSync`. The ticket comes from
+  the destination first, then from the source (the local branch, or the checked-out
+  branch for `HEAD` or its sha): one ticket's commit to another ticket's branch is
+  `cross_ticket_push`, to the default branch `push_to_default_branch`, to any other
+  name `push_destination_mismatch`. It also guards any branch naming a ticket that has engine state. It
   refuses a hooks directory inside the work tree unless ignored. In a linked worktree
   it installs into the shared hooks directory and judges each push by that work
   tree's engine state. A `git push <url>` is judged as the configured remote with
@@ -333,8 +362,10 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `release-2026-11` read as tickets and are refused until you narrow it with
   `--pattern`. A branch naming two tickets is judged by one run only (the first
   with engine state). `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*`
-  override, unsetting a repository `core.hooksPath`, `git push origin
-  HEAD:refs/heads/<name without a ticket>` and pushing with `gh` or another clone
+  override, unsetting a repository `core.hooksPath`, a commit the guard cannot tie
+  to a ticket (not the checked-out HEAD of a ticket branch with engine state: an
+  older commit, a detached HEAD, anything before `init`) pushed under a name with no
+  ticket, and pushing with `gh` or another clone
   bypass it, as does any process of the same user rewriting the engine state.
 
 ## Run engine
@@ -381,8 +412,20 @@ are refused, never dropped.
   into the DAG; `reviewProvenance` (`engine`, the behaviour when absent: `gate review`
   accepts only engine-dispatched, collected reviews; `unbound`: the owner opts the
   run out, the earlier gate) and `acceptNativeReview` (boolean: the owner accepts a
-  native Agent-tool primary or confirmation, labelled `native_unbound`), both owner
-  settings bound by the DAG digest ([review.md](review.md), Engine-dispatched reviewers). Billing is
+  native Agent-tool primary or confirmation, labelled `native_unbound`)
+  ([review.md](review.md), Engine-dispatched reviewers). These four are
+  ASSURANCE settings. Absent, the run is `STRICT`, the default and the enforced
+  release policy. A relaxing value is accepted only when it is written into the
+  approved plan narrative (what the trusted `START` digest covers; START is
+  orchestrator-appended, so the engine verifies placement, not that a human read
+  it): the DAG digest is listed in that narrative (binding `plan`; a
+  `DAG_BOUND` line never approves a relaxation) AND the narrative carries the
+  exact line `ship-ticket-assurance-policy: <the relaxed values as sorted-key
+  JSON>`, else `init` refuses `policy_unapproved`. Before every command the engine
+  re-validates the digest-verified DAG and refuses a state whose config differs
+  (`policy_drift` for these keys, `config_drift` for any other: DETECTED, a
+  same-user edit of the state file is refused, not prevented). A relaxed run is
+  labelled `RELAXED` on `next`, `status` and every `authorize` allow. Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with
   `billing: "api"` is refused (`dispatch refused: api billing requires allowApiBilling`) by design;
   `allowApiBilling` exists only for a library caller the user authorized.
@@ -406,8 +449,17 @@ command: `drive`, `resume`) or `human` (only the owner continues). Rules:
   the confirmation, `gate ship-ready`, the commit and `publish`. A review stale or
   terminal under the gate's own rules (a new original needs a trusted `RETRY`) is
   `NEEDS_APPROVAL` `owner_retry`. Execute `READY` and `RUNNING`/`WAITING`
-  (`wait`) actions, then run `next` again. Stop only on `NEEDS_APPROVAL`,
-  `BLOCKED`, `COMPLETED` or `FAILED` (exit 2 for the first, second and fourth).
+  (`wait`) actions, then run `next` again. Stop only when `next` prints
+  `stop: true`: `NEEDS_APPROVAL`, `COMPLETED`, `FAILED`, or `BLOCKED` whose `owner`
+  is `human` (exit 2 for all but `COMPLETED`). An orchestrator- or engine-owned
+  `BLOCKED` (`enroll`, `recover_review`, a refused `gate_review` or
+  `gate_ship_ready`, `resolve` of an engine judgment, `collect_ci` after a provider
+  failure) exits 0 and is owed work. ADVISORY: R0-S has no turn-end (Stop hook)
+  enforcement, so an orchestrator can still end its turn early; `stop` only says
+  when it may.
+- Every answer carries `assurance` (`STRICT`, or `RELAXED` with the approved relaxed
+  settings and any accepted review that is not engine-dispatched); a relaxed run also
+  labels `next_action.assurance: "RELAXED"`. Relaxing is never silent.
 - Under the run lock, `next` first collects finished background work with
   `resume`'s own reconcile: a worker whose envelope is on disk is recorded, never
   dispatched again (the launch protocol refuses a second writer), and `collected`

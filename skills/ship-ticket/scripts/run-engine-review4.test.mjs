@@ -19,12 +19,14 @@
  *   (plan narrative, DAG bytes) is re-verified; drift -> RED_DROPPED / dropped proof, judgment_point.
  * =========================================================================================
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { gate } from './run-engine.mjs';
-import { POSIX, fixture, runStateEvents, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
+import { POSIX, unboundFixture as fixture, runStateEvents, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const END = '<!-- RUN-STATE:END -->';

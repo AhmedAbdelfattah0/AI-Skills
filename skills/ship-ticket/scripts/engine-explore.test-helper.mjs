@@ -6,9 +6,11 @@
  * whole fixture root (same path, so the absolute paths in engine state stay valid) plus the
  * driver and oracle memory, which is what bounded exploration branches on.
  */
+// R0-S A5: this suite pins gate.mjs review semantics with hand-written review JSON, so it runs the owner-approved opt-out
+// (unboundFixture: config.reviewProvenance 'unbound' with its approved policy line); the strict default is covered elsewhere.
 import { readFileSync, writeFileSync, cpSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture, warmFakeClaude, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
+import { unboundFixture as fixture, warmFakeClaude, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
 import { Oracle, cliAsync } from './engine-oracle.test-helper.mjs';
 
 const J = JSON.stringify;

@@ -45,7 +45,14 @@ const VERDICTS = [
     ['PASS', 'ci_passed']],
   ['a required check never started, inside the window', V({ required: ['build'], collectedMs: MIN }), ['PENDING', 'ci_required_pending']],
   ['a required check never ran, after the window', V({ required: ['build'] }), ['NO_CHECKS', 'ci_required_missing']],
-  ['a red check outside the required set is not required', V({ required: ['test'], checks: [run('test', 'completed', 'success'), run('bot', 'completed', 'failure')] }), ['PASS', 'ci_passed']],
+  // R0-S: a configured set narrows what must PASS, never what may fail; a skipped check outside it is not a failure.
+  ['a red check outside the required set still fails the head', V({ required: ['test'], checks: [run('test', 'completed', 'success'), run('bot', 'completed', 'failure')] }), ['FAIL', 'ci_failed']],
+  ['a skipped check outside the required set does not block', V({ required: ['test'], checks: [run('test', 'completed', 'success'), run('bot', 'completed', 'skipped')] }), ['PASS', 'ci_passed']],
+  ['a same-named check of another app or workflow is independent, never a re-run', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11 }),
+    run('test', 'completed', 'success', { id: 2, app: 'circleci', check_suite: 22, started_at: '2026-11-15T00:01:00.000Z' })] }), ['FAIL', 'ci_failed']],
+  ['a re-run within one check suite supersedes its red run', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11 }),
+    run('test', 'completed', 'success', { id: 2, app: 'github-actions', check_suite: 11, started_at: '2026-11-15T00:01:00.000Z' })] }), ['PASS', 'ci_passed']],
+  ['the remote branch moved past the published head (no PR)', V({ remoteHead: OTHER }), ['STALE', 'ci_remote_moved']],
 ];
 
 test('verdict: every scenario yields its pinned state and code; PASS needs >=1 required check, all success, on exactly the published head', () => {
@@ -69,7 +76,8 @@ test('mutation: omitting any verdict check changes a pinned verdict, and each om
 // ------------------------------------------------------------------ authorize complete's CI condition
 
 const PUB = { head: SHA, branch: 'T-1-work', at: '2026-11-15T00:00:00.000Z' };
-const EV = (over = {}) => ({ head_sha: SHA, state: 'PASS', code: 'ci_passed', reasons: [], checks: [run('test', 'completed', 'success')], ...over });
+const EV = (over = {}) => ({ head_sha: SHA, state: 'PASS', code: 'ci_passed', reasons: [], remote_head: SHA, checks: [run('test', 'completed', 'success')], ...over });
+const unverified = () => { const e = EV(); delete e.remote_head; return e; };
 const AUTHS = [
   ['no evidence', { ci_evidence: [] }, 'ci_evidence_missing'],
   ['evidence of another head only', { ci_evidence: [EV({ head_sha: OTHER })] }, 'ci_evidence_missing'],
@@ -79,6 +87,8 @@ const AUTHS = [
   ['state PASS with no recorded check', { ci_evidence: [EV({ checks: [] })] }, 'ci_evidence_inconsistent'],
   ['PASS recorded before the bound config named a required check', { config: { ciRequiredChecks: ['build'] }, ci_evidence: [EV()] }, 'ci_evidence_inconsistent'],
   ['PASS whose recorded PR head moved', { ci_evidence: [EV({ pr_view: { number: 1, head_sha: OTHER, head_branch: 'T-1-work' } })] }, 'ci_evidence_inconsistent'],
+  ['PASS that never verified the branch head (no PR, no remote read)', { ci_evidence: [unverified()] }, 'ci_head_unverified'],
+  ['PASS whose recorded remote branch had moved (the PR head matched)', { ci_evidence: [EV({ remote_head: OTHER, pr_view: { number: 1, head_sha: SHA, head_branch: 'T-1-work' } })] }, 'ci_evidence_inconsistent'],
   ['PASS', { ci_evidence: [EV()] }, 'allow'],
 ];
 const authCode = (S, opts) => { const r = ciAuthorize({ config: {}, ...S }, PUB, opts); return r.ok ? 'allow' : r.code; };
@@ -327,7 +337,7 @@ test('ci with a PR: a moved PR head or another branch is STALE; the PR view feed
   assert.deepEqual(nextCi(fx), ['CI', 'READY', 'ci_owed', 'collect_ci']);
 });
 
-test('ci with config.ciRequiredChecks and ciNoChecksMinutes: a missing required check is PENDING then NO_CHECKS; a red check outside the set does not block', { skip: WIN_SKIP }, async (t) => {
+test('ci with config.ciRequiredChecks and ciNoChecksMinutes (approved in the plan): a missing required check is PENDING then NO_CHECKS; a red check outside the set still fails, a skipped one does not block', { skip: WIN_SKIP }, async (t) => {
   const fx = published(t, { config: { ciRequiredChecks: ['build'], ciNoChecksMinutes: 2 } });
   const w = fakeProvider();
   w.runs = [R('lint', 'completed', 'success')];
@@ -337,6 +347,8 @@ test('ci with config.ciRequiredChecks and ciNoChecksMinutes: a missing required 
   assert.ok(e.diagnostic, 'a missing required check carries the diagnostic too');
   assert.deepEqual(nextCi(fx), ['CI', 'BLOCKED', 'ci_required_missing', 'resolve']);
   w.runs = [R('lint', 'completed', 'failure'), R('build', 'completed', 'success')];
+  assert.deepEqual([(await collectAt(fx, w, 3)).code], ['ci_failed'], 'R0-S: a red check outside the configured set still fails the head');
+  w.runs = [R('lint', 'completed', 'skipped'), R('build', 'completed', 'success')];
   const p = await collectAt(fx, w, 3);
   assert.deepEqual([p.state, p.required, p.required_source], ['PASS', ['build'], 'config']);
   assert.equal(complete(fx).out.allow, true);

@@ -14,7 +14,8 @@ export const STDOUT_CAP = 32 * 1024 * 1024;
 
 /**
  * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
- * JSON `{file, args, shell}` plus, in durable mode, `{promptFile, outFile, envelopeFile, attemptId}`.
+ * JSON `{file, args, shell}` plus, in durable mode, `{promptFile, outFile, envelopeFile, attemptId}` and the
+ * optional `digestFiles` (paths whose sha256 the envelope records as `file_digests` at the provider's exit).
  * It waits for the release byte; stdin closing first, or a wrong first byte, exits 125 without
  * running the worker. Then it spawns the provider in its own process group (inherited).
  * - Carrier mode: forwards the rest of stdin, inherits stdout/stderr and mirrors the provider's
@@ -71,6 +72,9 @@ process.stdin.once('data', (chunk) => {
     for (const t of sm.timers) { clearTimeout(t); clearInterval(t); }
     try { if (sm.ps) sm.ps.kill('SIGKILL'); } catch {}
   };
+  // Optional (the engine's reviewer dispatch only): the sha256 of each named output file at the provider's exit, written
+  // into the envelope before anything else can touch the files; the engine compares them at collection.
+  const digests = () => Object.fromEntries(spec.digestFiles.map((f) => { try { return [f, 'sha256:' + require('node:crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex')]; } catch { return [f, 'missing']; } }));
   const envelope = (code, signal, error) => {
     stopSampler();
     fs.writeFileSync(spec.outFile, Buffer.concat(out), { mode: 0o600 });
@@ -79,7 +83,7 @@ process.stdin.once('data', (chunk) => {
     fs.writeSync(fd, JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
       exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString(),
       peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n,
-      ...(size > ${STDOUT_CAP} ? { truncated: true, stdout_bytes: size } : {}) }));
+      ...(size > ${STDOUT_CAP} ? { truncated: true, stdout_bytes: size } : {}), ...(Array.isArray(spec.digestFiles) ? { file_digests: digests() } : {}) }));
     fs.fsyncSync(fd); fs.closeSync(fd);
     fs.renameSync(tmp, spec.envelopeFile);
     process.exit(code === 0 ? 0 : 1);
@@ -117,7 +121,7 @@ process.stdin.once('data', (chunk) => {
 });
 `;
 
-const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId', 'digestFiles'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
 /** Arguments that run the launcher for a resolved provider spawn spec (durable mode when `spec.envelopeFile` is set). */

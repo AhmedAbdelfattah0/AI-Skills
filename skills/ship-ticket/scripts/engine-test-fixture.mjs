@@ -12,6 +12,8 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSpec } from './provider-env.mjs';
 import { ADMIT_CLI, admitRun } from './engine-admit.test-helper.mjs';
+import { REVIEW_CLI, installRelays } from './engine-review.test-helper.mjs';
+import { relaxedPolicy, policyLine } from './engine-dag.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -113,9 +115,15 @@ export function warmFakeClaude(bin, env) {
  * commit: make an initial commit so candidate ids (base HEAD) are computable.
  * startAt: the START timestamp (default 2026-11-05, before the security policy cutoff).
  * narrativeExtra: text appended to the approved narrative (e.g. a plan §3a security block).
+ * Review policy (R0-S A4/A5): STRICT by default, as in production: `fx.gate('review', input)` first runs each slot through an
+ * engine dispatch of a fake relay that emits that slot's content (engine-review.test-helper.mjs), so the gate judges the
+ * collected output. A suite that pins the pre-E7 gate with hand-written JSON passes `config.reviewProvenance: 'unbound'`
+ * (the approved opt-out); any relaxed assurance setting gets its approved policy line in the narrative unless
+ * `approvePolicy: false` (with bind 'plan' only: a DAG_BOUND binding never approves it).
  */
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
-  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '', admit = true } = {}) {
+  behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '', admit = true,
+  approvePolicy = true } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, 'repo');
@@ -138,9 +146,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     schema: 'ship-ticket-engine-dag-v1',
     config: { provider: 'claude', modelMap: {}, permissionMode: 'acceptEdits', billing: 'subscription', width: 2,
       memoryBudgetMb: 4096, timeoutMs: 10000, budget: null, candidateExclusions: ['.specs/plans/T-1.md', 'session-log.md'],
-      // P0 E7: these fixtures submit hand-written review JSON, so they carry the owner opt-out of receipt-bound review
-      // (the pre-E7 gate); run-engine-review-dispatch.test.mjs drops it to test the default ('engine').
-      testCommands: {}, base: commit ? 'HEAD' : 'main', reviewProvenance: 'unbound', ...config },
+      testCommands: {}, base: commit ? 'HEAD' : 'main', ...config },
     nodes: nodes.map(n => ({ deps: [], reads: [], writes: [], othersOwned: [], resources: [], risk: [], complexity: 'low',
       modelTier: 'inherit', estimatedMemoryMb: 64, promptFile: promptFor(n.id), phase: 'BUILD', role: 'builder',
       evidence: [], redSpecs: [], ...n })),
@@ -151,7 +157,9 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const dagDigest = sha(dagText);
   const dash = (d) => (digestForm === 'dash' ? d.replace(/^sha256:/, 'sha256-') : d);
 
-  const narrative = `# Plan T-1\n\nApproved narrative.\n\n${bind === 'plan' ? `Execution DAG digest: ${dash(dagDigest)}\n\n` : ''}${narrativeExtra}`;
+  const relaxed = relaxedPolicy(dag.config);
+  const policy = approvePolicy && bind === 'plan' && Object.keys(relaxed).length ? `${policyLine(relaxed)}\n\n` : '';
+  const narrative = `# Plan T-1\n\nApproved narrative.\n\n${bind === 'plan' ? `Execution DAG digest: ${dash(dagDigest)}\n\n` : ''}${policy}${narrativeExtra}`;
   const skeleton = `${narrative}${BEGIN}\n${END}\n`;
   const events = [{ run_id: 'run-1', event: 'START', timestamp: startAt, approved_plan_digest: dash(narrativeDigest(skeleton)) }];
   if (bind === 'dag_bound') events.push({ run_id: 'run-1', event: 'DAG_BOUND', dag_digest: dash(dagDigest) });
@@ -164,11 +172,32 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     assert.equal(g.status, 0, g.stderr);
   }
 
+  // Fake reviewer relays under the fixture's own relay home (never $HOME: the engine resolves the OS account home; tests pass ctx.relayHome).
+  const relayHome = join(root, 'relay-home');
+  installRelays(root, relayHome);
+  const strictReviews = (dag.config.reviewProvenance ?? 'engine') === 'engine';
   let inputSeq = 0;
   const fx = {
-    root, repo, dagFile, dagDigest, planFile, env, warmedUp,
+    root, repo, dagFile, dagDigest, planFile, env, warmedUp, relayHome, strictReviews,
     ctx: (extra = {}) => ({ repoRoot: repo, ticket: 'T-1', runId: 'run-1', dagFile, env, verifySubscription: () => true,
-      handleSignals: false, ...extra }),
+      handleSignals: false, relayHome, ...extra }),
+    /** `review-dispatch --role --candidate` IN PROCESS with the fixture's relay home (a CLI dispatch would resolve the real home). */
+    dispatch: (role, candidate = fx.candidate(), { runId = 'run-1' } = {}) => {
+      const args = join(root, `dispatch-${++inputSeq}.json`);
+      writeFileSync(args, JSON.stringify({ mode: 'dispatch', repoRoot: repo, ticket: 'T-1', runId, relayHome, role, candidate }));
+      const r = spawnSync(process.execPath, [REVIEW_CLI, args], { encoding: 'utf8', env, timeout: 120000 });
+      let out = null;
+      try { out = JSON.parse(r.stdout); } catch { /* not JSON */ }
+      return { status: r.status, out, stdout: r.stdout, stderr: r.stderr };
+    },
+    /** Strict policy: `input` with each review slot replaced by the engine-collected output of the same content (see above). */
+    engineReview: (input, { runId = 'run-1' } = {}) => {
+      const args = join(root, `strict-review-${++inputSeq}.json`);
+      writeFileSync(args, JSON.stringify({ repoRoot: repo, ticket: 'T-1', runId, relayHome, root, input }));
+      const r = spawnSync(process.execPath, [REVIEW_CLI, args], { encoding: 'utf8', env, timeout: 120000 });
+      assert.equal(r.status, 0, `strict review: ${r.stderr}`);
+      return JSON.parse(r.stdout);
+    },
     stateFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'),
     lockFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.lock'),
     runLog: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.jsonl'),
@@ -197,6 +226,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     /** `run-engine.mjs gate <kind> --input <file>` with `input` written to a temp file. */
     gate: (kind, input, opts) => {
       const file = join(root, `gate-input-${++inputSeq}.json`);
+      if (kind === 'review' && strictReviews && input && typeof input === 'object' && !opts?.raw && existsSync(fx.stateFile())) input = fx.engineReview(input, opts).input;
       writeFileSync(file, typeof input === 'string' ? input : JSON.stringify(input));
       return fx.cli(`gate ${kind}`, { input: file }, opts);
     },
@@ -216,6 +246,16 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   };
   return fx;
 }
+
+/**
+ * The fixture under the owner-approved opt-out `config.reviewProvenance: 'unbound'` (its policy line is in the approved
+ * narrative). For the suites that pin gate.mjs's review semantics with hand-written review JSON (identities, routes, chain
+ * rules, the golden): the provenance prefilter they bypass is covered under the strict default by run-engine-review-dispatch,
+ * run-engine-r0s and the enroll, CI, freshness, next and git-guard suites. Nothing here is the production policy.
+ */
+export const unboundFixture = (t, opts = {}) => (opts.bind && opts.bind !== 'plan'
+  ? fixture(t, opts) // a DAG_BOUND (or no) binding can never approve the opt-out: those binding tests run the strict default
+  : fixture(t, { ...opts, config: { reviewProvenance: 'unbound', ...(opts.config ?? {}) } }));
 
 export function spawnSpy() {
   const calls = [];
@@ -270,20 +310,21 @@ export const confirmReview = (rx, candidate) => ({ review_execution: rx, kind: '
 export const admittedInit = (initFn) => async (ctx, ...rest) => { const out = await initFn(ctx, ...rest); await admitRun(ctx); return out; };
 
 /**
- * The state without the keys P0 E1/E4 added (enrollment, contexts, ship_ready.merge_base), E3's review_bindings, and
- * E7's review_dispatches and the fixture's config.reviewProvenance 'unbound': the golden pins the engine behaviour
+ * The state without the keys P0 E1/E4 added (enrollment, contexts, ship_ready.merge_base), E3's review_bindings,
+ * E7's review_dispatches, R0-S's relay_pins and freeze.merge_base, and config.reviewProvenance 'unbound': the golden pins the engine behaviour
  * from before enrollment; run-engine-enroll.test.mjs and run-engine-review-dispatch.test.mjs cover the additions.
  */
 export function preEnrollmentState(S) {
-  const { enrollment: _e, contexts: _c, publish_intent: _p, review_bindings: _b, review_dispatches: _d, ...rest } = S;
+  const { enrollment: _e, contexts: _c, publish_intent: _p, review_bindings: _b, review_dispatches: _d, relay_pins: _rp, ...rest } = S;
+  if (rest.freeze?.merge_base !== undefined) { const { merge_base: _fm, ...fr } = rest.freeze; rest.freeze = fr; }
   if (rest.ship_ready) { const { merge_base: _m, ...sr } = rest.ship_ready; rest.ship_ready = sr; }
   if (rest.config?.reviewProvenance === 'unbound') { const { reviewProvenance: _r, ...config } = rest.config; rest.config = config; }
   return rest;
 }
 
-/** A status output without the keys P0 E2-min and E3 added (disposition, next_action, stages, review_freshness): the goldens pin the view from before. */
+/** A status output without the keys P0 E2-min, E3 and R0-S added (disposition, next_action, stages, review_freshness, stop, assurance): the goldens pin the view from before. */
 export function preNextStatus(out) {
   if (!out || typeof out !== 'object') return out;
-  const { disposition: _d, next_action: _n, stages: _s, review_freshness: _f, ...rest } = out;
+  const { disposition: _d, next_action: _n, stages: _s, review_freshness: _f, stop: _st, assurance: _a, ...rest } = out;
   return rest;
 }
