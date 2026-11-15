@@ -42,7 +42,7 @@ import { gateReview } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
-import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath, preEnrollmentState } from './engine-test-fixture.mjs';
+import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath, preEnrollmentState, preNextStatus } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const J = JSON.stringify;
@@ -284,7 +284,7 @@ function goldenRun(t, config) {
     behaviour: { a: { write: { 'src/a.txt': 'a1' } }, b: { write: { 'src/b.txt': 'b1' } }, c: { write: { 'src/c.txt': 'c1' } },
       fix: { write: { 'src/a.txt': 'fixed' } } } });
   const outs = [];
-  const step = (name, r) => { outs.push({ name, status: r.status, out: r.out }); return r; };
+  const step = (name, r) => { outs.push({ name, status: r.status, out: name.startsWith('status') ? preNextStatus(r.out) : r.out }); return r; };
   step('init', fx.cli('init', { dag: fx.dagFile }));
   step('drive-1', fx.cli('drive'));
   step('status-1', fx.cli('status'));

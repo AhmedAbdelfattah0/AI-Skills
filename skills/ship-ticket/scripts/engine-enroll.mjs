@@ -161,7 +161,7 @@ export function admission(S, stage, skillDir = SKILL_DIR) {
 }
 
 /** Why the recorded SHIP_READY no longer holds in state terms ([] when it does). */
-function supersededBy(S) {
+export function supersededBy(S) {
   const last = (S.review_chain ?? []).at(-1), c = S.ship_ready?.candidate_id;
   return [
     !(last && ['original', 'confirmation'].includes(last.kind) && last.outcome === 'PASS' && last.candidate_id === c) && 'the last review is not a PASS of the ship-ready candidate',

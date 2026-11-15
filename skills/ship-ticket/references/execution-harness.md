@@ -305,7 +305,8 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
 
 ```bash
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs init   --repo <R> --ticket <T> --run-id <ID> --dag /abs/dag.json
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # the only thing the orchestrator reads
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs next   --repo <R> --ticket <T> --run-id <ID>   # after every tool or agent return: execute its next_action
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs status --repo <R> --ticket <T> --run-id <ID>   # read-only: the same derivation, nothing collected
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs drive  --repo <R> --ticket <T> --run-id <ID> [--until <node>]
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs resume --repo <R> --ticket <T> --run-id <ID>
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs mark   --repo <R> --ticket <T> --run-id <ID> --node <id> --transition 'failed->pending' --reason <text>
@@ -347,7 +348,52 @@ are refused, never dropped.
   `evidence`, `redSpecs`, and the opt-in `unit`, `acceptance`, `checks` (see [units.md](units.md)).
 - `acceptance` and `config.acceptanceIds` are legal on a DAG without units; [units.md](units.md) applies only when a node has `unit`.
 
-`status` prints the compact `ship-ticket-engine-status-v1` view, including
+**`next` is the supported path** (`engine-next.mjs`). It derives one disposition per
+stage from existing records: `APPROVAL`, `ENROLL`, `BUILD`, `REVIEW`, `REPAIR`,
+`CONFIRMATION`, `SHIP_READY`, `PUBLISH` and `CI`. Each stage is `READY`,
+`RUNNING`, `WAITING`, `BLOCKED`, `NEEDS_APPROVAL`, `COMPLETED` or `FAILED`. It
+returns exactly one `next_action` `{stage, action, reason, owner, disposition}`,
+taken from the first stage that is not `COMPLETED`. Later stages are `BLOCKED`
+`prerequisite_open`. `owner` is `orchestrator` (you run it), `engine` (an engine
+command: `drive`, `resume`) or `human` (only the owner continues). Rules:
+
+- Owed work is `READY`: a review or second opinion with no dispatch, the repair,
+  the confirmation, `gate ship-ready`, the commit and `publish`. A review stale or
+  terminal under the gate's own rules (a new original needs a trusted `RETRY`) is
+  `NEEDS_APPROVAL` `owner_retry`. Execute `READY` and `RUNNING`/`WAITING`
+  (`wait`) actions, then run `next` again. Stop only on `NEEDS_APPROVAL`,
+  `BLOCKED`, `COMPLETED` or `FAILED` (exit 2 for the first, second and fourth).
+- Under the run lock, `next` first collects finished background work with
+  `resume`'s own reconcile: a worker whose envelope is on disk is recorded, never
+  dispatched again (the launch protocol refuses a second writer), and `collected`
+  lists it. `next` itself dispatches nothing. While another engine command holds
+  the lock, a `READY` stage is `RUNNING` (`wait`).
+- An engine attempt with no envelope is `WAITING` with its attempt id, `identity`,
+  `started_at`, `marker` (the envelope path) and `deadline`
+  (`config.timeoutMs` + 60 s). Past the deadline it is `BLOCKED`
+  `attempt_overdue` (`recover_attempt`: confirm its process group is gone, then
+  `resume`). Nothing is killed.
+- Review dispatches are DETECTED, not authority. They are the `run-log.mjs`
+  `primary_review`, `optional_review` and `review_confirmation` starts of the
+  candidate under review; the `--carrier-result` path is the marker. A marker on
+  disk is `collect_review` (`run-log end --carrier-result`), with or without a
+  notification. Once every role is collected, the action is `gate_review`. The
+  deadline is the REVIEW phase ceiling (default 20 min); past it the stage is
+  `BLOCKED` `review_overdue`. Rows of another candidate are ignored. Without the
+  rows, `next` keeps offering `dispatch_review`. A refused gate after collection
+  is `BLOCKED` with the gate's code. Acceptance stays with `gate review`.
+- An un-enrolled run is `ENROLL` `BLOCKED` `not_enrolled`
+  (`diagnostic: NEEDS_ENROLLMENT`, action `enroll`): nothing advances.
+- `PUBLISH` reads `authorize publish` (any deny is `BLOCKED` with its code).
+  `CI` reads `authorize complete`, so until slice E6 a published run stops at
+  `BLOCKED` `ci_evidence_unavailable`, never `COMPLETED`.
+- Judgment codes that only a human resolves (approval, authority, budget, billing)
+  are `NEEDS_APPROVAL`. Every other code is `BLOCKED`, and a stage no rule decides
+  is `BLOCKED` `underived` (fail closed).
+
+`status` prints the compact `ship-ticket-engine-status-v1` view plus `disposition`,
+`next_action` and `stages` (read-only and lock-free: it collects nothing),
+including
 `red_pending`, `budget` (`{ticket, phase, flags}` or null) and `telemetry_degraded`, and `truncated_outputs` only when an attempt's output passed the capture cap (below).
 
 **Approval binding.** `init` recomputes the plan narrative digest (the plan

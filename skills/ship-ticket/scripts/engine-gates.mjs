@@ -155,7 +155,7 @@ const CONFIRM_SECOND_OPINION = ['concurrency', 'security'];
  * write set overlaps a node labelled concurrency or security, else 'optional' (a supplied second
  * opinion is validated and counted, never ignored).
  */
-function confirmationPolicy(S, rx) {
+export function confirmationPolicy(S, rx) {
   const ws = S.review_chain.findLast(r => r.review_execution === rx && r.kind === 'repair')?.write_set ?? [];
   const risky = Object.values(S.nodes).some(n => (n.risk ?? []).some(l => CONFIRM_SECOND_OPINION.includes(l))
     && [...n.reads, ...n.writes].some(p => ws.some(q => overlap(p, q))));

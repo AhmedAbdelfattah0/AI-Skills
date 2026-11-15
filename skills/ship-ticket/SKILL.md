@@ -33,8 +33,15 @@ review finding, fallback notice or other progress report is never a reason to en
 the turn.
 
 **Continuation invariant:** after any non-terminal status message, immediately
-execute the recorded next action in the same turn. Resume automatically after a
-tool or delegated task returns. End the assistant turn only in one of these states:
+execute the recorded next action in the same turn. Once an engine run exists, the
+recorded next action is the engine's: after every tool or agent return, and before
+any turn end, run `run-engine.mjs next` and execute its `next_action`. Stop only
+when its disposition is `NEEDS_APPROVAL` (**WAIT_FOR_USER**), `BLOCKED` (resolve it
+if `owner` is `orchestrator`, else **WAIT_FOR_USER**), `FAILED` (**FAIL**) or
+`COMPLETED`. A `READY` stage is owed work, never a reason to end the turn. Until
+the engine records CI, a published run stops at `CI` `BLOCKED`
+(`ci_evidence_unavailable`): finish SHIP's CI and tracker steps in
+[references/ship.md](references/ship.md). End the assistant turn only in one of these states:
 
 | State | Meaning | End the turn? |
 |---|---|---|
@@ -194,8 +201,10 @@ table, and an in-flight worker is not one of them.
   If it doesn't, use the carrier's supported bounded wait inside the active turn,
   and declare recovery degraded.
 - **On re-invocation, validate before advancing.** This covers a watcher exit, a
-  host wake-up (date jump, `sleep` errors) or a user "status?". Read the markers
-  first. A marker only lets you *collect* the result. The phase advances only
+  host wake-up (date jump, `sleep` errors) or a user "status?". Run
+  `run-engine.mjs next` first: it collects finished engine work from disk and
+  returns `collect_review` for a review result file already on disk, with no
+  notification needed. A marker only lets you *collect* the result. The phase advances only
   after the substantive result passes its normal exit conditions: the REVIEW
   schema and PASS rules in [references/review.md](references/review.md), or the
   PROVE gate rules. A missing or invalid result uses that phase's bounded recovery
@@ -205,8 +214,12 @@ table, and an in-flight worker is not one of them.
   carrier/process status. Then verify cancellation, and keep REVIEW's deadline,
   recovery budget and reviewer-independence rules. The builder never takes over a
   review.
-- A reply of "still running" is valid only if a watcher or an active bounded
-  wait covers that item.
+- `WAITING` and `RUNNING` (`action: wait`) name the item, its start time, its
+  marker and its deadline. Wait for it with a bounded wait, or with a watcher the
+  host re-invokes you from, then run `next` again. Past the deadline `next`
+  returns `BLOCKED` with the recovery action. Record every review dispatch with
+  `run-log.mjs start ... --carrier-result <marker>` before launching the reviewer:
+  that row is the dispatch `next` sees.
 
 ## Invariants
 
@@ -438,8 +451,10 @@ Read the plan and Design Contract from disk before writing.
 - Reuse an existing ticket branch. If it contains unknown WIP commits, use
   **WAIT_FOR_USER** for the preserve-or-squash decision.
 - With Node available, drive BUILD and PROVE with `run-engine.mjs`: bind the
-  approved DAG at approval (`DAG_BOUND`), run `init` then `drive`, and read only
-  `status`. Record RED, review and ship-ready with `run-engine.mjs gate
+  approved DAG at approval (`DAG_BOUND`), run `init`, `enroll` and
+  `context --phase build`, then follow `run-engine.mjs next`. Its `drive`, `gate_*`,
+  `dispatch_review`, `collect_review`, `commit` and `publish` actions are the run.
+  Record RED, review and ship-ready with `run-engine.mjs gate
   red|review|ship-ready --repo <dir> --ticket <key> --run-id <id> --input <json-file>`
   rather than hand-run loops; a `gate review` FAIL enqueues its finding-bound repair,
   which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow
@@ -692,8 +707,9 @@ message look like completion.
 
 - Approved plan, no review result: recheck ticket ownership and resume the phase
   that stopped. Do not repeat the planning debate. When an engine state file
-  exists, run `run-engine.mjs resume`: it reconciles attempts, staleness and
-  pending events, and never starts a second writer.
+  exists, run `run-engine.mjs next`. It reconciles attempts, staleness and
+  pending events with `resume`'s own reconcile, never starts a second writer,
+  and names the one next action.
 - Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution with a new `review_execution` ID and predecessor under

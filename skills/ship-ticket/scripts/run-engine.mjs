@@ -11,7 +11,7 @@
  * is never dispatched. The API contract is the comment blocks at the top of run-engine.test.mjs
  * and run-engine-repair.test.mjs.
  *
- * CLI: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
+ * CLI: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id>
  *        [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
@@ -19,6 +19,8 @@
  *      run-engine.mjs enroll|context|authorize|publish ...: enrollment after init, trusted context delivery,
  *        stage authorization and the supported publish path (engine-enroll.mjs: lifecycle, admission). `drive`
  *        needs an admitted run and `gate` its phase context; a refused gate records no decision.
+ *      `status` and `next` print the stage dispositions and the one next_action (engine-next.mjs); `next` exits 2 on
+ *        BLOCKED, NEEDS_APPROVAL and FAILED.
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -36,7 +38,8 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun } from './engine-enroll.mjs';
+import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
+import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -197,7 +200,7 @@ function drift(E, { mutate = true } = {}) {
   return [];
 }
 
-/** Compact STATUS: the only thing the orchestrator reads. */
+/** Compact STATUS view (status adds the stage dispositions; the orchestrator follows `next`). */
 function view(E, transient = []) {
   const S = E.S;
   const failed = Object.entries(S.nodes).filter(([, n]) => n.state === 'failed')
@@ -321,12 +324,38 @@ export async function init(ctx) {
   }, { load: false });
 }
 
-/** Read-only STATUS (freeze drift is reported, nothing is written). */
+/**
+ * Stage dispositions and the next action (engine-next.mjs derive) from this command's view: the same
+ * judgments the view reports, plus the binding, the lock and the facts gather() reads from disk.
+ */
+async function deriveNext(E, transient, lock) {
+  const v = view(E, transient), S = E.S;
+  const work = Object.values(S.nodes).some(n => ['pending', 'stale'].includes(n.state)) || unitWork(E);
+  return derive(S, await gather(E, { unbound: verifyBinding(E), blockers: v.judgments, lock, redPending: v.red_pending, work,
+    unitReviewsPending: v.unit_reviews_pending ?? [], authorize: (stage) => authorizeStage({ ...E.ctx, stage }, readEngine) }));
+}
+
+/** Read-only STATUS (freeze drift is reported, nothing is written), with the stage dispositions and next action. */
 export async function status(ctx) {
   const E = open(ctx);
   E.load();
   reconcileReviews(E); // in memory only: status writes nothing
-  return view(E, drift(E, { mutate: false }));
+  const transient = drift(E, { mutate: false });
+  return { ...view(E, transient), ...(await deriveNext(E, transient, lockState(ctx.repoRoot, ctx.ticket))) };
+}
+
+/** resume's body, shared with `next`: deliver the outbox, reconcile attempts, clear spent judgments, mark staleness. */
+async function recoverRun(E) {
+  await deliver(E);
+  const live = await reconcile(E, 1000);
+  const cleared = clearSpent(E.S);
+  const transient = drift(E);
+  unitDrift(E);
+  reconcileReviews(E);
+  note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled',
+    ...(cleared.length ? { cleared_judgments: cleared } : {}) });
+  await E.commit();
+  return transient;
 }
 
 /** Reconcile attempts, the outbox, spent judgments and staleness after a crash or restart (refused when the binding drifted). */
@@ -334,17 +363,43 @@ export async function resume(ctx) {
   return locked(ctx, async (E) => {
     const unbound = verifyBinding(E);
     if (unbound.length) return view(E, unbound);
-    await deliver(E);
-    const live = await reconcile(E, 1000);
-    const cleared = clearSpent(E.S);
-    const transient = drift(E);
-    unitDrift(E);
-    reconcileReviews(E);
-    note(E.S, 'RESUME', { outcome: transient.length || E.S.judgments.length ? 'judgment' : live ? 'waiting' : 'reconciled',
-      ...(cleared.length ? { cleared_judgments: cleared } : {}) });
-    await E.commit();
-    return view(E, transient);
+    return view(E, await recoverRun(E));
   });
+}
+
+const NEXT_STOP = ['BLOCKED', 'NEEDS_APPROVAL', 'FAILED'];
+
+/**
+ * `next`: the supported path's one question (P0 E2-min). Under the run lock it first collects work that
+ * finished in the background with resume's own reconcile (recoverRun: an attempt whose envelope is on disk is
+ * recorded, never dispatched again; nothing is dispatched here), then derives the stage dispositions and the
+ * one next_action. While another engine command holds the lock it answers from a lock-free read (RUNNING).
+ * `collected` lists the attempts it settled.
+ */
+export async function next(ctx) {
+  const head = { schema: NEXT_SCHEMA, ticket: ctx.ticket, run_id: ctx.runId };
+  try {
+    return await locked(ctx, async (E) => {
+      const unbound = verifyBinding(E);
+      let collected = [];
+      if (!unbound.length && (E.S.outbox.length || E.S.attempts.some(a => LIVE.includes(a.status)))) {
+        const before = new Map(E.S.attempts.map(a => [a.attempt_id, a.status]));
+        await recoverRun(E);
+        collected = E.S.attempts.filter(a => LIVE.includes(before.get(a.attempt_id)) && !LIVE.includes(a.status))
+          .map(a => ({ attempt_id: a.attempt_id, kind: a.kind, node: a.node, status: a.status }));
+      }
+      reconcileReviews(E);
+      return { ...head, ...(await deriveNext(E, drift(E, { mutate: false }), 'mine')), collected };
+    });
+  } catch (e) {
+    if (e.code === 'no_state') return { ...head, disposition: 'BLOCKED', stages: {}, collected: [],
+      next_action: { stage: 'ENROLL', action: 'init', reason: 'no_state', owner: 'orchestrator', disposition: 'BLOCKED', reasons: [e.message] } };
+    if (e.code !== 'lock_held') throw e;
+    const E = open(ctx);
+    E.load();
+    reconcileReviews(E);
+    return { ...head, ...(await deriveNext(E, drift(E, { mutate: false }), 'held')), collected: [] };
+  }
 }
 
 /** Re-verify the binding, reconcile, then dispatch ready nodes and authorized repairs until done or a judgment point. */
@@ -658,10 +713,10 @@ async function main(argv) {
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));
-  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
+  if (unknown.length || !flags.repo || !flags.ticket || !flags['run-id'] || (cmd === 'gate') !== Boolean(flags.input)) throw new Error('Usage: run-engine.mjs init|status|next|drive|resume|mark|clear-unit|rebind|archive --repo <dir> --ticket <key> --run-id <id> [--dag <file>] [--until <node>] [--node <id> --transition <t> --reason <text>] [--unit <unit>]\n       run-engine.mjs rebind --repo <dir> --ticket <key> --run-id <id> --reason <text>\n       run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]');
   const ctx = { repoRoot: resolve(flags.repo), ticket: flags.ticket, runId: flags['run-id'],
     ...(flags.dag ? { dagFile: resolve(flags.dag) } : {}), ...(flags.until ? { until: flags.until } : {}) };
-  const commands = { init, status, drive, resume,
+  const commands = { init, status, drive, resume, next,
     mark: () => mark({ ...ctx, node: flags.node, transition: flags.transition, reason: flags.reason }),
     'clear-unit': () => clearUnitCmd({ ...ctx, unit: flags.unit }),
     rebind: () => rebind({ ...ctx, reason: flags.reason }),
@@ -682,6 +737,6 @@ if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) 
 } else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true))) process.exitCode = 2;
+    if (r?.outcome === 'judgment' || (r?.gate && (!r.ok || r.judgment_point === true)) || (r?.schema === NEXT_SCHEMA && NEXT_STOP.includes(r.disposition))) process.exitCode = 2;
   }).catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 }
