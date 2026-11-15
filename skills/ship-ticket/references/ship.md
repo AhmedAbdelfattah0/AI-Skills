@@ -106,7 +106,8 @@ The commit contains:
 - documentation changes;
 - the ticket-keyed session-log entry.
 
-Create one commit and push once. Do not create a WIP commit or amend later merely
+Create one commit and push once, through `run-engine.mjs publish` (the only
+supported push and PR path; it pushes only what `authorize publish` allows). Do not create a WIP commit or amend later merely
 to record external results.
 
 Commit, push, PR, CI and tracker results do not exist before the commit. Report

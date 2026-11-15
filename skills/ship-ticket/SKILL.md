@@ -70,7 +70,7 @@ The first action of the workflow, right after creating the run ID, is
 telemetry and is never skipped. Start every phase with `run-engine.mjs context
 --phase <phase>` (UNDERSTAND and PLAN before entering native Plan Mode): it prints
 the phase's mandatory references after verifying their exact bytes. BUILD and SHIP
-go through the engine: `authorize --stage build` before BUILD, and `publish` is
+go through the engine: `authorize --stage build` after `init` and before `drive`, and `publish` is
 the only supported push and PR path. The manual flow is allowed only for read-only
 planning and diagnostics. Any degraded shipping needs `DEGRADED_APPROVED`: record
 `degrade --reason`, use **WAIT_FOR_USER** for the owner's decision, then record

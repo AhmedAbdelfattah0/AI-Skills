@@ -15,6 +15,7 @@ import { writeFileSync, readFileSync, appendFileSync, unlinkSync, rmSync } from 
 import { join } from 'node:path';
 import { POSIX } from './engine-test-fixture.mjs';
 import { enrollFixture, skillCopy } from './engine-enroll.test-helper.mjs';
+import { failReview } from './engine-test-fixture.mjs';
 import { buildManifest, manifestText, verifySkill } from './context-manifest.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -294,4 +295,16 @@ test('forged records: engine-log and RUN-STATE lines are inert, a malformed ledg
   L.events = L.events.filter(e => e.type !== 'CONTEXT_DELIVERED').concat([{ ...ctx, seq: 99, manifest_digest: 'sha256:' + '0'.repeat(64) }]);
   writeFileSync(fx.ledgerFile(), JSON.stringify(L));
   denied(fx.cli('authorize', { stage: 'publish' }), 'context_stale');
+});
+
+test('a SHIP_READY superseded by a later FAIL review of the same candidate no longer authorizes publish', { skip: WIN_SKIP }, (t) => {
+  const fx = shippable(t);
+  allowed(fx.cli('authorize', { stage: 'publish' }));
+  fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
+  fx.commitAll('retry line'); // the plan file is excluded from the candidate, so the candidate is unchanged
+  const fail = fx.gate('review', failReview('rx-2', fx.candidate(), 'src/a.txt', fx.prompt('fix')));
+  assert.equal(fail.status, 0, fail.stdout + fail.stderr);
+  denied(fx.cli('authorize', { stage: 'publish' }), 'ship_ready_superseded');
+  assert.equal(fx.cli('publish', {}).status, 2);
+  assert.equal(fx.remoteHead(), null);
 });

@@ -248,6 +248,17 @@ export async function authorize(ctx, readEngine) {
   if (ctx.stage === 'complete') return complete();
   const S = eng.S;
   if (!S.ship_ready?.candidate_id) return deny('ship_ready_missing', ['no engine SHIP_READY for this run; run gate ship-ready']);
+  // SHIP_READY is a past decision: the state conjuncts gateShipReady judged must still hold now
+  // (a later review, repair, judgment or attempt supersedes it even on the same candidate).
+  const last = (S.review_chain ?? []).at(-1);
+  const superseded = [
+    !(last && ['original', 'confirmation'].includes(last.kind) && last.outcome === 'PASS' && last.candidate_id === S.ship_ready.candidate_id) && 'the last review is not a PASS of the ship-ready candidate',
+    (S.repairs ?? []).some(r => ['pending', 'running'].includes(r.state)) && 'a repair is open',
+    (S.judgments ?? []).length > 0 && 'judgments are unresolved',
+    (S.attempts ?? []).some(a => LIVE.includes(a.status)) && 'attempts may still run',
+    S.local_proof?.candidate_id !== S.ship_ready.candidate_id && 'the local proof is not of the ship-ready candidate',
+  ].filter(Boolean);
+  if (superseded.length) return deny('ship_ready_superseded', superseded);
   const baseRef = S.config?.base ?? 'HEAD';
   if (baseRef === 'HEAD') return deny('candidate_base_head', ['config.base is HEAD: after the commit the merge base moves and the candidate cannot be recomputed; bind the target base branch in the DAG']);
   const b = branchCheck();

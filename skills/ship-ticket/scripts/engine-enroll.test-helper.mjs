@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fixture, passReview, gitPath } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 export const SKILL = fileURLToPath(new URL('..', import.meta.url));
 
@@ -20,7 +21,7 @@ echo https://example.invalid/pr/1
 `;
 
 export function enrollFixture(t, { base = 'ship-base', branch = 'T-1-work', config = {} } = {}) {
-  const fx = fixture(t, { commit: true, config: { base, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
+  const fx = fixture(t, { commit: true, config: { base, timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } }, ...config } });
   const home = join(fx.root, 'home');
   mkdirSync(home);
   writeFileSync(join(home, '.gitconfig'), '');
