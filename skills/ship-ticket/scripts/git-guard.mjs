@@ -5,22 +5,29 @@
  * `install --repo <dir> [--pattern <regex>]` writes a pre-push hook into THAT repository's hooks
  * directory (`git rev-parse --git-path hooks`: .git/hooks, or the repository's own core.hooksPath).
  * It never touches global or system configuration and refuses a core.hooksPath that comes from
- * outside the repository's local config (a shared hooks directory). An existing pre-push hook is
- * moved to `pre-push.ship-ticket-backup`, still runs first on every push, and is restored by
- * `uninstall`. In a linked worktree the hooks directory is the repository's common one, so the guard
- * covers every work tree of the repository; each push is judged against its own work tree's engine state. The pattern (default TICKET_PATTERN) is stored in the repository's LOCAL config key
- * `shipTicket.guardPattern`; the ticket key is its first capture group, else the whole match.
+ * outside the repository's local config (a shared hooks directory), and a hooks directory inside the
+ * work tree unless git ignores it (a tracked hook would dirty the reviewed candidate: `.githooks`,
+ * `.husky`; husky's own `.husky/_` is ignored). An existing pre-push hook is moved to
+ * `pre-push.ship-ticket-backup`, still runs first on every push (a sh/bash hook is sourced with $0 =
+ * the hooks/pre-push path, so hooks that derive paths from $0, like husky's, behave as before), and is
+ * restored by `uninstall`. In a linked worktree the hooks directory is the repository's common one,
+ * so the guard covers every work tree; each push is judged by its own work tree's engine state.
  *
- * On push, for every ref whose remote or local branch matches the pattern, the hook runs
- * `authorize publish` for that ticket's engine run in this work tree (engine-enroll.mjs) and requires the
- * pushed sha to be the authorized HEAD. No engine state, an unreadable one, a deny, or any
- * error blocks the push (fail closed). Other branches, tags and branch deletions pass untouched.
+ * A pushed branch is guarded when it names, as a whole token, a ticket that has engine state in this
+ * work tree, or when it matches the pattern (default TICKET_PATTERN, unanchored: `T-1-x`,
+ * `feat/SCRUM-140-x`, `feature/AB-1`, `AIS-BENCH-1-x`; LOCAL config key `shipTicket.guardPattern`;
+ * the ticket is its first capture group, else the whole match). For a guarded branch the hook runs
+ * `authorize publish` for that ticket's run (engine-enroll.mjs) and requires the pushed sha to be the
+ * authorized HEAD. No engine state, an unreadable one, a deny, or any error blocks the push (fail
+ * closed). Other branches, tags and branch deletions pass. If node or this script has moved, the hook
+ * blocks only branches matching the default pattern and says how to reinstall.
  *
  * This is a GUARDRAIL, not a boundary. Bypasses, recorded as expected by git-guard.test.mjs:
  * `git push --no-verify`, `git -c core.hooksPath=/dev/null push`, the GIT_CONFIG_COUNT/KEY/VALUE
  * environment override of core.hooksPath, unsetting a repository core.hooksPath the hook was
- * installed into, editing or deleting the hook, and pushing with any tool that is not git (gh api,
- * a second clone). A push wrapped in a script, `sh -c`/`bash -c` or node execSync still runs the
+ * installed into, editing or deleting the hook, `git push origin HEAD:refs/heads/<other-name>` (a
+ * detached or renamed source to a branch that names no ticket), and pushing with any tool that is not
+ * git (gh api, a second clone). A push wrapped in a script, `sh -c`/`bash -c` or node execSync still runs the
  * hook and is blocked.
  *
  * CLI: git-guard.mjs install|uninstall|status --repo <dir> [--pattern <regex>]
@@ -31,9 +38,13 @@ import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, chmodS
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readdirSync } from 'node:fs';
 import { isEntrypoint } from './harness.mjs';
+import { branchNames } from './engine-enroll.mjs';
 
-export const TICKET_PATTERN = '^[A-Za-z][A-Za-z0-9]*-[0-9]+';
+export const TICKET_PATTERN = '(?:^|/)([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*?-[0-9]+)';
+/** The POSIX ERE the hook falls back to when node or this script is missing (same shape, presence only). */
+const FALLBACK_ERE = '(^|/)[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)*-[0-9]+';
 export const MARKER = '# ship-ticket git-guard v1 (managed by git-guard.mjs; remove with git-guard.mjs uninstall)';
 export const BACKUP = 'pre-push.ship-ticket-backup';
 const CONFIG_KEY = 'shipTicket.guardPattern';
@@ -56,6 +67,8 @@ export function hooksDir(repo, env = process.env) {
   const dir = resolve(top, out(git(repo, ['rev-parse', '--git-path', 'hooks'], env)) ?? '.git/hooks');
   const common = resolve(top, out(git(repo, ['rev-parse', '--git-common-dir'], env)) ?? '.git');
   if (!inside(dir, top) && !inside(dir, common)) throw Object.assign(new Error(`hooks directory ${dir} is outside the repository`), { code: 'hooks_path_shared' });
+  if (inside(dir, top) && !inside(dir, common) && git(repo, ['check-ignore', '-q', relative(top, join(dir, 'pre-push'))], env).status !== 0)
+    throw Object.assign(new Error(`hooks directory ${relative(top, dir)} is inside the work tree and not ignored: the hook would dirty the reviewed candidate; ignore it or use .git/hooks`), { code: 'hooks_dir_in_worktree' });
   return { top, dir, hook: join(dir, 'pre-push'), backup: join(dir, BACKUP) };
 }
 
@@ -67,10 +80,26 @@ export function hookScript(nodePath = process.execPath, guard = SELF) {
 ${MARKER}
 input=$(cat)
 dir=$(dirname "$0")
-if [ -x "$dir/${BACKUP}" ]; then
-  printf '%s\\n' "$input" | "$dir/${BACKUP}" "$@" || exit $?
+backup="$dir/${BACKUP}"
+if [ -x "$backup" ]; then
+  case "$(head -n 1 "$backup")" in
+    '#!/bin/sh'*|'#!/usr/bin/env sh'*) printf '%s\\n' "$input" | sh -c 'b=$1; shift; . "$b"' "$0" "$backup" "$@" || exit $? ;;
+    '#!/bin/bash'*|'#!/usr/bin/env bash'*) printf '%s\\n' "$input" | bash -c 'b=$1; shift; . "$b"' "$0" "$backup" "$@" || exit $? ;;
+    *) printf '%s\\n' "$input" | "$backup" "$@" || exit $? ;;
+  esac
 fi
-printf '%s\\n' "$input" | ${shq(nodePath)} ${shq(guard)} check --repo "$(pwd)" --remote "$1"
+node=${shq(nodePath)}
+guard=${shq(guard)}
+if [ ! -x "$node" ] || [ ! -f "$guard" ]; then
+  echo "git-guard: $guard or $node is missing; run git-guard.mjs install again (or uninstall). Ticket-like branches are blocked meanwhile." >&2
+  printf '%s\\n' "$input" | while read -r lref lsha rref rsha; do
+    for r in "$lref" "$rref"; do
+      case "$r" in refs/heads/*) if printf '%s\\n' "\${r#refs/heads/}" | grep -Eq '${FALLBACK_ERE}'; then echo "git-guard: push of $rref blocked (fail closed)" >&2; exit 1; fi ;; esac
+    done
+  done || exit 1
+  exit 0
+fi
+printf '%s\\n' "$input" | "$node" "$guard" check --repo "$(pwd)" --remote "$1"
 `;
 }
 
@@ -122,28 +151,35 @@ function latestRun(repo, ticket) {
   try { const id = JSON.parse(readFileSync(file, 'utf8')).run_id; return typeof id === 'string' && SAFE_ID.test(id) ? id : null; } catch { return null; }
 }
 
+/** Tickets with engine state in this work tree. */
+function stateTickets(repo) {
+  const dir = resolve(repo, out(git(repo, ['rev-parse', '--git-path', 'ai-skills/ship-ticket'])) ?? '');
+  try { return readdirSync(dir).filter(f => f.endsWith('.state.json')).map(f => f.slice(0, -'.state.json'.length)).filter(t => SAFE_ID.test(t)); } catch { return []; }
+}
+
 /**
  * The hook: decide every pushed ref from git's stdin lines `<local ref> <local sha> <remote ref> <remote sha>`.
  * -> { ok, decisions: [{ ref, guarded, ticket?, allow, code, reason }] }
  */
-export async function check(repo, stdin, { authorizeFn } = {}) {
+export async function check(repo, stdin, { authorizeFn, remote } = {}) {
   const authorize = authorizeFn ?? (async (ctx) => {
     const [{ authorize: a }, { readEngine }] = await Promise.all([import('./engine-enroll.mjs'), import('./run-engine.mjs')]);
     return a(ctx, readEngine);
   });
-  const pattern = guardPattern(repo);
+  const pattern = guardPattern(repo), withState = stateTickets(repo);
   const decisions = [];
   for (const line of stdin.split('\n').map(l => l.trim()).filter(Boolean)) {
     const [localRef, localSha, remoteRef] = line.split(/\s+/);
     const branchOf = (r) => (r?.startsWith('refs/heads/') ? r.slice('refs/heads/'.length) : null);
-    const ticket = ticketOf(branchOf(remoteRef), pattern) ?? ticketOf(branchOf(localRef), pattern);
+    const branches = [branchOf(remoteRef), branchOf(localRef)].filter(Boolean);
+    const ticket = withState.find(t => branches.some(b => branchNames(b, t))) ?? branches.map(b => ticketOf(b, pattern)).find(Boolean) ?? null;
     if (!ticket) { decisions.push({ ref: remoteRef, guarded: false, allow: true, code: 'not_a_ticket_branch' }); continue; }
     if (ZERO.test(localSha ?? '')) { decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: 'branch_delete' }); continue; }
     const deny = (code, reason) => decisions.push({ ref: remoteRef, guarded: true, ticket, allow: false, code, reason });
     const runId = latestRun(repo, ticket);
     if (!runId) { deny('not_enrolled', `no readable engine run for ${ticket} in this work tree; ship through run-engine.mjs publish`); continue; }
     let a;
-    try { a = await authorize({ repoRoot: repo, ticket, runId, stage: 'publish' }); } catch (e) { deny('authorize_error', e.message); continue; }
+    try { a = await authorize({ repoRoot: repo, ticket, runId, stage: 'publish', ...(remote ? { remote } : {}) }); } catch (e) { deny('authorize_error', e.message); continue; }
     if (!a.allow) { deny(a.code, a.reasons?.[0] ?? ''); continue; }
     if (a.binding?.head !== localSha) { deny('push_not_head', `pushing ${localSha}, but ${a.binding?.head} (HEAD) is what was authorized`); continue; }
     decisions.push({ ref: remoteRef, guarded: true, ticket, allow: true, code: a.code });
@@ -163,7 +199,7 @@ async function main(argv) {
   const repo = resolve(flags.repo);
   try {
     if (cmd === 'check') {
-      const r = await check(repo, readFileSync(0, 'utf8'));
+      const r = await check(repo, readFileSync(0, 'utf8'), { remote: flags.remote });
       for (const d of r.decisions.filter(x => !x.allow)) process.stderr.write(`git-guard: push of ${d.ref} blocked (${d.ticket}): ${d.code}: ${d.reason}\n`);
       return r.ok ? 0 : 1;
     }

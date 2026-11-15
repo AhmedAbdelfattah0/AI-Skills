@@ -17,11 +17,14 @@
  * bootstrap and needs only the approved plan. status, resume, mark, rebind, archive and `context`
  * are not gated.
  *
- * Skill pin (enroll): in a git install the skill commit (`gitReader`), whose blobs no later
- * work-tree write can change; every delivery reads those blobs. In a copy install the manifest digest
- * at enrollment: a later delivery re-verifies the files on disk and refuses any change. Enrollment is
- * once per run, refused while an attempt may still run, and in a copy install refused once any
- * attempt has run (its files could be worker-written).
+ * Skill pin (enroll): ONLY references/ (through the context manifest) and the SKILL.md digest are
+ * pinned. In a git install the pin is the skill commit (`gitReader`): every delivery reads that
+ * commit's blobs, so a later work-tree edit of the skill changes nothing delivered. In a copy install
+ * the pin is the manifest digest: a later delivery re-verifies the files and refuses any change.
+ * Enrollment is once per run, refused while an attempt may still run, and in a copy install refused
+ * once any attempt has run. The engine's scripts are NOT pinned: they run from disk as installed.
+ * The trust anchor is state.json, which any process of the same user can write; and when the target
+ * repository is the skill repository itself, a worker can commit to and so rewrite the pinned source.
  *
  * No degraded or owner-approved bypass exists. The engine has no channel that proves a human said
  * something (START, RETRY and waivers are orchestrator-appended RUN-STATE lines, trusted against
@@ -54,6 +57,17 @@ const gitOut = (repo, args, env) => {
   return r.status === 0 ? r.stdout.trim() : null;
 };
 const refusal = (code, reason, lifecycle) => ({ ok: false, code, reasons: [reason], lifecycle });
+const NEW_RUN = 'operator path: start a new run (new run id, START, init, enroll)';
+
+/** Whether `branch` names `ticket` as a whole token (T-1 in T-1-work or feat/T-1, not in T-10-x); case-insensitive. */
+export function branchNames(branch, ticket) {
+  const b = String(branch ?? '').toUpperCase(), k = String(ticket).toUpperCase();
+  for (let i = b.indexOf(k); i >= 0; i = b.indexOf(k, i + 1)) {
+    const before = i === 0 ? '' : b[i - 1], after = b[i + k.length] ?? '';
+    if (!/[A-Z0-9]/.test(before) && !/[A-Z0-9]/.test(after)) return true;
+  }
+  return false;
+}
 
 /** The reader a new enrollment pins: the skill commit when the skill is committed in git, else its files. */
 export function currentReader(skillDir = SKILL_DIR) {
@@ -65,14 +79,22 @@ export function currentReader(skillDir = SKILL_DIR) {
 const pinnedReader = (en, skillDir) => (en.mode === 'git' ? gitReader(skillDir, en.skill_revision) ?? { mode: 'git', revision: en.skill_revision, missing: true } : fsReader(skillDir));
 
 /** Verify the skill exactly as enrolled (git: the pinned commit; copy: the files, against the enrolled manifest digest). */
+const pinCache = new Map(); // git pins are immutable commits: verify each once per process
 function pinnedSkill(en, skillDir) {
+  const key = en.mode === 'git' ? `${skillDir}\u0000${en.skill_revision}\u0000${en.manifest_digest}\u0000${en.skill_digest}` : null;
+  if (key && pinCache.has(key)) return pinCache.get(key);
   const reader = pinnedReader(en, skillDir);
   const v = verifySkill(skillDir, reader);
-  if (!v.ok) return v;
-  if (v.digest !== en.manifest_digest) return refusal('manifest_drift', `the skill manifest is ${v.digest}, the run enrolled ${en.manifest_digest}; start a new run`);
-  const skill = reader.read('SKILL.md');
-  if (!skill || sha256(skill) !== en.skill_digest) return refusal('skill_drift', 'SKILL.md is not the enrolled one; start a new run');
-  return { ...v, reader };
+  let out;
+  if (v.code === 'manifest_phases_changed') out = refusal('skill_drift', `the installed engine scripts expect other mandatory references than the skill this run enrolled (a skill update changed PHASE_REFS); ${NEW_RUN}`);
+  else if (!v.ok) out = v;
+  else if (v.digest !== en.manifest_digest) out = refusal('manifest_drift', `the skill manifest is ${v.digest}, the run enrolled ${en.manifest_digest}; ${NEW_RUN}`);
+  else {
+    const skill = reader.read('SKILL.md');
+    out = !skill || sha256(skill) !== en.skill_digest ? refusal('skill_drift', `SKILL.md is not the one this run enrolled (a skill update or edit); ${NEW_RUN}`) : { ...v, reader };
+  }
+  if (key && out.ok) pinCache.set(key, out);
+  return out;
 }
 
 const live = (S) => (S.attempts ?? []).filter(a => LIVE.includes(a.status)).map(a => a.attempt_id);
@@ -93,10 +115,10 @@ export function enrollIn(E, skillDir = SKILL_DIR) {
   const pin = { mode: reader.mode, skill_revision: reader.revision, skill_digest: sha256(skill), manifest_digest: v.digest };
   if (S.enrollment) {
     if (['mode', 'skill_revision', 'skill_digest', 'manifest_digest'].every(k => S.enrollment[k] === pin[k])) return { already: true, enrollment: S.enrollment };
-    throw coded('enrollment_conflict', `run ${S.run_id} is enrolled to ${S.enrollment.skill_revision ?? S.enrollment.manifest_digest}; a skill change mid-run needs a new run`);
+    throw coded('enrollment_conflict', `run ${S.run_id} is enrolled to ${S.enrollment.skill_revision ?? S.enrollment.manifest_digest}; a skill change mid-run is not re-pinned; ${NEW_RUN}`);
   }
   if (reader.mode === 'copy' && (S.attempts ?? []).length)
-    throw coded('enrollment_after_execution', 'a copy-installed skill cannot be pinned after attempts ran (its files could be worker-written); start a new run');
+    throw coded('enrollment_after_execution', `this run already executed ${S.attempts.length} attempt(s) without enrollment and the skill is a copy install, whose files those attempts could have written; ${NEW_RUN}`);
   S.enrollment = { run_id: S.run_id, ticket: S.ticket, repo: gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']),
     branch: gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']), head: gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']),
     ...pin, attempts_before: (S.attempts ?? []).length, at: new Date().toISOString() };
@@ -158,19 +180,6 @@ export function lifecycle(S, skillDir = SKILL_DIR) {
   return S.ship_ready?.candidate_id && !supersededBy(S).length ? 'evidence' : 'admitted';
 }
 
-/** Carrier dispatch boundary (carrier.mjs dispatch): the approval's run must be ADMITTED in its engine state. Throws on refusal. */
-export function verifyAdmission(repoRoot, approval) {
-  const file = io.gitPath(repoRoot, `ai-skills/ship-ticket/${approval.ticket}.state.json`);
-  if (!existsSync(file)) throw coded('not_enrolled', `no engine state for ${approval.ticket}: worker dispatch needs an initialized, enrolled and admitted run`);
-  let S;
-  try { S = JSON.parse(readFileSync(file, 'utf8')); } catch { throw coded('state_unreadable', `${file} is not JSON`); }
-  const runId = approval.run_id ?? approval.runId;
-  if (S.run_id !== runId) throw coded('run_mismatch', `engine state belongs to run ${S.run_id}, not ${runId}`);
-  const a = admission(S, 'build');
-  if (!a.ok) throw coded(a.code, a.reasons.join('; '));
-  return a;
-}
-
 /**
  * `authorize --stage build|publish|complete`: read-only and lock-free (the pre-push hook calls it
  * while `publish` pushes). `readEngine(ctx)` -> { S, unbound } | { code, reasons }.
@@ -193,11 +202,24 @@ export async function authorize(ctx, readEngine) {
     return deny(CI_PLACEHOLDER, ['CI evidence is not recorded by the engine yet (slice E6), so complete cannot be authorized'], 'publication');
   }
   if (!S.ship_ready?.candidate_id) return deny('ship_ready_missing', ['no engine SHIP_READY for this run; run gate ship-ready'], lifecycle(S));
+  if (!S.ship_ready.merge_base) return deny('ship_ready_regate', ['this SHIP_READY predates the recorded merge base (an engine update); run gate ship-ready again'], lifecycle(S));
   const superseded = supersededBy(S);
   if (superseded.length) return deny('ship_ready_superseded', superseded, lifecycle(S));
+  const top = gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']);
+  if (S.enrollment.repo && S.enrollment.repo !== top) return deny('enrollment_repo_mismatch', [`enrolled in ${S.enrollment.repo}, authorizing in ${top}`], 'evidence');
   const branch = gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (!branch) return deny('branch_detached', ['HEAD is detached; publish pushes the ticket branch'], 'evidence');
-  if (!branch.toUpperCase().includes(ctx.ticket.toUpperCase())) return deny('branch_not_ticket', [`branch ${branch} does not name ticket ${ctx.ticket}`], 'evidence');
+  if (!branchNames(branch, ctx.ticket)) return deny('branch_not_ticket', [`branch ${branch} does not name ticket ${ctx.ticket} as a whole token`], 'evidence');
+  if (S.enrollment.branch && branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
+    return deny('branch_mismatch', [`the run enrolled on ${S.enrollment.branch}, HEAD is ${branch}`], 'evidence');
+  // The PR base: --base, else config.base (a branch), else the remote's default branch.
+  const remote = ctx.remote ?? 'origin';
+  const remoteHead = gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
+  const baseRef = ctx.base ?? (S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null) ?? remoteHead;
+  if (!baseRef) return deny('pr_base_required', ['no PR base: pass --base <branch>, bind a base branch as config.base, or set the remote HEAD'], 'evidence');
+  const prBase = baseRef === remoteHead && remoteHead.startsWith(`${remote}/`) ? remoteHead.slice(remote.length + 1) : baseRef; // the name gh expects
+  const mb = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
+  if (mb !== S.ship_ready.merge_base) return deny('base_mismatch', [`the reviewed candidate is relative to ${S.ship_ready.merge_base}, but merge-base(${baseRef}, HEAD) is ${mb}: the branch carries history the review did not cover`], 'evidence');
   const dirty = io.snapshot(ctx.repoRoot, S.pinned_exclusions ?? []);
   if (dirty === null) return deny('candidate_unavailable', ['git status failed'], 'evidence');
   if (Object.keys(dirty).length) return deny('tree_dirty', [`uncommitted candidate paths (the push would not be the reviewed bytes): ${Object.keys(dirty).sort().join(', ')}`], 'evidence');
@@ -205,13 +227,19 @@ export async function authorize(ctx, readEngine) {
   const cand = io.candidateId(ctx.repoRoot, S.ship_ready.merge_base ?? S.config?.base ?? 'HEAD', S.pinned_exclusions ?? []);
   if (!cand.candidate_id) return deny('candidate_unavailable', [cand.reason], 'evidence');
   if (cand.candidate_id !== S.ship_ready.candidate_id) return deny('candidate_stale', [`SHIP_READY is for ${S.ship_ready.candidate_id}, the candidate now is ${cand.candidate_id}`], 'admitted');
+  // History, not only the final tree: every path any commit since the merge base touched is a reviewed candidate path
+  // (or an excluded one), so a later-reverted commit cannot carry unreviewed bytes to the remote.
+  const covered = new Set([...(cand.paths ?? []), ...(S.pinned_exclusions ?? [])]);
+  const touched = (gitOut(ctx.repoRoot, ['log', '--format=', '--name-only', '--no-renames', `${mb}..HEAD`]) ?? '').split('\n').filter(Boolean);
+  const outside = [...new Set(touched.filter(p => !covered.has(p)))].sort();
+  if (outside.length) return deny('history_outside_candidate', [`commits since the merge base touch paths outside the reviewed candidate: ${outside.join(', ')}`], 'evidence');
   const plan = io.readIfExists(join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md')) ?? '';
   const log = io.readIfExists(io.gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.engine.jsonl`)) ?? '';
   const backed = checkShipReady(plan, log, { runId: ctx.runId, requireEvent: true });
   if (!backed.ok || !backed.shipReady.includes(cand.candidate_id))
     return deny('ship_ready_unbacked', [backed.reason || `RUN-STATE has no SHIP_READY for ${cand.candidate_id}; run resume to deliver the engine outbox`], 'evidence');
   return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch } };
+    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb } };
 }
 
 /**
@@ -242,25 +270,27 @@ export async function publish(ctx, readEngine, recordPublished) {
   if (remoteHead !== head) return { published: false, allow: true, code: 'remote_mismatch', reasons: [`pushed ${head}, the remote branch is ${remoteHead}; nothing recorded`] };
   let pr = null, prError = null;
   if (ctx.prTitle !== undefined) {
-    const r = spawnSync('gh', ['pr', 'create', '--head', branch, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
+    const r = spawnSync('gh', ['pr', 'create', '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
       { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 300000 });
     if (r.status === 0) pr = { url: r.stdout.trim().split('\n').at(-1) ?? '' };
     else prError = (r.stderr || r.error?.message || 'gh pr create failed').trim();
   }
   const entry = { ...a.binding, remote, pr, ...(prError ? { pr_error: prError } : {}), at: new Date().toISOString() };
-  await recordPublished(ctx, entry);
+  let recorded = true;
+  try { await recordPublished(ctx, entry); } catch { recorded = false; }
+  if (!recorded) return { published: true, code: 'published_unrecorded', reasons: ['the push succeeded but PUBLISHED could not be recorded; complete stays unauthorized'], run_id: ctx.runId, ...entry };
   return { published: true, code: prError ? 'pr_failed' : 'published', reasons: prError ? [prError] : [], run_id: ctx.runId, ...entry, lifecycle: 'publication' };
 }
 
 const USAGE = `Usage: run-engine.mjs enroll --repo <dir> --ticket <key> --run-id <id>             (after init)
        run-engine.mjs context --phase ${PHASES.join('|')} --repo <dir> --ticket <key> --run-id <id>
-       run-engine.mjs authorize --stage ${STAGES.join('|')} --repo <dir> --ticket <key> --run-id <id>
-       run-engine.mjs publish --repo <dir> --ticket <key> --run-id <id> [--remote origin] [--pr-title <t> --pr-body-file <f> [--draft]]`;
-const FLAGS = { enroll: [], context: ['phase'], authorize: ['stage'], publish: ['remote', 'pr-title', 'pr-body-file'] };
+       run-engine.mjs authorize --stage ${STAGES.join('|')} --repo <dir> --ticket <key> --run-id <id> [--base <branch>] [--remote origin]
+       run-engine.mjs publish --repo <dir> --ticket <key> --run-id <id> [--remote origin] [--base <branch>] [--pr-title <t> --pr-body-file <f> [--draft]]`;
+const FLAGS = { enroll: [], context: ['phase'], authorize: ['stage', 'base', 'remote'], publish: ['remote', 'base', 'pr-title', 'pr-body-file'] };
 export const ENROLL_COMMANDS = Object.freeze(Object.keys(FLAGS));
 
 /**
- * CLI for the commands above; `cmds` = { readEngine, enroll, context, recordPublished } from run-engine.mjs.
+ * CLI for the commands above; `cmds` = { readEngine, enroll, context, publish } from run-engine.mjs (publish runs under the run lock).
  * Prints, and returns the exit code (0 ok/allow, 2 refused/deny, 1 usage or failure).
  */
 export async function enrollCli(argv, cmds) {
@@ -286,13 +316,13 @@ export async function enrollCli(argv, cmds) {
       return r.delivered ? 0 : 2;
     }
     if (cmd === 'authorize') {
-      const r = await authorize({ ...ctx, stage: flags.stage }, cmds.readEngine);
+      const r = await authorize({ ...ctx, stage: flags.stage, base: flags.base, remote: flags.remote }, cmds.readEngine);
       json(r);
       if (!r.allow) process.stderr.write(`authorize: deny ${r.code}: ${r.reasons[0] ?? ''}\n`);
       return r.allow ? 0 : 2;
     }
     if (cmd === 'publish') {
-      const r = await publish({ ...ctx, remote: flags.remote, prTitle: flags['pr-title'], prBodyFile: flags['pr-body-file'], draft }, cmds.readEngine, cmds.recordPublished);
+      const r = await cmds.publish({ ...ctx, remote: flags.remote, base: flags.base, prTitle: flags['pr-title'], prBodyFile: flags['pr-body-file'], draft });
       json(r);
       if (r.code !== 'published') process.stderr.write(`publish: ${r.published ? '' : 'not published, '}${r.code}: ${r.reasons[0] ?? ''}\n`);
       return r.code === 'published' ? 0 : r.allow === false ? 2 : 1;

@@ -36,7 +36,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, STAGE_PHASE } from './engine-enroll.mjs';
+import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun } from './engine-enroll.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -106,6 +106,8 @@ function auditNow(ctx) {
 function open(ctx) {
   const P = locate(ctx);
   const E = { ctx, P, S: null, live: new Map(), refused: new Set(), lock: Promise.resolve(), verifyBinding: () => verifyBinding(E),
+    /** Admission re-checked before EVERY dispatch (engine-attempts.mjs runAttempt): the binding, then enrollment and build context. */
+    admitted: () => { const u = verifyBinding(E); if (u.length) return u[0]; const a = admission(E.S, 'build'); return a.ok ? null : judgment(a.code, null, a.reasons.join('; ')); },
     stamps: { ev: new Map(), end: new Map() },
     alive: (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid),
     load() {
@@ -369,6 +371,7 @@ export async function drive(ctx) {
         if (hasUnits(E.S)) { unitDrift(E); await runUnitChecks(E, transient); } // a repair's fingerprint refresh is never renewed evidence
         reconcileReviews(E); // a repaired unit verified again: the evidence its targeted confirmation reviews
         for (const j of drift(E, { mutate: false })) transient.push(j);
+        if (E.admissionRefused) transient.push(E.admissionRefused); // a dispatch refused mid-drive (admission no longer held)
       }
     }
     await E.commit();
@@ -595,12 +598,15 @@ export async function context(ctx) {
   });
 }
 
-/** Append a PUBLISHED record (publish, after the push was verified). */
-async function recordPublished(ctx, entry) {
-  return locked(ctx, async (E) => {
+/**
+ * `publish` under the run lock, held from the first authorization through the push to the PUBLISHED
+ * record, so no engine command changes the run in between (the pre-push hook's authorize is lock-free).
+ */
+export async function publish(ctx) {
+  return locked(ctx, async (E) => publishRun(ctx, readEngine, async (_c, entry) => {
     E.S.published = [...(E.S.published ?? []), entry];
     await E.commit();
-  });
+  }));
 }
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
@@ -671,7 +677,7 @@ async function main(argv) {
 }
 
 if (isEntrypoint(import.meta.url) && ENROLL_COMMANDS.includes(process.argv[2])) {
-  enrollCli(process.argv.slice(2), { readEngine, enroll, context, recordPublished }).then(code => { process.exitCode = code; })
+  enrollCli(process.argv.slice(2), { readEngine, enroll, context, publish }).then(code => { process.exitCode = code; })
     .catch(e => { process.stderr.write(`run-engine: ${e.message}\n`); process.exitCode = 1; });
 } else if (isEntrypoint(import.meta.url)) {
   main(process.argv.slice(2)).then(r => {

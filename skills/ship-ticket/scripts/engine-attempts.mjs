@@ -294,6 +294,9 @@ async function runAttempt(E, job) {
   const { ctx, S, P } = E;
   const { item } = job, cfg = S.config, platform = ctx.platform ?? process.platform;
   const timeoutMs = clampTimeout(cfg.timeoutMs);
+  // P0 E1: admission is re-checked before every node and repair dispatch, not only at drive entry.
+  const refusedAdmission = E.admitted?.();
+  if (refusedAdmission) { E.admissionRefused = refusedAdmission; return false; }
   item.state = 'running';
   let plan;
   try {
@@ -391,7 +394,7 @@ export async function dispatchNodes(E, transient, { onIdle, hold } = {}) {
   let failure = null, stop = false;
   try {
     for (;;) {
-      if (!failure && !stop && !S.judgments.length && !hold?.()) {
+      if (!failure && !stop && !E.admissionRefused && !S.judgments.length && !hold?.()) {
         const states = stateMemo(E);
         const ready = Object.values(S.nodes).filter(n => ['pending', 'stale'].includes(n.state) && !running.has(n.id)
           && (!limit || limit.has(n.id)) && n.deps.every(d => depDone(E, n, d, states)) && redReady(E, n, transient));
@@ -455,7 +458,7 @@ export async function runRepairs(E, transient) {
   const { S } = E;
   let batchOpen = false;
   for (const r of S.repairs) {
-    if (r.state !== 'pending' || S.judgments.length) continue;
+    if (r.state !== 'pending' || S.judgments.length || E.admissionRefused) continue;
     const auth = authorize(S, r, batchOpen);
     if (auth.code) { transient.push(judgment(auth.code, r.id, auth.reason)); continue; }
     if (!repairRedReady(E, r, transient)) continue;

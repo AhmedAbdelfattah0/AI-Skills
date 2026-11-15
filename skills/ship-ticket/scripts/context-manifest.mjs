@@ -9,10 +9,11 @@
  * context-manifest.test.mjs runs `verify` in CI, so a reference edit without a rebuild fails there.
  *
  * Bytes are read through a READER: `fsReader` (the files on disk) or `gitReader` (the blobs of one
- * commit of the skill's own git repository, which no later work-tree write can change). The engine
+ * commit of the skill's own git repository, which a work-tree edit does not change; a new commit
+ * does not either, but whoever can commit to that repository can create the commit that gets pinned). The engine
  * pins the reader at enrollment (engine-enroll.mjs) and delivers through it. What delivery proves is
- * VERIFIED DELIVERY: the exact bytes reached the tool result. Not that the model read, understood or
- * followed them.
+ * only that `context` emitted the verified bytes to stdout. Not that a model received, read,
+ * understood or followed them.
  *
  * CLI: context-manifest.mjs build|verify [--skill <dir>]   (default: the skill folder holding this script)
  * Exit codes: 0 ok, 1 verify failed, 2 usage error.

@@ -21,7 +21,6 @@
  * host can durably record the process group before any worker code runs. If
  * stdin closes without the release byte the launcher exits and the worker never starts.
  */
-import { verifyAdmission } from './engine-enroll.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync as realpathJs, statSync, writeFileSync, appendFileSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -374,6 +373,17 @@ export function ownershipViolations(before, after, writes, othersOwned, ticket) 
 export { RELEASE_BYTE, launcherArgs } from './launcher.mjs';
 
 /**
+ * The worker-dispatch boundary: the engine's own `authorize --stage build` for the approval's run.
+ * Loaded lazily (run-engine.mjs imports this module through engine-attempts.mjs). Throws on deny.
+ */
+export async function verifyAdmission(repoRoot, approval) {
+  const [{ authorize }, { readEngine }] = await Promise.all([import('./engine-enroll.mjs'), import('./run-engine.mjs')]);
+  const a = await authorize({ repoRoot, ticket: approval.ticket, runId: approval.run_id ?? approval.runId, stage: 'build' }, readEngine);
+  if (!a.allow) fail(`${a.code}: ${a.reasons.join('; ')}`);
+  return a;
+}
+
+/**
  * Run one approved writer node. Resolves with metadata only; raw output is
  * never returned. Safety refusals (approval, billing, ownership config) throw
  * before any worker starts. `deps` exists for tests and hosts that inject seams.
@@ -382,10 +392,10 @@ export async function dispatch(config, deps = {}) {
   if (deps.signal?.aborted) fail('dispatch cancelled before start');
   const plan = prepareDispatch(config);
   const approval = (deps.verifyApproval ?? verifyApproval)(plan.repoRoot, config.approval);
-  // Enrollment boundary (P0 E1): the approval's run must be ADMITTED in its engine state (enrolled, build
-  // context delivered from the pinned skill) before any worker starts. `deps.verifyAdmission` is an
+  // Enrollment boundary (P0 E1): `authorize --stage build` (the approval binding incl. REAPPROVAL and plan/DAG
+  // drift, enrollment and the build context from the pinned skill) must allow before any worker starts. `deps.verifyAdmission` is an
   // in-process seam like verifyApproval; the CLI (`carrier.mjs run`) always uses the real check.
-  (deps.verifyAdmission ?? verifyAdmission)(plan.repoRoot, approval);
+  await (deps.verifyAdmission ?? verifyAdmission)(plan.repoRoot, approval);
   if (plan.phase === 'REPAIR') verifyReviewExecution(plan.repoRoot, approval, config.reviewExecution, plan.ownership.writes);
   const env = childEnv(plan.provider, plan.billing, deps.env ?? process.env);
   const auth = plan.billing === 'subscription' ? (deps.verifySubscription ?? verifySubscription)(plan.provider, env) : 'api-authorized';
