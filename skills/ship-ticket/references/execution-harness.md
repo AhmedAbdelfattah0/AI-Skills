@@ -42,9 +42,10 @@ back:
 | SHIP | `gate` ship-ready, then `usage.mjs summary` and `eval.mjs report`; after the one commit, `publish` (the only supported push and PR); `docker-lifecycle.mjs cleanup` dry run, then `--apply` for this run's containers |
 
 The hand-run flow (`schedule` → `admit` → `carrier.mjs run`, gates recorded in
-the plan's RUN-STATE) is a declared degradation, not a bypass: without a recorded
-`DEGRADED_APPROVED` it is limited to read-only planning and diagnostics, and its
-result still ships only through `publish` (Enrollment and authorization, below).
+the plan's RUN-STATE) is a declared degradation, not a bypass: it is limited to
+read-only planning and diagnostics, `carrier.mjs run` refuses a run that is not
+enrolled and admitted, and nothing ships except through `publish` (Enrollment and
+authorization, below).
 
 Write every helper input and output outside the candidate (a scratch directory
 or the repository's Git metadata); never add them to the reviewed candidate.
@@ -222,53 +223,57 @@ that file before every dispatch.
 ## Enrollment and authorization
 
 ```bash
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs enroll    --repo <R> --ticket <T> --run-id <ID>          # first action; idempotent
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs context   --repo <R> --ticket <T> --run-id <ID> --phase understand|plan|build|review|ship
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs enroll    --repo <R> --ticket <T> --run-id <ID>          # right after init; idempotent
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs authorize --repo <R> --ticket <T> --run-id <ID> --stage build|publish|complete
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--pr-title <t> --pr-body-file <f> [--draft]]
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs degrade   --repo <R> --ticket <T> --run-id <ID> --reason <text>
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs approve-degraded --repo <R> --ticket <T> --run-id <ID> --owner-quote "<the owner's words>"
 node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <R> [--pattern <regex>]   # opt-in pre-push hook, this repository only
 ```
 
-- **Records** live in `<TICKET>.enrollment.json` beside the state file, keyed by run
-  ID: `ENROLLED` (ticket, branch, repository, skill revision, `SKILL.md` and manifest
-  digests), `CONTEXT_DELIVERED`, `DEGRADED`, `DEGRADED_APPROVED`, `PUBLISHED`. Each is
-  mirrored to the engine log as telemetry; that copy, and any such line in RUN-STATE,
-  authorizes nothing.
-- **`context`** checks every mandatory reference of the phase against
-  `references/context-manifest.json` (built and verified by
-  `scripts/context-manifest.mjs build|verify`; CI fails a reference edited without a
-  rebuild) and prints the verified bytes. A missing, changed or extra reference, or a
-  manifest other than the enrolled one, prints nothing and exits 2; after a skill
-  update, `enroll` again, then `context` again. This proves verified delivery of exact
-  bytes in the tool result, not that they were read or understood. `context` and
-  `status` are never blocked by enrollment or degradation.
+- **Lifecycle**, reported as `lifecycle` by `enroll`, `context` and `authorize`:
+  `none` (no state) → `unactivated` (`init`: approved plan and bound DAG) →
+  `enrolled` (`enroll`: approval re-verified, skill pinned) → `admitted` (`build`
+  context delivered) → `evidence` (an engine `SHIP_READY` that still holds) →
+  `publication` (`authorize publish` allows). The records are `enrollment`,
+  `contexts` and `published` in the engine state, so `resume` and `archive` keep
+  them. A state without `enrollment`, including one created before this existed, is
+  diagnostic-only until enrolled.
+- **Enforced:** `drive` and `carrier.mjs run` need `admitted`; a `gate` needs its
+  phase context (`red` build, `review`/`unit-review`/`reassess` review, `ship-ready`
+  ship) and otherwise refuses without recording a decision; `publish` needs
+  `publication`. `init`, `status`, `resume`, `mark`, `rebind`, `archive` and
+  `context` are not gated.
+- **The skill pin.** A git install pins the skill commit, and every `context` reads
+  that commit's blobs, so a later work-tree edit or commit to the skill changes
+  nothing that is delivered. A copy install pins the manifest digest, and every
+  delivery re-verifies the files: a changed, missing or extra reference or a rebuilt
+  manifest is refused (`reference_*`, `manifest_drift`). A run enrolls once, never
+  while an attempt may run, and a copy install never after an attempt ran; a skill
+  change mid-run needs a new run. `context-manifest.mjs build|verify` maintains
+  `references/context-manifest.json`, and CI fails a reference edited without a
+  rebuild. This proves verified delivery of exact bytes, not that they were read.
 - **`authorize`** is read-only: exit 0 allow, 2 deny with one `authorize: deny <code>`
-  line on stderr. Every stage needs the run enrolled, no unapproved `DEGRADED` and
-  its phase context (`build`, `ship`, `ship`) delivered against the current manifest.
-  `build` needs the engine state and its approval binding. `publish` also needs an
-  engine `SHIP_READY` for the candidate recomputed now, a clean tree, a branch naming
-  the ticket, a DAG `config.base` other than `HEAD` (`candidate_base_head`), and a
-  RUN-STATE `SHIP_READY` backed by its engine line. `complete` needs `PUBLISHED` for
-  HEAD and then stops at `ci_evidence_unavailable` until the engine records CI.
-  An enrolled run's `init` needs its `plan` context and its `drive` its `build` context.
-- **`publish`** runs `authorize publish`; on deny it pushes nothing and prints the
-  blocker. Otherwise it pushes the branch, opens the PR only when a title and body file
-  are given, and records `PUBLISHED`.
-- **Degradation is detected, not enforced.** `DEGRADED_APPROVED` is an
-  orchestrator-recorded owner decision: the engine cannot prove a human said it. Record
-  it only after **WAIT_FOR_USER**, with the owner's words verbatim. It is refused while
-  an engine attempt may run, binds the latest `DEGRADED` and, for `publish`, the HEAD it
-  approved, and an approved degraded `publish` skips the `SHIP_READY` and candidate
-  checks.
+  line on stderr. `publish` also needs a `SHIP_READY` whose state conditions still
+  hold (`ship_ready_superseded`), a clean tree, a branch naming the ticket, the
+  candidate recomputed against the merge base recorded with `SHIP_READY`, and a
+  RUN-STATE `SHIP_READY` backed by its engine line. Its allow binds head, tree,
+  candidate and branch. `complete` needs `PUBLISHED` for HEAD and then stops at
+  `ci_evidence_unavailable` until the engine records CI.
+- **`publish`** authorizes, authorizes again immediately before the push and requires
+  the same binding (`authorization_moved`), pushes `<sha>:refs/heads/<branch>`, checks
+  the remote ref, opens the PR only when a title and body file are given, and records
+  `PUBLISHED`. The remote can still move after that check.
+- **No degraded bypass.** The engine cannot prove a human said anything (START and
+  RETRY are orchestrator-appended), so there is no owner-approval override: a
+  degradation is **WAIT_FOR_USER**, and the skill does not ship.
 - **git-guard is a guardrail, not a boundary.** It blocks `git push` of a branch
   matching the pattern (default `^[A-Za-z][A-Za-z0-9]*-[0-9]+`) unless `authorize
-  publish` allows the pushed HEAD, including pushes wrapped in a script, `sh -c` or
-  `execSync`. `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*` environment
-  override and unsetting a repository `core.hooksPath` bypass it, as does any process
-  of the same user rewriting the enrollment ledger or engine state with well-formed
-  JSON.
+  publish` allows the pushed sha, including pushes wrapped in a script, `sh -c` or
+  `execSync`. In a linked worktree it installs into the shared hooks directory and
+  judges each push by that work tree's engine state. `--no-verify`, `-c
+  core.hooksPath=...`, the `GIT_CONFIG_*` override, unsetting a repository
+  `core.hooksPath` and pushing with `gh` or another clone bypass it, as does any
+  process of the same user rewriting the engine state.
 
 ## Run engine
 
