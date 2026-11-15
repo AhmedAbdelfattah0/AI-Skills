@@ -226,7 +226,7 @@ that file before every dispatch.
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs context   --repo <R> --ticket <T> --run-id <ID> --phase understand|plan|build|review|ship
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs enroll    --repo <R> --ticket <T> --run-id <ID>          # right after init; idempotent
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs authorize --repo <R> --ticket <T> --run-id <ID> --stage build|publish|complete
-node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--pr-title <t> --pr-body-file <f> [--draft]]
+node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs publish   --repo <R> --ticket <T> --run-id <ID> [--remote origin] [--base <branch>] [--pr-title <t> --pr-body-file <f> [--draft]]
 node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <R> [--pattern <regex>]   # opt-in pre-push hook, this repository only
 ```
 
@@ -276,6 +276,8 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `ci_evidence_unavailable` until the engine records CI.
 - **`publish`** holds the run lock throughout: it authorizes, authorizes again
   immediately before the push and requires the same binding (`authorization_moved`),
+  records an explicit `--base` for the HEAD it pushes (`publish_intent`, so the
+  guard's hook judges a stacked PR against that base, not the remote HEAD),
   pushes `<sha>:refs/heads/<branch>`, checks the remote ref, opens the PR with
   `--base` only when a title and body file are given, and records `PUBLISHED`
   (`published_unrecorded` if that record fails after a successful push). The remote
@@ -289,7 +291,12 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `execSync`. It also guards any branch naming a ticket that has engine state. It
   refuses a hooks directory inside the work tree unless ignored. In a linked worktree
   it installs into the shared hooks directory and judges each push by that work
-  tree's engine state. `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*`
+  tree's engine state. A `git push <url>` is judged as the configured remote with
+  that URL (`remote_unconfigured` when none has it and the PR base would be that
+  remote's HEAD). The pattern fails closed on look-alikes: `fix/issue-42` and
+  `release-2026-11` read as tickets and are refused until you narrow it with
+  `--pattern`. A branch naming two tickets is judged by one run only (the first
+  with engine state). `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*`
   override, unsetting a repository `core.hooksPath`, `git push origin
   HEAD:refs/heads/<name without a ticket>` and pushing with `gh` or another clone
   bypass it, as does any process of the same user rewriting the engine state.

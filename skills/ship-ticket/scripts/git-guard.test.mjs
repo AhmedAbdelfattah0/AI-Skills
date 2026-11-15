@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { POSIX } from './engine-test-fixture.mjs';
 import { enrollFixture } from './engine-enroll.test-helper.mjs';
-import { BACKUP, MARKER, ticketOf, TICKET_PATTERN } from './git-guard.mjs';
+import { BACKUP, MARKER, ticketOf, TICKET_PATTERN, check } from './git-guard.mjs';
 
 const WIN_SKIP = POSIX ? false : 'sh pre-push hooks and the POSIX engine';
 const GUARD = fileURLToPath(new URL('./git-guard.mjs', import.meta.url));
@@ -234,4 +234,64 @@ test('documented bypass: HEAD:refs/heads/<name without a ticket> is not guarded'
   const p = push(fx, ['origin', 'HEAD:refs/heads/shipped']);
   assert.equal(p.status, 0, p.stderr);
   assert.equal(fx.remoteHead('shipped'), fx.head(), 'the unauthorized commit reached the remote under another name');
+});
+
+// ------------------------------------------------------------------ E1 follow-up (stacked base, URL remote, pattern limits)
+
+test('stacked PR: publish --base <parent> passes its own hook (the recorded base), while a hook authorize without it would be base_mismatch', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  // The parent ticket's commit sits under this ticket's branch: the reviewed merge base is the parent, not the remote HEAD.
+  writeFileSync(join(fx.repo, 'docs', 'parent.txt'), 'parent work');
+  fx.commitAll('parent ticket');
+  fx.okGit(['branch', 'T-0-parent']);
+  fx.toShipReady();
+  fx.commitAll();
+  installed(fx);
+  const plain = fx.cli('authorize', { stage: 'publish' });
+  assert.equal(plain.out.code, 'base_mismatch', 'the hook gets no --base: before the fix it judged the remote HEAD and refused');
+  assert.equal(fx.cli('authorize', { stage: 'publish', base: 'T-0-parent' }).out.allow, true);
+  const p = fx.cli('publish', { base: 'T-0-parent' });
+  assert.equal(p.status, 0, p.stdout + p.stderr);
+  assert.equal(p.out.code, 'published');
+  assert.equal(fx.remoteHead(), fx.head(), 'the hook allowed the stacked push');
+  assert.deepEqual([fx.readState().publish_intent.base, fx.readState().publish_intent.head], ['T-0-parent', fx.head()]);
+  // The recorded base binds only that HEAD: a new commit falls back to the remote HEAD and is refused again.
+  writeFileSync(join(fx.repo, 'session-log.md'), 'note');
+  fx.commitAll('log');
+  assert.equal(fx.cli('authorize', { stage: 'publish' }).out.code, 'base_mismatch');
+});
+
+test('git push <url>: the URL of a configured remote is judged as that remote; an unknown URL is remote_unconfigured, never refs/remotes/<url>/HEAD', { skip: WIN_SKIP }, (t) => {
+  const fx = enrollFixture(t);
+  fx.toShipReady();
+  fx.commitAll();
+  installed(fx);
+  const other = join(fx.root, 'other.git');
+  assert.equal(spawnSync('git', ['init', '-q', '--bare', other], { encoding: 'utf8', env: fx.env }).status, 0);
+  blocked(push(fx, [other, 'T-1-work']), 'remote_unconfigured');
+  const r = push(fx, [fx.remote, 'T-1-work']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fx.remoteHead(), fx.head(), 'the URL of origin pushes under origin\'s authorization');
+  assert.doesNotMatch(r.stderr + push(fx, [other, 'T-1-work']).stderr, /refs\/remotes\//);
+});
+
+test('pattern limits: fix/issue-42 and release-2026-11 are false positives (fail closed) until --pattern narrows it; a two-ticket branch is judged by one run', { skip: WIN_SKIP }, async (t) => {
+  assert.equal(ticketOf('fix/issue-42', TICKET_PATTERN), 'issue-42');
+  assert.equal(ticketOf('release-2026-11', TICKET_PATTERN), 'release-2026');
+  const fx = enrollFixture(t);
+  installed(fx);
+  for (const b of ['fix/issue-42', 'release-2026-11']) {
+    fx.okGit(['branch', b]);
+    const p = push(fx, ['origin', b]);
+    assert.notEqual(p.status, 0, b);
+    assert.match(p.stderr, /not_enrolled/, b);
+  }
+  installed(fx, ['--pattern', '^(?:feat|fix)/([A-Z][A-Z0-9]*-[0-9]+)']);
+  for (const b of ['fix/issue-42', 'release-2026-11']) assert.equal(push(fx, ['origin', b]).status, 0, `${b} after narrowing`);
+  // One ticket per branch: only the first ticket with engine state (else the first the pattern finds) is consulted.
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const asked = [];
+  const r = await check(fx.repo, `refs/heads/feat/T-2-T-1 ${'1'.repeat(40)} refs/heads/feat/T-2-T-1 ${'0'.repeat(40)}\n`,
+    { authorizeFn: async (ctx) => { asked.push(ctx.ticket); return { allow: false, code: 'stub', reasons: [] }; } });
+  assert.deepEqual([asked, r.decisions.map(d => d.ticket)], [['T-1'], ['T-1']], 'T-1 has state here, so T-2 is never consulted');
 });

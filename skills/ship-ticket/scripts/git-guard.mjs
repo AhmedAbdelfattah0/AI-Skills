@@ -22,6 +22,19 @@
  * closed). Other branches, tags and branch deletions pass. If node or this script has moved, the hook
  * blocks only branches matching the default pattern and says how to reinstall.
  *
+ * The PR base the hook's authorize judges is the one `publish` used: publish records an explicit
+ * --base in the engine state for the HEAD it pushes (PUBLISH_INTENT) before the push, so a stacked
+ * PR's own push is not refused as base_mismatch. A push to a URL (`git push <url>`, where git passes
+ * the URL as $1) is judged as the configured remote with that url or pushurl; a URL no remote has is
+ * `remote_unconfigured` unless a PR base is known without it (config.base, a recorded --base).
+ *
+ * Pattern limits, pinned by git-guard.test.mjs. False positives (fail closed, never a bypass): the
+ * default pattern also reads `fix/issue-42` as ticket `issue-42` and `release-2026-11` as
+ * `release-2026`, so pushing those branches is refused (`not_enrolled`) until the repository narrows
+ * the pattern (`install --pattern '^(?:feat|fix)/([A-Z][A-Z0-9]*-[0-9]+)'`). One ticket per branch: a
+ * branch naming two tickets (`feat/T-1-T-2`) is judged only by the first ticket that has engine state
+ * here, else the first the pattern finds; the other ticket's run is never consulted.
+ *
  * This is a GUARDRAIL, not a boundary. Bypasses, recorded as expected by git-guard.test.mjs:
  * `git push --no-verify`, `git -c core.hooksPath=/dev/null push`, the GIT_CONFIG_COUNT/KEY/VALUE
  * environment override of core.hooksPath, unsetting a repository core.hooksPath the hook was
@@ -151,6 +164,24 @@ function latestRun(repo, ticket) {
   try { const id = JSON.parse(readFileSync(file, 'utf8')).run_id; return typeof id === 'string' && SAFE_ID.test(id) ? id : null; } catch { return null; }
 }
 
+/**
+ * The configured remote a pre-push `$1` names: a remote name as is, a URL (`git push <url>`) mapped to the
+ * remote whose url or pushurl it is, else the URL itself (authorize then refuses `remote_unconfigured`
+ * when it would need that remote's HEAD as the PR base, instead of reading refs/remotes/<url>/HEAD).
+ */
+export function remoteName(repo, given) {
+  if (!given) return given;
+  const list = out(git(repo, ['config', '--local', '--get-regexp', '^remote\\..*\\.(url|pushurl)$'])) ?? '';
+  const names = new Map();
+  for (const line of list.split('\n').filter(Boolean)) {
+    const sp = line.indexOf(' '), key = line.slice(0, sp), value = line.slice(sp + 1);
+    const name = key.replace(/^remote\./, '').replace(/\.(url|pushurl)$/, '');
+    if (!names.has(value)) names.set(value, name);
+    if (name === given) return given;
+  }
+  return names.get(given) ?? given;
+}
+
 /** Tickets with engine state in this work tree. */
 function stateTickets(repo) {
   const dir = resolve(repo, out(git(repo, ['rev-parse', '--git-path', 'ai-skills/ship-ticket'])) ?? '');
@@ -167,6 +198,7 @@ export async function check(repo, stdin, { authorizeFn, remote } = {}) {
     return a(ctx, readEngine);
   });
   const pattern = guardPattern(repo), withState = stateTickets(repo);
+  remote = remoteName(repo, remote);
   const decisions = [];
   for (const line of stdin.split('\n').map(l => l.trim()).filter(Boolean)) {
     const [localRef, localSha, remoteRef] = line.split(/\s+/);

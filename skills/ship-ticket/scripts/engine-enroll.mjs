@@ -212,10 +212,17 @@ export async function authorize(ctx, readEngine) {
   if (!branchNames(branch, ctx.ticket)) return deny('branch_not_ticket', [`branch ${branch} does not name ticket ${ctx.ticket} as a whole token`], 'evidence');
   if (S.enrollment.branch && branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
     return deny('branch_mismatch', [`the run enrolled on ${S.enrollment.branch}, HEAD is ${branch}`], 'evidence');
-  // The PR base: --base, else config.base (a branch), else the remote's default branch.
+  // The PR base: --base, else the --base `publish` recorded for this HEAD before its push (so the pre-push hook's
+  // authorize, which gets no --base, judges a stacked PR against the base publish used), else config.base (a
+  // branch), else the remote's default branch. Every source still has to give the merge base recorded with
+  // SHIP_READY (base_mismatch below), so none of them can widen what is allowed.
   const remote = ctx.remote ?? 'origin';
-  const remoteHead = gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
-  const baseRef = ctx.base ?? (S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null) ?? remoteHead;
+  const intent = S.publish_intent?.head === head && typeof S.publish_intent.base === 'string' ? S.publish_intent.base : null;
+  const explicit = ctx.base ?? intent ?? (S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null);
+  // A remote given as a URL (`git push <url>`) has no refs/remotes/<url>/HEAD: never build one (the hook maps a URL to its configured remote first).
+  if (!explicit && !SAFE_REMOTE.test(remote)) return deny('remote_unconfigured', [`the push names ${remote}, which is no configured remote, and no PR base is given: add it as a remote, pass --base, or ship through run-engine.mjs publish`], 'evidence');
+  const remoteHead = explicit ? null : gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
+  const baseRef = explicit ?? remoteHead;
   if (!baseRef) return deny('pr_base_required', ['no PR base: pass --base <branch>, bind a base branch as config.base, or set the remote HEAD'], 'evidence');
   const prBase = baseRef === remoteHead && remoteHead.startsWith(`${remote}/`) ? remoteHead.slice(remote.length + 1) : baseRef; // the name gh expects
   const mb = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
@@ -246,10 +253,12 @@ export async function authorize(ctx, readEngine) {
  * `publish`: authorize publish, then authorize AGAIN immediately before the push and require the same
  * binding (head, tree, candidate, branch); push exactly that commit (`<sha>:refs/heads/<branch>`),
  * check the remote ref is that commit, open the PR only when a title and body file are given, and
- * record PUBLISHED. Residual TOCTOU: the remote can still move after the check, and direct git/gh
- * pushes never pass through here. `ctx.beforePush` is a test seam run between the two authorizations.
+ * record PUBLISHED. Before the push it records PUBLISH_INTENT { head, branch, base, remote } (`recordIntent`,
+ * under the run lock): an explicit --base, so the pre-push hook's lock-free authorize resolves the same PR base.
+ * Residual TOCTOU: the remote can still move after the check, and direct git/gh pushes never pass through
+ * here. `ctx.beforePush` is a test seam run between the two authorizations.
  */
-export async function publish(ctx, readEngine, recordPublished) {
+export async function publish(ctx, readEngine, recordPublished, recordIntent = async () => {}) {
   const remote = ctx.remote ?? 'origin';
   if (!SAFE_REMOTE.test(remote)) throw coded('bad_input', '--remote must be a remote name');
   if ((ctx.prTitle === undefined) !== (ctx.prBodyFile === undefined) || (ctx.draft && ctx.prTitle === undefined))
@@ -263,6 +272,7 @@ export async function publish(ctx, readEngine, recordPublished) {
   if (JSON.stringify(again.binding) !== JSON.stringify(a.binding))
     return { published: false, allow: false, code: 'authorization_moved', reasons: [`authorized ${JSON.stringify(a.binding)}, now ${JSON.stringify(again.binding)}`], lifecycle: again.lifecycle };
   const { head, branch } = a.binding;
+  await recordIntent(ctx, { head, branch, base: ctx.base ?? null, remote, at: new Date().toISOString() });
   const env = ctx.env ?? process.env;
   const push = spawnSync('git', ['push', remote, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
   if (push.status !== 0) return { published: false, allow: true, code: 'push_failed', reasons: [(push.stderr || push.error?.message || '').trim()] };

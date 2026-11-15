@@ -606,7 +606,7 @@ export async function publish(ctx) {
   return locked(ctx, async (E) => publishRun(ctx, readEngine, async (_c, entry) => {
     E.S.published = [...(E.S.published ?? []), entry];
     await E.commit();
-  }));
+  }, async (_c, intent) => { E.S.publish_intent = intent; await E.commit(); }));
 }
 
 /** Record one gate decision: lock, re-verify the binding, compute the candidate, decide, commit state + GATE event, deliver. */
