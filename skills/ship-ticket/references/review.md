@@ -106,8 +106,13 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   provider also pins that CLI (path and sha256), every dispatch re-verifies it
   (`review_cli_drift`; none on PATH is `review_cli_unavailable`) and launches the
   relay with an engine-owned directory first on PATH that links exactly the
-  pinned file, without `NODE_OPTIONS` / `NODE_PATH`: a stub put earlier on PATH
-  after the pin never runs. The pin covers the entry file only (not the packages
+  pinned file, without `NODE_OPTIONS` / `NODE_PATH`: a stub `claude` / `codex`
+  put earlier on PATH after the pin never runs. The INTERPRETER is not pinned: an
+  npm-installed CLI entry starts with `#!/usr/bin/env node`, so `node` is still
+  resolved from the caller's PATH (after the shim directory, which holds only the
+  CLI link), and a stub `node` earlier on that PATH runs the pinned entry file
+  (a same-user residual; the relay itself is launched with the engine's own
+  node). The pin covers the entry file only (not the interpreter, the packages
   or native binaries it loads) and trusts the PATH of that first dispatch; on
   Windows the PATH is not steered (the pin is still verified). The engine builds the
   argv array and the prompt itself: the frozen candidate id, the approved plan

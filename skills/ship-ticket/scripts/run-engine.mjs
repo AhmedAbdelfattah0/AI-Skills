@@ -788,6 +788,8 @@ export async function ci(ctx) {
         E.S.published = [...(E.S.published ?? []), target];
       }
     }
+    // R0-S round 5 (item 4): no provider (no pinned gh, no in-process seam) is a recorded refusal, never a crash on a null provider.
+    if (!ev && !provider) ev = unavailableEv('ci_provider_unavailable', 'no CI provider: the gh pinned at enroll is not available and no in-process provider is set');
     ev ??= collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub: target, pr: number ?? undefined, now, remote, repository: ctx.ciProvider ? null : identity, view: number ? pv : null });
     E.S.ci_evidence = [...(E.S.ci_evidence ?? []), ev].slice(-CI_EVIDENCE_KEEP);
     note(E.S, 'CI_EVIDENCE', { head_sha: ev.head_sha, state: ev.state, code: ev.code });

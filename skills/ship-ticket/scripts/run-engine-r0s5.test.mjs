@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { POSIX } from './engine-test-fixture.mjs';
+import { POSIX, passReview } from './engine-test-fixture.mjs';
 import { enrollFixture, GITHUB_URL } from './engine-enroll.test-helper.mjs';
 import { candidateId } from './engine-io.mjs';
 import { historyPaths } from './engine-enroll.mjs';
@@ -53,7 +53,7 @@ const noPushUrl = (fx) => fx.okGit(['config', '--local', '--unset-all', 'remote.
 
 // ------------------------------------------------------------------ item 1: an ambiguous remote is never resolved to one of its values
 
-test('R5-1a (pre-fix: published to BOTH the fork and the enrolled repository): two origin fetch URLs (fork first) are remote_ambiguous at authorize publish and publish; nothing is pushed anywhere; one URL restored, it publishes', { skip: WIN_SKIP }, async (t) => {
+test('R5-1a [I1] (pre-fix: published to BOTH the fork and the enrolled repository): two origin fetch URLs (fork first) are remote_ambiguous at authorize publish and publish; nothing is pushed anywhere; one URL restored, it publishes', { skip: WIN_SKIP }, async (t) => {
   const h = enrollFixture(t);
   const fork = addForkBare(h);
   await h.toShipReady();
@@ -69,7 +69,7 @@ test('R5-1a (pre-fix: published to BOTH the fork and the enrolled repository): t
   assert.equal(refIn(h, fork), null);
 });
 
-test('R5-1b (pre-fix: published to both): two origin push URLs (fork first, the enrolled one last) are remote_ambiguous at publish, before any push', { skip: WIN_SKIP }, async (t) => {
+test('R5-1b [I1] (pre-fix: published to both): two origin push URLs (fork first, the enrolled one last) are remote_ambiguous at publish, before any push', { skip: WIN_SKIP }, async (t) => {
   const h = enrollFixture(t);
   const fork = addForkBare(h);
   await h.toShipReady();
@@ -87,7 +87,7 @@ test('R5-1b (pre-fix: published to both): two origin push URLs (fork first, the 
   assert.equal(code(publishPr(h)), 'published');
 });
 
-test('R5-1c (pre-fix: the hook allowed and git pushed to both): a plain `git push origin` with two push URLs is refused by the pre-push hook (remote_ambiguous); neither repository received the branch', { skip: WIN_SKIP }, async (t) => {
+test('R5-1c [I1] (pre-fix: the hook allowed and git pushed to both): a plain `git push origin` with two push URLs is refused by the pre-push hook (remote_ambiguous); neither repository received the branch', { skip: WIN_SKIP }, async (t) => {
   const h = enrollFixture(t);
   const fork = addForkBare(h);
   await h.toShipReady();
@@ -104,7 +104,7 @@ test('R5-1c (pre-fix: the hook allowed and git pushed to both): a plain `git pus
   assert.equal(h.remoteHead(), h.head());
 });
 
-test('R5-1d (pre-fix: ci PASS and complete allow after a second push URL): ci records UNAVAILABLE remote_ambiguous and complete refuses it; restored, both pass', { skip: WIN_SKIP }, async (t) => {
+test('R5-1d [I1] (pre-fix: ci PASS and complete allow after a second push URL): ci records UNAVAILABLE remote_ambiguous and complete refuses it; restored, both pass', { skip: WIN_SKIP }, async (t) => {
   const h = enrollFixture(t);
   addForkBare(h);
   await h.toShipReady();
@@ -129,7 +129,7 @@ test('R5-1d (pre-fix: ci PASS and complete allow after a second push URL): ci re
   assert.equal(d.out.code, 'remote_ambiguous', d.stdout);
 });
 
-test('R5-1e (pre-fix: enrolled the LAST URL as the identity): enroll refuses an ambiguous origin (remote_ambiguous) and records no enrollment; one URL, it enrolls', { skip: WIN_SKIP }, async (t) => {
+test('R5-1e [I1] (pre-fix: enrolled the LAST URL as the identity): enroll refuses an ambiguous origin (remote_ambiguous) and records no enrollment; one URL, it enrolls', { skip: WIN_SKIP }, async (t) => {
   const h = enrollFixture(t, { admit: false });
   addForkBare(h);
   assert.equal(h.cli('init', { dag: h.dagFile }).status, 0);
@@ -187,7 +187,7 @@ function briefRepo(t) {
 }
 const J = JSON.stringify;
 
-test('R5-2a (pre-fix: the brief carried NO content of src/a.txt while the candidate hashed its bytes): a SUCCESSFUL textconv (diff.hide.textconv=true via .git/info/attributes), a -diff attribute, core.bigFileThreshold and a clean filter never hide the changed bytes from the reviewer', (t) => {
+test('R5-2a [I2] (pre-fix: the brief carried NO content of src/a.txt while the candidate hashed its bytes): a SUCCESSFUL textconv (diff.hide.textconv=true via .git/info/attributes), a -diff attribute, core.bigFileThreshold and a clean filter never hide the changed bytes from the reviewer', (t) => {
   const r = briefRepo(t);
   for (const f of ['a', 'b', 'c', 'd']) writeFileSync(join(r.dir, 'src', `${f}.txt`), `SECRET-${f}\n`);
   writeFileSync(join(r.dir, '.git', 'info', 'attributes'), 'src/a.txt diff=hide\nsrc/b.txt -diff\nsrc/d.txt filter=blank\n');
@@ -200,7 +200,7 @@ test('R5-2a (pre-fix: the brief carried NO content of src/a.txt while the candid
   assert.doesNotMatch(b, /Binary files .* differ/, 'no text file is rendered as binary');
 });
 
-test('R5-2b the brief is bound to the frozen candidate and its COMPLETE inventory: a candidate id other than the bytes now, or an inventory missing a changed path, is review_diff_unverified (no reviewer launches)', (t) => {
+test('R5-2b [I2b] the brief is bound to the frozen candidate and its COMPLETE inventory: a candidate id other than the bytes now, or an inventory missing a changed path, is review_diff_unverified (no reviewer launches)', (t) => {
   const r = briefRepo(t);
   writeFileSync(join(r.dir, 'src', 'a.txt'), 'new a\n');
   writeFileSync(join(r.dir, 'src', 'b.txt'), 'new b\n');
@@ -237,7 +237,7 @@ test('R5-2c legitimate candidates render without a new false block: a new untrac
   assert.match(b, /\\ No newline at end of file/);
 });
 
-test('R5-2d (pre-fix: the reviewer prompt omitted src/a.txt): engine review-dispatch with a successful textconv hiding src/a.txt writes a prompt carrying its bytes; the receipt binds the inventory digest', { skip: WIN_SKIP }, async (t) => {
+test('R5-2d [I2] (pre-fix: the reviewer prompt omitted src/a.txt): engine review-dispatch with a successful textconv hiding src/a.txt writes a prompt carrying its bytes; the receipt binds the inventory digest', { skip: WIN_SKIP }, async (t) => {
   const fx = enrollFixture(t);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   assert.equal(fx.cli('drive').status, 0);
@@ -254,7 +254,7 @@ test('R5-2d (pre-fix: the reviewer prompt omitted src/a.txt): engine review-disp
   await waitFor(() => (fx.cli('review-collect').out?.live ?? ['?']).length === 0, 'the dispatched reviewer to be collected', { ms: 60000, every: 200 });
 });
 
-test('R5-2e (pre-fix: a submodule bump was NOT a candidate path, so neither reviewed nor caught by the history check): diff.ignoreSubmodules=all never hides a changed submodule from the candidate inventory or the publish history listing', (t) => {
+test('R5-2e [I2e] [I2h] (pre-fix: a submodule bump was NOT a candidate path, so neither reviewed nor caught by the history check): diff.ignoreSubmodules=all never hides a changed submodule from the candidate inventory or the publish history listing', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'r0s5-sub-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, 'none.gitconfig'), '');
@@ -296,7 +296,7 @@ const published = async (t) => {
   return h;
 };
 
-test('R5-3a (pre-fix: PASS and complete allow, the failed attempt hidden by filter=latest): a failed run of workflow run 500 and a green run of ANOTHER workflow run 501 of the same name: no verified supersession, FAIL', { skip: WIN_SKIP }, async (t) => {
+test('R5-3a [I3] [I3b] (pre-fix: PASS and complete allow, the failed attempt hidden by filter=latest): a failed run of workflow run 500 and a green run of ANOTHER workflow run 501 of the same name: no verified supersession, FAIL', { skip: WIN_SKIP }, async (t) => {
   const h = await published(t);
   h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(3, 'cancelled'), cr(2, 'success')], [
     { id: 500, run_attempt: 1, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }] } },
@@ -309,7 +309,7 @@ test('R5-3a (pre-fix: PASS and complete allow, the failed attempt hidden by filt
   assert.equal(code(authorize(h, 'complete')), 'ci_failed');
 });
 
-test('R5-3b legitimate green rerun: attempt 1 of workflow run 500 failed, attempt 2 of the SAME run passed: verified supersession, PASS (the superseded run is recorded), and complete allows on the recorded evidence', { skip: WIN_SKIP }, async (t) => {
+test('R5-3b [I3] legitimate green rerun: attempt 1 of workflow run 500 failed, attempt 2 of the SAME run passed: verified supersession, PASS (the superseded run is recorded), and complete allows on the recorded evidence', { skip: WIN_SKIP }, async (t) => {
   const h = await published(t);
   h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(2, 'success')], [
     { id: 500, run_attempt: 2, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }], 2: [{ id: 2, name: 'test', conclusion: 'success', check_run_id: 2 }] } }]));
@@ -321,7 +321,7 @@ test('R5-3b legitimate green rerun: attempt 1 of workflow run 500 failed, attemp
   assert.equal(a.out.allow, true, a.stdout);
 });
 
-test('R5-3c (pre-fix: PASS): a third-party app\'s same-named failed and green runs have no attempt identity: UNAVAILABLE ci_rerun_unverified with the recovery; complete refuses', { skip: WIN_SKIP }, async (t) => {
+test('R5-3c [I3] (pre-fix: PASS): a third-party app\'s same-named failed and green runs have no attempt identity: UNAVAILABLE ci_rerun_unverified with the recovery; complete refuses', { skip: WIN_SKIP }, async (t) => {
   const h = await published(t);
   const ext = { app: 'circleci', check_suite: 77 };
   h.scriptCi(ciScript([cr(2, 'success', ext)], [cr(1, 'failure', ext), cr(2, 'success', ext)]));
@@ -334,7 +334,7 @@ test('R5-3c (pre-fix: PASS): a third-party app\'s same-named failed and green ru
   assert.equal(n.owner, 'human', JSON.stringify(n));
 });
 
-test('R5-3d an Actions rerun still running (attempt 2 in progress) is PENDING, never PASS on attempt 1; an Actions check run no job maps, beside a same-named failure, is ci_rerun_unverified; an incomplete jobs listing is ci_provider_incomplete', { skip: WIN_SKIP }, async (t) => {
+test('R5-3d [I3] an Actions rerun still running (attempt 2 in progress) is PENDING, never PASS on attempt 1; an Actions check run no job maps, beside a same-named failure, is ci_rerun_unverified; an incomplete jobs listing is ci_provider_incomplete', { skip: WIN_SKIP }, async (t) => {
   const h = await published(t);
   h.scriptCi(ciScript([cr(2, null)], [cr(1, 'failure'), cr(2, null)], [
     { id: 500, run_attempt: 2, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }], 2: [{ id: 2, name: 'test', status: 'in_progress', check_run_id: 2 }] } }]));
@@ -349,8 +349,87 @@ test('R5-3d an Actions rerun still running (attempt 2 in progress) is PENDING, n
   assert.deepEqual([i.out.state, i.out.code], ['UNAVAILABLE', 'ci_provider_incomplete'], i.stdout);
 });
 
-test('R5-3e the collection reads EVERY check run (filter=all), never the provider\'s opaque latest selection', () => {
+test('R5-3e [I3] the collection reads EVERY check run (filter=all), never the provider\'s opaque latest selection', () => {
   const calls = [];
   ghProvider({ repoRoot: '/nowhere', repository: { host: 'github.com', owner: 'acme', repo: 't-1', slug: 'github.com/acme/t-1' }, spawn: (...a) => { calls.push(a[1]); return { status: 1, stderr: 'x' }; } }).checkRuns('a'.repeat(40));
   assert.ok(calls[0].includes('filter=all') && !calls[0].includes('filter=latest'), JSON.stringify(calls[0]));
+});
+
+// ------------------------------------------------------------------ item 4: the freeze-time base source; one verifier test per stage
+
+test('[H2] HEAD mode: the local refs/remotes/origin/HEAD symref repointed at a scratch branch BEFORE the review freeze never becomes the base of record (resolved once with ls-remote --symref)', { skip: WIN_SKIP }, async (t) => {
+  const h = enrollFixture(t);
+  h.okGit(['push', '-q', 'origin', `${h.defaultBranch}:refs/heads/scratch`]);
+  h.okGit(['fetch', '-q', 'origin']);
+  h.okGit(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/scratch']);
+  await h.toShipReady();
+  const S = h.readState();
+  assert.deepEqual([S.freeze.base.ref, S.ship_ready.base.ref], [h.defaultBranch, h.defaultBranch], J(S.freeze.base));
+  h.commitAll();
+  const a = authorize(h, 'publish');
+  assert.deepEqual([a.out.allow, a.out.binding?.base], [true, h.defaultBranch], a.stdout);
+});
+
+/** A run at `stage` (review: drive done, reviews collected but not gated; ship-ready: review accepted; publish: committed; ci/complete: published, CI PASS). */
+async function atStage(t, stage) {
+  const h = enrollFixture(t);
+  h.scriptCi(GREEN);
+  assert.equal(h.cli('init', { dag: h.dagFile }).status, 0);
+  assert.equal(h.cli('drive').status, 0);
+  if (stage === 'review') return h;
+  assert.equal(h.gate('review', passReview('rx-1', h.candidate())).out.code, 'review_accepted');
+  if (stage === 'ship-ready') return h;
+  assert.equal(h.gate('ship-ready', {}).out.ok, true);
+  h.commitAll();
+  if (stage === 'publish') return h;
+  assert.equal(code(publishPr(h)), 'published');
+  assert.equal(h.cli('ci').out.state, 'PASS');
+  return h;
+}
+/** origin re-pointed at another repository's URL (insteadOf keeps the bytes local: only the identity differs). */
+const OTHER_URL = 'https://github.com/evil/other.git';
+const toOther = (fx) => { fx.okGit(['config', '--local', '--add', `url.${fx.remote}.insteadOf`, OTHER_URL]); fx.okGit(['remote', 'set-url', 'origin', OTHER_URL]); };
+
+test('[V-review] gate review runs the verifier: origin re-pointed after the reviewers were collected is identity_changed at the gate', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'review');
+  const collected = h.engineReview(passReview('rx-1', h.candidate()));
+  toOther(h);
+  const g = h.gate('review', collected.input, { raw: true });
+  assert.equal(g.out?.code, 'identity_changed', g.stdout);
+});
+
+test('[V-ship-ready] gate ship-ready runs the verifier: identity_changed', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'ship-ready');
+  toOther(h);
+  const g = h.gate('ship-ready', {});
+  assert.equal(g.out?.code, 'identity_changed', g.stdout);
+});
+
+test('[V-publish] authorize publish runs the verifier: identity_changed, nothing pushed', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'publish');
+  toOther(h);
+  assert.equal(code(authorize(h, 'publish')), 'identity_changed');
+  assert.equal(code(publishPr(h)), 'identity_changed');
+  assert.equal(h.remoteHead(), null);
+});
+
+test('[V-ci] ci runs the verifier: an origin re-pointed after publish is a recorded identity_changed refusal', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'ci');
+  toOther(h);
+  const c = h.cli('ci');
+  assert.deepEqual([c.out?.recorded, c.out?.state, c.out?.code], [true, 'UNAVAILABLE', 'identity_changed'], c.stdout + c.stderr);
+});
+
+test('[V-ci] ci with the gh pin gone is a recorded gh_unpinned refusal (with the verifier omitted: a recorded ci_provider_unavailable, never a crash on a null provider)', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'ci');
+  h.editState(S => { delete S.enrollment.tools.gh; });
+  const u = h.cli('ci');
+  assert.deepEqual([u.out?.recorded, u.out?.state, u.out?.code], [true, 'UNAVAILABLE', 'gh_unpinned'], u.stdout + u.stderr);
+});
+
+test('[V-complete] authorize complete runs the verifier: a PR closed after CI passed is pr_state (a complete-only row)', { skip: WIN_SKIP }, async (t) => {
+  const h = await atStage(t, 'complete');
+  assert.equal(authorize(h, 'complete').out.allow, true);
+  h.scriptCi({ ...GREEN, pr: { number: 1, headRefOid: '$HEAD', headRefName: 'T-1-work', baseRefName: h.defaultBranch, state: 'CLOSED' } });
+  assert.equal(code(authorize(h, 'complete')), 'pr_state');
 });

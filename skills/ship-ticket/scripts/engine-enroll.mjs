@@ -56,6 +56,8 @@
  * R0-S round 4 (engine-identity.mjs, ONE verifier): enroll records the repository identity and pins gh (no late pin); the PR base is the
  * base of record frozen before review in both modes (never refs/remotes/<r>/HEAD; remote_unconfigured / pr_base_required are gone);
  * identity_unbound, identity_changed, publication_mismatch, pr_required, pr_state, pr_*_mismatch, pr_unavailable, assurance_relaxed.
+ * R0-S round 5: remote_ambiguous (several fetch or push URLs, or a push URL of another repository: refused at enroll, every stage, and
+ * immediately before publish pushes); the history check lists paths with --ignore-submodules=none.
  * Still the same-user residual (documented, not closed): rewriting state.json, the ledgers, a relay or launcher output
  * TOGETHER with the digests that bind them; replacing the relay or gh BEFORE their pin (the pin trusts that moment's
  * home and PATH); importing the modules and calling the in-process seams (ctx.ciProvider, ctx.relayHome); `git` itself

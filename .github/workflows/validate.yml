@@ -99,6 +99,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-r0s2.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s3.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s4.test.mjs
+          skills/ship-ticket/scripts/run-engine-r0s5.test.mjs
           skills/ship-ticket/scripts/run-engine-trust-matrix.test.mjs
           skills/ship-ticket/scripts/git-guard.test.mjs
           skills/ship-ticket/scripts/context-manifest.test.mjs
@@ -152,3 +153,9 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-record-mutation.test.mjs
+      - name: Release-identity mutation check (R0-S round 5)
+        env:
+          ENGINE_IDENTITY_MUTATION: '1'
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/engine-identity-mutation.test.mjs

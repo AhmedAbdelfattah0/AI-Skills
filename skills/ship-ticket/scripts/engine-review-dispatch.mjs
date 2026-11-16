@@ -492,9 +492,7 @@ export function reviewerBrief({ S, repoRoot, planText, role, owed, candidate, me
 const iso = (ms) => new Date(ms).toISOString();
 const refuse = (code, reasons, extra = {}) => ({ schema: REVIEW_SCHEMA, dispatched: false, code, reasons, ...extra });
 
-/** Dispatch refusals the orchestrator cannot correct (R0-S batch 2, item 6): recorded in state.review_refusals, BLOCKED for the human in `next`. */
-export const RECORDED_REFUSALS = Object.freeze(['reviewer_is_builder', 'review_relay_drift', 'review_cli_drift', 'review_cli_unavailable', 'review_diff_unavailable',
-  'identity_changed', 'base_unverified', 'base_remote_unavailable', 'base_moved_local', 'base_moved_remote']);
+/** How many dispatch refusals state.review_refusals keeps (every refusal `keep()` records is BLOCKED for the human in `next`). */
 const REFUSALS_KEEP = 20;
 function recordRefusal(S, r, { role, kind, candidate, mergeBase, now }) {
   S.review_refusals = [...(S.review_refusals ?? []), { code: r.code, role, kind, candidate_id: candidate, merge_base: mergeBase ?? null, reasons: r.reasons,
@@ -518,7 +516,8 @@ export function dispatchRefusal(S, kind, role, candidate, mergeBase = null) {
  * PATH (claude-delegate resolveClaudeLauncher, codex-delegate spawn('codex')); neither honours a binary override. So the first
  * dispatch of each provider pins the CLI found on PATH then (realpath + sha256, state.review_cli_pins), and every dispatch launches the
  * relay with an engine-owned shim directory FIRST on PATH whose `<provider>` entry links to exactly that pinned file, after
- * re-verifying its bytes (review_cli_drift). A stub put earlier on the caller's PATH after the pin is never resolved by the relay.
+ * re-verifying its bytes (review_cli_drift). A stub `claude`/`codex` put earlier on the caller's PATH after the pin is never resolved by the
+ * relay; the interpreter is NOT pinned: an npm entry's `#!/usr/bin/env node` resolves `node` from the caller's PATH (residual).
  * Residual: the pin covers the entry file only (not the packages or native binaries it loads), trusts that first moment's PATH,
  * and the check-to-exec window; on Windows no shim is built (the PATH is not steered; the pin is still verified).
  */
