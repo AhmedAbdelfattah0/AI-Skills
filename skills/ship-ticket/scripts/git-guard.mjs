@@ -32,7 +32,8 @@
  * default branch resolved once by `ls-remote --symref`: engine-identity.mjs, R0-S round 4), the same one `publish` used;
  * a stacked PR binds its parent as config.base. The ACTUAL push destination is judged by the same verifier (E-e): the
  * remote git passes as $1 (a remote name, or a URL mapped to the configured remote with that url or pushurl, else the URL
- * itself) must name the repository identity recorded at enroll, else `identity_changed` (a push to another remote is refused).
+ * itself) must name the repository identity recorded at enroll, else `identity_changed` (a push to another remote is refused); a remote
+ * with several URLs or push URLs (git pushes to all of them) is `remote_ambiguous` (R0-S round 5).
  *
  * Pattern limits, pinned by git-guard.test.mjs. False positives (fail closed, never a bypass): the
  * default pattern also reads `fix/issue-42` as ticket `issue-42` and `release-2026-11` as

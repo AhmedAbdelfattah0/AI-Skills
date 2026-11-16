@@ -87,12 +87,12 @@ const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ce
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
 /** CI UNAVAILABLE codes another collection cannot cure (R0-S batch 2, item 6): BLOCKED for the human. */
 export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified',
-  'identity_unbound', 'identity_changed', 'publication_mismatch', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch', 'pr_repo_mismatch']);
+  'identity_unbound', 'identity_changed', 'remote_ambiguous', 'publication_mismatch', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch', 'pr_repo_mismatch']);
 /** Gate refusal codes the orchestrator cannot correct by resubmitting (item 6): BLOCKED for the human at once. Any other refusal is the
  * orchestrator's to correct ONCE: the same refusal twice in a row for the same candidate is the human's (no endless gate loop). */
 export const GATE_HUMAN = Object.freeze(['review_fail_unconsumed', 'review_output_changed', 'review_receipt_spent', 'review_identity_spoofed', 'review_identity_shared',
   'review_base_moved', 'review_stale', 'stale_candidate', 'post_freeze_drift', 'review_binding_missing', 'review_provenance_unbound', 'quiescence_unknown',
-  'base_unverified', 'base_moved_local', 'base_moved_remote', 'identity_changed', 'identity_unbound']);
+  'base_unverified', 'base_moved_local', 'base_moved_remote', 'identity_changed', 'identity_unbound', 'remote_ambiguous']);
 const refusalOwner = (g) => (GATE_HUMAN.includes(g.code) || HUMAN_CODES.includes(g.code) || (g.repeat ?? 1) > 1 ? 'human' : 'orchestrator');
 /** The recovery each recorded dispatch refusal names (item 6). */
 const RECOVERY = Object.freeze({
@@ -101,6 +101,7 @@ const RECOVERY = Object.freeze({
   review_cli_drift: 'restore the pinned reviewer CLI (same path and bytes), or start a new run',
   review_cli_unavailable: 'install the reviewer CLI (claude or codex) on PATH, logged in, then run review-dispatch again',
   review_diff_unavailable: 'fix the git failure the reason names (the brief needs the full diff), then run review-dispatch again',
+  remote_ambiguous: 'configure exactly one URL (and at most one push URL, of the same repository) for the enrolled remote, then run review-dispatch again',
 });
 /** The poll interval `next` suggests while CI is PENDING (a hint: nothing waits on it). */
 export const CI_POLL_MS = 30 * 1000;

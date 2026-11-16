@@ -20,7 +20,8 @@
  *
  * A required field that is missing is a refusal (identity_unbound; a missing base record keeps its existing code base_unverified), never
  * a skip: review/ship-ready need the freeze base whenever an identity is recorded or config.base is a branch; publish, ci and complete need
- * the identity; ci and complete the pinned gh and the publication tuple; complete a bound PR and STRICT assurance. Reason codes: identity_unbound, identity_changed, pr_required, pr_state, pr_base_mismatch,
+ * the identity; ci and complete the pinned gh and the publication tuple; complete a bound PR and STRICT assurance. Reason codes: identity_unbound, identity_changed,
+ * remote_ambiguous (round 5: several fetch or push URLs, or a push URL of another repository; `remoteIdentity`), pr_required, pr_state, pr_base_mismatch,
  * pr_head_mismatch, pr_repo_mismatch, pr_unavailable, publication_mismatch, assurance_relaxed, gh_unpinned, gh_drift, and the base codes
  * of engine-base.mjs. Callers (one line each): gate review and gate ship-ready (engine-gates.mjs), authorize publish (engine-enroll.mjs:
  * publish(), the git-guard hook and `next` call it), `ci` (run-engine.mjs), authorize complete (engine-enroll.mjs).
@@ -38,7 +39,7 @@ import { assuranceOf } from './engine-dag.mjs';
 
 export { authGit };
 
-export const IDENTITY_CODES = Object.freeze(['identity_unbound', 'identity_changed', 'pr_required', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch',
+export const IDENTITY_CODES = Object.freeze(['identity_unbound', 'identity_changed', 'remote_ambiguous', 'pr_required', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch',
   'pr_repo_mismatch', 'pr_unavailable', 'publication_mismatch', 'assurance_relaxed']);
 export const STAGES = Object.freeze(['review', 'ship-ready', 'publish', 'ci', 'complete']);
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -46,21 +47,42 @@ const no = (code, reason) => ({ ok: false, code, reasons: [reason] });
 
 const out = (r) => (r.status === 0 ? r.stdout.trim() : null);
 
+/** EVERY configured value of `key` (all scopes): { ok: true, values } ([] when unset, git exit 1) | { ok: false, reason } (any other failure). */
+function configAll(repoRoot, key) {
+  const r = spawnSync('git', ['config', '--get-all', key], { cwd: repoRoot, encoding: 'utf8', timeout: 30000 });
+  if (r.status === 1 && !r.error) return { ok: true, values: [] };
+  if (r.status !== 0 || r.error) return { ok: false, reason: `git config --get-all ${key} failed (${(r.stderr || r.error?.message || `exit ${r.status}`).trim()})` };
+  return { ok: true, values: r.stdout.split('\n').map(s => s.trim()).filter(Boolean) };
+}
+
 /**
- * THE reader of a remote's repository identity: { remote_name, url, host, owner, repo, slug } or null. A remote name reads its CONFIGURED
- * remote.<name>.url (before any insteadOf rewrite); a configured pushurl naming another repository is no identity (null). A URL (`git push
- * <url>`, the hook's $1) is parsed as given.
+ * R0-S round 5 (item 1): THE reader of a remote's repository identity. A remote NAME must be unambiguous: exactly one configured
+ * remote.<name>.url (git fetch and ls-remote use the FIRST of several, git push uses ALL of them) and at most one remote.<name>.pushurl
+ * (git push uses ALL push URLs), naming the same repository as the URL. Several fetch URLs, several push URLs, or a push URL of another
+ * repository are `remote_ambiguous`: the engine never selects one of several conflicting values. Read from the CONFIGURED values (before
+ * any insteadOf rewrite: a documented residual). A URL (`git push <url>`, the hook's $1 when no remote names it) is parsed as given.
+ * -> { ok: true, identity: { remote_name, url, host, owner, repo, slug } | null (no GitHub repository) } | { ok: false, code: 'remote_ambiguous', reasons }
  */
-export function readIdentity(repoRoot, remote = 'origin') {
+export function remoteIdentity(repoRoot, remote = 'origin') {
   const given = String(remote ?? '');
-  if (!SAFE_REMOTE.test(given)) { const id = repositoryOf(given); return id ? { remote_name: null, url: given, ...id } : null; }
-  const cfg = (k) => out(spawnSync('git', ['config', '--get', `remote.${given}.${k}`], { cwd: repoRoot, encoding: 'utf8', timeout: 30000 }));
-  const url = cfg('url');
+  if (!SAFE_REMOTE.test(given)) { const id = repositoryOf(given); return { ok: true, identity: id ? { remote_name: null, url: given, ...id } : null }; }
+  const urls = configAll(repoRoot, `remote.${given}.url`), pushes = configAll(repoRoot, `remote.${given}.pushurl`);
+  for (const r of [urls, pushes]) if (!r.ok) return no('remote_ambiguous', `${r.reason}: the remote ${given} cannot be read unambiguously`);
+  const fix = 'configure exactly one URL (and at most one push URL, of the same repository) for the remote, or start a new run';
+  if (urls.values.length > 1) return no('remote_ambiguous', `remote ${given} has ${urls.values.length} fetch URLs (${urls.values.join(', ')}): git fetches from the first and pushes to all; ${fix}`);
+  if (pushes.values.length > 1) return no('remote_ambiguous', `remote ${given} has ${pushes.values.length} push URLs (${pushes.values.join(', ')}): git pushes to all of them; ${fix}`);
+  const url = urls.values[0] ?? null;
   const id = repositoryOf(url);
-  if (!id) return null;
-  const push = cfg('pushurl');
-  if (push !== null && !sameRepository(repositoryOf(push), id)) return null;
-  return { remote_name: given, url, ...id };
+  if (!id) return { ok: true, identity: null };
+  const push = pushes.values[0] ?? null;
+  if (push !== null && !sameRepository(repositoryOf(push), id))
+    return no('remote_ambiguous', `remote ${given} fetches from ${id.slug} but pushes to ${repositoryOf(push)?.slug ?? push}: a push URL of another repository; ${fix}`);
+  return { ok: true, identity: { remote_name: given, url, ...id } };
+}
+/** The identity alone (null when none or ambiguous): callers that must tell ambiguity apart use remoteIdentity. */
+export function readIdentity(repoRoot, remote = 'origin') {
+  const r = remoteIdentity(repoRoot, remote);
+  return r.ok ? r.identity : null;
 }
 
 /** Whether two identities name the same host/owner/repo (GitHub names are case-insensitive). */
@@ -100,7 +122,9 @@ function identityNow(S, repoRoot, remote, required) {
   const rec = S?.enrollment?.identity ?? null;
   if (!rec) return required ? no('identity_unbound', 'the enrollment recorded no repository identity (no GitHub origin at enroll): nothing is published, collected or completed for an unbound run; start a new run with origin configured') : { ok: true, identity: null };
   const name = remote ?? rec.remote_name;
-  const cur = readIdentity(repoRoot, name);
+  const read = remoteIdentity(repoRoot, name);
+  if (!read.ok) return read; // remote_ambiguous (round 5): never one of several values
+  const cur = read.identity;
   if (!sameIdentity(cur, rec)) return no('identity_changed', `${name} now names ${cur?.slug ?? 'no GitHub repository'}; this run enrolled ${rec.slug} (remote ${rec.remote_name}): `
     + 'a release never targets another repository than the one enrolled (restore the remote URL, or start a new run)');
   return { ok: true, identity: rec, remote: name };

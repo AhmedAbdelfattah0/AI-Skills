@@ -275,12 +275,19 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   The guarantee is *same configured repository identity* (trust on first use at
   enroll), not proof that it is the repository the owner intended:
   - `enroll` reads the repository identity once (`origin`'s configured URL:
-    host/owner/repo; a pushurl naming another repository is none) and pins `gh`
+    host/owner/repo) and pins `gh`
     (path, sha256). No GitHub origin then: identity null, and `publish`, `ci` and
     `complete` refuse `identity_unbound` (the gates still run). `gh` is pinned at
     enroll or never: no later pin authorizes release (`gh_unpinned`, `gh_drift`).
-    A remote (or a push URL, or `publish --remote`) naming another repository
-    than the enrolled one is `identity_changed` at every stage.
+    A remote (or `publish --remote`) naming another repository
+    than the enrolled one is `identity_changed` at every stage. R0-S round 5: the
+    remote must be unambiguous (`git config --get-all`): exactly one fetch URL and
+    at most one push URL, of the same repository. Several fetch URLs (git fetches
+    from the first and pushes to all), several push URLs (git pushes to all) or a
+    push URL of another repository are `remote_ambiguous` at enroll (nothing is
+    enrolled), at the review freeze, gate review and ship-ready, authorize publish
+    (so the pre-push hook), immediately before `publish` pushes, at `ci` and at
+    complete; the engine never picks one of several values.
   - The **freeze** is captured BEFORE each reviewer launches, in its
     `REVIEW_DISPATCHED` receipt (captured at the execution's first dispatch,
     re-verified and carried unchanged by its later dispatches while the merge base
@@ -449,7 +456,8 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   it installs into the shared hooks directory and judges each push by that work
   tree's engine state. The ACTUAL push destination is judged by the same verifier:
   a push to a remote (or `git push <url>`) naming another repository than the
-  enrolled one is `identity_changed`; the default-branch label comes from the base
+  enrolled one is `identity_changed`, and a remote with several URLs or push URLs
+  is `remote_ambiguous`; the default-branch label comes from the base
   of record, never the local `refs/remotes/<r>/HEAD`. The pattern fails closed on look-alikes: `fix/issue-42` and
   `release-2026-11` read as tickets and are refused until you narrow it with
   `--pattern`. A branch naming two tickets is judged by one run only (the first

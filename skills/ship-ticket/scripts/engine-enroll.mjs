@@ -72,7 +72,7 @@ import { reviewFreshness } from './engine-freshness.mjs';
 import { openReviewFail } from './engine-review-dispatch.mjs';
 import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf, ghEnv, ghProvider, prNumberOf } from './engine-ci.mjs';
 import { authGit } from './engine-base.mjs';
-import { verifyReleaseBinding, readIdentity, identityRecord, publicationOf, prRows, prBinding } from './engine-identity.mjs';
+import { verifyReleaseBinding, remoteIdentity, identityRecord, publicationOf, prRows, prBinding } from './engine-identity.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -82,7 +82,7 @@ export const STAGE_PHASE = Object.freeze({ build: 'build', publish: 'ship', comp
   red: 'build', review: 'review', 'unit-review': 'review', reassess: 'review', 'ship-ready': 'ship' });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-/** The remote enroll reads the run's repository identity from (once; engine-identity.mjs readIdentity). */
+/** The remote enroll reads the run's repository identity from (once; engine-identity.mjs remoteIdentity). */
 export const IDENTITY_REMOTE = 'origin';
 
 const gitOut = (repo, args, env) => {
@@ -166,10 +166,13 @@ export function enrollIn(E, skillDir = SKILL_DIR) {
   }
   if (reader.mode === 'copy' && (S.attempts ?? []).length)
     throw coded('enrollment_after_execution', `this run already executed ${S.attempts.length} attempt(s) without enrollment and the skill is a copy install, whose files those attempts could have written; ${NEW_RUN}`);
+  // R0-S round 5 (item 1): an ambiguous origin (several fetch or push URLs, a push URL of another repository) is never enrolled.
+  const remote = remoteIdentity(ctx.repoRoot, IDENTITY_REMOTE);
+  if (!remote.ok) throw coded(remote.code, remote.reasons.join('; '));
   S.enrollment = { run_id: S.run_id, ticket: S.ticket, repo: gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']),
     branch: gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']), head: gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']),
     // R0-S round 4 (D1): the repository identity, read ONCE here by the one reader; gh pinned here or never.
-    identity: identityRecord(readIdentity(ctx.repoRoot, IDENTITY_REMOTE)),
+    identity: identityRecord(remote.identity),
     tools: { gh: resolveTool('gh', ctx.env ?? process.env) }, ...pin, attempts_before: (S.attempts ?? []).length, at: new Date().toISOString() };
   S.contexts = {};
   return { already: false, enrollment: S.enrollment };
@@ -392,6 +395,10 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   const pushTo = remote ?? identity.remote_name;
   await recordIntent(ctx, { head, branch, base: a.binding.base, remote: pushTo, at: new Date().toISOString() });
   const env = ctx.env ?? process.env;
+  // R0-S round 5 (item 1): the push remote is re-read immediately before the push: one URL, at most one push URL, the enrolled repository.
+  const dest = remoteIdentity(ctx.repoRoot, pushTo);
+  if (!dest.ok) return deny(dest.code, dest.reasons[0]);
+  if (dest.identity?.slug?.toLowerCase() !== identity.slug.toLowerCase()) return deny('identity_changed', `${pushTo} now names ${dest.identity?.slug ?? 'no GitHub repository'}; this run enrolled ${identity.slug}`);
   const push = spawnSync('git', ['push', pushTo, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
   if (push.status !== 0) return { published: false, allow: true, code: 'push_failed', reasons: [(push.stderr || push.error?.message || '').trim()] };
   const remoteHead = gitOut(ctx.repoRoot, ['ls-remote', pushTo, `refs/heads/${branch}`], env)?.split(/\s+/)[0] ?? null;
