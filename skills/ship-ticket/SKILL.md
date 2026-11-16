@@ -82,7 +82,12 @@ enrolled. Right after approval, `init` creates the run and the next action is
 `run-engine.mjs enroll`, then `context --phase build`. The engine's entry points
 refuse an un-enrolled run or a missing phase context: `drive`, carrier dispatch
 and every `gate`; `publish` is the only supported push and PR path. Plain `git`
-and `gh`, and repositories without the opt-in guard, are outside the engine. The manual flow is allowed only for read-only planning and
+and `gh`, and repositories without the opt-in guard, are outside the engine. The engine
+is a same-user guardrail and evidence recorder (defense in depth), not an independent
+release-security boundary: release protection needs a trusted server-side check plus a
+human-controlled merge. Unresolved gaps are listed in
+[references/execution-harness.md](references/execution-harness.md), Known unresolved
+local-assurance risks. The manual flow is allowed only for read-only planning and
 diagnostics. There is no degraded shipping path: when the engine cannot be used,
 record `harness degraded` and use **WAIT_FOR_USER** with the blocker. Commands and
 limits: [references/execution-harness.md](references/execution-harness.md),

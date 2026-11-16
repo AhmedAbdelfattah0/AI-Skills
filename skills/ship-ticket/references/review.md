@@ -86,7 +86,10 @@ that exception; never silently claim an advisory ceiling was enforced.
 
 With the run engine and the default `config.reviewProvenance` (`engine`), the
 gate does not accept an agent-authored review file as proof of an independent
-review (`engine-review-dispatch.mjs`). The supported path is the relay route:
+review (`engine-review-dispatch.mjs`). This is a same-user guardrail and evidence
+record (DETECTED, not tamper-evident against the same user), not an independent
+security boundary; see Known unresolved local-assurance risks in
+[execution-harness.md](execution-harness.md). The supported path is the relay route:
 
 ```bash
 node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-dispatch --repo <R> --ticket <T> --run-id <ID> --role primary --candidate <candidate_id>

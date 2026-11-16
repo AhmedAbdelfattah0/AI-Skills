@@ -2,9 +2,23 @@
 
 Bundled dependency-free Node helpers (Node >= 18) under `ship-ticket/scripts/`,
 distributed by the existing installer with the skill. They make the existing
-dependency-driven orchestration measurable and enforce its safety rules at the
+dependency-driven orchestration measurable and apply its safety rules at the
 process boundary. They do not replace the DAG, approval, reviewer independence
 or security gates in `SKILL.md`.
+
+**What this engine is, and is not.** The local engine is a **same-user guardrail
+and evidence recorder** (defense in depth). It catches mistakes and unintended
+drift, and it records what was checked. It is **not** an independent
+release-security boundary: a process running as the same user can change git
+state or configuration, or the engine's own state file, and the engine cannot
+stop that. Release protection requires a **trusted server-side check** (for
+example required status checks and branch protection) plus a **human-controlled
+merge**. Vocabulary used below: **ENFORCED** means the engine refuses the
+operation under the stated assumptions (an honest same-user workflow, not an
+adversary); **DETECTED** means a change is noticed and reported, not prevented;
+**UNRESOLVED** means a known gap that is neither fixed nor accepted as resolved.
+The gaps are listed in [Known unresolved local-assurance
+risks](#known-unresolved-local-assurance-risks).
 
 Mechanism and rationale are in [harness-internals.md](harness-internals.md), read on demand; rules for nodes that carry `unit` are in [units.md](units.md).
 
@@ -245,7 +259,7 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   run with `skill_drift`; in both cases the operator path is a new run (new run
   ID, START, `init`, `enroll`). A pre-change `SHIP_READY` needs `gate ship-ready`
   again (`ship_ready_regate`).
-- **Enforced:** `drive` and `carrier.mjs run` need `admitted`; a `gate` needs its
+- **Refused by the engine's own commands (a same-user guardrail):** `drive` and `carrier.mjs run` need `admitted`; a `gate` needs its
   phase context (`red` build, `review`/`unit-review`/`reassess` review, `ship-ready`
   ship) and otherwise refuses without recording a decision; `publish` needs
   `publication`. `init`, `status`, `resume`, `mark`, `rebind`, `archive` and
@@ -268,12 +282,14 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   hold (`ship_ready_superseded`), a clean tree, a branch naming the ticket, the
   candidate recomputed against the merge base recorded with `SHIP_READY`, and a
   RUN-STATE `SHIP_READY` backed by its engine line.
-  **Release identity (R0-S round 4, ENFORCED by ONE verifier, `engine-identity.mjs`
+  **Release identity (R0-S round 4; checked by ONE verifier, `engine-identity.mjs`
   `verifyReleaseBinding(stage)`, called by gate review, gate ship-ready, authorize
   publish (so `publish`, the pre-push hook and `next`), `ci` and authorize
-  complete).** One tuple is recorded and never re-resolved from a mutable selector.
-  The guarantee is *same configured repository identity* (trust on first use at
-  enroll), not proof that it is the repository the owner intended:
+  complete; a same-user guardrail, DETECTED where the same user can change the
+  inputs, see the unresolved risks below).** One tuple is recorded and never
+  re-resolved from a mutable selector. The check is *same configured repository
+  identity* (trust on first use at enroll), not proof that it is the repository
+  the owner intended:
   - `enroll` reads the repository identity once (`origin`'s configured URL:
     host/owner/repo) and pins `gh`
     (path, sha256). No GitHub origin then: identity null, and `publish`, `ci` and
@@ -367,13 +383,15 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `PASS` recorded by `ci` for exactly that publication (below); evidence that
   verified the branch head (`ci_head_unverified`); and the remote branch still at
   that head now (`ci_remote_moved`, `remote_unavailable`).
-  Residual (documented, not closed): git URL rewriting (`url.<base>.insteadOf`,
+  Residual (UNRESOLVED, not closed): git URL rewriting (`url.<base>.insteadOf`,
   `pushInsteadOf`, `GIT_CONFIG_*` in the environment) redirects the CONFIGURED
   identity to other bytes; a push to the base branch itself moves it; a tool
   replaced before its pin; `state.json` stays same-user writable; no
   cryptographic attestation. Only SIMULATED GitHub answers are tested (a fake
-  `gh`): no live GitHub qualification is claimed.
-- **`ci`** (ENFORCED for `authorize complete`). Under the run lock, after the
+  `gh`): no live GitHub qualification is claimed. See [Known unresolved
+  local-assurance risks](#known-unresolved-local-assurance-risks).
+- **`ci`** (a recorded input to `authorize complete`; evidence, not a server-side
+  check). Under the run lock, after the
   binding and the `ship` context are re-verified, it asks `gh` for the check runs
   of the head `publish` pushed for HEAD. The `gh` it runs is the one `enroll`
   pinned (absolute path and sha256 resolved from that moment's PATH): a stub put
@@ -541,8 +559,8 @@ are refused, never dropped.
   run out, the earlier gate) and `acceptNativeReview` (boolean: the owner accepts a
   native Agent-tool primary or confirmation, labelled `native_unbound`)
   ([review.md](review.md), Engine-dispatched reviewers). These four are
-  ASSURANCE settings. Absent, the run is `STRICT`, the default and the enforced
-  release policy. A relaxing value is accepted only when it is written into the
+  ASSURANCE settings. Absent, the run is `STRICT`, the default local release
+  policy (a same-user guardrail, not a server-side control). A relaxing value is accepted only when it is written into the
   approved plan narrative (what the trusted `START` digest covers; START is
   orchestrator-appended, so the engine verifies placement, not that a human read
   it): the DAG digest is listed on a VISIBLE line of that narrative (binding
@@ -714,7 +732,7 @@ push, fetch, branch rename, excluded-path edit or commit, or a rebase that keeps
 base and tree never invalidates it. Any change to the candidate bytes does:
 `review_stale` (same base: an edit, an amend of content) or `review_base_moved` (a
 `config.base` branch merged or rebased in; with `config.base` HEAD only
-`review_stale` is reported). **Enforced:** `gate ship-ready` refuses to record
+`review_stale` is reported). **Refused by the engine's own gate (same-user guardrail):** `gate ship-ready` refuses to record
 `SHIP_READY`; `gate review` refuses a confirmation whose base branch moved since
 the repair; `authorize publish` (and so `publish` and the guard) refuses with
 the same code. All three hold until an accepted review of the current candidate
@@ -958,6 +976,40 @@ confirm with `docker inspect` that its published ports, datastore and image are
 the intended environment's. If none matches, start a new labelled container;
 never attach to the first ID returned. Images, volumes and networks are never removed, and there
 is no prune.
+
+## Known unresolved local-assurance risks
+
+The local engine is a same-user guardrail and evidence recorder, not an
+independent release-security boundary (see the top of this file). The items below
+are **UNRESOLVED**: each is neither fixed nor accepted as resolved. Do not read a
+local PASS as protection against them. Release protection requires a trusted
+server-side check plus a human-controlled merge.
+
+- **Merge-commit-only history paths.** The history check (`historyPaths`) lists
+  paths with `git log --name-only`; a merge commit contributes no paths, so a
+  path changed only inside a merge can be missed by `history_outside_candidate`.
+- **`.git/info/grafts`.** A grafts file can rewrite the apparent merge base and
+  history. `--no-replace-objects` disables `git replace` objects but does not
+  disable grafts.
+- **Reviewer-brief content suppression.** A path whose name contains a newline
+  followed by a `diff --git` line can drop another file's diff from the brief;
+  one invalid UTF-8 byte makes a text file render as an un-inlined binary entry.
+  The reviewer may therefore not be shown content that is part of the candidate.
+- **CI supersession keyed by job name, not job identity.** A same-named failed
+  and passing job pair is resolved by name and workflow-run attempt, not by a
+  verified job identity. Simulated in tests; live-unverified.
+- **`core.fileMode=false` false block.** With that setting a mode-only change is
+  invisible to some reads, which can produce a false `committed_content_mismatch`.
+- **Legacy commit statuses are never read.** A failing legacy status beside
+  passing check runs gives `PASS`; status-only CI is `NO_CHECKS`.
+- **All GitHub PR and CI behavior is simulated and live-unverified.** Tests use a
+  fake `gh`; no live GitHub qualification is claimed.
+- **Same-user residuals (already documented above).** A rewritten `state.json`
+  (evidence is DETECTED against the bound config, not authenticated); module
+  import by an in-process caller; a tool replaced before its pin; `url.*.insteadOf`
+  / `pushInsteadOf` / `GIT_CONFIG_*` redirecting the configured identity; hook
+  bypasses (`--no-verify`, `core.hooksPath`, another clone, direct `gh`); an
+  unpinned `node` interpreter; and no cryptographic attestation of any record.
 
 ## Known limits
 
