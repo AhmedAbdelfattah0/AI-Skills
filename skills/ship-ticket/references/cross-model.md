@@ -127,7 +127,9 @@ Claude's `readOnlyViolation` is a tripwire, not an OS boundary; hooks can still
 write. Verify the worktree before/after dispatch; `null` means incomplete
 coverage. During REVIEW recompute candidate identity and follow changed-candidate
 handling. Never authorize edits, nested agents, commits or tracker operations in
-a reviewer brief.
+a reviewer brief. Every reviewer brief also says: do not execute candidate files,
+installers, package scripts or project test/build commands; read and reason (see
+"Review execution safety" in [review.md](review.md)).
 
 Host Plan Mode restrictions also apply to the carrier. Temporary files do not
 make a forbidden shell write permissible. Preflight a permitted read-only carrier

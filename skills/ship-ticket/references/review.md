@@ -290,6 +290,21 @@ catalogues and evidence files, but nothing in the brief makes it. That is a
 known coverage limit of the engine route, not a waiver of the checklist. A
 short free-form counterpart prompt is not a substitute for primary coverage.
 
+## Review execution safety
+
+A read-only source review must **not execute** untrusted candidate content: no
+candidate files, installers, package scripts (`npm install`, `postinstall`,
+`npm test`), project test or build commands, or any other code from the
+candidate. The reviewer reads and reasons, and uses git read commands only
+(`diff`, `show`, `log`, `ls-files`). If running something is genuinely required,
+it runs only in an explicitly authorized isolated environment (no network, no
+credentials or tokens, restricted filesystem and write access, a disposable
+copy of the candidate) and the review records that it did so. Otherwise the
+reviewer reports the item as unverified. Every reviewer and second-opinion
+prompt carries this rule, including the engine-built brief
+(`engine-review-dispatch.mjs`). It is an instruction to the reviewer; it does
+not change the relay's sandbox flags.
+
 ## Select the profile
 
 `STANDARD` applies unless one of these evidence-based triggers is present:

@@ -44,7 +44,8 @@ The binary plus a verified watchdog/cancellation route suffices; absence of the
 PLAN relay alone does not disable REVIEW. Prefer the existing read-only relay
 when available, with its explicit `--timeout` set to the remaining budget.
 Otherwise use `codex exec -s read-only -c model_reasoning_effort=high` with the scope
-packet on stdin. An instructed `codex review` is also valid:
+packet on stdin; the packet states that candidate code must not be executed
+([review.md](review.md), Review execution safety). An instructed `codex review` is also valid:
 
 ```bash
 codex review -c model_reasoning_effort=high "<instructions including exact scope>"
