@@ -124,8 +124,11 @@ export function captureBase(S, repoRoot, { localMergeBase } = {}) {
 const baseRecord = ({ remote, identity, ref, sha, merge_base }) => ({ remote, identity, ref, sha, merge_base });
 
 /**
- * Re-verify a freeze base captured earlier for the same review execution (a later dispatch of it): the enrolled identity, and the remote
- * base descending from the frozen commit with the local merge base unchanged (branch mode). -> { ok, base: recorded } | refusal
+ * Re-verify a freeze base captured earlier for the same review execution (a later dispatch of it, before any original is accepted): the
+ * enrolled identity, and the remote base descending from the frozen commit (a rewind is base_moved_remote). The same merge base keeps the
+ * recorded base (an advance only); a moved merge base (the branch merged or rebased onto the base) re-captures it (`refrozen`): the
+ * receipts of the earlier base then never pair with the new ones (review_receipt_base) and a FAIL of the earlier base still binds
+ * (review_fail_unconsumed) until the owner RETRY names it. -> { ok, base, refrozen? } | refusal
  */
 export function verifyFrozenBase(S, repoRoot, recorded, localMergeBase) {
   const id = identityNow(S, repoRoot, undefined, false);
@@ -134,7 +137,7 @@ export function verifyFrozenBase(S, repoRoot, recorded, localMergeBase) {
   const branch = Boolean(S?.config?.base) && S.config.base !== 'HEAD';
   const v = verifyBase(repoRoot, { ref: recorded.ref, remote: id.remote ?? recorded.remote, identity: id.identity, recorded, ...(branch ? { localMergeBase } : {}) });
   if (!v.ok) return v;
-  if (v.base.merge_base !== recorded.merge_base) return no('base_moved_remote', `merge-base(HEAD, ${recorded.ref}) is ${v.base.merge_base}, this review execution froze ${recorded.merge_base}: the reviewed range changed; the owner re-freezes with a RETRY`);
+  if (v.base.merge_base !== recorded.merge_base) { const c = captureBase(S, repoRoot, { localMergeBase }); return c.ok ? { ...c, refrozen: true } : c; }
   return { ok: true, base: recorded };
 }
 

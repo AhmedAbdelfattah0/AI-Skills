@@ -283,7 +283,10 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
     than the enrolled one is `identity_changed` at every stage.
   - The **freeze** is captured BEFORE each reviewer launches, in its
     `REVIEW_DISPATCHED` receipt (captured at the execution's first dispatch,
-    re-verified and carried unchanged by its later dispatches), in BOTH base modes: `base` `{remote, identity,
+    re-verified and carried unchanged by its later dispatches while the merge base
+    holds; a rewound remote base refuses `base_moved_remote`; a merge base moved
+    before any original is accepted re-captures it, and receipts of the two bases
+    never pair), in BOTH base modes: `base` `{remote, identity,
     ref, sha, merge_base}` (the base of record is `config.base`, else the remote's
     default branch resolved with `git ls-remote --symref <remote> HEAD` at the
     execution's first dispatch, later reads only compared against it; a

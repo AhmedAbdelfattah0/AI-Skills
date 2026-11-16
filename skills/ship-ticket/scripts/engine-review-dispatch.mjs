@@ -450,7 +450,7 @@ export async function dispatchReview(E, { role, candidate }) {
       const fb = ex && Object.hasOwn(ex, 'base') ? verifyFrozenBase(S, ctx.repoRoot, ex.base, c.merge_base ?? null) : captureBase(S, ctx.repoRoot, { localMergeBase: c.merge_base ?? null });
       if (!fb.ok) return keep(refuse(fb.code, fb.reasons));
       frozenBase = fb.base;
-      if (ex && !Object.hasOwn(ex, 'base')) ex.base = fb.base;
+      if (ex && (!Object.hasOwn(ex, 'base') || fb.refrozen)) ex.base = fb.base;
     } else frozenBase = S.freeze?.base ?? null;
   }
   if (!relay) {
