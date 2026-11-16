@@ -95,6 +95,8 @@ export const GATE_HUMAN = Object.freeze(['review_fail_unconsumed', 'review_outpu
   'base_unverified', 'base_moved_local', 'base_moved_remote', 'identity_changed', 'identity_unbound', 'remote_ambiguous']);
 const refusalOwner = (g) => (GATE_HUMAN.includes(g.code) || HUMAN_CODES.includes(g.code) || (g.repeat ?? 1) > 1 ? 'human' : 'orchestrator');
 /** The recovery each recorded dispatch refusal names (item 6). */
+/** R0-S round 6: the committed bytes are not the reviewed bytes. */
+const CONTENT_RECOVERY = 'recovery: make the commit carry exactly the reviewed bytes (no clean filter, eol/autocrlf conversion or LFS on these paths), or have the committed content reviewed as a new candidate (re-freeze: review again); never accepted as is';
 const RECOVERY = Object.freeze({
   reviewer_is_builder: 'map the builders to another tier in config.modelMap and start a new run (the reviewer identity is fixed per role)',
   review_relay_drift: 'restore the pinned relay bytes, or start a new run',
@@ -102,8 +104,15 @@ const RECOVERY = Object.freeze({
   review_cli_unavailable: 'install the reviewer CLI (claude or codex) on PATH, logged in, then run review-dispatch again',
   review_diff_unavailable: 'fix the git failure the reason names (the brief needs the full diff), then run review-dispatch again',
   review_diff_unverified: 'the brief could not be verified against the frozen candidate (the work tree moved, or a path is unreadable): restore the candidate bytes or start from the current candidate, then run review-dispatch again',
+  committed_content_mismatch: CONTENT_RECOVERY,
   remote_ambiguous: 'configure exactly one URL (and at most one push URL, of the same repository) for the enrolled remote, then run review-dispatch again',
 });
+/** R0-S round 6: the recovery a publish or complete denial names (appended to its reasons; owner: the human). */
+export const PUBLISH_RECOVERY = Object.freeze({
+  committed_content_mismatch: CONTENT_RECOVERY,
+});
+const withRecovery = (code, reasons) => [...(reasons ?? []), ...(PUBLISH_RECOVERY[code] ? [PUBLISH_RECOVERY[code]] : [])];
+
 /** The poll interval `next` suggests while CI is PENDING (a hint: nothing waits on it). */
 export const CI_POLL_MS = 30 * 1000;
 
@@ -317,7 +326,7 @@ export const RULES = Object.freeze([
   { id: 'publish.unfinished', stage: 'PUBLISH', when: (S, f) => S.publish_intent?.head === f.head
     && res('BLOCKED', 'publish_unfinished', 'publish', { reasons: [`publish of ${f.head} started (PUBLISH_INTENT) but recorded no PUBLISHED: check the remote branch and the PR, then run publish again`] }) },
   { id: 'publish.denied', stage: 'PUBLISH', when: (S, f) => f.publishAuth && !f.publishAuth.allow
-    && res('BLOCKED', f.publishAuth.code, 'resolve', { owner: 'human', reasons: f.publishAuth.reasons ?? [] }) },
+    && res('BLOCKED', f.publishAuth.code, 'resolve', { owner: 'human', reasons: withRecovery(f.publishAuth.code, f.publishAuth.reasons) }) },
   { id: 'publish.owed', stage: 'PUBLISH', when: (S, f) => f.publishAuth?.allow && res('READY', 'publish_owed', 'publish', { binding: f.publishAuth.binding,
     reasons: ['authorize publish allows: run run-engine.mjs publish (the only supported push and PR path)'] }) },
   // CI (P0 E6-min): from the CI_EVIDENCE of the published head; COMPLETED only when authorize complete allows.
@@ -337,7 +346,7 @@ export const RULES = Object.freeze([
   { id: 'ci.blocked', stage: 'CI', when: (S, f) => ['NO_CHECKS', 'STALE'].includes(f.ci?.state) && res('BLOCKED', f.ci.code, 'resolve',
     { owner: 'human', head: f.head, reasons: f.ci.reasons, ...(f.ci.diagnostic ? { diagnostic: f.ci.diagnostic } : {}) }) },
   { id: 'ci.denied', stage: 'CI', when: (S, f) => res('BLOCKED', f.completeAuth?.code ?? 'underived', 'resolve',
-    { owner: 'human', head: f.head, reasons: f.completeAuth?.reasons ?? [] }) },
+    { owner: 'human', head: f.head, reasons: withRecovery(f.completeAuth?.code, f.completeAuth?.reasons) }) },
 ]);
 
 /**

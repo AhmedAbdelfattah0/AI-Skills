@@ -1,7 +1,7 @@
 /**
  * R0-S round 5 (item 4): every mandatory stage's release verifier, and each round-5 fix, has a named mutant. Each mutant is a copy of the
  * layout the engine needs (skills/ship-ticket and skills/vapt) in a temp dir with ONE exact string replacement that must match exactly once
- * (the repository is never edited). For mutant M the tests tagged [M] in run-engine-r0s5.test.mjs must FAIL with a failing test carrying
+ * (the repository is never edited). For mutant M the tests tagged [M] in run-engine-r0s5.test.mjs / run-engine-r0s6.test.mjs must FAIL with a failing test carrying
  * that tag, and the unpatched copy (the control) must PASS every tagged test, or the result would say nothing.
  *   V-*   the stage's verifyReleaseBinding is OMITTED: it returns ok with the recorded identity and base (a plausible shape: the caller runs on
  *         and the tagged test fails on its expected refusal code, never on a TypeError)
@@ -9,7 +9,7 @@
  *   I1    remote URLs read as the last configured value (pre-round-5); I2 the brief rendered by the repository's own `git diff`;
  *   I2b   the inventory not bound to the frozen candidate; I2e / I2h diff.ignoreSubmodules honoured by candidate-id / the history check;
  *   I3    filter=latest;
- *   I3b   supersession across workflow runs.
+ *   I3b   supersession across workflow runs; C1 / C1a / C1b (round 6) the committed-content check omitted, or its path-set or per-path half.
  * Runs with ENGINE_MUTATION=1 (the engine-properties CI job) or ENGINE_IDENTITY_MUTATION=1. POSIX only (the tagged tests are).
  */
 import test from 'node:test';
@@ -26,7 +26,7 @@ const VAPT = join(HERE, '..', '..', 'vapt');
 const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
   : process.env.ENGINE_MUTATION !== '1' && process.env.ENGINE_IDENTITY_MUTATION !== '1'
     ? 'slow: runs with ENGINE_MUTATION=1 (engine-properties CI job) or ENGINE_IDENTITY_MUTATION=1' : false;
-const TESTS = ['run-engine-r0s5.test.mjs'];
+const TESTS = ['run-engine-r0s5.test.mjs', 'run-engine-r0s6.test.mjs'];
 const CONCURRENCY = 3;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const ENTRY = "  if (!S?.enrollment) return no('identity_unbound', 'the run is not enrolled: no release identity is recorded');\n";
@@ -51,6 +51,12 @@ export const IDENTITY_MUTANTS = [
     from: "'--ignore-submodules=none', mergeBase", to: 'mergeBase' },
   { tag: 'I2h', name: 'the publish history listing honours diff.ignoreSubmodules', file: 'engine-enroll.mjs',
     from: "'--ignore-submodules=none', '-z', range]", to: "'-z', range]" },
+  { tag: 'C1', name: 'authorize publish (and complete) never compares the committed HEAD with the reviewed manifest', file: 'engine-enroll.mjs',
+    from: '  const committed = committedContent(ctx.repoRoot, head, S.ship_ready.manifest, S.pinned_exclusions ?? []);', to: '  const committed = null;' },
+  { tag: 'C1a', name: 'committedContent skips (a): the changed path set', file: 'engine-enroll.mjs',
+    from: "  if (checks.includes('paths')) {", to: '  if (false) {' },
+  { tag: 'C1b', name: 'committedContent skips (b): mode and object id per path', file: 'engine-enroll.mjs',
+    from: "  if (checks.includes('content') && entries.length) {", to: '  if (false) {' },
   { tag: 'I3', name: 'check runs read with filter=latest', file: 'engine-ci.mjs',
     from: "'-f', 'filter=all', '--paginate'", to: "'-f', 'filter=latest', '--paginate'" },
   { tag: 'I3b', name: 'a higher attempt of ANOTHER workflow run supersedes', file: 'engine-ci.mjs',

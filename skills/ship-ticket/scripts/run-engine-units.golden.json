@@ -1110,7 +1110,45 @@
   },
   "ship_ready": {
    "candidate_id": "<sha#4>",
-   "seq": 12
+   "seq": 12,
+   "manifest": {
+    "source": "worktree_verified",
+    "merge_base": "<hex#1>",
+    "entries": [
+     {
+      "path": "docs/in.txt",
+      "kind": "file",
+      "mode": "100644",
+      "bytes": 8,
+      "sha256": "<sha#5>",
+      "oid": "<hex#2>"
+     },
+     {
+      "path": "src/a.txt",
+      "kind": "file",
+      "mode": "100644",
+      "bytes": 5,
+      "sha256": "<sha#6>",
+      "oid": "<hex#3>"
+     },
+     {
+      "path": "src/b.txt",
+      "kind": "file",
+      "mode": "100644",
+      "bytes": 2,
+      "sha256": "<sha#7>",
+      "oid": "<hex#4>"
+     },
+     {
+      "path": "src/c.txt",
+      "kind": "file",
+      "mode": "100644",
+      "bytes": 2,
+      "sha256": "<sha#8>",
+      "oid": "<hex#5>"
+     }
+    ]
+   }
   }
  },
  "engine_log": [

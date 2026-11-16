@@ -377,6 +377,38 @@ export function applyHunks(oldText, hunks) {
   return out.join('');
 }
 
+/** The repository's object format (sha1 | sha256): blob ids of the manifest are computed in it. */
+export function objectFormat(repoRoot) { const r = authGit(repoRoot, ['rev-parse', '--show-object-format'], { timeout: 30000 }); return r.status === 0 && r.stdout.trim() === 'sha256' ? 'sha256' : 'sha1'; }
+/** The git blob id of raw `content` (`git hash-object --no-filters`, computed in process). */
+export const blobOid = (content, fmt = 'sha1') => createHash(fmt).update(`blob ${content.length}\0`).update(content).digest('hex');
+/** R0-S round 6: the object id the committed tree must hold for an entry (null: absent; a submodule: its commit). */
+const oidOf = (e, fmt) => (e.kind === 'deleted' ? null : e.kind === 'submodule' ? e.content.toString('utf8').trim() : blobOid(e.content, fmt));
+
+/**
+ * R0-S round 6: the reviewed-content manifest of `paths` read from the work tree, ONLY when it recomputes `candidate` exactly (so it is
+ * the reviewed bytes by the candidate id), else null. For a SHIP_READY whose accepted review has no receipt manifest (a policy without
+ * engine dispatch, or a receipt from before round 6).
+ */
+export function worktreeManifest(repoRoot, paths, candidate) {
+  const fmt = objectFormat(repoRoot);
+  const entries = paths.map(p => ({ path: p, ...worktreeEntry(repoRoot, p) }));
+  if (candidateDigest(entries) !== candidate) return null;
+  return entries.map(e => ({ path: e.path, kind: e.kind, mode: e.mode, bytes: e.kind === 'deleted' ? 0 : e.content.length, sha256: e.kind === 'deleted' ? null : digestOf(e.content), oid: oidOf(e, fmt) }));
+}
+
+/**
+ * R0-S round 6: the reviewed-content manifest SHIP_READY binds for `candidate` against `mergeBase`: the manifest of the accepted
+ * (consumed) review receipt of exactly that candidate and base whose inventory_sha256 still matches it (source review_receipt), else the
+ * work tree's only when it recomputes the candidate id (source worktree_verified), else null.
+ */
+export function shipManifest(S, repoRoot, candidate, mergeBase, paths) {
+  const d = (S.review_dispatches ?? []).findLast(x => x.consumed_by && x.candidate_id === candidate && (x.merge_base ?? null) === (mergeBase ?? null) && Array.isArray(x.manifest)
+    && x.inventory_sha256 === sha(canonical({ candidate, merge_base: mergeBase, inventory: x.manifest })));
+  if (d) return { source: 'review_receipt', attempt_id: d.attempt_id, inventory_sha256: d.inventory_sha256, merge_base: mergeBase, entries: d.manifest };
+  const w = worktreeManifest(repoRoot, paths, candidate);
+  return w ? { source: 'worktree_verified', merge_base: mergeBase, entries: w } : null;
+}
+
 const sideOf = (e) => (e ? `${e.content.length} bytes, ${digestOf(e.content)}` : 'absent');
 /**
  * The verified candidate diff of `paths` from `mergeBase` and the inventory -> { diff, inventory, inventory_sha256 }, or a thrown
@@ -384,6 +416,7 @@ const sideOf = (e) => (e ? `${e.content.length} bytes, ${digestOf(e.content)}` :
  */
 export function candidateBrief(repoRoot, mergeBase, paths, candidate, run = git) {
   const base = baseEntries(repoRoot, mergeBase, paths, run);
+  const fmt = objectFormat(repoRoot);
   const tmp = mkdtempSync(join(tmpdir(), 'ship-ticket-brief-'));
   const sections = [], entries = [], inventory = [];
   try {
@@ -394,7 +427,7 @@ export function candidateBrief(repoRoot, mergeBase, paths, candidate, run = git)
       const was = base.get(p) ?? null;
       const before = was ? { mode: was.mode, content: was.type === 'blob' ? blobBytes(repoRoot, was.oid) : Buffer.from(was.oid) } : null;
       const after = now.kind === 'deleted' ? null : { mode: now.mode, content: now.content };
-      inventory.push({ path: p, kind: now.kind, mode: now.mode, bytes: after ? after.content.length : 0, sha256: after ? digestOf(after.content) : null });
+      inventory.push({ path: p, kind: now.kind, mode: now.mode, bytes: after ? after.content.length : 0, sha256: after ? digestOf(after.content) : null, oid: oidOf(now, fmt) });
       const head = [`diff --git a/${p} b/${p}`];
       if (!before && after) head.push(`new file mode ${after.mode}`);
       else if (before && !after) head.push(`deleted file mode ${before.mode}`);
@@ -484,7 +517,7 @@ export function reviewerBrief({ S, repoRoot, planText, role, owed, candidate, me
     }),
     '',
   ];
-  return { prompt: lines.join('\n'), inventory_sha256 };
+  return { prompt: lines.join('\n'), inventory_sha256, inventory };
 }
 
 // ---- dispatch -------------------------------------------------------------------------------------
@@ -636,8 +669,8 @@ export async function dispatchReview(E, { role, candidate }) {
   const outDir = join(P.attempts, id + '.relay');
   mkdirSync(outDir, { recursive: true });
   const promptFile = join(P.attempts, id + '.prompt');
-  let prompt, inventorySha;
-  try { ({ prompt, inventory_sha256: inventorySha } = reviewerBrief({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] })); }
+  let prompt, inventorySha, manifest;
+  try { ({ prompt, inventory_sha256: inventorySha, inventory: manifest } = reviewerBrief({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] })); }
   catch (e) { if (!['review_diff_unavailable', 'review_diff_unverified'].includes(e.code)) throw e; return keep(refuse(e.code, [e.message])); }
   writeFileSync(promptFile, prompt, { mode: 0o600 });
   const argv = [process.execPath, relay, '--cd', ctx.repoRoot, '--read-only', '--effort', 'high', '--timeout', `${route.timeout_min}m`, '--out-dir', outDir,
@@ -646,7 +679,7 @@ export async function dispatchReview(E, { role, candidate }) {
   const receipt = { attempt_id: id, role, kind: owed.kind, ...(owed.review_execution ? { review_execution: owed.review_execution } : {}),
     review_execution_id: executionId, base: frozenBase,
     requested_identity: identity, provider: route.provider, candidate_id: candidate, merge_base: c.merge_base ?? null,
-    argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), inventory_sha256: inventorySha, started_at: iso(now), deadline: iso(deadline),
+    argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), inventory_sha256: inventorySha, manifest, started_at: iso(now), deadline: iso(deadline),
     relay, relay_sha256: sha(readFileSync(relay)), cli: { path: cli.pin.path, sha256: cli.pin.sha256 }, argv, prompt_file: promptFile, out_dir: outDir, result_file: join(outDir, 'result.json'),
     status: 'dispatched' };
   const a = { attempt_id: id, kind: REVIEW_KIND, node: `review-${role}`, role, provider: route.provider, model: route.model ?? 'provider-default',
@@ -656,7 +689,7 @@ export async function dispatchReview(E, { role, candidate }) {
   if (cli.fresh) S.review_cli_pins = { ...(S.review_cli_pins ?? {}), [route.provider]: { ...cli.pin, at: iso(now) } };
   S.attempts.push(a);
   note(S, 'REVIEW_DISPATCHED', { attempt_id: id, role, kind: owed.kind, candidate_id: candidate });
-  const { argv: _argv, ...line } = receipt;
+  const { argv: _argv, manifest: _manifest, ...line } = receipt; // the manifest stays in the engine state (inventory_sha256 binds it)
   S.outbox.push({ run_id: S.run_id, event: 'REVIEW_DISPATCHED', event_id: `review-dispatched-${id}`, ...line, timestamp: iso(now) });
   // The receipt is durable BEFORE anything is launched.
   await E.commit();

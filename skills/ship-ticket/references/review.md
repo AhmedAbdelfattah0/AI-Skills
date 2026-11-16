@@ -132,7 +132,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   (recorded) and nothing launches. The candidate itself and the publish history
   check list paths with `--ignore-submodules=none`.
 - **The receipt comes first.** `REVIEW_DISPATCHED` `{attempt_id, role,
-  requested_identity, candidate_id, argv_sha256, prompt_sha256, inventory_sha256, started_at,
+  requested_identity, candidate_id, argv_sha256, prompt_sha256, inventory_sha256, manifest (round 6: the inventory with each path's git object id), started_at,
   review_execution_id, base}` is committed before the launcher starts. It carries
   the FREEZE (R0-S round 4): `base` `{remote, identity, ref, sha, merge_base}`,
   the commit the remote names for the base of record (`config.base`, else the

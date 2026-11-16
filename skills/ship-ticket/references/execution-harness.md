@@ -325,7 +325,23 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   (`history_outside_candidate`: e.g. an extra commit later reverted; paths are
   checked, not bytes: an intermediate commit may hold other bytes of a reviewed
   path). A history listing that fails or overflows is `history_unavailable`, never
-  an empty history. An enrollment with no captured repository or branch is
+  an empty history. R0-S round 6: and the COMMITTED HEAD is exactly the reviewed
+  content. `gate ship-ready` binds the reviewed-content manifest (every candidate
+  path: kind, mode, sha256 and the git object id of the RAW reviewed bytes) of the
+  accepted review's receipt (`ship_ready.manifest.source` `review_receipt`; without
+  one, the work tree's only when it recomputes the candidate id:
+  `worktree_verified`). Authorize publish (so `publish`, the pre-push hook and
+  `next`) and, cumulatively, authorize complete compare HEAD with it using plumbing
+  only (`diff-tree -r --raw --no-renames --ignore-submodules=none` from the
+  recorded merge base: the changed paths, less the pinned exclusions, are exactly
+  the manifest's; `ls-tree`: each path's mode and object id are the reviewed ones,
+  a deletion absent). Any difference is `committed_content_mismatch` (human-owned;
+  the reasons name each path and which side differs): commit exactly the reviewed
+  bytes, or have the committed content reviewed as a new candidate. Compatibility
+  limit, fail closed: a repository whose commits store other bytes than the work
+  tree (a clean filter, `core.autocrlf` / `eol` conversion, Git LFS) is refused on
+  those paths; a smudge-only filter is fine. A `SHIP_READY` recorded before round
+  6 has no manifest: `ship_ready_regate`. An enrollment with no captured repository or branch is
   `enrollment_repo_unknown` / `enrollment_branch_unknown`. The candidate is
   computed against the merge base recorded with the review freeze when
   `config.base` is `HEAD`, so committing the reviewed (or repaired) bytes before

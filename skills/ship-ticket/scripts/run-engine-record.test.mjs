@@ -301,10 +301,10 @@ function goldenRun(t, config) {
   return normalizer(fx.root)({ outputs: outs, state: preEnrollmentState(fx.readState()), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
 }
 
-test('[R9] the golden file hash is pinned (main plus the one proof started_at line), and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {
+test('[R9] the golden file hash is pinned (main plus the one proof started_at line and ship_ready.manifest), and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {
   const text = readFileSync(GOLDEN, 'utf8').replace(/\r\n/g, '\n');
-  assert.equal(createHash('sha256').update(text).digest('hex'), 'd4a6ad070760758cb7bac18a95591b997a335ad3cffec2e81e8a103bcbe56d94',
-    'run-engine-units.golden.json is main@888df9e plus the one proof-attempt started_at line (Phase 0 slice 1 telemetry)');
+  assert.equal(createHash('sha256').update(text).digest('hex'), 'e65b028e785665956a55a72da6507c37d079afe592f0bbcef81a09e146347c47',
+    'run-engine-units.golden.json is main@888df9e plus the one proof-attempt started_at line (Phase 0 slice 1 telemetry) plus ship_ready.manifest (R0-S round 6, appended after its existing keys)');
   const got = goldenRun(t, { auditRecord: false });
   assert.equal(got.state.config.auditRecord, false, 'the bound config records the explicit false');
   delete got.state.config.auditRecord;

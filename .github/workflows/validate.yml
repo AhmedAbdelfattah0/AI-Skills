@@ -100,6 +100,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-r0s3.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s4.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s5.test.mjs
+          skills/ship-ticket/scripts/run-engine-r0s6.test.mjs
           skills/ship-ticket/scripts/run-engine-trust-matrix.test.mjs
           skills/ship-ticket/scripts/git-guard.test.mjs
           skills/ship-ticket/scripts/context-manifest.test.mjs

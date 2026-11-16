@@ -48,7 +48,7 @@ import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverCont
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
 import { collect as collectCi, ghProvider, pinnedTool, remoteHeadOf, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
 import { verifyReleaseBinding, publicationOf, prBinding } from './engine-identity.mjs';
-import { dispatchReview, collectReviews, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
+import { dispatchReview, collectReviews, shipManifest, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -870,6 +870,8 @@ export async function gate(ctx) {
         S.ship_ready.merge_base = c.merge_base;
         // R0-S round 3 (N-BASE): and the verified base commit (config.base a branch) authorize publish re-verifies on the remote.
         if (E.verifiedBase) S.ship_ready.base = E.verifiedBase; else delete S.ship_ready.base;
+        // R0-S round 6: the reviewed-content manifest (the accepted review's), which authorize publish and complete compare with HEAD.
+        S.ship_ready.manifest = shipManifest(S, ctx.repoRoot, c.candidate_id, c.merge_base ?? null, c.paths ?? []);
       }
       // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
       const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});

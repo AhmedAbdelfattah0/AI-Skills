@@ -105,6 +105,50 @@ export function historyPaths(repo, range, { spawn = spawnSync, maxBuffer = HISTO
   if (r.error || r.status !== 0) return { ok: false, reason: (r.error?.code ?? r.error?.message ?? (r.stderr || `git log exited ${r.status}`)).toString().trim() };
   return { ok: true, paths: r.stdout.split('\0').map(p => p.replace(/^\n/, '')).filter(Boolean) };
 }
+/**
+ * R0-S round 6: reviewed content == committed content. Compare commit `head` with the reviewed-content manifest bound at SHIP_READY
+ * (`manifest.entries`: path, kind, mode, oid of the RAW reviewed bytes), plumbing only, replacement objects off, literal pathspecs:
+ *   (a) the paths changed between the manifest's merge base and `head` (diff-tree -r --raw --no-renames --ignore-submodules=none), less
+ *       the pinned exclusions, are exactly the manifest's paths (no extra, none missing);
+ *   (b) each path's mode and object id in `git ls-tree head` are the manifest's (a deletion is absent; a symlink its target's blob; a
+ *       submodule its commit; the executable bit by mode).
+ * A clean filter, core.autocrlf / eol conversion or LFS stores other bytes than the reviewed ones: refused, fail closed.
+ * -> null (equal) | { code: 'committed_content_mismatch' | 'history_unavailable', reasons }
+ */
+export function committedContent(repo, head, manifest, exclusions = [], { checks = ['paths', 'content'] } = {}) {
+  const git = (args) => spawnSync('git', ['--no-replace-objects', '--literal-pathspecs', ...args], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer: HISTORY_MAX_BUFFER,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
+  const fail = (what, r) => ({ code: 'history_unavailable', reasons: [`git ${what} failed (${(r.error?.code ?? r.stderr ?? `exit ${r.status}`).toString().trim()}): the committed content cannot be compared with the reviewed content`] });
+  const entries = manifest?.entries ?? [];
+  const excluded = (p) => exclusions.some(e => p === e || p.startsWith(String(e).replace(/\/$/, '') + '/'));
+  const out = [];
+  if (checks.includes('paths')) {
+    const d = git(['diff-tree', '-r', '--raw', '--no-renames', '-z', '--ignore-submodules=none', manifest.merge_base, head]);
+    if (d.error || d.status !== 0) return fail('diff-tree', d);
+    const f = d.stdout.split('\0');
+    const changed = new Set();
+    for (let i = 0; i + 1 < f.length; i += 2) if (f[i].startsWith(':')) changed.add(f[i + 1]);
+    const want = new Set(entries.map(e => e.path));
+    const extra = [...changed].filter(p => !want.has(p) && !excluded(p)).sort(), missing = [...want].filter(p => !changed.has(p)).sort();
+    for (const p of extra) out.push(`${p}: committed (changed since the merge base) but not in the reviewed content`);
+    for (const p of missing) out.push(`${p}: reviewed but not changed in the commit (left uncommitted, or reverted)`);
+  }
+  if (checks.includes('content') && entries.length) {
+    const t = git(['ls-tree', '-r', '-z', '--full-tree', head, '--', ...entries.map(e => e.path)]);
+    if (t.error || t.status !== 0) return fail('ls-tree', t);
+    const tree = new Map();
+    for (const rec of t.stdout.split('\0').filter(Boolean)) { const tab = rec.indexOf('\t'); const [mode, , oid] = rec.slice(0, tab).split(' '); tree.set(rec.slice(tab + 1), { mode, oid }); }
+    for (const e of entries) {
+      const now = tree.get(e.path) ?? null;
+      if (e.kind === 'deleted') { if (now) out.push(`${e.path}: reviewed as deleted, committed as ${now.mode} ${now.oid}`); continue; }
+      if (!now) out.push(`${e.path}: reviewed as ${e.mode} ${e.oid}, absent from the commit`);
+      else if (now.mode !== e.mode || now.oid !== e.oid) out.push(`${e.path}: committed ${now.mode} ${now.oid}, reviewed ${e.mode} ${e.oid}`
+        + `${now.mode === e.mode ? ' (other bytes: a clean filter, eol/autocrlf conversion or LFS stored what the reviewers did not see)' : ''}`);
+    }
+  }
+  return out.length ? { code: 'committed_content_mismatch', reasons: out } : null;
+}
+
 const refusal = (code, reason, lifecycle) => ({ ok: false, code, reasons: [reason], lifecycle });
 const NEW_RUN = 'operator path: start a new run (new run id, START, init, enroll)';
 
@@ -345,6 +389,11 @@ function publishCore(ctx, S, head, deny) {
   const outside = [...new Set(hist.paths.filter(p => !covered.has(p)))].sort();
   if (outside.length) return deny('history_outside_candidate', [`commits since the merge base touch ${outside.length} path(s) outside the reviewed candidate: `
     + `${outside.slice(0, 20).join(', ')}${outside.length > 20 ? `, ... (${outside.length - 20} more)` : ''}`], 'evidence');
+  // R0-S round 6: the committed HEAD is exactly the reviewed content (the manifest bound at SHIP_READY), byte for byte.
+  if (!S.ship_ready.manifest?.entries) return deny('ship_ready_regate', ['this SHIP_READY carries no reviewed-content manifest (recorded before R0-S round 6, or the reviewed bytes could not be bound): run gate ship-ready again'], 'evidence');
+  const committed = committedContent(ctx.repoRoot, head, S.ship_ready.manifest, S.pinned_exclusions ?? []);
+  if (committed) return deny(committed.code, [...committed.reasons.slice(0, 20), ...(committed.reasons.length > 20 ? [`... (${committed.reasons.length - 20} more)`] : []),
+    'the committed bytes are not the reviewed bytes: commit exactly the reviewed content (no clean filter, eol conversion or LFS on these paths), or have the committed content reviewed (a new candidate: review again)'], 'evidence');
   const plan = io.readIfExists(join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md')) ?? '';
   const log = io.readIfExists(io.gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.engine.jsonl`)) ?? '';
   const backed = checkShipReady(plan, log, { runId: ctx.runId, requireEvent: true });
