@@ -402,11 +402,22 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
     does not add up (`ci_provider_incomplete`). This is never zero checks.
 
   Runs of another SHA are ignored. The check-runs `filter` parameter defaults to
-  `latest` ("returns the most recent check runs", GitHub REST docs; the adapter
-  passes `filter=latest` explicitly), so the engine collapses nothing itself: EVERY
-  returned run on the SHA counts, and a returned red run is never erased by a
-  same-named success (round 4; overlapping or sequential same-named jobs are both
-  judged, no ordering by start time or id). ANY failed check on the SHA (`failure`,
+  `latest` ("returns the most recent check runs", GitHub REST docs, which do not
+  say what it collapses: an earlier failed run can be absent from the answer), so
+  the adapter passes `filter=all` (R0-S round 5) and reads, for the GitHub Actions
+  runs, the jobs of every attempt of every workflow run of the SHA
+  (`actions/runs?head_sha=`, `actions/runs/<id>/attempts/<n>/jobs`): each Actions
+  check run carries its workflow run id and `run_attempt` in the evidence. A run is
+  superseded ONLY by a later attempt of the SAME workflow run (a GitHub re-run);
+  runs of different workflow runs (another push or event) both count, and nothing
+  is ordered by start time, id, check suite or `external_id`. A same-named failed
+  and non-failed pair that lacks that identity (a third-party app's re-run, or an
+  Actions check run no job maps) is `UNAVAILABLE` `ci_rerun_unverified`
+  (human-owned): re-run the failed Actions workflow run itself (a new attempt is
+  verified) or push a new commit; a third-party app's re-run cannot be verified
+  from the API. A listing whose count does not add up is `ci_provider_incomplete`.
+  All of this is SIMULATED in the tests; live GitHub re-run behaviour is
+  unverified. ANY failed check on the SHA (`failure`,
   `cancelled`, `timed_out`, `action_required`, `startup_failure`, `stale`) is
   `FAIL`, required or not. The required set (what must pass) is
   `config.ciRequiredChecks` when the approved DAG names it, else every check run on

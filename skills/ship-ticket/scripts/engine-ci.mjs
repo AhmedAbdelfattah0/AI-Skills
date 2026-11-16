@@ -17,10 +17,11 @@
  * Verdict (`verdict`, one pure function shared by `ci` and `authorize complete`; each check has an id the
  * mutation test omits): STALE (the PR head is not the published head, the PR is another branch, or the remote
  * branch, read at collection, no longer points at the head), PENDING, FAIL, NO_CHECKS, PASS. Only check runs
- * whose head_sha is the published head count. R0-S round 4 (D5): the check-runs endpoint's `filter` defaults to
- * `latest` ("returns the most recent check runs", GitHub REST docs, List check runs for a Git reference; the adapter
- * passes filter=latest explicitly), so the engine does NOT collapse runs itself: EVERY returned run on the head
- * counts, and a returned failed run is never erased by a same-named success (no start-time or id ordering). ANY
+ * whose head_sha is the published head count. R0-S round 5 (item 3): the check-runs endpoint's `filter` defaults to
+ * `latest` ("returns the most recent check runs": the docs do not say what it collapses), which can omit an earlier failed
+ * run before the engine sees it; the adapter therefore passes filter=all, and a run is superseded ONLY by a later attempt
+ * of the same GitHub Actions workflow run (`supersession`: run id + run_attempt from the jobs of every attempt). A same-named
+ * failed and non-failed pair without that identity is UNAVAILABLE ci_rerun_unverified (never guessed by time or id). ANY
  * failed check on the head (failure, cancelled, timed_out, action_required, startup_failure, stale) is FAIL, required or not.
  * The required set (what must PASS) is config.ciRequiredChecks when the approved DAG names it (an assurance
  * setting: approved in the plan, R0-S A4), else every check run reported on that head. PASS needs at least one
@@ -92,12 +93,17 @@ export function verdict(input, { omit = [] } = {}) {
     : out('PENDING', 'ci_no_checks_yet', [`no check run on ${sha} yet; NO_CHECKS from ${iso(dispatchMs + windowMs)}`]);
   if (on('remote_moved') && input.remoteHead !== undefined && input.remoteHead !== sha)
     return out('STALE', 'ci_remote_moved', [`the remote branch ${branch ?? ''} is ${input.remoteHead ?? 'gone'}, the published head is ${sha}: checks of a moved branch are never this head's success`]);
-  // R0-S round 4 (D5): every run the provider returned for the head counts (filter=latest already selected the most recent ones);
-  // the engine never decides that one run supersedes another (overlapping or sequential same-named jobs are both judged).
-  const runs = onSha;
+  // R0-S round 5 (item 3): the provider returns EVERY check run (filter=all). A run is superseded ONLY by a later attempt of the same
+  // GitHub Actions workflow run (`supersession`: authoritative run id + run_attempt, never start time, id order, check suite or name alone);
+  // everything else counts. A same-named failed and non-failed pair that lacks that identity is ambiguous: refused, never guessed.
+  const { runs, superseded, ambiguous } = supersession(onSha);
+  if (ambiguous.length) return out('UNAVAILABLE', 'ci_rerun_unverified', ambiguous.map(g => `${g.name} (${g.app ?? 'unknown app'}): `
+    + `run(s) ${g.failed.join(', ')} failed and run(s) ${g.passed.join(', ')} did not, with no attempt identity tying them (${g.why}). Supersession cannot be verified: `
+    + 're-run the failed GitHub Actions workflow run itself (a new attempt of the same run is verified), or push a new commit; a third-party app\'s re-run cannot be verified from the API'),
+    { more: { ambiguous, superseded } });
   const configured = Array.isArray(required) && required.length > 0;
   const names = configured ? [...required] : [...new Set(runs.map(c => c.name))];
-  const more = { required: names, required_source: configured ? 'config' : 'all_on_sha' };
+  const more = { required: names, required_source: configured ? 'config' : 'all_on_sha', superseded };
   const req = runs.filter(c => names.includes(c.name));
   // FAIL on any failed check on the exact SHA, required or not: a configured set narrows what must PASS, never what may fail.
   const failed = [...new Set([...req.filter(c => c.status === 'completed' && c.conclusion !== 'success'),
@@ -112,6 +118,39 @@ export function verdict(input, { omit = [] } = {}) {
   if (on('all_complete') && open.length) return out('PENDING', 'ci_pending', open.map(c => `${c.name}: ${c.status}`), { more });
   const completed = iso(Math.max(...req.map(c => ms(c.completed_at) ?? -Infinity)));
   return out('PASS', 'ci_passed', [], { completed, more });
+}
+
+/** Whether a completed run's conclusion is a failure for supersession purposes (anything but success, neutral or skipped). */
+const failedRun = (c) => c.status === 'completed' && !['success', 'neutral', 'skipped'].includes(c.conclusion);
+const annotated = (c) => c.workflow_run != null && Number.isInteger(c.run_attempt);
+
+/**
+ * R0-S round 5 (item 3): the runs that count -> { runs, superseded, ambiguous }. Pure (ciAuthorize recomputes it from the recorded checks).
+ * VERIFIED supersession only: two runs of the same app and name in the same GitHub Actions workflow run (`workflow_run`, from the jobs of
+ * each attempt) -> every run below the highest `run_attempt` present is superseded by it (a re-run attempt). Runs of different workflow
+ * runs (another push or event) never supersede each other, and a run without that identity (a third-party app, or an Actions check run no
+ * job maps) is never superseded. AMBIGUOUS: a same app+name group that keeps a failed and a non-failed run while any of them lacks the identity.
+ */
+export function supersession(checks) {
+  const top = new Map();
+  for (const c of checks) if (annotated(c)) { const k = JSON.stringify([c.app ?? null, c.name, String(c.workflow_run)]); top.set(k, Math.max(top.get(k) ?? -Infinity, c.run_attempt)); }
+  const runs = [], superseded = [];
+  for (const c of checks) {
+    const best = annotated(c) ? top.get(JSON.stringify([c.app ?? null, c.name, String(c.workflow_run)])) : undefined;
+    if (best !== undefined && c.run_attempt < best) superseded.push({ id: c.id, name: c.name, app: c.app ?? null, workflow_run: c.workflow_run, run_attempt: c.run_attempt,
+      conclusion: c.conclusion, superseded_by_attempt: best });
+    else runs.push(c);
+  }
+  const groups = new Map();
+  for (const c of runs) { const k = JSON.stringify([c.app ?? null, c.name]); groups.set(k, [...(groups.get(k) ?? []), c]); }
+  const ambiguous = [];
+  for (const g of groups.values()) {
+    const failed = g.filter(failedRun), passed = g.filter(c => c.status === 'completed' && !failedRun(c));
+    const loose = g.filter(c => !annotated(c));
+    if (failed.length && passed.length && loose.length) ambiguous.push({ name: g[0].name, app: g[0].app ?? null, failed: failed.map(c => c.id), passed: passed.map(c => c.id),
+      why: loose.some(c => c.app === 'github-actions') ? 'an Actions check run that no workflow job maps' : 'no workflow run or attempt for this app' });
+  }
+  return { runs, superseded, ambiguous };
 }
 
 /** The latest CI_EVIDENCE recorded for `head` (a later collection supersedes an earlier one), or null. */
@@ -160,6 +199,36 @@ function jsonLines(text) {
 
 const normRun = (r) => ({ id: r.id ?? null, name: String(r.name ?? ''), head_sha: r.head_sha ?? null, status: r.status ?? null, conclusion: r.conclusion ?? null,
   started_at: r.started_at ?? null, completed_at: r.completed_at ?? null, app: r.app ?? null, check_suite: r.check_suite ?? null, url: r.url ?? null });
+
+/** Parse paginated `{ total_count }` + item JSON lines (gh api --paginate --jq); a total that does not add up is ci_provider_incomplete. */
+export function parsePaged(stdout, what, isItem) {
+  const lines = jsonLines(stdout);
+  if (!lines) return unavailable('ci_provider_unavailable', `gh ${what} output is not JSON lines`);
+  const totals = lines.filter(l => Object.hasOwn(l, 'total_count') && !isItem(l)).map(l => l.total_count);
+  const items = lines.filter(isItem);
+  if (!totals.length || !totals.every(Number.isInteger)) return unavailable('ci_provider_unavailable', `gh ${what} output has no total_count`);
+  const total = Math.max(...totals);
+  if (items.length !== total) return unavailable('ci_provider_incomplete', `the provider reports ${total} ${what} and listed ${items.length}`);
+  return { ok: true, items };
+}
+
+/** The check-run id a job's check_run_url names (…/check-runs/<id>), as a string, or null. */
+export const checkRunIdOf = (url) => /\/check-runs\/(\d+)\/?$/.exec(String(url ?? ''))?.[1] ?? null;
+
+/**
+ * R0-S round 5 (item 3): annotate the GitHub Actions check runs of `sha` with their workflow run and attempt, from the jobs of EVERY attempt
+ * of every workflow run of the head (`jobs` from provider.actionsJobs). -> { ok, runs } (a run no job maps is left unannotated).
+ */
+export function annotateRuns(runs, jobs, sha) {
+  const byRun = new Map();
+  for (const j of jobs) {
+    const id = checkRunIdOf(j.check_run_url);
+    if (!id || j.head_sha !== sha || !Number.isInteger(j.run_attempt) || j.run_id == null) continue;
+    if (byRun.has(id) && JSON.stringify(byRun.get(id)) !== JSON.stringify([j.run_id, j.run_attempt])) byRun.set(id, null); // two identities: none
+    else if (!byRun.has(id)) byRun.set(id, [j.run_id, j.run_attempt]);
+  }
+  return runs.map(r => { const a = r.app === 'github-actions' ? byRun.get(String(r.id)) : null; return a ? { ...r, workflow_run: a[0], run_attempt: a[1] } : r; });
+}
 
 /**
  * Parse the check-runs output: one `{ total_count }` line per page followed by that page's runs (gh api --paginate --jq).
@@ -276,10 +345,34 @@ export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin
     name: 'gh',
     checkRuns(sha) {
       if (!SHA_RE.test(sha)) return unavailable('ci_provider_unavailable', `not a commit SHA: ${sha}`);
-      const r = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '-f', 'filter=latest', '--paginate', '--jq',
+      // filter=all (R0-S round 5): every check run; GitHub's default `latest` is an undocumented selection that can omit a failed run.
+      const r = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '-f', 'filter=all', '--paginate', '--jq',
         '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, check_suite: .check_suite.id, url: .html_url})',
         '--hostname', id?.host ?? '']);
       return r.ok ? parseCheckRuns(r.stdout) : r;
+    },
+    // R0-S round 5 (item 3): the jobs of EVERY attempt of every workflow run of `sha` (GET actions/runs?head_sha=, then
+    // actions/runs/<id>/attempts/<n>/jobs for n = 1..run_attempt): the authoritative workflow run id and run_attempt of each Actions check run.
+    actionsJobs(sha) {
+      if (!SHA_RE.test(sha)) return unavailable('ci_provider_unavailable', `not a commit SHA: ${sha}`);
+      const wr = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/actions/runs`, '-f', `head_sha=${sha}`, '-f', 'per_page=100', '--paginate', '--jq',
+        '{total_count}, (.workflow_runs[] | {id, run_attempt, head_sha})', '--hostname', id?.host ?? '']);
+      if (!wr.ok) return wr;
+      const runs = parsePaged(wr.stdout, 'workflow runs', (l) => Object.hasOwn(l, 'run_attempt'));
+      if (!runs.ok) return runs;
+      const jobs = [];
+      for (const w of runs.items.filter(x => x.head_sha === sha)) {
+        if (!Number.isInteger(w.run_attempt) || w.run_attempt < 1) return unavailable('ci_provider_unavailable', `workflow run ${w.id} has no run_attempt`);
+        for (let n = 1; n <= w.run_attempt; n++) {
+          const jr = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/actions/runs/${w.id}/attempts/${n}/jobs`, '-f', 'per_page=100', '--paginate', '--jq',
+            '{total_count}, (.jobs[] | {id, name, run_id, run_attempt, head_sha, status, conclusion, check_run_url})', '--hostname', id?.host ?? '']);
+          if (!jr.ok) return jr;
+          const js = parsePaged(jr.stdout, `jobs of workflow run ${w.id} attempt ${n}`, (l) => Object.hasOwn(l, 'check_run_url'));
+          if (!js.ok) return js;
+          jobs.push(...js.items);
+        }
+      }
+      return { ok: true, jobs };
     },
     // R0-S round 4: the REST pull (read-only): head and base REPOSITORY, refs, head sha, state and merged; `gh pr view --json` has no base repository.
     pullRequest(n) {
@@ -398,7 +491,12 @@ export function remoteHeadOf(repoRoot, pub, env) {
 export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub), repository = null, view: given }) {
   const prNumber = pr ?? pub.pr?.number ?? prNumberOf(pub.pr?.url);
   const view = given !== undefined ? given : prNumber ? provider.pullRequest(prNumber) : null;
-  const runs = provider.checkRuns(pub.head);
+  let runs = provider.checkRuns(pub.head);
+  // R0-S round 5 (item 3): Actions check runs carry their workflow run and attempt (the only verified supersession); a failed listing is UNAVAILABLE.
+  if (runs.ok && runs.runs.some(c => c.app === 'github-actions') && typeof provider.actionsJobs === 'function') {
+    const jobs = provider.actionsJobs(pub.head);
+    runs = jobs.ok ? { ...runs, runs: annotateRuns(runs.runs, jobs.jobs, pub.head) } : jobs;
+  }
   const collectedMs = now();
   const head = { schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: prNumber ?? null, provider: provider.name ?? 'custom',
     ...(pub.publication_id ? { publication_id: pub.publication_id } : {}), ...(repository ? { repository: repository.slug } : {}),

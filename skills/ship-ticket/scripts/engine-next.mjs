@@ -86,7 +86,7 @@ export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', '
 const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ceiling_ms', confirmation: 'confirmation_ceiling_ms' };
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
 /** CI UNAVAILABLE codes another collection cannot cure (R0-S batch 2, item 6): BLOCKED for the human. */
-export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified',
+export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified', 'ci_rerun_unverified',
   'identity_unbound', 'identity_changed', 'remote_ambiguous', 'publication_mismatch', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch', 'pr_repo_mismatch']);
 /** Gate refusal codes the orchestrator cannot correct by resubmitting (item 6): BLOCKED for the human at once. Any other refusal is the
  * orchestrator's to correct ONCE: the same refusal twice in a row for the same candidate is the human's (no endless gate loop). */

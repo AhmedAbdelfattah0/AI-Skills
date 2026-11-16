@@ -68,9 +68,27 @@ if (argv[0] === 'api' && /\\/check-runs$/.test(argv[3] ?? '')) {
   fs.writeFileSync(root + '/gh-ci.count', String(n + 1));
   const step = steps[Math.min(n, steps.length - 1)];
   if (step.fail) die(step.fail);
-  const runs = step.runs.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha, url: r.url ?? 'https://' + repo + '/runs/' + (r.id ?? 0) }));
+  // SIMULATED \`filter\` (R0-S round 5): a step with \`all\` answers filter=all with it and filter=latest (GitHub's default) with \`runs\`
+  // (the provider's opaque "most recent" selection, which can omit an earlier failed run); a step without \`all\` answers both with \`runs\`.
+  const filter = (argv.find(a => /^filter=/.test(a)) ?? 'filter=latest').slice('filter='.length);
+  const chosen = filter === 'all' && step.all ? step.all : step.runs;
+  const runs = chosen.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha, url: r.url ?? 'https://' + repo + '/runs/' + (r.id ?? 0) }));
   console.log(JSON.stringify({ total_count: step.total ?? runs.length }));
   for (const r of runs) console.log(JSON.stringify(r));
+} else if (argv[0] === 'api' && /\\/actions\\/runs$/.test(argv[3] ?? '')) {
+  // SIMULATED workflow runs of a head (GET repos/<o>/<r>/actions/runs?head_sha=): script.workflowRuns [{ id, run_attempt, jobs: { <attempt>: [job] } }].
+  const sha = (argv.find(a => /^head_sha=/.test(a)) ?? '').slice('head_sha='.length);
+  const wr = (script.workflowRuns ?? []).map(w => ({ id: w.id, run_attempt: w.run_attempt, head_sha: w.head_sha === undefined || w.head_sha === '$SHA' ? sha : w.head_sha }));
+  console.log(JSON.stringify({ total_count: script.workflowRunsTotal ?? wr.length }));
+  for (const w of wr) console.log(JSON.stringify(w));
+} else if (argv[0] === 'api' && /\\/actions\\/runs\\/\\d+\\/attempts\\/\\d+\\/jobs$/.test(argv[3] ?? '')) {
+  // SIMULATED jobs of one attempt; a job's check_run_id is served as its check_run_url (…/check-runs/<id>), as the REST job carries it.
+  const m = /\\/actions\\/runs\\/(\\d+)\\/attempts\\/(\\d+)\\/jobs$/.exec(argv[3]);
+  const w = (script.workflowRuns ?? []).find(x => String(x.id) === m[1]) ?? die('no workflow run ' + m[1]);
+  const jobs = (w.jobs?.[m[2]] ?? []).map(j => ({ id: j.id, name: j.name, run_id: w.id, run_attempt: Number(m[2]), head_sha: j.head_sha ?? head(), status: j.status ?? 'completed',
+    conclusion: j.conclusion ?? null, check_run_url: j.check_run_url ?? 'https://api.github.com/repos/x/y/check-runs/' + j.check_run_id }));
+  console.log(JSON.stringify({ total_count: w.jobsTotal?.[m[2]] ?? jobs.length }));
+  for (const j of jobs) console.log(JSON.stringify(j));
 } else if (argv[0] === 'pr' && argv[1] === 'view') {
   if (!script.pr || script.pr.fail) die(script.pr?.fail ?? 'no pr script');
   console.log(JSON.stringify({ url: 'https://' + (script.htmlRepo ?? flag('-R')) + '/pull/' + argv[2], ...script.pr, headRefOid: script.pr.headRefOid === '$HEAD' ? head() : script.pr.headRefOid }));

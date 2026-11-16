@@ -29,7 +29,7 @@
     "references/codex-cli.md": "sha256:2038e541e3b1f698a820f938e616ac6acefd2414cced93551324d17647d4205f",
     "references/cross-model.md": "sha256:a4b55cec6f68c954b2297dedf6a71af6c1d3bde9d0dbd0462297cae4c654fd6d",
     "references/design-parity.md": "sha256:ef87e1e8146000470d2e0a270aaad8e350b0057223d2a99628f97efb2543be63",
-    "references/execution-harness.md": "sha256:22b9556c79f450d423ba9b622b4ba4e6a8063aecd378e5a2976a5ec6adf86625",
+    "references/execution-harness.md": "sha256:4775a015e5bd7a9522462f61bcb8494154ccb8944b42fabf1b378d6deb1df88c",
     "references/harness-internals.md": "sha256:e6fa6c5e2caf8b40217b0424a47234bdba674fb8e1e2e611b6fb3fcd1510521f",
     "references/observability.md": "sha256:65a5b4f6190b06318c63371b3826dce59e2ccb3ee6cb04378c674c35ad1e805e",
     "references/plan.md": "sha256:84c26f87f3717efb1d9b641d72db627ecb8bc64d111bdf6849700f87ac39854d",

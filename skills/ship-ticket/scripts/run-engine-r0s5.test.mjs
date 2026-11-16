@@ -20,6 +20,8 @@ import { enrollFixture, GITHUB_URL } from './engine-enroll.test-helper.mjs';
 import { candidateId } from './engine-io.mjs';
 import { historyPaths } from './engine-enroll.mjs';
 import { buildPrompt } from './engine-review-dispatch.mjs';
+import { ghProvider } from './engine-ci.mjs';
+import { waitFor } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups (engine) and sh fakes';
 const GUARD = fileURLToPath(new URL('./git-guard.mjs', import.meta.url));
@@ -248,6 +250,8 @@ test('R5-2d (pre-fix: the reviewer prompt omitted src/a.txt): engine review-disp
   const prompt = readFileSync(d.out.receipt.prompt_file, 'utf8');
   assert.match(prompt, /^\+a1$/m, 'the reviewer sees the bytes the candidate covers');
   assert.match(d.out.receipt.inventory_sha256 ?? '', /^sha256:[0-9a-f]{64}$/);
+  // the detached fake reviewer finishes and is collected before the fixture is removed
+  await waitFor(() => (fx.cli('review-collect').out?.live ?? ['?']).length === 0, 'the dispatched reviewer to be collected', { ms: 60000, every: 200 });
 });
 
 test('R5-2e (pre-fix: a submodule bump was NOT a candidate path, so neither reviewed nor caught by the history check): diff.ignoreSubmodules=all never hides a changed submodule from the candidate inventory or the publish history listing', (t) => {
@@ -275,3 +279,78 @@ test('R5-2e (pre-fix: a submodule bump was NOT a candidate path, so neither revi
   assert.match(b, /Subproject commit [0-9a-f]{40} -> [0-9a-f]{40}/);
 });
 
+// ------------------------------------------------------------------ item 3: CI over every check run; supersession only by a later attempt
+
+/** A check run on the published head (SIMULATED GitHub answer). */
+const cr = (id, conclusion, over = {}) => ({ id, name: 'test', head_sha: '$SHA', status: conclusion ? 'completed' : 'in_progress', conclusion: conclusion ?? null,
+  started_at: `2026-11-15T00:00:0${id % 10}.000Z`, completed_at: conclusion ? `2026-11-15T00:01:0${id % 10}.000Z` : null, app: 'github-actions', check_suite: 11, ...over });
+/** One collection's script: what filter=latest returns (`latest`), what filter=all returns (`all`), and the Actions workflow runs. */
+const ciScript = (latest, all, workflowRuns = []) => ({ checkRuns: [{ runs: latest, all }], workflowRuns });
+/** A published, ship-ready fixture with a PR. */
+const published = async (t) => {
+  const h = enrollFixture(t);
+  await h.toShipReady();
+  h.commitAll();
+  h.scriptCi(GREEN);
+  assert.equal(code(publishPr(h)), 'published');
+  return h;
+};
+
+test('R5-3a (pre-fix: PASS and complete allow, the failed attempt hidden by filter=latest): a failed run of workflow run 500 and a green run of ANOTHER workflow run 501 of the same name: no verified supersession, FAIL', { skip: WIN_SKIP }, async (t) => {
+  const h = await published(t);
+  h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(3, 'cancelled'), cr(2, 'success')], [
+    { id: 500, run_attempt: 1, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }] } },
+    // run 501 was itself re-run (attempt 2): a HIGHER attempt of ANOTHER workflow run never supersedes run 500's failure
+    { id: 501, run_attempt: 2, jobs: { 1: [{ id: 3, name: 'test', conclusion: 'cancelled', check_run_id: 3 }], 2: [{ id: 2, name: 'test', conclusion: 'success', check_run_id: 2 }] } }]));
+  const c = h.cli('ci');
+  assert.deepEqual([c.out.state, c.out.code], ['FAIL', 'ci_failed'], c.stdout);
+  assert.deepEqual(c.out.failed, ['test'], c.stdout);
+  assert.match(c.out.reasons.join(' '), /failure/, 'run 500\'s failure is the one reported');
+  assert.equal(code(authorize(h, 'complete')), 'ci_failed');
+});
+
+test('R5-3b legitimate green rerun: attempt 1 of workflow run 500 failed, attempt 2 of the SAME run passed: verified supersession, PASS (the superseded run is recorded), and complete allows on the recorded evidence', { skip: WIN_SKIP }, async (t) => {
+  const h = await published(t);
+  h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(2, 'success')], [
+    { id: 500, run_attempt: 2, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }], 2: [{ id: 2, name: 'test', conclusion: 'success', check_run_id: 2 }] } }]));
+  const c = h.cli('ci');
+  assert.deepEqual([c.out.state, c.out.code], ['PASS', 'ci_passed'], c.stdout);
+  assert.deepEqual(c.out.superseded.map(x => [x.id, x.run_attempt, x.superseded_by_attempt]), [[1, 1, 2]]);
+  assert.deepEqual(c.out.checks.map(x => [x.id, x.workflow_run, x.run_attempt]), [[1, 500, 1], [2, 500, 2]], 'the attempt identity is recorded with the evidence');
+  const a = authorize(h, 'complete');
+  assert.equal(a.out.allow, true, a.stdout);
+});
+
+test('R5-3c (pre-fix: PASS): a third-party app\'s same-named failed and green runs have no attempt identity: UNAVAILABLE ci_rerun_unverified with the recovery; complete refuses', { skip: WIN_SKIP }, async (t) => {
+  const h = await published(t);
+  const ext = { app: 'circleci', check_suite: 77 };
+  h.scriptCi(ciScript([cr(2, 'success', ext)], [cr(1, 'failure', ext), cr(2, 'success', ext)]));
+  const c = h.cli('ci');
+  assert.deepEqual([c.out.state, c.out.code], ['UNAVAILABLE', 'ci_rerun_unverified'], c.stdout);
+  assert.match(c.out.reasons.join(' '), /circleci/);
+  assert.match(c.out.reasons.join(' '), /re-run/);
+  assert.equal(code(authorize(h, 'complete')), 'ci_rerun_unverified');
+  const n = h.cli('next').out.next_action;
+  assert.equal(n.owner, 'human', JSON.stringify(n));
+});
+
+test('R5-3d an Actions rerun still running (attempt 2 in progress) is PENDING, never PASS on attempt 1; an Actions check run no job maps, beside a same-named failure, is ci_rerun_unverified; an incomplete jobs listing is ci_provider_incomplete', { skip: WIN_SKIP }, async (t) => {
+  const h = await published(t);
+  h.scriptCi(ciScript([cr(2, null)], [cr(1, 'failure'), cr(2, null)], [
+    { id: 500, run_attempt: 2, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }], 2: [{ id: 2, name: 'test', status: 'in_progress', check_run_id: 2 }] } }]));
+  assert.deepEqual([h.cli('ci').out.state, h.cli('ci').out.code], ['PENDING', 'ci_pending']);
+  h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(2, 'success')], [
+    { id: 500, run_attempt: 1, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }] } }]));
+  const u = h.cli('ci');
+  assert.deepEqual([u.out.state, u.out.code], ['UNAVAILABLE', 'ci_rerun_unverified'], u.stdout);
+  h.scriptCi(ciScript([cr(2, 'success')], [cr(1, 'failure'), cr(2, 'success')], [
+    { id: 500, run_attempt: 2, jobsTotal: { 2: 5 }, jobs: { 1: [{ id: 1, name: 'test', conclusion: 'failure', check_run_id: 1 }], 2: [{ id: 2, name: 'test', conclusion: 'success', check_run_id: 2 }] } }]));
+  const i = h.cli('ci');
+  assert.deepEqual([i.out.state, i.out.code], ['UNAVAILABLE', 'ci_provider_incomplete'], i.stdout);
+});
+
+test('R5-3e the collection reads EVERY check run (filter=all), never the provider\'s opaque latest selection', () => {
+  const calls = [];
+  ghProvider({ repoRoot: '/nowhere', repository: { host: 'github.com', owner: 'acme', repo: 't-1', slug: 'github.com/acme/t-1' }, spawn: (...a) => { calls.push(a[1]); return { status: 1, stderr: 'x' }; } }).checkRuns('a'.repeat(40));
+  assert.ok(calls[0].includes('filter=all') && !calls[0].includes('filter=latest'), JSON.stringify(calls[0]));
+});

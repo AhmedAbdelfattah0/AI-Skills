@@ -166,15 +166,15 @@ test('X5 (pre-fix: republish without --pr-title recorded pr null and complete st
   assert.equal(code(authorize(h, 'complete')), 'pr_required');
 });
 
-test('X6 (pre-fix: PASS for both): every returned check run counts (filter=latest is GitHub\'s default and passed explicitly): overlapping same-name runs with one red, and ids 9/10, are FAIL', () => {
+test('X6 (pre-fix: PASS for both): every check run counts (round 5: filter=all; a same-named red/green pair with no attempt identity is refused as ambiguous, never PASS): overlapping same-name runs with one red, and ids 9/10', () => {
   const SHA = 'a'.repeat(40);
   const r = (id, c, s, e) => ({ id, name: 'test', head_sha: SHA, status: 'completed', conclusion: c, started_at: s, completed_at: e, app: 'github-actions', check_suite: 11 });
   const b = { sha: SHA, branch: 'T-1-work', windowMs: 0, dispatchMs: 0, collectedMs: 0 };
-  assert.equal(verdict({ ...b, checks: [r(1, 'failure', '2026-11-15T00:00:01Z', '2026-11-15T00:00:30Z'), r(2, 'success', '2026-11-15T00:00:02Z', '2026-11-15T00:00:20Z')] }).state, 'FAIL');
-  assert.equal(verdict({ ...b, checks: [r(9, 'success', '2026-11-15T00:00:01Z', 'x'), r(10, 'failure', '2026-11-15T00:00:01Z', 'x')] }).state, 'FAIL');
+  assert.equal(verdict({ ...b, checks: [r(1, 'failure', '2026-11-15T00:00:01Z', '2026-11-15T00:00:30Z'), r(2, 'success', '2026-11-15T00:00:02Z', '2026-11-15T00:00:20Z')] }).code, 'ci_rerun_unverified');
+  assert.equal(verdict({ ...b, checks: [r(9, 'success', '2026-11-15T00:00:01Z', 'x'), r(10, 'failure', '2026-11-15T00:00:01Z', 'x')] }).code, 'ci_rerun_unverified');
   const calls = [];
   ghProvider({ repoRoot: '/nowhere', repository: { host: 'github.com', owner: 'acme', repo: 't-1', slug: 'github.com/acme/t-1' }, spawn: (...a) => { calls.push(a[1]); return { status: 1, stderr: 'x' }; } }).checkRuns(SHA);
-  assert.ok(calls[0].join(' ').includes('-f filter=latest'), J(calls[0]));
+  assert.ok(calls[0].join(' ').includes('-f filter=all'), J(calls[0]));
 });
 
 // ------------------------------------------------------------------ the strict stage x mutated-field matrix (literal)

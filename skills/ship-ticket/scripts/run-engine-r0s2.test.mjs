@@ -266,7 +266,7 @@ test('item 6 (round 4: no late pin): a run enrolled without gh never pins one la
   denied(authorize(fx, 'complete'), 'gh_unpinned', 'an unpinned gh never authorizes release');
 });
 
-test('item 6: dispatch refusals the orchestrator cannot correct (review_relay_drift, reviewer_is_builder, review_diff_unavailable before any receipt) are recorded and stop next for the human', { skip: WIN_SKIP }, async (t) => {
+test('item 6: dispatch refusals the orchestrator cannot correct (review_relay_drift, reviewer_is_builder) are recorded and stop next for the human; a failing textconv no longer touches the brief (round 5)', { skip: WIN_SKIP }, async (t) => {
   const fx = enrollFixture(t);
   started(fx);
   const stopsFor = (code) => { for (let i = 0; i < 2; i++) assert.deepEqual((({ reason, owner, stop }) => [reason, owner, stop])(next(fx)), [code, 'human', true], `${code} (ask ${i + 1})`); };
@@ -295,6 +295,7 @@ test('item 6: dispatch refusals the orchestrator cannot correct (review_relay_dr
   const d = fx.dispatch('primary');
   assert.equal(d.out.code, 'review_dispatched', d.stdout);
   assert.match(readFileSync(d.out.receipt.prompt_file, 'utf8'), /^\+a1$/m);
+  await waitFor(() => (fx.cli('review-collect').out?.live ?? ['?']).length === 0, 'the dispatched reviewer to be collected', { ms: 60000, every: 200 });
 });
 
 test('item 6: the same gate refusal twice in a row is the human\'s (gate review, gate ship-ready); a repeated provider failure at ci too', { skip: WIN_SKIP }, async (t) => {

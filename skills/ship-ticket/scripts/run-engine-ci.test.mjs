@@ -41,10 +41,17 @@ const VERDICTS = [
   ['a red check', V({ checks: [run('test', 'completed', 'success'), run('lint', 'completed', 'failure')] }), ['FAIL', 'ci_failed']],
   ['skipped is not success', V({ checks: [run('test', 'completed', 'skipped')] }), ['FAIL', 'ci_failed']],
   ['a check still running', V({ checks: [run('test', 'completed', 'success'), run('lint', 'in_progress')] }), ['PENDING', 'ci_pending']],
-  // R0-S round 4 (D5): GitHub's check-runs `filter` defaults to `latest` (and the adapter passes it): a RETURNED red run is never erased by a
-  // same-named success, whatever the start times or ids (pre-fix the engine collapsed them and a red run disappeared).
-  ['a returned red run is not superseded by a later same-named success', V({ checks: [run('test', 'completed', 'failure', { id: 1 }), run('test', 'completed', 'success', { id: 2, started_at: '2026-11-15T00:01:00.000Z' })] }),
-    ['FAIL', 'ci_failed']],
+  // R0-S round 5 (item 3): the adapter reads filter=all; a red run is never erased by a same-named success on start time or id. Without
+  // an attempt identity tying them the pair is ambiguous (refused, UNAVAILABLE ci_rerun_unverified); with one, only a later attempt of the
+  // SAME workflow run supersedes it.
+  ['a returned red run is not superseded by a later same-named success (no attempt identity: ambiguous)', V({ checks: [run('test', 'completed', 'failure', { id: 1 }), run('test', 'completed', 'success', { id: 2, started_at: '2026-11-15T00:01:00.000Z' })] }),
+    ['UNAVAILABLE', 'ci_rerun_unverified']],
+  ['attempt 1 red, attempt 2 green of the SAME workflow run: verified supersession', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', workflow_run: 500, run_attempt: 1 }),
+    run('test', 'completed', 'success', { id: 2, app: 'github-actions', workflow_run: 500, run_attempt: 2 })] }), ['PASS', 'ci_passed']],
+  ['red in workflow run 500, green in ANOTHER workflow run 501: both count', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', workflow_run: 500, run_attempt: 1 }),
+    run('test', 'completed', 'success', { id: 2, app: 'github-actions', workflow_run: 501, run_attempt: 2 })] }), ['FAIL', 'ci_failed']],
+  ['attempt 2 of the same run still running: PENDING, never PASS on attempt 1', V({ checks: [run('test', 'completed', 'success', { id: 1, app: 'github-actions', workflow_run: 500, run_attempt: 1 }),
+    run('test', 'in_progress', null, { id: 2, app: 'github-actions', workflow_run: 500, run_attempt: 2 })] }), ['PENDING', 'ci_pending']],
   ['a required check never started, inside the window', V({ required: ['build'], collectedMs: MIN }), ['PENDING', 'ci_required_pending']],
   ['a required check never ran, after the window', V({ required: ['build'] }), ['NO_CHECKS', 'ci_required_missing']],
   // R0-S: a configured set narrows what must PASS, never what may fail; a skipped check outside it is not a failure.
@@ -52,9 +59,9 @@ const VERDICTS = [
   ['a skipped check outside the required set does not block', V({ required: ['test'], checks: [run('test', 'completed', 'success'), run('bot', 'completed', 'skipped')] }), ['PASS', 'ci_passed']],
   ['a same-named check of another app or workflow is independent, never a re-run', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11 }),
     run('test', 'completed', 'success', { id: 2, app: 'circleci', check_suite: 22, started_at: '2026-11-15T00:01:00.000Z' })] }), ['FAIL', 'ci_failed']],
-  ['two returned runs of one name in one check suite: the red one fails the head (overlapping jobs, pre-fix PASS)', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11, completed_at: '2026-11-15T00:00:30.000Z' }),
-    run('test', 'completed', 'success', { id: 2, app: 'github-actions', check_suite: 11, started_at: '2026-11-15T00:00:02.000Z', completed_at: '2026-11-15T00:00:20.000Z' })] }), ['FAIL', 'ci_failed']],
-  ['ids 9 and 10 with the same start: no ordering by id (pre-fix "9" > "10" as strings gave PASS)', V({ checks: [run('test', 'completed', 'success', { id: 9 }), run('test', 'completed', 'failure', { id: 10 })] }), ['FAIL', 'ci_failed']],
+  ['two returned runs of one name in one check suite, no attempt identity: never PASS (overlapping jobs, round-4 pre-fix PASS; ambiguous since round 5)', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11, completed_at: '2026-11-15T00:00:30.000Z' }),
+    run('test', 'completed', 'success', { id: 2, app: 'github-actions', check_suite: 11, started_at: '2026-11-15T00:00:02.000Z', completed_at: '2026-11-15T00:00:20.000Z' })] }), ['UNAVAILABLE', 'ci_rerun_unverified']],
+  ['ids 9 and 10 with the same start: no ordering by id (pre-fix "9" > "10" as strings gave PASS)', V({ checks: [run('test', 'completed', 'success', { id: 9 }), run('test', 'completed', 'failure', { id: 10 })] }), ['UNAVAILABLE', 'ci_rerun_unverified']],
   ['the remote branch moved past the published head (no PR)', V({ remoteHead: OTHER }), ['STALE', 'ci_remote_moved']],
 ];
 
