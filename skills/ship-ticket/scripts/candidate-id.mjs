@@ -11,11 +11,15 @@ function fail(message) {
   process.exit(1);
 }
 
-/** Run git in `repo`; return stdout (Buffer when encoding is null) or fail with git's stderr. */
+/**
+ * Run git in `repo`; return stdout (Buffer when encoding is null) or fail with git's stderr. Replacement objects are off
+ * (R0-S round 4, E-a): a `git replace` of the base or a tree never changes the merge base or the candidate's paths.
+ */
 function git(repo, args, encoding = 'utf8') {
-  const result = spawnSync('git', ['-C', repo, ...args], {
+  const result = spawnSync('git', ['--no-replace-objects', '-C', repo, ...args], {
     encoding: encoding === null ? undefined : encoding,
     maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
   });
   if (result.status !== 0) {
     const stderr = encoding === null

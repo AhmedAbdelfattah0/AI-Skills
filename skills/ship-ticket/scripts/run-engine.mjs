@@ -46,7 +46,8 @@ import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, 
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { enrollCli, ENROLL_COMMANDS, admission, enrollIn, deliver as deliverContext, recordContext, lifecycle, publish as publishRun, authorize as authorizeStage } from './engine-enroll.mjs';
 import { derive, gather, lockState, NEXT_SCHEMA } from './engine-next.mjs';
-import { collect as collectCi, ghProvider, pinnedTool, resolveTool, remoteHeadOf, remoteRepository, sameRepository, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
+import { collect as collectCi, ghProvider, pinnedTool, remoteHeadOf, CI_SCHEMA, CI_EVIDENCE_KEEP } from './engine-ci.mjs';
+import { verifyReleaseBinding, publicationOf, prBinding } from './engine-identity.mjs';
 import { dispatchReview, collectReviews, REVIEW_SCHEMA, REVIEW_ROLES, REVIEW_KIND } from './engine-review-dispatch.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
@@ -762,32 +763,32 @@ export async function ci(ctx) {
     const remote = remoteHeadOf(ctx.repoRoot, pub, ctx.env);
     // R0-S batch 2 (items 3, 6): a refusal past this point is RECORDED as UNAVAILABLE evidence with its code (never a silent
     // return that `next` would re-offer forever); engine-next.mjs gives each code its owner and recovery.
-    const unavailableEv = (code, reason) => ({ schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: ctx.pr ?? null, provider: 'gh', state: 'UNAVAILABLE',
-      code, reasons: [reason], checks: [], collected_at: new Date(now()).toISOString(), timing: { dispatched_at: pub.at ?? null, collected_at: new Date(now()).toISOString() } });
-    let provider = ctx.ciProvider, repository = null, ev = null;
-    if (!provider) {
-      // Item 3: CI is read from exactly the repository publish recorded (its configured remote URL), and that remote must still name it.
-      repository = pub.repository ?? null;
-      const nowRepo = remoteRepository(ctx.repoRoot, pub.remote ?? 'origin');
-      if (!repository) ev = unavailableEv('ci_repo_unknown', `the PUBLISHED record of ${pub.head} names no GitHub repository (a remote that is no GitHub URL, or a publish before R0-S batch 2): CI evidence is read only from the published repository; publish again or start a new run`);
-      else if (!sameRepository(repository, nowRepo)) ev = unavailableEv('ci_repo_mismatch', `remote ${pub.remote ?? 'origin'} now names ${nowRepo?.slug ?? 'no GitHub repository'}, publish pushed to ${repository.slug}: restore the remote URL`);
-      // R0-S N4: the real provider runs exactly the gh pinned at enroll (a PATH stub added later is never run); ctx.ciProvider is in-process only.
-      // Item 6: a run enrolled with no gh on PATH pins gh at its first ci, and only after the published branch is verified at the
-      // published head (the same pre-pin residual as enroll: it trusts that moment's PATH). A drifted pin is never re-pinned.
-      let pin = E.S.enrollment?.tools?.gh ?? null;
-      if (!ev && !pin?.path) {
-        const found = resolveTool('gh', ctx.env ?? process.env);
-        if (!found) ev = unavailableEv('gh_unpinned', 'no gh was pinned at enroll and none is on PATH now: install gh (logged in), then run run-engine.mjs ci again');
-        else if (!remote.ok || remote.head !== pub.head) ev = unavailableEv('ci_head_unverified', `gh would be pinned at this first ci, but the published branch is ${remote.ok ? remote.head ?? 'gone' : `unreadable (${remote.error})`}, not ${pub.head}: nothing is pinned or collected`);
-        else { pin = { ...found, pinned_at: 'ci', at: new Date().toISOString() }; E.S.enrollment.tools = { ...(E.S.enrollment.tools ?? {}), gh: pin }; }
-      }
-      if (!ev) {
-        const gh = pinnedTool(pin);
-        if (!gh.ok) ev = unavailableEv(gh.code, gh.reason);
-        else provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path, repository });
+    const unavailableEv = (code, reason) => ({ schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: ctx.pr ?? pub.pr?.number ?? null, provider: 'gh', state: 'UNAVAILABLE',
+      ...(pub.publication_id ? { publication_id: pub.publication_id } : {}), code, reasons: [reason], checks: [], collected_at: new Date(now()).toISOString(),
+      timing: { dispatched_at: pub.at ?? null, collected_at: new Date(now()).toISOString() } });
+    // R0-S round 4: CI is read from the ENROLLED repository with the gh pinned at enroll (no late pin: a run enrolled without gh never
+    // collects authoritative CI; gh_unpinned), for exactly the publication of this head (publication_id), and its PR: the recorded one,
+    // or (only when none is recorded) the `--pr` one, which must satisfy every PR row and is then bound as the publication's PR.
+    const identity = E.S.enrollment?.identity ?? null;
+    let provider = ctx.ciProvider ?? null, ev = null;
+    if (!provider && identity) { const gh = pinnedTool(E.S.enrollment?.tools?.gh); if (gh.ok) provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path, repository: identity }); }
+    if (ctx.pr !== undefined && pub.pr && ctx.pr !== pub.pr.number)
+      ev = unavailableEv('publication_mismatch', `--pr ${ctx.pr} is not the publication's PR #${pub.pr.number}: a PR is bound once (--pr is accepted only when no PR is recorded)`);
+    const number = pub.pr?.number ?? ctx.pr ?? null;
+    const pv = !ev && number && provider ? provider.pullRequest(number) : null;
+    let target = pub;
+    if (!ev) {
+      const vr = verifyReleaseBinding('ci', { S: E.S, repoRoot: ctx.repoRoot, pub, view: number ? (pv?.ok ? pv.pr : null) : undefined, inProcess: Boolean(ctx.ciProvider) });
+      if (!vr.ok) ev = unavailableEv(vr.code, vr.reasons[0]);
+      else if (!pub.pr && number) {
+        // The one permitted change of a publication: pr null -> this verified PR (a new publication_id; earlier evidence never counts for it).
+        const pr = prBinding(pv.pr);
+        target = { ...pub, pr, publication_id: publicationOf({ identity, branch: pub.branch, head: pub.head, tree: pub.tree, base: pub.release_base, candidate_id: pub.candidate_id, pr }).publication_id,
+          pr_bound_by: 'ci --pr', at_bound: new Date(now()).toISOString() };
+        E.S.published = [...(E.S.published ?? []), target];
       }
     }
-    ev ??= collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub, pr: ctx.pr, now, remote, repository });
+    ev ??= collectCi({ S: E.S, repoRoot: ctx.repoRoot, provider, pub: target, pr: number ?? undefined, now, remote, repository: ctx.ciProvider ? null : identity, view: number ? pv : null });
     E.S.ci_evidence = [...(E.S.ci_evidence ?? []), ev].slice(-CI_EVIDENCE_KEEP);
     note(E.S, 'CI_EVIDENCE', { head_sha: ev.head_sha, state: ev.state, code: ev.code });
     E.S.outbox.push({ run_id: E.S.run_id, event: 'CI_EVIDENCE', event_id: `ci-${E.S.run_id}-${E.S.seq}`, head_sha: ev.head_sha, pr: ev.pr, state: ev.state,

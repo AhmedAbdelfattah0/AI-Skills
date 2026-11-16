@@ -25,7 +25,9 @@ const J = JSON.stringify;
 // ------------------------------------------------------------------ synthetic derivations
 
 const OK = { ok: true, code: 'admitted', reasons: [] };
+// round 4 (E-b): receipts carry the engine-minted execution id; the open original execution and the original's binding name it.
 const baseS = (over = {}) => ({ run_id: 'run-1', ticket: 'T-1', nodes: { a: { state: 'done' } }, review_chain: [], repairs: [], attempts: [],
+  review_executions: [{ id: 'rxe-1', kind: 'original', review_execution: null }], review_bindings: [{ review_execution: 'review-1', kind: 'original', review_execution_id: 'rxe-1' }],
   judgments: [], authority: { trusted: [], untrusted: [] }, ...over });
 const baseF = (over = {}) => ({ now: 10000, lock: 'mine', unbound: [], blockers: [], attempts: [], redPending: [], work: false, unitReviewsPending: [],
   admission: { build: OK, review: OK, ship: OK }, candidate: { id: 'C1' }, tree: { dirty: false, paths: [] }, head: 'H1', dispatches: [],
@@ -34,7 +36,7 @@ const att = (over = {}) => ({ attempt_id: 'att-1', kind: 'node', node: 'a', stat
   started_at: '2026-11-15T00:00:00.000Z', envelope_file: '/x/att-1.envelope.json', envelope: false, deadline: 'd', deadline_ms: 20000, pgid: 42, ...over });
 const disp = (role, over = {}) => ({ role, event_id: `e-${role}`, review_execution: 'review-1', candidate_id: 'C1', started_at: 't', ended: false,
   ended_ms: null, marker: `/m/${role}.json`, marker_exists: false, deadline: 'd', deadline_ms: 20000, ...over });
-const rcpt = (role, over = {}) => ({ ...disp(role), review_execution: null, kind: 'original', status: 'dispatched', consumed: false, event_id: `att-${role}`, parsed_file: null, ...over });
+const rcpt = (role, over = {}) => ({ ...disp(role), review_execution: null, review_execution_id: 'rxe-1', kind: 'original', status: 'dispatched', consumed: false, event_id: `att-${role}`, parsed_file: null, ...over });
 const PASS_O = { review_execution: 'review-1', kind: 'original', outcome: 'PASS', candidate_id: 'C1' };
 const FAIL_O = { review_execution: 'review-1', kind: 'original', outcome: 'FAIL', candidate_id: 'C0', fix_findings: ['F1'] };
 const REPAIR_REC = { review_execution: 'review-1', kind: 'repair', old_candidate: 'C0', new_candidate: 'C1', write_set: ['src/a.txt'] };
@@ -253,7 +255,7 @@ function orchestrator(fx, script) {
     },
     gate_ship_ready: () => fx.gate('ship-ready', {}),
     commit: (a) => { fx.okGit(['add', '--', ...a.paths]); fx.okGit(['commit', '-q', '-m', 'T-1: ship']); },
-    publish: () => fx.cli('publish'),
+    publish: () => { writeFileSync(join(fx.root, 'pr.md'), 'body'); return fx.cli('publish', { 'pr-title': 'T-1: ship', 'pr-body-file': join(fx.root, 'pr.md') }); }, // round 4: a PR is required to complete
     collect_ci: () => fx.cli('ci'),
   };
   return {

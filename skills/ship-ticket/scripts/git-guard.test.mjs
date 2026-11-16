@@ -276,14 +276,14 @@ test('stacked PR: the parent branch bound as config.base passes its own hook; --
   assert.equal(h.remoteHead(), null);
 });
 
-test('git push <url>: the URL of a configured remote is judged as that remote; an unknown URL is remote_unconfigured, never refs/remotes/<url>/HEAD', { skip: WIN_SKIP }, (t) => {
+test('git push <url>: the URL of a configured remote is judged as that remote; an unknown URL is identity_changed (round 4: the actual destination against the enrolled identity), never refs/remotes/<url>/HEAD', { skip: WIN_SKIP }, (t) => {
   const fx = enrollFixture(t);
   fx.toShipReady();
   fx.commitAll();
   installed(fx);
   const other = join(fx.root, 'other.git');
   assert.equal(spawnSync('git', ['init', '-q', '--bare', other], { encoding: 'utf8', env: fx.env }).status, 0);
-  blocked(push(fx, [other, 'T-1-work']), 'remote_unconfigured');
+  blocked(push(fx, [other, 'T-1-work']), 'identity_changed');
   const r = push(fx, [fx.remote, 'T-1-work']);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(fx.remoteHead(), fx.head(), 'the URL of origin pushes under origin\'s authorization');

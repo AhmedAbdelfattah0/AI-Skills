@@ -16,7 +16,9 @@ import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 export const SKILL = fileURLToPath(new URL('..', import.meta.url));
 
 /**
- * Fake `gh` (never the real one): records its argv as JSON lines in <root>/gh.log. `pr create` prints a PR URL.
+ * Fake `gh` (never the real one): records its argv as JSON lines in <root>/gh.log. `pr create` records a SIMULATED PR in
+ * <root>/gh-prs.json and prints its URL under the -R repository; `api repos/<o>/<r>/pulls/<n>` serves it as a REST pull (R0-S round 4),
+ * with the scripted `pr` (gh pr view vocabulary, plus headRepo / baseRepo / merged) laid over it.
  * The CI calls `run-engine.mjs ci` makes are served from <root>/gh-ci.json (`fx.scriptCi`): `checkRuns` is a
  * sequence of steps, one per call (the last repeats): { runs: [...], total?: n } or { fail: 'stderr text' }; a
  * run's head_sha '$SHA' is the requested commit. `pr` is the `gh pr view` JSON ('$HEAD' is the work tree's HEAD)
@@ -28,10 +30,35 @@ fs.appendFileSync(root + '/gh.log', JSON.stringify(argv) + '\\n');
 fs.appendFileSync(root + '/gh-env.log', JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(GH|GITHUB)_|^HOME$/.test(k)))) + '\\n');
 const flag = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 const die = (m) => { process.stderr.write('fake gh: ' + m + '\\n'); process.exit(1); };
-if (argv[0] === 'pr' && argv[1] === 'create') { console.log('https://example.invalid/pr/1'); process.exit(0); }
+// SIMULATED GitHub PRs: \`pr create\` records the PR it "opened" in <root>/gh-prs.json and prints its URL under the -R repository.
+const prsFile = root + '/gh-prs.json';
+const prs = (() => { try { return JSON.parse(fs.readFileSync(prsFile, 'utf8')); } catch { return {}; } })();
+if (argv[0] === 'pr' && argv[1] === 'create') {
+  const n = Object.keys(prs).length + 1, slug = flag('-R');
+  prs[n] = { head: flag('--head'), base: flag('--base'), slug };
+  fs.writeFileSync(prsFile, JSON.stringify(prs));
+  console.log('https://' + slug + '/pull/' + n); process.exit(0);
+}
 let script = null;
-try { script = JSON.parse(fs.readFileSync(root + '/gh-ci.json', 'utf8')); } catch { die('unscripted call ' + argv.join(' ')); }
+try { script = JSON.parse(fs.readFileSync(root + '/gh-ci.json', 'utf8')); } catch { script = null; }
 const head = () => execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const pulls = /^repos\\/([^/]+)\\/([^/]+)\\/pulls\\/(\\d+)$/.exec(argv[3] ?? '');
+if (argv[0] === 'api' && pulls) {
+  // SIMULATED REST pull (GET repos/<o>/<r>/pulls/<n>): the scripted \`pr\` (gh pr view vocabulary, plus headRepo/baseRepo/merged) over the created one.
+  const o = pulls[1], r = pulls[2], n = Number(pulls[3]), host = flag('--hostname') ?? 'github.com', made = prs[n] ?? null;
+  const sp = script?.pr ?? null;
+  if (sp?.fail) die(sp.fail);
+  if (!sp && !made) die('no such PR ' + n);
+  const p = { number: n, headRefOid: '$HEAD', headRefName: made?.head ?? null, baseRefName: made?.base ?? null, state: 'OPEN', ...(sp ?? {}) };
+  const own = script?.htmlRepo ? script.htmlRepo.split('/').slice(1).join('/') : o + '/' + r;
+  console.log(JSON.stringify({ number: p.number, state: p.state === 'OPEN' ? 'open' : 'closed', merged: p.merged === true || p.state === 'MERGED',
+    html_url: 'https://' + (script?.htmlRepo ?? host + '/' + o + '/' + r) + '/pull/' + p.number,
+    head: { ref: p.headRefName, sha: p.headRefOid === '$HEAD' ? head() : p.headRefOid, repo: { full_name: p.headRepo ?? own } },
+    base: { ref: p.baseRefName, repo: { full_name: p.baseRepo ?? own } }, mergeable: p.mergeable === 'MERGEABLE' ? true : p.mergeable ?? null,
+    mergeable_state: p.mergeStateStatus ? String(p.mergeStateStatus).toLowerCase() : null }));
+  process.exit(0);
+}
+if (!script) die('unscripted call ' + argv.join(' '));
 if (argv[0] === 'api' && /\\/check-runs$/.test(argv[3] ?? '')) {
   const sha = /commits\\/([0-9a-f]+)\\//.exec(argv[3])[1];
   // A real gh answers for the repository in the path: html URLs carry it (script.htmlRepo simulates answers from another one).
@@ -81,6 +108,9 @@ export function enrollFixture(t, opts = {}) {
   ok(g(['config', '--local', `url.${remote}.insteadOf`, GITHUB_URL]));
   // The remote's default branch is the PR base authorize publish resolves when the DAG's base is HEAD.
   ok(g(['push', '-q', 'origin', defaultBranch]));
+  // The REMOTE's own HEAD names the default branch (what `ls-remote --symref origin HEAD` reads at the review freeze; the engine never
+  // reads the local refs/remotes/origin/HEAD symref, which `set-head` writes for the tests that probe it).
+  ok(spawnSync('git', ['--git-dir', remote, 'symbolic-ref', 'HEAD', `refs/heads/${defaultBranch}`], { encoding: 'utf8', env: fx.env }));
   ok(g(['remote', 'set-head', 'origin', defaultBranch]));
   // A config.base branch exists on the remote too: the engine verifies the base commit there (ls-remote), never the local ref (R0-S round 3).
   if (base !== 'HEAD') ok(g(['push', '-q', 'origin', base]));

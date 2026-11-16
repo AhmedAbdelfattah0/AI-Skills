@@ -210,12 +210,15 @@ test('B6: an old receipt after the base moved under an unchanged candidate id is
 
 // ------------------------------------------------------------------ N3: complete re-verifies the remote head
 
-test('N3: with no PR, complete needs the remote branch at the published head: a later push is ci_remote_moved at collection and at authorize complete', { skip: WIN_SKIP }, async (t) => {
+test('N3: complete needs the remote branch at the published head: a later push is ci_remote_moved at collection and at authorize complete (round 4: with the PR complete requires; SIMULATED)', { skip: WIN_SKIP }, async (t) => {
   const fx = await shippable(t);
-  assert.equal(fx.cli('publish').out.code, 'published');
+  writeFileSync(join(fx.root, 'pr.md'), 'body');
+  assert.equal(fx.cli('publish', { 'pr-title': 'T-1', 'pr-body-file': join(fx.root, 'pr.md') }).out.code, 'published');
   const head = fx.head();
+  const slug = 'github.com/acme/t-1';
   const provider = { name: 'fake', checkRuns: (sha) => ({ ok: true, runs: [{ id: 1, name: 'test', head_sha: sha, status: 'completed', conclusion: 'success', started_at: 't', completed_at: 't' }], total: 1 }),
-    pullRequest: () => ({ ok: false, error: 'none' }), recentRuns: () => ({ ok: true, runs: [] }) };
+    pullRequest: (n) => ({ ok: true, pr: { number: n, state: 'open', merged: false, head_sha: head, head_ref: 'T-1-work', head_branch: 'T-1-work', head_repo: slug,
+      base_ref: fx.defaultBranch, base: fx.defaultBranch, base_repo: slug } }), recentRuns: () => ({ ok: true, runs: [] }) };
   const ev = await ci({ ...fx.ctx(), ciProvider: provider });
   assert.deepEqual([ev.state, ev.remote_head], ['PASS', head]);
   assert.equal(authorize(fx, 'complete').out.allow, true);

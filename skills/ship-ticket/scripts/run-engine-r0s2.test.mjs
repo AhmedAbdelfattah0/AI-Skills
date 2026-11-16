@@ -159,22 +159,23 @@ test('item 3: gh runs with GH_REPO / GH_HOST / tokens stripped and the published
   fx.scriptCi({ ...PASS_RUN, htmlRepo: 'github.com/evil/fork' });
   const f = fx.cli('ci');
   assert.deepEqual([f.status, f.out.state, f.out.code], [2, 'UNAVAILABLE', 'ci_repo_mismatch'], f.stdout);
-  denied(authorize(fx, 'complete'), 'ci_repo_mismatch', 'complete');
+  denied(authorize(fx, 'complete'), 'pr_required', 'complete (round 4: a branch-only publication never completes, whatever the evidence)');
   const n = next(fx);
   assert.deepEqual([n.stage, n.reason, n.owner, n.stop], ['CI', 'ci_repo_mismatch', 'human', true], J(n));
 });
 
-test('item 3: a remote URL changed after publish is ci_repo_mismatch at ci and at authorize complete', { skip: WIN_SKIP }, async (t) => {
+test('item 3: a remote URL changed after publish is refused at ci and at authorize complete (round 4: identity_changed against the enrolled identity; was ci_repo_mismatch)', { skip: WIN_SKIP }, async (t) => {
   const fx = await shippable(t);
-  assert.equal(fx.cli('publish').out.code, 'published');
+  writeFileSync(join(fx.root, 'pr.md'), 'body');
+  assert.equal(fx.cli('publish', { 'pr-title': 'T-1', 'pr-body-file': join(fx.root, 'pr.md') }).out.code, 'published');
   fx.scriptCi(PASS_RUN);
   assert.equal(fx.cli('ci').out.state, 'PASS');
   assert.equal(authorize(fx, 'complete').out.allow, true);
   fx.okGit(['remote', 'set-url', 'origin', 'https://github.com/evil/fork.git']);
   fx.okGit(['config', '--local', `url.${fx.remote}.insteadOf`, 'https://github.com/evil/fork.git']);
-  denied(authorize(fx, 'complete'), 'ci_repo_mismatch', 'complete re-reads the remote');
+  denied(authorize(fx, 'complete'), 'identity_changed', 'complete re-reads the remote');
   const r = fx.cli('ci');
-  assert.deepEqual([r.out.state, r.out.code], ['UNAVAILABLE', 'ci_repo_mismatch'], r.stdout);
+  assert.deepEqual([r.out.state, r.out.code], ['UNAVAILABLE', 'identity_changed'], r.stdout);
 });
 
 // ------------------------------------------------------------------ item 4: reviewer executables
@@ -250,39 +251,19 @@ test('item 5: visible lines drop HTML comments and fences; the DAG digest must b
 
 // ------------------------------------------------------------------ item 6: refusals never loop
 
-test('item 6: gh_unpinned after a no-PR publish: ci pins gh at first use when the published head verifies; with no gh at all ci records gh_unpinned and next stops for the human', { skip: WIN_SKIP }, async (t) => {
+test('item 6 (round 4: no late pin): a run enrolled without gh never pins one later: ci records gh_unpinned (pre-round-4: pinned at the first ci) and next stops for the human; nothing is pinned', { skip: WIN_SKIP }, async (t) => {
   const fx = await shippable(t);
   fx.editState(S => { S.enrollment.tools = { gh: null }; });
   assert.equal(fx.cli('publish').out.code, 'published', 'a no-PR publish needs no gh');
   fx.scriptCi(PASS_RUN);
   const r = fx.cli('ci');
-  assert.deepEqual([r.out.state, fx.readState().enrollment.tools.gh.pinned_at], ['PASS', 'ci'], r.stdout);
-  assert.equal(fx.readState().enrollment.tools.gh.path, realpathSync(join(fx.root, 'bin', 'gh')));
-
-  const g = await shippable(t);
-  g.editState(S => { S.enrollment.tools = { gh: null }; });
-  assert.equal(g.cli('publish').out.code, 'published');
-  const bare = [dirname(process.execPath), '/usr/bin', '/bin'].join(':');
-  const real = bare.split(':').some(d => existsSync(join(d, 'gh')));
-  if (!real) {
-    const saved = g.env.PATH;
-    g.env.PATH = bare; g.env.Path = bare;
-    try {
-      const c = g.cli('ci');
-      assert.deepEqual([c.status, c.out.state, c.out.code], [2, 'UNAVAILABLE', 'gh_unpinned'], c.stdout + c.stderr);
-      for (let i = 0; i < 2; i++) {
-        const n = next(g);
-        assert.deepEqual([n.stage, n.reason, n.owner, n.stop], ['CI', 'gh_unpinned', 'human', true], J(n));
-      }
-    } finally { g.env.PATH = saved; g.env.Path = saved; }
+  assert.deepEqual([r.status, r.out.state, r.out.code, fx.readState().enrollment.tools.gh], [2, 'UNAVAILABLE', 'gh_unpinned', null], r.stdout);
+  assert.equal(fx.ghLog().length, 0, 'the gh found on PATH is never run');
+  for (let i = 0; i < 2; i++) {
+    const n = next(fx);
+    assert.deepEqual([n.stage, n.reason, n.owner, n.stop], ['CI', 'gh_unpinned', 'human', true], J(n));
   }
-  // The late pin is refused while the published branch is not at the published head (nothing pinned).
-  const h = await shippable(t);
-  h.editState(S => { S.enrollment.tools = { gh: null }; });
-  assert.equal(h.cli('publish').out.code, 'published');
-  h.okGit(['push', '-q', 'origin', `${h.okGit(['rev-parse', 'HEAD~1']).stdout.trim()}:refs/heads/T-1-work`, '--force']);
-  const c = h.cli('ci');
-  assert.deepEqual([c.out.code, h.readState().enrollment.tools.gh], ['ci_head_unverified', null], c.stdout);
+  denied(authorize(fx, 'complete'), 'gh_unpinned', 'an unpinned gh never authorizes release');
 });
 
 test('item 6: dispatch refusals the orchestrator cannot correct (review_relay_drift, reviewer_is_builder, review_diff_unavailable before any receipt) are recorded and stop next for the human', { skip: WIN_SKIP }, async (t) => {
@@ -367,11 +348,12 @@ test('item 7: an envelope with no result.json digest (an old launcher) is review
 
 test('item 7: CI evidence that verified neither the remote branch nor a PR head is ci_head_unverified at authorize complete', { skip: WIN_SKIP }, async (t) => {
   const fx = await shippable(t);
-  assert.equal(fx.cli('publish').out.code, 'published');
+  writeFileSync(join(fx.root, 'pr.md'), 'body'); // round 4: a PR (SIMULATED) is required to complete
+  assert.equal(fx.cli('publish', { 'pr-title': 'T-1', 'pr-body-file': join(fx.root, 'pr.md') }).out.code, 'published');
   fx.scriptCi(PASS_RUN);
   assert.equal(fx.cli('ci').out.state, 'PASS');
   assert.equal(authorize(fx, 'complete').out.allow, true);
-  fx.editState(S => { delete S.ci_evidence.at(-1).remote_head; });
+  fx.editState(S => { delete S.ci_evidence.at(-1).remote_head; delete S.ci_evidence.at(-1).pr_view; }); // neither the branch nor the PR head verified
   denied(authorize(fx, 'complete'), 'ci_head_unverified');
 });
 

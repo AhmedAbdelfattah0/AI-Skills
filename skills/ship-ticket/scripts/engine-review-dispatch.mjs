@@ -59,6 +59,12 @@
  * ship-ready and authorize publish); review_cli_drift / review_cli_unavailable (the pinned reviewer CLI, launched through an
  * engine shim first on PATH); the uncorrectable refusals are recorded (state.review_refusals) for `next`.
  *
+ * R0-S round 4: the FREEZE is captured BEFORE launch, in the receipt: `base` { remote, identity, ref, sha, merge_base } (engine-identity.mjs
+ * captureBase: the remote's commit for the base of record, both base modes) and `review_execution_id`, an engine-minted id per owed review
+ * (state.review_executions: one per original group; a confirmation carries its original's). gate review adopts the receipts' base as the
+ * freeze (review_receipt_base when they differ from the remote now) and accepts only receipts of the expected execution
+ * (review_receipt_execution: a receipt of another execution, e.g. replayed after an owner RETRY, never authorizes); `next` projects it.
+ *
  * Honest limits: this is not cryptographic. A process running as the same user can rewrite the engine state (the
  * ledger), the relay output and the launcher envelope together, replace the relay before its first-dispatch pin, or
  * import this module and pass ctx.relayHome; the receipt then proves only that the engine started that file. Native
@@ -75,6 +81,7 @@ import { note, judgment, sha, coded, BEGIN, END } from './engine-dag.mjs';
 import { childEnv, spawnSpec } from './provider-env.mjs';
 import { trustedEvents } from './engine-authority.mjs';
 import { resolveTool } from './engine-ci.mjs';
+import { captureBase } from './engine-identity.mjs';
 
 export const REVIEW_SCHEMA = 'ship-ticket-review-dispatch-v1';
 export const REVIEW_KIND = 'review';
@@ -90,7 +97,7 @@ export const INJECTED = Object.freeze(['reviewer_identity', 'candidate_id', 'rou
 /** How long past the relay watchdog a review attempt may run before `next` reports it overdue. */
 export const REVIEW_GRACE_MS = 2 * 60 * 1000;
 /** The gate's removable provenance checks (the mutation test omits each and a pinned verdict changes). */
-export const PROVENANCE_CHECKS = Object.freeze(['bound', 'native_key', 'second_native', 'role', 'kind', 'candidate', 'receipt_base', 'spent',
+export const PROVENANCE_CHECKS = Object.freeze(['bound', 'native_key', 'second_native', 'role', 'kind', 'candidate', 'receipt_base', 'execution', 'spent',
   'shared_identity', 'identity_claim', 'output_integrity']);
 /** Dispatch statuses: dispatched (live), collected, failed, unavailable, abandoned (never released; owed again). */
 export const DISPATCH_STATUSES = Object.freeze(['dispatched', 'collected', 'failed', 'unavailable', 'abandoned']);
@@ -210,6 +217,39 @@ export function owedReview(S) {
     + 'no review is owed (a new original needs a trusted owner RETRY; a FAIL needs its repair first)'] };
 }
 
+// ---- review execution ids (R0-S round 4, E-b) -----------------------------------------------------
+
+/**
+ * The engine-minted execution id of the owed review `owed` (dispatch) or null when none is open yet. An original group (the first
+ * original: review_execution null; an owner-RETRY original: its review_execution) has one id until an accepted original consumes it; a
+ * confirmation carries the id its original was accepted with.
+ */
+export function executionOf(S, kind, reviewExecution) {
+  if (kind === 'confirmation') {
+    const o = (S.review_chain ?? []).findLast(r => r.kind === 'original' && r.review_execution === reviewExecution);
+    return o ? (S.review_bindings ?? []).findLast(b => b.review_execution === o.review_execution && b.kind === 'original')?.review_execution_id ?? null : null;
+  }
+  return (S.review_executions ?? []).findLast(x => x.kind === 'original' && (x.review_execution ?? null) === (reviewExecution ?? null) && !x.accepted_by)?.id ?? null;
+}
+/** The execution id gate review expects for `input` (null when none was minted: no receipt can match). */
+export function expectedExecution(S, input) {
+  if (input.kind === 'confirmation') return executionOf(S, 'confirmation', input.review_execution);
+  const retry = (S.review_chain ?? []).some(r => r.kind === 'original');
+  return executionOf(S, 'original', retry ? input.review_execution : null);
+}
+/** Mark an original execution consumed by the accepted original `rx` (its receipts are spent with it). */
+export function acceptExecution(S, id, rx) {
+  const x = (S.review_executions ?? []).find(e => e.id === id);
+  if (x) x.accepted_by = rx;
+}
+/** The common freeze base of the receipts `ids` (null: none recorded; undefined: they differ or a receipt predates round 4). */
+export function receiptBase(S, ids) {
+  const ds = (S.review_dispatches ?? []).filter(d => ids.includes(d.attempt_id));
+  if (!ds.length || ds.some(d => !Object.hasOwn(d, 'base'))) return undefined;
+  const k = (b) => JSON.stringify(b ?? null);
+  return ds.every(d => k(d.base) === k(ds[0].base)) ? ds[0].base : undefined;
+}
+
 // ---- prompt ---------------------------------------------------------------------------------------
 
 const git = (repo, args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
@@ -283,7 +323,8 @@ const iso = (ms) => new Date(ms).toISOString();
 const refuse = (code, reasons, extra = {}) => ({ schema: REVIEW_SCHEMA, dispatched: false, code, reasons, ...extra });
 
 /** Dispatch refusals the orchestrator cannot correct (R0-S batch 2, item 6): recorded in state.review_refusals, BLOCKED for the human in `next`. */
-export const RECORDED_REFUSALS = Object.freeze(['reviewer_is_builder', 'review_relay_drift', 'review_cli_drift', 'review_cli_unavailable', 'review_diff_unavailable']);
+export const RECORDED_REFUSALS = Object.freeze(['reviewer_is_builder', 'review_relay_drift', 'review_cli_drift', 'review_cli_unavailable', 'review_diff_unavailable',
+  'identity_changed', 'base_unverified', 'base_remote_unavailable', 'base_moved_local', 'base_moved_remote']);
 const REFUSALS_KEEP = 20;
 function recordRefusal(S, r, { role, kind, candidate, mergeBase, now }) {
   S.review_refusals = [...(S.review_refusals ?? []), { code: r.code, role, kind, candidate_id: candidate, merge_base: mergeBase ?? null, reasons: r.reasons,
@@ -362,7 +403,8 @@ export async function dispatchReview(E, { role, candidate }) {
     + 'its verdict comes first; no reviewer of another candidate or base is launched beside it (collect it: next / review-collect)']);
   const latest = latestDispatch(S, role, owed.kind, candidate, c.merge_base ?? null);
   if (latest?.status === 'dispatched') return refuse('review_dispatch_live', [`${role} ${latest.attempt_id} is still running for ${candidate}: collect it (review-collect or next), never a second launch`]);
-  if (latest?.status === 'collected' && !latest.consumed_by) return refuse('review_already_collected', [`${role} ${latest.attempt_id} is collected for ${candidate}: submit it to gate review`]);
+  // Round 4 (E-b): an unconsumed collected receipt of ANOTHER execution (e.g. before an owner RETRY) is never this review's: it does not block.
+  if (latest?.status === 'collected' && !latest.consumed_by && (latest.review_execution_id ?? null) === executionOf(S, owed.kind, owed.review_execution)) return refuse('review_already_collected', [`${role} ${latest.attempt_id} is collected for ${candidate}: submit it to gate review`]);
   const identity = identityOf(role);
   // gate.mjs builderOf: a builder of this identity, or of '<provider>:provider-default' (any model of the provider), would make the
   // gate refuse this reviewer after the whole review ran; refuse before launching it.
@@ -389,10 +431,26 @@ export async function dispatchReview(E, { role, candidate }) {
   }
   const cli = relay ? reviewerCli(S, route.provider, env) : null;
   if (cli?.code) return keep(refuse(cli.code, cli.reasons));
+  // R0-S round 4 (D2): the freeze is captured BEFORE the reviewer launches: the remote's commit for the base of record (both base modes),
+  // on the enrolled repository identity; a confirmation reviews against the freeze its original recorded.
+  let frozenBase = null;
+  if (relay) {
+    if (owed.kind === 'original') {
+      const fb = captureBase(S, ctx.repoRoot, { localMergeBase: c.merge_base ?? null });
+      if (!fb.ok) return keep(refuse(fb.code, fb.reasons));
+      frozenBase = fb.base;
+    } else frozenBase = S.freeze?.base ?? null;
+  }
   const now = Date.parse(ctx.now?.() ?? new Date().toISOString());
+  // E-b: the execution id of this owed review (minted at its first dispatch; a confirmation carries its original's).
+  let executionId = executionOf(S, owed.kind, owed.review_execution);
+  if (!executionId && owed.kind === 'original') {
+    executionId = 'rxe-' + randomUUID();
+    S.review_executions = [...(S.review_executions ?? []), { id: executionId, kind: 'original', review_execution: owed.review_execution ?? null, at: iso(now) }];
+  }
   if (!relay) {
     const id = 'unavail-' + randomUUID();
-    S.review_dispatches.push({ attempt_id: id, role, kind: owed.kind, requested_identity: identity, candidate_id: candidate, status: 'unavailable',
+    S.review_dispatches.push({ attempt_id: id, role, kind: owed.kind, requested_identity: identity, candidate_id: candidate, review_execution_id: executionId, status: 'unavailable',
       started_at: iso(now), relay: null, code: 'review_relay_unavailable' });
     note(S, 'REVIEW_UNAVAILABLE', { role, kind: owed.kind, candidate_id: candidate, skill: route.skill });
     S.outbox.push({ run_id: S.run_id, event: 'REVIEW_UNAVAILABLE', event_id: `review-unavailable-${id}`, role, kind: owed.kind, candidate_id: candidate,
@@ -413,6 +471,7 @@ export async function dispatchReview(E, { role, candidate }) {
     ...(route.model ? ['--model', route.model] : [])];
   const deadline = now + route.timeout_min * 60000 + REVIEW_GRACE_MS;
   const receipt = { attempt_id: id, role, kind: owed.kind, ...(owed.review_execution ? { review_execution: owed.review_execution } : {}),
+    review_execution_id: executionId, base: frozenBase,
     requested_identity: identity, provider: route.provider, candidate_id: candidate, merge_base: c.merge_base ?? null,
     argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), started_at: iso(now), deadline: iso(deadline),
     relay, relay_sha256: sha(readFileSync(relay)), cli: { path: cli.pin.path, sha256: cli.pin.sha256 }, argv, prompt_file: promptFile, out_dir: outDir, result_file: join(outDir, 'result.json'),
@@ -563,7 +622,7 @@ const no = (code, reasons) => ({ ok: false, code, reasons });
  * The provenance verdict of a `gate review` input under config.reviewProvenance 'engine'. Pure apart from `read`
  * (path -> Buffer | null). -> { ok: true, input (engine identities substituted), provenance, used } | { ok: false, code, reasons }
  */
-export function provenanceVerdict({ S, input, frozen, mergeBase, read = readBytes }, { omit = [] } = {}) {
+export function provenanceVerdict({ S, input, frozen, mergeBase, execution, read = readBytes }, { omit = [] } = {}) {
   const on = (id) => !omit.includes(id);
   const kind = input.kind;
   const slots = ['primary', 'second_opinion'].filter(s => isObj(input[s]));
@@ -596,6 +655,9 @@ export function provenanceVerdict({ S, input, frozen, mergeBase, read = readByte
       return no('review_receipt_base', [`${slot}'s receipt reviewed candidate ${frozen} against merge base ${matches[0].merge_base ?? 'unknown'}; this review binds it to ${mergeBase}: `
         + 'the base moved since the dispatch (the shipped tree differs); dispatch again']); }
     if (on('spent')) { pool = pool.filter(d => !d.consumed_by); if (!pool.length) return no('review_receipt_spent', [`${slot}'s receipt was consumed by review ${matches[0].consumed_by}`]); }
+    // R0-S round 4 (E-b): the receipt must be of the execution this review is (never another execution's, e.g. replayed after a RETRY).
+    if (on('execution') && execution !== undefined) { pool = pool.filter(d => (d.review_execution_id ?? null) === execution && execution !== null); if (!pool.length)
+      return no('review_receipt_execution', [`${slot}'s receipt is of review execution ${matches[0].review_execution_id ?? 'none'}; this ${kind} is execution ${execution ?? 'none (never dispatched)'}: dispatch again for this review`]); }
     bound[slot] = pool.at(-1);
   }
   if (on('shared_identity') && bound.primary && bound.second_opinion && bound.primary.requested_identity === bound.second_opinion.requested_identity)

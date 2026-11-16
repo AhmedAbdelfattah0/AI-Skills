@@ -71,7 +71,7 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   fx.commitAll(); // config.base HEAD: the merge base recorded with SHIP_READY keeps the candidate computable after the commit
   const a = authorize(fx, 'publish');
   allowed(a, 'publication');
-  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base', 'base_sha', 'assurance']);
+  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base', 'base_sha', 'identity', 'assurance']);
   assert.equal(a.out.binding.base_sha, fx.okGit(['ls-remote', 'origin', `refs/heads/${fx.defaultBranch}`]).stdout.split(/\s+/)[0], 'the base commit the remote names (round 3)');
   assert.equal(a.out.binding.assurance, 'STRICT', 'the production policy is what this run authorizes');
   assert.equal(a.out.binding.base, fx.defaultBranch, 'the remote default branch is the PR base');
@@ -81,7 +81,10 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   const p = spawnCli(fx, ['publish', '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1', '--pr-title', 'T-1: ship', '--pr-body-file', body, '--draft']);
   assert.equal(p.status, 0, p.stdout + p.stderr);
   assert.equal(fx.remoteHead(), fx.head());
-  assert.deepEqual(fx.ghLog(), [['pr', 'create', '-R', 'github.com/acme/t-1', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft']]);
+  // Round 4 (D4): the created PR is verified read-only (REST pull: head/base repository, refs, sha, state) before it is bound (SIMULATED gh).
+  assert.deepEqual(fx.ghLog(), [['pr', 'create', '-R', 'github.com/acme/t-1', '--head', 'T-1-work', '--base', fx.defaultBranch, '--title', 'T-1: ship', '--body-file', body, '--draft'],
+    ['api', '-X', 'GET', 'repos/acme/t-1/pulls/1', '--hostname', 'github.com']]);
+  assert.deepEqual(fx.readState().published.at(-1).pr, { number: 1, head_repo: 'github.com/acme/t-1', base_repo: 'github.com/acme/t-1', base_ref: fx.defaultBranch, url: 'https://github.com/acme/t-1/pull/1' });
   assert.equal(fx.readState().published.at(-1).repository.slug, 'github.com/acme/t-1', 'PUBLISHED records the repository identity');
   assert.equal(fx.readState().published.at(-1).head, fx.head());
   const done = authorize(fx, 'complete');

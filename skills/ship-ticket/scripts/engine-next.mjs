@@ -55,7 +55,7 @@ import { admission, supersededBy } from './engine-enroll.mjs';
 import { confirmationPolicy } from './engine-gates.mjs';
 import { reviewFreshness, FRESHNESS_CODES } from './engine-freshness.mjs';
 import { latestEvidence } from './engine-ci.mjs';
-import { REVIEW_KIND, provenanceMode, sameReviewed, unconsumedFail, liveSibling, dispatchRefusal } from './engine-review-dispatch.mjs';
+import { REVIEW_KIND, provenanceMode, sameReviewed, unconsumedFail, liveSibling, dispatchRefusal, executionOf } from './engine-review-dispatch.mjs';
 
 export const NEXT_SCHEMA = 'ship-ticket-engine-next-v1';
 export const DISPOSITIONS = Object.freeze(['READY', 'RUNNING', 'WAITING', 'BLOCKED', 'NEEDS_APPROVAL', 'COMPLETED', 'FAILED']);
@@ -86,12 +86,13 @@ export const HUMAN_CODES = Object.freeze(['approval_mismatch', 'dag_mismatch', '
 const CEILING_OF = { primary: 'primary_ceiling_ms', second_opinion: 'optional_ceiling_ms', confirmation: 'confirmation_ceiling_ms' };
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
 /** CI UNAVAILABLE codes another collection cannot cure (R0-S batch 2, item 6): BLOCKED for the human. */
-export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified']);
+export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unknown', 'ci_repo_mismatch', 'ci_head_unverified',
+  'identity_unbound', 'identity_changed', 'publication_mismatch', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch', 'pr_repo_mismatch']);
 /** Gate refusal codes the orchestrator cannot correct by resubmitting (item 6): BLOCKED for the human at once. Any other refusal is the
  * orchestrator's to correct ONCE: the same refusal twice in a row for the same candidate is the human's (no endless gate loop). */
 export const GATE_HUMAN = Object.freeze(['review_fail_unconsumed', 'review_output_changed', 'review_receipt_spent', 'review_identity_spoofed', 'review_identity_shared',
   'review_base_moved', 'review_stale', 'stale_candidate', 'post_freeze_drift', 'review_binding_missing', 'review_provenance_unbound', 'quiescence_unknown',
-  'base_unverified', 'base_moved_local', 'base_moved_remote']);
+  'base_unverified', 'base_moved_local', 'base_moved_remote', 'identity_changed', 'identity_unbound']);
 const refusalOwner = (g) => (GATE_HUMAN.includes(g.code) || HUMAN_CODES.includes(g.code) || (g.repeat ?? 1) > 1 ? 'human' : 'orchestrator');
 /** The recovery each recorded dispatch refusal names (item 6). */
 const RECOVERY = Object.freeze({
@@ -167,8 +168,10 @@ function reviewRules(stage, kind, want) {
   const p = stage.toLowerCase();
   const rows = (S, f, x) => {
     const w = want(S, f, x);
-    if (f.reviewMode === 'engine') { // E7: the latest unconsumed receipt per role of this review kind and candidate (abandoned: owed again)
-      const mine = w.roles.map(r => (f.receipts ?? []).filter(d => d.kind === kind && !d.consumed && sameReviewed(d, w.candidate, f.candidate?.merge_base ?? null) && d.role === r).at(-1))
+    if (f.reviewMode === 'engine') { // E7: the latest unconsumed receipt per role of this review kind, candidate and EXECUTION (round 4; abandoned: owed again)
+      const ex = executionOf(S, kind, w.rx);
+      const mine = w.roles.map(r => (f.receipts ?? []).filter(d => d.kind === kind && !d.consumed && sameReviewed(d, w.candidate, f.candidate?.merge_base ?? null) && d.role === r
+        && ex !== null && d.review_execution_id === ex).at(-1))
         .filter(d => d && d.status !== 'abandoned');
       return { ...w, engine: true, mine };
     }
@@ -438,7 +441,8 @@ export function reviewReceipts(S, now) {
   return (S.review_dispatches ?? []).map(d => {
     const a = (S.attempts ?? []).find(x => x.attempt_id === d.attempt_id);
     const deadline = ms(d.deadline);
-    return { role: d.role === 'second' ? 'second_opinion' : d.role, kind: d.kind, event_id: d.attempt_id, review_execution: null, candidate_id: d.candidate_id, merge_base: d.merge_base ?? null,
+    return { role: d.role === 'second' ? 'second_opinion' : d.role, kind: d.kind, event_id: d.attempt_id, review_execution: d.review_execution ?? null,
+      review_execution_id: d.review_execution_id ?? null, candidate_id: d.candidate_id, merge_base: d.merge_base ?? null,
       started_at: d.started_at, status: d.status, consumed: Boolean(d.consumed_by), ended: d.status === 'collected', ended_ms: ms(d.collected?.collected_at),
       marker: a?.envelope_file ?? null, marker_exists: d.status === 'dispatched' && Boolean(a?.envelope_file && existsSync(a.envelope_file)),
       deadline: d.deadline ?? null, deadline_ms: deadline ?? Infinity, overdue: deadline !== null && now > deadline, parsed_file: d.collected?.parsed_file ?? null,

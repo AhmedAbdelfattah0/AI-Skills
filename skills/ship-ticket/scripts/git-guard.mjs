@@ -28,10 +28,11 @@
  * branch deletions pass. If node or this script has moved, the hook blocks only branches matching the
  * default pattern and says how to reinstall.
  *
- * The PR base the hook's authorize judges is the bound one (config.base, else the remote default branch:
- * engine-enroll.mjs authorize, R0-S batch 2), the same one `publish` used; a stacked PR binds its parent as
- * config.base. A push to a URL (`git push <url>`, where git passes the URL as $1) is judged as the configured
- * remote with that url or pushurl; a URL no remote has is `remote_unconfigured` unless config.base binds the base.
+ * The PR base the hook's authorize judges is the base of record frozen before review (config.base, else the remote's
+ * default branch resolved once by `ls-remote --symref`: engine-identity.mjs, R0-S round 4), the same one `publish` used;
+ * a stacked PR binds its parent as config.base. The ACTUAL push destination is judged by the same verifier (E-e): the
+ * remote git passes as $1 (a remote name, or a URL mapped to the configured remote with that url or pushurl, else the URL
+ * itself) must name the repository identity recorded at enroll, else `identity_changed` (a push to another remote is refused).
  *
  * Pattern limits, pinned by git-guard.test.mjs. False positives (fail closed, never a bypass): the
  * default pattern also reads `fix/issue-42` as ticket `issue-42` and `release-2026-11` as
@@ -172,8 +173,8 @@ function latestRun(repo, ticket) {
 
 /**
  * The configured remote a pre-push `$1` names: a remote name as is, a URL (`git push <url>`) mapped to the
- * remote whose url or pushurl it is, else the URL itself (authorize then refuses `remote_unconfigured`
- * when it would need that remote's HEAD as the PR base, instead of reading refs/remotes/<url>/HEAD).
+ * remote whose url or pushurl it is, else the URL itself (authorize then judges the URL's repository against the enrolled identity:
+ * identity_changed for another one, R0-S round 4).
  */
 export function remoteName(repo, given) {
   if (!given) return given;
@@ -212,8 +213,6 @@ export async function check(repo, stdin, { authorizeFn, remote } = {}) {
   const ticketIn = (b) => (b ? withState.find(t => branchNames(b, t)) ?? ticketOf(b, pattern) : null);
   const head = out(git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD']));
   const current = out(git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD']));
-  const defaultRef = remote ? out(git(repo, ['symbolic-ref', '--quiet', `refs/remotes/${remote}/HEAD`])) : null;
-  const defaultBranch = defaultRef?.startsWith(`refs/remotes/${remote}/`) ? defaultRef.slice(`refs/remotes/${remote}/`.length) : null;
   for (const line of stdin.split('\n').map(l => l.trim()).filter(Boolean)) {
     const [localRef, localSha, remoteRef] = line.split(/\s+/);
     const branchOf = (r) => (r?.startsWith('refs/heads/') ? r.slice('refs/heads/'.length) : null);
@@ -237,7 +236,8 @@ export async function check(repo, stdin, { authorizeFn, remote } = {}) {
     // The authorization names one branch: the destination must be exactly it (never the default branch, never another name).
     const want = `refs/heads/${a.binding?.branch}`;
     if (remoteRef !== want) {
-      const toDefault = branchOf(remoteRef) && (branchOf(remoteRef) === defaultBranch || branchOf(remoteRef) === a.binding?.base);
+      // R0-S round 4 (L2): the label comes from the base of record the authorization names, never the local refs/remotes/<r>/HEAD symref.
+      const toDefault = branchOf(remoteRef) && branchOf(remoteRef) === a.binding?.base;
       deny(toDefault ? 'push_to_default_branch' : 'push_destination_mismatch', `${ticket} is authorized to push ${want} only, not ${remoteRef}`);
       continue;
     }

@@ -267,30 +267,49 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   line on stderr. `publish` also needs a `SHIP_READY` whose state conditions still
   hold (`ship_ready_superseded`), a clean tree, a branch naming the ticket, the
   candidate recomputed against the merge base recorded with `SHIP_READY`, and a
-  RUN-STATE `SHIP_READY` backed by its engine line. The PR base is bound, never
-  chosen on the command line: the approved DAG's `config.base` branch, else the
-  remote's default branch. A `--base` naming any other ref is `pr_base_unbound` (a
-  `--base` at a local ref carrying unreviewed commits would otherwise give the
-  reviewed merge base and launder them; a stacked PR binds its parent as
-  `config.base`). The bound base must give the merge base recorded with
-  `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits),
-  measured from the commit the REMOTE names for the base (`git ls-remote`), never
-  from a local ref: a `config.base` branch or `origin/<default>` moved onto
-  unreviewed commits is `base_moved_local` (the merge bases from the local ref and
-  from the remote commit differ). With a `config.base` branch, `gate review`
-  verifies the base and the original's freeze records it (ref, remote, repository
-  identity, commit); `gate ship-ready` and `authorize publish` re-verify that record:
-  a remote base force-pushed off the reviewed commit is `base_moved_remote`; no
-  configured remote, another repository, or a freeze or `SHIP_READY` without the
-  record is `base_unverified`; a failed `ls-remote`, a missing remote branch, or a
-  remote commit not fetched is `base_remote_unavailable`. A remote base that only
-  advanced (the branch does not contain the new commits) is accepted: the merge
-  base and the PR's range are the reviewed ones; merging or rebasing onto it moves
-  the merge base and needs an owner `RETRY` (re-freeze). Residual: the remote is
-  reached through the repository's git config (`insteadOf`/`set-url` can redirect
-  it; the recorded URL identity is compared, not the bytes behind it), a push to
-  the base branch itself moves it, and `state.json` stays same-user writable. And
-  no commit since that merge base may touch a path outside the candidate
+  RUN-STATE `SHIP_READY` backed by its engine line.
+  **Release identity (R0-S round 4, ENFORCED by ONE verifier, `engine-identity.mjs`
+  `verifyReleaseBinding(stage)`, called by gate review, gate ship-ready, authorize
+  publish (so `publish`, the pre-push hook and `next`), `ci` and authorize
+  complete).** One tuple is recorded and never re-resolved from a mutable selector.
+  The guarantee is *same configured repository identity* (trust on first use at
+  enroll), not proof that it is the repository the owner intended:
+  - `enroll` reads the repository identity once (`origin`'s configured URL:
+    host/owner/repo; a pushurl naming another repository is none) and pins `gh`
+    (path, sha256). No GitHub origin then: identity null, and `publish`, `ci` and
+    `complete` refuse `identity_unbound` (the gates still run). `gh` is pinned at
+    enroll or never: no later pin authorizes release (`gh_unpinned`, `gh_drift`).
+    A remote (or a push URL, or `publish --remote`) naming another repository
+    than the enrolled one is `identity_changed` at every stage.
+  - The **freeze** is captured BEFORE each reviewer launches, in its
+    `REVIEW_DISPATCHED` receipt, in BOTH base modes: `base` `{remote, identity,
+    ref, sha, merge_base}` (the base of record is `config.base`, else the remote's
+    default branch resolved ONCE with `git ls-remote --symref <remote> HEAD`; a
+    remote-tracking ref such as `refs/remotes/origin/HEAD` or `origin/<default>`
+    is never read) and an engine-minted `review_execution_id`. `gate review`
+    adopts it into the freeze (`review_receipt_base` when the receipts differ from
+    the remote now; `review_receipt_execution` for a receipt of another
+    execution, e.g. replayed after an owner `RETRY`); `gate ship-ready` binds it to
+    `SHIP_READY`. A missing record is `base_unverified`. Under an approved
+    policy without engine dispatch (`reviewProvenance` `unbound`, RELAXED) the gate
+    captures it.
+  - Re-verification of that record on the remote (ship-ready, publish, complete):
+    a remote base force-pushed or rewound off the frozen commit is
+    `base_moved_remote`; a local `config.base` branch whose merge base differs
+    from the remote commit's is `base_moved_local`; a failed `ls-remote`, a missing
+    remote branch or an unfetched commit is `base_remote_unavailable`. A remote
+    base that only advanced (descends from the frozen commit, same merge base) is
+    accepted; merging or rebasing onto it moves the merge base (review freshness:
+    `review_base_moved` / `review_stale`; `base_mismatch` at publish) and needs an
+    owner `RETRY` (a new freeze).
+  - The PR base is the frozen ref, never chosen on the command line: a `--base`
+    or recorded intent naming another is `pr_base_unbound`; the merge base from
+    the remote commit must be the one recorded with `SHIP_READY` (`base_mismatch`:
+    e.g. a reused branch with earlier commits).
+  - Authoritative git reads (merge base, ancestry, candidate, history) run with
+    `--no-replace-objects`: a `git replace` object never changes what is judged.
+
+  And no commit since that merge base may touch a path outside the candidate
   (`history_outside_candidate`: e.g. an extra commit later reverted; paths are
   checked, not bytes: an intermediate commit may hold other bytes of a reviewed
   path). A history listing that fails or overflows is `history_unavailable`, never
@@ -303,36 +322,54 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `review_binding_missing`, one that is not engine-dispatched under the strict
   policy `review_provenance_unbound`. A `SHIP_READY`
   recorded before the merge base existed needs `gate ship-ready` again
-  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch, base and the
-  run's `assurance` (`STRICT` or `RELAXED`). `complete` needs `PUBLISHED` for HEAD,
-  CI `PASS` recorded by `ci` for exactly that head (below), evidence that verified
-  the branch head (`ci_head_unverified`), and the remote branch still at that head
-  now (`ci_remote_moved`, `remote_unavailable`).
+  (`ship_ready_regate`). Its allow binds head, tree, candidate, branch, base, the
+  enrolled identity and the run's `assurance` (`STRICT` or `RELAXED`).
+  **`complete` is cumulative**: it re-runs the whole publish conjunction above
+  (review, repair, candidate, base, history) and then requires: `PUBLISHED` for
+  HEAD whose `publication_id` still matches the reviewed release
+  (`publication_mismatch`); a STRICT run (`assurance_relaxed`: a RELAXED run,
+  including an approved `ciRequiredChecks` or `ciNoChecksMinutes`, never
+  completes); a verified PR bound to the publication (`pr_required`: a
+  branch-only publication never completes); the PR read LIVE and read-only with
+  the pinned `gh` (`gh api repos/<o>/<r>/pulls/<n>`: `complete` now calls `gh`,
+  and so do `next` and `status`, which ask `authorize complete`): state open and
+  not merged (`pr_state`), head and base repository the enrolled one
+  (`pr_repo_mismatch`), head ref and sha the published ones (`pr_head_mismatch`),
+  base ref the frozen one (`pr_base_mismatch`), unreadable `pr_unavailable`; CI
+  `PASS` recorded by `ci` for exactly that publication (below); evidence that
+  verified the branch head (`ci_head_unverified`); and the remote branch still at
+  that head now (`ci_remote_moved`, `remote_unavailable`).
+  Residual (documented, not closed): git URL rewriting (`url.<base>.insteadOf`,
+  `pushInsteadOf`, `GIT_CONFIG_*` in the environment) redirects the CONFIGURED
+  identity to other bytes; a push to the base branch itself moves it; a tool
+  replaced before its pin; `state.json` stays same-user writable; no
+  cryptographic attestation. Only SIMULATED GitHub answers are tested (a fake
+  `gh`): no live GitHub qualification is claimed.
 - **`ci`** (ENFORCED for `authorize complete`). Under the run lock, after the
   binding and the `ship` context are re-verified, it asks `gh` for the check runs
   of the head `publish` pushed for HEAD. The `gh` it runs is the one `enroll`
   pinned (absolute path and sha256 resolved from that moment's PATH): a stub put
   earlier on PATH later is never run, changed bytes are `gh_drift`
   (`publish --pr-title` uses the same pin). A run enrolled with no `gh` on PATH
-  pins one at its first `ci`, only after the published branch is verified at the
-  published head (`ci_head_unverified` otherwise; the same pre-pin residual as
-  enroll); none on PATH then is `gh_unpinned`. `gh` runs with every `GH_*` and
+  is `gh_unpinned` at `ci` (round 4: no late pin; start a new run). `gh` runs with every `GH_*` and
   `GITHUB_*` variable removed (`GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, tokens) and
   the OS account's `HOME`, so it uses the account's stored login (an
-  environment-token-only setup fails closed), and every call names the repository
-  `publish` recorded in `PUBLISHED` (`repository`: the remote's configured URL,
-  before `insteadOf`) explicitly (`repos/<owner>/<repo>/...`, `--hostname`, `-R`).
-  A remote that names no GitHub repository is `ci_repo_unknown`; a remote URL
-  changed since `publish`, or any check run or PR answer whose html URL is of
-  another repository, is `ci_repo_mismatch` (also at `authorize complete`). Not
+  environment-token-only setup fails closed), and every call names the ENROLLED repository
+  explicitly (`repos/<owner>/<repo>/...`, `--hostname`, `-R`); a remote URL changed
+  since enroll is `identity_changed`, and any check run or PR answer whose html URL
+  is of another repository is `ci_repo_mismatch`. The evidence is bound to the
+  publication (`publication_id`) and carries a PR snapshot; `--pr` is accepted
+  only when no PR is recorded and must satisfy every PR row (it is then bound: a
+  NEW `publication_id`, the one permitted change of a publication, pr null -> one
+  verified PR); a `--pr` naming another than the bound PR is `publication_mismatch`. Not
   removed: proxy and TLS variables (a residual that needs a trusted interception
   certificate). That SHA comes from the `PUBLISHED`
   record, never from the caller. It records `CI_EVIDENCE` `{head_sha, checks[],
   collected_at, state, code, timing, repository}` in the state and the engine log, never in
   RUN-STATE. Exit 0 is `PASS`. Exit 2 is any other state or a refusal. A refusal
   before the provider (`publish_evidence_missing`, the binding and context codes)
-  records nothing; one after it (`gh_unpinned`, `gh_drift`, `ci_repo_unknown`,
-  `ci_repo_mismatch`, `ci_head_unverified`) is recorded as `UNAVAILABLE` evidence
+  records nothing; one after it (`gh_unpinned`, `gh_drift`, the identity,
+  publication and PR codes, `ci_repo_mismatch`) is recorded as `UNAVAILABLE` evidence
   with its code, so `next` reports it as the human's `BLOCKED` instead of
   offering `ci` again.
   States:
@@ -350,17 +387,20 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   - `UNAVAILABLE`: a `gh` failure (`ci_provider_unavailable`) or a page count that
     does not add up (`ci_provider_incomplete`). This is never zero checks.
 
-  Runs of another SHA are ignored. A re-run replaces the earlier run of the same
-  check (same app, check suite and name); a same-named run of another app or
-  workflow is an independent check. ANY failed check on the SHA (`failure`,
+  Runs of another SHA are ignored. The check-runs `filter` parameter defaults to
+  `latest` ("returns the most recent check runs", GitHub REST docs; the adapter
+  passes `filter=latest` explicitly), so the engine collapses nothing itself: EVERY
+  returned run on the SHA counts, and a returned red run is never erased by a
+  same-named success (round 4; overlapping or sequential same-named jobs are both
+  judged, no ordering by start time or id). ANY failed check on the SHA (`failure`,
   `cancelled`, `timed_out`, `action_required`, `startup_failure`, `stale`) is
   `FAIL`, required or not. The required set (what must pass) is
   `config.ciRequiredChecks` when the approved DAG names it, else every check run on
   the SHA; a `skipped` or `neutral` check outside it does not block. `authorize
-  complete` reads only the latest evidence for the published head. It re-judges
+  complete` reads only the latest evidence of the publication (`publication_mismatch`
+  when the latest is of another publication of the head). It re-judges
   the recorded checks under the bound config (`ci_evidence_missing`, the
-  evidence's own code, `ci_evidence_inconsistent`), and it never calls `gh`.
-  `--pr` (else the PR URL `publish` recorded) adds the PR view. `NO_CHECKS`
+  evidence's own code, `ci_evidence_inconsistent`); the PR itself it reads live (above). `NO_CHECKS`
   carries a DETECTED diagnostic, never part of the verdict: the PR's mergeable and
   merge state, each workflow's `on:` triggers with branch and path filters against
   the files changed since the merge base (a line-based reading, `parsed: false`
@@ -377,8 +417,15 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   records the bound PR base for the HEAD it pushes (`publish_intent`; the guard's
   hook re-derives the same bound base and refuses a recorded one that differs),
   pushes `<sha>:refs/heads/<branch>`, checks the remote ref, opens the PR with
-  `--base` only when a title and body file are given, and records `PUBLISHED`
-  (`published_unrecorded` if that record fails after a successful push). The remote
+  `--base` (the frozen ref) only when a title and body file are given and no PR is
+  bound to the branch yet, verifies it read-only (REST pull) before binding it,
+  re-verifies a PR already bound instead of opening another, and records
+  `PUBLISHED` with its `publication_id` = sha256 of {identity, destination ref,
+  head, tree, base {ref, sha, merge_base}, candidate, PR {number, head and base
+  repository, base ref} | null} (`published_unrecorded` if that record fails after
+  a successful push). A second publication of a head must equal the first
+  (`publication_mismatch`, checked before the push; never PR -> null, never another
+  PR or repository). The remote
   can still move after the check, and direct `git push`/`gh` never pass through it.
 - **No degraded bypass.** The engine cannot prove a human said anything (START and
   RETRY are orchestrator-appended), so there is no owner-approval override: a
@@ -393,9 +440,10 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   name `push_destination_mismatch`. It also guards any branch naming a ticket that has engine state. It
   refuses a hooks directory inside the work tree unless ignored. In a linked worktree
   it installs into the shared hooks directory and judges each push by that work
-  tree's engine state. A `git push <url>` is judged as the configured remote with
-  that URL (`remote_unconfigured` when none has it and the PR base would be that
-  remote's HEAD). The pattern fails closed on look-alikes: `fix/issue-42` and
+  tree's engine state. The ACTUAL push destination is judged by the same verifier:
+  a push to a remote (or `git push <url>`) naming another repository than the
+  enrolled one is `identity_changed`; the default-branch label comes from the base
+  of record, never the local `refs/remotes/<r>/HEAD`. The pattern fails closed on look-alikes: `fix/issue-42` and
   `release-2026-11` read as tickets and are refused until you narrow it with
   `--pattern`. A branch naming two tickets is judged by one run only (the first
   with engine state). `--no-verify`, `-c core.hooksPath=...`, the `GIT_CONFIG_*`

@@ -14,7 +14,8 @@
  * Enforced entry points: drive and carrier.mjs dispatch need `admitted` (stage build); gate needs
  * the gate's phase context (red: build, review/unit-review/reassess: review, ship-ready: ship) and
  * otherwise returns a refusal that records no decision; publish needs `publication`; `authorize complete`
- * needs a PUBLISHED record for HEAD and a CI_EVIDENCE PASS of exactly that head (engine-ci.mjs). `init` is the
+ * is CUMULATIVE (round 4): the whole publish conjunction again, then the release identity (engine-identity.mjs: publication_id,
+ * STRICT assurance, a verified PR read LIVE read-only with the pinned gh) and a CI_EVIDENCE PASS of exactly that publication. `init` is the
  * bootstrap and needs only the approved plan. status, resume, mark, rebind, archive and `context`
  * are not gated.
  *
@@ -52,6 +53,9 @@
  * R0-S round 3 (N-BASE): base_unverified / base_remote_unavailable / base_moved_local / base_moved_remote (engine-base.mjs): the merge
  * base is measured from the commit the remote names for the base (ls-remote), recorded at the review freeze with the repository
  * identity, re-verified at ship-ready and here; a local base ref (config.base branch, or origin/<default>) is never the authority.
+ * R0-S round 4 (engine-identity.mjs, ONE verifier): enroll records the repository identity and pins gh (no late pin); the PR base is the
+ * base of record frozen before review in both modes (never refs/remotes/<r>/HEAD; remote_unconfigured / pr_base_required are gone);
+ * identity_unbound, identity_changed, publication_mismatch, pr_required, pr_state, pr_*_mismatch, pr_unavailable, assurance_relaxed.
  * Still the same-user residual (documented, not closed): rewriting state.json, the ledgers, a relay or launcher output
  * TOGETHER with the digests that bind them; replacing the relay or gh BEFORE their pin (the pin trusts that moment's
  * home and PATH); importing the modules and calling the in-process seams (ctx.ciProvider, ctx.relayHome); `git` itself
@@ -66,8 +70,9 @@ import { LIVE } from './engine-quiesce.mjs';
 import { checkShipReady } from './ship-ready-check.mjs';
 import { reviewFreshness } from './engine-freshness.mjs';
 import { openReviewFail } from './engine-review-dispatch.mjs';
-import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf, remoteRepository, ghEnv } from './engine-ci.mjs';
-import { verifyBase, remoteIdentity } from './engine-base.mjs';
+import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf, ghEnv, ghProvider, prNumberOf } from './engine-ci.mjs';
+import { authGit } from './engine-base.mjs';
+import { verifyReleaseBinding, readIdentity, identityRecord, publicationOf, prRows, prBinding } from './engine-identity.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -77,11 +82,15 @@ export const STAGE_PHASE = Object.freeze({ build: 'build', publish: 'ship', comp
   red: 'build', review: 'review', 'unit-review': 'review', reassess: 'review', 'ship-ready': 'ship' });
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** The remote enroll reads the run's repository identity from (once; engine-identity.mjs readIdentity). */
+export const IDENTITY_REMOTE = 'origin';
 
 const gitOut = (repo, args, env) => {
   const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 30000, ...(env ? { env } : {}) });
   return r.status === 0 ? r.stdout.trim() : null;
 };
+/** An authoritative read (merge base, tree): replacement objects off (E-a). */
+const authOut = (repo, args) => { const r = authGit(repo, args, { timeout: 30000 }); return r.status === 0 ? r.stdout.trim() : null; };
 /** The history listing's buffer: far above any real branch; past it the call fails and the caller refuses. */
 export const HISTORY_MAX_BUFFER = 256 * 1024 * 1024;
 /**
@@ -89,7 +98,8 @@ export const HISTORY_MAX_BUFFER = 256 * 1024 * 1024;
  * A non-zero exit, a spawn error or a buffer overflow (ENOBUFS) is { ok: false }: never read as an empty history.
  */
 export function historyPaths(repo, range, { spawn = spawnSync, maxBuffer = HISTORY_MAX_BUFFER } = {}) {
-  const r = spawn('git', ['log', '--format=', '--name-only', '--no-renames', '-z', range], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer });
+  const r = spawn('git', ['--no-replace-objects', 'log', '--format=', '--name-only', '--no-renames', '-z', range], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   if (r.error || r.status !== 0) return { ok: false, reason: (r.error?.code ?? r.error?.message ?? (r.stderr || `git log exited ${r.status}`)).toString().trim() };
   return { ok: true, paths: r.stdout.split('\0').map(p => p.replace(/^\n/, '')).filter(Boolean) };
 }
@@ -158,6 +168,8 @@ export function enrollIn(E, skillDir = SKILL_DIR) {
     throw coded('enrollment_after_execution', `this run already executed ${S.attempts.length} attempt(s) without enrollment and the skill is a copy install, whose files those attempts could have written; ${NEW_RUN}`);
   S.enrollment = { run_id: S.run_id, ticket: S.ticket, repo: gitOut(ctx.repoRoot, ['rev-parse', '--show-toplevel']),
     branch: gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']), head: gitOut(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']),
+    // R0-S round 4 (D1): the repository identity, read ONCE here by the one reader; gh pinned here or never.
+    identity: identityRecord(readIdentity(ctx.repoRoot, IDENTITY_REMOTE)),
     tools: { gh: resolveTool('gh', ctx.env ?? process.env) }, ...pin, attempts_before: (S.attempts ?? []).length, at: new Date().toISOString() };
   S.contexts = {};
   return { already: false, enrollment: S.enrollment };
@@ -237,20 +249,45 @@ export async function authorize(ctx, readEngine) {
   if (ctx.stage === 'complete') {
     const pub = (S.published ?? []).findLast(p => p.head === head);
     if (!pub) return deny('publish_evidence_missing', [`no PUBLISHED record for HEAD ${head}; ship through run-engine.mjs publish`], lifecycle(S));
-    // P0 E6-min: CI PASS recorded by run-engine.mjs ci for exactly the published head (engine-ci.mjs ciAuthorize).
+    // R0-S round 4 (D3): CUMULATIVE: the whole publish conjunction (review, repair, candidate, base, history) holds now, not only CI.
+    const core = publishCore(ctx, S, head, deny);
+    if (!core.allow) return core;
+    // The PR is read LIVE (read-only, the pinned gh, the enrolled repository) for the verifier's PR rows.
+    const view = livePr(ctx, S, pub);
+    const vr = verifyReleaseBinding('complete', { S, repoRoot: ctx.repoRoot, pub, view, inProcess: Boolean(ctx.ciProvider) });
+    if (!vr.ok) return deny(vr.code, vr.reasons, 'publication');
+    // P0 E6-min: CI PASS recorded by run-engine.mjs ci for exactly this publication (engine-ci.mjs ciAuthorize, publication_id).
     const c = ciAuthorize(S, pub);
     if (!c.ok) return deny(c.code, c.reasons, 'publication');
-    // R0-S batch 2 (item 3): the evidence is of the published repository, and the remote still names it.
-    if (pub.repository && ((c.evidence.repository && c.evidence.repository.toLowerCase() !== pub.repository.slug.toLowerCase())
-      || remoteRepository(ctx.repoRoot, pub.remote ?? 'origin')?.slug?.toLowerCase() !== pub.repository.slug.toLowerCase()))
-      return deny('ci_repo_mismatch', [`the CI evidence (${c.evidence.repository ?? 'in-process provider'}) or remote ${pub.remote ?? 'origin'} is not the published repository ${pub.repository.slug}`], 'publication');
     // R0-S N3: and the published branch still points at that head now (a push after the collection moved what the PR ships).
     const now = remoteHeadOf(ctx.repoRoot, pub);
     if (!now.ok) return deny('remote_unavailable', [`the published branch could not be read: ${now.error}`], 'publication');
     if (now.head !== pub.head) return deny('ci_remote_moved', [`the remote branch ${pub.branch} is ${now.head ?? 'gone'}, the published (and CI-verified) head is ${pub.head}: publish the new head and collect its CI`], 'publication');
     return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-      binding: { head, assurance: assuranceOf(S).level, ci: { state: c.evidence.state, collected_at: c.evidence.collected_at, checks: c.evidence.checks.length, required: c.evidence.required } } };
+      binding: { head, publication_id: pub.publication_id, pr: pub.pr.number, assurance: assuranceOf(S).level, ci: { state: c.evidence.state, collected_at: c.evidence.collected_at, checks: c.evidence.checks.length, required: c.evidence.required } } };
   }
+  return publishCore(ctx, S, head, deny);
+}
+
+/** The live PR of publication `pub` for complete (null when none is recorded, gh is not the pinned one, or the read failed: the verifier refuses). */
+function livePr(ctx, S, pub) {
+  if (!pub?.pr?.number || !S.enrollment?.identity) return null;
+  let provider = ctx.ciProvider;
+  if (!provider) {
+    const gh = pinnedTool(S.enrollment.tools?.gh);
+    if (!gh.ok) return null;
+    provider = ghProvider({ repoRoot: ctx.repoRoot, env: ctx.env ?? process.env, bin: gh.path, repository: S.enrollment.identity });
+  }
+  const v = provider.pullRequest(pub.pr.number);
+  return v?.ok ? v.pr : null;
+}
+
+/**
+ * The publish conjunction (authorize publish; and, cumulatively, authorize complete). Read-only and lock-free.
+ * A publish allow names the head commit, its tree, the candidate, the branch and the base of record it covers.
+ */
+function publishCore(ctx, S, head, deny) {
+  const base = { schema: AUTHORIZE_SCHEMA, stage: ctx.stage, ticket: ctx.ticket, run_id: ctx.runId };
   if (!S.ship_ready?.candidate_id) return deny('ship_ready_missing', ['no engine SHIP_READY for this run; run gate ship-ready'], lifecycle(S));
   if (!S.ship_ready.merge_base) return deny('ship_ready_regate', ['this SHIP_READY predates the recorded merge base (an engine update); run gate ship-ready again'], lifecycle(S));
   const superseded = supersededBy(S);
@@ -268,38 +305,21 @@ export async function authorize(ctx, readEngine) {
   if (!S.enrollment.branch) return deny('enrollment_branch_unknown', ['the enrollment recorded no branch (a detached HEAD or a git failure at enroll): enroll on the ticket branch in a new run'], 'evidence');
   if (branchNames(S.enrollment.branch, ctx.ticket) && S.enrollment.branch !== branch)
     return deny('branch_mismatch', [`the run enrolled on ${S.enrollment.branch}, HEAD is ${branch}`], 'evidence');
-  // R0-S batch 2 (item 1): the PR base is BOUND, never chosen on the command line: the approved DAG's config.base when it
-  // names a branch, else the remote's default branch. A --base (or a recorded PUBLISH_INTENT base) may only name that same
-  // base (pr_base_unbound otherwise): a --base at a local ref carrying unreviewed commits once laundered them, because
-  // merge-base(<that ref>, HEAD) equalled the reviewed merge base. The history check runs from the SHIP_READY merge base.
-  const remote = ctx.remote ?? 'origin';
+  // R0-S round 4 (D1-D3): the enrolled repository identity (the push remote, or URL, names it), and the base of record bound to SHIP_READY
+  // (frozen before the reviewer launched, both base modes), re-verified on the remote. The PR base is that record's ref: never a local
+  // ref, never refs/remotes/<remote>/HEAD, never chosen on the command line (a --base or recorded intent naming another is pr_base_unbound).
   const configured = S.config?.base && S.config.base !== 'HEAD' ? S.config.base : null;
-  // A remote given as a URL (`git push <url>`) has no refs/remotes/<url>/HEAD: never build one (the hook maps a URL to its configured remote first).
-  if (!configured && !SAFE_REMOTE.test(remote)) return deny('remote_unconfigured', [`the push names ${remote}, which is no configured remote, and no PR base is bound: add it as a remote, bind config.base, or ship through run-engine.mjs publish`], 'evidence');
-  const remoteHead = configured ? null : gitOut(ctx.repoRoot, ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`]);
-  const baseRef = configured ?? remoteHead;
-  if (!baseRef) return deny('pr_base_required', ['no PR base: bind a base branch as config.base in the approved DAG, or set the remote HEAD'], 'evidence');
-  const prBase = baseRef === remoteHead && remoteHead.startsWith(`${remote}/`) ? remoteHead.slice(remote.length + 1) : baseRef; // the name gh expects
+  const prBase = S.ship_ready.base?.ref ?? configured;
   const intent = S.publish_intent?.head === head && typeof S.publish_intent.base === 'string' ? S.publish_intent.base : null;
   for (const [src, given] of [['--base', ctx.base], ['the recorded publish intent', intent]]) {
-    if (given != null && given !== prBase && given !== baseRef)
-      return deny('pr_base_unbound', [`${src} names ${given}; the PR base bound at review is ${prBase} (config.base, else the remote default branch): a PR base is never chosen on the command line`], 'evidence');
+    if (given != null && given !== prBase)
+      return deny('pr_base_unbound', [`${src} names ${given}; the PR base bound at the review freeze is ${prBase ?? 'none'}: a PR base is never chosen on the command line`], 'evidence');
   }
-  // R0-S round 3 (N-BASE): the merge base is measured from the commit the REMOTE names for the base (engine-base.mjs), never from a
-  // local ref (`git branch -f trunk HEAD`, `git update-ref refs/remotes/origin/main ...` once moved it onto unreviewed commits).
-  // With config.base a branch it is the base commit recorded at the review freeze and bound to SHIP_READY, on the same repository.
-  const mbLocal = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
-  let vb;
-  if (configured) {
-    const rec = S.ship_ready.base;
-    if (!rec?.sha || rec.ref !== configured) return deny('base_unverified', [`SHIP_READY binds no verified base commit of ${configured} (recorded before base verification, or lost): run gate ship-ready again (a freeze without one needs an owner RETRY)`], 'evidence');
-    const push = remoteIdentity(ctx.repoRoot, remote);
-    if (!push || push.identity !== rec.identity) return deny('base_unverified', [`the push remote ${remote} is ${push?.identity ?? 'no configured remote'}, the base was verified on ${rec.identity}: the PR would target another repository than the reviewed base`], 'evidence');
-    vb = verifyBase(ctx.repoRoot, { ref: configured, remote: rec.remote, recorded: rec, localMergeBase: mbLocal });
-  } else vb = verifyBase(ctx.repoRoot, { ref: prBase, remote, localMergeBase: mbLocal });
-  if (!vb.ok) return deny(vb.code, vb.reasons, 'evidence');
-  const mb = vb.base.merge_base;
-  if (mb !== S.ship_ready.merge_base) return deny('base_mismatch', [`the reviewed candidate is relative to ${S.ship_ready.merge_base}, but merge-base(${baseRef}, HEAD) is ${mb}: the branch carries history the review did not cover`], 'evidence');
+  const mbLocal = configured ? authOut(ctx.repoRoot, ['merge-base', configured, 'HEAD']) : undefined;
+  const vr = verifyReleaseBinding('publish', { S, repoRoot: ctx.repoRoot, remote: ctx.remote, localMergeBase: mbLocal });
+  if (!vr.ok) return deny(vr.code, vr.reasons, 'evidence');
+  const mb = vr.base.merge_base;
+  if (mb !== S.ship_ready.merge_base) return deny('base_mismatch', [`the reviewed candidate is relative to ${S.ship_ready.merge_base}, but merge-base(${prBase} on the remote, HEAD) is ${mb}: the branch carries history the review did not cover`], 'evidence');
   const dirty = io.snapshot(ctx.repoRoot, S.pinned_exclusions ?? []);
   if (dirty === null) return deny('candidate_unavailable', ['git status failed'], 'evidence');
   if (Object.keys(dirty).length) return deny('tree_dirty', [`uncommitted candidate paths (the push would not be the reviewed bytes): ${Object.keys(dirty).sort().join(', ')}`], 'evidence');
@@ -326,7 +346,8 @@ export async function authorize(ctx, readEngine) {
   if (!backed.ok || !backed.shipReady.includes(cand.candidate_id))
     return deny('ship_ready_unbacked', [backed.reason || `RUN-STATE has no SHIP_READY for ${cand.candidate_id}; run resume to deliver the engine outbox`], 'evidence');
   return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb, base_sha: vb.base.remote_head, assurance: assuranceOf(S).level } };
+    binding: { head, tree: authOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb, base_sha: vr.base.remote_head,
+      identity: vr.identity.slug.toLowerCase(), assurance: assuranceOf(S).level } };
 }
 
 /**
@@ -339,8 +360,8 @@ export async function authorize(ctx, readEngine) {
  * here. `ctx.beforePush` is a test seam run between the two authorizations.
  */
 export async function publish(ctx, readEngine, recordPublished, recordIntent = async () => {}) {
-  const remote = ctx.remote ?? 'origin';
-  if (!SAFE_REMOTE.test(remote)) throw coded('bad_input', '--remote must be a remote name');
+  const remote = ctx.remote;
+  if (remote !== undefined && !SAFE_REMOTE.test(remote)) throw coded('bad_input', '--remote must be a remote name');
   if ((ctx.prTitle === undefined) !== (ctx.prBodyFile === undefined) || (ctx.draft && ctx.prTitle === undefined))
     throw coded('bad_input', '--pr-title and --pr-body-file go together (--draft needs them)');
   if (ctx.prTitle !== undefined && (!ctx.prTitle.trim() || !existsSync(ctx.prBodyFile))) throw coded('bad_input', 'PR title must be non-empty and the body file must exist');
@@ -351,32 +372,57 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
   if (!again.allow) return { published: false, ...again };
   if (JSON.stringify(again.binding) !== JSON.stringify(a.binding))
     return { published: false, allow: false, code: 'authorization_moved', reasons: [`authorized ${JSON.stringify(a.binding)}, now ${JSON.stringify(again.binding)}`], lifecycle: again.lifecycle };
-  const { head, branch } = a.binding;
-  // R0-S N4: a PR is opened only with the gh pinned at enroll (checked before anything is pushed).
-  const gh = ctx.prTitle !== undefined ? pinnedTool(readEngine(ctx).S?.enrollment?.tools?.gh) : null;
-  if (gh && !gh.ok) return { published: false, allow: false, code: gh.code, reasons: [gh.reason], lifecycle: a.lifecycle };
-  // R0-S batch 2 (item 3): the repository the remote's configured URL names is recorded in PUBLISHED; `ci` reads CI only from it,
-  // and the PR is opened in exactly it (-R, gh's environment sanitized: GH_REPO / GH_HOST / tokens never select another one).
-  const repository = remoteRepository(ctx.repoRoot, remote);
-  if (gh && !repository) return { published: false, allow: false, code: 'pr_repo_unknown', reasons: [`remote ${remote} names no GitHub repository (remote.${remote}.url, and a pushurl naming the same one): no PR is opened in a repository the engine cannot name`], lifecycle: a.lifecycle };
-  await recordIntent(ctx, { head, branch, base: a.binding.base, remote, at: new Date().toISOString() });
+  const { head, branch, tree, candidate_id } = a.binding;
+  const S = readEngine(ctx).S;
+  const identity = S.enrollment.identity;
+  const releaseBase = { ref: S.ship_ready.base.ref, sha: S.ship_ready.base.sha, merge_base: S.ship_ready.base.merge_base };
+  const deny = (code, reason) => ({ published: false, allow: false, code, reasons: [reason], lifecycle: a.lifecycle });
+  // R0-S round 4 (D4): a head is published as ONE tuple. A second publication must equal the first; the one permitted change is pr null ->
+  // one verified PR (a recorded PR is re-verified and reused, never replaced or dropped). Checked BEFORE anything is pushed.
+  const prior = (S.published ?? []).findLast(p => p.head === head && p.publication_id) ?? null;
+  const draft = publicationOf({ identity, branch, head, tree, base: releaseBase, candidate_id, pr: prior?.pr ?? null });
+  if (prior && draft.publication_id !== prior.publication_id)
+    return deny('publication_mismatch', `${head} was published as ${prior.publication_id} (${prior.identity}, base ${prior.release_base?.ref}); this publication differs: a head is published once (start a new run to change it)`);
+  // The PR already bound for this branch (this head's, else an earlier head's: GitHub moves a PR's head with its branch) is LOOKED UP and
+  // re-verified for this head, never created twice.
+  const known = prior?.pr ?? (S.published ?? []).findLast(p => p.branch === branch && p.pr && p.identity === identity.slug.toLowerCase())?.pr ?? null;
+  // R0-S N4: a PR is opened or re-verified only with the gh pinned at enroll (checked before anything is pushed).
+  const gh = ctx.prTitle !== undefined || known ? pinnedTool(S.enrollment?.tools?.gh) : null;
+  if (gh && !gh.ok && !ctx.ciProvider) return deny(gh.code, gh.reason);
+  const pushTo = remote ?? identity.remote_name;
+  await recordIntent(ctx, { head, branch, base: a.binding.base, remote: pushTo, at: new Date().toISOString() });
   const env = ctx.env ?? process.env;
-  const push = spawnSync('git', ['push', remote, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
+  const push = spawnSync('git', ['push', pushTo, `${head}:refs/heads/${branch}`], { cwd: ctx.repoRoot, encoding: 'utf8', env, timeout: 600000 });
   if (push.status !== 0) return { published: false, allow: true, code: 'push_failed', reasons: [(push.stderr || push.error?.message || '').trim()] };
-  const remoteHead = gitOut(ctx.repoRoot, ['ls-remote', remote, `refs/heads/${branch}`], env)?.split(/\s+/)[0] ?? null;
+  const remoteHead = gitOut(ctx.repoRoot, ['ls-remote', pushTo, `refs/heads/${branch}`], env)?.split(/\s+/)[0] ?? null;
   if (remoteHead !== head) return { published: false, allow: true, code: 'remote_mismatch', reasons: [`pushed ${head}, the remote branch is ${remoteHead}; nothing recorded`] };
-  let pr = null, prError = null;
-  if (ctx.prTitle !== undefined) {
-    const r = spawnSync(gh.path, ['pr', 'create', '-R', repository.slug, '--head', branch, '--base', a.binding.base, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
+  const provider = gh ? ctx.ciProvider ?? ghProvider({ repoRoot: ctx.repoRoot, env, bin: gh.path, repository: identity }) : null;
+  const facts = { head, branch, release_base: releaseBase };
+  let pr = known, prError = null, prCode = null;
+  if (known) {
+    // A recorded PR is re-verified read-only (never a second create).
+    const v = provider.pullRequest(known.number);
+    const rows = prRows(v?.ok ? v.pr : null, { ...facts, pr: known }, identity);
+    if (rows) return { published: true, code: rows.code, reasons: rows.reasons, run_id: ctx.runId, head, branch, recorded: false };
+  } else if (ctx.prTitle !== undefined) {
+    const r = spawnSync(gh.path, ['pr', 'create', '-R', identity.slug, '--head', branch, '--base', releaseBase.ref, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
       { cwd: ctx.repoRoot, encoding: 'utf8', env: ghEnv(env), timeout: 300000 });
-    if (r.status === 0) pr = { url: r.stdout.trim().split('\n').at(-1) ?? '' };
-    else prError = (r.stderr || r.error?.message || 'gh pr create failed').trim();
+    const number = r.status === 0 ? prNumberOf(r.stdout.trim().split('\n').at(-1)) : null;
+    if (!number) prError = (r.status === 0 ? `gh pr create printed no PR URL: ${r.stdout.trim()}` : (r.stderr || r.error?.message || 'gh pr create failed')).trim();
+    else {
+      // The created PR is verified read-only before it is bound: head and base repository, head ref and sha, base ref, OPEN.
+      const v = provider.pullRequest(number);
+      const rows = prRows(v?.ok ? v.pr : null, facts, identity);
+      if (rows) { prError = rows.reasons[0]; prCode = rows.code; } else pr = prBinding(v.pr);
+    }
   }
-  const entry = { ...a.binding, remote, repository, pr, ...(prError ? { pr_error: prError } : {}), at: new Date().toISOString() };
+  const pubn = publicationOf({ identity, branch, head, tree, base: releaseBase, candidate_id, pr });
+  const entry = { ...a.binding, remote: pushTo, repository: { slug: identity.slug, host: identity.host, owner: identity.owner, repo: identity.repo },
+    identity: identity.slug.toLowerCase(), release_base: releaseBase, pr, publication_id: pubn.publication_id, ...(prError ? { pr_error: prError } : {}), at: new Date().toISOString() };
   let recorded = true;
   try { await recordPublished(ctx, entry); } catch { recorded = false; }
   if (!recorded) return { published: true, code: 'published_unrecorded', reasons: ['the push succeeded but PUBLISHED could not be recorded; complete stays unauthorized'], run_id: ctx.runId, ...entry };
-  return { published: true, code: prError ? 'pr_failed' : 'published', reasons: prError ? [prError] : [], run_id: ctx.runId, ...entry, lifecycle: 'publication' };
+  return { published: true, code: prError ? prCode ?? 'pr_failed' : 'published', reasons: prError ? [prError] : [], run_id: ctx.runId, ...entry, lifecycle: 'publication' };
 }
 
 const USAGE = `Usage: run-engine.mjs enroll --repo <dir> --ticket <key> --run-id <id>             (after init)

@@ -126,7 +126,7 @@ test('M3 CI: GH_REPO at a fork plus green answers of the fork is ci_repo_mismatc
   const f = fx.cli('ci');
   assert.deepEqual([f.out.state, f.out.code], ['UNAVAILABLE', 'ci_repo_mismatch'], f.stdout);
   assert.equal(fx.ghEnvLog().at(-1).GH_REPO, undefined, 'GH_REPO never reaches gh');
-  assert.equal(code(authorize(fx, 'complete')), 'ci_repo_mismatch');
+  assert.equal(code(authorize(fx, 'complete')), 'pr_required', 'round 4: a branch-only publication never completes');
   // The right repository, green, but for a stale SHA (the previous head): ignored, never this head's success.
   fx.scriptCi(PASS('0'.repeat(40)));
   const s = fx.cli('ci');
@@ -206,7 +206,8 @@ test('M7 strict end to end: build -> engine-dispatched FAIL -> repair -> engine 
   assert.equal(fx.gate('ship-ready', {}).out.ok, true);
   fx.commitAll();
   assert.equal(authorize(fx, 'publish').out.binding.assurance, 'STRICT');
-  assert.equal(fx.cli('publish').out.code, 'published');
+  writeFileSync(join(fx.root, 'pr.md'), 'body'); // round 4: authoritative completion needs a verified PR (SIMULATED by the fake gh)
+  assert.equal(fx.cli('publish', { 'pr-title': 'T-1', 'pr-body-file': join(fx.root, 'pr.md') }).out.code, 'published');
   fx.scriptCi(PASS());
   assert.equal(fx.cli('ci').out.state, 'PASS');
   const done = fx.cli('next');

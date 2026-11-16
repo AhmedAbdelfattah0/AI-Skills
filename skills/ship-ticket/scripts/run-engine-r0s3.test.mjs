@@ -145,7 +145,7 @@ test('N-BASE (d): missing or unavailable base evidence fails closed: no remote, 
   const none = enrollFixture(t, { base: 'trunk' });
   started(none);
   none.okGit(['remote', 'remove', 'origin']);
-  assert.equal(code(review(none)), 'base_unverified', 'no remote: a local ref is never the base authority');
+  assert.equal(code(review(none)), 'identity_changed', 'no remote (round 4: the enrolled identity is gone): a local ref is never the base authority');
 
   const fx = enrollFixture(t, { base: 'trunk' });
   started(fx);
@@ -159,7 +159,7 @@ test('N-BASE (d): missing or unavailable base evidence fails closed: no remote, 
   fx.okGit(['config', '--local', '--unset-all', `url.${join(fx.root, 'nowhere.git')}.insteadOf`]);
   fx.okGit(['config', '--local', `url.${fx.remote}.insteadOf`, 'https://github.com/acme/t-1.git']);
   const record = fx.readState().freeze.base;
-  assert.deepEqual(record, { ref: 'trunk', remote: 'origin', identity: 'github.com/acme/t-1', repository: 'github.com/acme/t-1', sha: remoteSha(fx, 'trunk') });
+  assert.deepEqual(record, { remote: 'origin', identity: 'github.com/acme/t-1', ref: 'trunk', sha: remoteSha(fx, 'trunk'), merge_base: remoteSha(fx, 'trunk') });
   fx.editState(S => { delete S.freeze.base; });
   assert.equal(code(shipReady(fx)), 'base_unverified', 'a freeze without a verified base is never grandfathered');
   fx.editState(S => { S.freeze.base = record; });
@@ -170,11 +170,11 @@ test('N-BASE (d): missing or unavailable base evidence fails closed: no remote, 
   assert.equal(code(authorize(fx)), 'base_unverified', 'SHIP_READY without a verified base');
   fx.editState(S => { S.ship_ready.base = structuredClone(S.freeze.base); });
   assert.equal(authorize(fx).out.allow, true);
-  // Another repository behind the same name (the fork maps to the same bare remote): the reviewed base is of github.com/acme/t-1.
+  // Another repository behind the same name (the fork maps to the same bare remote): the run enrolled github.com/acme/t-1 (round 4: identity_changed).
   fx.okGit(['remote', 'set-url', 'origin', 'https://github.com/evil/fork.git']);
   fx.okGit(['config', '--local', `url.${fx.remote}.insteadOf`, 'https://github.com/evil/fork.git']);
-  assert.equal(code(authorize(fx)), 'base_unverified');
-  assert.equal(code(shipReady(fx)), 'base_unverified');
+  assert.equal(code(authorize(fx)), 'identity_changed');
+  assert.equal(code(shipReady(fx)), 'identity_changed');
 });
 
 test('N-BASE (e): the unchanged-base workflows still pass: named base (review -> ship-ready -> publish, base commit bound) and config.base HEAD', { skip: WIN_SKIP }, async (t) => {
@@ -188,7 +188,8 @@ test('N-BASE (e): the unchanged-base workflows still pass: named base (review ->
   h.commitAll();
   const q = h.cli('publish');
   assert.deepEqual([q.out.code, q.out.base, q.out.base_sha], ['published', h.defaultBranch, remoteSha(h, h.defaultBranch)], q.stdout);
-  assert.equal(h.readState().freeze.base, undefined, 'config.base HEAD: the freeze merge base is the commit; nothing to record');
+  // R0-S round 4 (D2): config.base HEAD records the base too: the remote's default branch, resolved once with ls-remote --symref.
+  assert.deepEqual(h.readState().freeze.base, { remote: 'origin', identity: 'github.com/acme/t-1', ref: h.defaultBranch, sha: remoteSha(h, h.defaultBranch), merge_base: remoteSha(h, h.defaultBranch) });
 });
 
 test('N-BASE (f): laundering through base changes stays refused in combination: --base (pr_base_unbound), the moved local base, the history check, and the remote-tracking ref under config.base HEAD', { skip: WIN_SKIP }, async (t) => {
@@ -215,8 +216,9 @@ test('N-BASE (f): laundering through base changes stays refused in combination: 
   h.commitAll();
   assert.equal(code(authorize(h)), 'base_mismatch', 'the unreviewed commit is under the reviewed range');
   h.okGit(['update-ref', `refs/remotes/origin/${h.defaultBranch}`, wip]);
-  assert.equal(code(authorize(h)), 'base_moved_local', 'pre-fix: allow (the tracking ref gave the reviewed merge base)');
+  // Round 4: the remote-tracking ref is never read at all; the remote's commit gives the true merge base (was base_moved_local in round 3).
+  assert.equal(code(authorize(h)), 'base_mismatch', 'pre-fix (c1fec76): allow (the tracking ref gave the reviewed merge base)');
   assert.equal(code(authorize(h, { base: wip })), 'pr_base_unbound');
-  assert.equal(code(h.cli('publish')), 'base_moved_local');
+  assert.equal(code(h.cli('publish')), 'base_mismatch');
   assert.equal(h.remoteHead(), null, 'nothing pushed');
 });

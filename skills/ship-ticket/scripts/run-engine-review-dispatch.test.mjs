@@ -336,6 +336,8 @@ const VERDICTS = [
   ['receipt for another candidate', S0([prim({ candidate_id: 'C0' }), SECOND()]), input(), 'C1', 'review_receipt_candidate', 'candidate'],
   ['receipt of the same candidate id against another merge base (R0-S B6)', S0([prim({ merge_base: 'M0' }), SECOND()]), input(), 'C1', 'review_receipt_base', 'receipt_base'],
   ['consumed receipt', S0([prim({ consumed_by: 'rx-0' }), SECOND()]), input(), 'C1', 'review_receipt_spent', 'spent'],
+  // R0-S round 4 (E-b): the expected execution id rides on S0's `execution` (the gate passes expectedExecution(S, input)).
+  ['receipt of another review execution (replayed after a RETRY)', { ...S0([prim({ review_execution_id: 'rxe-0' }), SECOND({ review_execution_id: 'rxe-1' })]), execution: 'rxe-1' }, input(), 'C1', 'review_receipt_execution', 'execution'],
   ['two roles, one identity', S0([prim({ requested_identity: 'codex:provider-default' }), SECOND()]), input({ primary: { ...P_OBJ, reviewer_identity: undefined } }), 'C1', 'review_identity_shared', 'shared_identity'],
   ['spoofed identity', S0([prim(), SECOND()]), input({ second_opinion: { ...S_OBJ, reviewer_identity: 'opus:review' } }), 'C1', 'review_identity_spoofed', 'identity_claim'],
   ['output changed', S0([prim(), SECOND({ collected: { ...SECOND().collected, output_sha256: sha('other') } })]), input(), 'C1', 'review_output_changed', 'output_integrity'],
@@ -343,9 +345,9 @@ const VERDICTS = [
 
 test('provenance verdict: every pinned case decides by its check, and deleting any check changes a pinned verdict (mutation)', () => {
   const codeOf = (v) => (v.ok ? 'ok' : v.code);
-  for (const [name, S, inp, frozen, want] of VERDICTS) assert.equal(codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', read })), want, name);
+  for (const [name, S, inp, frozen, want] of VERDICTS) assert.equal(codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', execution: S.execution, read })), want, name);
   for (const id of PROVENANCE_CHECKS) {
-    const flipped = VERDICTS.filter(([, S, inp, frozen, want]) => codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', read }, { omit: [id] })) !== want);
+    const flipped = VERDICTS.filter(([, S, inp, frozen, want]) => codeOf(provenanceVerdict({ S, input: JSON.parse(J(inp)), frozen, mergeBase: 'M1', execution: S.execution, read }, { omit: [id] })) !== want);
     assert.ok(flipped.length > 0, `omitting ${id} changes no pinned verdict`);
     assert.ok(flipped.some(([, , , , , by]) => by === id), `omitting ${id} flips its own case`);
   }

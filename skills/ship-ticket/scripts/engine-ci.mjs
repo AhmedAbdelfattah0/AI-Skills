@@ -5,7 +5,8 @@
  * the check runs of the EXACT head that `run-engine.mjs publish` pushed (the PUBLISHED record for HEAD, never
  * a SHA from the command line) through a provider adapter, and records CI_EVIDENCE in the engine state
  * (`state.ci_evidence`, the last 20) and the engine log (never RUN-STATE). `authorize complete` and
- * `next` read only that record; neither calls the provider.
+ * `next` read that record for the checks (R0-S round 4: `authorize complete`, so `next` too, reads the PR LIVE and read-only with
+ * the pinned gh through engine-identity.mjs; CI evidence is bound to the publication_id).
  *
  * Provider adapter (`ghProvider` is the real one; tests inject a fake through the in-process ctx.ciProvider,
  * which no CLI flag or environment variable can set):
@@ -16,9 +17,11 @@
  * Verdict (`verdict`, one pure function shared by `ci` and `authorize complete`; each check has an id the
  * mutation test omits): STALE (the PR head is not the published head, the PR is another branch, or the remote
  * branch, read at collection, no longer points at the head), PENDING, FAIL, NO_CHECKS, PASS. Only check runs
- * whose head_sha is the published head count. A re-run replaces the earlier run of the same check (same app,
- * check suite and name); same-named runs of another app or workflow are independent checks. ANY failed check
- * on the head (failure, cancelled, timed_out, action_required, startup_failure, stale) is FAIL, required or not.
+ * whose head_sha is the published head count. R0-S round 4 (D5): the check-runs endpoint's `filter` defaults to
+ * `latest` ("returns the most recent check runs", GitHub REST docs, List check runs for a Git reference; the adapter
+ * passes filter=latest explicitly), so the engine does NOT collapse runs itself: EVERY returned run on the head
+ * counts, and a returned failed run is never erased by a same-named success (no start-time or id ordering). ANY
+ * failed check on the head (failure, cancelled, timed_out, action_required, startup_failure, stale) is FAIL, required or not.
  * The required set (what must PASS) is config.ciRequiredChecks when the approved DAG names it (an assurance
  * setting: approved in the plan, R0-S A4), else every check run reported on that head. PASS needs at least one
  * required check and every one completed with conclusion `success` (`skipped` and `neutral` are not success). Zero check runs, or a required name with none, is PENDING until
@@ -44,11 +47,11 @@ export const CI_STATES = Object.freeze(['PASS', 'PENDING', 'FAIL', 'NO_CHECKS', 
 export const DEFAULT_NO_CHECKS_MINUTES = 5;
 export const CI_EVIDENCE_KEEP = 20;
 /** The verdict's removable checks (mutation test: omitting any one changes a pinned verdict). */
-export const VERDICT_CHECKS = Object.freeze(['head_moved', 'pr_branch', 'remote_moved', 'exact_sha', 'at_least_one', 'conclusion', 'any_failed', 'independent_runs', 'required_present', 'all_complete']);
+export const VERDICT_CHECKS = Object.freeze(['head_moved', 'pr_branch', 'remote_moved', 'exact_sha', 'at_least_one', 'conclusion', 'any_failed', 'required_present', 'all_complete']);
 /** Conclusions that are a failed check wherever it runs (required or not); `skipped` and `neutral` fail only a required check. */
 export const FAILING = Object.freeze(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
 /** authorize complete's removable checks. */
-export const AUTHORIZE_CHECKS = Object.freeze(['evidence_present', 'state_pass', 'head_verified', 'recheck']);
+export const AUTHORIZE_CHECKS = Object.freeze(['evidence_present', 'publication', 'state_pass', 'head_verified', 'recheck']);
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_TEXT = 500;
 
@@ -64,9 +67,6 @@ export function prNumberOf(url) {
   const m = /\/(?:pull|pr|pulls)\/(\d+)(?:[/?#].*)?$/.exec(String(url ?? ''));
   return m ? Number(m[1]) : null;
 }
-
-/** The later of two runs of one check name (a re-run): by start time, then id. */
-const later = (a, b) => (ms(a.started_at) ?? -1) > (ms(b.started_at) ?? -1) || ((ms(a.started_at) ?? -1) === (ms(b.started_at) ?? -1) && String(a.id ?? '') > String(b.id ?? ''));
 
 /**
  * The CI verdict of `checks` for the published head `sha`. Pure.
@@ -92,12 +92,9 @@ export function verdict(input, { omit = [] } = {}) {
     : out('PENDING', 'ci_no_checks_yet', [`no check run on ${sha} yet; NO_CHECKS from ${iso(dispatchMs + windowMs)}`]);
   if (on('remote_moved') && input.remoteHead !== undefined && input.remoteHead !== sha)
     return out('STALE', 'ci_remote_moved', [`the remote branch ${branch ?? ''} is ${input.remoteHead ?? 'gone'}, the published head is ${sha}: checks of a moved branch are never this head's success`]);
-  // A re-run replaces the earlier run of the SAME check (same app, same check suite, same name); runs of another app or
-  // workflow (another check suite) that share a name are independent checks, and each must pass (R0-S, Codex MEDIUM).
-  const keyOf = (c) => (on('independent_runs') ? `${c.app ?? ''}\u0000${c.check_suite ?? ''}\u0000${c.name}` : c.name);
-  const latest = new Map();
-  for (const c of onSha) { const k = keyOf(c), p = latest.get(k); if (!p || later(c, p)) latest.set(k, c); }
-  const runs = [...latest.values()];
+  // R0-S round 4 (D5): every run the provider returned for the head counts (filter=latest already selected the most recent ones);
+  // the engine never decides that one run supersedes another (overlapping or sequential same-named jobs are both judged).
+  const runs = onSha;
   const configured = Array.isArray(required) && required.length > 0;
   const names = configured ? [...required] : [...new Set(runs.map(c => c.name))];
   const more = { required: names, required_source: configured ? 'config' : 'all_on_sha' };
@@ -129,6 +126,10 @@ export function ciAuthorize(S, pub, { omit = [] } = {}) {
   const on = (id) => !omit.includes(id);
   const ev = latestEvidence(S, pub.head);
   if (on('evidence_present') && !ev) return { ok: false, code: 'ci_evidence_missing', reasons: [`no CI evidence for the published head ${pub.head}: run run-engine.mjs ci`] };
+  // R0-S round 4: the LATEST evidence of the head must be of THIS publication (publication_id): never an earlier publication's, and an
+  // earlier record of this publication never outvotes a later collection.
+  if (on('publication') && ev && ev.publication_id !== pub.publication_id)
+    return { ok: false, code: 'publication_mismatch', reasons: [`the latest CI evidence for ${pub.head} is of publication ${ev.publication_id ?? 'none'}, not ${pub.publication_id ?? 'none'}: run run-engine.mjs ci`] };
   if (on('state_pass') && ev?.state !== 'PASS')
     return { ok: false, code: typeof ev?.code === 'string' && ev.code !== 'ci_passed' ? ev.code : 'ci_not_passed', reasons: Array.isArray(ev?.reasons) && ev.reasons.length ? ev.reasons : [`CI is ${ev?.state} on ${pub.head}`] };
   // R0-S N3: the evidence must have verified the published branch still pointed at the head (the remote ref read at
@@ -220,21 +221,6 @@ export function repositoryOf(url) {
   return { host, owner, repo, slug: `${host}/${owner}/${repo}` };
 }
 
-/**
- * The repository identity of remote `remote` as CONFIGURED (remote.<name>.url, before any insteadOf rewrite): { url, ...repositoryOf }
- * or null. `publish` records it in PUBLISHED; `ci` re-reads it and refuses ci_repo_mismatch when it moved, and asks gh for exactly it.
- * A configured pushurl naming another repository is not this identity (null: the push and the CI would be different repositories).
- */
-export function remoteRepository(repoRoot, remote = 'origin') {
-  const cfg = (k) => { const r = spawnSync('git', ['config', '--get', `remote.${remote}.${k}`], { cwd: repoRoot, encoding: 'utf8', timeout: 30000 }); return r.status === 0 ? r.stdout.trim() : null; };
-  const url = cfg('url');
-  const id = repositoryOf(url);
-  if (!id) return null;
-  const push = cfg('pushurl');
-  if (push !== null && repositoryOf(push)?.slug?.toLowerCase() !== id.slug.toLowerCase()) return null;
-  return { url, ...id };
-}
-
 /** Whether two repository identities are the same repository (GitHub names are case-insensitive). */
 export const sameRepository = (a, b) => Boolean(a?.slug && b?.slug) && a.slug.toLowerCase() === b.slug.toLowerCase();
 
@@ -262,6 +248,18 @@ export function ghEnv(env = process.env) {
 }
 
 /**
+ * A REST pull (GET repos/<o>/<r>/pulls/<n>) as the engine's PR view; repositories as host/owner/repo. Missing fields stay null (the
+ * verifier refuses them: never a wildcard).
+ */
+export function prFromRest(d, host) {
+  const repo = (x) => (typeof x?.repo?.full_name === 'string' && host ? `${String(host).toLowerCase()}/${x.repo.full_name}` : null);
+  return { number: Number.isInteger(d?.number) ? d.number : null, state: typeof d?.state === 'string' ? d.state.toLowerCase() : null, merged: d?.merged === true,
+    head_sha: d?.head?.sha ?? null, head_ref: d?.head?.ref ?? null, head_branch: d?.head?.ref ?? null, head_repo: repo(d?.head),
+    base_ref: d?.base?.ref ?? null, base: d?.base?.ref ?? null, base_repo: repo(d?.base),
+    mergeable: d?.mergeable ?? null, merge_state: d?.mergeable_state ?? null, url: d?.html_url ?? null };
+}
+
+/**
  * The real adapter: the pinned `gh` (`bin`) asked about exactly `repository` (the PUBLISHED identity: explicit repos/<owner>/<repo>
  * API paths and --hostname, -R host/owner/repo for pr and run), with ghEnv. Without a repository it answers ci_repo_unknown.
  */
@@ -278,17 +276,16 @@ export function ghProvider({ repoRoot, env = process.env, spawn = spawnSync, bin
     name: 'gh',
     checkRuns(sha) {
       if (!SHA_RE.test(sha)) return unavailable('ci_provider_unavailable', `not a commit SHA: ${sha}`);
-      const r = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '--paginate', '--jq',
+      const r = run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/commits/${sha}/check-runs`, '-f', 'per_page=100', '-f', 'filter=latest', '--paginate', '--jq',
         '{total_count}, (.check_runs[] | {id, name, head_sha, status, conclusion, started_at, completed_at, app: .app.slug, check_suite: .check_suite.id, url: .html_url})',
         '--hostname', id?.host ?? '']);
       return r.ok ? parseCheckRuns(r.stdout) : r;
     },
+    // R0-S round 4: the REST pull (read-only): head and base REPOSITORY, refs, head sha, state and merged; `gh pr view --json` has no base repository.
     pullRequest(n) {
-      const r = json(run(['pr', 'view', String(n), '-R', id?.slug ?? '', '--json', 'number,headRefOid,headRefName,baseRefName,mergeable,mergeStateStatus,state,url']));
+      const r = json(run(['api', '-X', 'GET', `repos/${id?.owner}/${id?.repo}/pulls/${n}`, '--hostname', id?.host ?? '']));
       if (!r.ok) return r;
-      const d = r.data ?? {};
-      return { ok: true, pr: { number: d.number ?? n, head_sha: d.headRefOid ?? null, head_branch: d.headRefName ?? null, base: d.baseRefName ?? null,
-        mergeable: d.mergeable ?? null, merge_state: d.mergeStateStatus ?? null, state: d.state ?? null, url: d.url ?? null } };
+      return { ok: true, pr: prFromRest(r.data, id?.host) };
     },
     recentRuns(branch) {
       const r = json(run(['run', 'list', '-R', id?.slug ?? '', '--branch', branch, '--limit', '10', '--json', 'databaseId,headSha,status,conclusion,event,workflowName,createdAt']));
@@ -398,13 +395,15 @@ export function remoteHeadOf(repoRoot, pub, env) {
   return { ok: true, head: r.stdout.trim().split(/\s+/)[0] || null };
 }
 
-export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub), repository = null }) {
-  const prNumber = pr ?? prNumberOf(pub.pr?.url);
-  const view = prNumber ? provider.pullRequest(prNumber) : null;
+export function collect({ S, repoRoot, provider, pub, pr, now, remote = remoteHeadOf(repoRoot, pub), repository = null, view: given }) {
+  const prNumber = pr ?? pub.pr?.number ?? prNumberOf(pub.pr?.url);
+  const view = given !== undefined ? given : prNumber ? provider.pullRequest(prNumber) : null;
   const runs = provider.checkRuns(pub.head);
   const collectedMs = now();
   const head = { schema: CI_SCHEMA, head_sha: pub.head, branch: pub.branch ?? null, pr: prNumber ?? null, provider: provider.name ?? 'custom',
-    ...(repository ? { repository: repository.slug } : {}) };
+    ...(pub.publication_id ? { publication_id: pub.publication_id } : {}), ...(repository ? { repository: repository.slug } : {}),
+    ...(view?.ok ? { pr_snapshot: { number: view.pr.number, state: view.pr.state, merged: view.pr.merged ?? null, head_repo: view.pr.head_repo ?? null, head_sha: view.pr.head_sha,
+      base_repo: view.pr.base_repo ?? null, base_ref: view.pr.base_ref ?? view.pr.base ?? null } } : {}) };
   const timing = (t = {}) => ({ dispatched_at: pub.at ?? null, first_check_started_at: t.first_check_started_at ?? null,
     checks_completed_at: t.checks_completed_at ?? null, collected_at: iso(collectedMs) });
   // R0-S batch 2 (item 3): every answer must be of the published repository (each check run's and the PR's html URL), or the

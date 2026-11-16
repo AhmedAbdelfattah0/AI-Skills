@@ -44,7 +44,7 @@ export const bindingOf = (S, rec) => (S.review_bindings ?? []).findLast(b => b.r
 const branchBase = (S) => Boolean(S.config?.base) && S.config.base !== 'HEAD';
 
 const mergeBase = (repo, a, b) => {
-  const r = spawnSync('git', ['merge-base', a, b], { cwd: repo, encoding: 'utf8', timeout: 30000 });
+  const r = spawnSync('git', ['--no-replace-objects', 'merge-base', a, b], { cwd: repo, encoding: 'utf8', timeout: 30000, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   return r.status === 0 ? r.stdout.trim() : null;
 };
 

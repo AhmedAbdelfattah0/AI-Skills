@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { POSIX } from './engine-test-fixture.mjs';
-import { enrollFixture } from './engine-enroll.test-helper.mjs';
+import { enrollFixture, GITHUB_SLUG } from './engine-enroll.test-helper.mjs';
 import { ci } from './run-engine.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
 import { verdict, ciAuthorize, parseCheckRuns, parseTriggers, globRe, filterVerdict, workflowDiagnostic, prNumberOf, ghProvider,
@@ -41,8 +41,10 @@ const VERDICTS = [
   ['a red check', V({ checks: [run('test', 'completed', 'success'), run('lint', 'completed', 'failure')] }), ['FAIL', 'ci_failed']],
   ['skipped is not success', V({ checks: [run('test', 'completed', 'skipped')] }), ['FAIL', 'ci_failed']],
   ['a check still running', V({ checks: [run('test', 'completed', 'success'), run('lint', 'in_progress')] }), ['PENDING', 'ci_pending']],
-  ['a re-run supersedes the earlier red run', V({ checks: [run('test', 'completed', 'failure', { id: 1 }), run('test', 'completed', 'success', { id: 2, started_at: '2026-11-15T00:01:00.000Z' })] }),
-    ['PASS', 'ci_passed']],
+  // R0-S round 4 (D5): GitHub's check-runs `filter` defaults to `latest` (and the adapter passes it): a RETURNED red run is never erased by a
+  // same-named success, whatever the start times or ids (pre-fix the engine collapsed them and a red run disappeared).
+  ['a returned red run is not superseded by a later same-named success', V({ checks: [run('test', 'completed', 'failure', { id: 1 }), run('test', 'completed', 'success', { id: 2, started_at: '2026-11-15T00:01:00.000Z' })] }),
+    ['FAIL', 'ci_failed']],
   ['a required check never started, inside the window', V({ required: ['build'], collectedMs: MIN }), ['PENDING', 'ci_required_pending']],
   ['a required check never ran, after the window', V({ required: ['build'] }), ['NO_CHECKS', 'ci_required_missing']],
   // R0-S: a configured set narrows what must PASS, never what may fail; a skipped check outside it is not a failure.
@@ -50,8 +52,9 @@ const VERDICTS = [
   ['a skipped check outside the required set does not block', V({ required: ['test'], checks: [run('test', 'completed', 'success'), run('bot', 'completed', 'skipped')] }), ['PASS', 'ci_passed']],
   ['a same-named check of another app or workflow is independent, never a re-run', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11 }),
     run('test', 'completed', 'success', { id: 2, app: 'circleci', check_suite: 22, started_at: '2026-11-15T00:01:00.000Z' })] }), ['FAIL', 'ci_failed']],
-  ['a re-run within one check suite supersedes its red run', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11 }),
-    run('test', 'completed', 'success', { id: 2, app: 'github-actions', check_suite: 11, started_at: '2026-11-15T00:01:00.000Z' })] }), ['PASS', 'ci_passed']],
+  ['two returned runs of one name in one check suite: the red one fails the head (overlapping jobs, pre-fix PASS)', V({ checks: [run('test', 'completed', 'failure', { id: 1, app: 'github-actions', check_suite: 11, completed_at: '2026-11-15T00:00:30.000Z' }),
+    run('test', 'completed', 'success', { id: 2, app: 'github-actions', check_suite: 11, started_at: '2026-11-15T00:00:02.000Z', completed_at: '2026-11-15T00:00:20.000Z' })] }), ['FAIL', 'ci_failed']],
+  ['ids 9 and 10 with the same start: no ordering by id (pre-fix "9" > "10" as strings gave PASS)', V({ checks: [run('test', 'completed', 'success', { id: 9 }), run('test', 'completed', 'failure', { id: 10 })] }), ['FAIL', 'ci_failed']],
   ['the remote branch moved past the published head (no PR)', V({ remoteHead: OTHER }), ['STALE', 'ci_remote_moved']],
 ];
 
@@ -89,6 +92,7 @@ const AUTHS = [
   ['PASS whose recorded PR head moved', { ci_evidence: [EV({ pr_view: { number: 1, head_sha: OTHER, head_branch: 'T-1-work' } })] }, 'ci_evidence_inconsistent'],
   ['PASS that never verified the branch head (no PR, no remote read)', { ci_evidence: [unverified()] }, 'ci_head_unverified'],
   ['PASS whose recorded remote branch had moved (the PR head matched)', { ci_evidence: [EV({ remote_head: OTHER, pr_view: { number: 1, head_sha: SHA, head_branch: 'T-1-work' } })] }, 'ci_evidence_inconsistent'],
+  ['evidence of another publication of the same head (round 4: publication_id)', { ci_evidence: [EV({ publication_id: 'sha256:another-publication' })] }, 'publication_mismatch'],
   ['PASS', { ci_evidence: [EV()] }, 'allow'],
 ];
 const authCode = (S, opts) => { const r = ciAuthorize({ config: {}, ...S }, PUB, opts); return r.ok ? 'allow' : r.code; };
@@ -192,7 +196,9 @@ function fakeProvider() {
   const w = { runs: [], pr: null, fail: null, recent: [{ id: 9, head_sha: OTHER, status: 'completed', conclusion: 'success', event: 'push', workflow: 'ci', created_at: 't' }], calls: [] };
   w.provider = { name: 'fake',
     checkRuns: (sha) => { w.calls.push(['checkRuns', sha]); return w.fail ? { ok: false, code: 'ci_provider_unavailable', error: w.fail } : { ok: true, runs: w.runs.map(r => ({ ...r, head_sha: r.head_sha === '$SHA' ? sha : r.head_sha })), total: w.runs.length }; },
-    pullRequest: (n) => { w.calls.push(['pr', n]); return w.pr ? { ok: true, pr: { number: n, ...w.pr } } : { ok: false, code: 'ci_provider_unavailable', error: 'no such PR' }; },
+    // The engine's PR view (engine-ci.mjs prFromRest shape; SIMULATED): repositories default to the fixture's, state lower-cased.
+    pullRequest: (n) => { w.calls.push(['pr', n]); return w.pr ? { ok: true, pr: { number: n, merged: false, head_repo: GITHUB_SLUG, base_repo: GITHUB_SLUG, ...w.pr,
+      head_ref: w.pr.head_branch, base_ref: w.pr.base, state: String(w.pr.state ?? 'OPEN').toLowerCase() } } : { ok: false, code: 'ci_provider_unavailable', error: 'no such PR' }; },
     recentRuns: (b) => { w.calls.push(['recentRuns', b]); return { ok: true, runs: w.recent }; } };
   return w;
 }
@@ -244,13 +250,14 @@ test('ci: exact-head evidence through PENDING, NO_CHECKS (with diagnostic), stal
   const w = fakeProvider();
   const head = fx.head();
   assert.deepEqual(nextCi(fx), ['CI', 'READY', 'ci_owed', 'collect_ci']);
-  assert.equal(complete(fx).out.code, 'ci_evidence_missing');
+  // Round 4: a branch-only publication never completes (pr_required); the CI evidence below is still collected and judged per publication.
+  assert.equal(complete(fx).out.code, 'pr_required');
 
   let e = await collectAt(fx, w, 1);
   assert.deepEqual([e.recorded, e.head_sha, e.state, e.code], [true, head, 'PENDING', 'ci_no_checks_yet'], 'zero checks inside the window');
   assert.deepEqual(w.calls, [['checkRuns', head]], 'asked for exactly the published head; no PR known, so no PR view');
   assert.deepEqual(nextCi(fx), ['CI', 'WAITING', 'ci_no_checks_yet', 'collect_ci']);
-  assert.equal(complete(fx).out.code, 'ci_no_checks_yet');
+  assert.equal(complete(fx).out.code, 'pr_required');
 
   w.runs = [run('test', 'completed', 'success', { head_sha: OTHER })];
   e = await collectAt(fx, w, DEFAULT_NO_CHECKS_MINUTES + 1);
@@ -263,20 +270,20 @@ test('ci: exact-head evidence through PENDING, NO_CHECKS (with diagnostic), stal
   const n = fx.cli('next').out;
   assert.deepEqual([n.next_action.stage, n.disposition, n.next_action.reason, n.next_action.owner], ['CI', 'BLOCKED', 'ci_no_checks', 'human']);
   assert.deepEqual(n.next_action.diagnostic.recent_runs, w.recent, 'next carries the diagnostic');
-  assert.equal(complete(fx).out.code, 'ci_no_checks');
+  assert.equal(complete(fx).out.code, 'pr_required');
 
   w.fail = 'HTTP 502';
   e = await collectAt(fx, w, 7);
   assert.deepEqual([e.state, e.code, e.reasons], ['UNAVAILABLE', 'ci_provider_unavailable', ['HTTP 502']]);
   assert.deepEqual(nextCi(fx), ['CI', 'BLOCKED', 'ci_provider_unavailable', 'collect_ci']);
-  assert.equal(complete(fx).out.code, 'ci_provider_unavailable');
+  assert.equal(complete(fx).out.code, 'pr_required');
   w.fail = null;
 
   w.runs = [R('test', 'completed', 'success'), R('lint', 'completed', 'failure')];
   e = await collectAt(fx, w, 8);
   assert.deepEqual([e.state, e.code, e.failed], ['FAIL', 'ci_failed', ['lint']]);
   assert.deepEqual(nextCi(fx), ['CI', 'FAILED', 'ci_failed', 'none']);
-  assert.equal(complete(fx).out.code, 'ci_failed');
+  assert.equal(complete(fx).out.code, 'pr_required');
 
   w.runs = [R('test', 'completed', 'success'), { ...R('lint', 'in_progress'), id: 'lint-2', started_at: '2026-11-15T00:05:00.000Z' }];
   e = await collectAt(fx, w, 9);
@@ -288,14 +295,24 @@ test('ci: exact-head evidence through PENDING, NO_CHECKS (with diagnostic), stal
   assert.deepEqual([e.state, e.code, e.required, e.required_source], ['PASS', 'ci_passed', ['test', 'lint'], 'all_on_sha']);
   assert.deepEqual(e.timing, { dispatched_at: fx.readState().published.at(-1).at, first_check_started_at: '2026-11-15T00:00:01.000Z',
     checks_completed_at: '2026-11-15T00:06:00.000Z', collected_at: new Date(pubAt(fx) + 10 * MIN).toISOString() }, 'dispatch, first start, completion, collection: separately');
+  assert.equal(complete(fx).out.code, 'pr_required', 'PASS of a branch-only publication: never COMPLETE');
+  // Bind the PR (ci --pr: the one permitted change, pr null -> a verified PR; SIMULATED PR view): a NEW publication_id, so the PASS above
+  // (of the branch-only publication) does not count until collected for it.
+  w.pr = { head_sha: head, head_branch: 'T-1-work', base: fx.defaultBranch, mergeable: 'MERGEABLE', merge_state: 'CLEAN', state: 'OPEN' };
+  e = await collectAt(fx, w, 10, { pr: 1 });
+  assert.deepEqual([e.state, e.pr], ['PASS', 1]);
+  assert.equal(fx.readState().published.at(-1).pr.number, 1);
+  assert.notEqual(fx.readState().published.at(-1).publication_id, fx.readState().published.at(-2).publication_id);
+  // authorize complete (CLI) reads the PR LIVE through the pinned (fake) gh: the SIMULATED REST pull of PR #1.
+  fx.scriptCi({ pr: { number: 1, headRefOid: '$HEAD', headRefName: 'T-1-work', baseRefName: fx.defaultBranch, state: 'OPEN' } });
   const a = complete(fx);
   assert.equal(a.status, 0, a.stdout);
-  assert.deepEqual([a.out.allow, a.out.binding.head, a.out.binding.ci.state], [true, head, 'PASS']);
+  assert.deepEqual([a.out.allow, a.out.binding.head, a.out.binding.ci.state, a.out.binding.pr], [true, head, 'PASS', 1]);
   assert.deepEqual(nextCi(fx), [null, 'COMPLETED', 'completed', 'none']);
 
   // The engine log carries each collection; RUN-STATE never does.
   const log = readFileSync(fx.engineLog(), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(x => x.event === 'CI_EVIDENCE');
-  assert.deepEqual(log.map(x => x.state), ['PENDING', 'NO_CHECKS', 'UNAVAILABLE', 'FAIL', 'PENDING', 'PASS']);
+  assert.deepEqual(log.map(x => x.state), ['PENDING', 'NO_CHECKS', 'UNAVAILABLE', 'FAIL', 'PENDING', 'PASS', 'PASS']);
   assert.ok(log.every(x => x.head_sha === head && x.timing?.dispatched_at));
   assert.doesNotMatch(readFileSync(fx.planFile, 'utf8'), /CI_EVIDENCE/);
 
@@ -308,35 +325,41 @@ test('ci: exact-head evidence through PENDING, NO_CHECKS (with diagnostic), stal
   assert.deepEqual(nextCi(fx), ['CI', 'BLOCKED', 'ci_evidence_inconsistent', 'resolve']);
 });
 
-test('ci with a PR: a moved PR head or another branch is STALE; the PR view feeds the NO_CHECKS diagnostic; a newly published head needs its own evidence', { skip: WIN_SKIP }, async (t) => {
+test('ci with a PR: a --pr whose head moved or is another branch is never bound (pr_head_mismatch); the PR view feeds the NO_CHECKS diagnostic; a newly published head needs its own evidence', { skip: WIN_SKIP }, async (t) => {
   const fx = published(t);
   const w = fakeProvider();
   const head = fx.head();
   w.runs = [R('test', 'completed', 'success')];
   w.pr = { head_sha: OTHER, head_branch: 'T-1-work', base: fx.defaultBranch, mergeable: 'MERGEABLE', merge_state: 'CLEAN', state: 'OPEN' };
+  // Round 4 (D4): `--pr` must satisfy every PR row before it is bound (pre-round-4 the verdict's STALE ci_head_moved / ci_pr_mismatch judged it).
   let e = await collectAt(fx, w, 1, { pr: 4 });
-  assert.deepEqual([e.state, e.code, e.pr], ['STALE', 'ci_head_moved', 4], 'green checks of the published head, but the PR now points elsewhere');
-  assert.deepEqual(w.calls.slice(0, 2), [['pr', 4], ['checkRuns', head]]);
-  assert.deepEqual(nextCi(fx), ['CI', 'BLOCKED', 'ci_head_moved', 'resolve']);
-  assert.equal(complete(fx).out.code, 'ci_head_moved');
+  assert.deepEqual([e.state, e.code, e.pr], ['UNAVAILABLE', 'pr_head_mismatch', 4], 'green checks of the published head, but the PR now points elsewhere');
+  assert.deepEqual(w.calls, [['pr', 4]], 'no check run is collected for a PR that is not this publication\'s');
+  assert.deepEqual(nextCi(fx), ['CI', 'BLOCKED', 'pr_head_mismatch', 'collect_ci']);
+  assert.equal(complete(fx).out.code, 'pr_required');
   w.pr = { ...w.pr, head_sha: head, head_branch: 'someone-else' };
-  assert.equal((await collectAt(fx, w, 2, { pr: 4 })).code, 'ci_pr_mismatch');
+  assert.equal((await collectAt(fx, w, 2, { pr: 4 })).code, 'pr_head_mismatch');
   w.pr = { ...w.pr, head_branch: 'T-1-work', mergeable: 'CONFLICTING', merge_state: 'DIRTY' };
   w.runs = [];
   e = await collectAt(fx, w, 6, { pr: 4 });
-  assert.deepEqual([e.state, e.diagnostic.pr], ['NO_CHECKS', { number: 4, mergeable: 'CONFLICTING', merge_state: 'DIRTY', state: 'OPEN', base: fx.defaultBranch }],
+  assert.deepEqual([e.state, e.diagnostic.pr], ['NO_CHECKS', { number: 4, mergeable: 'CONFLICTING', merge_state: 'DIRTY', state: 'open', base: fx.defaultBranch }],
     'a conflicting PR runs no pull_request workflow: the diagnostic says so');
+  assert.equal(fx.readState().published.at(-1).pr.number, 4, 'every PR row held: PR #4 is bound to the publication');
   w.pr = null;
-  assert.equal((await collectAt(fx, w, 7, { pr: 4 })).code, 'ci_provider_unavailable', 'a PR view failure is a provider failure');
+  assert.equal((await collectAt(fx, w, 7)).code, 'pr_unavailable', 'a PR view failure: the PR rows cannot be verified');
   w.pr = { head_sha: head, head_branch: 'T-1-work', base: fx.defaultBranch, mergeable: 'MERGEABLE', merge_state: 'CLEAN', state: 'OPEN' };
   w.runs = [R('test', 'completed', 'success')];
+  assert.equal((await collectAt(fx, w, 8, { pr: 5 })).code, 'publication_mismatch', 'a PR is bound once: --pr naming another is refused');
   assert.equal((await collectAt(fx, w, 8, { pr: 4 })).state, 'PASS');
+  fx.scriptCi({ pr: { number: 4, headRefOid: '$HEAD', headRefName: 'T-1-work', baseRefName: fx.defaultBranch, state: 'OPEN' } }); // the live read (SIMULATED)
   assert.equal(complete(fx).out.allow, true);
-  // A new head published after the PASS (an excluded-path commit keeps the reviewed candidate) has no evidence yet.
+  // A new head published after the PASS (an excluded-path commit keeps the reviewed candidate) has no evidence yet; publish looks up the
+  // branch's bound PR and re-verifies it read-only (SIMULATED gh REST pull).
   writeFileSync(join(fx.repo, 'session-log.md'), 'after the first publish');
   fx.okGit(['add', 'session-log.md']);
   fx.okGit(['commit', '-q', '-m', 'session log']);
   assert.equal(fx.cli('publish').out.code, 'published');
+  assert.equal(fx.readState().published.at(-1).pr.number, 4);
   assert.notEqual(fx.head(), head);
   assert.equal(complete(fx).out.code, 'ci_evidence_missing', 'the earlier head\'s PASS never covers the new head');
   assert.deepEqual(nextCi(fx), ['CI', 'READY', 'ci_owed', 'collect_ci']);
@@ -356,7 +379,8 @@ test('ci with config.ciRequiredChecks and ciNoChecksMinutes (approved in the pla
   w.runs = [R('lint', 'completed', 'skipped'), R('build', 'completed', 'success')];
   const p = await collectAt(fx, w, 3);
   assert.deepEqual([p.state, p.required, p.required_source], ['PASS', ['build'], 'config']);
-  assert.equal(complete(fx).out.allow, true);
+  // Owner decision (round 4): a RELAXED run (ciRequiredChecks / ciNoChecksMinutes are relaxed assurance settings) never completes.
+  assert.equal(complete(fx).out.code, 'assurance_relaxed');
 });
 
 // ------------------------------------------------------------------ the CLI through the fake gh
@@ -376,7 +400,7 @@ test('CLI ci through the fake gh: the published head is queried, a short page is
     runs: [{ databaseId: 5, headSha: head, status: 'completed', conclusion: 'skipped', event: 'push', workflowName: 'ci', createdAt: 't' }] });
   r = fx.cli('ci', { pr: '1' });
   assert.deepEqual([r.status, r.out.state, r.out.code], [2, 'NO_CHECKS', 'ci_no_checks'], r.stdout + r.stderr);
-  assert.deepEqual([r.out.diagnostic.pr.mergeable, r.out.diagnostic.pr.merge_state], ['CONFLICTING', 'DIRTY']);
+  assert.deepEqual([r.out.diagnostic.pr.mergeable, r.out.diagnostic.pr.merge_state], ['CONFLICTING', 'dirty'], 'REST mergeable_state (round 4: the REST pull)');
   assert.deepEqual(r.out.diagnostic.recent_runs.map(x => [x.id, x.conclusion]), [[5, 'skipped']]);
   fx.scriptCi({ checkRuns: [{ runs: [{ id: 1, name: 'test', head_sha: '$SHA', status: 'completed', conclusion: 'success', started_at: 's', completed_at: 'c' }] }],
     pr: { number: 1, headRefOid: '$HEAD', headRefName: 'T-1-work', baseRefName: fx.defaultBranch, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', state: 'OPEN' } });

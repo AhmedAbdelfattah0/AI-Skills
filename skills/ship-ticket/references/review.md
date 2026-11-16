@@ -114,8 +114,15 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   narrative, the acceptance inventory, the candidate's paths, diff and untracked
   contents, and the output contract. Nothing of the command comes from you.
 - **The receipt comes first.** `REVIEW_DISPATCHED` `{attempt_id, role,
-  requested_identity, candidate_id, argv_sha256, prompt_sha256, started_at}` is
-  committed before the launcher starts, then the durable attempt handshake
+  requested_identity, candidate_id, argv_sha256, prompt_sha256, started_at,
+  review_execution_id, base}` is committed before the launcher starts. It carries
+  the FREEZE (R0-S round 4): `base` `{remote, identity, ref, sha, merge_base}`,
+  the commit the remote names for the base of record (`config.base`, else the
+  remote default branch resolved once by `ls-remote --symref`), on the enrolled
+  repository identity, and the engine-minted execution id of this owed review (a
+  confirmation carries its original's). A base or identity that cannot be
+  verified refuses the dispatch (`identity_changed`, `base_*`, recorded).
+  Then then the durable attempt handshake
   runs (intent, spawn, pid, release). The command returns while the detached
   reviewer runs; dispatch `primary` and `second` back to back so they overlap.
   Refusals: `review_candidate_mismatch` (not the current candidate),
@@ -135,7 +142,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   `gate review`, `gate ship-ready` and `authorize publish` enforce the same
   ungated-FAIL and running-reviewer rule. The refusals the orchestrator cannot
   correct (`reviewer_is_builder`, `review_relay_drift`, `review_cli_drift`,
-  `review_cli_unavailable`, `review_diff_unavailable`) are recorded
+  `review_cli_unavailable`, `review_diff_unavailable`, `identity_changed` and the
+  `base_*` codes) are recorded
   (`state.review_refusals`) and make `next` a human-owned `BLOCKED` until a later
   dispatch of that role succeeds.
 - **Collection.** `review-collect`, `next`, `resume` and `drive` settle a finished
@@ -161,7 +169,10 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   produce), `review_role_mismatch`, `review_receipt_candidate` (a receipt for
   another candidate: dispatch again for the current one), `review_receipt_base`
   (the receipt's merge base is not the one the review binds to: a rebase or merge
-  that left the candidate id unchanged; dispatch again), `review_receipt_spent`,
+  that left the candidate id unchanged; dispatch again; for an original also the
+  receipts' frozen base when it is not the remote's now), `review_receipt_execution`
+  (a receipt of another review execution, e.g. replayed after an owner `RETRY`:
+  dispatch again for this one), `review_receipt_spent`,
   `review_identity_shared`, `review_identity_spoofed` (the file names another
   identity, candidate or route than its receipt) and `review_output_changed`. The
   identity, role and candidate it judges come from the receipt, never from the
