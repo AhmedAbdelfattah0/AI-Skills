@@ -111,6 +111,8 @@ export const SECURITY_MUTANTS = [
     from: "  if (outside.length) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
   { tag: 'S40', name: 'init: a reassess refusal of the approved block is taken for "no surface outside the contract"', file: 'run-engine.mjs',
     from: "  if (!res.ok) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
+  { tag: 'S41', name: 'init: the security-pairs line is matched as a substring (a comment-, fence-, quote- or indent-hidden line counts)', file: 'run-engine.mjs',
+    from: "  if (!narrativeHasLine(narrative, line)) throw coded('security_pairs_mismatch',", to: "  if (!narrative.includes(line)) throw coded('security_pairs_mismatch'," },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

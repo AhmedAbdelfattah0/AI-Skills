@@ -33,12 +33,13 @@ const FAIL_PRIMARY = (c) => ({ 'claude-delegate': { final: finalMessage(reviewBo
 const next = (fx) => { const n = fx.cli('next'); return { ...n.out.next_action, stop: n.out.stop, status: n.status }; };
 const PASS_RUN = { checkRuns: [{ runs: [{ id: 1, name: 'test', head_sha: '$SHA', status: 'completed', conclusion: 'success', started_at: 's', completed_at: 'c' }] }] };
 const relayLog = (fx) => readFileSync(join(fx.root, 'relay.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
-/** Move the configured base branch `trunk` forward with a commit outside the patch and fast-forward the ticket branch onto it (candidate id unchanged). */
+/** Move the configured base branch `trunk` forward (locally and on the remote: the upstream moved) with a commit outside the patch and fast-forward the ticket branch onto it (candidate id unchanged). */
 const moveBase = (fx) => {
   fx.okGit(['checkout', '-q', 'trunk']);
   writeFileSync(join(fx.repo, 'trunk.txt'), 'upstream change outside the patch');
   fx.okGit(['add', 'trunk.txt']);
   fx.okGit(['commit', '-q', '-m', 'trunk']);
+  fx.okGit(['push', '-q', 'origin', 'trunk']); // the upstream moved (round 3: the base is the remote's commit)
   fx.okGit(['checkout', '-q', 'T-1-work']);
   fx.okGit(['merge', '-q', '--ff-only', 'trunk']);
 };

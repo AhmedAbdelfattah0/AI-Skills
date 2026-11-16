@@ -20,8 +20,11 @@ import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
 import { bindReview, bindingOf, reviewFreshness } from './engine-freshness.mjs';
 import { provenanceMode, provenanceVerdict, owedReview, unconsumedFail, liveSibling, openReviewFail } from './engine-review-dispatch.mjs';
+import { gateBase } from './engine-base.mjs';
 
 export const gateNo = (code, reasons, extra = {}) => ({ ok: false, code, judgment_point: false, reasons, ...extra });
+/** The base record a freeze and SHIP_READY keep (engine-base.mjs verifyBase's base without the per-call fields). */
+const recordOf = ({ ref, remote, identity, repository, sha }) => ({ ref, remote, identity, repository, sha });
 const nonEmpty = (v) => typeof v === 'string' && v.length > 0;
 
 /**
@@ -190,6 +193,12 @@ async function reviewGate(E, input, candidate) {
   if (S.freeze && !retry && candidate !== S.freeze.candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
+  // R0-S round 3 (N-BASE): with config.base a branch, the base is the commit the REMOTE names for it (engine-base.mjs), never the
+  // local ref: an original records it with its freeze; a confirmation re-verifies the freeze's record (a local ref moved onto
+  // unreviewed commits made the candidate omit them).
+  const vb = gateBase(S, E.ctx.repoRoot, { localMergeBase: E.candidateMergeBase ?? null,
+    recorded: input.kind === 'original' ? null : S.freeze?.base ?? null, requireRecord: input.kind !== 'original' });
+  if (vb && !vb.ok) return gateNo(vb.code, vb.reasons);
   // E3: a confirmation reviews the repaired candidate as frozen; a config.base branch that moved under the branch since the repair
   // (a merge or rebase) leaves the same id against the new merge base but ships another tree.
   const repaired = input.kind === 'confirmation' ? S.review_chain.findLast(r => r.review_execution === input.review_execution && r.kind === 'repair') : null;
@@ -242,10 +251,10 @@ async function reviewGate(E, input, candidate) {
   for (const d of S.review_dispatches ?? []) if (prov?.used.includes(d.attempt_id)) d.consumed_by = v.record.review_execution;
   const so = prov ? prov.input.second_opinion : input.second_opinion;
   bindReview(S, { review_execution: v.record.review_execution, kind: v.record.kind, candidate_id: v.record.candidate_id,
-    merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(typeof so?.candidate_id === 'string' ? { second_opinion_candidate_id: so.candidate_id } : {}),
+    merge_base: frozenBase ?? E.candidateMergeBase ?? null, ...(vb ? { base_sha: vb.base.sha } : {}), ...(typeof so?.candidate_id === 'string' ? { second_opinion_candidate_id: so.candidate_id } : {}),
     provenance: prov ? prov.provenance : 'unbound' });
   // R0-S C6: the freeze records the merge base its candidate was computed against (io.candidateBase uses it with config.base HEAD).
-  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0, ...(E.candidateMergeBase ? { merge_base: E.candidateMergeBase } : {}) }; S.frozen_candidate = candidate; }
+  if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0, ...(E.candidateMergeBase ? { merge_base: E.candidateMergeBase } : {}), ...(vb ? { base: recordOf(vb.base) } : {}) }; S.frozen_candidate = candidate; }
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,
       writes: [...v.repair.write_set], promptFile: brief, state: 'pending', old_candidate: candidate });
@@ -322,6 +331,11 @@ async function shipReadyGate(E, input, candidate) {
   const units = unitShipRefusal(E);
   if (units) return units;
   if (input.candidate_id !== undefined && input.candidate_id !== candidate) return gateNo('candidate_mismatch', [`input names ${input.candidate_id}, current is ${candidate}`]);
+  // R0-S round 3 (N-BASE): the base commit of the review freeze, re-verified on the remote before anything is judged against the
+  // candidate (a moved local base changes it); SHIP_READY binds it (run-engine.mjs gate), authorize publish re-verifies it.
+  const vb = gateBase(S, E.ctx.repoRoot, { localMergeBase: E.candidateMergeBase ?? null, recorded: S.freeze?.base ?? null, requireRecord: true });
+  if (vb && !vb.ok) return gateNo(vb.code, vb.reasons);
+  E.verifiedBase = vb ? recordOf(vb.base) : null;
   // Derived on every call (and again after the proof): red_accepted from the current RED gates (RED can
   // be invalidated between calls) and exists from the work tree (a git-ignored evidence file can go).
   const rebind = () => {

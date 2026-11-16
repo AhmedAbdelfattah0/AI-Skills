@@ -90,7 +90,8 @@ export const CI_HUMAN = Object.freeze(['gh_unpinned', 'gh_drift', 'ci_repo_unkno
 /** Gate refusal codes the orchestrator cannot correct by resubmitting (item 6): BLOCKED for the human at once. Any other refusal is the
  * orchestrator's to correct ONCE: the same refusal twice in a row for the same candidate is the human's (no endless gate loop). */
 export const GATE_HUMAN = Object.freeze(['review_fail_unconsumed', 'review_output_changed', 'review_receipt_spent', 'review_identity_spoofed', 'review_identity_shared',
-  'review_base_moved', 'review_stale', 'stale_candidate', 'post_freeze_drift', 'review_binding_missing', 'review_provenance_unbound', 'quiescence_unknown']);
+  'review_base_moved', 'review_stale', 'stale_candidate', 'post_freeze_drift', 'review_binding_missing', 'review_provenance_unbound', 'quiescence_unknown',
+  'base_unverified', 'base_moved_local', 'base_moved_remote']);
 const refusalOwner = (g) => (GATE_HUMAN.includes(g.code) || HUMAN_CODES.includes(g.code) || (g.repeat ?? 1) > 1 ? 'human' : 'orchestrator');
 /** The recovery each recorded dispatch refusal names (item 6). */
 const RECOVERY = Object.freeze({

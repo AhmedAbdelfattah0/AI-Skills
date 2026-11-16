@@ -82,6 +82,8 @@ export function enrollFixture(t, opts = {}) {
   // The remote's default branch is the PR base authorize publish resolves when the DAG's base is HEAD.
   ok(g(['push', '-q', 'origin', defaultBranch]));
   ok(g(['remote', 'set-head', 'origin', defaultBranch]));
+  // A config.base branch exists on the remote too: the engine verifies the base commit there (ls-remote), never the local ref (R0-S round 3).
+  if (base !== 'HEAD') ok(g(['push', '-q', 'origin', base]));
   ok(g(['checkout', '-q', '-b', branch]));
   Object.assign(fx, {
     remote, defaultBranch, git: g, okGit: (args, opts) => ok(g(args, opts)),

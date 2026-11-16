@@ -93,6 +93,7 @@ test('a config.base branch rebased onto, or merged into the branch, changes the 
     writeFileSync(join(fx.repo, 'trunk.txt'), 'trunk moved');
     fx.okGit(['add', 'trunk.txt']);
     commitAs(fx, 'trunk');
+    fx.okGit(['push', '-q', 'origin', 'trunk']); // the upstream moved (round 3: the base is the remote's commit)
     fx.okGit(['checkout', '-q', 'T-1-work']);
     fx.okGit(how === 'rebase' ? ['rebase', '-q', 'trunk'] : ['merge', '-q', '--no-edit', 'trunk']);
     const code = staleNow(fx, 'review_base_moved', 'REVIEW', how);
@@ -189,6 +190,7 @@ test('a confirmation is judged against the merge base its repaired candidate was
   writeFileSync(join(fx.repo, 'trunk.txt'), 'trunk moved');
   fx.okGit(['add', 'trunk.txt']);
   commitAs(fx, 'trunk');
+  fx.okGit(['push', '-q', 'origin', 'trunk']); // the upstream moved (round 3: the base is the remote's commit)
   fx.okGit(['checkout', '-q', 'T-1-work']);
   fx.okGit(['merge', '-q', '--no-edit', 'trunk']);
   assert.equal(fx.candidate(), repaired, 'against the new merge base the candidate id is the repaired one');

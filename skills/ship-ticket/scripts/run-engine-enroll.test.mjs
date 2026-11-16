@@ -71,7 +71,8 @@ test('lifecycle: none -> unactivated -> enrolled -> admitted -> evidence -> publ
   fx.commitAll(); // config.base HEAD: the merge base recorded with SHIP_READY keeps the candidate computable after the commit
   const a = authorize(fx, 'publish');
   allowed(a, 'publication');
-  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base', 'assurance']);
+  assert.deepEqual(Object.keys(a.out.binding), ['head', 'tree', 'candidate_id', 'branch', 'base', 'merge_base', 'base_sha', 'assurance']);
+  assert.equal(a.out.binding.base_sha, fx.okGit(['ls-remote', 'origin', `refs/heads/${fx.defaultBranch}`]).stdout.split(/\s+/)[0], 'the base commit the remote names (round 3)');
   assert.equal(a.out.binding.assurance, 'STRICT', 'the production policy is what this run authorizes');
   assert.equal(a.out.binding.base, fx.defaultBranch, 'the remote default branch is the PR base');
   denied(authorize(fx, 'complete'), 'publish_evidence_missing');

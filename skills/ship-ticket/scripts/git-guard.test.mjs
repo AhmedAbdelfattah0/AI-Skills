@@ -252,6 +252,7 @@ test('stacked PR: the parent branch bound as config.base passes its own hook; --
   writeFileSync(join(fx.repo, 'docs', 'parent.txt'), 'parent work');
   fx.commitAll('parent ticket');
   fx.okGit(['branch', '-f', 'T-0-parent', 'HEAD']);
+  fx.okGit(['push', '-q', '-f', 'origin', 'T-0-parent']); // the parent ticket's branch is published (round 3: the base is the remote's commit)
   fx.toShipReady();
   fx.commitAll();
   installed(fx);

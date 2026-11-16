@@ -97,6 +97,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-review-dispatch.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s.test.mjs
           skills/ship-ticket/scripts/run-engine-r0s2.test.mjs
+          skills/ship-ticket/scripts/run-engine-r0s3.test.mjs
           skills/ship-ticket/scripts/run-engine-trust-matrix.test.mjs
           skills/ship-ticket/scripts/git-guard.test.mjs
           skills/ship-ticket/scripts/context-manifest.test.mjs

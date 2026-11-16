@@ -195,7 +195,8 @@ function completeRepair(E, repair, a, paths) {
     new_candidate: c.candidate_id, write_set: [...repair.writes], attempt_id: a.attempt_id });
   bindReview(S, { review_execution: repair.review_execution, kind: 'repair', candidate_id: c.candidate_id, merge_base: c.merge_base ?? null });
   note(S, 'REPAIR_RECORDED', { review_execution: repair.review_execution, new_candidate: c.candidate_id });
-  S.freeze = { candidate: c.candidate_id, seq: S.seq, ...(c.merge_base ? { merge_base: c.merge_base } : {}) }; // R0-S C6: keep the base the candidate is computed against
+  // R0-S C6: keep the base the candidate is computed against; round 3: and the verified base commit of the original's freeze.
+  S.freeze = { candidate: c.candidate_id, seq: S.seq, ...(c.merge_base ? { merge_base: c.merge_base } : {}), ...(S.freeze?.base ? { base: S.freeze.base } : {}) };
   S.frozen_candidate = c.candidate_id;
 }
 

@@ -273,7 +273,23 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   `--base` at a local ref carrying unreviewed commits would otherwise give the
   reviewed merge base and launder them; a stacked PR binds its parent as
   `config.base`). The bound base must give the merge base recorded with
-  `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits), and
+  `SHIP_READY` (`base_mismatch`: e.g. a reused branch with earlier commits),
+  measured from the commit the REMOTE names for the base (`git ls-remote`), never
+  from a local ref: a `config.base` branch or `origin/<default>` moved onto
+  unreviewed commits is `base_moved_local` (the merge bases from the local ref and
+  from the remote commit differ). With a `config.base` branch, `gate review`
+  verifies the base and the original's freeze records it (ref, remote, repository
+  identity, commit); `gate ship-ready` and `authorize publish` re-verify that record:
+  a remote base force-pushed off the reviewed commit is `base_moved_remote`; no
+  configured remote, another repository, or a freeze or `SHIP_READY` without the
+  record is `base_unverified`; a failed `ls-remote`, a missing remote branch, or a
+  remote commit not fetched is `base_remote_unavailable`. A remote base that only
+  advanced (the branch does not contain the new commits) is accepted: the merge
+  base and the PR's range are the reviewed ones; merging or rebasing onto it moves
+  the merge base and needs an owner `RETRY` (re-freeze). Residual: the remote is
+  reached through the repository's git config (`insteadOf`/`set-url` can redirect
+  it; the recorded URL identity is compared, not the bytes behind it), a push to
+  the base branch itself moves it, and `state.json` stays same-user writable. And
   no commit since that merge base may touch a path outside the candidate
   (`history_outside_candidate`: e.g. an extra commit later reverted; paths are
   checked, not bytes: an intermediate commit may hold other bytes of a reviewed

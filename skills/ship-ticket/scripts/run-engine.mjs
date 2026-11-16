@@ -37,7 +37,7 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, policyApproval, configDrift, ASSURANCE_KEYS, narrativeListsDigest, relaxedPolicy } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, policyApproval, configDrift, ASSURANCE_KEYS, narrativeListsDigest, narrativeHasLine, relaxedPolicy } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
@@ -295,7 +295,8 @@ async function deliver(E) {
  * was approved before SECURITY_POLICY_CUTOFF is admitted (security_policy_required). With policy 2:
  * the installed catalog loads and is the one the plan was approved against (catalog_unavailable),
  * every control id is in it (dag_invalid), and the approved narrative carries both the
- * `security-pairs` line of exactly the DAG's pairs and a verified §3a machine block with the same
+ * `security-pairs` line of exactly the DAG's pairs, as a VISIBLE line of its own (engine-dag.mjs narrativeHasLine: not in an
+ * HTML comment, a fence, a blockquote, an indent or other text; placement only, not human approval), and a verified §3a machine block with the same
  * pairs and catalog digest (security_pairs_mismatch), every surface path of which lies inside the Design
  * Contract (designContract of the DAG nodes, matched by reassess itself: else the first gate reassess ends in
  * a permanent REAPPROVAL; security_pairs_mismatch naming the path).
@@ -314,7 +315,11 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (unknown.length) throw coded('dag_invalid', `config.controlCoverage names control(s) not in the catalog: ${[...new Set(unknown)].join(', ')}`);
   const ids = config.controlCoverage.map(pairKey).sort();
   const line = sp.pairsLine({ catalogDigest: config.catalogDigest, pairs: ids });
-  if (!narrative.includes(line)) throw coded('security_pairs_mismatch', 'the approved narrative has no security-pairs line for exactly the DAG\'s controlCoverage and catalogDigest');
+  // R0-S round 3: a VISIBLE standalone line only (the visible-line parser the assurance policy line uses): never inside an HTML
+  // comment (an unterminated one hides the rest), a fence, a blockquote, an indent or other text. Placement in the approved text,
+  // not proof that a human approved it.
+  if (!narrativeHasLine(narrative, line)) throw coded('security_pairs_mismatch', 'the approved narrative has no visible security-pairs line (a line of its own, '
+    + 'outside HTML comments and code fences, not quoted or indented) for exactly the DAG\'s controlCoverage and catalogDigest');
   const block = sp.parsePlanSecurityBlock(text);
   if (!block || block.catalog_digest !== config.catalogDigest || JSON.stringify(block.pairs) !== JSON.stringify(ids))
     throw coded('security_pairs_mismatch', 'the approved §3a security-plan block is missing, invalid or names other pairs than config.controlCoverage');
@@ -858,7 +863,11 @@ export async function gate(ctx) {
         : gateNo('candidate_unavailable', [c.reason], { judgment_point: true });
       const S = E.S;
       // The merge base the candidate was computed against: authorize publish recomputes against it after the commit.
-      if (ctx.gate === 'ship-ready' && v.ok && S.ship_ready?.candidate_id === c.candidate_id) S.ship_ready.merge_base = c.merge_base;
+      if (ctx.gate === 'ship-ready' && v.ok && S.ship_ready?.candidate_id === c.candidate_id) {
+        S.ship_ready.merge_base = c.merge_base;
+        // R0-S round 3 (N-BASE): and the verified base commit (config.base a branch) authorize publish re-verifies on the remote.
+        if (E.verifiedBase) S.ship_ready.base = E.verifiedBase; else delete S.ship_ready.base;
+      }
       // W3-record: appended after the existing keys only with config.auditRecord (the binding-drift return above records nothing).
       const audit = auditOn(S) ? () => gateAuditFields(ctx.gate, input, v) : () => ({});
       note(S, 'GATE', { gate: ctx.gate, ok: v.ok, code: v.code, ...audit() });

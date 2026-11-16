@@ -176,6 +176,31 @@ test('[S13] C9 init binds the narrative pairs line and §3a block to the DAG bot
   initFails(initOf(secFx(t, { coverage: (c) => c.map((p, i) => (i ? p : { ...p, control: 'VAPT-API-99' })) })), 'dag_invalid'); // control not in the catalog
 });
 
+// R0-S round 3: the security-pairs line is accepted only as a VISIBLE line of its own (engine-dag.mjs narrativeHasLine, the parser the
+// assurance policy line uses). This checks PLACEMENT in the approved text, never that a human approved it (START is orchestrator-appended).
+test('[S41] init refuses a security-pairs line hidden in an HTML comment (also unterminated), a fence, a blockquote, an indent or inside other text (placement only, not human approval); the visible twin binds', { skip: WIN_SKIP }, (t) => {
+  const initOf = (fx) => fx.cli('init', { dag: fx.dagFile });
+  const hide = (wrap) => (sel) => { const line = SP.pairsLine({ catalogDigest: sel.catalog_digest, pairs: sel.pairs.map(p => p.pair_id) });
+    const text = SP.renderSection3a(sel);
+    assert.ok(text.split('\n').includes(line), 'the rendered section carries the line standalone');
+    return text.replace(line, wrap(line)); };
+  const variants = [['comment', (l) => `<!-- ${l} -->`], ['multi-line comment', (l) => `<!--\n${l}\n-->`], ['backtick fence', (l) => '```\n' + l + '\n```'],
+    ['tilde fence', (l) => '~~~text\n' + l + '\n~~~'], ['blockquote', (l) => `> ${l}`], ['indented code', (l) => `    ${l}`], ['indented', (l) => `  ${l}`],
+    ['list item', (l) => `- ${l}`], ['inside text', (l) => `see ${l} above`], ['trailing text', (l) => `${l} (approved)`]];
+  for (const [how, wrap] of variants) {
+    const r = initOf(secFx(t, { narrative: hide(wrap) }));
+    initFails(r, 'security_pairs_mismatch');
+    assert.match(r.stderr, /no visible security-pairs line/, `${how}: the line check refused (not the block check)`);
+  }
+  // Unterminated comment: everything after it is hidden, the machine block (a comment by design) still parses.
+  const unterminated = initOf(secFx(t, { narrative: (sel) => { const text = SP.renderSection3a(sel); const i = text.lastIndexOf('security-pairs ');
+    return `${text.slice(0, i)}<!-- draft\n${text.slice(i)}`; } }));
+  initFails(unterminated, 'security_pairs_mismatch');
+  assert.match(unterminated.stderr, /no visible security-pairs line/, 'unterminated comment');
+  ok(initOf(secFx(t)), 'the visible standalone line binds');
+  ok(initOf(secFx(t, { narrative: (sel) => SP.renderSection3a(sel).replace(/\n/g, '\r\n') })), 'CRLF line ends: the same visible line');
+});
+
 test('[S39] init refuses an approved §3a surface outside every node\'s writes (security_pairs_mismatch, naming the path); its twin inside a node\'s writes binds', { skip: WIN_SKIP }, (t) => {
   const outside = secFx(t, { surfacePath: 'lib/orders.ts' }); // nodes write spec/ and src/ only
   const r = outside.cli('init', { dag: outside.dagFile });

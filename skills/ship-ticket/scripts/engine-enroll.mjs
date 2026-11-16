@@ -49,7 +49,9 @@
  * R0-S batch 2: pr_base_unbound (a --base or recorded intent base other than the bound one: config.base, else the remote default
  * branch; the history check runs from the SHIP_READY merge base), review_fail_unconsumed / review_dispatch_live at authorize publish
  * (engine-review-dispatch.mjs openReviewFail), ci_repo_mismatch at complete (PUBLISHED.repository, engine-ci.mjs), pr_repo_unknown.
- * Not closed (reported): a LOCAL config.base branch moved onto unreviewed commits before the review is trusted as the base.
+ * R0-S round 3 (N-BASE): base_unverified / base_remote_unavailable / base_moved_local / base_moved_remote (engine-base.mjs): the merge
+ * base is measured from the commit the remote names for the base (ls-remote), recorded at the review freeze with the repository
+ * identity, re-verified at ship-ready and here; a local base ref (config.base branch, or origin/<default>) is never the authority.
  * Still the same-user residual (documented, not closed): rewriting state.json, the ledgers, a relay or launcher output
  * TOGETHER with the digests that bind them; replacing the relay or gh BEFORE their pin (the pin trusts that moment's
  * home and PATH); importing the modules and calling the in-process seams (ctx.ciProvider, ctx.relayHome); `git` itself
@@ -65,6 +67,7 @@ import { checkShipReady } from './ship-ready-check.mjs';
 import { reviewFreshness } from './engine-freshness.mjs';
 import { openReviewFail } from './engine-review-dispatch.mjs';
 import { ciAuthorize, resolveTool, pinnedTool, remoteHeadOf, remoteRepository, ghEnv } from './engine-ci.mjs';
+import { verifyBase, remoteIdentity } from './engine-base.mjs';
 import { deliverPhase, verifySkill, fsReader, gitReader, SKILL_DIR, PHASES, sha256, MANIFEST_REL } from './context-manifest.mjs';
 
 export const AUTHORIZE_SCHEMA = 'ship-ticket-authorize-v1';
@@ -282,7 +285,20 @@ export async function authorize(ctx, readEngine) {
     if (given != null && given !== prBase && given !== baseRef)
       return deny('pr_base_unbound', [`${src} names ${given}; the PR base bound at review is ${prBase} (config.base, else the remote default branch): a PR base is never chosen on the command line`], 'evidence');
   }
-  const mb = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
+  // R0-S round 3 (N-BASE): the merge base is measured from the commit the REMOTE names for the base (engine-base.mjs), never from a
+  // local ref (`git branch -f trunk HEAD`, `git update-ref refs/remotes/origin/main ...` once moved it onto unreviewed commits).
+  // With config.base a branch it is the base commit recorded at the review freeze and bound to SHIP_READY, on the same repository.
+  const mbLocal = gitOut(ctx.repoRoot, ['merge-base', baseRef, 'HEAD']);
+  let vb;
+  if (configured) {
+    const rec = S.ship_ready.base;
+    if (!rec?.sha || rec.ref !== configured) return deny('base_unverified', [`SHIP_READY binds no verified base commit of ${configured} (recorded before base verification, or lost): run gate ship-ready again (a freeze without one needs an owner RETRY)`], 'evidence');
+    const push = remoteIdentity(ctx.repoRoot, remote);
+    if (!push || push.identity !== rec.identity) return deny('base_unverified', [`the push remote ${remote} is ${push?.identity ?? 'no configured remote'}, the base was verified on ${rec.identity}: the PR would target another repository than the reviewed base`], 'evidence');
+    vb = verifyBase(ctx.repoRoot, { ref: configured, remote: rec.remote, recorded: rec, localMergeBase: mbLocal });
+  } else vb = verifyBase(ctx.repoRoot, { ref: prBase, remote, localMergeBase: mbLocal });
+  if (!vb.ok) return deny(vb.code, vb.reasons, 'evidence');
+  const mb = vb.base.merge_base;
   if (mb !== S.ship_ready.merge_base) return deny('base_mismatch', [`the reviewed candidate is relative to ${S.ship_ready.merge_base}, but merge-base(${baseRef}, HEAD) is ${mb}: the branch carries history the review did not cover`], 'evidence');
   const dirty = io.snapshot(ctx.repoRoot, S.pinned_exclusions ?? []);
   if (dirty === null) return deny('candidate_unavailable', ['git status failed'], 'evidence');
@@ -310,7 +326,7 @@ export async function authorize(ctx, readEngine) {
   if (!backed.ok || !backed.shipReady.includes(cand.candidate_id))
     return deny('ship_ready_unbacked', [backed.reason || `RUN-STATE has no SHIP_READY for ${cand.candidate_id}; run resume to deliver the engine outbox`], 'evidence');
   return { ...base, allow: true, code: 'allow', reasons: [], lifecycle: 'publication',
-    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb, assurance: assuranceOf(S).level } };
+    binding: { head, tree: gitOut(ctx.repoRoot, ['rev-parse', 'HEAD^{tree}']), candidate_id: cand.candidate_id, branch, base: prBase, merge_base: mb, base_sha: vb.base.remote_head, assurance: assuranceOf(S).level } };
 }
 
 /**

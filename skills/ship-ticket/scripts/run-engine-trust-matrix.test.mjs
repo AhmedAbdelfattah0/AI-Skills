@@ -159,6 +159,7 @@ test('M5 anti-shopping: a FAIL still in flight while the base moves under the sa
   writeFileSync(join(fx.repo, 'trunk.txt'), 'upstream');
   fx.okGit(['add', 'trunk.txt']);
   fx.okGit(['commit', '-q', '-m', 'trunk']);
+  fx.okGit(['push', '-q', 'origin', 'trunk']); // the upstream moved (round 3: the base is the remote's commit)
   fx.okGit(['checkout', '-q', 'T-1-work']);
   fx.okGit(['merge', '-q', '--ff-only', 'trunk']);
   assert.equal(fx.candidate(), c);

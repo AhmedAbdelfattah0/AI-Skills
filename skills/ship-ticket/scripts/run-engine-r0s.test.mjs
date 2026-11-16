@@ -193,6 +193,7 @@ test('B6: an old receipt after the base moved under an unchanged candidate id is
   writeFileSync(join(fx.repo, 'trunk.txt'), 'upstream change outside the patch');
   fx.okGit(['add', 'trunk.txt']);
   fx.okGit(['commit', '-q', '-m', 'trunk']);
+  fx.okGit(['push', '-q', 'origin', 'trunk']); // the upstream moved (round 3: the base is the remote's commit)
   fx.okGit(['checkout', '-q', 'T-1-work']);
   fx.okGit(['merge', '-q', '--ff-only', 'trunk']);
   assert.equal(fx.candidate(), c, 'the candidate id is unchanged against the new merge base');

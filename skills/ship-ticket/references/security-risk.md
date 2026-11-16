@@ -77,8 +77,12 @@ that would sit outside the existing node paths is a contract expansion:
 `config.testCommands` runner, because the proof parses each spec's result. `init`
 refuses with `security_policy_required` (post-cutoff run without policy 2),
 `security_pairs_mismatch` (the narrative's `security-pairs` line or machine block
-does not match the DAG's pairs and digest, or an approved surface path lies outside
-every node's `writes`) and `catalog_unavailable` (catalog missing or not the one
+does not match the DAG's pairs and digest, the line is not a visible line of its
+own (inside an HTML comment, even an unterminated one, a code fence, a blockquote,
+an indent, a list item or other text), or an approved surface path lies outside
+every node's `writes`). The visible-line check verifies placement in the approved
+text only; it does not prove that a human approved it (`START` is
+orchestrator-appended) and `catalog_unavailable` (catalog missing or not the one
 approved).
 
 ## 7. Reassessment
