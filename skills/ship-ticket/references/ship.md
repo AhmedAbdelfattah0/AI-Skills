@@ -106,8 +106,13 @@ The commit contains:
 - documentation changes;
 - the ticket-keyed session-log entry.
 
-Create one commit and push once, through `run-engine.mjs publish` (the only
-supported push and PR path; it pushes only what `authorize publish` allows). Do not create a WIP commit or amend later merely
+Create one commit and push once, through `run-engine.mjs publish --pr-title <t>
+--pr-body-file <f>` (the only supported push and PR path; it pushes only what
+`authorize publish` allows). The PR is REQUIRED to complete: a branch-only
+publication never reaches `COMPLETED` (`pr_required`); bind an existing PR with
+`run-engine.mjs ci --pr <n>` only when none is recorded. `complete` reads the PR
+live: it must stay open, on the enrolled repository, at the published head and
+the frozen base. Do not create a WIP commit or amend later merely
 to record external results.
 
 Commit, push, PR, CI and tracker results do not exist before the commit. Report

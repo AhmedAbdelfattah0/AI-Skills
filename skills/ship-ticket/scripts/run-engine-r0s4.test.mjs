@@ -17,6 +17,7 @@ import { POSIX, passReview } from './engine-test-fixture.mjs';
 import { enrollFixture, GITHUB_URL } from './engine-enroll.test-helper.mjs';
 import { verdict, ghProvider } from './engine-ci.mjs';
 import { candidateId } from './engine-io.mjs';
+import { buildPrompt } from './engine-review-dispatch.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups (engine) and sh fakes';
 const J = JSON.stringify;
@@ -155,6 +156,14 @@ test('X5 (pre-fix: republish without --pr-title recorded pr null and complete st
   assert.equal(code(h.cli('publish')), 'pr_state');
   assert.equal(h.readState().published.length, n, 'nothing recorded');
   assert.equal(code(authorize(h, 'complete')), 'pr_state');
+  // A NEW head while the branch's PR is closed: recorded branch-only with the refusal (never completes; next does not loop on publish).
+  writeFileSync(join(h.repo, 'session-log.md'), 'a later excluded-path commit');
+  h.okGit(['add', 'session-log.md']); h.okGit(['commit', '-q', '-m', 'log']);
+  const p = h.cli('publish');
+  assert.deepEqual([code(p), h.readState().published.at(-1).head, h.readState().published.at(-1).pr], ['pr_state', h.head(), null], p.stdout);
+  const nx = h.cli('next').out;
+  assert.deepEqual([nx.next_action.stage, nx.next_action.action === 'publish'], ['CI', false], J(nx.next_action));
+  assert.equal(code(authorize(h, 'complete')), 'pr_required');
 });
 
 test('X6 (pre-fix: PASS for both): every returned check run counts (filter=latest is GitHub\'s default and passed explicitly): overlapping same-name runs with one red, and ids 9/10, are FAIL', () => {
@@ -322,7 +331,7 @@ test('combined: fork + republish (identity_changed both ways); symref repoint + 
   assert.equal(authorize(fx, 'complete').out.allow, true);
 });
 
-test('combined E-b: execution replay after an owner RETRY (pre-fix: an unconsumed receipt of the earlier execution was accepted as the RETRY review) is review_receipt_execution; a fresh dispatch of the RETRY execution is accepted', { skip: WIN_SKIP }, async (t) => {
+test('combined E-b: execution replay after an owner RETRY (an unconsumed receipt of the earlier execution; source-derived row, not reproduced on ea6cc9b) is review_receipt_execution; a fresh dispatch of the RETRY execution is accepted', { skip: WIN_SKIP }, async (t) => {
   const fx = enrollFixture(t);
   assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
   assert.equal(fx.cli('drive').status, 0);
@@ -371,5 +380,41 @@ test('E-a: a `git replace` of the base commit never changes the candidate (autho
     assert.equal(replaced, '', 'with the replacement git itself no longer sees secret.txt as a change (the attack works on plain git)');
     const c = candidateId(dir, 'trunk', []);
     assert.deepEqual([c.merge_base, c.paths], [c0, ['secret.txt']], J(c));
+    // ...and the reviewer's brief shows the same bytes the candidate id covers (its git runs without replacement objects too).
+    const brief = buildPrompt({ S: { ticket: 'T-1', run_id: 'run-1', config: {} }, repoRoot: dir, planText: null, role: 'primary', owed: { kind: 'original' }, candidate: c.candidate_id, mergeBase: c.merge_base, paths: c.paths });
+    assert.match(brief, /\+token/, 'the diff in the brief carries secret.txt');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ------------------------------------------------------------------ the freeze is per review execution (captured once, re-verified)
+
+test('the freeze is captured once per review execution: a remote base that advances between the primary and the second dispatch is accepted (the frozen commit stays the base of record); one rewound between them refuses the second dispatch (base_moved_remote, recorded)', { skip: WIN_SKIP }, async (t) => {
+  const fx = enrollFixture(t, { base: 'trunk' });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0);
+  const frozen = fx.remoteHead('trunk');
+  const { second_opinion: _s, ...primaryOnly } = passReview('rx-1', fx.candidate());
+  const first = fx.engineReview(primaryOnly);
+  assert.equal(first.dispatched[0].code, 'review_dispatched');
+  // the upstream advances trunk with an unrelated commit (another clone), fetched here
+  const other = join(fx.root, 'upstream');
+  fx.okGit(['clone', '-q', '--branch', 'trunk', fx.remote, other], { cwd: fx.root });
+  writeFileSync(join(other, 'upstream.txt'), 'u');
+  fx.okGit(['add', 'upstream.txt'], { cwd: other }); fx.okGit(['commit', '-q', '-m', 'u'], { cwd: other }); fx.okGit(['push', '-q', 'origin', 'trunk'], { cwd: other });
+  fx.okGit(['fetch', '-q', 'origin']);
+  const g = fx.gate('review', { ...passReview('rx-1', fx.candidate()), primary: first.input.primary });
+  assert.equal(g.out.code, 'review_accepted', g.stdout);
+  const S = fx.readState();
+  assert.equal(S.freeze.base.sha, frozen, 'the commit frozen before the first reviewer launched');
+  assert.ok(S.review_dispatches.every(d => J(d.base) === J(S.freeze.base)), 'both receipts carry the one freeze');
+
+  const h = enrollFixture(t, { base: 'trunk' });
+  const b = baseWithA(h, 'trunk');
+  assert.equal(h.cli('init', { dag: h.dagFile }).status, 0);
+  assert.equal(h.cli('drive').status, 0);
+  const { second_opinion: _t, ...p2 } = passReview('rx-1', h.candidate());
+  assert.equal(h.engineReview(p2).dispatched[0].code, 'review_dispatched');
+  b.rewind();
+  const second = h.dispatch('second');
+  assert.deepEqual([second.out.code, second.out.recorded], ['base_moved_remote', true], second.stdout);
 });

@@ -169,7 +169,7 @@ export const fingerprints = (root, paths) => Object.fromEntries([...new Set(path
 
 /** Map of every dirty or untracked path (minus `exclude`) to its fingerprint; null without git. A rename records both paths. */
 export function snapshot(root, exclude = []) {
-  const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: root, encoding: 'utf8', timeout: 30000 });
+  const r = spawnSync('git', ['--no-replace-objects', 'status', '--porcelain', '-z', '--untracked-files=all'], { cwd: root, encoding: 'utf8', env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' }, timeout: 30000 });
   if (r.status !== 0) return null;
   const out = {};
   const entries = r.stdout.split('\0');

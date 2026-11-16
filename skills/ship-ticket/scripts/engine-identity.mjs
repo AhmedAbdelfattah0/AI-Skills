@@ -18,8 +18,9 @@
  *   CI EVIDENCE  publication_id, head, repository, checks, PR snapshot (engine-ci.mjs).
  *   COMPLETE     the same verifier, cumulatively, plus a LIVE read-only `gh api repos/<o>/<r>/pulls/<n>` with the pinned gh.
  *
- * Stage table (`STAGE_REQUIRES`): a required field that is missing is a refusal (identity_unbound; a missing base record keeps its existing
- * code base_unverified), never a skip. Reason codes: identity_unbound, identity_changed, pr_required, pr_state, pr_base_mismatch,
+ * A required field that is missing is a refusal (identity_unbound; a missing base record keeps its existing code base_unverified), never
+ * a skip: review/ship-ready need the freeze base whenever an identity is recorded or config.base is a branch; publish, ci and complete need
+ * the identity; ci and complete the pinned gh and the publication tuple; complete a bound PR and STRICT assurance. Reason codes: identity_unbound, identity_changed, pr_required, pr_state, pr_base_mismatch,
  * pr_head_mismatch, pr_repo_mismatch, pr_unavailable, publication_mismatch, assurance_relaxed, gh_unpinned, gh_drift, and the base codes
  * of engine-base.mjs. Callers (one line each): gate review and gate ship-ready (engine-gates.mjs), authorize publish (engine-enroll.mjs:
  * publish(), the git-guard hook and `next` call it), `ci` (run-engine.mjs), authorize complete (engine-enroll.mjs).
@@ -39,14 +40,7 @@ export { authGit };
 
 export const IDENTITY_CODES = Object.freeze(['identity_unbound', 'identity_changed', 'pr_required', 'pr_state', 'pr_base_mismatch', 'pr_head_mismatch',
   'pr_repo_mismatch', 'pr_unavailable', 'publication_mismatch', 'assurance_relaxed']);
-/** The fields each stage requires (a literal table: tests pin the refusals independently of it). */
-export const STAGE_REQUIRES = Object.freeze({
-  review: Object.freeze(['enrollment']),
-  'ship-ready': Object.freeze(['enrollment', 'freeze.base']),
-  publish: Object.freeze(['enrollment', 'identity', 'ship_ready.base']),
-  ci: Object.freeze(['enrollment', 'identity', 'gh', 'publication']),
-  complete: Object.freeze(['enrollment', 'identity', 'ship_ready.base', 'gh', 'publication', 'publication.pr', 'assurance']),
-});
+export const STAGES = Object.freeze(['review', 'ship-ready', 'publish', 'ci', 'complete']);
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const no = (code, reason) => ({ ok: false, code, reasons: [reason] });
 
@@ -129,6 +123,21 @@ export function captureBase(S, repoRoot, { localMergeBase } = {}) {
 }
 const baseRecord = ({ remote, identity, ref, sha, merge_base }) => ({ remote, identity, ref, sha, merge_base });
 
+/**
+ * Re-verify a freeze base captured earlier for the same review execution (a later dispatch of it): the enrolled identity, and the remote
+ * base descending from the frozen commit with the local merge base unchanged (branch mode). -> { ok, base: recorded } | refusal
+ */
+export function verifyFrozenBase(S, repoRoot, recorded, localMergeBase) {
+  const id = identityNow(S, repoRoot, undefined, false);
+  if (!id.ok) return id;
+  if (!recorded) return id.identity ? no('base_unverified', 'the execution froze no base while an identity is recorded') : { ok: true, base: null };
+  const branch = Boolean(S?.config?.base) && S.config.base !== 'HEAD';
+  const v = verifyBase(repoRoot, { ref: recorded.ref, remote: id.remote ?? recorded.remote, identity: id.identity, recorded, ...(branch ? { localMergeBase } : {}) });
+  if (!v.ok) return v;
+  if (v.base.merge_base !== recorded.merge_base) return no('base_moved_remote', `merge-base(HEAD, ${recorded.ref}) is ${v.base.merge_base}, this review execution froze ${recorded.merge_base}: the reviewed range changed; the owner re-freezes with a RETRY`);
+  return { ok: true, base: recorded };
+}
+
 /** A live PR (REST shape, `prFromRest`) against a publication: null when every row holds, else the refusal. */
 export function prRows(view, pub, identity) {
   if (!view) return no('pr_unavailable', 'the PR could not be read');
@@ -156,7 +165,7 @@ const ghPinned = (S) => { const g = pinnedTool(S?.enrollment?.tools?.gh); return
  */
 export function verifyReleaseBinding(stage, a) {
   const { S, repoRoot } = a;
-  if (!STAGE_REQUIRES[stage]) throw new Error(`verifyReleaseBinding: unknown stage ${stage}`);
+  if (!STAGES.includes(stage)) throw new Error(`verifyReleaseBinding: unknown stage ${stage}`);
   if (!S?.enrollment) return no('identity_unbound', 'the run is not enrolled: no release identity is recorded');
   const late = ['publish', 'ci', 'complete'].includes(stage);
   const id = identityNow(S, repoRoot, stage === 'publish' ? a.remote : undefined, late);

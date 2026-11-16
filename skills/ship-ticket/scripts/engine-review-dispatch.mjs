@@ -81,7 +81,7 @@ import { note, judgment, sha, coded, BEGIN, END } from './engine-dag.mjs';
 import { childEnv, spawnSpec } from './provider-env.mjs';
 import { trustedEvents } from './engine-authority.mjs';
 import { resolveTool } from './engine-ci.mjs';
-import { captureBase } from './engine-identity.mjs';
+import { captureBase, verifyFrozenBase, authGit } from './engine-identity.mjs';
 
 export const REVIEW_SCHEMA = 'ship-ticket-review-dispatch-v1';
 export const REVIEW_KIND = 'review';
@@ -252,7 +252,8 @@ export function receiptBase(S, ids) {
 
 // ---- prompt ---------------------------------------------------------------------------------------
 
-const git = (repo, args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+// The brief's git runs with replacement objects off (E-a): the reviewer sees the diff the candidate id covers.
+const git = (repo, args) => authGit(repo, args, { maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
 /** stdout of a brief git call, or a thrown review_diff_unavailable: a failed or overflowing call never becomes an empty diff. */
 export function briefGit(repo, args, run = git) {
   const r = run(repo, args);
@@ -369,6 +370,7 @@ function reviewerCli(S, provider, env) {
 /** The relay's environment: billing variables stripped (childEnv), NODE_OPTIONS / NODE_PATH removed (no preload into the relay), and the shim first on PATH. */
 function reviewerEnv(base, shimDir) {
   const env = Object.fromEntries(Object.entries(base).filter(([k]) => !['NODE_OPTIONS', 'NODE_PATH'].includes(k.toUpperCase())));
+  env.GIT_NO_REPLACE_OBJECTS = '1'; // E-a: the reviewer's own git reads see no replacement objects either
   if (shimDir) for (const k of Object.keys(env).filter(k => k.toUpperCase() === 'PATH')) env[k] = shimDir + delimiter + env[k];
   if (shimDir && !Object.keys(env).some(k => k.toUpperCase() === 'PATH')) env.PATH = shimDir;
   return env;
@@ -431,22 +433,25 @@ export async function dispatchReview(E, { role, candidate }) {
   }
   const cli = relay ? reviewerCli(S, route.provider, env) : null;
   if (cli?.code) return keep(refuse(cli.code, cli.reasons));
-  // R0-S round 4 (D2): the freeze is captured BEFORE the reviewer launches: the remote's commit for the base of record (both base modes),
-  // on the enrolled repository identity; a confirmation reviews against the freeze its original recorded.
-  let frozenBase = null;
-  if (relay) {
-    if (owed.kind === 'original') {
-      const fb = captureBase(S, ctx.repoRoot, { localMergeBase: c.merge_base ?? null });
-      if (!fb.ok) return keep(refuse(fb.code, fb.reasons));
-      frozenBase = fb.base;
-    } else frozenBase = S.freeze?.base ?? null;
-  }
   const now = Date.parse(ctx.now?.() ?? new Date().toISOString());
   // E-b: the execution id of this owed review (minted at its first dispatch; a confirmation carries its original's).
   let executionId = executionOf(S, owed.kind, owed.review_execution);
   if (!executionId && owed.kind === 'original') {
     executionId = 'rxe-' + randomUUID();
     S.review_executions = [...(S.review_executions ?? []), { id: executionId, kind: 'original', review_execution: owed.review_execution ?? null, at: iso(now) }];
+  }
+  // R0-S round 4 (D2): the freeze is captured BEFORE the reviewer launches, ONCE per execution (its first dispatch): the remote's commit for
+  // the base of record (both base modes), on the enrolled repository identity. A later dispatch of the same execution re-verifies that record
+  // (a remote base that only advanced is accepted) and carries it unchanged; a confirmation carries the freeze its original recorded.
+  let frozenBase = null;
+  if (relay) {
+    if (owed.kind === 'original') {
+      const ex = (S.review_executions ?? []).find(x => x.id === executionId);
+      const fb = ex && Object.hasOwn(ex, 'base') ? verifyFrozenBase(S, ctx.repoRoot, ex.base, c.merge_base ?? null) : captureBase(S, ctx.repoRoot, { localMergeBase: c.merge_base ?? null });
+      if (!fb.ok) return keep(refuse(fb.code, fb.reasons));
+      frozenBase = fb.base;
+      if (ex && !Object.hasOwn(ex, 'base')) ex.base = fb.base;
+    } else frozenBase = S.freeze?.base ?? null;
   }
   if (!relay) {
     const id = 'unavail-' + randomUUID();

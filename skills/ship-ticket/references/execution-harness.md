@@ -282,9 +282,11 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
     A remote (or a push URL, or `publish --remote`) naming another repository
     than the enrolled one is `identity_changed` at every stage.
   - The **freeze** is captured BEFORE each reviewer launches, in its
-    `REVIEW_DISPATCHED` receipt, in BOTH base modes: `base` `{remote, identity,
+    `REVIEW_DISPATCHED` receipt (captured at the execution's first dispatch,
+    re-verified and carried unchanged by its later dispatches), in BOTH base modes: `base` `{remote, identity,
     ref, sha, merge_base}` (the base of record is `config.base`, else the remote's
-    default branch resolved ONCE with `git ls-remote --symref <remote> HEAD`; a
+    default branch resolved with `git ls-remote --symref <remote> HEAD` at the
+    execution's first dispatch, later reads only compared against it; a
     remote-tracking ref such as `refs/remotes/origin/HEAD` or `origin/<default>`
     is never read) and an engine-minted `review_execution_id`. `gate review`
     adopts it into the freeze (`review_receipt_base` when the receipts differ from
@@ -380,8 +382,10 @@ node <SHIP_TICKET_SKILL>/scripts/git-guard.mjs install|uninstall|status --repo <
   - `NO_CHECKS`: zero check runs (`ci_no_checks`) or a required name with none
     (`ci_required_missing`), from a collection made `config.ciNoChecksMinutes`
     (default 5) or more after the push.
-  - `STALE`: the PR head is not the published head (`ci_head_moved`), the PR is
-    another branch (`ci_pr_mismatch`), or the remote branch read at collection
+  - `STALE`: the recorded PR view's head is not the published head (`ci_head_moved`)
+    or another branch (`ci_pr_mismatch`) (a re-judgement of recorded evidence: since
+    round 4 the PR rows refuse such a PR at `ci` first, `pr_head_mismatch`), or the
+    remote branch read at collection
     (`git ls-remote`, recorded as `remote_head`) is not the head (`ci_remote_moved`).
     A branch that cannot be read is `UNAVAILABLE` `ci_remote_unavailable`.
   - `UNAVAILABLE`: a `gh` failure (`ci_provider_unavailable`) or a page count that

@@ -546,8 +546,8 @@ const MAX_ADDED_BYTES = 1024 * 1024;
 /** The candidate's changed paths with their added lines (git diff from config.base; an unlisted path is read whole: more signals, never fewer). */
 function changedFiles(E, paths) {
   const root = E.ctx.repoRoot, added = new Map();
-  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
-    { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+  const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
+    { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   if (r.status === 0) for (const [p, lines] of addedLinesByFile(r.stdout)) added.set(p, lines);
   return paths.map(p => {
     if (added.has(p)) return { path: p, added: added.get(p) };

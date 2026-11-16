@@ -403,7 +403,11 @@ export async function publish(ctx, readEngine, recordPublished, recordIntent = a
     // A recorded PR is re-verified read-only (never a second create).
     const v = provider.pullRequest(known.number);
     const rows = prRows(v?.ok ? v.pr : null, { ...facts, pr: known }, identity);
-    if (rows) return { published: true, code: rows.code, reasons: rows.reasons, run_id: ctx.runId, head, branch, recorded: false };
+    // This head's own recorded PR failing its rows records nothing (its publication stands; complete refuses live). An EARLIER head's PR
+    // (closed, retargeted) is not bound to this new head: it is recorded branch-only with the refusal (never completes; `ci --pr` may bind a
+    // verified PR), so `next` never re-offers the same publish in a loop.
+    if (rows && prior?.pr) return { published: true, code: rows.code, reasons: rows.reasons, run_id: ctx.runId, head, branch, recorded: false };
+    if (rows) { pr = null; prError = rows.reasons[0]; prCode = rows.code; }
   } else if (ctx.prTitle !== undefined) {
     const r = spawnSync(gh.path, ['pr', 'create', '-R', identity.slug, '--head', branch, '--base', releaseBase.ref, '--title', ctx.prTitle, '--body-file', ctx.prBodyFile, ...(ctx.draft ? ['--draft'] : [])],
       { cwd: ctx.repoRoot, encoding: 'utf8', env: ghEnv(env), timeout: 300000 });
