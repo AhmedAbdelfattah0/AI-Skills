@@ -10,12 +10,16 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, rmSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { POSIX } from './engine-test-fixture.mjs';
 import { enrollFixture, GITHUB_URL } from './engine-enroll.test-helper.mjs';
+import { candidateId } from './engine-io.mjs';
+import { historyPaths } from './engine-enroll.mjs';
+import { buildPrompt } from './engine-review-dispatch.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups (engine) and sh fakes';
 const GUARD = fileURLToPath(new URL('./git-guard.mjs', import.meta.url));
@@ -153,3 +157,121 @@ test('R5-1f legitimate: one fetch URL and one push URL naming the SAME repositor
   assert.equal(h.cli('ci').out.state, 'PASS');
   assert.equal(authorize(h, 'complete').out.allow, true);
 });
+
+// ------------------------------------------------------------------ item 2: the reviewer brief is the candidate's own bytes
+
+/** A temp repo (isolated config): base commit c0 with src/{a,b,c,d}.txt = "old", HEAD = c0 (trunk), the work tree changed by `edit`. */
+function briefRepo(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'r0s5-brief-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, '.home'); // outside the work tree? no: ignored below
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: join(dir, '.gitconfig-none'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  writeFileSync(join(dir, '.gitconfig-none'), '');
+  const g = (...a) => { const r = spawnSync('git', a, { cwd: dir, encoding: 'utf8', env }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  g('init', '-q');
+  writeFileSync(join(dir, '.gitignore'), '.gitconfig-none\n.home\n');
+  mkdirSync(join(dir, 'src'));
+  for (const f of ['a', 'b', 'c', 'd']) writeFileSync(join(dir, 'src', `${f}.txt`), 'old\n');
+  g('add', '.'); g('commit', '-q', '-m', 'c0'); g('branch', 'trunk');
+  void home;
+  const brief = (over = {}) => {
+    const c = candidateId(dir, 'trunk', []);
+    assert.ok(c.candidate_id, J(c));
+    return buildPrompt({ S: { ticket: 'T-1', run_id: 'run-1', config: {} }, repoRoot: dir, planText: null, role: 'primary', owed: { kind: 'original' },
+      candidate: c.candidate_id, mergeBase: c.merge_base, paths: c.paths, ...over });
+  };
+  return { dir, g, brief };
+}
+const J = JSON.stringify;
+
+test('R5-2a (pre-fix: the brief carried NO content of src/a.txt while the candidate hashed its bytes): a SUCCESSFUL textconv (diff.hide.textconv=true via .git/info/attributes), a -diff attribute, core.bigFileThreshold and a clean filter never hide the changed bytes from the reviewer', (t) => {
+  const r = briefRepo(t);
+  for (const f of ['a', 'b', 'c', 'd']) writeFileSync(join(r.dir, 'src', `${f}.txt`), `SECRET-${f}\n`);
+  writeFileSync(join(r.dir, '.git', 'info', 'attributes'), 'src/a.txt diff=hide\nsrc/b.txt -diff\nsrc/d.txt filter=blank\n');
+  r.g('config', 'diff.hide.textconv', 'true');
+  r.g('config', 'core.bigFileThreshold', '1');
+  r.g('config', 'filter.blank.clean', 'cat >/dev/null');
+  const b = r.brief();
+  for (const f of ['a', 'b', 'c', 'd']) assert.match(b, new RegExp(`^\\+SECRET-${f}$`, 'm'), `src/${f}.txt's new line is in the brief`);
+  for (const f of ['a', 'b', 'c', 'd']) assert.match(b, new RegExp(`^-old$`, 'm'));
+  assert.doesNotMatch(b, /Binary files .* differ/, 'no text file is rendered as binary');
+});
+
+test('R5-2b the brief is bound to the frozen candidate and its COMPLETE inventory: a candidate id other than the bytes now, or an inventory missing a changed path, is review_diff_unverified (no reviewer launches)', (t) => {
+  const r = briefRepo(t);
+  writeFileSync(join(r.dir, 'src', 'a.txt'), 'new a\n');
+  writeFileSync(join(r.dir, 'src', 'b.txt'), 'new b\n');
+  const c = candidateId(r.dir, 'trunk', []);
+  const ok = r.brief();
+  assert.match(ok, new RegExp(`candidate ${c.candidate_id}`));
+  assert.match(ok, /## Candidate inventory/);
+  const unverified = (e) => e.code === 'review_diff_unverified';
+  assert.throws(() => r.brief({ candidate: 'f'.repeat(64) }), unverified, 'another candidate id');
+  assert.throws(() => r.brief({ paths: ['src/a.txt'] }), unverified, 'src/b.txt left out of the inventory');
+  // the work tree moving after the candidate was frozen (the bytes the reviewer would read are not the candidate's)
+  const frozen = candidateId(r.dir, 'trunk', []);
+  writeFileSync(join(r.dir, 'src', 'a.txt'), 'moved after the freeze\n');
+  assert.throws(() => buildPrompt({ S: { ticket: 'T-1', run_id: 'run-1', config: {} }, repoRoot: r.dir, planText: null, role: 'primary', owed: { kind: 'original' },
+    candidate: frozen.candidate_id, mergeBase: frozen.merge_base, paths: frozen.paths }), unverified);
+});
+
+test('R5-2c legitimate candidates render without a new false block: a new untracked file, a deletion, a mode-only change, a symlink, a real binary (declared with its digest), CRLF and a file with no final newline', { skip: POSIX ? false : 'symlink and mode bits' }, (t) => {
+  const r = briefRepo(t);
+  writeFileSync(join(r.dir, 'src', 'new.txt'), 'brand new\n');
+  rmSync(join(r.dir, 'src', 'b.txt'));
+  chmodSync(join(r.dir, 'src', 'c.txt'), 0o755);
+  symlinkSync('a.txt', join(r.dir, 'src', 'link'));
+  writeFileSync(join(r.dir, 'src', 'blob.bin'), Buffer.from([0, 1, 2, 3, 0, 255]));
+  writeFileSync(join(r.dir, 'src', 'a.txt'), 'line1\r\nline2');
+  r.g('add', '-N', 'src/blob.bin', 'src/link');
+  const b = r.brief();
+  assert.match(b, /## Untracked file src\/new\.txt\n```\nbrand new\n/, 'untracked content, whole');
+  assert.match(b, /deleted file mode 100644/);
+  assert.match(b, /old mode 100644\nnew mode 100755/);
+  assert.match(b, /new file mode 120000/);
+  assert.match(b, /binary content \(6 bytes, sha256:[0-9a-f]{64}\)/);
+  assert.match(b, /^\+line1\r$/m);
+  assert.match(b, /\\ No newline at end of file/);
+});
+
+test('R5-2d (pre-fix: the reviewer prompt omitted src/a.txt): engine review-dispatch with a successful textconv hiding src/a.txt writes a prompt carrying its bytes; the receipt binds the inventory digest', { skip: WIN_SKIP }, async (t) => {
+  const fx = enrollFixture(t);
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0);
+  mkdirSync(join(fx.repo, '.git', 'info'), { recursive: true });
+  writeFileSync(join(fx.repo, '.git', 'info', 'attributes'), 'src/a.txt diff=hide\n');
+  fx.okGit(['config', '--local', 'diff.hide.textconv', 'true']);
+  fx.okGit(['add', '-N', 'src/a.txt']);
+  const d = fx.dispatch('primary');
+  assert.equal(d.out.code, 'review_dispatched', d.stdout);
+  const prompt = readFileSync(d.out.receipt.prompt_file, 'utf8');
+  assert.match(prompt, /^\+a1$/m, 'the reviewer sees the bytes the candidate covers');
+  assert.match(d.out.receipt.inventory_sha256 ?? '', /^sha256:[0-9a-f]{64}$/);
+});
+
+test('R5-2e (pre-fix: a submodule bump was NOT a candidate path, so neither reviewed nor caught by the history check): diff.ignoreSubmodules=all never hides a changed submodule from the candidate inventory or the publish history listing', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'r0s5-sub-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'none.gitconfig'), '');
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: join(root, 'none.gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const g = (cwd, ...a) => { const r = spawnSync('git', a, { cwd, encoding: 'utf8', env }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const inner = join(root, 'inner'), main = join(root, 'main');
+  mkdirSync(inner); mkdirSync(main);
+  g(inner, 'init', '-q'); writeFileSync(join(inner, 'f'), '1'); g(inner, 'add', 'f'); g(inner, 'commit', '-q', '-m', 'i1');
+  g(main, 'init', '-q'); writeFileSync(join(main, 'x'), 'x'); g(main, 'add', 'x'); g(main, 'commit', '-q', '-m', 'c0');
+  g(main, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', inner, 'sub'); g(main, 'commit', '-q', '-m', 'sub');
+  g(main, 'branch', 'trunk');
+  writeFileSync(join(main, 'sub', 'f'), '2'); g(join(main, 'sub'), 'commit', '-q', '-a', '-m', 'i2');
+  g(main, 'add', 'sub'); g(main, 'commit', '-q', '-m', 'bump the submodule');
+  g(main, 'config', 'diff.ignoreSubmodules', 'all');
+  const c = candidateId(main, 'trunk', []);
+  assert.deepEqual(c.paths, ['sub'], J(c));
+  const h = historyPaths(main, 'trunk..HEAD');
+  assert.deepEqual([h.ok, h.paths], [true, ['sub']], J(h));
+  const b = buildPrompt({ S: { ticket: 'T-1', run_id: 'run-1', config: {} }, repoRoot: main, planText: null, role: 'primary', owed: { kind: 'original' },
+    candidate: c.candidate_id, mergeBase: c.merge_base, paths: c.paths });
+  assert.match(b, /Subproject commit [0-9a-f]{40} -> [0-9a-f]{40}/);
+});
+

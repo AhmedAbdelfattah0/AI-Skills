@@ -86,8 +86,10 @@ const excludes = new Set([...rawExcludes].map((item) => {
  */
 const isExcluded = (repoPath) => [...excludes].some((e) => repoPath === e || repoPath.startsWith(e.replace(/\/$/, '') + '/'));
 
+// R0-S round 5 (item 2): --ignore-submodules=none: diff.ignoreSubmodules / submodule.<name>.ignore never hide a changed
+// submodule from the candidate (the command runs at the top level, so diff.relative has no effect).
 const tracked = splitNul(git(root, [
-  'diff', '--name-only', '-z', '--no-renames', mergeBase, '--',
+  'diff', '--name-only', '-z', '--no-renames', '--ignore-submodules=none', mergeBase, '--',
 ], null));
 const untracked = splitNul(git(root, [
   'ls-files', '--others', '--exclude-standard', '-z', '--',

@@ -59,6 +59,9 @@
  * ship-ready and authorize publish); review_cli_drift / review_cli_unavailable (the pinned reviewer CLI, launched through an
  * engine shim first on PATH); the uncorrectable refusals are recorded (state.review_refusals) for `next`.
  *
+ * R0-S round 5 (item 2): review_diff_unverified: the brief's diff is rendered from the candidate's own bytes with no repository or user diff
+ * configuration (`candidateBrief`), verified hunk by hunk, and bound to the frozen candidate id by its inventory (inventory_sha256 in the receipt).
+ *
  * R0-S round 4: the FREEZE is captured BEFORE launch, in the receipt: `base` { remote, identity, ref, sha, merge_base } (engine-identity.mjs
  * captureBase: the remote's commit for the base of record, both base modes) and `review_execution_id`, an engine-minted id per owed review
  * (state.review_executions: one per original group; a confirmation carries its original's). gate review adopts the receipts' base as the
@@ -70,10 +73,10 @@
  * import this module and pass ctx.relayHome; the receipt then proves only that the engine started that file. Native
  * Agent-tool reviews cannot be bound by this mechanism. `gate unit-review` is not covered.
  */
-import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
-import { join, delimiter } from 'node:path';
-import { userInfo } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync, symlinkSync, lstatSync, readlinkSync, mkdtempSync, rmSync } from 'node:fs';
+import { join, delimiter, dirname } from 'node:path';
+import { userInfo, tmpdir } from 'node:os';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
@@ -263,6 +266,161 @@ export function briefGit(repo, args, run = git) {
 }
 const MAX_UNTRACKED_BYTES = 256 * 1024;
 
+// ---- the candidate brief (R0-S round 5, item 2) -----------------------------------------------------
+//
+// The reviewer's diff is rendered from the candidate's OWN bytes (the bytes candidate-id.mjs hashes), never by `git diff` in the
+// repository: there a .gitattributes / .git/info/attributes driver (a textconv that succeeds, `-diff`/`binary`), core.bigFileThreshold,
+// a clean filter or diff.ignoreSubmodules can show the reviewer other content than the candidate id covers. Old side: the merge base's
+// blobs read raw (cat-file, no filters, no replacement objects); new side: the work tree read raw (lstat, readlink, readFile). Each text
+// pair is rendered by `git diff --no-index --text --no-textconv --no-ext-diff` in an empty temp directory with no repository, no global or
+// system config and no GIT_* environment (nothing of the repository's or user's diff configuration applies), then VERIFIED independently:
+// its hunks, applied to the old bytes, must give exactly the new bytes. Binary or non-UTF-8 content is declared with its size and sha256
+// (never silently dropped). The inventory (every candidate path: kind, mode, size, sha256) recomputes the candidate id from exactly these
+// bytes: it must be the frozen candidate the brief names, else review_diff_unverified (a path left out, the work tree moved since the
+// freeze, or unverifiable content). Nothing launches on an unverified brief.
+
+const BINARY_SNIFF = 8000; // git's own binary heuristic: a NUL in the first 8000 bytes
+/** Whether a buffer is shown as text: no NUL in its head and valid UTF-8 (a lossy decode would show the reviewer other bytes). */
+export const isTextBytes = (b) => !b.subarray(0, BINARY_SNIFF).includes(0) && Buffer.from(b.toString('utf8'), 'utf8').equals(b);
+const unverified = (reason) => coded('review_diff_unverified', `${reason}: no reviewer is launched on a brief that does not verifiably carry the candidate`);
+const digestOf = (b) => sha(b);
+
+/** The work-tree entry of `p` exactly as candidate-id.mjs hashes it: { kind, mode, content }. */
+function worktreeEntry(repoRoot, p) {
+  const abs = join(repoRoot, p);
+  let st;
+  try { st = lstatSync(abs); } catch (e) { if (e?.code === 'ENOENT') return { kind: 'deleted', mode: '0', content: Buffer.from('tombstone') }; throw unverified(`${p} cannot be read (${e?.code ?? e?.message})`); }
+  try {
+    if (st.isSymbolicLink()) return { kind: 'symlink', mode: '120000', content: Buffer.from(readlinkSync(abs)) };
+    if (st.isFile()) return { kind: 'file', mode: (st.mode & 0o111) === 0 ? '100644' : '100755', content: readFileSync(abs) };
+  } catch (e) { throw unverified(`${p} cannot be read (${e?.code ?? e?.message})`); }
+  if (st.isDirectory()) {
+    const r = authGit(abs, ['rev-parse', 'HEAD'], { timeout: 30000 });
+    if (r.status !== 0) throw unverified(`submodule ${p} has no readable HEAD`);
+    return { kind: 'submodule', mode: '160000', content: Buffer.from(r.stdout.trim()) };
+  }
+  throw unverified(`${p} is not a file, symlink or submodule`);
+}
+
+/** The candidate id of `entries` ({ path, kind, mode, content }): candidate-id.mjs's digest, recomputed in process from the same bytes. */
+export function candidateDigest(entries) {
+  const h = createHash('sha256');
+  h.update('ship-ticket-candidate-v1\0');
+  for (const e of [...entries].sort((a, b) => Buffer.compare(Buffer.from(a.path, 'utf8'), Buffer.from(b.path, 'utf8')))) {
+    for (const part of [Buffer.from(e.path, 'utf8'), e.kind, e.mode, String(e.content.length)]) { h.update(part); h.update('\0'); }
+    h.update(e.content); h.update('\0');
+  }
+  return h.digest('hex');
+}
+
+/** The merge base's entries of `paths`: Map path -> { mode, type, oid }, read with replacement objects off. */
+function baseEntries(repoRoot, mergeBase, paths, run) {
+  const out = new Map();
+  if (!paths.length) return out;
+  for (const rec of briefGit(repoRoot, ['ls-tree', '-r', '-z', '--full-tree', mergeBase, '--', ...paths], run).split('\0').filter(Boolean)) {
+    const tab = rec.indexOf('\t');
+    const [mode, type, oid] = rec.slice(0, tab).split(' ');
+    out.set(rec.slice(tab + 1), { mode, type, oid });
+  }
+  return out;
+}
+
+/** Raw blob bytes (cat-file blob: no textconv, no filters), or a thrown review_diff_unavailable. */
+function blobBytes(repoRoot, oid) {
+  const r = spawnSync('git', ['--no-replace-objects', 'cat-file', 'blob', oid], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024, timeout: 60000,
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
+  if (r.error || r.status !== 0) throw coded('review_diff_unavailable', `git cat-file blob ${oid} for the reviewer brief failed (${(r.error?.code ?? r.stderr?.toString() ?? '').toString().trim()})`);
+  return r.stdout;
+}
+
+/** The environment of the neutral renderer: no GIT_* variable, no global or system config, no repository above the temp directory. */
+function neutralEnv(tmp) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k) && !['HOME', 'XDG_CONFIG_HOME', 'USERPROFILE'].includes(k.toUpperCase())));
+  writeFileSync(join(tmp, 'empty.gitconfig'), '');
+  return { ...env, HOME: tmp, USERPROFILE: tmp, XDG_CONFIG_HOME: tmp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(tmp, 'empty.gitconfig'),
+    GIT_CEILING_DIRECTORIES: dirname(tmp), GIT_ATTR_NOSYSTEM: '1', LC_ALL: 'C' };
+}
+
+/** The unified hunks (everything from the first `@@`) between two texts, rendered with no repository or user diff configuration. */
+function renderHunks(tmp, env, oldText, newText) {
+  writeFileSync(join(tmp, 'old'), oldText);
+  writeFileSync(join(tmp, 'new'), newText);
+  const r = spawnSync('git', ['diff', '--no-index', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', '-U3', '--', 'old', 'new'],
+    { cwd: tmp, env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+  if (r.error || (r.status !== 0 && r.status !== 1)) throw coded('review_diff_unavailable', `git diff --no-index for the reviewer brief failed (${(r.error?.code ?? r.stderr ?? `exit ${r.status}`).toString().trim()})`);
+  const i = r.stdout.search(/^@@ /m);
+  return i < 0 ? '' : r.stdout.slice(i).replace(/\n$/, '');
+}
+
+/** Apply unified `hunks` to `oldText` -> the new text, or null when the hunks do not apply exactly (the independent verifier). */
+export function applyHunks(oldText, hunks) {
+  const old = oldText.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const lines = hunks ? hunks.split('\n') : [];
+  const out = [];
+  let i = 0;
+  for (let k = 0; k < lines.length;) {
+    const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(lines[k]);
+    if (!m) return null;
+    const start = Number(m[2] ?? 1) === 0 ? Number(m[1]) : Number(m[1]) - 1;
+    if (start < i || start > old.length) return null;
+    out.push(...old.slice(i, start)); i = start;
+    for (k++; k < lines.length && !lines[k].startsWith('@@ '); k++) {
+      const l = lines[k], tag = l[0];
+      if (tag === '\\') continue;
+      const text = l.slice(1) + (lines[k + 1]?.startsWith('\\') ? '' : '\n');
+      if (tag === ' ' || tag === '-') { if (old[i] !== text) return null; i++; if (tag === ' ') out.push(text); }
+      else if (tag === '+') out.push(text);
+      else return null;
+    }
+  }
+  out.push(...old.slice(i));
+  return out.join('');
+}
+
+const sideOf = (e) => (e ? `${e.content.length} bytes, ${digestOf(e.content)}` : 'absent');
+/**
+ * The verified candidate diff of `paths` from `mergeBase` and the inventory -> { diff, inventory, inventory_sha256 }, or a thrown
+ * review_diff_unverified / review_diff_unavailable. `candidate`: the frozen candidate id the brief must carry.
+ */
+export function candidateBrief(repoRoot, mergeBase, paths, candidate, run = git) {
+  const base = baseEntries(repoRoot, mergeBase, paths, run);
+  const tmp = mkdtempSync(join(tmpdir(), 'ship-ticket-brief-'));
+  const sections = [], entries = [], inventory = [];
+  try {
+    const env = neutralEnv(tmp);
+    for (const p of paths) {
+      const now = worktreeEntry(repoRoot, p);
+      entries.push({ path: p, ...now });
+      const was = base.get(p) ?? null;
+      const before = was ? { mode: was.mode, content: was.type === 'blob' ? blobBytes(repoRoot, was.oid) : Buffer.from(was.oid) } : null;
+      const after = now.kind === 'deleted' ? null : { mode: now.mode, content: now.content };
+      inventory.push({ path: p, kind: now.kind, mode: now.mode, bytes: after ? after.content.length : 0, sha256: after ? digestOf(after.content) : null });
+      const head = [`diff --git a/${p} b/${p}`];
+      if (!before && after) head.push(`new file mode ${after.mode}`);
+      else if (before && !after) head.push(`deleted file mode ${before.mode}`);
+      else if (before && after && before.mode !== after.mode) head.push(`old mode ${before.mode}`, `new mode ${after.mode}`);
+      if (!before && !after) throw unverified(`${p} is neither in the merge base nor in the work tree`);
+      const sub = [before?.mode, after?.mode].includes('160000');
+      const oldB = before?.content ?? Buffer.alloc(0), newB = after?.content ?? Buffer.alloc(0);
+      if (sub) { sections.push([...head, `Subproject commit ${before ? oldB.toString() : '(none)'} -> ${after ? newB.toString() : '(removed)'}`].join('\n')); continue; }
+      if (!isTextBytes(oldB) || !isTextBytes(newB)) {
+        sections.push([...head, `old: ${before && !isTextBytes(oldB) ? 'binary content (' : ''}${before ? sideOf(before) : 'absent'}${before && !isTextBytes(oldB) ? ')' : ''}`,
+          `new: ${after && !isTextBytes(newB) ? 'binary content (' : ''}${after ? sideOf(after) : 'absent'}${after && !isTextBytes(newB) ? ')' : ''}`,
+          `(binary or non-UTF-8 content is not inlined: read ${p} from the repository and check its sha256)`].join('\n'));
+        continue;
+      }
+      const oldT = oldB.toString('utf8'), newT = newB.toString('utf8');
+      const hunks = oldT === newT ? '' : renderHunks(tmp, env, oldT, newT);
+      if (applyHunks(oldT, hunks) !== newT) throw unverified(`the rendered diff of ${p} does not reproduce its bytes`);
+      sections.push([...head, ...(hunks ? [`--- ${before ? `a/${p}` : '/dev/null'}`, `+++ ${after ? `b/${p}` : '/dev/null'}`, hunks] : [])].join('\n'));
+    }
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+  const recomputed = candidateDigest(entries);
+  if (recomputed !== candidate) throw unverified(`the brief's inventory (${paths.length} path(s)) hashes to candidate ${recomputed}, not the frozen candidate ${candidate} (a changed path left out, or the work tree moved since the freeze)`);
+  const inventory_sha256 = sha(canonical({ candidate, merge_base: mergeBase, inventory }));
+  return { diff: sections.join('\n'), inventory, inventory_sha256, entries: new Map(entries.map(e => [e.path, e])) };
+}
+
 const CONTRACTS = {
   primary: ['reviewed_paths: [path]', 'reasoned_exclusions: [{ path, reason }]', 'coverage_partitions: [{ identity, owned: [path], outcome: PASS|FAIL }]',
     'acceptance_criteria: [{ id?, criterion, outcome: PASS|FAIL|NOT_APPLICABLE, evidence }]', 'rule_rows: [{ subject_id, outcome: PASS|FAIL|NOT_APPLICABLE, evidence }]',
@@ -273,12 +431,17 @@ const CONTRACTS = {
 };
 
 /** The engine-built reviewer brief: deterministic for one candidate, plan and role. */
-export function buildPrompt({ S, repoRoot, planText, role, owed, candidate, mergeBase, paths, run = git }) {
+export function buildPrompt(args) { return reviewerBrief(args).prompt; }
+
+/** The brief and the digest of its verified inventory (the receipt binds both: prompt_sha256, inventory_sha256). */
+export function reviewerBrief({ S, repoRoot, planText, role, owed, candidate, mergeBase, paths, run = git }) {
   const narrative = planText ? planText.slice(0, planText.indexOf(BEGIN)) + planText.slice(planText.indexOf(END) + END.length) : '(plan unreadable)';
   const acceptance = { ids: S.config?.acceptanceIds ?? [], nodes: Object.fromEntries(Object.entries(S.nodes ?? {}).map(([id, n]) => [id, n.acceptance ?? []])) };
   if (!mergeBase) throw coded('review_diff_unavailable', 'the candidate has no merge base: no reviewer is launched without its diff');
-  const diff = briefGit(repoRoot, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', mergeBase, '--', ...paths], run);
+  // Untracked candidate paths are shown whole (as before); tracked ones as the verified diff. The inventory covers both.
   const untracked = briefGit(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z'], run).split('\0').filter(p => p && paths.includes(p));
+  const { diff, inventory, inventory_sha256, entries } = candidateBrief(repoRoot, mergeBase, paths.filter(p => !untracked.includes(p)).concat(untracked), candidate, run);
+  const tracked = diff.split(/^(?=diff --git )/m).filter(sec => !untracked.some(p => sec.startsWith(`diff --git a/${p} b/${p}\n`))).join('');
   const shape = role === 'second' && owed.kind === 'confirmation' ? CONTRACTS.confirmation : CONTRACTS[role];
   const lines = [
     `# ship-ticket ${owed.kind} review, role ${role} (built by the run engine)`,
@@ -306,16 +469,22 @@ export function buildPrompt({ S, repoRoot, planText, role, owed, candidate, merg
     '## Candidate paths',
     ...paths.map(p => `- ${p}`),
     '',
-    '## Diff from the merge base to the work tree (tracked paths)',
-    '```diff', diff, '```',
+    `## Candidate inventory (verified: these bytes are candidate ${candidate}; inventory ${inventory_sha256})`,
+    ...inventory.map(e => `- ${e.path}: ${e.kind} ${e.mode}, ${e.bytes} bytes${e.sha256 ? `, ${e.sha256}` : ''}`),
+    '',
+    '## Diff from the merge base to the work tree (tracked paths; rendered from the candidate bytes, no diff driver or filter applies)',
+    '```diff', tracked.replace(/\n$/, ''), '```',
     ...untracked.flatMap(p => {
-      const b = readBytes(join(repoRoot, p));
-      const text = b === null ? '(unreadable)' : b.length > MAX_UNTRACKED_BYTES ? `(${b.length} bytes; read ${p} from the repository)` : b.toString('utf8');
+      // The inventoried bytes themselves (read once: what is shown is what the candidate id covers).
+      const e = entries.get(p), b = e.content, d = sha(b);
+      const text = e.kind === 'symlink' ? `(symbolic link to ${JSON.stringify(b.toString('utf8'))})` : e.kind !== 'file' ? `(${e.kind})`
+        : b.length > MAX_UNTRACKED_BYTES ? `(${b.length} bytes, ${d}; read ${p} from the repository)`
+        : !isTextBytes(b) ? `(binary content (${b.length} bytes, ${d}); read ${p} from the repository)` : b.toString('utf8');
       return ['', `## Untracked file ${p}`, '```', text, '```'];
     }),
     '',
   ];
-  return lines.join('\n');
+  return { prompt: lines.join('\n'), inventory_sha256 };
 }
 
 // ---- dispatch -------------------------------------------------------------------------------------
@@ -468,9 +637,9 @@ export async function dispatchReview(E, { role, candidate }) {
   const outDir = join(P.attempts, id + '.relay');
   mkdirSync(outDir, { recursive: true });
   const promptFile = join(P.attempts, id + '.prompt');
-  let prompt;
-  try { prompt = buildPrompt({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] }); }
-  catch (e) { if (e.code !== 'review_diff_unavailable') throw e; return keep(refuse(e.code, [e.message])); }
+  let prompt, inventorySha;
+  try { ({ prompt, inventory_sha256: inventorySha } = reviewerBrief({ S, repoRoot: ctx.repoRoot, planText: io.readIfExists(P.plan), role, owed, candidate, mergeBase: c.merge_base ?? null, paths: c.paths ?? [] })); }
+  catch (e) { if (!['review_diff_unavailable', 'review_diff_unverified'].includes(e.code)) throw e; return keep(refuse(e.code, [e.message])); }
   writeFileSync(promptFile, prompt, { mode: 0o600 });
   const argv = [process.execPath, relay, '--cd', ctx.repoRoot, '--read-only', '--effort', 'high', '--timeout', `${route.timeout_min}m`, '--out-dir', outDir,
     ...(route.model ? ['--model', route.model] : [])];
@@ -478,7 +647,7 @@ export async function dispatchReview(E, { role, candidate }) {
   const receipt = { attempt_id: id, role, kind: owed.kind, ...(owed.review_execution ? { review_execution: owed.review_execution } : {}),
     review_execution_id: executionId, base: frozenBase,
     requested_identity: identity, provider: route.provider, candidate_id: candidate, merge_base: c.merge_base ?? null,
-    argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), started_at: iso(now), deadline: iso(deadline),
+    argv_sha256: sha(JSON.stringify(argv)), prompt_sha256: sha(prompt), inventory_sha256: inventorySha, started_at: iso(now), deadline: iso(deadline),
     relay, relay_sha256: sha(readFileSync(relay)), cli: { path: cli.pin.path, sha256: cli.pin.sha256 }, argv, prompt_file: promptFile, out_dir: outDir, result_file: join(outDir, 'result.json'),
     status: 'dispatched' };
   const a = { attempt_id: id, kind: REVIEW_KIND, node: `review-${role}`, role, provider: route.provider, model: route.model ?? 'provider-default',

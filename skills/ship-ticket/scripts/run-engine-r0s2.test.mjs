@@ -285,17 +285,16 @@ test('item 6: dispatch refusals the orchestrator cannot correct (review_relay_dr
   assert.deepEqual([b.out.code, b.out.recorded], ['reviewer_is_builder', true], b.stdout);
   stopsFor('reviewer_is_builder');
   fx.editState(S => { S.builders.pop(); });
-  // review_diff_unavailable: a textconv that fails breaks the content diff (the brief) while the candidate (name-only) still computes.
+  // R0-S round 5 (item 2): a textconv driver (failing here) no longer touches the brief at all: it is rendered from the candidate's own
+  // bytes with no diff driver, so the dispatch proceeds and the reviewer sees src/a.txt (review_diff_unavailable stays for a failed git
+  // read: A1 in run-engine-r0s.test.mjs; a successful hiding textconv: R5-2a/R5-2d in run-engine-r0s5.test.mjs).
   mkdirSync(join(fx.repo, '.git', 'info'), { recursive: true });
   writeFileSync(join(fx.repo, '.git', 'info', 'attributes'), '* diff=boom\n');
   fx.okGit(['config', '--local', 'diff.boom.textconv', 'false']);
-  fx.okGit(['add', '-N', 'src/a.txt']); // tracked (intent to add): its content diff runs the failing textconv
-  const before = fx.readState();
+  fx.okGit(['add', '-N', 'src/a.txt']); // tracked (intent to add): a repository `git diff` of it would run the failing textconv
   const d = fx.dispatch('primary');
-  assert.deepEqual([d.out.code, d.out.recorded], ['review_diff_unavailable', true], d.stdout);
-  const after = fx.readState();
-  assert.deepEqual([after.review_dispatches.length, after.attempts.length], [before.review_dispatches.length, before.attempts.length], 'no receipt, no attempt');
-  stopsFor('review_diff_unavailable');
+  assert.equal(d.out.code, 'review_dispatched', d.stdout);
+  assert.match(readFileSync(d.out.receipt.prompt_file, 'utf8'), /^\+a1$/m);
 });
 
 test('item 6: the same gate refusal twice in a row is the human\'s (gate review, gate ship-ready); a repeated provider failure at ci too', { skip: WIN_SKIP }, async (t) => {

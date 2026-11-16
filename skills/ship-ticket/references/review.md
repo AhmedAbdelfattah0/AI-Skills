@@ -113,8 +113,21 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   argv array and the prompt itself: the frozen candidate id, the approved plan
   narrative, the acceptance inventory, the candidate's paths, diff and untracked
   contents, and the output contract. Nothing of the command comes from you.
+  R0-S round 5: the diff is rendered from the candidate's OWN bytes (the merge
+  base's blobs read raw, the work tree read raw) in an empty temp directory with
+  no repository, user or system diff configuration, so no textconv or external
+  diff driver, `-diff`/`binary` attribute, `core.bigFileThreshold`, clean filter
+  or `diff.ignoreSubmodules` can show the reviewer other content than the
+  candidate id covers. Each text diff is verified (its hunks applied to the old
+  bytes give exactly the new bytes); binary or non-UTF-8 content is declared with
+  its size and sha256. The brief lists the candidate inventory (every path:
+  kind, mode, size, sha256), which must recompute the frozen candidate id
+  exactly; otherwise (a changed path missing, the work tree moved since the
+  freeze, an unreadable path) the dispatch is `review_diff_unverified`
+  (recorded) and nothing launches. The candidate itself and the publish history
+  check list paths with `--ignore-submodules=none`.
 - **The receipt comes first.** `REVIEW_DISPATCHED` `{attempt_id, role,
-  requested_identity, candidate_id, argv_sha256, prompt_sha256, started_at,
+  requested_identity, candidate_id, argv_sha256, prompt_sha256, inventory_sha256, started_at,
   review_execution_id, base}` is committed before the launcher starts. It carries
   the FREEZE (R0-S round 4): `base` `{remote, identity, ref, sha, merge_base}`,
   the commit the remote names for the base of record (`config.base`, else the
@@ -129,7 +142,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   `review_role_mismatch` (not the role owed: `confirmation` only after the
   repair), `review_not_owed`, `review_dispatch_live` (never a second launch),
   `review_already_collected`, `review_identity_shared`, `review_build_live`,
-  `review_launch_failed`, `review_relay_drift`, `review_diff_unavailable` (a git
+  `review_launch_failed`, `review_relay_drift`, `review_diff_unverified` (above), `review_diff_unavailable` (a git
   call for the brief failed or overflowed: no reviewer launches on a partial
   diff), `review_fail_unconsumed` (a reviewer FAIL, or a failed reviewer, of this
   owed review for another candidate OR for the same candidate id against another
@@ -142,7 +155,7 @@ node <SHIP_TICKET_SKILL>/scripts/run-engine.mjs review-collect  --repo <R> --tic
   `gate review`, `gate ship-ready` and `authorize publish` enforce the same
   ungated-FAIL and running-reviewer rule. The refusals the orchestrator cannot
   correct (`reviewer_is_builder`, `review_relay_drift`, `review_cli_drift`,
-  `review_cli_unavailable`, `review_diff_unavailable`, `identity_changed`, `remote_ambiguous` and the
+  `review_cli_unavailable`, `review_diff_unavailable`, `review_diff_unverified`, `identity_changed`, `remote_ambiguous` and the
   `base_*` codes) are recorded
   (`state.review_refusals`) and make `next` a human-owned `BLOCKED` until a later
   dispatch of that role succeeds.

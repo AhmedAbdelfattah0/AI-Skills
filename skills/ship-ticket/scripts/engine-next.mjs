@@ -101,6 +101,7 @@ const RECOVERY = Object.freeze({
   review_cli_drift: 'restore the pinned reviewer CLI (same path and bytes), or start a new run',
   review_cli_unavailable: 'install the reviewer CLI (claude or codex) on PATH, logged in, then run review-dispatch again',
   review_diff_unavailable: 'fix the git failure the reason names (the brief needs the full diff), then run review-dispatch again',
+  review_diff_unverified: 'the brief could not be verified against the frozen candidate (the work tree moved, or a path is unreadable): restore the candidate bytes or start from the current candidate, then run review-dispatch again',
   remote_ambiguous: 'configure exactly one URL (and at most one push URL, of the same repository) for the enrolled remote, then run review-dispatch again',
 });
 /** The poll interval `next` suggests while CI is PENDING (a hint: nothing waits on it). */

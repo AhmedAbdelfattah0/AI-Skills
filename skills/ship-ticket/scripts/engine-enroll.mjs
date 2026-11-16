@@ -98,7 +98,7 @@ export const HISTORY_MAX_BUFFER = 256 * 1024 * 1024;
  * A non-zero exit, a spawn error or a buffer overflow (ENOBUFS) is { ok: false }: never read as an empty history.
  */
 export function historyPaths(repo, range, { spawn = spawnSync, maxBuffer = HISTORY_MAX_BUFFER } = {}) {
-  const r = spawn('git', ['--no-replace-objects', 'log', '--format=', '--name-only', '--no-renames', '-z', range], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer,
+  const r = spawn('git', ['--no-replace-objects', 'log', '--format=', '--name-only', '--no-renames', '--ignore-submodules=none', '-z', range], { cwd: repo, encoding: 'utf8', timeout: 120000, maxBuffer,
     env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
   if (r.error || r.status !== 0) return { ok: false, reason: (r.error?.code ?? r.error?.message ?? (r.stderr || `git log exited ${r.status}`)).toString().trim() };
   return { ok: true, paths: r.stdout.split('\0').map(p => p.replace(/^\n/, '')).filter(Boolean) };
