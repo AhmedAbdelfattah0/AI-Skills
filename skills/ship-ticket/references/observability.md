@@ -373,5 +373,9 @@ Deferred to S-04a2 (relay `exit`/`usage` import, removed from S-04a1 after two f
 contract must define a CLOSED set of known usage keys with an explicit unknown-key rule, and settle these surviving defects. Inherited
 property names (`constructor`, `__proto__`, `toString`) must not index the key table. A cap on kept unknown counters must report the
 omitted count rather than drop silently. Claude's nested `output_tokens_details.thinking_tokens` needs a mapping or an explicit
-"not imported". `exit` and `usage` must be validated when a log row is read (`validCarrierTiming`). Both relays' real result shapes
+"not imported". `exit` and `usage` must be validated when a log row is read (`validCarrierTiming`). Nested numerics (for example `output_tokens_details`) need an explicit decision too. Both relays' real result shapes
 need fixtures (the Codex relay writes no `usage` today). Until then carrier timing imports only the whitelisted timing/status fields.
+
+Known limit of the END leniency (S-04a1): an invalid or repeated `gap_reason` or `skill_revision` on an `end` is recorded as `unknown` and, because
+start and end metrics merge with the end winning, it overwrites a valid value declared at the start of the same interval. The stderr note
+names the rejected value; omitting the key instead is a candidate refinement for S-04a2.

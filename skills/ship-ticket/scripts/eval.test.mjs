@@ -552,15 +552,35 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   assert.deepEqual(got.summary_cli.integrity_warnings, []);
   assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'T1').open_state, 'active_or_unexpected_stop');
   assert.ok(got.summary_cli.runs.find((r) => r.ticket === 'T1').intervals.some((i) => i.carrier_timing));
-  assert.ok(t1.review_rounds.some((r) => r.intervals.some((i) => i.basis === 'carrier' && i.collection_delay_ms === 0)));
+  assert.ok(t1.review_rounds.some((r) => r.intervals.some((i) => i.basis === 'carrier' && i.collection_delay_ms === 10000)));
   assert.deepEqual(got.summary_cli.runs.find((r) => r.ticket === 'T1').parallel_groups.map((p) => p.timing_basis), ['carrier']);
   // The frozen clock makes the age of the oldest open interval an exact figure.
-  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').open_intervals.length, 1);
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').open_intervals.length, 2);
   assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').oldest_open_age_ms, FROZEN_NOW - Date.UTC(2026, 0, 1, 0, 0, 10));
   assert.deepEqual(t1.truncated_outputs, [{ attempt_id: 'att-3', kind: 'node', node: 'c', stdout_bytes: 1234 }]);
   assert.deepEqual(got.summary_cli.runs.map((r) => r.open_state).filter((v, i, a) => a.indexOf(v) === i).sort(), ['active_or_unexpected_stop', 'closed', 'planning_or_approval', 'waiting']);
   assert.equal(got.summary_cli.aggregate.standard_review_median_ms > 0 && got.summary_cli.aggregate.elevated_review_median_ms > 0, true);
   assert.equal(got.summary_cli.aggregate.primary_degradations_observed, 1);
+  assert.equal(got.summary_cli.aggregate.optional_degradations_observed, 1);
+  assert.equal(got.summary_cli.aggregate.failed_runs, 1);
+  assert.notEqual(got.summary_cli.aggregate.standard_review_median_ms, got.summary_cli.aggregate.elevated_review_median_ms);
+  // A carrier-timed interval whose carrier span (710-790 s, 80 s) differs from the logger span (700-800 s, 100 s): the carrier span wins.
+  const primary = t1.review_rounds.find((r) => r.review_execution === 'review-a').intervals.find((i) => i.role === 'primary');
+  assert.deepEqual([primary.basis, primary.duration_ms, primary.collection_delay_ms], ['carrier', 80000, 10000]);
+  assert.equal(t1.review_rounds.find((r) => r.review_execution === 'review-a').overlap_ms, 80000);
+  // Two distinct open starts in one run (10 s and 30 s): the age is measured from the oldest.
   assert.equal(got.policy_refusal.status, 1);
   assert.match(got.policy_refusal.stderr, /policy_version_unsupported/);
+});
+
+test('T-C1 generator: re-captures the golden from the pinned base even under hostile GIT_* variables, and reproduces the committed golden', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'legacy-gen-'));
+  try {
+    const out = join(dir, 'golden.json');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const r = spawnSync(process.execPath, [join(here, 'legacy-golden.mjs'), '--out', out], { encoding: 'utf8',
+      env: { ...process.env, GIT_DIR: join(dir, 'not-a-repo'), GIT_WORK_TREE: dir, GIT_INDEX_FILE: join(dir, 'idx') } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(out, 'utf8'), readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8'), 'the committed golden is exactly what the base produces');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

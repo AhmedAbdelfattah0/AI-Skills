@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { FROZEN_NOW } from './legacy-golden.clock.test-helper.mjs';
+export { FROZEN_NOW };
 
 export const S27_STATE = join(dirname(fileURLToPath(import.meta.url)), 'legacy-golden.s27-state.json');
-const CLOCK = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'legacy-golden.clock.test-helper.mjs')).href;
-export const FROZEN_NOW = Date.parse('2026-01-02T00:00:00Z');
+const CLOCK = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'legacy-golden.clock-preload.test-helper.mjs')).href;
 // No inherited GIT_* variable may steer the capture's git or CLI subprocesses to another repository.
 const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
 const schema = 'ship-ticket-run-log-v1';
@@ -39,7 +40,7 @@ function logs() {
     ...pair('T1', 'run-1', 'fe', 'activity', 'frontend_build', 110 * SEC, 400 * SEC, { parallel_group: 'wave-1', candidate_id: 'sha-1', review_execution: 'review-pg' }, 'pass', { carrier_timing: carrier(110, 390, 10, 'review-pg') }),
     ...pair('T1', 'run-1', 'be', 'activity', 'backend_build', 110 * SEC, 380 * SEC, { parallel_group: 'wave-1', candidate_id: 'sha-1', review_execution: 'review-pg' }, 'pass', { carrier_timing: carrier(110, 370, 10, 'review-pg') }),
     ...pair('T1', 'run-1', 'w1', 'wait', 'user_approval', 500 * SEC, 560 * SEC));
-  T1.push(...roundRows('T1', 'run-1', 'a', 700, [['primary_review', 0, 100, {}, 'pass', carrier(700, 800, 0, 'review-a')], ['optional_review', 10, 120], ['review_reconcile', 130, 160],
+  T1.push(...roundRows('T1', 'run-1', 'a', 700, [['primary_review', 0, 100, {}, 'pass', carrier(710, 790, 10, 'review-a')], ['optional_review', 10, 120], ['review_reconcile', 130, 160],
     ['review_repair', 170, 220], ['review_confirmation', 230, 280]], { repair_batches: 1, confirmation_count: 1, gap_reason: 'wait' }, 300));
   T1.push(...roundRows('T1', 'run-1', 'b', 1100, [['primary_review', 0, 90], ['optional_review', 5, 95], ['review_reconcile', 100, 130], ['review_repair', 140, 170]],
     { repair_batches: 2, confirmation_count: 0 }, 250));
@@ -48,10 +49,14 @@ function logs() {
   T1.push({ schema, ticket: 'T1', run_id: 'run-1', event_id: 'open-1', kind: 'activity', name: 'frontend_build', event: 'start', timestamp: iso(1900 * SEC), metrics: {} });
   out.T1 = T1;
   // 21 single-round runs of one ticket: P50 (n>=5) and P95 (n>=20) are computed.
-  out.P = Array.from({ length: 21 }, (_, i) => roundRows('P', `run-p${i}`, 'a', 0, [['primary_review', 0, (i + 1) * 10, {}, i === 3 ? 'degraded' : 'pass'], ['optional_review', 0, (i + 1) * 9], ['review_reconcile', (i + 1) * 10, (i + 1) * 10 + 5]],
-    { repair_batches: 0, confirmation_count: 0, review_profile: i % 2 ? 'elevated' : 'standard' }, (i + 1) * 10 + 5)).flat();
+  out.P = Array.from({ length: 21 }, (_, i) => roundRows('P', `run-p${i}`, 'a', 0, [['primary_review', 0, (i + 1) * 10, {}, i === 3 ? 'degraded' : 'pass'], ['optional_review', 0, (i + 1) * 9, {}, i === 5 ? 'degraded' : 'pass'], ['review_reconcile', (i + 1) * 10, (i + 1) * 10 + 5]],
+    { repair_batches: 0, confirmation_count: 0, review_profile: i % 2 ? 'elevated' : 'standard' }, (i + 1) * 10 + 5 + (i % 2 ? 500 : 0))).flat();
   // open states other than active_or_unexpected_stop
-  out.W = [{ schema, ticket: 'W', run_id: 'run-w', event_id: 'w-open', kind: 'wait', name: 'user_approval', event: 'start', timestamp: iso(10 * SEC), metrics: {} }];
+  // a failed workflow
+  out.F = pair('F', 'run-f', 'wf', 'workflow', 'ticket', 0, 50 * SEC, {}, 'fail');
+  out.W = [{ schema, ticket: 'W', run_id: 'run-w', event_id: 'w-open', kind: 'wait', name: 'user_approval', event: 'start', timestamp: iso(10 * SEC), metrics: {} },
+    // a second, newer open interval in the same run: the oldest-open age must use the OLDEST start
+    { schema, ticket: 'W', run_id: 'run-w', event_id: 'w-open-2', kind: 'activity', name: 'frontend_build', event: 'start', timestamp: iso(30 * SEC), metrics: {} }];
   out.N = [{ schema, ticket: 'N', run_id: 'run-n', event_id: 'n-open', kind: 'activity', name: 'native_plan_mode', event: 'start', timestamp: iso(20 * SEC), metrics: {} }];
   // a legacy raw log without review_execution ids
   out.L = [...pair('L', 'run-l', 'ph', 'phase', 'REVIEW', 0, 100 * SEC, { repair_batches: 1, confirmation_count: 1 }), ...pair('L', 'run-l', 'c', 'activity', 'review_confirmation', 110 * SEC, 120 * SEC),

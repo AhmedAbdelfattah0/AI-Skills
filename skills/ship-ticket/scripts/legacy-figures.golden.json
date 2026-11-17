@@ -126,11 +126,11 @@
         {
          "role": "primary",
          "event_id": "run-1-a-primary_review",
-         "started_at": "2026-01-01T00:11:40.000Z",
-         "ended_at": "2026-01-01T00:13:20.000Z",
-         "duration_ms": 100000,
+         "started_at": "2026-01-01T00:11:50.000Z",
+         "ended_at": "2026-01-01T00:13:10.000Z",
+         "duration_ms": 80000,
          "basis": "carrier",
-         "collection_delay_ms": 0
+         "collection_delay_ms": 10000
         },
         {
          "role": "second_opinion",
@@ -171,10 +171,10 @@
        ],
        "missing_roles": [],
        "wall_ms": 300000,
-       "unaccounted_gap_ms": 50000,
+       "unaccounted_gap_ms": 60000,
        "gap_reason": "wait",
-       "overlap_ms": 90000,
-       "concurrency_ratio": 0.9
+       "overlap_ms": 80000,
+       "concurrency_ratio": 1
       },
       {
        "review_execution": "review-b",
@@ -486,7 +486,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 25000
+      "REVIEW": 525000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -548,9 +548,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 25000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 525000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 18000,
        "concurrency_ratio": 1
       }
@@ -648,7 +648,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 45000
+      "REVIEW": 545000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -710,9 +710,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 45000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 545000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 36000,
        "concurrency_ratio": 1
       }
@@ -810,7 +810,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 65000
+      "REVIEW": 565000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -872,9 +872,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 65000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 565000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 54000,
        "concurrency_ratio": 1
       }
@@ -972,7 +972,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 85000
+      "REVIEW": 585000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1034,9 +1034,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 85000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 585000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 72000,
        "concurrency_ratio": 1
       }
@@ -1134,7 +1134,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 105000
+      "REVIEW": 605000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1196,9 +1196,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 105000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 605000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 90000,
        "concurrency_ratio": 1
       }
@@ -1296,7 +1296,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 125000
+      "REVIEW": 625000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1358,9 +1358,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 125000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 625000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 108000,
        "concurrency_ratio": 1
       }
@@ -1458,7 +1458,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 145000
+      "REVIEW": 645000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1520,9 +1520,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 145000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 645000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 126000,
        "concurrency_ratio": 1
       }
@@ -1620,7 +1620,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 165000
+      "REVIEW": 665000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1682,9 +1682,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 165000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 665000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 144000,
        "concurrency_ratio": 1
       }
@@ -1782,7 +1782,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 185000
+      "REVIEW": 685000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -1844,9 +1844,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 185000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 685000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 162000,
        "concurrency_ratio": 1
       }
@@ -1944,7 +1944,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 205000
+      "REVIEW": 705000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -2006,9 +2006,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 205000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 705000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 180000,
        "concurrency_ratio": 1
       }
@@ -2094,6 +2094,39 @@
        "concurrency_ratio": 1
       }
      ],
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
+    },
+    {
+     "ticket": "F",
+     "run_id": "run-f",
+     "outcome": "fail",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
      "ui_ticket": false,
      "review_to_build_ratio": "unknown",
      "suggestions": []
@@ -2342,14 +2375,14 @@
     }
    ],
    "cross_run": {
-    "runs": 26,
+    "runs": 27,
     "orchestrator_share_pct_median": 62.7,
     "review_repairs_median": 0,
     "review_round_wall_ms": {
      "n": 24,
      "excluded_unknown": 0,
-     "p50": 125000,
-     "p95": 250000
+     "p50": 215000,
+     "p95": 685000
     },
     "peak_rss_mb_max": 640,
     "suggestions_fired": {
@@ -2375,22 +2408,22 @@
    "note": "Read-only. unknown means the source did not carry the value. Suggestions are never applied."
   },
   "aggregate": {
-   "runs": 25,
+   "runs": 26,
    "completed_runs": 2,
-   "failed_runs": 0,
+   "failed_runs": 1,
    "open_runs": 3,
    "integrity_affected_runs": 0,
    "planning_runs": 1,
    "waiting_runs": 1,
    "open_without_wait": 1,
-   "review_median_ms": 115000,
+   "review_median_ms": 215000,
    "standard_review_median_ms": 115000,
-   "elevated_review_median_ms": 115000,
+   "elevated_review_median_ms": 615000,
    "review_to_build_ratio_median": 1.25,
    "review_to_build_excluding_recorded_waits_ratio_median": 1.3888888888888888,
    "counter_mismatch_runs": 2,
    "primary_degradations_observed": 1,
-   "optional_degradations_observed": 0,
+   "optional_degradations_observed": 1,
    "parallel_groups": 1,
    "peak_concurrency": 2,
    "frontend_backend_union_overlap_pct_median": 92.9
@@ -2398,6 +2431,39 @@
   "eval_cli": {
    "schema": "ship-ticket-eval-v1",
    "runs": [
+    {
+     "ticket": "F",
+     "run_id": "run-f",
+     "outcome": "fail",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
+    },
     {
      "ticket": "L",
      "run_id": "run-l",
@@ -2585,7 +2651,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 25000
+      "REVIEW": 525000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -2647,9 +2713,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 25000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 525000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 18000,
        "concurrency_ratio": 1
       }
@@ -2747,7 +2813,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 45000
+      "REVIEW": 545000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -2809,9 +2875,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 45000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 545000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 36000,
        "concurrency_ratio": 1
       }
@@ -2909,7 +2975,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 65000
+      "REVIEW": 565000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -2971,9 +3037,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 65000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 565000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 54000,
        "concurrency_ratio": 1
       }
@@ -3071,7 +3137,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 85000
+      "REVIEW": 585000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3133,9 +3199,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 85000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 585000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 72000,
        "concurrency_ratio": 1
       }
@@ -3233,7 +3299,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 105000
+      "REVIEW": 605000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3295,9 +3361,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 105000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 605000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 90000,
        "concurrency_ratio": 1
       }
@@ -3395,7 +3461,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 125000
+      "REVIEW": 625000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3457,9 +3523,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 125000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 625000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 108000,
        "concurrency_ratio": 1
       }
@@ -3557,7 +3623,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 145000
+      "REVIEW": 645000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3619,9 +3685,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 145000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 645000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 126000,
        "concurrency_ratio": 1
       }
@@ -3719,7 +3785,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 165000
+      "REVIEW": 665000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3781,9 +3847,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 165000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 665000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 144000,
        "concurrency_ratio": 1
       }
@@ -3881,7 +3947,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 185000
+      "REVIEW": 685000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -3943,9 +4009,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 185000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 685000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 162000,
        "concurrency_ratio": 1
       }
@@ -4043,7 +4109,7 @@
      "tokens_by_phase": "unknown",
      "orchestrator_share_pct": "unknown",
      "wall_ms_by_phase": {
-      "REVIEW": 205000
+      "REVIEW": 705000
      },
      "review_executions": 1,
      "peak_rss_mb": "unknown",
@@ -4105,9 +4171,9 @@
         }
        ],
        "missing_roles": [],
-       "wall_ms": 205000,
-       "unaccounted_gap_ms": 0,
-       "gap_reason": "none",
+       "wall_ms": 705000,
+       "unaccounted_gap_ms": 500000,
+       "gap_reason": "unknown",
        "overlap_ms": 180000,
        "concurrency_ratio": 1
       }
@@ -4318,11 +4384,11 @@
         {
          "role": "primary",
          "event_id": "run-1-a-primary_review",
-         "started_at": "2026-01-01T00:11:40.000Z",
-         "ended_at": "2026-01-01T00:13:20.000Z",
-         "duration_ms": 100000,
+         "started_at": "2026-01-01T00:11:50.000Z",
+         "ended_at": "2026-01-01T00:13:10.000Z",
+         "duration_ms": 80000,
          "basis": "carrier",
-         "collection_delay_ms": 0
+         "collection_delay_ms": 10000
         },
         {
          "role": "second_opinion",
@@ -4363,10 +4429,10 @@
        ],
        "missing_roles": [],
        "wall_ms": 300000,
-       "unaccounted_gap_ms": 50000,
+       "unaccounted_gap_ms": 60000,
        "gap_reason": "wait",
-       "overlap_ms": 90000,
-       "concurrency_ratio": 0.9
+       "overlap_ms": 80000,
+       "concurrency_ratio": 1
       },
       {
        "review_execution": "review-b",
@@ -4539,14 +4605,14 @@
     }
    ],
    "cross_run": {
-    "runs": 25,
+    "runs": 26,
     "orchestrator_share_pct_median": 81.35,
     "review_repairs_median": 0,
     "review_round_wall_ms": {
      "n": 24,
      "excluded_unknown": 0,
-     "p50": 125000,
-     "p95": 250000
+     "p50": 215000,
+     "p95": 685000
     },
     "peak_rss_mb_max": 640,
     "suggestions_fired": {
@@ -4576,30 +4642,87 @@
    "event_schema": "ship-ticket-run-log-v1",
    "integrity_warnings": [],
    "aggregate": {
-    "runs": 25,
+    "runs": 26,
     "completed_runs": 2,
-    "failed_runs": 0,
+    "failed_runs": 1,
     "open_runs": 3,
     "integrity_affected_runs": 0,
     "planning_runs": 1,
     "waiting_runs": 1,
     "open_without_wait": 1,
-    "review_median_ms": 115000,
+    "review_median_ms": 215000,
     "standard_review_median_ms": 115000,
-    "elevated_review_median_ms": 115000,
+    "elevated_review_median_ms": 615000,
     "review_to_build_ratio_median": 1.25,
     "review_to_build_excluding_recorded_waits_ratio_median": 1.3888888888888888,
     "counter_mismatch_runs": 2,
     "primary_degradations_observed": 1,
-    "optional_degradations_observed": 0,
+    "optional_degradations_observed": 1,
     "parallel_groups": 1,
     "peak_concurrency": 2,
     "frontend_backend_union_overlap_pct_median": 92.9,
     "missing_review_intervals": "at_least",
     "missing_review_intervals_known_sum": 1,
-    "missing_review_intervals_unknown_runs": 3
+    "missing_review_intervals_unknown_runs": 4
    },
    "runs": [
+    {
+     "ticket": "F",
+     "run_id": "run-f",
+     "outcome": "fail",
+     "open_state": "closed",
+     "integrity_warnings": [],
+     "oldest_open_age_ms": null,
+     "review_profile": null,
+     "durations": {
+      "workflow_ms": 50000,
+      "phase_ms": null,
+      "activity_ms": null,
+      "wait_ms": null,
+      "build_ms": null,
+      "review_ms": null,
+      "build_wall_excluding_recorded_waits_ms": null,
+      "review_wall_excluding_recorded_waits_ms": null
+     },
+     "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+     "counters": {
+      "repair_batches": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "confirmations": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "primary_degradations_observed": 0,
+      "optional_degradations_observed": 0
+     },
+     "review_executions": [],
+     "review_execution_coverage": "legacy_unknown",
+     "phase_coverage": [],
+     "parallel_groups": [],
+     "open_intervals": [],
+     "intervals": [
+      {
+       "event_id": "wf",
+       "kind": "workflow",
+       "name": "ticket",
+       "started_at": "2026-01-01T00:00:00.000Z",
+       "ended_at": "2026-01-01T00:00:50.000Z",
+       "duration_ms": 50000,
+       "outcome": "fail",
+       "metrics": {}
+      }
+     ],
+     "missing_review_intervals": {
+      "count": "unknown",
+      "items": []
+     }
+    },
     {
      "ticket": "L",
      "run_id": "run-l",
@@ -4897,13 +5020,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 25000,
+      "phase_ms": 525000,
       "activity_ms": 43000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 25000,
+      "review_ms": 525000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 25000
+      "review_wall_excluding_recorded_waits_ms": 525000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -4964,7 +5087,7 @@
        "event_id": "run-p1-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -4975,8 +5098,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:00:25.000Z",
-       "duration_ms": 25000,
+       "ended_at": "2026-01-01T00:08:45.000Z",
+       "duration_ms": 525000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -5189,13 +5312,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 45000,
+      "phase_ms": 545000,
       "activity_ms": 81000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 45000,
+      "review_ms": 545000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 45000
+      "review_wall_excluding_recorded_waits_ms": 545000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -5256,7 +5379,7 @@
        "event_id": "run-p3-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -5267,8 +5390,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:00:45.000Z",
-       "duration_ms": 45000,
+       "ended_at": "2026-01-01T00:09:05.000Z",
+       "duration_ms": 545000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -5481,13 +5604,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 65000,
+      "phase_ms": 565000,
       "activity_ms": 119000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 65000,
+      "review_ms": 565000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 65000
+      "review_wall_excluding_recorded_waits_ms": 565000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -5504,7 +5627,7 @@
        "mismatch": false
       },
       "primary_degradations_observed": 0,
-      "optional_degradations_observed": 0
+      "optional_degradations_observed": 1
      },
      "review_executions": [
       {
@@ -5532,7 +5655,7 @@
          "mismatch": false
         },
         "primary_degradations_observed": 0,
-        "optional_degradations_observed": 0
+        "optional_degradations_observed": 1
        },
        "event_ids": [
         "run-p5-a-ph",
@@ -5548,7 +5671,7 @@
        "event_id": "run-p5-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -5559,8 +5682,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:01:05.000Z",
-       "duration_ms": 65000,
+       "ended_at": "2026-01-01T00:09:25.000Z",
+       "duration_ms": 565000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -5592,7 +5715,7 @@
        "started_at": "2026-01-01T00:00:00.000Z",
        "ended_at": "2026-01-01T00:00:54.000Z",
        "duration_ms": 54000,
-       "outcome": "pass",
+       "outcome": "degraded",
        "metrics": {
         "review_execution": "review-a",
         "candidate_id": "sha-1"
@@ -5773,13 +5896,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 85000,
+      "phase_ms": 585000,
       "activity_ms": 157000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 85000,
+      "review_ms": 585000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 85000
+      "review_wall_excluding_recorded_waits_ms": 585000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -5840,7 +5963,7 @@
        "event_id": "run-p7-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -5851,8 +5974,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:01:25.000Z",
-       "duration_ms": 85000,
+       "ended_at": "2026-01-01T00:09:45.000Z",
+       "duration_ms": 585000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -6065,13 +6188,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 105000,
+      "phase_ms": 605000,
       "activity_ms": 195000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 105000,
+      "review_ms": 605000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 105000
+      "review_wall_excluding_recorded_waits_ms": 605000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -6132,7 +6255,7 @@
        "event_id": "run-p9-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -6143,8 +6266,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:01:45.000Z",
-       "duration_ms": 105000,
+       "ended_at": "2026-01-01T00:10:05.000Z",
+       "duration_ms": 605000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -6357,13 +6480,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 125000,
+      "phase_ms": 625000,
       "activity_ms": 233000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 125000,
+      "review_ms": 625000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 125000
+      "review_wall_excluding_recorded_waits_ms": 625000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -6424,7 +6547,7 @@
        "event_id": "run-p11-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -6435,8 +6558,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:02:05.000Z",
-       "duration_ms": 125000,
+       "ended_at": "2026-01-01T00:10:25.000Z",
+       "duration_ms": 625000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -6649,13 +6772,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 145000,
+      "phase_ms": 645000,
       "activity_ms": 271000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 145000,
+      "review_ms": 645000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 145000
+      "review_wall_excluding_recorded_waits_ms": 645000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -6716,7 +6839,7 @@
        "event_id": "run-p13-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -6727,8 +6850,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:02:25.000Z",
-       "duration_ms": 145000,
+       "ended_at": "2026-01-01T00:10:45.000Z",
+       "duration_ms": 645000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -6941,13 +7064,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 165000,
+      "phase_ms": 665000,
       "activity_ms": 309000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 165000,
+      "review_ms": 665000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 165000
+      "review_wall_excluding_recorded_waits_ms": 665000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -7008,7 +7131,7 @@
        "event_id": "run-p15-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -7019,8 +7142,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:02:45.000Z",
-       "duration_ms": 165000,
+       "ended_at": "2026-01-01T00:11:05.000Z",
+       "duration_ms": 665000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -7233,13 +7356,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 185000,
+      "phase_ms": 685000,
       "activity_ms": 347000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 185000,
+      "review_ms": 685000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 185000
+      "review_wall_excluding_recorded_waits_ms": 685000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -7300,7 +7423,7 @@
        "event_id": "run-p17-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -7311,8 +7434,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:03:05.000Z",
-       "duration_ms": 185000,
+       "ended_at": "2026-01-01T00:11:25.000Z",
+       "duration_ms": 685000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -7525,13 +7648,13 @@
      "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
-      "phase_ms": 205000,
+      "phase_ms": 705000,
       "activity_ms": 385000,
       "wait_ms": null,
       "build_ms": null,
-      "review_ms": 205000,
+      "review_ms": 705000,
       "build_wall_excluding_recorded_waits_ms": null,
-      "review_wall_excluding_recorded_waits_ms": 205000
+      "review_wall_excluding_recorded_waits_ms": 705000
      },
      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
      "counters": {
@@ -7592,7 +7715,7 @@
        "event_id": "run-p19-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 0
+       "uninstrumented_ms": 500000
       }
      ],
      "parallel_groups": [],
@@ -7603,8 +7726,8 @@
        "kind": "phase",
        "name": "REVIEW",
        "started_at": "2026-01-01T00:00:00.000Z",
-       "ended_at": "2026-01-01T00:03:25.000Z",
-       "duration_ms": 205000,
+       "ended_at": "2026-01-01T00:11:45.000Z",
+       "duration_ms": 705000,
        "outcome": "pass",
        "metrics": {
         "review_execution": "review-a",
@@ -7990,7 +8113,7 @@
        "event_id": "run-1-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 50000
+       "uninstrumented_ms": 60000
       },
       {
        "event_id": "run-1-b-ph",
@@ -8177,10 +8300,10 @@
         "result_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "candidate_id": "sha-1",
         "review_execution": "review-a",
-        "started_at": "2026-01-01T00:11:40.000Z",
-        "ended_at": "2026-01-01T00:13:20.000Z",
-        "duration_ms": 100000,
-        "collection_delay_ms": 0
+        "started_at": "2026-01-01T00:11:50.000Z",
+        "ended_at": "2026-01-01T00:13:10.000Z",
+        "duration_ms": 80000,
+        "collection_delay_ms": 10000
        }
       },
       {
@@ -8418,6 +8541,13 @@
        "kind": "wait",
        "name": "user_approval",
        "started_at": "2026-01-01T00:00:10.000Z",
+       "metrics": {}
+      },
+      {
+       "event_id": "w-open-2",
+       "kind": "activity",
+       "name": "frontend_build",
+       "started_at": "2026-01-01T00:00:30.000Z",
        "metrics": {}
       }
      ],
