@@ -23,8 +23,8 @@ host's family. Never reuse a PLAN or BUILD session for REVIEW.
 
 Record `host_agent`, `counterpart_agent`, CLI version, carrier and exact session
 ID. The PLAN debate is required when the risk floor (`scripts/risk-floor.mjs`) is ELEVATED and for
-money or auth tickets (owner rule); only a ticket below the floor may record
-`plan_debate.status: SKIPPED` with the reason. When the debate runs, it requires actual counterpart participation:
+money or auth tickets (owner rule); `plan_debate.status: SKIPPED` with the reason is allowed
+only when the floor is STANDARD and the ticket is neither money nor auth. When the debate runs, it requires actual counterpart participation:
 unavailable capability or a failed dispatch is `WAIT_FOR_USER` after bounded
 recovery, unless the user explicitly authorizes solo planning. Record `DEGRADED`
 for diagnostics, but never treat that label as permission to skip a required

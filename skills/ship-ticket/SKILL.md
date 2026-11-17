@@ -552,7 +552,7 @@ dependencies:
 - **Concurrency.** Run at most 2–3 agents at once.
 - **Survey and planning.** Use one survey agent. Use the cross-model plan debate
   when the risk floor is ELEVATED or the ticket is money or auth. Skip it, and
-  record the skip, only below the floor. The REVIEW second opinion is never skipped (see REVIEW).
+  record the skip, only when the floor is STANDARD and the ticket is neither money nor auth. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
