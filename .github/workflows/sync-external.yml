@@ -11,11 +11,6 @@ on:
 permissions:
   contents: write
 
-# Serialise; never cancel a run that may be committing.
-concurrency:
-  group: sync-external
-  cancel-in-progress: false
-
 jobs:
   sync:
     runs-on: ubuntu-latest
