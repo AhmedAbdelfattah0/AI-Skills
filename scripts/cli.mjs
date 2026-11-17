@@ -1616,7 +1616,7 @@ Autoupdate flags:
   stdout, which a SessionStart hook would inject into your session.
 
 Examples:
-  npx github:AhmedAbdelfattah0/AI-Skills install security researcher
+  npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
   npx github:AhmedAbdelfattah0/AI-Skills install --target codex
   node scripts/cli.mjs install --target all
   node scripts/cli.mjs install security --target claude,codex
