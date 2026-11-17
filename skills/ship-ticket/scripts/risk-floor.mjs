@@ -19,6 +19,9 @@
  * 1 = unusable or untrustworthy input (malformed or oversized paths/declaration, tampered declaration, unknown profile, base_mismatch,
  * usage error). An exit-1 output still carries final=ELEVATED. Flags take `--flag value` or `--flag=value`; a missing value, unknown or
  * repeated flag, positional argument or unknown command is an error. Files are read as strict UTF-8 (UTF-16/32 BOMs, NUL, invalid bytes rejected).
+ * REUSE: real tree paths are enumerated and filtered by git itself (diff/ls-files and its `:(glob,icase)` pathspec magic for the ignored pass). The
+ * custom matcher below exists ONLY for PLANNED paths and declared patterns, which are in no tree. Evaluated and rejected: node:path.matchesGlob and
+ * fs.glob (Node >= 22 only; CI runs Node 18), picomatch/minimatch (would need vendoring: skills install without npm install).
  * Glob grammar (deliberately small): literal characters, `*` (any run inside ONE path segment), a WHOLE-segment `**`, a trailing `/`.
  * EVERY other metacharacter (`? [ ] { } ! \ ( )`), a `**` that is not a whole segment, and leading/trailing whitespace in a segment make the
  * declaration invalid (fail closed), never a silent non-match. Directory semantics (git-style): a pattern matches a path if it matches the
@@ -39,7 +42,7 @@
  * known, deferred limit).
  * ADVISORY, NOT ENFORCED: no gate or engine step runs this yet (wiring is the driver slice, S-23/S-24).
  */
-import { openSync, readSync, closeSync, realpathSync, readFileSync, lstatSync } from 'node:fs';
+import { openSync, readSync, closeSync, realpathSync, lstatSync, fstatSync, constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -49,7 +52,7 @@ export const MAX_INPUT = 2_000_000;
 export const MAX_PATHS = 200_000;
 export const MAX_DECLARATION = 256 * 1024;
 const MAX_GLOB_CHARS = 256, MAX_GLOB_SEGS = 32, MAX_PATH_CHARS = 4096, MAX_PATH_SEGS = 64, MAX_GLOBS = 256;
-export const STEP_BOUND_PER_PAIR = MAX_GLOB_CHARS * MAX_PATH_CHARS + (MAX_GLOB_SEGS + 2) * MAX_PATH_SEGS;
+export const STEP_BOUND_PER_PAIR = MAX_GLOB_CHARS * MAX_PATH_CHARS + (MAX_GLOB_SEGS + 2) * (MAX_PATH_SEGS + 1) + 1;
 export const MAX_STEPS = 50_000_000;
 export const CHANGED = 'risk_declaration_changed';
 export const DECLARATION_PATH = '.ship-ticket/risk-paths.json';
@@ -61,7 +64,7 @@ const bad = (code, reason) => Object.assign(new Error(reason), { code });
 const wellFormed = (x) => typeof x === 'string' && x !== '' && !/[\u0000�]|[\uD800-\uDFFF]/u.test(x);
 function segmentsOf(p, what, maxChars = MAX_PATH_CHARS, maxSegs = MAX_PATH_SEGS) {
   if (!wellFormed(p) || p.length > maxChars) throw bad('malformed_input', `${what} is not a well-formed string within the budget`);
-  const s = p.normalize('NFC').replace(/\p{Cf}/gu, '').toLowerCase().replace(/\\/g, '/');
+  const s = p.replace(/\p{Cf}/gu, '').normalize('NFC').toLowerCase().normalize('NFC').replace(/\\/g, '/');
   if (s.startsWith('/') || /^[a-z]:\//.test(s)) throw bad('malformed_input', `${what} is absolute`);
   const segs = [];
   for (const seg of s.split('/')) { if (seg === '' || seg === '.') continue; if (seg === '..') throw bad('malformed_input', `${what} has a ".." segment`); segs.push(seg); }
@@ -89,18 +92,20 @@ export function compileGlob(glob) {
   return slash ? segs : ['**', ...segs];
 }
 export function matchSegments(g, p, ctx = null) {
+  if (ctx && (ctx.steps += 1 + g.length * (p.length + 1)) > MAX_STEPS) throw bad('malformed_input', 'work budget exceeded'); // every DP row and cell is charged BEFORE allocation
   let row = new Array(p.length + 1).fill(false); row[p.length] = true; // row[j]: g[i..] matches p[j..]
   for (let i = g.length - 1; i >= 0; i--) {
     const next = row; row = new Array(p.length + 1).fill(false);
     if (g[i] === '**') { row[p.length] = next[p.length]; for (let j = p.length - 1; j >= 0; j--) row[j] = next[j] || row[j + 1]; }
-    else for (let j = p.length - 1; j >= 0; j--) { if (ctx && ++ctx.steps > MAX_STEPS) throw bad('malformed_input', 'work budget exceeded'); row[j] = next[j + 1] && segMatch(g[i], p[j], ctx); }
+    else for (let j = p.length - 1; j >= 0; j--) row[j] = next[j + 1] && segMatch(g[i], p[j], ctx);
     if (ctx && ctx.steps > MAX_STEPS) throw bad('malformed_input', 'work budget exceeded');
   }
   return row[0];
 }
 export const globMatches = (glob, path) => matchSegments(compileGlob(glob), segmentsOf(path, 'a path'));
 // A planned entry that may denote a set: may any path below it match this glob? Conservative: a glob whose literal prefix is empty (any depth) may.
-function mayCover(g, dir) {
+function mayCover(g, dir, ctx) {
+  if (ctx) ctx.steps += g.length;
   let lit = 0; while (lit < g.length && !g[lit].includes('*')) lit++;
   if (lit === 0) return true;
   const n = Math.min(lit, dir.length);
@@ -127,7 +132,7 @@ export function validateDeclaration(d) {
 // ---- assessment (pure) ----
 const DECL_SEGS = DECLARATION_PATH.split('/');
 /** paths: array of strings. declaration: validated classes or null. forced: error codes decided by the caller. Never throws. */
-export function assess({ paths, declaration = null, declSha = 'none', declChanged = false, claimed, ai, forced = [], planned = false, baseSha = 'none', headLabel = 'none' }) {
+export function assess({ paths, declaration = null, declSha = 'none', declChanged = false, claimed, ai, forced = [], also = [], planned = false, baseSha = 'none', headLabel = 'none' }) {
   const errors = [...forced], reasons = [];
   const c = normProfile(claimed), a = normProfile(ai);
   if (c === null) errors.push('bad_claimed');
@@ -151,13 +156,13 @@ export function assess({ paths, declaration = null, declSha = 'none', declChange
         if (p[0] === DECL_SEGS[0]) { classes.add(CHANGED); hit = true; }
         const wi = p.findIndex((x) => x.includes('*')), dir = wi < 0 ? p : p.slice(0, wi);
         const dirLike = planned && (/[\\/]$/.test(paths[i]) || wi >= 0 || !p[p.length - 1].includes('.'));
-        for (const cl of declaration ?? []) if (cl.globs.some((g) => matchSegments(g, p, ctx) || (dirLike && mayCover(g, dir)))) { classes.add(cl.name); hit = true; }
+        for (const cl of declaration ?? []) if (cl.globs.some((g) => matchSegments(g, p, ctx) || (dirLike && mayCover(g, dir, ctx)))) { classes.add(cl.name); hit = true; }
         if (hit) matched++;
       });
     } catch (e) { errors.push(e.code ?? 'malformed_input'); }
   }
   const floor = errors.length || classes.size ? 'ELEVATED' : 'STANDARD';
-  const final = [floor, c ?? 'ELEVATED', a ?? 'ELEVATED'].reduce((x, y) => (RANK[y] > RANK[x] ? y : x));
+  const final = [floor, c ?? 'ELEVATED', a ?? 'ELEVATED', ...also].reduce((x, y) => (RANK[y] > RANK[x] ? y : x));
   const names = [...classes].sort(), n = Array.isArray(paths) ? paths.length : 0;
   return { ok: !errors.length, errors, floor, floor_classes: names, reasons, claimed: c ?? 'invalid', ai: a ?? 'invalid', final, raised: errors.length > 0 || final !== c,
     counts: { paths: n, matched },
@@ -177,7 +182,7 @@ function readBounded(f) { // at most MAX_INPUT + 1 bytes are read
   let n = 0;
   try {
     while (n < buf.length) {
-      let got; try { got = readSync(fd, buf, n, buf.length - n, null); } catch (e) { if (e.code === 'EOF') break; if (e.code === 'EAGAIN') continue; throw e; }
+      let got; try { got = readSync(fd, buf, n, buf.length - n, null); } catch (e) { if (e.code === 'EOF') break; if (e.code === 'EAGAIN') { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10); continue; } throw e; }
       if (got === 0) break; n += got;
     }
   } finally { if (fd !== 0) closeSync(fd); }
@@ -189,10 +194,16 @@ export const parsePathsArg = (v) => JSON.parse(v.trim().startsWith('[') ? (v.len
 
 // ---- hardened git (mirrors fast-checks.mjs: no GIT_* inherited, replace objects off, literal pathspecs, raw -z paths, no optional locks) ----
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_LITERAL_PATHSPECS = '1'; e.GIT_OPTIONAL_LOCKS = '0'; return e; };
-const gitRaw = (cwd, args) => execFileSync('git', ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const LIST_CAP = 64 * 1024 * 1024; // bytes git may print for ONE enumeration; excess aborts the child (ENOBUFS) before anything is sorted or hashed
+const gitRaw = (cwd, args, { env = gitEnv(), maxBuffer = 256 * 1024 * 1024 } = {}) => execFileSync('git', ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', ...args], { cwd, env, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 const git = (cwd, args) => gitRaw(cwd, args).toString('utf8').replace(/\n$/, '');
 const zSplit = (buf) => { const out = []; let at = 0; for (let i = 0; i < buf.length; i++) if (buf[i] === 0) { if (i > at) out.push(buf.subarray(at, i)); at = i + 1; } if (at < buf.length) out.push(buf.subarray(at)); return out; };
 const utf8Path = (raw) => { const p = raw.toString('utf8'); return Buffer.from(p, 'utf8').equals(raw) ? p : null; };
+/** One bounded enumeration (byte cap in git, count cap here). Excess or failure is malformed_input, never a truncated list. */
+function listZ(top, args, env) {
+  let buf; try { buf = gitRaw(top, args, { env, maxBuffer: LIST_CAP }); } catch { throw bad('malformed_input', 'git listing failed or exceeded the byte cap'); }
+  const parts = zSplit(buf); if (parts.length > MAX_PATHS) throw bad('malformed_input', 'too many changed paths'); return parts;
+}
 const commitOf = (top, ref, code) => { if (typeof ref !== 'string' || !ref || ref.startsWith('-')) throw bad(code, 'a commit-ish must not be empty or start with "-"'); try { return git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]); } catch { throw bad(code, 'git could not resolve the commit-ish'); } };
 
 function resolveRepo(repo, base) {
@@ -201,8 +212,9 @@ function resolveRepo(repo, base) {
 }
 const treeEntry = (top, tree) => { const e = git(top, ['ls-tree', '-z', tree, '--', DECLARATION_PATH]).replace(/\0$/, ''); if (!e) return null; const m = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(e); return m ? { mode: m[1], type: m[2], oid: m[3] } : null; };
 const REGULAR = /^100(644|755)$/;
-/** Base declaration and whether the compared state (HEAD commit, or working tree + index) differs. Not-a-regular-file or a mode change is tampering. */
-function readDeclaration(top, sha, headSha) {
+function readFd(fd, limit) { const buf = Buffer.alloc(limit + 1); let n = 0; while (n < buf.length) { const got = readSync(fd, buf, n, buf.length - n, null); if (got === 0) break; n += got; } return buf.subarray(0, n); }
+/** The declaration as of BASE, and whether HEAD (commit) and/or the working tree + index differ from it. A non-regular entry or a mode change is tampering. */
+function readDeclaration(top, sha, { headSha = null, worktree = false } = {}) {
   let base, baseBytes = null;
   try { base = treeEntry(top, sha); } catch { throw bad('repo_unavailable', 'git could not read the declaration at base'); }
   if (base && (base.type !== 'blob' || !REGULAR.test(base.mode))) throw bad('declaration_tampered', 'the base declaration is not a regular file');
@@ -212,25 +224,33 @@ function readDeclaration(top, sha, headSha) {
     const h = treeEntry(top, headSha);
     if (h && (h.type !== 'blob' || !REGULAR.test(h.mode) || (base && h.mode !== base.mode))) throw bad('declaration_tampered', 'the declaration is not a regular file with its base mode at head');
     changed = !h !== !base || (h && base && h.oid !== base.oid);
-  } else {
+  }
+  if (worktree) {
     let wt = null; const full = join(top, DECLARATION_PATH);
-    try { const st = lstatSync(full, { throwIfNoEntry: false }); if (st) { if (!st.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file'); if (st.size > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large'); wt = readFileSync(full); if (process.platform !== 'win32' && base && ((st.mode & 0o111) !== 0) !== (base.mode === '100755')) throw bad('declaration_tampered', 'mode differs from base'); } }
-    catch (e) { if (e.code) throw e; throw bad('declaration_tampered', 'the working-tree declaration is unreadable'); }
+    try {
+      const st = lstatSync(full, { throwIfNoEntry: false });
+      if (st) {
+        if (!st.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file');
+        const fd = openSync(full, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+        try { const fs2 = fstatSync(fd); if (!fs2.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file'); if (fs2.size > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large'); wt = readFd(fd, MAX_DECLARATION); if (wt.length > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large'); if (process.platform !== 'win32' && base && ((fs2.mode & 0o111) !== 0) !== (base.mode === '100755')) throw bad('declaration_tampered', 'mode differs from base'); } finally { closeSync(fd); }
+      }
+    } catch (e) { if (e.code && /^[a-z_]+$/.test(e.code)) throw e; throw bad('declaration_tampered', 'the working-tree declaration is unreadable'); }
     const idx = gitRaw(top, ['ls-files', '-s', '-z', '--', DECLARATION_PATH]).toString('utf8').replace(/\0$/, '');
     const im = idx ? /^(\d+) ([0-9a-f]+) (\d)\t/.exec(idx) : null;
     if (idx && (!im || !REGULAR.test(im[1]) || im[3] !== '0' || (base && im[1] !== base.mode))) throw bad('declaration_tampered', 'the index declaration is not a regular file with its base mode');
-    changed = !wt !== !base || !im !== !base || (wt && baseBytes && !wt.equals(baseBytes)) || (im && base && im[2] !== base.oid);
+    changed = changed || !wt !== !base || !im !== !base || (wt && baseBytes && !wt.equals(baseBytes)) || (im && base && im[2] !== base.oid);
   }
   if (!base) return { declaration: null, declSha: 'none', changed: !!changed };
   try { return { declaration: validateDeclaration(JSON.parse(decodeStrict(baseBytes))), declSha: createHash('sha256').update(baseBytes).digest('hex').slice(0, 16), changed: !!changed }; }
   catch (e) { throw e.code ? e : bad('declaration_invalid', 'the base declaration is not valid JSON'); }
 }
 const failed = (e, claimed, ai) => assess({ paths: null, claimed, ai, forced: [e.code ?? 'internal'] });
+const headOrNull = (top) => { try { return git(top, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']); } catch { return null; } };
 
 export function check({ repo = '.', base, plannedPaths, claimed, ai }) {
   try {
     const { top, sha } = resolveRepo(repo, base);
-    const d = readDeclaration(top, sha, null);
+    const d = readDeclaration(top, sha, { headSha: headOrNull(top), worktree: true });
     return assess({ paths: plannedPaths, declaration: d.declaration, declSha: d.declSha, declChanged: d.changed, claimed, ai, planned: true, baseSha: sha.slice(0, 12), headLabel: 'planned' });
   } catch (e) { return failed(e, claimed, ai); }
 }
@@ -240,31 +260,42 @@ export function changedPaths(top, sha, head, declaration = null) {
   let raws;
   if (head === 'WORKTREE') {
     for (const rec of zSplit(gitRaw(top, ['ls-files', '-v', '-z']))) if (/^[a-zS] /.test(rec.subarray(0, 2).toString('latin1'))) throw bad('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit');
-    raws = [...zSplit(gitRaw(top, ['diff', ...D, sha, '--'])), ...zSplit(gitRaw(top, ['diff', '--cached', ...D, sha, '--'])), ...zSplit(gitRaw(top, ['ls-files', '-z', '--others', '--exclude-standard']))];
-    const ctx = { steps: 0 };
-    for (const raw of zSplit(gitRaw(top, ['ls-files', '-z', '-o', '-i', '--exclude-standard']))) { // ignored untracked: only declared matches count
-      const p = utf8Path(raw); let segs; try { segs = segmentsOf(p ?? '', 'a path'); } catch { continue; }
-      if ((declaration ?? []).some((cl) => cl.globs.some((g) => matchSegments(g, segs, ctx)))) raws.push(raw);
-    }
-  } else raws = zSplit(gitRaw(top, ['diff', ...D, sha, commitOf(top, head, 'head_invalid'), '--']));
+    // union: base->HEAD (committed), base->index (staged), base->working tree, untracked, and git-ignored files that match a declared glob
+    raws = [...listZ(top, ['diff', ...D, sha, 'HEAD', '--']), ...listZ(top, ['diff', '--cached', ...D, sha, '--']), ...listZ(top, ['diff', ...D, sha, '--']), ...listZ(top, ['ls-files', '-z', '--others', '--exclude-standard'])];
+    // The ignored pass REUSES git's own pathspec engine (:(glob,icase)); ignored files are never matched in JS. .ship-ticket/** always counts.
+    const specs = new Set(['.ship-ticket/**']); for (const cl of declaration ?? []) for (const g of cl.globs) specs.add(g.join('/'));
+    raws.push(...listZ(top, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--', ...[...specs].map((x) => `:(glob,icase)${x}`)], { ...gitEnv(), GIT_LITERAL_PATHSPECS: '0' }));
+  } else raws = listZ(top, ['diff', ...D, sha, commitOf(top, head, 'head_invalid'), '--']);
+  if (raws.length > MAX_PATHS) throw bad('malformed_input', 'too many changed paths');
   const seen = new Set(), out = [];
   for (const raw of raws.sort(Buffer.compare)) {
     const k = raw.toString('hex'); if (seen.has(k)) continue; seen.add(k);
-    const p = utf8Path(raw); if (p === null) throw bad('malformed_input', 'a changed path is not valid UTF-8');
+    const p = utf8Path(raw); if (p === null) throw bad('unclassifiable_path', 'a changed path is not valid UTF-8');
+    try { segmentsOf(p, 'a path'); } catch { throw bad('unclassifiable_path', 'a changed path exceeds the path budget'); }
     out.push(p);
   }
   return out;
+}
+
+// The recorded plan line, strict: exactly one `[risk_floor: ]risk-floor: ...` line with exactly these keys. `risk_reassess:` lines are ignored.
+const RECORD = /^(?:risk_floor:[ \t]*)?risk-floor: floor=(STANDARD|ELEVATED); classes=[a-z0-9_,-]*; claimed=(STANDARD|ELEVATED); ai=(STANDARD|ELEVATED); final=(STANDARD|ELEVATED); paths=\d+; matched=\d+; base=([0-9a-f]{12}); head=[a-z0-9]+; declaration=(?:[0-9a-f]{16}|none)$/;
+export function parseRecordedLine(text) {
+  const lines = typeof text === 'string' ? text.split(/\r?\n/).filter((l) => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l)) : [];
+  const m = lines.length === 1 ? RECORD.exec(lines[0]) : null;
+  if (!m) throw bad('recorded_line_invalid', 'the recorded line must be exactly one strict risk-floor record');
+  return { floor: m[1], claimed: m[2], ai: m[3], final: m[4], base: m[5] };
 }
 
 export function reassess({ repo = '.', base, head, recordedLine, claimed, ai }) {
   try {
     const { top, sha } = resolveRepo(repo, base);
     const headSha = head === 'WORKTREE' ? git(top, ['rev-parse', '--verify', 'HEAD^{commit}']) : commitOf(top, head, 'head_invalid');
-    const rec = typeof recordedLine === 'string' ? [...recordedLine.matchAll(/risk-floor: [^\n]*?\bbase=([0-9a-f]{12})\b/g)] : [];
-    if (rec.length !== 1 || rec[0][1] !== sha.slice(0, 12)) throw bad('base_mismatch', 'the recorded base does not match --base');
+    const rec = parseRecordedLine(recordedLine);
+    if (rec.base !== sha.slice(0, 12)) throw bad('base_mismatch', 'the recorded base does not match --base');
+    // base must be an ancestor of the head, so base..head (two-dot) equals merge-base..head and nothing outside the branch is counted
     try { gitRaw(top, ['merge-base', '--is-ancestor', sha, headSha]); } catch { throw bad('base_mismatch', 'the recorded base is not an ancestor of the head'); }
-    const d = readDeclaration(top, sha, head === 'WORKTREE' ? null : headSha);
-    return assess({ paths: changedPaths(top, sha, head, d.declaration), declaration: d.declaration, declSha: d.declSha, declChanged: d.changed, claimed, ai, baseSha: sha.slice(0, 12), headLabel: head === 'WORKTREE' ? 'worktree' : headSha.slice(0, 12) });
+    const d = readDeclaration(top, sha, { headSha, worktree: head === 'WORKTREE' });
+    return assess({ paths: changedPaths(top, sha, head, d.declaration), declaration: d.declaration, declSha: d.declSha, declChanged: d.changed, claimed, ai, also: [rec.claimed, rec.ai, rec.final], baseSha: sha.slice(0, 12), headLabel: head === 'WORKTREE' ? 'worktree' : headSha.slice(0, 12) });
   } catch (e) { return failed(e, claimed, ai); }
 }
 

@@ -254,10 +254,16 @@ sensitive paths in `.ship-ticket/risk-paths.json` (read from the base commit; se
 [references/risk-paths.example.json](references/risk-paths.example.json); a pattern also covers
 everything below a match). `node scripts/risk-floor.mjs check --base <c> --planned-paths <json>
 --claimed <profile> --ai <profile>` computes the floor from the planned paths, and `reassess
---base <c> --head <c|WORKTREE> --recorded-line <plan line> ...` recomputes it from the ACTUAL changed
-paths (staged, unstaged, untracked, and git-ignored files that match a declared path) before release.
-Pin `--base` from the plan/run state: the record carries `base=<sha12>` and `reassess` refuses a
-different base. The final profile is never lower than the floor, the recorded claim or your own
+--base <c> --head <c|WORKTREE> --recorded-line <file|-> ...` recomputes it from the ACTUAL changed
+paths (base to HEAD, staged, unstaged, untracked, and git-ignored files that match a declared path)
+before release. `--recorded-line` is a file or stdin holding the plan's `risk_floor:` record line
+(the `check` line; paste it from the plan header; `risk_reassess:` lines are ignored). Pin `--base`
+from the plan/run state: `reassess` refuses a base different from the recorded line, and the
+recorded claim, assessment and final also count, so it can never return less than the plan said.
+The recorded line is not authenticated until the driver slice. Planned directories and wildcards are
+treated conservatively (a directory-like entry floors if a declared glob may match below it);
+a dotted directory name without a trailing `/` is read as a file, which `reassess` catches later.
+The final profile is never lower than the floor, the recorded claim or your own
 semantic assessment (your assessment owns business impact, indirect dependencies and architecture).
 A floor only raises, and a path that matches nothing is not evidence of low risk. A repository that
 declares no paths gets no structural protection (`no_risk_paths_declared`); your assessment is then

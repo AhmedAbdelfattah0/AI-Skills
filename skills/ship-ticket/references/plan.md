@@ -110,7 +110,8 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
      review_profile: STANDARD|ELEVATED
      review_profile_reasons: [<evidence-backed trigger>]
-     risk_floor: <the `risk-floor.mjs check` record_line (planned paths) and, before release, the `reassess` record_line (actual changed paths)>
+     risk_floor: <the `risk-floor.mjs check` record_line (planned paths); `reassess` reads exactly this line>
+     risk_reassess: <the `reassess` record_line (actual changed paths), recorded before release>
      review_timeouts: {primary: 12m, optional: 10m, confirmation: 6m}
      owned_screens:                      one entry per screen:
        - impl: <path>

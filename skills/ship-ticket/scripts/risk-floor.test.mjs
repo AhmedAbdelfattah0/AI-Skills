@@ -199,7 +199,6 @@ test('malformed planned paths fail closed: shape, element types, NUL, surrogates
 test('M6 planned directories and wildcards are conservative: they floor if a declared glob matches them, an ancestor, or anything that may lie below', () => {
   const r = repo();
   for (const p of ['db/', 'db', 'src/**', 'apps/', 'apps/api', 'apps/api/src/', 'apps/api/src/**/*.ts', 'apps/api/src/bill*', '*', '**/x']) assert.equal(chk(r, [p]).floor, 'ELEVATED', p);
-  for (const p of ['README.md', 'docs/intro.md', 'docs/', 'docs']) assert.ok(chk(repo({ 'README.md': 'x' }, { version: 1, classes: [{ name: 'a', floor: 'ELEVATED', globs: ['db/migrations/**'] }] }), [p]).floor !== undefined);
   const narrow = repo({ 'README.md': 'x' }, { version: 1, classes: [{ name: 'a', floor: 'ELEVATED', globs: ['db/migrations/**'] }] });
   for (const p of ['db/', 'db', 'src/**', 'db/*', 'db/migrations/', '**']) assert.equal(chk(narrow, [p]).floor, p === 'src/**' ? 'STANDARD' : 'ELEVATED', p);
   for (const p of ['docs/', 'docs', 'README.md', 'src/app.ts']) assert.equal(chk(narrow, [p]).floor, 'STANDARD', p);
@@ -218,8 +217,8 @@ test('M1 base pinning: reassess needs the recorded line; a different base, a mis
   const r = repo({ 'README.md': 'x' }); writeFileSync(join(r.dir, 'README.md'), 'y'); const h1 = commit(r.dir); writeFileSync(join(r.dir, 'README.md'), 'z'); const h2 = commit(r.dir);
   assert.equal(RF.exitCodeFor(re(r, h2)), 0);
   const other = { ...r, base: h1 }; // the caller picks a different base: the recorded line names the original
-  for (const x of [RF.reassess({ repo: r.dir, base: h1, head: h2, recordedLine: line(r), claimed: 'STANDARD', ai: 'STANDARD' }), re(r, h2, 'STANDARD', 'STANDARD', 'no record here'), re(r, h2, 'STANDARD', 'STANDARD', null),
-    re(r, h2, 'STANDARD', 'STANDARD', `${line(r)}\n${line(r)}`), re(r, h2, 'STANDARD', 'STANDARD', line(r).replace(/base=[0-9a-f]{12}/, 'base=000000000000'))]) { assert.equal(x.final, 'ELEVATED'); assert.ok(x.errors.includes('base_mismatch')); assert.equal(RF.exitCodeFor(x), 1); }
+  for (const x of [RF.reassess({ repo: r.dir, base: h1, head: h2, recordedLine: line(r), claimed: 'STANDARD', ai: 'STANDARD' }), re(r, h2, 'STANDARD', 'STANDARD', line(r).replace(/base=[0-9a-f]{12}/, 'base=000000000000'))]) { assert.equal(x.final, 'ELEVATED'); assert.ok(x.errors.includes('base_mismatch')); assert.equal(RF.exitCodeFor(x), 1); }
+  for (const bad of ['no record here', null, `${line(r)}\n${line(r)}`]) { const x = re(r, h2, 'STANDARD', 'STANDARD', bad); assert.equal(x.final, 'ELEVATED'); assert.ok(x.errors.includes('recorded_line_invalid')); assert.equal(RF.exitCodeFor(x), 1); }
   assert.equal(RF.exitCodeFor(RF.reassess({ repo: r.dir, base: h1, head: h2, recordedLine: line(other), claimed: 'STANDARD', ai: 'STANDARD' })), 0);
   G(r.dir, 'checkout', '-q', '-b', 'side', r.base); writeFileSync(join(r.dir, 'side.txt'), 's'); const side = commit(r.dir);
   const x = RF.reassess({ repo: r.dir, base: h2, head: side, recordedLine: line({ base: h2 }), claimed: 'STANDARD', ai: 'STANDARD' }); assert.ok(x.errors.includes('base_mismatch')); // base not an ancestor of head
@@ -260,6 +259,49 @@ test('reassess: newline/space filenames survive git -z; bad and flag-looking hea
   const dead = repo({ 'README.md': 'x' }, null); writeFileSync(join(dead.dir, 'db.sql'), 'x'); assert.deepEqual(re(dead, commit(dead.dir)).reasons, ['no_risk_paths_declared']);
 });
 
+// ---- confirmation repair: recorded line, HEAD in the union, git-side ignored pass, Unicode order, budgets ----
+const rec = (r, o = {}) => `${o.key ?? 'risk_floor: '}risk-floor: floor=${o.floor ?? 'ELEVATED'}; classes=money; claimed=${o.claimed ?? 'STANDARD'}; ai=${o.ai ?? 'ELEVATED'}; final=${o.final ?? 'ELEVATED'}; paths=1; matched=1; base=${r.base.slice(0, 12)}; head=planned; declaration=${o.decl ?? 'abcdef0123456789'}`;
+test('R-B1 the WHOLE recorded line counts: final is never lower than the recorded claim, ai or final (siblings: each field, now-values, strictness)', () => {
+  const r = repo(); writeFileSync(join(r.dir, 'README.md'), 'typo'); const h = commit(r.dir);
+  for (const o of [{}, { ai: 'STANDARD', claimed: 'ELEVATED', final: 'STANDARD' }, { ai: 'STANDARD', claimed: 'STANDARD', final: 'ELEVATED' }, { ai: 'ELEVATED', claimed: 'STANDARD', final: 'STANDARD' }]) {
+    const x = re(r, h, 'STANDARD', 'STANDARD', rec(r, o)); assert.equal(x.floor, 'STANDARD'); assert.equal(x.final, 'ELEVATED', JSON.stringify(o)); assert.equal(RF.exitCodeFor(x), 2, JSON.stringify(o));
+    assert.equal(RF.exitCodeFor(re(r, h, 'ELEVATED', 'STANDARD', rec(r, o))), 0);
+  }
+  const ok = re(r, h, 'STANDARD', 'STANDARD', rec(r, { ai: 'STANDARD', final: 'STANDARD', floor: 'STANDARD' })); assert.equal(RF.exitCodeFor(ok), 0);
+  for (const bad of [rec(r).replace('ai=ELEVATED', 'ai=LOW'), rec(r).replace('; paths=1', '; extra=1; paths=1'), `${rec(r)}\n${rec(r)}`, `${rec(r)}\n${rec(r, { key: 'risk_floor: ' })}`, rec(r) + '; trailing', rec(r).replace('final=ELEVATED', 'final=')]) {
+    const x = re(r, h, 'ELEVATED', 'ELEVATED', bad); assert.equal(RF.exitCodeFor(x), 1, bad); assert.ok(x.errors.includes('recorded_line_invalid'), bad);
+  }
+  assert.equal(RF.exitCodeFor(re(r, h, 'STANDARD', 'STANDARD', `${rec(r)}\n${rec(r, { key: 'risk_reassess: ' })}`)), 2); // a risk_reassess: line is ignored, not a duplicate
+  assert.equal(RF.exitCodeFor(re(r, h, 'ELEVATED', 'ELEVATED', rec(r).replace('risk_floor: ', ''))), 0); // the bare check line is accepted
+});
+test('R-M2 WORKTREE includes base->HEAD: a committed change restored in index and working tree still counts (paths and declaration)', () => {
+  const r = repo({ 'README.md': 'x', 'apps/api/src/billing/a.ts': 'a' });
+  writeFileSync(join(r.dir, 'apps/api/src/billing/a.ts'), 'changed'); commit(r.dir); G(r.dir, 'checkout', r.base, '--', 'apps/api/src/billing/a.ts'); writeFileSync(join(r.dir, 'README.md'), 'edit');
+  assert.deepEqual(re(r, 'WORKTREE').floor_classes, ['money']);
+  const d = repo(); writeFileSync(join(d.dir, DECL_PATH), JSON.stringify({ ...DECL, classes: DECL.classes.slice(0, 1) })); commit(d.dir); G(d.dir, 'checkout', d.base, '--', DECL_PATH);
+  assert.ok(re(d, 'WORKTREE').floor_classes.includes(RF.CHANGED)); assert.ok(chk(d, ['README.md']).floor_classes.includes(RF.CHANGED)); // also at check time
+});
+test('ignored pass: git filters (declared globs and .ship-ticket/**); unclassifiable ignored paths fail closed; huge ignored trees do not exhaust the budget', () => {
+  const mk = () => { const r = repo({ 'README.md': 'x' }); writeFileSync(join(r.dir, '.git/info/exclude'), 'apps/\nnode_modules/\n.ship-ticket/other.json\nignored-deep/\n'); writeFileSync(join(r.dir, 'README.md'), 'edit'); return r; };
+  let r = mk(); writeFileSync(join(r.dir, '.ship-ticket/other.json'), '{}'); const x = re(r, 'WORKTREE'); assert.ok(x.floor_classes.includes(RF.CHANGED)); assert.equal(x.counts.paths, 2); // built-in protection for ignored .ship-ticket files
+  r = mk(); mkdirSync(join(r.dir, 'apps/api/src/AUTH'), { recursive: true }); writeFileSync(join(r.dir, 'apps/api/src/AUTH/x.ts'), 'x'); // ignored via apps/; case-insensitive match is done by git
+  assert.ok(re(r, 'WORKTREE').floor_classes.includes('auth'));
+  r = mk(); mkdirSync(join(r.dir, 'apps/api/src/auth', ...Array(66).fill('d')), { recursive: true }); writeFileSync(join(r.dir, 'apps/api/src/auth', ...Array(66).fill('d'), 'x.ts'), 'x');
+  const y = re(r, 'WORKTREE'); assert.equal(y.final, 'ELEVATED'); assert.ok(y.errors.includes('unclassifiable_path'), JSON.stringify(y.errors)); assert.equal(RF.exitCodeFor(y), 1); // not silently dropped
+  r = mk(); mkdirSync(join(r.dir, 'node_modules/pkg'), { recursive: true }); for (let i = 0; i < 3000; i++) writeFileSync(join(r.dir, `node_modules/pkg/f${i}.js`), 'x');
+  const z = re(r, 'WORKTREE'); assert.equal(z.errors.length, 0); assert.equal(z.counts.paths, 1); assert.equal(z.floor, 'STANDARD'); // node_modules is ignored and matches no declared glob
+});
+test('Unicode order: format characters are stripped and case folded BEFORE NFC, on both pattern and path', () => {
+  for (const [g, p] of [['café.ts', 'cafe‍́.ts'], ['café.ts', 'café.ts'], ['café.ts', 'café.ts'], ['CAFÉ.ts', 'cafe‍́.ts'], ['caf‍é.ts', 'CAFÉ.TS'], ['straße.ts', 'STRASSE.ts'.replace('SSE', 'ße')]])
+    assert.equal(RF.globMatches(g, p), true, JSON.stringify([g, p]));
+});
+test('budgets count every DP row/cell: 200 classes x 32-segment ** patterns against 200000 planned paths fail closed fast; one pair stays within the bound', () => {
+  const glob = Array.from({ length: 32 }, (_, i) => (i % 2 ? 'a' : '**')).join('/'), g = RF.compileGlob(glob), ctx = { steps: 0 };
+  RF.matchSegments(g, ['a', 'a', 'a'], ctx); assert.ok(ctx.steps > 30 && ctx.steps <= RF.STEP_BOUND_PER_PAIR, String(ctx.steps));
+  const dec = repo({ 'README.md': 'x' }, { version: 1, classes: Array.from({ length: 200 }, (_, i) => ({ name: `c${i}`, floor: 'ELEVATED', globs: [['**', `z${i}`, ...Array.from({ length: 30 }, (_, k) => (k % 2 ? 'a' : '**'))].join('/')] })) });
+  const t = Date.now(), x = chk(dec, Array(RF.MAX_PATHS).fill('a/a/a')); assert.equal(x.final, 'ELEVATED'); assert.ok(x.errors.includes('malformed_input')); assert.ok(Date.now() - t < 60_000);
+});
+
 // ---- CLI ----
 test('CLI: exit 0 / 2 / 1, both flag forms, strict parsing, own-property commands, recorded line from file or stdin', () => {
   const r = repo(), common = ['--base', r.base, '--repo', r.dir, '--claimed', 'STANDARD', '--ai', 'STANDARD'];
@@ -294,7 +336,7 @@ test('docs: debate rule is consistent, the unrelated preflight paragraph is inta
   assert.match(ref('references/cross-model.md'), /both STANDARD/);
   assert.match(ref('SKILL.md'), /risk floor or your own assessment is ELEVATED/); assert.match(ref('SKILL.md'), /your own assessment is also STANDARD/);
   for (const f of ['SKILL.md', 'references/plan.md']) { assert.match(ref(f), /not evidence of low risk/); assert.match(ref(f), /advisory, not enforced/i); }
-  assert.match(ref('SKILL.md'), /no_risk_paths_declared/); assert.match(ref('SKILL.md'), /ignored/i); assert.match(ref('SKILL.md'), /Pin `--base`/); assert.match(ref('scripts/risk-floor.mjs'), /worst-case/i);
+  assert.match(ref('SKILL.md'), /no_risk_paths_declared/); assert.match(ref('SKILL.md'), /ignored/i); assert.match(ref('SKILL.md'), /Pin `--base`/); assert.match(ref('SKILL.md'), /--recorded-line <file\|->/); assert.match(ref('references/plan.md'), /risk_reassess/); assert.match(ref('scripts/risk-floor.mjs'), /worst-case/i);
   assert.doesNotMatch(ref('SKILL.md') + ref('scripts/risk-floor.mjs'), /never under-classify|is final: it forces/);
   assert.doesNotThrow(() => RF.validateDeclaration(JSON.parse(readFileSync(new URL('references/risk-paths.example.json', root), 'utf8'))));
 });
