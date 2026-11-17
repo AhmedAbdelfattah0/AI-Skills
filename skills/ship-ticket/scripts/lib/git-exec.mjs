@@ -32,16 +32,19 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 import { spawnSync } from 'node:child_process';
-import path from 'node:path';
+import { statSync } from 'node:fs';
 import { probeGit } from './git-capability.mjs';
 
 const DECODE_CODES = ['git_output_not_utf8', 'path_not_utf8', 'filter_name_not_utf8'];
 export const GIT_CODES = Object.freeze(['git_env_too_large', 'git_unavailable', 'git_launch_failed', 'git_timeout', 'git_signal',
   'git_output_truncated', 'git_failed', 'git_stderr', ...DECODE_CODES, 'git_op_invalid']);
-const STDERR = Symbol('gitStderr');
+// stderr lives in a module-private WeakMap: no property of the error (enumerable, hidden or symbol-keyed)
+// carries it, so no inspect option, spread or serialiser can reach it. Stored bytes are capped.
+const STDERR = new WeakMap();
+export const STDERR_CAP = 64 * 1024;
 const OP_ID = /^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)*$/;
 
-/** A typed git failure. message, stack and toJSON carry {code, op} only; stderr is non-enumerable and never printed. */
+/** A typed git failure. message, stack and toJSON carry {code, op} only; stderr is kept off the object and never printed. */
 export class GitError extends Error {
   constructor(code, { op = null, stderr = null } = {}) {
     if (!GIT_CODES.includes(code)) throw new TypeError('GitError: unknown code');
@@ -50,18 +53,22 @@ export class GitError extends Error {
     Object.defineProperty(this, 'name', { value: 'GitError', enumerable: false });
     this.code = code;
     this.op = id;
-    Object.defineProperty(this, STDERR, { value: Buffer.isBuffer(stderr) ? Buffer.from(stderr) : null, enumerable: false });
+    const bytes = Buffer.isBuffer(stderr) && stderr.length ? stderr : null;
+    STDERR.set(this, bytes && Object.freeze({ bytes: Buffer.from(bytes.subarray(0, STDERR_CAP)), total: bytes.length }));
   }
   toJSON() { return { code: this.code, op: this.op }; }
   [Symbol.for('nodejs.util.inspect.custom')]() {
-    const n = this[STDERR]?.length ?? 0;
+    const n = STDERR.get(this)?.total ?? 0;
     return `GitError [${this.code}]${this.op ? ` op=${this.op}` : ''}${n ? ` {stderr: <redacted ${n} bytes>}` : ''}`;
   }
 }
 const fail = (code, op, stderr) => new GitError(code, { op, stderr });
 const invalid = () => fail('git_op_invalid');
-/** The stored stderr bytes of a GitError (explicit diagnostics only), else null. */
-export const stderrOf = (e) => (e instanceof GitError ? e[STDERR] : null);
+/** Explicit diagnostics only: {bytes (at most STDERR_CAP), total, truncated} of a GitError's stderr, else null. */
+export function stderrOf(e) {
+  const s = e instanceof GitError ? STDERR.get(e) : null;
+  return s ? { bytes: Buffer.from(s.bytes), total: s.total, truncated: s.total > s.bytes.length } : null;
+}
 
 // ------------------------------------------------------------------ strict decoding (the lib's only decoder)
 
@@ -104,34 +111,45 @@ export const BASE_ENV = Object.freeze({
 export const POLICY_GIT_KEYS = Object.freeze(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_ATTR_NOSYSTEM']);
 export const SELECTION_KEYS = Object.freeze(['GIT_CEILING_DIRECTORIES']);
 const HOME_FAMILY = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'HOMEDRIVE', 'HOMEPATH'];
-const COMPOSED = new WeakSet();
+const COMPOSED = new WeakMap(); // composed env -> the platform it was validated for
 const up = (k) => k.toUpperCase();
 const isStr = (v) => typeof v === 'string' && !v.includes('\0');
 const isKey = (k) => isStr(k) && k.length > 0 && !k.includes('=');
-const isAbs = (p) => isStr(p) && (path.posix.isAbsolute(p) || path.win32.isAbsolute(p));
+/**
+ * Absolute for the TARGET platform. POSIX: `/`-rooted only (`C:\x` and `\x` are relative names there).
+ * win32: a drive root (`C:\`, `C:/`) or a UNC/device prefix (`\\srv\share`, `\\?\C:\`); a rooted-relative
+ * `\x` or `/x`, and a drive-relative `C:x`, are refused.
+ */
+const isAbs = (p, platform) => isStr(p) && (platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(p) : p.startsWith('/'));
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+/** An own data property's value through its descriptor (never a getter or an inherited value), else undefined. */
+const ownValue = (o, k) => { const d = Object.getOwnPropertyDescriptor(o, k); return d && own(d, 'value') ? d.value : undefined; };
 const isScrubbed = (k) => up(k).startsWith('GIT_') || up(k) === 'SSH_ASKPASS';
 
 /**
- * The ambient env without any GIT_* or SSH_ASKPASS key (upper-cased match on every OS), and without entries
- * no child can receive (a key with `=` or NUL, a non-string or NUL value). On Windows case-duplicate keys
- * collapse to the lexicographically first, which is the one Node's child_process passes on.
+ * A null-prototype copy of the ambient env without any GIT_* or SSH_ASKPASS key (upper-cased match on every
+ * OS), and without entries no child can receive (a key with `=` or NUL, a non-string, NUL or accessor
+ * value). Values are read through own descriptors, so `__proto__`, `constructor` or a getter cannot inject
+ * or hide a value, and Node's `for...in` env copy sees no inherited key. On Windows case-duplicate keys
+ * collapse to the lexicographically first, the one Node's child_process passes on (VERIFIED against the
+ * Node 22.23.1 child_process source; not re-read for Node 18).
  */
 export function scrubAmbient(env, { platform = process.platform } = {}) {
   if (!env || typeof env !== 'object') throw invalid();
-  const keys = Object.keys(env).filter((k) => isKey(k) && isStr(env[k]) && !isScrubbed(k));
-  const out = {};
+  const keys = Object.keys(env).filter((k) => isKey(k) && isStr(ownValue(env, k)) && !isScrubbed(k));
+  const keep = new Set(keys);
   if (platform === 'win32') {
     const seen = new Set();
-    for (const k of [...keys].sort()) if (!seen.has(up(k))) { seen.add(up(k)); out[k] = env[k]; }
-    return Object.fromEntries(keys.filter((k) => k in out).map((k) => [k, out[k]]));
+    for (const k of [...keys].sort()) if (seen.has(up(k))) keep.delete(k); else seen.add(up(k));
   }
-  for (const k of keys) out[k] = env[k];
+  const out = Object.create(null);
+  for (const k of keys) if (keep.has(k)) out[k] = ownValue(env, k);
   return out;
 }
 
 /** The P neutralEnv elements (a890b0d:337-342) as a pure policy; the caller owns and creates the paths. */
-export function hermeticPolicy({ home, globalConfig } = {}) {
-  if (!isAbs(home) || !isAbs(globalConfig)) throw invalid();
+export function hermeticPolicy({ home, globalConfig, platform = process.platform } = {}) {
+  if (!isAbs(home, platform) || !isAbs(globalConfig, platform)) throw invalid();
   return Object.freeze({
     deletes: Object.freeze([...HOME_FAMILY]),
     set: Object.freeze({ HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1' }),
@@ -160,6 +178,9 @@ export function neutralisationPairs(stdout) {
 const BASE_PAIR_LOWER = ['core.fsmonitor', 'core.hookspath'];
 const okPairs = (pairs) => Array.isArray(pairs) && pairs.every((p) => Array.isArray(p) && p.length === 2 && isStr(p[0]) && p[0].length > 0
   && !/[\n\r]/.test(p[0]) && isStr(p[1]) && !BASE_PAIR_LOWER.includes(p[0].toLowerCase()));
+// Neutralisation pairs can only DISABLE a filter: `filter.<d>.clean|smudge|process` = '' or `.required` = 'false'.
+const okNeutral = (pairs) => okPairs(pairs) && pairs.every(([k, v]) => /^filter\..*\.(?:clean|smudge|process|required)$/.test(k)
+  && v === (k.endsWith('.required') ? 'false' : ''));
 
 /**
  * The child env, in the fixed order of design §2.2: (1) scrub, (2) policy deletes, (3) BASE then policy
@@ -172,11 +193,11 @@ export function composeEnv({ ambient, platform = process.platform, gitInfo, hook
   // A policy may set a non-git variable, or a GIT_* key from the closed list by its exact spelling.
   const settable = ([k, v]) => isKey(k) && isStr(v) && !baseKeys.has(up(k)) && !isScrubbed(k) || POLICY_GIT_KEYS.includes(k) && isStr(v);
   const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
-  if (Object.keys(extra).length || typeof gitInfo?.noLazyFetch !== 'boolean' || !isAbs(hooksDir)
+  if (Object.keys(extra).length || typeof gitInfo?.noLazyFetch !== 'boolean' || !isAbs(hooksDir, platform)
     || !Array.isArray(deletes) || !deletes.every(isKey)
     || !isObj(set) || !Object.entries(set).every(settable)
-    || !isObj(selection) || !Object.entries(selection).every(([k, v]) => SELECTION_KEYS.includes(k) && isStr(v))
-    || !okPairs(pairs) || !okPairs(neutralisation)) throw invalid();
+    || !isObj(selection) || !Object.entries(selection).every(([k, v]) => SELECTION_KEYS.includes(k) && isAbs(v, platform))
+    || !okPairs(pairs) || !okNeutral(neutralisation)) throw invalid();
   const env = scrubAmbient(ambient, { platform });
   const drop = (k) => { for (const e of Object.keys(env)) if (up(e) === up(k)) delete env[e]; };
   const put = (k, v) => { drop(k); env[k] = v; };
@@ -189,7 +210,7 @@ export function composeEnv({ ambient, platform = process.platform, gitInfo, hook
   all.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
   env.GIT_CONFIG_COUNT = `${all.length}`;
   Object.freeze(env);
-  COMPOSED.add(env);
+  COMPOSED.set(env, platform);
   return env;
 }
 
@@ -222,12 +243,16 @@ export function classify(facts, spec) {
 
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */
 const WIN_ENV_LIMIT = 32767;
-const envUnits = (env) => Object.entries(env).reduce((n, [k, v]) => n + k.length + v.length + 2, 1);
+/** UTF-16 units of the block `k=v\0...\0`: own keys and values of a null-prototype env (no inherited reads). */
+const envUnits = (env) => Object.keys(env).reduce((n, k) => n + k.length + env[k].length + 2, 1);
 
 /**
  * The ONE spawn site. The binary is the one `probeGit` (S-02a0a) resolved and version-checked in this
- * call, so no caller can supply an executable and `info` (noLazyFetch, for composeEnv) describes exactly
- * the binary that runs. `run` executes `args` once with an env from composeEnv: `status` maps accepted exit
+ * call: callers of `run` cannot supply an executable (the probe options themselves, PATH/cwd/exclude and
+ * a0a's fs seam, still choose what probeGit resolves), and `info` (noLazyFetch, for composeEnv) describes
+ * exactly the binary that runs. `platform` is the target platform: it fixes the Windows env bound and must
+ * equal the platform the env was composed for. A missing cwd is refused before spawn as git_launch_failed
+ * (spawn would report ENOENT, indistinguishable from a missing binary). `run` executes `args` once with an env from composeEnv: `status` maps accepted exit
  * codes to outcome names, `stderr` is 'forbid' (default) or 'allow', `decode` is a decode code or absent
  * (stdout stays a Buffer). Option-free argv building is S-02a0c's (closed OPS).
  */
@@ -236,12 +261,15 @@ export function gitRunner({ platform = process.platform, envLimit, ...probeOptio
   const gi = probeGit(probeOptions);
   const run = ({ args, cwd, env, op, status = { 0: 'ok' }, stderr = 'forbid', decode, timeoutMs = 60_000, maxBuffer = 64 * 1024 * 1024,
     ...unknown } = {}) => {
-    if (Object.keys(unknown).length || !isAbs(cwd) || !COMPOSED.has(env) || !Array.isArray(args) || !args.every(isStr)
+    if (Object.keys(unknown).length || !isAbs(cwd, platform) || COMPOSED.get(env) !== platform || !Array.isArray(args) || !args.every(isStr)
       || !status || typeof status !== 'object' || !Object.entries(status).every(([k, v]) => /^\d+$/.test(k) && /^[a-z_]+$/.test(v))
       || !['forbid', 'allow'].includes(stderr) || (decode !== undefined && !DECODE_CODES.includes(decode))
       || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) throw invalid();
     const spec = { op, status, stderr, decode };
     if (envUnits(env) > (envLimit ?? (platform === 'win32' ? WIN_ENV_LIMIT : Infinity))) return classify({ envTooLarge: true }, spec);
+    let isDir = false;
+    try { isDir = statSync(cwd).isDirectory(); } catch { /* refused below */ }
+    if (!isDir) return classify({ error: { code: 'ECWD' } }, spec);
     const r = spawnSync(gi.path, args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer });
     return classify({ error: r.error ? { code: r.error.code } : null, signal: r.signal, status: r.status, stdout: r.stdout, stderr: r.stderr }, spec);
   };

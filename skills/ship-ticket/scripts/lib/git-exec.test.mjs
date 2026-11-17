@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 import * as X from './git-exec.mjs';
 
 const {
-  BASE_ENV, GIT_CODES, GitError, OUTCOME_ROWS, classify, composeEnv, decodeStrict, hermeticPolicy, label,
+  BASE_ENV, GIT_CODES, GitError, OUTCOME_ROWS, STDERR_CAP, classify, composeEnv, decodeStrict, hermeticPolicy, label,
   gitRunner, neutralisationPairs, scrubAmbient, stderrOf, zSplit,
 } = X;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -50,7 +50,9 @@ function tmp(t) {
   t.after(() => rmSync(d, { recursive: true, force: true }));
   return d;
 }
-const HOOKS = win ? 'C:\\ctx\\hooks' : '/ctx/hooks';
+/** An absolute path for the TARGET platform (composeEnv validates against the platform it is given). */
+const absFor = (platform, ...parts) => (platform === 'win32' ? `C:\\${parts.join('\\')}` : `/${parts.join('/')}`);
+const HOOKS = absFor(process.platform, 'ctx', 'hooks');
 const GI = { noLazyFetch: true };
 const env0 = (o = {}) => composeEnv({ ambient: {}, gitInfo: GI, hooksDir: HOOKS, ...o });
 const NOFAKE = win && 'a fake git is a POSIX shell script; Windows runs the real-git rows';
@@ -69,7 +71,7 @@ function fakeRunner(t, binName = 'bin', runnerOpts = {}) {
 
 test('the export list is pinned: no lossy or try-decoder can be added unseen', () => {
   assert.deepEqual(Object.keys(X).sort(), [
-    'BASE_ENV', 'GIT_CODES', 'GitError', 'OUTCOME_ROWS', 'POLICY_GIT_KEYS', 'SELECTION_KEYS',
+    'BASE_ENV', 'GIT_CODES', 'GitError', 'OUTCOME_ROWS', 'POLICY_GIT_KEYS', 'SELECTION_KEYS', 'STDERR_CAP',
     'classify', 'composeEnv', 'decodeStrict', 'gitRunner', 'hermeticPolicy', 'label', 'neutralisationPairs',
     'scrubAmbient', 'stderrOf', 'zSplit',
   ]);
@@ -142,7 +144,7 @@ test('label escapes every non-printable or non-ASCII byte and the backslash (dis
 
 // ------------------------------------------------------------------ typed errors and safe serialisation (AC3)
 
-test('GitError serialises {code, op} only; stderr is non-enumerable and redacted everywhere', () => {
+test('GitError serialises {code, op} only; stderr is held off the object and redacted everywhere', () => {
   const marker = 'SECRET-https://user:tok3n@example.invalid/';
   const e = new GitError('git_failed', { op: 'blob.read', stderr: S(`fatal: ${marker}\n`) });
   assert.equal(e.message, 'git_failed (blob.read)');
@@ -150,14 +152,25 @@ test('GitError serialises {code, op} only; stderr is non-enumerable and redacted
   assert.deepEqual(Object.keys(e).sort(), ['code', 'op']);
   const seen = [JSON.stringify(e), JSON.stringify({ wrapped: e }), inspect(e), inspect({ deep: { e } }, { depth: 5 }),
     inspect(e, { showHidden: true }), String(e), e.stack, `${e}`, Object.getOwnPropertyNames(e).join(',')];
-  seen.push(inspect({ ...e }, { showHidden: true }), JSON.stringify({ ...e }), inspect(Object.assign({}, e)));
+  seen.push(inspect({ ...e }, { showHidden: true }), JSON.stringify({ ...e }), inspect(Object.assign({}, e)),
+    inspect(e, { customInspect: false, showHidden: true, depth: 9 }), inspect({ e }, { customInspect: false, showHidden: true, depth: 9 }));
   // Neither the text nor its bytes: a default inspect of a Buffer prints hex ("74 6f 6b 33 6e" is "tok3n").
   for (const s of seen) assert.ok(!s.includes('tok3n') && !s.includes('74 6f 6b 33 6e') && !s.includes('<Buffer'), `leaked: ${s}`);
   assert.match(inspect(e, { showHidden: true }), /^GitError \[git_failed\] op=blob\.read \{stderr: <redacted \d+ bytes>\}$/);
-  for (const sym of Object.getOwnPropertySymbols(e)) assert.equal(Object.getOwnPropertyDescriptor(e, sym).enumerable, false, 'stderr is not copied by spread');
-  assert.ok(Object.getOwnPropertySymbols(e).length > 0, 'positive control: the symbol property exists');
-  assert.ok(stderrOf(e).includes(marker), 'positive control: the stderr was stored and is reachable explicitly');
+  assert.deepEqual(Object.getOwnPropertySymbols(e), [], 'no symbol-keyed copy for spread or showHidden to reach');
+  assert.ok(stderrOf(e).bytes.includes(marker), 'positive control: the stderr was stored and is reachable explicitly');
+  assert.deepEqual([stderrOf(e).total, stderrOf(e).truncated], [Buffer.byteLength(`fatal: ${marker}\n`), false]);
   assert.equal(stderrOf(new Error('x')), null);
+  assert.equal(stderrOf(new GitError('git_failed')), null);
+});
+
+test('stored stderr is capped at STDERR_CAP bytes, with the total and a truncation flag', () => {
+  const big = Buffer.alloc(STDERR_CAP * 3, 0x61);
+  const s = stderrOf(new GitError('git_stderr', { stderr: big }));
+  assert.deepEqual([s.bytes.length, s.total, s.truncated], [STDERR_CAP, STDERR_CAP * 3, true]);
+  assert.equal(STDERR_CAP, 64 * 1024);
+  const t = stderrOf(new GitError('git_stderr', { stderr: big.subarray(0, STDERR_CAP) }));
+  assert.deepEqual([t.bytes.length, t.truncated], [STDERR_CAP, false], 'exactly at the cap is not truncated');
 });
 
 test('GitError refuses unknown codes and records only a closed-shape op id', () => {
@@ -183,7 +196,7 @@ test('a real failing child: stderr, argv and bin path never reach the serialised
     for (const s of [JSON.stringify(e), inspect(e, { showHidden: true, depth: 9 }), String(e), e.stack]) assert.ok(!s.includes(marker), s);
     assert.equal(e.cause, undefined, 'the Node spawn error (spawnargs, path) is never attached');
   }
-  assert.ok(stderrOf(e1).includes(marker), 'positive control');
+  assert.ok(stderrOf(e1).bytes.includes(marker), 'positive control');
 });
 
 // ------------------------------------------------------------------ environment (AC1: T2a; AC5: neutralEnv elements)
@@ -218,28 +231,49 @@ test('scrubAmbient removes every GIT_* and SSH_ASKPASS case-insensitively and ke
     assert.equal(e.HOME, '/HOSTILE-home', 'non-git variables are not this function’s business');
   }
   const odd = scrubAmbient({ '=C:': 'C:\\x', 'A\0B': 'v', OK: 'a\0b', N: 1, U: undefined, FINE: 'y' }, { platform: 'linux' });
-  assert.deepEqual(odd, { FINE: 'y' }, 'keys with = or NUL, and non-string or NUL values, are dropped');
+  assert.deepEqual({ ...odd }, { FINE: 'y' }, 'keys with = or NUL, and non-string or NUL values, are dropped');
+  const acc = Object.defineProperty({ A: 'a' }, 'GETTER', { get: () => 'x', enumerable: true });
+  assert.deepEqual({ ...scrubAmbient(acc, { platform: 'linux' }) }, { A: 'a' }, 'an accessor value is never invoked or kept');
 });
 
 test('scrubAmbient on Windows collapses case-duplicates to the lexicographically first key (Node child_process rule)', () => {
   const e = scrubAmbient({ path: 'c', Path: 'b', PATH: 'a', Temp: 't' }, { platform: 'win32' });
-  assert.deepEqual(e, { PATH: 'a', Temp: 't' });
-  assert.deepEqual(scrubAmbient({ path: 'c', PATH: 'a' }, { platform: 'linux' }), { path: 'c', PATH: 'a' }, 'POSIX names are case-sensitive');
+  assert.deepEqual({ ...e }, { PATH: 'a', Temp: 't' });
+  assert.deepEqual({ ...scrubAmbient({ path: 'c', PATH: 'a' }, { platform: 'linux' }) }, { path: 'c', PATH: 'a' }, 'POSIX names are case-sensitive');
 });
 
-const POLICIES = (root) => ({
+test('hostile prototype keys (__proto__, constructor, toString) are own data, never inherited reads or pollution', () => {
+  const amb = JSON.parse('{"__proto__":"P","constructor":"C","toString":"T","hasOwnProperty":"H","A":"a"}');
+  for (const platform of ['linux', 'win32']) {
+    const e = scrubAmbient(amb, { platform });
+    assert.equal(Object.getPrototypeOf(e), null, 'null prototype: Node copies the child env with for...in');
+    assert.deepEqual(Object.keys(e).sort(), ['A', '__proto__', 'constructor', 'hasOwnProperty', 'toString']);
+    assert.equal(e['__proto__'], 'P');
+    const env = composeEnv({ ambient: amb, platform, gitInfo: GI, hooksDir: absFor(platform, 'h') });
+    assert.equal(Object.getPrototypeOf(env), null);
+    assert.equal(env['__proto__'], 'P');
+    assert.equal(env.constructor, 'C');
+  }
+  Object.prototype.GIT_DIR_POLLUTED = 'x';
+  try {
+    const env = env0();
+    assert.equal(env.GIT_DIR_POLLUTED, undefined, 'a polluted Object.prototype key is not visible through the composed env');
+  } finally { delete Object.prototype.GIT_DIR_POLLUTED; }
+});
+
+const POLICIES = (platform) => ({
   plain: {},
-  hermetic: { policy: hermeticPolicy({ home: join(root, 'home'), globalConfig: join(root, 'empty.gitconfig') }) },
-  hermeticNoRepo: { policy: hermeticPolicy({ home: join(root, 'home'), globalConfig: join(root, 'empty.gitconfig') }), selection: { GIT_CEILING_DIRECTORIES: root } },
+  hermetic: { policy: hermeticPolicy({ platform, home: absFor(platform, 'r', 'home'), globalConfig: absFor(platform, 'r', 'empty.gitconfig') }) },
+  hermeticNoRepo: { policy: hermeticPolicy({ platform, home: absFor(platform, 'r', 'home'), globalConfig: absFor(platform, 'r', 'empty.gitconfig') }), selection: { GIT_CEILING_DIRECTORIES: absFor(platform, 'r') } },
   neutralised: { neutralisation: neutralisationPairs(S('filter.lfs.clean\0filter.x=y.smudge\0')) },
 });
 
 test('T2a: over the hostile corpus, the env holds only lib-set GIT_* keys, a contiguous COUNT and no hostile value', () => {
-  const root = win ? 'C:\\r' : '/r';
   for (const platform of ['linux', 'darwin', 'win32']) {
-    for (const [name, o] of Object.entries(POLICIES(root))) {
+    const hooks = absFor(platform, 'ctx', 'hooks');
+    for (const [name, o] of Object.entries(POLICIES(platform))) {
       for (const noLazyFetch of [true, false]) {
-        const env = composeEnv({ ambient: HOSTILE, platform, gitInfo: { noLazyFetch }, hooksDir: HOOKS, ...o });
+        const env = composeEnv({ ambient: HOSTILE, platform, gitInfo: { noLazyFetch }, hooksDir: hooks, ...o });
         const tag = `${platform}/${name}/${noLazyFetch}`;
         assert.ok(Object.isFrozen(env), tag);
         // Without the hermetic policy the user's HOME family is kept by design (repo-query reads the user view).
@@ -257,7 +291,7 @@ test('T2a: over the hostile corpus, the env holds only lib-set GIT_* keys, a con
         assert.equal(env.GIT_CONFIG_KEY_0, 'core.fsmonitor');
         assert.equal(env.GIT_CONFIG_VALUE_0, 'false');
         assert.equal(env.GIT_CONFIG_KEY_1, 'core.hooksPath');
-        assert.equal(env.GIT_CONFIG_VALUE_1, HOOKS);
+        assert.equal(env.GIT_CONFIG_VALUE_1, hooks);
         assert.equal(n, 2 + (name === 'neutralised' ? 8 : 0), tag);
         assert.ok(!Object.keys(env).some((k) => /^SSH_ASKPASS$/i.test(k)), tag);
         for (const [k, v] of Object.entries(BASE_ENV)) assert.equal(env[k], v, `${tag}: ${k}`);
@@ -287,20 +321,21 @@ test('pair order is BASE, policy, neutralisation, serialised once with contiguou
 });
 
 test('AC5: hermeticPolicy carries every element of P neutralEnv (a890b0d:337-342)', () => {
-  const home = win ? 'C:\\c\\home' : '/c/home';
-  const cfg = win ? 'C:\\c\\empty.gitconfig' : '/c/empty.gitconfig';
-  const env = env0({ ambient: HOSTILE, platform: 'win32', policy: hermeticPolicy({ home, globalConfig: cfg }), selection: { GIT_CEILING_DIRECTORIES: '/c' } });
+  const home = 'C:\\c\\home';
+  const cfg = 'C:\\c\\empty.gitconfig';
+  const env = env0({ ambient: HOSTILE, platform: 'win32', hooksDir: 'C:\\h', policy: hermeticPolicy({ platform: 'win32', home, globalConfig: cfg }), selection: { GIT_CEILING_DIRECTORIES: 'C:\\c' } });
   // neutralEnv: HOME/USERPROFILE/XDG_CONFIG_HOME=tmp, GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=empty file,
   // GIT_CEILING_DIRECTORIES (no-repo ops, set through the selection step), GIT_ATTR_NOSYSTEM=1, LC_ALL=C.
   for (const [k, v] of Object.entries({ HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: cfg,
-    GIT_CEILING_DIRECTORIES: '/c', GIT_ATTR_NOSYSTEM: '1', LC_ALL: 'C' })) assert.equal(env[k], v, k);
+    GIT_CEILING_DIRECTORIES: 'C:\\c', GIT_ATTR_NOSYSTEM: '1', LC_ALL: 'C' })) assert.equal(env[k], v, k);
   for (const k of ['HOMEDRIVE', 'HOMEPATH']) assert.equal(env[k], undefined, `${k} deleted (Windows HOME fallback)`);
-  assert.throws(() => hermeticPolicy({ home: 'rel', globalConfig: cfg }), code('git_op_invalid'));
-  assert.throws(() => hermeticPolicy({ home, globalConfig: undefined }), code('git_op_invalid'));
+  assert.throws(() => hermeticPolicy({ platform: 'win32', home: 'rel', globalConfig: cfg }), code('git_op_invalid'));
+  assert.throws(() => hermeticPolicy({ platform: 'win32', home, globalConfig: undefined }), code('git_op_invalid'));
+  assert.throws(() => hermeticPolicy({ platform: 'linux', home, globalConfig: cfg }), code('git_op_invalid'), 'C:\\ is a relative name on POSIX');
 });
 
 test('on Windows a set replaces every case-variant spelling (HOME vs Home)', () => {
-  const env = env0({ ambient: { Home: '/HOSTILE', Lc_All: 'x', Path: 'p' }, platform: 'win32', policy: hermeticPolicy({ home: '/h', globalConfig: '/g' }) });
+  const env = env0({ ambient: { Home: '/HOSTILE', Lc_All: 'x', Path: 'p' }, platform: 'win32', hooksDir: 'C:\\k', policy: hermeticPolicy({ platform: 'win32', home: 'C:\\h', globalConfig: 'C:\\g' }) });
   assert.deepEqual(Object.keys(env).filter((k) => k.toUpperCase() === 'HOME'), ['HOME']);
   assert.deepEqual(Object.keys(env).filter((k) => k.toUpperCase() === 'LC_ALL'), ['LC_ALL']);
   assert.equal(env.Path, 'p');
@@ -314,9 +349,24 @@ test('composeEnv refuses inputs that could reach a GIT_CONFIG index, a BASE key 
     { policy: { pairs: [['a.b', 'x\0']] } }, { policy: { pairs: [['', 'x']] } }, { policy: { pairs: [['a.b\nc', 'x']] } }, { policy: { pairs: [['a.b']] } }, { policy: { pairs: [['Core.HooksPath', '/x']] } }, { neutralisation: [['core.fsmonitor', 'true']] },
     { policy: { extra: 1 } }, { selection: { GIT_DIR: '/x' } }, { selection: { GIT_CEILING_DIRECTORIES: 'a\0' } }, { selection: { HOME: '/x' } },
     { neutralisation: [['filter.a.clean', '\0']] }, { hooksDir: 'relative/hooks' }, { hooksDir: undefined }, { gitInfo: undefined },
-    { gitInfo: { noLazyFetch: 'yes' } }, { ambient: null },
+    { gitInfo: { noLazyFetch: 'yes' } }, { ambient: null }, { selection: { GIT_CEILING_DIRECTORIES: 'rel' } },
+    // Neutralisation pairs may only disable a filter.
+    { neutralisation: [['filter.x.smudge', 'sh -c evil']] }, { neutralisation: [['alias.x', '!evil']] }, { neutralisation: [['filter.x.required', 'true']] },
+    { neutralisation: [['filter.x.clean', 'false']] }, { neutralisation: [['filter.x.textconv', '']] },
   ];
   for (const o of bad) assert.throws(() => env0(o), code('git_op_invalid'), JSON.stringify(o));
+});
+
+test('absolute paths are judged for the TARGET platform (hooksDir, ceiling, hermetic paths)', () => {
+  const ok = (platform, p) => composeEnv({ ambient: {}, platform, gitInfo: GI, hooksDir: p });
+  const no = (platform, p) => assert.throws(() => ok(platform, p), code('git_op_invalid'), `${platform}: ${JSON.stringify(p)}`);
+  for (const platform of ['linux', 'darwin']) {
+    ok(platform, '/ctx/hooks');
+    for (const p of ['C:\\ctx\\hooks', 'C:/ctx/hooks', '\\ctx\\hooks', '\\\\srv\\share\\h', 'ctx/hooks', '', 'C:h']) no(platform, p);
+  }
+  for (const p of ['C:\\ctx\\hooks', 'c:/ctx/hooks', '\\\\srv\\share\\h', '//srv/share/h', '\\\\?\\C:\\h']) ok('win32', p);
+  for (const p of ['\\ctx\\hooks', '/ctx/hooks', 'C:ctx', 'ctx\\hooks', '\\\\srv', '']) no('win32', p);
+  assert.throws(() => composeEnv({ ambient: {}, platform: 'linux', gitInfo: GI, hooksDir: '/h', selection: { GIT_CEILING_DIRECTORIES: 'C:\\c' } }), code('git_op_invalid'));
 });
 
 test('real git: hostile ambient COUNT/KEY_0/PARAMETERS lose to the lib pairs; HOME/XDG plants are ignored when hermetic', (t) => {
@@ -358,6 +408,15 @@ test('neutralisationPairs: upstream driver names, four pairs each, discovery ord
   assert.deepEqual(neutralisationPairs(S('filter..clean\0')).map(([k]) => k)[0], 'filter..clean', 'an empty driver name is neutralised too (fail closed)');
 });
 
+test('neutralisationPairs: EACH attribute alone discovers its driver (process-only, required-only, clean-only, smudge-only)', () => {
+  const four = (d) => [[`filter.${d}.clean`, ''], [`filter.${d}.smudge`, ''], [`filter.${d}.process`, ''], [`filter.${d}.required`, 'false']];
+  for (const a of ['clean', 'smudge', 'process', 'required']) assert.deepEqual(neutralisationPairs(S(`filter.only.${a}\0`)), four('only'), a);
+  for (const combo of [['process', 'required'], ['clean', 'process'], ['smudge', 'required'], ['clean', 'smudge', 'process', 'required']]) {
+    assert.deepEqual(neutralisationPairs(S(combo.map((a) => `filter.c.${a}\0`).join(''))), four('c'), combo.join('+'));
+  }
+  for (const a of ['textconv', 'foo', 'cleaner', 'Process']) assert.deepEqual(neutralisationPairs(S(`filter.n.${a}\0`)), [], `${a}: not a filter attribute`);
+});
+
 test('neutralisationPairs refuses a non-UTF-8 driver name and takes bytes only', () => {
   assert.throws(() => neutralisationPairs(B([...S('filter.'), 0xff, ...S('.clean'), 0])), code('filter_name_not_utf8'));
   assert.throws(() => neutralisationPairs('filter.a.clean\0'), code('git_op_invalid'));
@@ -377,6 +436,24 @@ test('real git: neutralisation pairs override a required smudge driver in repo c
   assert.equal(get('filter.evil.required', true).stdout, 'true\n', 'control: the repo config itself is untouched and live');
   assert.equal(get('filter.evil.required').stdout, 'false\n', 'the GIT_CONFIG_* pairs win over repo-level config');
   assert.equal(get('filter.evil.smudge').stdout, '\n');
+});
+
+test('real git: a process-only driver is discovered and neutralised (the discovery output comes from git itself)', (t) => {
+  const g = gitRunner();
+  const d = tmp(t);
+  const repo = join(d, 'repo');
+  const plain = composeEnv({ ambient: process.env, gitInfo: g.info, hooksDir: join(d, 'hooks') });
+  const run = (env, args, o = {}) => g.run({ args, cwd: d, env, op: 'test.config', status: { 0: 'ok', 1: 'absent' }, ...o });
+  run(plain, ['init', '-q', repo], { stderr: 'allow' });
+  const gd = ['--git-dir', join(repo, '.git')];
+  run(plain, [...gd, 'config', 'filter.ponly.process', 'HOSTILE-process']);
+  // Discover through the same channel a0c will use; drop drivers inherited from the user's config (lfs, ...).
+  const found = run(plain, [...gd, 'config', '--local', '--null', '--name-only', '--get-regexp', '^filter\\.']).stdout;
+  const pairs = neutralisationPairs(found);
+  assert.deepEqual(pairs.map(([k]) => k), ['filter.ponly.clean', 'filter.ponly.smudge', 'filter.ponly.process', 'filter.ponly.required']);
+  const env = composeEnv({ ambient: process.env, gitInfo: g.info, hooksDir: join(d, 'hooks'), neutralisation: pairs });
+  assert.equal(decodeStrict(run(plain, [...gd, 'config', '--get', 'filter.ponly.process']).stdout), 'HOSTILE-process\n', 'control: live without pairs');
+  assert.equal(decodeStrict(run(env, [...gd, 'config', '--get', 'filter.ponly.process']).stdout), '\n', 'neutralised with pairs');
 });
 
 // ------------------------------------------------------------------ outcomes (AC2)
@@ -464,8 +541,10 @@ test('real child: a SIGTERM-ignoring child cannot hold the runner past its timeo
   const script = `import { gitRunner, composeEnv } from ${JSON.stringify(new URL('./git-exec.mjs', import.meta.url).href)};
 const r = gitRunner({ env: { PATH: ${JSON.stringify(dirname(f))} }, cwd: ${JSON.stringify(cwd)} });
 const env = composeEnv({ ambient: {}, gitInfo: r.info, hooksDir: '/h' });
-try { r.run({ args: ['-e', ${JSON.stringify(child)}], cwd: ${JSON.stringify(cwd)}, env, timeoutMs: 2000 }); console.log('no-error'); } catch (e) { console.log(e.code); }`;
-  const out = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'latin1', timeout: 20_000, killSignal: 'SIGKILL' });
+try { r.run({ args: ['-e', ${JSON.stringify(child)}], cwd: ${JSON.stringify(cwd)}, env, timeoutMs: 5000 }); console.log('no-error'); } catch (e) { console.log(e.code); }`;
+  // The inner 5 s timeout is a failure bound for a slow start (red, never green); the outer 30 s watchdog
+  // only catches a SIGTERM regression.
+  const out = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'latin1', timeout: 30_000, killSignal: 'SIGKILL' });
   assert.ok(existsSync(ready), 'readiness: the TERM trap was installed before the runner killed the child');
   assert.equal(out.signal, null, 'the outer watchdog did not have to kill the runner');
   assert.equal(out.stdout.trim(), 'git_timeout');
@@ -480,16 +559,39 @@ test('real child: git_launch_failed (E2BIG)', { skip: NOFAKE }, (t) => {
   const { cwd, runner } = fakeRunner(t);
   assert.throws(() => runner.run({ args: ['-e', '0', 'x'.repeat(4 << 20)], cwd, env: env0(), op: 'test.child' }), code('git_launch_failed'));
 });
-test('real child: git_env_too_large is decided before spawn (the child never runs)', { skip: NOFAKE }, (t) => {
-  const { cwd, runner } = fakeRunner(t, 'bin', { platform: 'win32' });
-  const { runner: posixRunner } = fakeRunner(t);
+test('git_env_too_large is decided before any fs check or spawn; a __proto__ key cannot shrink the size', (t) => {
+  const w = gitRunner({ platform: 'win32' });
+  const wenv = (ambient) => composeEnv({ ambient, platform: 'win32', gitInfo: w.info, hooksDir: 'C:\\h' });
+  const cwd = 'C:\\git-exec-no-such-dir-0d1e';
+  const big = 'x'.repeat(40000);
+  assert.throws(() => w.run({ args: ['--version'], cwd, env: wenv({ BIG: big }), op: 'test.child' }), code('git_env_too_large'));
+  for (const k of ['__proto__', 'constructor', 'toString']) {
+    assert.throws(() => w.run({ args: ['--version'], cwd, env: wenv(JSON.parse(`{${JSON.stringify(k)}:${JSON.stringify(big)}}`)), op: 'test.child' }), code('git_env_too_large'), k);
+  }
+  // Control: a small env passes the bound and then meets the missing cwd (refused, nothing spawned).
+  assert.throws(() => w.run({ args: ['--version'], cwd, env: wenv({}), op: 'test.child' }), code('git_launch_failed'));
+});
+test('real child: the POSIX default applies no Windows bound', { skip: NOFAKE }, (t) => {
+  const { cwd, runner } = fakeRunner(t);
   const mark = join(cwd, 'ran');
-  const touch = ['-e', `require('fs').writeFileSync(${JSON.stringify(mark)},'')`];
-  const env = env0({ ambient: { BIG: 'x'.repeat(40000) } });
-  assert.throws(() => runner.run({ args: touch, cwd, env, op: 'test.child' }), code('git_env_too_large'));
-  assert.equal(existsSync(mark), false);
-  posixRunner.run({ args: touch, cwd, env, op: 'test.child' });
-  assert.equal(existsSync(mark), true, 'control: the POSIX default does not apply the Windows bound, and the touch works');
+  runner.run({ args: ['-e', `require('fs').writeFileSync(${JSON.stringify(mark)},'')`], cwd, env: env0({ ambient: { BIG: 'x'.repeat(40000) } }), op: 'test.child' });
+  assert.equal(existsSync(mark), true);
+});
+test('the env bound counts the exact block size: k=v NUL per entry plus the final NUL', (t) => {
+  const g = gitRunner();
+  const cwd = tmp(t);
+  const env = env0({ ambient: process.env, gitInfo: g.info });
+  const units = 1 + Object.keys(env).reduce((n, k) => n + k.length + 1 + env[k].length + 1, 0);
+  const run = (envLimit) => gitRunner({ envLimit }).run({ args: ['--version'], cwd, env, op: 'test.child' });
+  let r;
+  assert.doesNotThrow(() => { r = run(units); }, 'at the limit: allowed');
+  assert.equal(r.outcome, 'ok');
+  assert.throws(() => run(units - 1), code('git_env_too_large'), 'one unit over: refused');
+});
+test('a missing cwd is refused before spawn as git_launch_failed, not reported as a missing git', (t) => {
+  const g = gitRunner();
+  const cwd = join(tmp(t), 'gone');
+  assert.throws(() => g.run({ args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.child' }), code('git_launch_failed'));
 });
 
 test('the runner spawns only the probed binary, and refuses an env composeEnv did not build or a malformed spec', (t) => {
@@ -498,35 +600,46 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
   const cwd = tmp(t);
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.child' };
   assert.match(decodeStrict(g.run(ok).stdout), /^git version /);
-  const bad = [{ env: { ...ok.env } }, { env: process.env }, { cwd: 'rel' }, { args: ['a\0b'] }, { args: 'x' }, { bin: '/bin/sh' }, { spawn: () => ({}) }, { shell: true },
+  const other = process.platform === 'win32' ? 'linux' : 'win32';
+  const bad = [{ env: { ...ok.env } }, { env: process.env }, { env: composeEnv({ ambient: {}, platform: other, gitInfo: g.info, hooksDir: absFor(other, 'h') }) }, { cwd: 'rel' }, { args: ['a\0b'] }, { args: 'x' }, { bin: '/bin/sh' }, { spawn: () => ({}) }, { shell: true },
     { status: { 0: 'OK!' } }, { stderr: 'sometimes' }, { decode: 'git_failed' }, { timeoutMs: 0 }, { maxBuffer: -1 }, { envLimit: 10 }, { platform: 'win32' }];
   for (const o of bad) assert.throws(() => g.run({ ...ok, ...o }), code('git_op_invalid'), JSON.stringify(Object.keys(o)));
   assert.throws(() => gitRunner({ envLimit: 'x' }), code('git_op_invalid'));
   assert.throws(() => gitRunner({ envLimit: 10 }).run(ok), code('git_env_too_large'), 'the bound is fixed at construction, not per call');
 });
 
-// ------------------------------------------------------------------ T4a: no lossy decode site in lib/ (AC4)
+// ------------------------------------------------------------------ T4a: no LISTED lossy decode form in lib/ (AC4)
 
-// One rule set for every non-test module in lib/ (so later lib/git-*.mjs files are covered without edits).
+// A lexical scan of every non-test module in lib/ for the forms listed below; a new lib module is scanned
+// without edits. It does NOT type values: template interpolation (`${buf}`) and string concatenation
+// (`buf + ''`) of a Buffer decode lossily and are NOT detected here; they stay a review item until an
+// AST/type-aware check exists. Everything else listed is detected on any line outside an allowlisted site.
+const FS_NAME = /\b(?:realpath|readdir|readlink|mkdtemp)(?:Sync)?(?:\s*\.\s*native)?\s*\(|\bprocess\s*\.\s*cwd\s*\(/;
 const LOSSY = [
-  [/\.toString\b/, 'Buffer#toString / any toString (called or borrowed)'],
+  [/\.to(?:Locale)?String\b|\[\s*['"`]to(?:Locale)?String['"`]\s*\]/, 'Buffer#toString / toLocaleString (called, borrowed or bracketed)'],
+  [/\bTextDecoder\b/, 'a TextDecoder outside decodeStrict (with or without new, any global path)'],
   [/\bencoding\s*:\s*['"`](?!buffer['"`])/, 'a text encoding option on a spawn or fs call'],
-  [/new\s+TextDecoder\b/, 'a TextDecoder outside decodeStrict'],
   [/['"`]utf-?8['"`]/i, 'a utf8 encoding literal'],
   [/['"`](?:latin1|binary|ascii|ucs-?2|utf-?16le)['"`]/i, 'a byte-reinterpreting encoding literal'],
   [/\b(?:utf8|latin1|ascii|ucs2)Slice\b|\bStringDecoder\b|\bsetEncoding\s*\(/, 'a raw slice or stream decoder'],
   [/\bString\s*\(/, 'String() coercion (of a Buffer: an implicit utf8 decode)'],
+  // fs name APIs and the cwd return names decoded as UTF-8 by default (lossy); only an explicit buffer encoding is exact.
+  [{ test: (c) => FS_NAME.test(c) && !/\bencoding\s*:\s*['"`]buffer['"`]/.test(c) }, 'a name-returning fs call or process.cwd() without encoding: buffer'],
 ];
 // Exact sites allowed, each with its reason. A stale entry fails.
 const ALLOWED_SITES = [
   ['git-exec.mjs', "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'the one strict decoder'],
   ['git-capability.mjs', "const bytes = Buffer.isBuffer(out) ? out : Buffer.from(String(out), 'utf8');", 'encodes (string to bytes); not a decode'],
   ['git-capability.mjs', "for (const raw of String(pathVar ?? '').split(win ? ';' : ':')) {", 'coerces the PATH env value (already a string), not bytes'],
+  ['git-capability.mjs', 'realpath(p) { try { return realpathSync.native(p); } catch { return null; } },', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'export function resolveGitBinary({ env = process.env, cwd = process.cwd(), exclude = [], platform = process.platform, fs = realFs } = {}) {', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'const banned = [cwd, ...exclude].flatMap((d) => [P.resolve(d), fs.realpath(d)]).filter(Boolean);', 'the resolver seam above: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
+  ['git-capability.mjs', 'const real = fs.realpath(file);', 'the resolver seam above: the spawn executable, never compared with git output (S-02a0a)'],
   ['git-capability.mjs', 'const m = VERSION.exec(bytes.toString(\'latin1\'));', 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
 ];
 function lossySites(file, src) {
   const hits = [];
-  src.split('\n').forEach((line, i) => {
+  src.split(/\r?\n/).forEach((line, i) => {
     const code = line.replace(/\/\/.*$/, '').trim();
     if (!code || code.startsWith('*') || code.startsWith('/*')) return;
     for (const [re, why] of LOSSY) if (re.test(code)) { hits.push({ file, line: i + 1, code, why }); break; }
@@ -534,7 +647,7 @@ function lossySites(file, src) {
   return hits;
 }
 
-test('T4a: every byte-to-text site in lib/ is the strict decoder (or an allowlisted, reasoned site)', () => {
+test('T4a: no listed lossy decode form appears in lib/ outside the strict decoder or an allowlisted, reasoned site', () => {
   const files = readdirSync(here).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs')).sort();
   assert.ok(files.includes('git-exec.mjs') && files.includes('git-capability.mjs'), `scanned: ${files}`);
   const hits = files.flatMap((f) => lossySites(f, readFileSync(join(here, f), 'utf8')));
@@ -543,51 +656,49 @@ test('T4a: every byte-to-text site in lib/ is the strict decoder (or an allowlis
   const stale = ALLOWED_SITES.filter(([f, c]) => !hits.some((h) => h.file === f && h.code === c));
   assert.deepEqual(stale, [], 'every allowlist entry still matches a real site');
   assert.ok(hits.some((h) => h.file === 'git-exec.mjs' && /TextDecoder/.test(h.code)), 'positive control: the decoder site itself was seen');
+  // L10: a CRLF checkout (Windows) must give the same verdict.
+  const crlf = files.flatMap((f) => lossySites(f, readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, '\r\n')));
+  assert.deepEqual(crlf.map((h) => [h.file, h.line, h.code]), hits.map((h) => [h.file, h.line, h.code]));
 });
 
 test('T4a scanner flags each planted lossy form (the scan is not vacuous)', () => {
   const planted = ["const s = r.stdout.toString();", "const s = buf.toString('utf8');", "spawnSync(b, a, { encoding: 'utf8' })",
     "spawnSync(b, a, { encoding: \"latin1\" })", "const d = new TextDecoder();", "readFileSync(p, 'utf-8')", "x.utf8Slice(0)", "child.stdout.setEncoding('x')",
-    'const z = buf.toString("latin1")', 'const t = String(r.stdout);', 'const u = Buffer.prototype.toString.call(b);'];
+    'const z = buf.toString("latin1")', 'const t = String(r.stdout);', 'const u = Buffer.prototype.toString.call(b);',
+    'const l = buf.toLocaleString();', "const m = buf['toString']();", 'const n = buf[ "toLocaleString" ]();', 'const d = new globalThis.TextDecoder();',
+    'const D = TextDecoder; const d = new D();', 'const r = realpathSync.native(dir);', 'const r = realpathSync(dir, {});', 'const l = readdirSync(dir);',
+    'const t = readlinkSync(p);', 'const m = mkdtempSync(prefix);', 'const c = process.cwd();', 'const r = fs.realpath (p, cb);'];
   for (const p of planted) assert.equal(lossySites('m.mjs', p).length, 1, p);
-  for (const fine of ["spawnSync(b, a, { encoding: 'buffer' })", '// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');"]) {
+  for (const fine of ["spawnSync(b, a, { encoding: 'buffer' })", '// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
+    "const r = realpathSync.native(dir, { encoding: 'buffer' });", "const l = readdirSync(dir, { encoding: 'buffer' });", 'const s = statSync(cwd);']) {
     assert.equal(lossySites('m.mjs', fine).length, 0, fine);
   }
 });
 
 // ------------------------------------------------------------------ mutation evidence (AC6)
-// Each mutant was applied to a scratch copy of lib/ (git-exec.mjs only); every one turned this file red,
-// except the one marked EQUIVALENT.
-// | Mutant                                              | Killed by                                            |
-// |-----------------------------------------------------|------------------------------------------------------|
-// | case-sensitive GIT_* scrub                          | scrubAmbient; T2a; composeEnv refusals               |
-// | SSH_ASKPASS kept                                    | scrubAmbient; T2a                                    |
-// | dropped BASE key (GIT_OPTIONAL_LOCKS)               | BASE list                                            |
-// | no ambient scrub before composition                 | T2a; real git hostile COUNT/PARAMETERS               |
-// | clobbered COUNT (base pairs only)                   | T2a; pair order; real git neutralisation             |
-// | neutralisation pairs before policy pairs            | pair order                                           |
-// | Windows collapse keeps the last spelling            | Windows collapse                                     |
-// | set does not drop case variants                     | Windows HOME vs Home                                 |
-// | policy may set any GIT_* key / override BASE        | composeEnv refusals                                  |
-// | lossy decoder (fatal: false)                        | T4a scan                                             |
-// | BOM stripped (ignoreBOM: false)                     | decodeStrict BOM; T4a                                |
-// | round-trip check removed                            | EQUIVALENT: a fatal decoder already refuses every    |
-// |                                                     | non-UTF-8 input; kept as defence in depth            |
-// | zSplit drops interior empty records                 | zSplit                                               |
-// | signal row before error rows                        | cross-product; real timeout and truncation           |
-// | stderr row before status row                        | cross-product; real failing child                    |
-// | swallowed decode error mapped to an outcome         | cross-product; no reinterpretation; real child       |
-// | ENOBUFS / ETIMEDOUT unmapped                        | cross-product; real truncation / timeout             |
-// | Windows env bound off                               | env_too_large before spawn                           |
-// | stderr enumerable / in toJSON / inspect redaction   | GitError serialisation                               |
-// | op id not validated                                 | GitError op shape                                    |
-// | `required` neutralised to '' / upstream `>` bound   | neutralisationPairs; real git neutralisation         |
-// | non-composed env or unknown run keys accepted       | runner refusals                                      |
-// | GIT_NO_LAZY_FETCH always set                        | T2a                                                  |
-// | hermetic keeps HOMEDRIVE/HOMEPATH                   | T2a; AC5 neutralEnv                                  |
-// | label backslash not escaped                         | label                                                |
-// | decodeStrict accepts strings                        | decodeStrict bytes only                              |
-// | ambient NUL / '=' entries kept                      | scrubAmbient                                         |
-// | a lossy toString site added / String(bytes) added   | T4a scan                                             |
-// | caller pair overrides a BASE pair (any case)        | composeEnv refusals                                  |
-// | killSignal default (SIGTERM)                        | SIGTERM-ignoring child (external watchdog)           |
+// Harness: scratchpad mut-a0b/mutate2.py (copies all of lib/, LF-normalised anchors). A mutant counts as
+// KILLED only when the baseline test count ran and a failing test reports ERR_ASSERTION; a load failure,
+// changed test count or timeout is INVALID. Round 2: 56 mutants, 55 killed, 0 invalid, 1 EQUIVALENT.
+// | Area                 | Mutants (each killed by a named assertion)                                          |
+// |----------------------|-------------------------------------------------------------------------------------|
+// | scrub / compose      | case-sensitive GIT_* scrub; SSH_ASKPASS kept; BASE key dropped; no ambient scrub;   |
+// |                      | COUNT clobbered; neutralisation before policy pairs; Windows collapse keeps last;  |
+// |                      | set keeps case variants; policy sets any GIT_* / overrides BASE; caller pair        |
+// |                      | overrides a BASE pair; neutralisation pairs unrestricted; NO_LAZY_FETCH always;    |
+// |                      | hermetic keeps HOMEDRIVE/HOMEPATH; ambient NUL/'=' entries kept                    |
+// | target-platform paths| POSIX accepts C:\ or \ forms; win32 accepts rooted-relative; union of both;       |
+// |                      | ceiling selection not path-checked                                                  |
+// | filter discovery     | drops clean / smudge / process / required (each alone); accepts any attribute;     |
+// |                      | required neutralised to ''; upstream `>` bound (empty driver)                       |
+// | prototype keys       | Object.prototype accumulator (__proto__ shrinks the env size); getter-read values  |
+// | decoding             | fatal:false (killed by the T4a source scan only: with the round-trip present it is |
+// |                      | behaviourally equivalent); BOM stripped; zSplit drops empties; strings accepted;   |
+// |                      | label backslash. EQUIVALENT: round-trip removed (a fatal decoder already refuses   |
+// |                      | every non-UTF-8 input; kept as defence in depth)                                    |
+// | outcomes             | signal before error rows; stderr before status; swallowed decode error; ENOBUFS /  |
+// |                      | ETIMEDOUT unmapped; killSignal SIGTERM; Windows bound off; size +1 per entry;      |
+// |                      | bound `>=`; missing cwd not pre-checked; env platform not matched; non-composed    |
+// |                      | env accepted; unknown run keys accepted                                             |
+// | serialisation        | stderr stored on the object; stderr not capped; toJSON carries stderr; inspect     |
+// |                      | redaction removed; op not validated                                                  |
+// | T4a scan             | toString / toLocaleString / String(bytes) / process.cwd() site added               |
