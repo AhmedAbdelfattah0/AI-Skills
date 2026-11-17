@@ -130,7 +130,7 @@ export function validateDeclaration(d) {
   const names = new Set(), out = []; let total = 0;
   for (const c of d.classes) {
     if (!c || typeof c !== 'object' || Object.keys(c).some((k) => !['name', 'floor', 'globs'].includes(k))) throw inv('a class has unknown keys');
-    if (typeof c.name !== 'string' || !CLASS_NAME.test(c.name) || names.has(c.name) || c.name === CHANGED) throw inv('class names are unique [a-z0-9_-] identifiers (one is reserved)');
+    if (typeof c.name !== 'string' || !CLASS_NAME.test(c.name) || names.has(c.name) || c.name === CHANGED || c.name === 'none') throw inv('class names are unique [a-z0-9_-] identifiers (risk_declaration_changed and none are reserved: none is the record\'s empty-set sentinel)');
     if (c.floor !== 'ELEVATED') throw inv('a class floor must be "ELEVATED"');
     if (!Array.isArray(c.globs) || !c.globs.length || (total += c.globs.length) > MAX_GLOBS) throw inv('globs must be non-empty arrays, at most 256 in total');
     names.add(c.name);

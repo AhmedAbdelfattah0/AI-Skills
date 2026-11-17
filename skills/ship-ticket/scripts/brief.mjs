@@ -158,7 +158,7 @@ function testKindLines(r, withT0) {
       ...bullets(r.kinds.map((k) => `${code(`[kind:${k}]`)} (${KINDS[k].letter}): ${KINDS[k].definition}.`), 'none'),
       '',
       ...(r.items.length ? [`Plan lifecycle items, each covered by a test whose title carries its marker: ${r.items.map((i) => code(`[plan:${i}]`)).join(', ')}.`, ''] : []),
-      'A kind or item you cannot prove goes in `blockers`. Only the owner can waive one, in the approved plan; a waiver line you add removes nothing.',
+      'A kind or item you cannot prove goes in `blockers`. A waiver line removes nothing here: only a trusted owner approval can, in a later slice.',
       '',
     ],
     report: [

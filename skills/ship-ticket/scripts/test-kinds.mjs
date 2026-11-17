@@ -4,15 +4,15 @@
  * model choice: the approved plan's trigger tags, its recorded risk-floor classes (risk-floor.mjs) and its verified security
  * surfaces (security-plan.mjs) select rows of the table below; each row names the required test kinds (a)-(g).
  *
- *   test-kinds.mjs require --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <sha256:..>]
- *   test-kinds.mjs check   --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <sha256:..>] (--titles <json array|file> | --report-file <final message>)
+ *   test-kinds.mjs require --repo <dir> --base <commit> --plan <plan.md>
+ *   test-kinds.mjs check   --repo <dir> --base <commit> --plan <plan.md> (--titles <json array|file> | --report-file <final message>)
  *
  * Opt-in: nothing is required (`not_declared`, exit 0) unless the plan has a `test-triggers:` line or the repository commits
  * `.ship-ticket/test-triggers.json`, read from the BASE commit only (never the tree under check). Plan lines, all from the plan
  * narrative (RUN-STATE excluded): exactly one `test-triggers: <tag>[, <tag>...]` (or `none`); `lifecycle-item: <id> <text>`;
- * `test-waiver: <kind|item id> <reason>` (an owner disposition). A waiver removes a requirement ONLY when the plan is bound to its
- * approval (`--approved-digest` equals the plan's narrative digest AND a RUN-STATE START event records that digest); otherwise
- * it is reported in `unbound_waivers` and removes nothing. The `risk_floor:` record line is TRUSTED advisory input as recorded
+ * `test-waiver: <kind|item id> <reason>` (a requested owner disposition). A waiver NEVER removes a requirement here: it is only
+ * reported in `waiver_requested` (not applied, needs trusted approval). Applying one needs the engine's pinned approval record
+ * for the selected run (S-01b2); the plan file cannot carry that authority. The `risk_floor:` record line is TRUSTED advisory input as recorded
  * in the approved plan (its base must equal --base; it is not recomputed here; absent = `risk_floor_missing`). Tag convention for test titles:
  * `[kind:<kind id>]` and `[plan:<item id>]`, exact and case-sensitive; one title may carry several.
  * Fail closed: an unknown tag, an unmapped risk class, an unmapped or unverifiable security surface, a malformed line or
@@ -27,7 +27,6 @@ import { execFileSync } from 'node:child_process';
 import { realpathSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { parseRecordedLine, decodeStrict, CHANGED, CLASS_NAME } from './risk-floor.mjs';
-import { planNarrativeDigest } from './engine-dag.mjs';
 import { parsePlanSecurityBlock } from './security-plan.mjs';
 import { parseWorkerReport } from './worker-report.mjs';
 import { isEntrypoint } from './harness.mjs';
@@ -101,17 +100,9 @@ const linesOf = (text, key) => text.split(/\r?\n/).map((l) => new RegExp(`^\\s*$
 const LOOSE = /test-triggers|lifecycle-item|test-waiver/i;
 const nearMiss = (text) => text.split(/\r?\n/).filter((l) => LOOSE.test(l)).length !== ['test-triggers', 'lifecycle-item', 'test-waiver'].reduce((n, k) => n + linesOf(text, k).length, 0);
 
-/** True only when the plan is the approved one: its narrative digest equals `approvedDigest` and a START event records it. */
-export function approvalBound(planText, approvedDigest) {
-  if (typeof approvedDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(approvedDigest)) return false;
-  try { if (planNarrativeDigest(planText) !== approvedDigest) return false; } catch { return false; }
-  const b = planText.indexOf(RS_BEGIN), e = planText.indexOf(RS_END);
-  return planText.slice(b, e).split(/\r?\n/).some((l) => { try { const x = JSON.parse(l); return x?.event === 'START' && x.approved_plan_digest === approvedDigest; } catch { return false; } });
-}
-
 /** The required kinds and items for a plan, under an optional validated declaration. Pure; never throws. */
-export function requiredFor({ planText, declaration = null, baseSha = null, approvedDigest = null }) {
-  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waived: [], unbound_waivers: [], tags: [], errors: uniq(errors), ...o });
+export function requiredFor({ planText, declaration = null, baseSha = null }) {
+  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), ...o });
   if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
   const text = narrative(planText);
   const trig = linesOf(text, 'test-triggers');
@@ -153,10 +144,8 @@ export function requiredFor({ planText, declaration = null, baseSha = null, appr
   for (const l of linesOf(text, 'test-waiver')) { const m = /^(\S+)\s+\S/.exec(l); if (!m || !(Object.hasOwn(KINDS, m[1]) || items.includes(m[1]))) errors.push('waiver_invalid'); else waivers.add(m[1]); }
   if (errors.length) return out('refused');
   const kinds = uniq([...tags].flatMap((t) => table[t]));
-  const relevant = uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w)));
-  const bound = approvalBound(planText, approvedDigest) ? new Set(relevant) : new Set(); // unbound waivers are reported, never applied
-  return out('required', { tags: uniq([...tags]), kinds: kinds.filter((k) => !bound.has(k)), items: items.filter((i) => !bound.has(i)).sort(),
-    waived: [...bound].sort(), unbound_waivers: relevant.filter((w) => !bound.has(w)) });
+  // waivers are reported, never applied: the requirement stays and a missing kind is still missing
+  return out('required', { tags: uniq([...tags]), kinds, items: items.sort(), waiver_requested: uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w))) });
 }
 
 /** The `[kind:..]` and `[plan:..]` markers in test titles. `unknown`: well-formed kind markers naming no kind. */
@@ -175,8 +164,8 @@ export function checkTitles(req, titles) {
   const missing = req.kinds.filter((k) => !m.kinds.includes(k)), unmapped = req.items.filter((i) => !m.items.includes(i));
   const reasons = [...(missing.length ? ['missing_test_kinds'] : []), ...(unmapped.length ? ['unmapped_lifecycle_item'] : [])];
   const status = reasons.length ? 'freeze_refused' : 'pass';
-  const counts = { required: req.kinds.length, present: req.kinds.length - missing.length, missing: missing.length, waived: req.waived.length, unbound_waivers: req.unbound_waivers.length, items: req.items.length, unmapped: unmapped.length, unknown_markers: m.unknown.length };
-  return { status, reasons, missing_kinds: missing, unmapped_items: unmapped, unknown_markers: m.unknown, waived: req.waived, unbound_waivers: req.unbound_waivers, counts,
+  const counts = { required: req.kinds.length, present: req.kinds.length - missing.length, missing: missing.length, waiver_requested: req.waiver_requested.length, items: req.items.length, unmapped: unmapped.length, unknown_markers: m.unknown.length };
+  return { status, reasons, missing_kinds: missing, unmapped_items: unmapped, unknown_markers: m.unknown, waiver_requested: req.waiver_requested, counts,
     record_line: `test-kinds: status=${status}; ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join('; ')}; reasons=${reasons.join(',') || 'none'}` };
 }
 
@@ -200,19 +189,19 @@ export function readDeclaration(repo, base) {
 }
 
 // ---- CLI ----
-const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waived: [], unbound_waivers: [], tags: [], errors: [code] });
+const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waiver_requested: [], tags: [], errors: [code] });
 export function main(argv) {
-  const usage = { code: 2, out: { status: 'refused', errors: ['bad_usage'], usage: 'test-kinds.mjs require|check --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <d>] [--titles <json|file> | --report-file <file>]' } };
+  const usage = { code: 2, out: { status: 'refused', errors: ['bad_usage'], usage: 'test-kinds.mjs require|check --repo <dir> --base <commit> --plan <plan.md> [--titles <json|file> | --report-file <file>]' } };
   const [cmd, ...rest] = argv;
   let v;
-  try { ({ values: v } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: { repo: { type: 'string' }, base: { type: 'string' }, plan: { type: 'string' }, titles: { type: 'string' }, 'report-file': { type: 'string' }, 'approved-digest': { type: 'string' } } })); } catch { return usage; }
+  try { ({ values: v } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: { repo: { type: 'string' }, base: { type: 'string' }, plan: { type: 'string' }, titles: { type: 'string' }, 'report-file': { type: 'string' } } })); } catch { return usage; }
   if (!['require', 'check'].includes(cmd) || !v.repo || !v.base || !v.plan || rest.filter((a) => a.startsWith('--')).length !== Object.keys(v).length) return usage;
   if (cmd === 'require' ? (v.titles || v['report-file']) : !v.titles === !v['report-file']) return usage;
   let r;
   try {
     const planText = decodeStrict(readFileSync(v.plan));
     const { declaration, baseSha } = readDeclaration(v.repo, v.base);
-    r = requiredFor({ planText, declaration, baseSha, approvedDigest: v['approved-digest'] ?? null });
+    r = requiredFor({ planText, declaration, baseSha });
   } catch (e) { r = refusedOut(e.code && /^[a-z_]+$/.test(e.code) ? e.code : 'plan_unreadable'); }
   if (cmd === 'check' && r.status === 'required') {
     let titles = null;

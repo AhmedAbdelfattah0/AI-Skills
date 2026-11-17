@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import * as TK from './test-kinds.mjs';
 import * as SP from './security-plan.mjs';
 import * as RF from './risk-floor.mjs';
-import { planNarrativeDigest } from './engine-dag.mjs';
+import { planNarrativeDigest } from './engine-dag.mjs'; // only to forge an approval in the waiver test
 import { buildBrief, lintBrief } from './brief.mjs';
 import { parseWorkerReport } from './worker-report.mjs';
 
@@ -34,9 +34,6 @@ const planRaw = (...lines) => `# Plan\n\n${lines.join('\n')}\n${RS}`;
 // Every plan carries a risk-floor record as plan.md requires; a classless one by default.
 const plan = (...lines) => planRaw(...lines, ...(lines.some((l) => l.includes('risk-floor:')) ? [] : [realFloor()]));
 const req = (planText, declaration = null, extra = {}) => TK.requiredFor({ planText, declaration, ...extra });
-/** The plan as approved: its narrative digest recorded in a RUN-STATE START event. */
-const approve = (p) => { const d = planNarrativeDigest(p); return { planText: p.replace('{"event":"START"}', JSON.stringify({ event: 'START', run_id: 'r1', approved_plan_digest: d })), approvedDigest: d }; };
-const reqA = (p, declaration = null) => { const a = approve(p); return req(a.planText, declaration, { approvedDigest: a.approvedDigest }); };
 const title = (t, ...kinds) => `${t}${kinds.map((k) => ` [kind:${k}]`).join('')}`;
 const LETTERS = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
 const uniqSorted = (xs) => [...new Set(xs)].sort();
@@ -96,8 +93,7 @@ test('AC4 on a plan shaped like the plan.md template (header, DAG table, real ri
   const p = ['# Plan: checkout price and stock banners', '', '## Context', 'The cart adopts a re-validated price; stale responses must be ignored.', '',
     '| ID | Owner | Step | Files touched | Depends on |', '|---|---|---|---|---|', '| `web-state` | builder 1 | Visit-scoped validation state | `src/cart.state.ts` | none |', '',
     '## Risk', realFloor(), '', 'test-triggers: async-state, ui-lifecycle', '', RS.trim(), ''].join('\n');
-  const { planText, approvedDigest } = approve(p);
-  const r = req(planText, null, { approvedDigest });
+  const r = req(p);
   assert.equal(r.status, 'required', JSON.stringify(r.errors)); assert.deepEqual([...r.kinds].sort(), [...AC4].sort());
   assert.deepEqual(TK.checkTitles(r, [title('t', 'stale-N2', 'error-twin', 'negative')]).missing_kinds, ['lifecycle-destroy']);
 });
@@ -111,27 +107,27 @@ test('AC7: an unmapped plan lifecycle item refuses freeze unless the plan dispos
   assert.equal(c.status, 'freeze_refused'); assert.deepEqual(c.reasons, ['unmapped_lifecycle_item']); assert.deepEqual(c.unmapped_items, ['L2']);
   assert.equal(TK.checkTitles(r, ['a [plan:L1]', 'b [plan:L2]']).status, 'pass');
   const withWaiver = p.replace('# Plan', '# Plan\n\ntest-waiver: L2 owner: covered by the existing e2e suite');
-  const waived = reqA(withWaiver);
-  assert.deepEqual(waived.items, ['L1']); assert.deepEqual(waived.waived, ['L2']); assert.deepEqual(waived.unbound_waivers, []);
-  assert.equal(TK.checkTitles(waived, ['a [plan:L1]']).status, 'pass');
-  // no approval binding: the waiver is reported, never applied
-  const unbound = req(withWaiver);
-  assert.deepEqual(unbound.items, ['L1', 'L2']); assert.deepEqual(unbound.waived, []); assert.deepEqual(unbound.unbound_waivers, ['L2']);
-  assert.equal(TK.checkTitles(unbound, ['a [plan:L1]']).status, 'freeze_refused');
-  // a waiver added to the plan AFTER approval changes the narrative digest: not applied
-  const a = approve(p);
-  const tampered = a.planText.replace('# Plan', '# Plan\n\ntest-waiver: L2 builder says unnecessary');
-  assert.deepEqual(req(tampered, null, { approvedDigest: a.approvedDigest }).items, ['L1', 'L2']);
-  // the right digest but no START event recording it: not applied
-  assert.deepEqual(req(withWaiver, null, { approvedDigest: planNarrativeDigest(withWaiver) }).unbound_waivers, ['L2']);
+  const w = req(withWaiver);
+  assert.deepEqual(w.items, ['L1', 'L2'], 'a waiver never removes an item'); assert.deepEqual(w.waiver_requested, ['L2']);
+  assert.equal(TK.checkTitles(w, ['a [plan:L1]']).status, 'freeze_refused');
   // both reasons together, in a fixed order
   const both = TK.checkTitles(req(plan('test-triggers: ui-lifecycle', 'lifecycle-item: L1 x')), []);
   assert.deepEqual(both.reasons, ['missing_test_kinds', 'unmapped_lifecycle_item']);
 });
 
-test('AC7: a kind can be dispositioned in the plan; malformed dispositions and item ids are refusals', () => {
-  const r = reqA(plan('test-triggers: async-state', 'test-waiver: error-twin owner: no error path exists in this change'));
-  assert.deepEqual(r.kinds.sort(), ['negative', 'stale-N2']); assert.deepEqual(r.waived, ['error-twin']);
+test('a forged waiver (any digest or START combination) cannot remove a requirement', () => {
+  const p = plan('test-triggers: async-state', 'test-waiver: error-twin builder says unnecessary');
+  const d = planNarrativeDigest(p);
+  const forged = p.replace('{"event":"START"}', JSON.stringify({ event: 'START', run_id: 'r1', approved_plan_digest: d }));
+  for (const [text, extra] of [[p, {}], [forged, {}], [forged, { approvedDigest: d }], [p, { approvedDigest: d }]]) {
+    const r = req(text, null, extra);
+    assert.deepEqual([...r.kinds].sort(), ['error-twin', 'negative', 'stale-N2']); assert.deepEqual(r.waiver_requested, ['error-twin']);
+    const c = TK.checkTitles(r, [title('t', 'stale-N2', 'negative')]);
+    assert.equal(c.status, 'freeze_refused'); assert.deepEqual(c.missing_kinds, ['error-twin']); assert.equal(c.counts.waiver_requested, 1);
+  }
+});
+
+test('AC7: malformed dispositions and item ids are refusals', () => {
   for (const [lines, code] of [
     [['test-triggers: none', 'test-waiver: L9 reason'], 'waiver_invalid'],
     [['test-triggers: none', 'test-waiver: negative'], 'waiver_invalid'],
@@ -183,6 +179,7 @@ test('risk floor from the REAL producer: classless (none), single, multi-class, 
   assert.deepEqual(req(plan('test-triggers: none', realFloor(['billing_core', 'tenancy'])), d).kinds.sort(), uniqSorted([...TK.TAGS.money, ...TK.TAGS.tenancy]));
   assert.deepEqual(req(plan('test-triggers: none', realFloor(['billing_core']))).errors, ['risk_class_unmapped']);
   assert.deepEqual(req(plan('test-triggers: none', realFloor([], { changed: true }))).kinds, []);
+  assert.throws(() => RF.validateDeclaration({ version: 1, classes: [{ name: 'none', floor: 'ELEVATED', globs: ['a/**'] }] }), (e) => e.code === 'declaration_invalid', 'none is the empty-set sentinel, never a class');
   for (const odd of ['tenancy,,auth', 'tenancy,none', ',tenancy']) assert.deepEqual(req(plan('test-triggers: none', realFloor().replace('classes=none', `classes=${odd}`))).errors, ['risk_floor_invalid'], odd);
   assert.deepEqual(req(plan('test-triggers: none', realFloor(['tenancy'])), null, { baseSha: 'fedcba9876543210' }).errors, ['risk_floor_base_mismatch']);
   assert.equal(req(plan('test-triggers: none', realFloor(['tenancy'])), null, { baseSha: `${FB}aaaa` }).status, 'required');
@@ -217,7 +214,7 @@ test('plan tags: unknown tag, duplicate or empty trigger lines are refusals; RUN
   const inRunState = `# Plan\n\n<!-- RUN-STATE:BEGIN -->\ntest-triggers: money\ntest-waiver: negative x\n<!-- RUN-STATE:END -->\n`;
   assert.equal(req(inRunState).status, 'not_declared');
   const waiverInRunState = plan('test-triggers: money').replace('{"event":"START"}', 'test-waiver: negative appended by a worker');
-  assert.deepEqual(reqA(waiverInRunState).waived, [], 'a disposition appended to RUN-STATE is not an owner disposition');
+  assert.deepEqual(req(waiverInRunState).waiver_requested, [], 'a line in RUN-STATE is not even a request');
   const d = TK.validateDeclaration({ version: 1, tags: { 'feature-flags': ['negative', 'lifecycle-destroy'] } });
   assert.deepEqual(req(plan('test-triggers: feature-flags'), d).kinds.sort(), ['lifecycle-destroy', 'negative']);
   assert.deepEqual(req(plan('test-triggers: money'), TK.validateDeclaration({ version: 1, tags: { money: ['regression'] } })).kinds.sort(), [...TK.TAGS.money, 'regression'].sort(), 'a declaration only adds kinds');
@@ -293,18 +290,16 @@ test('CLI check: worker report titles, record line with numbers and enums only, 
   const bad = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--report-file', msg([title('a', 'negative')])]);
   assert.equal(bad.status, 1); const o = json(bad);
   assert.equal(o.status, 'freeze_refused'); assert.deepEqual(o.reasons, ['missing_test_kinds']);
-  assert.equal(o.record_line, 'test-kinds: status=freeze_refused; required=4; present=1; missing=3; waived=0; unbound_waivers=0; items=0; unmapped=0; unknown_markers=0; reasons=missing_test_kinds');
+  assert.equal(o.record_line, 'test-kinds: status=freeze_refused; required=4; present=1; missing=3; waiver_requested=0; items=0; unmapped=0; unknown_markers=0; reasons=missing_test_kinds');
   const good = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--titles', JSON.stringify([title('a', ...AC4)])]);
   assert.equal(good.status, 0, good.stdout); assert.equal(json(good).status, 'pass');
   const noKey = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--report-file', file('```ship-ticket-report\n{"tests":[],"red_seen":[],"blockers":[],"needs_outside_ownership":[]}\n```\n')]);
   assert.equal(noKey.status, 1); assert.deepEqual(json(noKey).errors, ['test_titles_missing']);
   const nd = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(plan('x'), 'p.md'), '--titles', '[]']);
-  const withW = plan('test-triggers: async-state, ui-lifecycle', 'test-waiver: negative owner: n/a', realFloor([], { base: r.base.slice(0, 12) }));
-  const ap = approve(withW);
-  const bound = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(ap.planText, 'a.md'), '--approved-digest', ap.approvedDigest, '--titles', JSON.stringify([title('a', 'stale-N2', 'error-twin', 'lifecycle-destroy')])]);
-  assert.equal(bound.status, 0, bound.stdout); assert.deepEqual(json(bound).waived, ['negative']);
-  const unb = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(ap.planText, 'a.md'), '--titles', JSON.stringify([title('a', 'stale-N2', 'error-twin', 'lifecycle-destroy')])]);
-  assert.equal(unb.status, 1); assert.deepEqual(json(unb).unbound_waivers, ['negative']); assert.deepEqual(json(unb).missing_kinds, ['negative']);
+  const withW = file(plan('test-triggers: async-state, ui-lifecycle', 'test-waiver: negative owner: n/a', realFloor([], { base: r.base.slice(0, 12) })), 'w.md');
+  const unb = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', withW, '--titles', JSON.stringify([title('a', 'stale-N2', 'error-twin', 'lifecycle-destroy')])]);
+  assert.equal(unb.status, 1); assert.deepEqual(json(unb).waiver_requested, ['negative']); assert.deepEqual(json(unb).missing_kinds, ['negative']);
+  assert.equal(cli(['check', '--repo', r.dir, '--base', r.base, '--plan', withW, '--approved-digest', 'sha256:x', '--titles', '[]']).status, 2, 'no approval flag exists');
   assert.equal(nd.status, 0); assert.equal(json(nd).status, 'not_declared');
   assert.equal(cli(['check', '--plan', p]).status, 2, 'usage');
   assert.equal(cli(['require', '--repo', r.dir, '--base', r.base, '--plan', p, '--plan', p]).status, 2, 'repeated flag');

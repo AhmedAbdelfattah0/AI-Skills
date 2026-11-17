@@ -236,7 +236,7 @@ Tags come from three places, all in the plan narrative (the RUN-STATE block neve
 - the plan's `risk_floor:` record line (`scripts/risk-floor.mjs`), required in every opted-in plan (absent:
   `risk_floor_missing`; more than one or malformed: `risk_floor_invalid`; its `base=` differs from `--base`:
   `risk_floor_base_mismatch`). `classes=none` is the empty set. A class named like a tag is that tag;
-  `risk_declaration_changed` adds nothing (a declaration change is reviewed as a declaration, not a code surface); any
+  `risk_declaration_changed` adds nothing and `none` is reserved by `risk-floor.mjs` as a class name (a declaration change is reviewed as a declaration, not a code surface); any
   other class must be mapped by the repository, else `risk_class_unmapped`. The line is **trusted advisory input as
   recorded in the approved plan**: this script does not recompute the floor (`risk-floor.mjs reassess` does, and
   feeding its classes here is S-01b2);
@@ -249,11 +249,11 @@ remove one: a declared class mapping is united with the built-in reading of that
 the file exists, every plan needs the `test-triggers:` line.
 
 Two more plan lines: `lifecycle-item: <id> <text>` makes the item a required entry of its own, covered by a test whose
-title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` is the owner's disposition of one requirement.
-A waiver removes the requirement **only when the plan is bound to its approval**: pass `--approved-digest <digest>`
-(the run's `approved_plan_digest`), and the plan's narrative digest must equal it and a RUN-STATE `START` event must
-record it. A waiver added after approval changes the digest. Without that binding a waiver is listed in
-`unbound_waivers` and removes nothing; a waiver in RUN-STATE never counts. Every line that mentions one of
+title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` requests the owner's disposition of one requirement.
+**In this slice a waiver never removes a requirement**: it is listed in `waiver_requested` (not applied, needs
+trusted approval) and the kind or item stays missing. Anyone who can write the plan file can write a waiver line and a
+matching RUN-STATE `START`, so the plan cannot carry that authority; applying a waiver needs the engine's pinned
+approval record for the selected run (S-01b2). A waiver line inside RUN-STATE is not even a request. Every line that mentions one of
 the three keys must be exactly one of these lines: a bulleted, bold or differently cased key is `plan_line_invalid`,
 and a plan that uses items or waivers without the `test-triggers:` line is `plan_tags_missing`, never `not_declared`.
 
@@ -263,7 +263,7 @@ it covers, exact and case-sensitive (`[kind:negative]`; `non-negative` or `[kind
 ```text
 node scripts/test-kinds.mjs require --repo <repo> --base <base sha> --plan <plan.md> > require.json
 node scripts/brief.mjs build ... --test-kinds require.json --out <brief>
-node scripts/test-kinds.mjs check --repo <repo> --base <base sha> --plan <plan.md> --approved-digest <digest> --report-file <final message file>
+node scripts/test-kinds.mjs check --repo <repo> --base <base sha> --plan <plan.md> --report-file <final message file>
 ```
 
 `brief.mjs build --test-kinds` lists the kinds, their definitions and the items in Required tests and asks for a
