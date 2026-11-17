@@ -147,7 +147,16 @@ test('a relative cwd or exclude is refused, not resolved against the process cwd
   assert.throws(() => resolveGitBinary({ env: { PATH: '/g' }, cwd: '/work', exclude: ['/cand'], platform: 'linux', fs }), code('git_unavailable'), 'control');
 });
 
-test('macOS: a case-variant PATH spelling of the cwd is still refused', { skip: process.platform !== 'darwin' && 'case-insensitive APFS only' }, (t) => {
+// Probe the real temp volume, not the OS name: macOS volumes may be case-sensitive.
+const caseInsensitiveTmp = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'git-cap-case-'));
+  try { writeFileSync(join(d, 'probe'), ''); return existsSync(join(d, 'PROBE')); } finally { rmSync(d, { recursive: true, force: true }); }
+})();
+
+test('case-insensitive volume: a case-variant PATH spelling of the cwd is still refused', {
+  skip: (process.platform === 'win32' && 'Windows spellings are covered by the injected-fs test')
+    || (!caseInsensitiveTmp && 'the temp volume is case-sensitive, so a case-variant spelling names a different dir'),
+}, (t) => {
   const root = tmp(t);
   const plant = join(root, 'plant');
   fakeGit(plant, 'echo planted');
@@ -236,21 +245,25 @@ test('a git that ignores SIGTERM cannot hold probeGit past its timeout (external
   const root = tmp(t);
   const pidFile = join(root, 'pid');
   const d = join(root, 'g');
-  fakeGit(d, `echo $$ > '${pidFile}'\ntrap '' TERM\nwhile :; do :; done`);
+  // Trap FIRST, then publish readiness (the PID file). probeGit owns the spawn, so the test cannot hold
+  // the probe until the wrapper is ready; instead readiness is asserted below. A SIGTERM regression that
+  // lands before the trap leaves no PID file and fails; one that lands after it hangs and the watchdog
+  // fails it. Only a correct SIGKILL passes. A wrapper slower than timeoutMs fails red, never green.
+  fakeGit(d, `trap '' TERM\necho $$ > '${pidFile}.tmp'\n/bin/mv '${pidFile}.tmp' '${pidFile}'\nwhile :; do :; done`);
   const cwd = join(root, 'cwd');
   mkdirSync(cwd);
   const pid = () => Number(readFileSync(pidFile, 'utf8'));
   const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
   t.after(() => { if (existsSync(pidFile) && alive(pid())) process.kill(pid(), 'SIGKILL'); });
   const mod = JSON.stringify(pathToFileURL(join(here, 'git-capability.mjs')).href);
-  const opts = JSON.stringify({ env: { PATH: d }, cwd, timeoutMs: 2000 });
+  const opts = JSON.stringify({ env: { PATH: d }, cwd, timeoutMs: 5000 });
   const script = `import(${mod}).then((m) => { try { m.probeGit(${opts}); console.log('returned'); } catch (e) { console.log(e.code); } });`;
   const started = Date.now();
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL' });
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' });
   assert.equal(r.error, undefined, 'the external watchdog had to kill the probe: it hung');
   assert.equal(r.stdout.trim(), 'git_timeout', r.stderr);
-  assert.ok(Date.now() - started < 15_000);
-  assert.ok(existsSync(pidFile), 'the TERM-ignoring git really ran');
+  assert.ok(Date.now() - started < 20_000);
+  assert.ok(existsSync(pidFile), 'readiness: the TERM trap was installed before the probe killed the wrapper');
   assert.equal(alive(pid()), false, 'and was killed');
 });
 
