@@ -47,9 +47,10 @@ The format is the one in `references/execution-harness.md`.
 
 Put these in every brief's Notes, or point the worker here. They are first-pass rules, so review has less to find.
 
-- **Size the slice.** At most 6 production files or about 500 lines, 6 acceptance criteria, 3 metrics and
-  1 new semantic mechanism. A contract and the calculation that uses it are separate slices. Each slice has
-  output that stands alone. Over a limit: split the DAG node before BUILD.
+- **Watch the size.** Advisory signals, never triggers (`references/plan.md`, Decomposition): about 6
+  production files or 500 lines, 6 acceptance criteria, 1 new semantic mechanism, a contract and its
+  calculation kept apart, output that stands alone. If your node is well past them, say so in the report
+  (`blockers`); the DAG is plan-bound and only a re-approved plan changes it.
 - **Reuse before implementation.** Before building generic infrastructure, evaluate the native API, an
   in-repo module and a mature library, in that order. Custom code needs a one-line justification in the
   report and the Reuse inventory.
@@ -60,9 +61,8 @@ Put these in every brief's Notes, or point the worker here. They are first-pass 
   on invalid bytes.
 - **Tests do not time.** No wall-clock assertions, no sleeps as synchronisation, no shared temp names, no
   dependence on scheduler order: use injected clocks, barriers, readiness files written after the guarded
-  state exists, and a unique temp directory per test. See `references/prove.md` (Test reliability).
+  state exists, and a unique temp directory per test. See `references/prove.md` (Test reliability and evidence).
 - **Run targeted checks while building** and leave the full suite to final verification.
-- **Open an early draft PR** when the change must pass the 3-OS CI, so a platform failure shows before REVIEW.
 
 ## Base drift
 

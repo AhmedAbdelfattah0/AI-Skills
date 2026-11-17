@@ -353,9 +353,10 @@ reruns and UI slice. It checks only:
 - the affected closure has no regression;
 - changed rule rows and triggered sub-outcomes pass.
 
-Confirmation is finding-specific: it reviews only the prior findings, their dependency-closed surface and
-anything the repair introduced, on a frozen packet. A new unrelated finding is judged against the ship
-threshold, not treated as an automatic new cycle; a blocker is never suppressed to satisfy the cap.
+Confirmation is finding-specific in what it checks: the prior findings, their dependency-closed surface and
+anything the repair introduced, on a frozen packet, in addition to the checks above. This narrows the scope
+only; a new actionable finding is still the terminal result below, and a blocker is never suppressed to
+satisfy the cap.
 
 Pass it only the captures of screens the repair changed. When the repair
 touches a `concurrency`-labelled node, or repairs a security or architecture
@@ -383,15 +384,15 @@ With `config.unitReview`, the per-unit reviews, the unit repair routing and the 
 
 ## Tripwire: same defect class twice
 
-If the confirmation fails on the same defect class as the primary finding, stop patching. The result is the
-terminal `FAIL` above, and the next decision names the challenge to the pattern: a stronger model or a fresh
-builder, and whether to simplify, replace or reuse instead of repairing. Preserve the unresolved findings and
-both reviews in the record. Do not run a second repair batch to clear it.
+A failed confirmation is the terminal `FAIL` above. When it fails on the same defect class as the primary
+finding, the next decision also challenges the pattern: a stronger model or a fresh builder, and whether to
+simplify, replace or reuse instead of repairing. Preserve the unresolved findings, the primary review and the
+confirmation in the record. Do not run a second repair batch to clear it.
 
 ## Packets and instances
 
-Review packets are frozen and read-only: reviewers never execute project code, they read the packet and the
-recorded command output. A review reports all instances of a defect class it finds, not the first one, so the
+Review packets are frozen and read-only: reviewers never execute project code, they read the frozen
+candidate and the recorded command output. A review reports all instances of a defect class it finds, not the first one, so the
 single repair batch can fix the class.
 
 ## Record and transition

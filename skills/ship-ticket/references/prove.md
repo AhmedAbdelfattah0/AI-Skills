@@ -395,9 +395,9 @@ another reader is still inspecting the old candidate.
 
 A test must not depend on wall-clock time, a sleep used as synchronisation, a shared temp name or scheduler
 order. A test that is red in the suite and green alone is a verification-reliability incident: record it.
-Passing alone is diagnostic, not proof. Do not fix it with a longer timeout, a retry or less parallelism;
+Passing alone is diagnostic, not proof. Record the incident in the PROVE record. Do not fix it with a longer timeout, a retry or less parallelism;
 remove the dependency (injected clock, barrier, readiness file published after the guarded state is
 installed, unique temp directory).
 
 Run targeted checks during development and the full suite once for final verification. Bind the evidence
-to the exact candidate SHA; evidence for another SHA is stale. Unavailable CI is never a pass.
+to the exact `candidate_id`; evidence for another candidate ID is stale. Unavailable hosted CI is never a pass.
