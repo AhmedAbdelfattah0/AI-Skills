@@ -37,7 +37,7 @@ npx github:AhmedAbdelfattah0/AI-Skills install
 
 # install ONE skill, or SEVERAL (space-separated)
 npx github:AhmedAbdelfattah0/AI-Skills install security
-npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket pr-review
+npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
 
 # the ticket workflow — write the backlog, then implement it ticket by ticket
 npx github:AhmedAbdelfattah0/AI-Skills install generate-ticket ship-ticket
@@ -210,7 +210,7 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (19)
+## Skills (17)
 
 | Skill | Extras |
 |---|---|
@@ -222,7 +222,6 @@ Claude-only.
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
 | marketing-video | `references/` + `scripts/` (factual product videos from real captures: claim-gated timeline, local Remotion render, measured QA, independent frame review, shot-preserving revisions; `.specs/marketing-video/`) |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
-| pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
 | project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
 | security | — |
 | security-audit | vendored from cloudflare/security-audit-skill; auto-synced daily (`scripts/sync-external.mjs`) |
@@ -231,7 +230,6 @@ Claude-only.
 | session-restore | — |
 | ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, Claude↔Codex planning debate and review, stable candidate identity, and timing telemetry) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
-| ux-audit | `references/` + `scripts/` (report-only running-interface audit; preserves DESIGN.md identity locks) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |
 
 Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.
