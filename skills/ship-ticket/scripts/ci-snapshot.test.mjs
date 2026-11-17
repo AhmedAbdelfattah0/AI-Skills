@@ -437,57 +437,92 @@ for (const root of ['check_run', 'job', 'annotation', 'page']) (function walk(ki
 // Read but not a consumed value: the line-kind discriminators of a paginated page (`name` / `id` tell an item from a total_count line).
 const UNCONSUMED_BUT_PRESERVED = { page: ['name', 'id'] };
 
-function recordReads(texts, reads) {
+const ARRAY_BUILTINS = ['length', 'map', 'slice', 'every', 'some', 'filter', 'forEach', 'includes', 'indexOf', 'join', 'find', 'findLast', 'at', 'entries', 'keys', 'values', 'flat', 'reduce', 'concat', 'constructor']; // constructor: read by Array.prototype.map (species lookup)
+/** Run the module over `texts` with every raw object wrapped in a recording Proxy. reads = every read; biz = reads made by the business code (not by the shape validator or the traversal helpers). */
+function recordReads(texts, reads, biz) {
   const tag = new Map(), orig = JSON.parse;
   const kindOf = (line, itemKind) => { let o; try { o = orig(line); } catch { return itemKind; } if (!o || typeof o !== 'object') return itemKind; return Object.hasOwn(o, 'total_count') && !Object.hasOwn(o, 'name') ? 'page' : itemKind; };
   const add = (text, itemKind) => { for (const l of text.split('\n')) if (l.trim()) tag.set(l, kindOf(l, itemKind)); };
   add(texts.checkRuns, 'check_run');
   for (const v of Object.values(texts.jobs)) add(v, 'job');
   for (const v of Object.values(texts.annotations)) for (const l of v.split('\n')) if (l.trim()) tag.set(l, 'annotation');
-  const skipKey = (k) => typeof k !== 'string' || k === 'length' || /^\d+$/.test(k) || ['toJSON', 'then', 'constructor', '__proto__'].includes(k) || typeof Array.prototype[k] === 'function';
-  const traversal = () => /at (depthOf|canon|sha256)\b/.test(new Error().stack);
-  const rec = (kind, k) => { if (!skipKey(k) && !traversal()) { if (!reads.has(kind)) reads.set(kind, new Set()); reads.get(kind).add(k); } };
-  const wrap = (v, kind) => new Proxy(v, {
-    get(t, k, r) {
-      const x = Reflect.get(t, k, r);
-      if (!Array.isArray(t)) rec(kind, k);
-      if (x && typeof x === 'object') return Array.isArray(t) ? (/^\d+$/.test(String(k)) ? wrap(x, `${kind}[]`) : x) : (typeof k === 'string' ? wrap(x, `${kind}.${k}`) : x);
-      return x;
-    },
-    has(t, k) { rec(kind, k); return Reflect.has(t, k); },
-  });
+  const rec = (kind, k, isArray) => {
+    if (typeof k !== 'string' || (isArray && (/^\d+$/.test(k) || ARRAY_BUILTINS.includes(k)))) return;
+    const stack = new Error().stack;
+    if (/at (depthOf|canon|sha256)\b/.test(stack)) return;
+    (reads.get(kind) ?? reads.set(kind, new Set()).get(kind)).add(k);
+    if (!/at shapeProblem\b/.test(stack)) (biz.get(kind) ?? biz.set(kind, new Set()).get(kind)).add(k);
+  };
+  const wrap = (v, kind) => {
+    let enumerated = new Set(); // keys listed by an ownKeys call whose descriptors are being fetched (Object.keys): enumeration is not a read
+    return new Proxy(v, {
+      get(t, k, r) {
+        const x = Reflect.get(t, k, r);
+        rec(kind, k, Array.isArray(t));
+        if (x && typeof x === 'object') return Array.isArray(t) ? (/^\d+$/.test(String(k)) ? wrap(x, `${kind}[]`) : x) : (typeof k === 'string' ? wrap(x, `${kind}.${k}`) : x);
+        return x;
+      },
+      has(t, k) { rec(kind, k, Array.isArray(t)); return Reflect.has(t, k); },
+      ownKeys(t) { const ks = Reflect.ownKeys(t); enumerated = new Set(ks.filter((k) => typeof k === 'string')); return ks; },
+      getOwnPropertyDescriptor(t, k) { if (enumerated.has(k)) enumerated.delete(k); else rec(kind, k, Array.isArray(t)); return Reflect.getOwnPropertyDescriptor(t, k); },
+    });
+  };
   JSON.parse = (text, ...rest) => { const v = orig(text, ...rest); const kind = tag.get(text); return kind && v && typeof v === 'object' ? wrap(v, kind) : v; };
   try { return buildSnapshot({ texts, repo: REPO, sha: SHA, origin: ORIGIN }); } finally { JSON.parse = orig; }
 }
-
-test('invariant: every property the module READS from a raw object is declared in SHAPES (or listed as unconsumed with a reason)', () => {
-  const reads = new Map();
+const allRuns = () => {
   const runs = [rich(), base()];
-  for (const list of Object.values(CASES)) for (const c of list) if (!c.root && !c.args) { const s = base(); c.s?.(s); const x = texts(s); c.t?.(x); runs.push([s, x]); }
-  for (const r of runs) { const [s, x] = Array.isArray(r) ? r : [r, texts(r)]; recordReads(x, reads); }
+  for (const list of Object.values(CASES)) for (const c of list) if (!c.root && !c.args) { const s = base(); c.s?.(s); const x = texts(s); c.t?.(x); runs.push(s); }
+  return runs;
+};
+// Declared but only VALIDATED (typed, never read by a business function): the checks of their type is all this module does with them.
+const VALIDATED_ONLY = { 'job.steps[]': ['started_at', 'completed_at'], annotation: ['path', 'start_line', 'end_line', 'start_column', 'end_column', 'annotation_level', 'title', 'raw_details', 'blob_href'] };
+
+test('invariant: every property READ from a raw object is declared in SHAPES; business code reads every declared field except the explicit validated-only list', () => {
+  const reads = new Map(), biz = new Map();
+  for (const s of allRuns()) recordReads(texts(s), reads, biz);
   const undeclared = [];
   for (const [kind, keys] of reads) for (const k of keys) if (!DECLARED.get(kind)?.has(k) && !UNCONSUMED_BUT_PRESERVED[kind]?.includes(k)) undeclared.push(`${kind}.${k}`);
   assert.deepEqual(undeclared, []);
-  // the recorder really sees the consumers (a dead harness would pass vacuously)
-  for (const [kind, keys] of Object.entries({ check_run: ['id', 'name', 'status', 'conclusion', 'started_at', 'url', 'app', 'output', 'head_sha'], job: ['steps', 'runner_name', 'labels', 'runner_group_name', 'check_run_url', 'run_attempt', 'completed_at'],
-    'job.steps[]': ['number', 'conclusion'], annotation: ['message', 'blob_href'], 'check_run.app': ['slug'], 'check_run.output': ['annotations_count'], page: ['total_count'] })) for (const k of keys) assert.ok(reads.get(kind)?.has(k), `recorder saw no read of ${kind}.${k}`);
+  const unread = [];
+  for (const [kind, keys] of DECLARED) for (const k of keys) if (!biz.get(kind)?.has(k) && !VALIDATED_ONLY[kind]?.includes(k)) unread.push(`${kind}.${k}`);
+  assert.deepEqual(unread, [], 'declared fields no business function reads (and not listed as validated-only)');
+  for (const [kind, keys] of Object.entries(VALIDATED_ONLY)) for (const k of keys) assert.equal(biz.get(kind)?.has(k) ?? false, false, `${kind}.${k} is listed validated-only but is read: remove it from the list`);
+  assert.ok(reads.get('job.steps[]').has('started_at') && !biz.get('job.steps[]').has('started_at')); // validator reads are attributed separately
 });
 
-test('invariant: a wrongly-typed value in ANY declared field is never snapshot_valid (every declared field is validated end to end)', () => {
+test('invariant: a wrongly-typed value, or a missing required key, in ANY declared field is never snapshot_valid', () => {
   assert.equal(build(rich()).state, 'snapshot_valid');
   const HUGE = 'x'.repeat(100000), BAD = [{}, 7, true, [], '', HUGE, null, { toString: 1 }];
   const target = {
     check_run: (s) => s.checks[0], 'check_run.app': (s) => s.checks[0].app, 'check_run.output': (s) => s.checks[0].output,
     job: (s) => s.jobs['run100-1'][0], 'job.steps[]': (s) => s.jobs['run100-1'][0].steps[0],
   };
-  let n = 0;
-  const check = (label, spec, mutate) => { for (const bad of BAD) { if (shapeProblem(bad, spec) === null) continue; const s = rich(); const x = texts(s); mutate(s, x, bad); n++; assert.notEqual(build(s, x).state, 'snapshot_valid', `${label} = ${typeof bad}`); } };
-  for (const [kind, get] of Object.entries(target)) for (const [k, spec] of Object.entries(SPECS.get(kind))) check(`${kind}.${k}`, spec, (s, x, bad) => { get(s)[k] = bad; Object.assign(x, texts(s)); });
-  for (const [k, spec] of Object.entries(SPECS.get('annotation'))) check(`annotation.${k}`, spec, (s, x, bad) => { const o = JSON.parse(s.annotations['1.jsonl']); o[k] = bad; s.annotations['1.jsonl'] = JSON.stringify(o) + '\n'; Object.assign(x, texts(s)); });
+  const stat = { mutated: 0, specAccepts: 0, deleted: 0, optionalSkipped: 0 };
+  const check = (label, spec, mutate) => { for (const bad of BAD) { if (shapeProblem(bad, spec) === null) { stat.specAccepts++; continue; } const s = rich(); const x = texts(s); mutate(s, x, bad); stat.mutated++; assert.notEqual(build(s, x).state, 'snapshot_valid', `${label} = ${typeof bad}`); } };
+  const isOptional = (spec) => (typeof spec === 'string' ? spec.startsWith('?') : spec.optional === true);
+  const del = (label, spec, mutate) => { if (isOptional(spec)) { stat.optionalSkipped++; return; } const s = rich(); const x = texts(s); mutate(s, x); stat.deleted++; assert.notEqual(build(s, x).state, 'snapshot_valid', `${label} deleted`); };
+  for (const [kind, get] of Object.entries(target)) for (const [k, spec] of Object.entries(SPECS.get(kind))) {
+    check(`${kind}.${k}`, spec, (s, x, bad) => { get(s)[k] = bad; Object.assign(x, texts(s)); });
+    del(`${kind}.${k}`, spec, (s, x) => { delete get(s)[k]; Object.assign(x, texts(s)); });
+  }
+  const annoMut = (fn) => (s, x, bad) => { const o = JSON.parse(s.annotations['1.jsonl']); fn(o, bad); s.annotations['1.jsonl'] = JSON.stringify(o) + '\n'; Object.assign(x, texts(s)); };
+  for (const [k, spec] of Object.entries(SPECS.get('annotation'))) { check(`annotation.${k}`, spec, annoMut((o, bad) => { o[k] = bad; })); del(`annotation.${k}`, spec, annoMut((o) => { delete o[k]; })); }
   check('page.total_count', SPECS.get('page').total_count, (s, x, bad) => { const l = x.checkRuns.split('\n'); l[0] = JSON.stringify({ total_count: bad }); x.checkRuns = l.join('\n'); });
-  assert.ok(n > 250, `only ${n} mutations ran`);
-  // declared keys are exactly the walked ones: a field added to SHAPES is automatically covered above
+  check('job.labels[0]', 'string', (s, x, bad) => { s.jobs['run100-1'][0].labels[0] = bad; Object.assign(x, texts(s)); });
+  assert.deepEqual(stat, { mutated: 281, specAccepts: 71, deleted: 9, optionalSkipped: 33 }); // exact: a field added to SHAPES changes these deliberately
   assert.deepEqual([...DECLARED.keys()].sort(), ['annotation', 'check_run', 'check_run.app', 'check_run.output', 'job', 'job.steps[]', 'page']);
+});
+
+test('timestamps: impossible calendar dates are rejected in ALL six consumed fields by the native Date round trip; real instants pass', () => {
+  const IMPOSSIBLE = ['2026-02-30T00:00:00Z', '2025-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '2026-00-10T00:00:00Z', '2026-13-10T00:00:00Z', '2026-01-00T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:60:00Z', '2026-01-01T00:00:60Z', '2026-01-01T00:00:00+00:00', '2026-01-01 00:00:00Z'];
+  const REAL = ['2024-02-29T23:59:59Z', '2026-11-16T21:28:16.123456789Z', '2026-12-31T23:59:59Z'];
+  const slots = { 'check.started_at': (s, v) => { s.checks[0].started_at = v; }, 'check.completed_at': (s, v) => { s.checks[0].completed_at = v; }, 'job.started_at': (s, v) => { s.jobs['run100-1'][0].started_at = v; },
+    'job.completed_at': (s, v) => { s.jobs['run100-1'][0].completed_at = v; }, 'step.started_at': (s, v) => { s.jobs['run100-1'][0].steps[0].started_at = v; }, 'step.completed_at': (s, v) => { s.jobs['run100-1'][0].steps[0].completed_at = v; } };
+  for (const [slot, set] of Object.entries(slots)) {
+    for (const v of IMPOSSIBLE) { const s = rich(); set(s, v); const snap = build(s); assert.equal(snap.state, 'incomplete', `${slot} ${v}`); assert.ok(snap.reasons.some((r) => r.endsWith('_field_type')), `${slot} ${v}`); }
+    for (const v of REAL) { const s = rich(); set(s, v); assert.equal(build(s).state, 'snapshot_valid', `${slot} ${v}`); }
+  }
 });
 
 test('SHAPES golden: the declared types are pinned (loosening a field type must be a deliberate edit of this digest)', () => {

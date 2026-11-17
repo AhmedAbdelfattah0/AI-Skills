@@ -119,8 +119,14 @@ export const SHAPES = Object.freeze({
 });
 const MAX_DEPTH = 32;
 const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+/** Strict ISO-8601 UTC, and a REAL instant: the native Date round trip must reproduce the supplied second (Feb 30, hour 24, second 60 do not survive it). */
+const isTimestamp = (v) => {
+  if (typeof v !== 'string' || !TS.test(v)) return false;
+  const whole = v.replace(/\.\d+Z$/, 'Z'), d = new Date(whole);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 19) === whole.slice(0, 19);
+};
 const scalarOk = (v, tok) => (tok === 'string' ? typeof v === 'string' : tok === 'null' ? v === null : tok === 'int' ? Number.isSafeInteger(v) : tok === 'posint' ? Number.isSafeInteger(v) && v >= 1
-  : tok === 'id' ? idStr(v) !== null : tok === 'ts' ? typeof v === 'string' && TS.test(v) && !Number.isNaN(Date.parse(v)) : false);
+  : tok === 'id' ? idStr(v) !== null : tok === 'ts' ? isTimestamp(v) : false);
 /** null when `v` matches `spec`, else a short problem string built from the path only (never throws, never stringifies a value). */
 export function shapeProblem(v, spec, path = '$') {
   if (typeof spec === 'string') return spec.replace(/^\?/, '').split('|').some((tok) => scalarOk(v, tok)) ? null : `${path}:bad_type`;
