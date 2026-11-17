@@ -360,3 +360,191 @@ test('invariant: the table in references/prove.md equals TAGS row for row', () =
   }
   assert.deepEqual(doc, Object.fromEntries(Object.entries(TK.TAGS).map(([t, k]) => [t, [...k].sort()])));
 });
+
+// ---- FAIL-CLOSED RECOGNITION (generic over TK.MARKERS). Tags [R#] are the mutation targets of test-kinds-mutation.test.mjs ----
+// One plan carrying EVERY marker, all from real producers (L8): risk-floor.mjs assess (record and reassess lines, inside the
+// plan.md header comment), security-plan.mjs selectControls + renderSection3a (pairs line and machine block), RUN-STATE.
+const FULL_SEL = (() => {
+  const cat = SP.loadCatalog();
+  const facts = Object.fromEntries(Object.entries(VAPT.fact_vocabulary).filter(([, v]) => v.type === 'bool').map(([k]) => [k, false]));
+  const surfaces = [{ boundary_id: 'GET /a/:id', kind: 'request-handler', path: 'src/a.ts', principals: ['anonymous'] }];
+  const sel = SP.selectControls(cat, { security_policy: 2, surfaces, facts: { ...facts, boundaries: ['request-handler'], principals: ['anonymous'] },
+    evidence: Object.fromEntries(Object.keys(facts).map((k) => [k, 'src/a.ts:handler'])) });
+  assert.equal(sel.ok, true, JSON.stringify(sel));
+  return sel;
+})();
+const reassessLine = () => {
+  const d = RF.validateDeclaration({ version: 1, classes: [{ name: 'tenancy', floor: 'ELEVATED', globs: ['src/**'] }] });
+  const r = RF.assess({ paths: ['src/x.ts'], declaration: d, claimed: 'ELEVATED', ai: 'ELEVATED', baseSha: FB, headLabel: 'worktree' });
+  return `risk_reassess: ${r.record_line}`;
+};
+const FULL = ['# Plan: invoice route', '', '<!--', `     ${realFloor(['tenancy'])}`, `     ${reassessLine()}`, '-->', '',
+  'The `risk-floor.mjs check` and `security-plan.mjs select` outputs are pasted below; this test triggers a reload and the risk floor is ELEVATED.', '',
+  'test-triggers: async-state', 'lifecycle-item: L1 dismissing one banner keeps the other', 'test-waiver: L1 owner: covered by the e2e suite', '',
+  '### 3a. Security risk assessment', SP.renderSection3a(FULL_SEL), '',
+  '<!-- RUN-STATE:BEGIN -->', '{"event":"START"}', 'test-triggers: money', '<!-- RUN-STATE:END -->', ''].join('\n');
+const lineOf = (text, pred) => { const ls = text.split('\n').filter(pred); assert.equal(ls.length, 1); return ls[0]; };
+/** Per marker: the raw line in FULL that carries it, and the exact key text the near-miss corpus damages. */
+const SITES = {
+  'test-triggers': { line: 'test-triggers: async-state', key: 'test-triggers:' },
+  'lifecycle-item': { line: 'lifecycle-item: L1 dismissing one banner keeps the other', key: 'lifecycle-item:' },
+  'test-waiver': { line: 'test-waiver: L1 owner: covered by the e2e suite', key: 'test-waiver:' },
+  'risk-floor': { line: lineOf(FULL, (l) => l.includes('risk_floor:')), key: 'risk_floor: risk-floor:' },
+  classes: { line: lineOf(FULL, (l) => l.includes('risk_floor:')), key: 'classes=' },
+  'security-plan': { line: lineOf(FULL, (l) => l.startsWith('<!-- security-plan: ')), key: '<!-- security-plan: ' },
+  'security-pairs': { line: lineOf(FULL, (l) => l.startsWith('security-pairs ')), key: 'security-pairs ' },
+  'run-state': { line: '<!-- RUN-STATE:BEGIN -->', key: '<!-- RUN-STATE:BEGIN -->' },
+};
+const BASE = req(FULL);
+const swapOnce = (text, from, to) => { assert.equal(text.split(from).length, 2, `exactly one ${JSON.stringify(from.slice(0, 40))}`); return text.replace(from, () => to); };
+/** The near-miss corpus for one key inside one line: separator, invisible, case, delimiter, width and decoration mutations. */
+function nearMissKeys(key) {
+  const out = new Set();
+  for (const d of ['\u2011', '\u2010', '\u2013', '\u2212', '\uFF0D', '\u2E3A', '--', ' - ', '\u00AD-', '-\u200B', '\\-', '-\uFE0F']) out.add(key.replace(/[-_]/g, d));
+  out.add(key.replace(/[-_]/g, (c) => (c === '-' ? '_' : '-')));
+  for (const z of ['\u200B', '\u2060', '\u00AD', '\uFEFF', '\uFE0F', '\u034F', '\u3164']) out.add(`${key[0]}${z}${key.slice(1)}`);
+  const i = key.search(/[a-z]/i); out.add(key.slice(0, i) + String.fromCharCode(key.charCodeAt(i) + 0xfee0) + key.slice(i + 1)); // fullwidth letter
+  out.add(key.toUpperCase()); out.add(key.toLowerCase()); out.add(key.slice(0, i) + (key[i] === key[i].toUpperCase() ? key[i].toLowerCase() : key[i].toUpperCase()) + key.slice(i + 1));
+  for (const s of ['\t', '\u00A0', '\u2003', '  ', '']) if (key.includes(' ')) out.add(key.replace(/ /g, s));
+  for (const [c, alts] of [[':', ['', '::', ' :', '=', '\t:']], ['=', ['', '==', ' =', ':', '\t=']]]) if (key.includes(c)) for (const a of alts) out.add(key.replace(c, a));
+  out.delete(key);
+  return [...out];
+}
+/** Every mutant of FULL for one marker: [label, text, keyDamaged]. Key mutants appear in place AND as an extra line beside the intact one. */
+function corpus(id) {
+  const { line, key } = SITES[id];
+  const at = line.indexOf(key); assert.ok(at >= 0, id);
+  const out = [];
+  for (const k of nearMissKeys(key)) {
+    const bad = line.slice(0, at) + k + line.slice(at + key.length);
+    out.push([`key ${JSON.stringify(k)}`, swapOnce(FULL, line, bad), k], [`extra ${JSON.stringify(k)}`, swapOnce(FULL, line, `${line}\n${bad}`), k]);
+  }
+  for (const [label, l] of [['bullet', `- ${line}`], ['star', `* ${line}`], ['quote', `> ${line}`], ['code span', `\`${line}\``], ['nbsp indent', `\u00A0${line}`],
+    ['bom', `\uFEFF${line}`], ['trailing text', `${line} trailing`], ['trailing tab', `${line}\t`], ['crlf line', `${line}\r`], ['fenced', `\`\`\`\n${line}\n\`\`\``],
+    ['duplicated', `${line}\n${line}`], ['line separator', `${line}\u2028x`]]) out.push([label, swapOnce(FULL, line, l), false]);
+  out.push(['copy above everything', swapOnce(FULL, '# Plan: invoice route\n', `# Plan: invoice route\n${line}\n`), false]);
+  out.push(['whole plan CRLF', FULL.replace(/\n/g, '\r\n'), false]);
+  return out;
+}
+
+test('[R0] fail-closed fixture: the full plan is required, and every marker contributes (no vacuous base)', () => {
+  assert.equal(BASE.status, 'required', JSON.stringify(BASE.errors));
+  assert.deepEqual(BASE.kinds, ['error-twin', 'negative', 'ownership', 'real-entrypoint', 'stale-N2']); // async-state + tenancy + request-handler
+  assert.deepEqual(BASE.items, ['L1']); assert.deepEqual(BASE.waiver_requested, ['L1']);
+  assert.deepEqual(Object.keys(SITES).sort(), TK.MARKERS.map((m) => m.id).sort(), 'the corpus covers every row of the table');
+  for (const m of TK.MARKERS) assert.ok(TK.carriers(FULL, m).length >= 1, `${m.id} is present in the fixture`);
+  const without = (l) => req(swapOnce(FULL, `${l}\n`, ''));
+  assert.deepEqual(without(SITES['test-triggers'].line).errors, ['plan_tags_missing']);
+  assert.deepEqual(without(SITES['lifecycle-item'].line).errors, ['waiver_invalid'], 'the waiver names the item');
+  assert.deepEqual(req(swapOnce(FULL, `${SITES['test-waiver'].line}\n`, '')).waiver_requested, []);
+  assert.deepEqual(without(SITES['risk-floor'].line).errors, ['risk_floor_missing']);
+  assert.ok(!without(SITES['security-plan'].line).kinds.length, 'without the block the plan is refused');
+  assert.deepEqual(req(FULL.replace('<!-- RUN-STATE:BEGIN -->\n', '').replace('<!-- RUN-STATE:END -->\n', '')).errors, ['plan_line_invalid'], 'RUN-STATE hides a worker line');
+  assert.deepEqual(req(swapOnce(FULL, SITES.classes.line, SITES.classes.line.replace('classes=tenancy', 'classes=none'))).kinds.includes('ownership'), false, 'the classes field adds ownership');
+});
+
+test('[R1] invariant: every near miss of every marker is a refusal carrying a code, or the identical parse; never a silent drop', (t) => {
+  let n = 0, refusedWithCode = 0, identical = 0;
+  for (const m of TK.MARKERS) {
+    for (const [label, text, keyDamaged] of corpus(m.id)) {
+      n++;
+      assert.notEqual(text, FULL, `${m.id} ${label}: the mutant differs from the base`);
+      const r = req(text);
+      const why = `${m.id} / ${label}: ${r.status} ${JSON.stringify(r.errors)} ${JSON.stringify(r.kinds)}`;
+      // the one key variant the producer's own grammar accepts: `risk_floor:` then [ \t]* then `risk-floor:` (risk-floor.mjs RECORD)
+      const producerForm = m.id === 'risk-floor' && label.startsWith('key ') && /^risk_floor:[ \t]*risk-floor:$/.test(keyDamaged);
+      if (keyDamaged && !producerForm) {
+        assert.equal(r.status, 'refused', `a damaged key is never read as absent or as valid: ${why}`);
+        assert.ok(r.errors.includes(m.code), `a damaged key refuses with the marker's own code: ${why}`);
+      }
+      if (label === 'fenced') assert.deepEqual(r, BASE, `a marker inside a code fence counts like any other line: ${why}`);
+      if (r.status === 'refused') {
+        assert.ok(r.errors.length > 0 && r.kinds.length === 0, why);
+        refusedWithCode++;
+      } else { assert.deepEqual(r, BASE, `not refused, so identical: ${why}`); identical++; }
+    }
+  }
+  assert.ok(n >= 450 && refusedWithCode >= 400 && identical >= 40, `corpus size ${n}, refused ${refusedWithCode}, identical ${identical}`);
+  t.diagnostic(`near-miss corpus: ${n} mutants over ${TK.MARKERS.length} markers; refused ${refusedWithCode}, identical ${identical}, silent drops 0`);
+});
+
+test('[R2] monotonicity: adding any near-miss marker line to a required plan yields a refusal or a superset of its kinds and items', (t) => {
+  // bases: the full plan, and the full plan with optional markers removed (each still required)
+  const drop = (t, ...ls) => ls.reduce((x, l) => swapOnce(x, `${l}\n`, ''), t);
+  const sec = SP.renderSection3a(FULL_SEL);
+  const bases = [FULL, drop(FULL, SITES['test-waiver'].line), drop(FULL, SITES['test-waiver'].line, SITES['lifecycle-item'].line), swapOnce(FULL, `${sec}\n`, '')];
+  const fullLines = new Set(FULL.split('\n'));
+  const nearLines = new Set(TK.MARKERS.flatMap((m) => corpus(m.id).flatMap(([, t]) => t.split(/\r?\n/).filter((l) => !fullLines.has(l)))));
+  assert.ok(nearLines.size >= 150, `distinct near-miss lines ${nearLines.size}`);
+  let n = 0;
+  for (const base of bases) {
+    const b = req(base);
+    assert.equal(b.status, 'required', JSON.stringify(b.errors));
+    for (const nl of nearLines) for (const at of ['# Plan: invoice route\n', '<!-- RUN-STATE:BEGIN -->']) {
+      const r = req(swapOnce(base, at, at.startsWith('#') ? `${at}${nl}\n` : `${nl}\n${at}`)); n++;
+      if (r.status === 'refused') { assert.ok(r.errors.length > 0); continue; }
+      assert.equal(r.status, 'required', JSON.stringify(nl));
+      for (const k of b.kinds) assert.ok(r.kinds.includes(k), `${JSON.stringify(nl)}: kind ${k} kept`);
+      for (const i of b.items) assert.ok(r.items.includes(i), `${JSON.stringify(nl)}: item ${i} kept`);
+    }
+  }
+  assert.ok(n >= 1200, `monotonicity cases ${n}`);
+  t.diagnostic(`monotonicity: ${n} cases (${nearLines.size} near-miss lines x ${bases.length} bases x 2 positions)`);
+});
+
+test('[R3] the reported case: a tab after `security-plan:` with triggers none and classes=none refuses (CLI check never passes empty titles)', () => {
+  const p = `# Plan\n\ntest-triggers: none\n${realFloor()}\n\n${SP.renderSection3a(FULL_SEL)}\n${RS}`;
+  assert.deepEqual(req(p).kinds, ['negative', 'real-entrypoint']);
+  for (const bad of ['<!--\tsecurity-plan: ', '<!-- security-plan:\t', '<!-- Security-Plan: ', '<!-- security_plan: ', '<!--security-plan: ', '<!-- security-plan : ']) {
+    const t = swapOnce(p, '<!-- security-plan: ', bad);
+    const r = req(t);
+    assert.equal(r.status, 'refused', bad); assert.ok(r.errors.includes('security_block_invalid'), `${JSON.stringify(bad)} -> ${r.errors}`);
+    assert.equal(TK.checkTitles(r, []).status, 'refused');
+  }
+  const pairsOnly = p.split('\n').filter((l) => !l.startsWith('<!-- security-plan: ')).join('\n');
+  assert.deepEqual(req(pairsOnly).errors, ['security_block_invalid'], 'a pairs line without its block is a refusal, not absence');
+  const r = repo(null);
+  const pf = file(swapOnce(p.replace(FB, r.base.slice(0, 12)), '<!-- security-plan: ', '<!-- security-plan:\t'), 'plan.md');
+  const c = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', pf, '--titles', '[]']);
+  assert.equal(c.status, 1); assert.equal(json(c).status, 'refused'); assert.deepEqual(json(c).errors, ['security_block_invalid']);
+});
+
+test('[R4] RUN-STATE: a duplicated or damaged marker never hides the narrative; an unopted plan stays not_declared', () => {
+  const hidden = swapOnce(FULL, '# Plan: invoice route\n', '# Plan: invoice route\n<!-- RUN-STATE:BEGIN -->\n');
+  assert.deepEqual(req(hidden).errors, ['run_state_invalid'], 'a BEGIN above the trigger line cannot hide it');
+  assert.deepEqual(req(FULL.replace('<!-- RUN-STATE:END -->', '<!-- RUN-STATE:END -->\n<!-- RUN-STATE:END -->')).errors, ['run_state_invalid']);
+  assert.deepEqual(req(FULL.replace('<!-- RUN-STATE:END -->', '<!-- run-state:end -->')).errors, ['run_state_invalid']);
+  const onlyInside = `# Plan\n\n<!-- RUN-STATE:BEGIN -->\n<!-- RUN-STATE:BEGIN -->\ntest-triggers: money\n<!-- RUN-STATE:END -->\n`;
+  assert.deepEqual(req(onlyInside).errors, ['run_state_invalid'], 'malformed RUN-STATE: the whole plan is scanned for opt-in');
+  assert.equal(req(`# Plan\n\nnothing\n<!-- RUN-STATE:BEGIN -->\n<!-- RUN-STATE:BEGIN -->\n`).status, 'not_declared', 'no opt-in token anywhere: still not_declared');
+  assert.deepEqual(req(`# Plan\n\nnothing\n<!-- RUN-STATE:BEGIN -->\n`, TK.validateDeclaration({ version: 1 })).errors, ['run_state_invalid'], 'a declaring repo opts in');
+  // a real START event names the marker in its text (StoreCraft SCRUM-73: "digest_scope":"file bytes before RUN-STATE:BEGIN")
+  const event = '{"event":"START","run_id":"r1","digest_scope":"file bytes before RUN-STATE:BEGIN","note":"<!-- RUN-STATE:END -->"}';
+  assert.deepEqual(req(swapOnce(FULL, '{"event":"START"}', event)), BASE, 'an event record may name the markers');
+  // the region is cut at whole marker LINES: the exact BEGIN text inside an earlier line hides nothing
+  const inline = swapOnce(FULL, '# Plan: invoice route\n', '# Plan: invoice route\n{"note":"<!-- RUN-STATE:BEGIN -->"}\n');
+  assert.deepEqual(req(inline), BASE);
+  assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', '\n\n{"note":"<!-- RUN-STATE:BEGIN -->"}\ntest-triggers:').replace('test-triggers: async-state', 'test-triggers: async-state, repair')).kinds,
+    uniqSorted([...BASE.kinds, 'regression']), 'a trigger line after an inline BEGIN text still counts');
+});
+
+test('[R5] benign text is not a marker: prose, script names and the reassess record line keep the plan required; prose does not opt in', () => {
+  assert.equal(BASE.status, 'required'); // FULL already carries prose, `risk-floor.mjs`, `security-plan.mjs` and a real risk_reassess line
+  for (const prose of ['This test triggers a reload.', 'The risk floor is ELEVATED and the security plan is attached.', 'Each lifecycle item and test waiver is listed.',
+    'See risk-floor.mjs, risk_floor.mjs, risk-floor.test.mjs, security-plan.mjs and scripts/run-state.mjs.', 'Run `ship-ready-check.mjs check --run-state <plan>`.',
+    'The runState, lifecycleItem and testTriggers identifiers, and the testtriggers flag, stay.',
+    // real-plan prose (650 plans scanned): bare words without their marker syntax
+    '## RUN-STATE', 'The plan file excluding the RUN-STATE block; the run_state table.', '| Security-plan size (owner decision) | branch feat/x-security-plan |',
+    '`bindSecurity` refuses `security_pairs_mismatch`; the security-pairs are listed.']) {
+    assert.equal(req(`# Plan\n\n${prose}\n${RS}`).status, 'not_declared', prose);
+    assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${prose}\ntest-triggers:`)), BASE, prose);
+  }
+  for (const near of ['the test-triggers line', 'a test_triggers variable', 'RUN_STATE:BEGIN', 'run-state end', '<!- security-plan {"policy":2} -->', 'security-plan= {}', '"selection_digest": "sha256:00"', 'security_pairs: sha256:00', '<!-- security_plan -->', 'security_plan: none', 'Test triggers: money', 'lifecycle item: L2 x', 'Test Waiver : L1 x', 'test\\-triggers: money', 'test\uFE0F-triggers: money', 'risk_floor: see below', 'RISK_FLOOR: ELEVATED', 'risk\u2011floor: ELEVATED', 'a stray classes=tenancy']) {
+    const r = req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${near}\ntest-triggers:`));
+    assert.equal(r.status, 'refused', near); assert.ok(r.errors.length > 0);
+  }
+  assert.deepEqual(req(`# Plan\n\nThe test\u2011triggers line is missing.\n${RS}`).errors, ['plan_line_invalid', 'plan_tags_missing', 'risk_floor_missing'], 'a non-breaking hyphen opts in');
+  const noReassess = swapOnce(FULL, `     ${reassessLine()}\n`, '');
+  assert.deepEqual(req(noReassess), BASE, 'the reassess line adds and removes nothing');
+  assert.deepEqual(req(swapOnce(FULL, 'risk_reassess: ', 'Risk_Reassess: ')).errors, ['risk_floor_invalid'], 'a damaged reassess key is not ignored');
+});

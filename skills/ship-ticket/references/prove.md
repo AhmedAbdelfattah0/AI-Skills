@@ -253,9 +253,26 @@ title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` requests 
 **In this slice a waiver never removes a requirement**: it is listed in `waiver_requested` (not applied, needs
 trusted approval) and the kind or item stays missing. Anyone who can write the plan file can write a waiver line and a
 matching RUN-STATE `START`, so the plan cannot carry that authority; applying a waiver needs the engine's pinned
-approval record for the selected run (S-01b2). A waiver line inside RUN-STATE is not even a request. Every line that mentions one of
-the three keys must be exactly one of these lines: a bulleted, bold or differently cased key is `plan_line_invalid`,
-and a plan that uses items or waivers without the `test-triggers:` line is `plan_tags_missing`, never `not_declared`.
+approval record for the selected run (S-01b2). A waiver line inside RUN-STATE is not even a request. A plan that uses
+items or waivers without the `test-triggers:` line is `plan_tags_missing`, never `not_declared`.
+
+**Fail-closed recognition.** One recogniser (`MARKERS` in `scripts/test-kinds.mjs`) covers every marker the script reads:
+`test-triggers`, `lifecycle-item`, `test-waiver`, the `risk_floor:` record and its `classes=` field, the `security-plan`
+block, the `security-pairs` line and the RUN-STATE markers. It looks for each marker's token in a normalised copy of
+every line (NFKC; format and default-ignorable characters such as zero-width spaces and variation selectors removed;
+Markdown backslash escapes removed; lower case; unicode dashes and `_` folded to `-`). The words of a token are joined
+by dashes (or, for the three plan keys, by whitespace before a colon: `Test triggers:`), so prose ("this test
+triggers a reload") and camelCase identifiers carry no token, while snake_case ones (`test_triggers`) do. The first five tokens are the bare words; the block, pairs and RUN-STATE tokens are the words
+in their marker syntax (`<!-- security-plan`, `security-plan:`, a `"selection_digest":` key, `security-pairs sha256`,
+`RUN-STATE:BEGIN`/`END`), because real plans use those words in prose. A line that carries a token must parse strictly
+as that marker, else the marker's code (`plan_line_invalid`, `waiver_invalid`, `risk_floor_invalid`,
+`security_block_invalid`, `run_state_invalid`): a bulleted, bold, re-cased, tab-separated or zero-width-damaged marker is
+a refusal, never an absent one. Markers in fences or comments count. Benign: the names `risk-floor.mjs` and
+`security-plan.mjs`, and the `risk_reassess:` record line (ignored here). A pairs line without its block is
+`security_block_invalid`. RUN-STATE is cut at whole lines: it must be absent or exactly one `BEGIN` line followed by one
+`END` line, with no other marker line in the plan (an event record, a line starting with `{`, may name the markers).
+Not caught (read as absent): homoglyphs, misspellings, words joined by nothing, and words joined by a space with no
+colon after them.
 
 **Tag convention.** A test title carries `[kind:<kind id>]` for each kind it proves and `[plan:<id>]` for each item
 it covers, exact and case-sensitive (`[kind:negative]`; `non-negative` or `[kind:Negative]` do not count).
