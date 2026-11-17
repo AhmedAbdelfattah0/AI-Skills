@@ -2,8 +2,9 @@
 /**
  * Linked CI snapshot verifier (ASTF-39, S-05a). CONTRACT (deliberately narrow): this module is a BINDING AND
  * INTERNAL-CONSISTENCY verifier of a CAPTURED snapshot. `state: 'snapshot_valid'` means ONLY that the supplied files are
- * internally consistent (page counts, annotation counts, attempt numbering), well-formed, non-empty, and every check run,
- * job and annotation file is bound to the expected provider origin + repository + head SHA. It does NOT attest what
+ * internally consistent (page counts, annotation counts, attempt numbering), well-formed, non-empty, and every check run
+ * and job is bound to the expected provider origin + repository + head SHA (annotation files are matched to a bound check
+ * run by file name and count only). It does NOT attest what
  * NOT_ATTESTED lists (also emitted as `not_attested` in the JSON): `snapshot_valid` is never "CI passed" and never "nothing
  * missing upstream". Those are owed by the capture manifest (S-05e: expected counts, the run listing) and by the
  * classifier (S-05b). It maps NOTHING to a verdict; later slices must refuse unless `state === 'snapshot_valid'` AND treat
@@ -13,7 +14,8 @@
  *
  * `--origin` is REQUIRED (https://api.github.com, or a GHES base such as https://ghe.example/api/v3). Every
  * `url` / `check_run_url` must be exactly `<origin>/repos/<owner>/<name>/check-runs/<id>`; another installation: unbound.
- * Snapshot directory (input files only; never fetched; a symlink is refused, root included):
+ * Snapshot directory (input files only; never fetched; a symlink is refused: every entry and the root itself, after lexical normalisation by
+ * path.resolve (so `link/`, `link/.`, `dir/../link` all name the link). Symlinks in ANCESTOR directories are allowed, e.g. /tmp on macOS):
  *   check-runs.jsonl            `gh api --paginate "commits/<sha>/check-runs?filter=all" --jq '{total_count}, .check_runs[]'`
  *                               (filter=all: the default `latest` drops earlier attempts' check runs)
  *   jobs/<name>.jsonl           ONE file per call of `actions/runs/<id>/attempts/<n>/jobs` (same line shape; the
@@ -26,7 +28,7 @@
  * of predicates that fired, not every failure (the first failure per check run wins).
  *   identity_args        repo is owner/name, sha is 40 hex, origin is an https URL without credentials/query
  *   files_safe           root and entries: real directory/regular file, no symlink, UTF-8, size cap, no unexpected entry
- *   lines_wellformed     every line a JSON object; names strings; annotation lines carry a string message
+ *   lines_wellformed     every line a JSON object (nesting <= MAX_DEPTH); names strings; annotation lines match SHAPES.annotation
  *   pages_complete       check-runs.jsonl and jobs/ exist; each call: total_count on every page, equal, items == total
  *   ids_canonical_unique ids canonical digit strings or safe integers (no leading zero), unique per kind
  *   non_empty            at least one check run (an empty capture proves nothing)
@@ -38,7 +40,8 @@
  *   job_name_unique      no two bound jobs share (run_id, run_attempt, name)
  *   status_consistent    check and job `completed`; equal conclusions
  *   outcomes_known       a completed check/job has a conclusion in CONCLUSIONS (never null/absent/unrecognised)
- *   job_inputs_known     every job has the fields the classifier needs (conclusion; steps and runner_name when failure-class)
+ *   job_inputs_known     every job has the fields the classifier needs (conclusion; steps and runner_name when failure-class);
+ *                        steps and labels match SHAPES (closed schema); a malformed entry is flagged, never defaulted
  *   attempts_contiguous  per run_id the attempts present are exactly 1..max (a lone attempt 2 hides attempt 1)
  *   no_orphan_jobs       every job is bound by a check run of the snapshot
  *   annotations_complete for EVERY check run the listed annotations equal output.annotations_count
@@ -53,7 +56,7 @@
  */
 import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isEntrypoint } from './harness.mjs';
 
 export const SCHEMA = 'ci-snapshot-v1';
@@ -69,7 +72,7 @@ export const CONCLUSIONS = Object.freeze(['success', 'failure', 'cancelled', 'sk
 export const SITES = Object.freeze({
   identity_args: ['repo_malformed', 'sha_malformed', 'origin_malformed'],
   files_safe: ['file_not_regular_or_too_large', 'file_unreadable_or_not_utf8', 'entry_not_a_directory', 'dir_unreadable', 'unexpected_entry', 'root_not_a_real_directory', 'annotation_file_unexpected'],
-  lines_wellformed: ['not_json_lines', 'unrecognised_line', 'name_not_string', 'annotation_not_an_annotation'],
+  lines_wellformed: ['not_json_lines', 'unrecognised_line', 'name_not_string', 'annotation_not_an_annotation', 'too_deep'],
   pages_complete: ['check_runs_missing', 'jobs_missing', 'no_total_count', 'total_count_disagree', 'items_differ_from_total'],
   ids_canonical_unique: ['id_invalid', 'id_duplicate'],
   non_empty: ['no_check_runs'],
@@ -80,7 +83,7 @@ export const SITES = Object.freeze({
   job_name_unique: ['ambiguous_job_name'],
   status_consistent: ['check_not_completed', 'job_not_completed', 'conclusion_mismatch'],
   outcomes_known: ['check_conclusion_unknown', 'job_conclusion_unknown'],
-  job_inputs_known: ['job_inputs_unknown'],
+  job_inputs_known: ['job_inputs_unknown', 'malformed_step', 'malformed_labels'],
   attempts_contiguous: ['attempt_gap'],
   no_orphan_jobs: ['not_bound'],
   annotations_complete: ['annotations_missing', 'annotations_incomplete', 'annotations_unknown'],
@@ -90,6 +93,32 @@ const MAX_BYTES = 64 * 1024 * 1024;
 const OK_CONCLUSIONS = ['success', 'neutral', 'skipped'];
 const failedConclusion = (c) => typeof c === 'string' && !OK_CONCLUSIONS.includes(c);
 const NOT_EXECUTED = ['skipped', 'neutral', 'cancelled'];
+/** The closed schemas of retained provider metadata, described once. Scalars: string, null, int, posint, with `|` for alternatives and a leading `?` for an optional key. */
+export const SHAPES = Object.freeze({
+  step: { object: { name: 'string', status: ['queued', 'in_progress', 'completed', 'pending'], conclusion: 'string|null', number: 'posint', started_at: '?string|null', completed_at: '?string|null' } },
+  labels: { arrayOf: 'string' },
+  annotation: { object: { path: '?string', start_line: '?int', end_line: '?int', start_column: '?int|null', end_column: '?int|null', annotation_level: '?string', title: '?string|null', message: 'string', raw_details: '?string|null', blob_href: '?string' } },
+});
+const MAX_DEPTH = 32;
+const scalarOk = (v, tok) => (tok === 'string' ? typeof v === 'string' : tok === 'null' ? v === null : tok === 'int' ? Number.isSafeInteger(v) : tok === 'posint' ? Number.isSafeInteger(v) && v >= 1 : false);
+/** null when `v` matches `spec`, else a short problem string (never throws, never stringifies a value). */
+export function shapeProblem(v, spec, path = '$') {
+  if (Array.isArray(spec)) return typeof v === 'string' && spec.includes(v) ? null : `${path}:not_in_set`;
+  if (typeof spec === 'string') return spec.replace(/^\?/, '').split('|').some((tok) => scalarOk(v, tok)) ? null : `${path}:bad_type`;
+  if (spec.arrayOf) { if (!Array.isArray(v)) return `${path}:not_array`; for (let i = 0; i < v.length; i++) { const p = shapeProblem(v[i], spec.arrayOf, `${path}[${i}]`); if (p) return p; } return null; }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return `${path}:not_object`;
+  for (const k of Object.keys(v)) if (!Object.hasOwn(spec.object, k)) return `${path}.${k}:unknown_key`;
+  for (const [k, s] of Object.entries(spec.object)) {
+    if (!Object.hasOwn(v, k)) { if (typeof s === 'string' && s.startsWith('?')) continue; return `${path}.${k}:missing`; }
+    const p = shapeProblem(v[k], s, `${path}.${k}`); if (p) return p;
+  }
+  return null;
+}
+const depthOf = (v) => {
+  let max = 0; const stack = [[v, 0]];
+  while (stack.length) { const [x, d] = stack.pop(); if (x && typeof x === 'object') { max = Math.max(max, d + 1); if (max > MAX_DEPTH) return max; for (const y of Object.values(x)) stack.push([y, d + 1]); } }
+  return max;
+};
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** An id as a canonical digit string (no leading zero), or null (numbers must be safe integers). */
@@ -107,7 +136,7 @@ export function normOrigin(o) {
 
 /** `<origin>/repos/<owner>/<name>/check-runs/<id>` -> { repo (lower-cased), id }, or null (another origin, shape or a leading-zero id). */
 export function checkRunRef(url, origin) {
-  const m = new RegExp(`^${esc(origin ?? '\0')}/repos/([^/]+/[^/]+)/check-runs/(0|[1-9]\\d*)/?$`).exec(String(url ?? ''));
+  const m = new RegExp(`^${esc(origin ?? '\0')}/repos/([^/]+/[^/]+)/check-runs/(0|[1-9]\\d*)/?$`).exec(typeof url === 'string' ? url : '');
   return m ? { repo: m[1].toLowerCase(), id: m[2] } : null;
 }
 
@@ -118,6 +147,7 @@ function objectLines(text) {
     let v;
     try { v = JSON.parse(l); } catch { return null; }
     if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    if (depthOf(v) > MAX_DEPTH) return 'too_deep';
     out.push(v);
   }
   return out;
@@ -126,6 +156,7 @@ function objectLines(text) {
 /** One paginated call -> { state: 'ok'|'incomplete'|'invalid', items, lines, reason, predicate }. */
 export function parsePaged(text, isItem) {
   const lines = objectLines(text);
+  if (lines === 'too_deep') return { state: 'invalid', items: [], lines: [], reason: 'too_deep', predicate: 'lines_wellformed' };
   if (!lines) return { state: 'invalid', items: [], lines: [], reason: 'not_json_lines', predicate: 'lines_wellformed' };
   const items = lines.filter(isItem);
   const totals = lines.filter((l) => !isItem(l) && Object.hasOwn(l, 'total_count')).map((l) => l.total_count);
@@ -150,9 +181,14 @@ export function classifyJob(j) {
 const state3 = (v) => (v === undefined ? 'absent' : v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
 const str = (v) => (typeof v === 'string' ? v : null);
 /** The raw classification inputs of a job, with explicit absent/null markers (never a default). */
-const jobInputs = (j) => ({ status: str(j.status), conclusion: str(j.conclusion), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, started_at: str(j.started_at), completed_at: str(j.completed_at),
-  steps_state: state3(j.steps), steps: Array.isArray(j.steps) ? j.steps.map((s) => ({ name: str(s?.name), status: str(s?.status), conclusion: str(s?.conclusion), number: Number.isSafeInteger(s?.number) ? s.number : null })) : null,
-  runner_name_state: state3(j.runner_name), runner_name: str(j.runner_name), runner_group_name: str(j.runner_group_name), labels: Array.isArray(j.labels) ? j.labels.map(String) : null });
+const jobInputs = (j) => {
+  const stepList = Array.isArray(j.steps) ? j.steps.map((s) => { const p = shapeProblem(s, SHAPES.step); return p ? { malformed: true, type: state3(s), problem: p } : { name: s.name, status: s.status, conclusion: s.conclusion, number: s.number }; }) : null;
+  const stepsBad = (j.steps !== undefined && j.steps !== null && !Array.isArray(j.steps)) || (stepList?.some((s) => s.malformed) ?? false);
+  const labelsProblem = j.labels === undefined || j.labels === null ? null : shapeProblem(j.labels, SHAPES.labels);
+  return { status: str(j.status), conclusion: str(j.conclusion), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, started_at: str(j.started_at), completed_at: str(j.completed_at),
+    steps_state: stepsBad ? 'malformed' : state3(j.steps), steps: stepList, steps_type: state3(j.steps), runner_name_state: state3(j.runner_name), runner_name: str(j.runner_name), runner_group_name: str(j.runner_group_name),
+    labels_state: labelsProblem ? 'malformed' : state3(j.labels), labels: labelsProblem || !Array.isArray(j.labels) ? null : j.labels.slice(), labels_type: state3(j.labels), labels_problem: labelsProblem };
+};
 
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
 const sha256 = (v) => createHash('sha256').update(JSON.stringify(canon(v))).digest('hex');
@@ -209,13 +245,13 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
 
   const byRef = new Map(); // check-run id -> jobs naming it
   for (const j of jobs) { const ref = checkRunRef(j.check_run_url, org); const k = ref ? ref.id : '\0none'; byRef.set(k, [...(byRef.get(k) ?? []), j]); }
-  const jobRows = jobs.map((j) => ({ id: idStr(j.id), name: String(j.name), run_id: idStr(j.run_id), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, inputs: jobInputs(j), ...classifyJob(j), bound: false }));
+  const jobRows = jobs.map((j) => ({ id: idStr(j.id), name: typeof j.name === 'string' ? j.name : null, run_id: idStr(j.run_id), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, inputs: jobInputs(j), ...classifyJob(j), bound: false }));
   const jobRow = new Map(jobRows.map((r) => [r.id, r]));
 
   const rows = [];
   for (const c of checks) {
     const id = idStr(c.id);
-    const row = { id, name: String(c.name), app: typeof c.app?.slug === 'string' ? c.app.slug : null, status: str(c.status), conclusion: str(c.conclusion), started_at: str(c.started_at), completed_at: str(c.completed_at),
+    const row = { id, name: typeof c.name === 'string' ? c.name : null, app: typeof c.app?.slug === 'string' ? c.app.slug : null, status: str(c.status), conclusion: str(c.conclusion), started_at: str(c.started_at), completed_at: str(c.completed_at),
       binding: 'unbound', reason: null, predicate: null, job_id: null, run_id: null, run_attempt: null, job_inputs: null, input_status: 'unbound', supersession: 'not_applicable',
       annotations: { status: 'unknown', messages: [], count: null, sha256: null } };
     rows.push(row);
@@ -273,7 +309,8 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
     const id = /^(\d+)\.jsonl$/.exec(file)?.[1];
     const lines = objectLines(text);
     if (!id || !checkById.has(id)) { fail('invalid', 'files_safe', `annotations_${file}_annotation_file_unexpected`); continue; }
-    if (!lines || !lines.every((l) => typeof l.message === 'string')) { fail('invalid', 'lines_wellformed', `annotations_${file}_annotation_not_an_annotation`); continue; }
+    if (lines === 'too_deep') { fail('invalid', 'lines_wellformed', `annotations_${file}_too_deep`); continue; }
+    if (!lines || !lines.every((l) => shapeProblem(l, SHAPES.annotation) === null)) { fail('invalid', 'lines_wellformed', `annotations_${file}_annotation_not_an_annotation`); continue; }
     raw.annotations[file] = lines;
   }
   for (const row of rows) {
@@ -293,7 +330,11 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
   for (const r of rows) if (r.binding === 'unbound') fail('incomplete', r.predicate ?? 'actions_check_one_job', `check_run_${r.id}_${r.reason ?? 'no_job'}`);
   const orphan = jobRows.filter((j) => !j.bound).map((j) => j.id);
   for (const id of orphan) fail('incomplete', 'no_orphan_jobs', `job_${id}_not_bound`);
-  for (const j of jobRows) if (j.input_status === 'unknown') { j.inputs_unknown = true; fail('incomplete', 'job_inputs_known', `job_${j.id}_job_inputs_unknown`); }
+  for (const j of jobRows) {
+    if (j.input_status === 'unknown') { j.inputs_unknown = true; fail('incomplete', 'job_inputs_known', `job_${j.id}_job_inputs_unknown`); }
+    if (j.inputs.steps_state === 'malformed') { j.inputs_unknown = true; fail('incomplete', 'job_inputs_known', `job_${j.id}_malformed_step`); }
+    if (j.inputs.labels_state === 'malformed') { j.inputs_unknown = true; fail('incomplete', 'job_inputs_known', `job_${j.id}_malformed_labels`); }
+  }
   const attempts = new Map();
   for (const j of jobRows) if (j.run_id !== null && j.run_attempt !== null) attempts.set(j.run_id, new Set([...(attempts.get(j.run_id) ?? []), j.run_attempt]));
   for (const [run, set] of attempts) if (set.size !== Math.max(...set)) fail('incomplete', 'attempts_contiguous', `run_${run}_attempt_gap`);
@@ -323,7 +364,7 @@ function readDir(dir, sub, namePattern, problems) {
 /** Read a snapshot directory (see the header) and build it. */
 export function readSnapshot({ dir, repo, sha, origin }) {
   const problems = [];
-  const root = String(dir).replace(/[\\/]+$/, '') || String(dir); // a trailing slash would make lstat follow a symlink
+  const root = resolve(String(dir)); // lexical normalisation: `link/`, `link/.`, `dir/../link` all become the link itself, which lstat then refuses
   let rootOk = false;
   try { rootOk = lstatSync(root).isDirectory(); } catch { /* reported below */ }
   if (!rootOk) problems.push(['files_safe', 'root_not_a_real_directory']);

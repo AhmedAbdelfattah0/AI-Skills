@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, truncateSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSnapshot, readSnapshot, classifyJob, idStr, checkRunRef, PREDICATES, SITES, NOT_ATTESTED, CONCLUSIONS } from './ci-snapshot.mjs';
+import { buildSnapshot, readSnapshot, classifyJob, idStr, checkRunRef, PREDICATES, SITES, NOT_ATTESTED, CONCLUSIONS, SHAPES, shapeProblem } from './ci-snapshot.mjs';
 
 const CLI = fileURLToPath(new URL('./ci-snapshot.mjs', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('./fixtures/ci-snapshot/scrum202-abf4d7ea-actions-jobs.jsonl', import.meta.url));
@@ -24,14 +24,14 @@ const job = (o) => ({ id: 1, name: 'verify', run_id: 100, run_attempt: 1, head_s
 const check = (o) => ({ id: 1, name: 'verify', head_sha: SHA, status: 'completed', url: url(o.id ?? 1), app: { slug: 'github-actions' }, conclusion: 'failure', output: { annotations_count: 0 }, ...o });
 const base = () => ({
   checks: [check({ id: 1 }), check({ id: 2, conclusion: 'success' }), check({ id: 3, name: 'verify' }), check({ id: 4, name: 'review', app: { slug: 'other-app' }, conclusion: 'success' })],
-  jobs: { 'run100-1': [job({ id: 1 })], 'run200-1': [job({ id: 3, run_id: 200 })], 'run100-2': [job({ id: 2, run_attempt: 2, conclusion: 'success', steps: [{}], runner_name: 'GitHub Actions 1' })] },
+  jobs: { 'run100-1': [job({ id: 1 })], 'run200-1': [job({ id: 3, run_id: 200 })], 'run100-2': [job({ id: 2, run_attempt: 2, conclusion: 'success', steps: [{ name: 's', status: 'completed', conclusion: 'success', number: 1 }], runner_name: 'GitHub Actions 1' })] },
   annotations: {},
 });
 const texts = (s) => ({ checkRuns: nl(s.checks), jobs: Object.fromEntries(Object.entries(s.jobs).map(([k, v]) => [k + '.jsonl', nl(v)])), annotations: s.annotations, problems: [] });
 const build = (s = base(), over = {}) => buildSnapshot({ texts: { ...texts(s), ...over }, repo: REPO, sha: SHA, origin: ORIGIN });
 const row = (snap, id) => snap.check_runs.find((r) => r.id === String(id));
 
-test('the synthetic replica is complete and fully bound (baseline for every mutation below)', () => {
+test('the synthetic replica is snapshot_valid and fully bound (baseline for every mutation below)', () => {
   const s = build();
   assert.equal(s.state, 'snapshot_valid'); assert.equal(s.internally_consistent, true);
   assert.equal(row(s, 1).binding, 'bound'); assert.equal(row(s, 4).binding, 'external');
@@ -139,7 +139,7 @@ test('AC6: provider_snapshot_sha256 is canonical (key order immaterial), value-s
   assert.equal(build(base(), { checkRuns: 'not json\n' }).provider_snapshot_sha256, null);
 });
 
-test('negatives: invalid input is invalid, never complete', () => {
+test('negatives: invalid input is invalid, never snapshot_valid', () => {
   const s = base();
   const dupJobs = base(); dupJobs.jobs['run100-2'][0].id = 1;
   assert.ok(build(dupJobs).reasons.includes('job_id_duplicate'));
@@ -185,7 +185,7 @@ function writeDir(root, s, t = texts(s)) {
 }
 const cli = (dir, sha = SHA) => spawnSync(process.execPath, [CLI, 'check', '--snapshot', dir, '--repo', REPO, '--sha', sha, '--origin', ORIGIN], { encoding: 'utf8' });
 
-test('CLI + reader: a complete bound directory exits 0; every filesystem hazard fails closed', () => {
+test('CLI + reader: a valid bound directory exits 0; every filesystem hazard fails closed', () => {
   const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
   try {
     const good = join(root, 'good'); mkdirSync(good); writeDir(good, base());
@@ -212,25 +212,28 @@ test('CLI + reader: a complete bound directory exits 0; every filesystem hazard 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-// ---- the completeness predicates: ONE table, each reason of each predicate broken in turn from a complete snapshot ----
+// ---- the validity predicates: ONE table, each reason of each predicate broken in turn from a snapshot_valid snapshot ----
 // Case: { reason, s(s) mutates the synthetic snapshot, t(texts) mutates the texts, args, root: <file-system hazard>, want }.
 const big = () => base().checks;
 const CASES = {
   identity_args: [{ reason: 'repo_malformed', args: { repo: 'x' } }, { reason: 'sha_malformed', args: { sha: 'abc' } }, { reason: 'origin_malformed', args: { origin: 'http://api.github.com' } }],
   files_safe: [{ reason: 'file_not_regular_or_too_large', root: 'dircheck' }, { reason: 'file_not_regular_or_too_large', root: 'oversized' }, { reason: 'file_not_regular_or_too_large', root: 'filelink' },
     { reason: 'file_unreadable_or_not_utf8', root: 'badutf8' }, { reason: 'entry_not_a_directory', root: 'jobs_is_file' }, { reason: 'dir_unreadable', root: 'unreadable' },
-    { reason: 'unexpected_entry', root: 'extra' }, { reason: 'unexpected_entry', root: 'extra_in_jobs' }, { reason: 'unexpected_entry', root: 'extra_in_annotations' }, { reason: 'root_not_a_real_directory', root: 'missing_root' }, { reason: 'root_not_a_real_directory', root: 'symlink' }, { reason: 'root_not_a_real_directory', root: 'symlink_slash' },
+    { reason: 'unexpected_entry', root: 'extra' }, { reason: 'unexpected_entry', root: 'extra_in_jobs' }, { reason: 'unexpected_entry', root: 'extra_in_annotations' }, { reason: 'root_not_a_real_directory', root: 'missing_root' }, { reason: 'root_not_a_real_directory', root: 'symlink' }, { reason: 'root_not_a_real_directory', root: 'symlink_slash' }, { reason: 'root_not_a_real_directory', root: 'symlink_dot' }, { reason: 'root_not_a_real_directory', root: 'symlink_dotslash' },
+    { reason: 'root_not_a_real_directory', root: 'symlink_updir' }, { reason: 'root_not_a_real_directory', root: 'symlink_rel' },
     { reason: 'annotation_file_unexpected', t: (x) => { x.annotations['999.jsonl'] = '{"message":"m"}\n'; } }],
   lines_wellformed: [{ reason: 'not_json_lines', t: (x) => { x.checkRuns += 'not json\n'; } }, { reason: 'unrecognised_line', t: (x) => { x.checkRuns += '{"stray":1}\n'; } },
-    { reason: 'name_not_string', s: (s) => { s.checks[3].name = 7; } }, { reason: 'annotation_not_an_annotation', t: (x) => { x.annotations['1.jsonl'] = '{"x":1}\n'; } }],
+    { reason: 'name_not_string', s: (s) => { s.checks[3].name = 7; } }, { reason: 'annotation_not_an_annotation', t: (x) => { x.annotations['1.jsonl'] = '{"x":1}\n'; } },
+    { reason: 'annotation_not_an_annotation', t: (x) => { x.annotations['1.jsonl'] = '{"message":"m","extra":1}\n'; } },
+    { reason: 'too_deep', t: (x) => { x.checkRuns += '{"a":'.repeat(40) + '1' + '}'.repeat(40) + '\n'; } }, { reason: 'name_not_string', s: (s) => { s.checks[3].name = { toString: 1 }; } }],
   pages_complete: [{ reason: 'check_runs_missing', root: 'nocheckfile' }, { reason: 'jobs_missing', root: 'nojobsdir' }, { reason: 'no_total_count', t: (x) => { x.checkRuns = big().map((c) => JSON.stringify(c)).join('\n'); } },
     { reason: 'total_count_disagree', t: (x) => { x.checkRuns = JSON.stringify({ total_count: 3 }) + '\n' + nl(big()); } }, { reason: 'items_differ_from_total', t: (x) => { x.checkRuns = nl(big(), 9); } }],
   ids_canonical_unique: [{ reason: 'id_invalid', s: (s) => { s.checks[3].id = '04'; } }, { reason: 'id_invalid', s: (s) => { s.checks[3].id = 2 ** 60; } }, { reason: 'id_duplicate', s: (s) => { s.jobs['run100-2'][0].id = 1; } }],
   non_empty: [{ reason: 'no_check_runs', want: 'empty', s: (s) => { s.checks = []; s.jobs = {}; } }],
-  check_bound_to_repo: [{ reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = url(4, 'other/widgets'); } }, { reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = s.checks[3].url.replace('api.github.com', 'ghe.example'); } },
+  check_bound_to_repo: [{ reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = { toString: 1 }; } }, { reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = url(4, 'other/widgets'); } }, { reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = s.checks[3].url.replace('api.github.com', 'ghe.example'); } },
     { reason: 'own_url_not_origin_repo', s: (s) => { delete s.checks[3].url; } }, { reason: 'head_sha_mismatch', s: (s) => { s.checks[3].head_sha = 'f'.repeat(40); } }, { reason: 'app_missing', s: (s) => { s.checks[3].app = null; } }],
   ids_agree: [{ reason: 'own_id_mismatch', s: (s) => { s.checks[1].url = url(98); } }, { reason: 'job_id_mismatch', s: (s) => { s.jobs['run100-2'][0].id = 99; } }],
-  actions_check_one_job: [{ reason: 'no_job', s: (s) => { delete s.jobs['run100-2']; } }, { reason: 'no_job', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2).replace('api.github.com', 'ghe.example'); } },
+  actions_check_one_job: [{ reason: 'no_job', s: (s) => { delete s.jobs['run100-2']; } }, { reason: 'no_job', s: (s) => { s.jobs['run100-2'][0].check_run_url = { toString: 1 }; } }, { reason: 'no_job', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2).replace('api.github.com', 'ghe.example'); } },
     { reason: 'job_repo_mismatch', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2, 'other/widgets'); } }, { reason: 'job_head_sha_mismatch', s: (s) => { s.jobs['run100-2'][0].head_sha = 'f'.repeat(40); } },
     { reason: 'job_name_mismatch', s: (s) => { s.jobs['run100-2'][0].name = 'lint'; } }, { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1.5; } },
     { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1e100; } }, { reason: 'job_identity_invalid', s: (s) => { delete s.jobs['run100-2'][0].run_id; } }],
@@ -240,12 +243,25 @@ const CASES = {
     { reason: 'job_not_completed', s: (s) => { s.jobs['run100-1'][0].status = 'queued'; } }, { reason: 'conclusion_mismatch', s: (s) => { s.jobs['run100-2'][0].conclusion = 'failure'; } }],
   outcomes_known: [{ reason: 'check_conclusion_unknown', s: (s) => { s.checks[1].conclusion = null; } }, { reason: 'check_conclusion_unknown', s: (s) => { delete s.checks[1].conclusion; s.jobs['run100-2'][0].conclusion = null; } },
     { reason: 'check_conclusion_unknown', s: (s) => { s.checks[3].conclusion = 'bogus'; } }, { reason: 'job_conclusion_unknown', s: (s) => { s.jobs['run100-2'][0].conclusion = 'bogus'; } }],
-  job_inputs_known: [{ reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].steps; } }, { reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].runner_name; } }],
+  job_inputs_known: [{ reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [null]; } }, { reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [7]; } }, { reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [{}]; } },
+    { reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [{ name: 'a', status: 'bogus', conclusion: null, number: 1 }]; } }, { reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [{ name: 'a', status: 'queued', conclusion: null, number: 0 }]; } },
+    { reason: 'malformed_step', s: (s) => { s.jobs['run100-1'][0].steps = [{ name: 'a', status: 'queued', conclusion: null, number: 1, extra: 1 }]; } }, { reason: 'malformed_step', s: (s) => { s.jobs['run100-2'][0].steps = 'x'; } },
+    { reason: 'malformed_labels', s: (s) => { s.jobs['run100-1'][0].labels = [null]; } }, { reason: 'malformed_labels', s: (s) => { s.jobs['run100-1'][0].labels = [{ toString: 1 }]; } }, { reason: 'malformed_labels', s: (s) => { s.jobs['run100-1'][0].labels = 'x'; } },
+    { reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].steps; } }, { reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].runner_name; } }],
   attempts_contiguous: [{ reason: 'attempt_gap', s: (s) => { s.checks.splice(0, 1); delete s.jobs['run100-1']; } }],
   no_orphan_jobs: [{ reason: 'not_bound', s: (s) => { s.jobs['run100-2'].push(job({ id: 77, name: 'x', run_attempt: 2, check_run_url: url(77) })); } }],
   annotations_complete: [{ reason: 'annotations_missing', s: (s) => { s.checks[0].output.annotations_count = 1; } }, { reason: 'annotations_unknown', s: (s) => { delete s.checks[3].output; } },
     { reason: 'annotations_incomplete', s: (s) => { s.checks[0].output.annotations_count = 2; s.annotations['1.jsonl'] = '{"message":"a"}\n'; } }],
 };
+// The EXACT state every reason must give (mandatory: a case whose reason is not listed fails).
+const WANT = Object.fromEntries([
+  ...['repo_malformed', 'sha_malformed', 'origin_malformed', 'file_not_regular_or_too_large', 'file_unreadable_or_not_utf8', 'entry_not_a_directory', 'dir_unreadable', 'unexpected_entry', 'root_not_a_real_directory',
+    'annotation_file_unexpected', 'not_json_lines', 'unrecognised_line', 'name_not_string', 'annotation_not_an_annotation', 'too_deep', 'id_invalid', 'id_duplicate', 'mixed_run_attempt'].map((r) => [r, 'invalid']),
+  ...['check_runs_missing', 'jobs_missing', 'no_total_count', 'total_count_disagree', 'items_differ_from_total', 'own_url_not_origin_repo', 'head_sha_mismatch', 'app_missing', 'own_id_mismatch', 'job_id_mismatch', 'no_job',
+    'job_repo_mismatch', 'job_head_sha_mismatch', 'job_name_mismatch', 'job_identity_invalid', 'ambiguous_job_name', 'check_not_completed', 'job_not_completed', 'conclusion_mismatch', 'check_conclusion_unknown',
+    'job_conclusion_unknown', 'job_inputs_unknown', 'malformed_step', 'malformed_labels', 'attempt_gap', 'not_bound', 'annotations_missing', 'annotations_incomplete', 'annotations_unknown'].map((r) => [r, 'incomplete']),
+  ['no_check_runs', 'empty'],
+]);
 const observed = new Set(), skippedReasons = new Set();
 const SKIPPABLE = ['EPERM', 'EACCES', 'ENOSYS', 'EOPNOTSUPP', 'UNKNOWN']; // the only symlink/chmod errors that mean "this platform or account cannot"
 
@@ -261,17 +277,20 @@ const hazard = (kind, root, dir) => {
   else if (kind === 'nocheckfile') rmSync(cr);
   else if (kind === 'nojobsdir') rmSync(join(dir, 'jobs'), { recursive: true });
   else if (kind === 'missing_root') return join(root, 'nope');
-  else if (kind === 'filelink' || kind === 'symlink' || kind === 'symlink_slash' || kind === 'unreadable') {
+  else if (kind === 'filelink' || kind.startsWith('symlink') || kind === 'unreadable') {
     try {
       if (kind === 'filelink') { writeFileSync(join(root, 'real.jsonl'), readFileSync(cr)); rmSync(cr); symlinkSync(join(root, 'real.jsonl'), cr); }
       else if (kind === 'unreadable') { if (process.platform === 'win32' || process.getuid?.() === 0) throw Object.assign(new Error('root or Windows ignores chmod'), { code: 'EPERM' }); chmodSync(join(dir, 'jobs'), 0); }
-      else { const link = join(root, 'link'); symlinkSync(dir, link); return kind === 'symlink_slash' ? link + '/' : link; }
+      else {
+        const link = join(root, 'link'); symlinkSync(dir, link);
+        return kind === 'symlink_slash' ? link + '/' : kind === 'symlink_dot' ? link + '/.' : kind === 'symlink_dotslash' ? link + '/./' : kind === 'symlink_updir' ? dir + '/../link' : kind === 'symlink_rel' ? { dir: './link', cwd: root } : link;
+      }
     } catch (e) { if (SKIPPABLE.includes(e.code)) return { skip: `${kind}: ${e.code}` }; throw e; }
   }
   return dir;
 };
 
-test('completeness: the baseline is complete with no failed predicate, exits 0, and states what it does not attest', () => {
+test('validity: the baseline is snapshot_valid with no failed predicate, exits 0, and states what it does not attest', () => {
   const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
   try {
     writeDir(root, base());
@@ -285,7 +304,7 @@ test('completeness: the baseline is complete with no failed predicate, exits 0, 
 });
 
 for (const [predicate, list] of Object.entries(CASES)) {
-  test(`completeness: breaking ${predicate} makes the snapshot not complete (state, exact reason, predicate, exit)`, (tc) => {
+  test(`validity: breaking ${predicate} makes the snapshot not snapshot_valid (state, exact reason, predicate, exit)`, (tc) => {
     const skipped = [];
     list.forEach((c, i) => {
       const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
@@ -296,10 +315,10 @@ for (const [predicate, list] of Object.entries(CASES)) {
         mkdirSync(dir); writeDir(dir, s, x);
         const d = c.root ? hazard(c.root, root, dir) : dir;
         if (d?.skip) { skipped.push(d.skip); skippedReasons.add(c.reason); return; }
-        const r = spawnSync(process.execPath, [CLI, 'check', '--snapshot', d, '--repo', c.args?.repo ?? REPO, '--sha', c.args?.sha ?? SHA, '--origin', c.args?.origin ?? ORIGIN], { encoding: 'utf8' });
+        const r = spawnSync(process.execPath, [CLI, 'check', '--snapshot', d?.dir ?? d, '--repo', c.args?.repo ?? REPO, '--sha', c.args?.sha ?? SHA, '--origin', c.args?.origin ?? ORIGIN], { encoding: 'utf8', cwd: d?.cwd });
         const out = JSON.parse(r.stdout);
         const why = `${predicate}[${i}] ${c.reason}: ${out.reasons.join(',')}`;
-        assert.equal(out.state, c.want ?? out.state, why); assert.notEqual(out.state, 'snapshot_valid', why); assert.notEqual(r.status, 0, why);
+        assert.ok(WANT[c.reason], `${why}: no WANT state`); assert.equal(out.state, WANT[c.reason], why); assert.equal(r.status, 1, why);
         assert.ok(out.reasons.some((q) => q === c.reason || q.endsWith(`_${c.reason}`)), why);
         assert.ok(out.failed_predicates.includes(predicate), why);
         assert.equal(out.internally_consistent, false, why);
@@ -310,7 +329,7 @@ for (const [predicate, list] of Object.entries(CASES)) {
   });
 }
 
-test('completeness registry: every predicate has cases, every site reason in SITES fired (or was explicitly skipped), nothing else is listed', () => {
+test('validity registry: every predicate has cases, every site reason in SITES fired (or was explicitly skipped), nothing else is listed', () => {
   assert.deepEqual(Object.keys(CASES).sort(), [...PREDICATES].sort());
   assert.deepEqual(Object.keys(SITES).sort(), [...PREDICATES].sort());
   for (const [p, reasons] of Object.entries(SITES)) for (const r of reasons) {
@@ -370,4 +389,26 @@ test('terminology: the module and its header never use the ambiguous `complete` 
   const s = build();
   assert.deepEqual([s.state, s.internally_consistent, Object.hasOwn(s, old)], ['snapshot_valid', true, false]);
   assert.ok(['snapshot_valid', 'incomplete', 'empty', 'invalid'].includes(build(base(), { checkRuns: nl([]) }).state));
+});
+
+test('malformed steps and labels keep their type information: different malformed entries never collapse to one value', () => {
+  const s = base(); s.jobs['run100-1'][0].steps = [null, 7, {}, 'x', [1], { name: 'a', status: 'bogus', conclusion: null, number: 1 }]; s.jobs['run100-1'][0].labels = [null, { toString: 1 }];
+  const snap = build(s);
+  const inp = snap.jobs.find((j) => j.id === '1').inputs;
+  assert.deepEqual([inp.steps_state, inp.labels_state, inp.labels], ['malformed', 'malformed', null]);
+  assert.deepEqual(inp.steps.map((x) => [x.malformed, x.type]), [[true, 'null'], [true, 'number'], [true, 'object'], [true, 'string'], [true, 'array'], [true, 'object']]);
+  assert.equal(new Set(inp.steps.map((x) => x.type + x.problem)).size, 6);
+  assert.ok(snap.reasons.includes('job_1_malformed_step') && snap.reasons.includes('job_1_malformed_labels'));
+  assert.equal(snap.state, 'incomplete');
+  const ok = build(); const good = ok.jobs.find((j) => j.id === '2').inputs;
+  assert.deepEqual(good.steps, [{ name: 's', status: 'completed', conclusion: 'success', number: 1 }]);
+});
+
+test('shape validator: closed schema, scalars, optional keys', () => {
+  assert.equal(shapeProblem({ name: 'a', status: 'queued', conclusion: null, number: 1, started_at: null }, SHAPES.step), null);
+  assert.equal(shapeProblem({ name: 'a', status: 'queued', conclusion: null }, SHAPES.step), '$.number:missing');
+  assert.equal(shapeProblem(['a', 'b'], SHAPES.labels), null);
+  assert.equal(shapeProblem(['a', 1], SHAPES.labels), '$[1]:bad_type');
+  assert.equal(shapeProblem({ message: 'm', title: null }, SHAPES.annotation), null);
+  assert.equal(shapeProblem({ message: 'm', x: 1 }, SHAPES.annotation), '$.x:unknown_key');
 });
