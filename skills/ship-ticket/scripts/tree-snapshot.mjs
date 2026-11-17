@@ -11,14 +11,15 @@
  * No directory is skipped because it contains a `.git`: the walk excludes only this repository's own git directory and the
  * paths git itself lists as gitlinks (mode 160000). Any other `.git` is an ordinary entry (a file hashed by raw bytes; a
  * directory walked under NESTED_GIT_CAP, beyond which the verdict is `unknown`). tree-snapshot.test.mjs checks a FINITE
- * list of mutators against an independent observation, and a second list under `.git` markers of every kind.
+ * list of mutators against an independent observation, and a second list under five `.git` marker kinds.
+ * No on-disk name or link target is ever decoded: every listing goes through listRaw (Buffer names) and absOf (Buffer paths).
  *
  * The orchestrator takes a snapshot before a reviewer lane starts and runs `compare --repo` after it. Wiring into the
  * lane lifecycle is S-03b; this slice is the stand-alone check. `--out` must live OUTSIDE the checked tree (and its
  * git dir): a path resolving inside is refused, so the tool can neither modify the tree it checks nor make it `changed`.
  * A snapshot records, from git and the filesystem and never from anything the tree configures: HEAD (symbolic ref
  * and sha), the index (stage entries, assume-unchanged/skip-worktree flags, intent-to-add),
- * the ignore rules (info/exclude, core.excludesFile resolved against the tree top, every .gitignore seen) and the hooks
+ * the root .git (its entry, e.g. gitfile bytes, and the real git and common dirs it resolves to), the ignore rules (info/exclude, core.excludesFile resolved against the tree top, every .gitignore seen) and the hooks
  * directory (content, owner exec bit, subdirectories, symlink targets), and for every path of the tree (tracked, untracked, and any directory entry git does not list) its
  * kind, OWNER exec bit (git's rule: group/other bits are invisible to git and are not compared) and the sha256 of its
  * CONTENT (a symlink: of its target). Path keys are the hex of the raw path bytes. It does not hash `git status` text
@@ -79,7 +80,10 @@ const zList = (buf) => buf.toString('latin1').split('\0').filter(Boolean).map((x
 const hexOf = (raw) => raw.toString('hex');
 const sub = (parent, name) => (parent.length ? Buffer.concat([parent, Buffer.from('/'), name]) : name);
 /** A path usable with fs: a string when it round-trips through UTF-8 (so Windows namespacing applies), else the raw Buffer. */
-const absOf = (top, raw) => { const s = raw.toString('utf8'); return Buffer.from(s, 'utf8').equals(raw) ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
+const exactUtf8 = (raw) => { const s = raw.toString('utf8'); return Buffer.from(s, 'utf8').equals(raw) ? s : null; };
+const absOf = (top, raw) => { const s = exactUtf8(raw); return s !== null ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
+/** The ONLY directory listing: raw name bytes (a string listing maps distinct invalid-UTF-8 names onto one U+FFFD spelling). */
+const listRaw = (path) => readdirSync(path, { encoding: 'buffer' }).sort(Buffer.compare);
 /** sha256 of a file read in 1 MiB chunks (no whole-file Buffer, so no 2 GiB ceiling). */
 function hashFile(path) {
   const h = createHash('sha256'); const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK || 0)); const buf = Buffer.alloc(1 << 20);
@@ -88,19 +92,19 @@ function hashFile(path) {
 }
 const fileSha = (path) => { try { return hashFile(path); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } };
 /** Digest of a directory tree (git's hooks): relative path, kind, owner exec bit, and content (symlink: target); subdirectories enumerated. */
-function dirDigest(dir, modeSupported) {
+export function dirDigest(dir, modeSupported) {
   const rows = [];
-  const visit = (abs, rel) => {
-    for (const name of readdirSync(abs).sort()) {
-      const full = join(abs, name); const r = rel ? rel + '/' + name : name; const st = lstatSync(full);
+  const visit = (rel) => {
+    for (const name of listRaw(rel.length ? absOf(dir, rel) : dir)) {
+      const raw = sub(rel, name); const full = absOf(dir, raw); const r = hexOf(raw); const st = lstatSync(full);
       if (st.isSymbolicLink()) rows.push([r, 'l', readlinkSync(full, { encoding: 'buffer' }).toString('hex')]);
-      else if (st.isDirectory()) { rows.push([r, 'd']); visit(full, r); }
+      else if (st.isDirectory()) { rows.push([r, 'd']); visit(raw); }
       else if (st.isFile()) rows.push([r, 'f', modeSupported ? (st.mode & 0o100) !== 0 : null, hashFile(full)]);
       else rows.push([r, 'o']);
     }
   };
-  try { readdirSync(dir); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } // only a missing ROOT is 'absent'
-  visit(dir, '');
+  try { listRaw(dir); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } // only a missing ROOT is 'absent'
+  visit(Buffer.alloc(0));
   return sha(JSON.stringify(rows));
 }
 
@@ -129,7 +133,7 @@ function entryOf(top, raw, { modeSupported, gitlinks }) {
 function walk(top, rel, ctx, out, cap = null) {
   if (cap?.over) return;
   let names;
-  try { names = readdirSync(rel.length ? absOf(top, rel) : top, { encoding: 'buffer' }); } catch { out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'unreadable' }); return; }
+  try { names = listRaw(rel.length ? absOf(top, rel) : top); } catch { out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'unreadable' }); return; }
   if (names.length === 0 && rel.length && !ctx.known.has(hexOf(rel))) out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'emptydir' });
   for (const name of names) {
     const raw = sub(rel, name); const key = hexOf(raw);
@@ -142,7 +146,7 @@ function walk(top, rel, ctx, out, cap = null) {
   }
 }
 
-const bodyOf = (s) => ({ schema: s.schema, lane: null, top: s.top, mode_checked: s.mode_checked, head: s.head, refs: s.refs, index: s.index, config: s.config, excludes: s.excludes, hooks: s.hooks, entries: s.entries });
+const bodyOf = (s) => ({ schema: s.schema, lane: null, top: s.top, mode_checked: s.mode_checked, head: s.head, refs: s.refs, index: s.index, config: s.config, excludes: s.excludes, hooks: s.hooks, gitdir: s.gitdir, entries: s.entries });
 const REAL = (p) => realpathSync.native(p);
 
 /** The real top level and git directories of `repo` (what `--out` must stay out of). Throws when git cannot say. */
@@ -156,8 +160,8 @@ export function realOutPath(p) {
   let cur = resolve(p); const rest = [];
   for (let guard = 0; guard < 64; guard++) {
     try { const r = REAL(cur); return rest.length ? join(r, ...rest.reverse()) : r; } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; }
-    let link = null; try { if (lstatSync(cur).isSymbolicLink()) link = resolve(dirname(cur), readlinkSync(cur)); } catch { /* not a link */ }
-    if (link) { cur = link; continue; }
+    let link = null; try { if (lstatSync(cur).isSymbolicLink()) link = readlinkSync(cur, { encoding: 'buffer' }); } catch { /* not a link */ }
+    if (link) { const t = exactUtf8(link); if (t === null) throw new Error('a symlink on the --out path has a non-UTF-8 target'); cur = resolve(dirname(cur), t); continue; }
     const parent = dirname(cur); if (parent === cur) throw new Error('no existing ancestor');
     rest.push(basename(cur)); cur = parent;
   }
@@ -170,7 +174,7 @@ export function isInside(p, roots) {
 
 /** Take a snapshot of the tree at `repo`. Throws when git cannot describe the repository (the caller treats that as a FAIL). */
 export function takeSnapshot(repo, { lane = null, platform = process.platform, nestedGitCap = NESTED_GIT_CAP } = {}) {
-  const { top } = treeRoots(repo);
+  const { top, roots } = treeRoots(repo);
   const modeSupported = platform !== 'win32';
   let headSha = null; try { headSha = text(gitRaw(top, ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* unborn */ }
   let symref = null; try { symref = text(gitRaw(top, ['symbolic-ref', '-q', 'HEAD'])); } catch { /* detached */ }
@@ -202,7 +206,9 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform, n
   for (const e of extra) if (!byKey.has(e.p)) byKey.set(e.p, e);
   const entries = [...byKey.values()].sort((a, b) => (a.p < b.p ? -1 : a.p > b.p ? 1 : 0));
   const excludes = sha(JSON.stringify([fileSha(gitPath('info/exclude')), excludesSha]));
-  const rec = { schema: SCHEMA, lane, top, mode_checked: modeSupported, head: { sha: headSha, symref }, refs, index, config, excludes, hooks, entries };
+  // The root `.git` (a directory, or a gitfile in a linked worktree) is not walked, so bind it: its own entry (gitfile bytes) and the real git and common dirs it resolves to.
+  const gitdir = sha(JSON.stringify([entryOf(top, DOTGIT, ctx), hexOf(Buffer.from(roots[1])), hexOf(Buffer.from(roots[2]))]));
+  const rec = { schema: SCHEMA, lane, top, mode_checked: modeSupported, head: { sha: headSha, symref }, refs, index, config, excludes, hooks, gitdir, entries };
   return { ...rec, identity: sha(JSON.stringify(bodyOf(rec))) };
 }
 
@@ -218,7 +224,7 @@ export function validateSnapshot(s) {
   const h = s.head;
   if (!h || typeof h !== 'object' || !(h.sha === null || /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(h.sha)) || !(h.symref === null || typeof h.symref === 'string')) return bad('head');
   if (!Array.isArray(s.refs) || !s.refs.every((r) => typeof r === 'string' && /^\S+ [0-9a-f]{40,64}( \S*)?$/.test(r))) return bad('refs');
-  for (const k of ['index', 'excludes', 'identity']) if (typeof s[k] !== 'string' || !HEX64.test(s[k])) return bad(k);
+  for (const k of ['index', 'excludes', 'gitdir', 'identity']) if (typeof s[k] !== 'string' || !HEX64.test(s[k])) return bad(k);
   for (const k of ['config', 'hooks']) if (typeof s[k] !== 'string' || !(s[k] === 'absent' || HEX64.test(s[k]))) return bad(k);
   if (!Array.isArray(s.entries)) return bad('entries');
   let prev = null;
@@ -245,7 +251,7 @@ export function compareSnapshots(before, after, { strictShared = false } = {}) {
   const changed = []; const degraded = [];
   const flag = (what, ok) => { if (!ok) changed.push({ path: null, what }); };
   flag('head', before.head.sha === after.head.sha && before.head.symref === after.head.symref);
-  for (const k of ['index', 'excludes', 'hooks']) flag(k, before[k] === after[k]);
+  for (const k of ['index', 'excludes', 'hooks', 'gitdir']) flag(k, before[k] === after[k]);
   // Shared state (every other ref, tags, remote-tracking refs, the common config) moves with sibling worktrees, IDE fetches and maintenance:
   // reported separately and NOT part of the tree verdict unless strictShared.
   const refMap = (snap) => new Map(snap.refs.map((r) => [r.split(' ')[0], r]));
@@ -289,8 +295,7 @@ function writeNew(out, data) {
   const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
   try { writeSync(fd, data); } finally { closeSync(fd); }
   try { linkSync(tmp, out); unlinkSync(tmp); } catch (e) {
-    const why = e.code === 'EEXIST' ? EXISTS : NO_HARDLINKS.includes(e.code) ? existsRefusal(out) : e;
-    try { if (why) throw why; renameSync(tmp, out); } catch (e2) { try { unlinkSync(tmp); } catch { /* gone */ } if (e2 === EXISTS) return EXISTS; throw e2; }
+    try { const why = e.code === 'EEXIST' ? EXISTS : NO_HARDLINKS.includes(e.code) ? existsRefusal(out) : e; if (why) throw why; renameSync(tmp, out); } catch (e2) { try { unlinkSync(tmp); } catch { /* gone */ } if (e2 === EXISTS) return EXISTS; throw e2; }
   }
   return null;
 }

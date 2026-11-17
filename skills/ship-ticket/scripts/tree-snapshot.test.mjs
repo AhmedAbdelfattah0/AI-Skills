@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const MODULE = process.env.TREE_SNAPSHOT_UNDER_TEST || fileURLToPath(new URL('./tree-snapshot.mjs', import.meta.url));
-const { takeSnapshot, compareSnapshots, validateSnapshot, LIMITS } = await import(pathToFileURL(MODULE).href);
+const { takeSnapshot, compareSnapshots, validateSnapshot, LIMITS, dirDigest } = await import(pathToFileURL(MODULE).href);
 const win = process.platform === 'win32';
 const CASE_INSENSITIVE = (() => { const d = realpathSync.native(mkdtempSync(join(tmpdir(), 'treecase-'))); try { writeFileSync(join(d, 'Ab'), ''); return existsSync(join(d, 'aB')); } finally { rmSync(d, { recursive: true, force: true }); } })();
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -360,7 +360,7 @@ test('fix7 malformed records are invalid (unknown, exit 1): the counterexample a
   const good = takeSnapshot(repo);
   assert.equal(validateSnapshot(good), null);
   const drop = (k) => { const c = { ...good }; delete c[k]; return c; };
-  for (const k of ['top', 'head', 'refs', 'index', 'config', 'identity', 'entries', 'mode_checked', 'excludes', 'hooks']) { assert.ok(validateSnapshot(drop(k)), 'missing ' + k); assert.equal(compareSnapshots(good, drop(k)).result, 'unknown', k); }
+  for (const k of ['top', 'head', 'refs', 'index', 'config', 'identity', 'entries', 'mode_checked', 'excludes', 'hooks', 'gitdir']) { assert.ok(validateSnapshot(drop(k)), 'missing ' + k); assert.equal(compareSnapshots(good, drop(k)).result, 'unknown', k); }
   const mut = [
     { ...good, refs: 'zz' }, { ...good, refs: [1] }, { ...good, head: { ...good.head, sha: 'nothex' } }, { ...good, identity: '0'.repeat(64) },
     { ...good, entries: [good.entries[1], good.entries[0], ...good.entries.slice(2)] }, // unordered
@@ -597,7 +597,7 @@ test('r2 hook symlink targets are hashed as raw bytes: targets differing only in
   assert.deepEqual(paths(verdict(s, repo)), ['hooks:null']);
 });
 
-test('INVARIANT under .git markers: every mutator under each marker directory (gitfile, invalid dir, symlink, real nested repo; several depths) is detected and its undo restores unchanged', (t) => {
+test('INVARIANT under five .git marker kinds: every mutator under each marker directory (gitfile, invalid empty dir, symlink, garbage file, real nested repo; depths 1-3) is detected and its undo restores unchanged', (t) => {
   const { dir, repo } = fixture(t);
   put(repo, 'm1/t.txt', 't'); put(repo, 'm2/x/t.txt', 't'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'markers');
   const markers = { 'm1': (d) => put(repo, d + '/.git', `gitdir: ${join(dir, 'evil')}\n`), 'm2/x': (d) => mkdirSync(join(repo, d, '.git')),
@@ -621,4 +621,38 @@ test('INVARIANT under .git markers: every mutator under each marker directory (g
     doIt(d); assert.equal(verdict(s, repo).result, 'changed', `${name} under ${d}`);
     undo(d); assert.equal(verdict(s, repo).result, 'unchanged', `undo ${name} under ${d}`);
   }
+});
+
+// ---- byte-preservation batch: no on-disk name or link target is decoded ------------------------------------------
+const RAW_NAMES = (() => { const d = mkdtempSync(join(tmpdir(), 'treeraw-')); try { writeFileSync(Buffer.concat([Buffer.from(d + '/'), Buffer.from([0xff])]), ''); return true; } catch { return false; } finally { rmSync(d, { recursive: true, force: true }); } })();
+test('b1 the module never lists a directory or reads a link target as a string: every readdirSync/readlinkSync call asks for a Buffer', () => {
+  const src = readFileSync(MODULE, 'utf8');
+  const calls = [...src.matchAll(/\b(readdirSync|readlinkSync)\(([^()]*(?:\([^()]*\))?[^()]*)\)/g)];
+  assert.ok(calls.length >= 3, 'the source scan found the calls');
+  for (const [call] of calls) assert.match(call, /encoding: 'buffer'/, call);
+});
+test('b1 hook digest keeps raw name bytes: an 0xFF-named hook beside a U+FFFD-named one, editing the 0xFF one is a change', { skip: !RAW_NAMES && 'filesystem rejects non-UTF-8 names' }, (t) => {
+  const d = mkdtempSync(join(tmpdir(), 'treehooks-')); t.after(() => rmSync(d, { recursive: true, force: true }));
+  const bad = Buffer.concat([Buffer.from(d + '/'), Buffer.from([0xff])]);
+  writeFileSync(bad, 'one'); writeFileSync(join(d, '�'), 'same');
+  const before = dirDigest(d, true);
+  writeFileSync(bad, 'two');
+  assert.notEqual(dirDigest(d, true), before);
+});
+test('b2 the root gitfile is bound: repointing a linked worktree .git at a byte-identical copy of its git dir is a change', { skip: win && 'worktree fixtures run on POSIX' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const wt = join(dir, 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'w', wt);
+  const s = takeSnapshot(wt);
+  const real = join(repo, '.git', 'worktrees', 'wt'); const copy = join(dir, 'crafted');
+  execFileSync('cp', ['-Rp', real, copy]); writeFileSync(join(copy, 'commondir'), join(repo, '.git') + '\n');
+  writeFileSync(join(wt, '.git'), `gitdir: ${copy}\n`);
+  const v = verdict(s, wt);
+  assert.deepEqual(paths(v), ['gitdir:null']);
+  writeFileSync(join(wt, '.git'), `gitdir: ${real}\n`); // the original bytes again
+  assert.equal(verdict(s, wt).result, 'unchanged');
+  writeFileSync(join(wt, '.git'), `gitdir: ${real}`); // same target, parser-equivalent bytes: the gitfile itself is bound
+  assert.deepEqual(paths(verdict(s, wt)), ['gitdir:null']);
+  const via = join(dir, 'via'); symlinkSync(real, via); writeFileSync(join(wt, '.git'), `gitdir: ${via}\n`); // identical gitfile bytes below, only the resolution moves
+  const s2 = takeSnapshot(wt); rmSync(via); symlinkSync(copy, via);
+  assert.deepEqual(paths(verdict(s2, wt)), ['gitdir:null']);
 });
