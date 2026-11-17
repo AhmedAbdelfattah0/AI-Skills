@@ -523,9 +523,71 @@ test('[R4] RUN-STATE: a duplicated or damaged marker never hides the narrative; 
   assert.deepEqual(req(swapOnce(FULL, '{"event":"START"}', event)), BASE, 'an event record may name the markers');
   // the region is cut at whole marker LINES: the exact BEGIN text inside an earlier line hides nothing
   const inline = swapOnce(FULL, '# Plan: invoice route\n', '# Plan: invoice route\n{"note":"<!-- RUN-STATE:BEGIN -->"}\n');
-  assert.deepEqual(req(inline), BASE);
-  assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', '\n\n{"note":"<!-- RUN-STATE:BEGIN -->"}\ntest-triggers:').replace('test-triggers: async-state', 'test-triggers: async-state, repair')).kinds,
-    uniqSorted([...BASE.kinds, 'regression']), 'a trigger line after an inline BEGIN text still counts');
+  // the engine (run-engine.mjs: parsePlanSecurityBlock(plan)) cuts at that substring and loses the block: the two readings disagree, so refuse
+  assert.deepEqual(req(inline).errors, ['security_block_invalid']);
+});
+
+// ---- ONE narrative interpretation (Codex F1): the recogniser and every downstream parse read planNarrative's cut; the engine's
+// own substring cut of the raw plan must agree, else refusal ----
+const EMPTY_SEL = (() => {
+  const facts = Object.fromEntries(Object.entries(VAPT.fact_vocabulary).filter(([, v]) => v.type === 'bool').map(([k]) => [k, false]));
+  const sel = SP.selectControls(SP.loadCatalog(), { security_policy: 2, surfaces: [], facts: { ...facts, boundaries: [], principals: [] },
+    evidence: Object.fromEntries(Object.keys(facts).map((k) => [k, 'src/a.ts:handler'])) });
+  assert.equal(sel.ok, true, JSON.stringify(sel));
+  return sel;
+})();
+const J = (x) => `{"note":"${x}"}`;
+const RS_B = '<!-- RUN-STATE:BEGIN -->', RS_E = '<!-- RUN-STATE:END -->';
+/** The composed counterexample and its variants: [label, plan]. Each wraps the request-handler block in fake or doubled markers. */
+const SPLIT_CORPUS = (() => {
+  const head = `# Plan\n\ntest-triggers: none\n${realFloor()}\n`, rh = SP.renderSection3a(FULL_SEL), empty = SP.renderSection3a(EMPTY_SEL);
+  const wrap = (open, close, tail = `\n${empty}`) => `${head}${open}\n${rh}\n${close}${tail}\n${RS}`;
+  return [
+    ['Codex F1: JSON-string markers around the block, an empty block after', wrap(J(RS_B), J(RS_E))],
+    ['JSON-string markers around the only block', wrap(J(RS_B), J(RS_E), '')],
+    ['JSON-string BEGIN only', wrap(J(RS_B), 'x', '')],
+    ['code-span markers', wrap(`\`${RS_B}\``, `\`${RS_E}\``, '')],
+    ['marker text inside prose', wrap(`The ${RS_B} marker starts the log.`, `The ${RS_E} marker ends it.`, '')],
+    ['doubled exact markers', wrap(RS_B, RS_E, '')],
+    ['nested BEGIN BEGIN END END', `${head}${RS_B}\n${RS_B}\n${rh}\n${RS_E}\n${RS_E}\n`],
+    ['END before BEGIN', `${head}${RS_E}\n${rh}\n${RS_B}\n`],
+    ['unbalanced: BEGIN, block, no END', `${head}${RS_B}\n${rh}\n`],
+  ];
+})();
+const surfaceKinds = (block) => uniq2((block?.surfaces ?? []).flatMap((s) => TK.SURFACE_TAGS[s.kind] ?? []).flatMap((t) => TK.TAGS[t]));
+function uniq2(xs) { return [...new Set(xs)].sort(); }
+
+test('[R6] the composed counterexample and its variants never drop the request-handler kinds: refused, or the kinds stay', () => {
+  for (const [label, p] of SPLIT_CORPUS) {
+    const r = req(p);
+    if (r.status === 'refused') { assert.ok(r.errors.length > 0, label); assert.equal(TK.checkTitles(r, []).status, 'refused', label); continue; }
+    assert.equal(r.status, 'required', label);
+    for (const k of ['negative', 'real-entrypoint']) assert.ok(r.kinds.includes(k), `${label}: ${k} kept (${r.kinds})`);
+  }
+  const codex = req(SPLIT_CORPUS[0][1]);
+  assert.equal(codex.status, 'refused'); assert.ok(codex.errors.includes('security_block_invalid'), String(codex.errors));
+  assert.notEqual(TK.checkTitles(codex, []).status, 'pass', 'empty titles never pass the composed case');
+  // DISCLOSED RESIDUAL (S-01b2, plan trust): ONE well-formed exact RUN-STATE pair wrapped around narrative hides it, and both
+  // readings agree on that. Pinned so a change to it is visible, not because it is desired.
+  const wrapped = `# Plan\n\ntest-triggers: none\n${realFloor()}\n${RS_B}\n${SP.renderSection3a(FULL_SEL)}\n${RS_E}\n`;
+  assert.deepEqual(req(wrapped).kinds, []);
+  assert.deepEqual(SP.parsePlanSecurityBlock(TK.planNarrative(wrapped), { narrative: true }), SP.parsePlanSecurityBlock(wrapped));
+});
+
+test('[R7] differential: whenever a plan is required, the recogniser narrative and the engine reading parse the same block and its kinds are required', (t) => {
+  const plans = [...SPLIT_CORPUS.map(([, p]) => p), FULL, ...TK.MARKERS.flatMap((m) => corpus(m.id).map(([, p]) => p))];
+  let required = 0, withBlock = 0;
+  for (const p of plans) {
+    const r = req(p);
+    if (r.status !== 'required') { assert.equal(r.status, 'refused'); continue; }
+    required++;
+    const pre = SP.parsePlanSecurityBlock(TK.planNarrative(p), { narrative: true }), engine = SP.parsePlanSecurityBlock(p);
+    assert.deepEqual(pre, engine, 'one narrative: both readings parse the same block');
+    if (engine) withBlock++;
+    for (const k of surfaceKinds(engine)) assert.ok(r.kinds.includes(k), `surface kind ${k} is required`);
+  }
+  assert.ok(required >= 50 && withBlock >= 50, `required ${required}, with a block ${withBlock}`);
+  t.diagnostic(`differential: ${plans.length} plans, ${required} required, ${withBlock} with a block; every one agrees`);
 });
 
 test('[R5] benign text is not a marker: prose, script names and the reassess record line keep the plan required; prose does not opt in', () => {
@@ -533,7 +595,7 @@ test('[R5] benign text is not a marker: prose, script names and the reassess rec
   for (const prose of ['This test triggers a reload.', 'The risk floor is ELEVATED and the security plan is attached.', 'Each lifecycle item and test waiver is listed.',
     'See risk-floor.mjs, risk_floor.mjs, risk-floor.test.mjs, security-plan.mjs and scripts/run-state.mjs.', 'Run `ship-ready-check.mjs check --run-state <plan>`.',
     'The runState, lifecycleItem and testTriggers identifiers, and the testtriggers flag, stay.',
-    // real-plan prose (650 plans scanned): bare words without their marker syntax
+    // real-plan prose (650 real, unopted plans scanned): bare words without their marker syntax
     '## RUN-STATE', 'The plan file excluding the RUN-STATE block; the run_state table.', '| Security-plan size (owner decision) | branch feat/x-security-plan |',
     '`bindSecurity` refuses `security_pairs_mismatch`; the security-pairs are listed.']) {
     assert.equal(req(`# Plan\n\n${prose}\n${RS}`).status, 'not_declared', prose);
@@ -544,6 +606,23 @@ test('[R5] benign text is not a marker: prose, script names and the reassess rec
     assert.equal(r.status, 'refused', near); assert.ok(r.errors.length > 0);
   }
   assert.deepEqual(req(`# Plan\n\nThe test\u2011triggers line is missing.\n${RS}`).errors, ['plan_line_invalid', 'plan_tags_missing', 'risk_floor_missing'], 'a non-breaking hyphen opts in');
+  // Opus M1/M2: Markdown- or HTML-formatted plan keys refuse, opted in or not
+  for (const k of ['**Test triggers**: money', '_Test triggers_: money', '`Test triggers`: money', '<b>test-triggers</b>: money', '<b>Test triggers</b>: money', '<code>lifecycle item</code>: L2 x', 'test&#45;triggers: money',
+    'test&#x2D;triggers: money', 'test&hyphen;triggers: money', 'lifecycle&lowbar;item: L2 x', 'test-waiver&colon; L1 x', '__Test Waiver__ : L1 x']) {
+    const alone = req(`# Plan\n\n${k}\n${RS}`);
+    assert.equal(alone.status, 'refused', `${k} alone: ${alone.status}`);
+    const r = req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${k}\ntest-triggers:`));
+    assert.equal(r.status, 'refused', k);
+  }
+  // Opus M4: a token starts a word, so these neither opt in nor refuse
+  for (const prose of ['The latest waiver: none.', 'contest triggers: none', 'a protest-waiver was filed', 'attest-triggers', 'brisk-floor']) {
+    assert.equal(req(`# Plan\n\n${prose}\n${RS}`).status, 'not_declared', prose);
+    assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${prose}\ntest-triggers:`)), BASE, prose);
+  }
+  // Opus M3: the plan.md template guidance prose kept in an opted-in plan does not refuse (read from the shipped template)
+  const tpl = readFileSync(new URL('../references/plan.md', import.meta.url), 'utf8').split('\n').filter((l) => l.includes('Deferred: a plan-record check'));
+  assert.equal(tpl.length, 1);
+  assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${tpl[0]}\ntest-triggers:`)), BASE, 'plan.md template prose');
   const noReassess = swapOnce(FULL, `     ${reassessLine()}\n`, '');
   assert.deepEqual(req(noReassess), BASE, 'the reassess line adds and removes nothing');
   assert.deepEqual(req(swapOnce(FULL, 'risk_reassess: ', 'Risk_Reassess: ')).errors, ['risk_floor_invalid'], 'a damaged reassess key is not ignored');

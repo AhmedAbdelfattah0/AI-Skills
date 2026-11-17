@@ -1,7 +1,7 @@
 /**
  * S-01b fail-closed recognition: every guard of the one marker recogniser in test-kinds.mjs has a named mutant. Each mutant
  * is a COPY of the layout the tests import (skills/ship-ticket/scripts and references, skills/vapt) in a temp dir, with ONE
- * guard patched by an exact string replacement (hand-named guards, plus two generated per MARKERS row) that must match
+ * guard patched (in test-kinds.mjs, or security-plan.mjs where named) by an exact string replacement (hand-named guards, plus two generated per MARKERS row) that must match
  * exactly once after CRLF became LF (a Windows checkout anchors the same). The repo is never edited.
  *
  * A mutant counts as KILLED only when (1) the patched module still imports (else INVALID: a load or syntax failure proves
@@ -24,8 +24,8 @@ const RUN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** The hand-named guards: the exact text replaced in test-kinds.mjs. */
 const GUARDS = [
-  { name: 'detection skips NFKC (fullwidth letters read as absent)', from: "l.normalize('NFKC').replace(INVISIBLE, '')", to: "l.replace(INVISIBLE, '')" },
-  { name: 'detection keeps invisible characters (a zero-width space hides a token)', from: ".replace(INVISIBLE, '').replace(MD_ESCAPE", to: '.replace(MD_ESCAPE' },
+  { name: 'detection skips NFKC (fullwidth letters read as absent)', from: ".normalize('NFKC').replace(INVISIBLE, '')", to: ".replace(INVISIBLE, '')" },
+  { name: 'detection keeps invisible characters (a zero-width space hides a token)', from: ".replace(INVISIBLE, '').replace(INLINE_TAG", to: '.replace(INLINE_TAG' },
   { name: 'only \\p{Cf} is invisible (a variation selector hides a token)', from: '/[\\p{Cf}\\p{Default_Ignorable_Code_Point}]/gu', to: '/[\\p{Cf}]/gu' },
   { name: 'a Markdown backslash escape hides a token', from: ".replace(MD_ESCAPE, '')", to: '' },
   { name: 'detection is case-sensitive', from: '.toLowerCase().replace(FOLD_DASH', to: '.replace(FOLD_DASH' },
@@ -45,7 +45,14 @@ const GUARDS = [
   { name: 'security-pairs token: only `sha` may follow', from: 'pairs\\\\s*(?:sha|[:=])', to: 'pairs\\\\s*(?:sha)' },
   { name: 'security-pairs token: only a colon may follow', from: 'pairs\\\\s*(?:sha|[:=])', to: 'pairs\\\\s*(?:[:=])' },
   { name: 'run-state token: only a colon between the words and BEGIN/END', from: 'state[\\\\s:=]*(?:begin|end)', to: 'state:(?:begin|end)' },
-  { name: 'plan-key token: the whitespace-before-colon form is dropped', from: '|${a}\\\\s+${b}\\\\s*:', to: '' },
+  { name: 'plan-key token: the whitespace-before-colon form is dropped', from: '|${a}\\\\s+${b}[^a-z0-9]{0,8}:', to: '' },
+  { name: 'plan-key token: no decoration between the words and the colon', from: '${b}[^a-z0-9]{0,8}:', to: '${b}\\\\s*:' },
+  { name: 'a token may start inside a word (no boundary)', from: "const EDGE = '(?<![a-z0-9])';", to: "const EDGE = '';" },
+  { name: 'HTML character references are not decoded', from: 'decodeEntities(l).normalize', to: 'l.normalize' },
+  { name: 'inline HTML tags are not removed', from: ".replace(INLINE_TAG, '')", to: '' },
+  { name: 'the block is parsed with a second RUN-STATE cut (no narrative option)', from: 'parsePlanSecurityBlock(text, { narrative: true })', to: 'parsePlanSecurityBlock(text)' },
+  { name: 'the block reading is not cross-checked against the engine reading of the raw plan', from: 'if (!block || JSON.stringify(parsePlanSecurityBlock(planText)) !== JSON.stringify(block))', to: 'if (!block)' },
+  { name: 'security-plan.mjs ignores the narrative option (always re-cuts)', file: 'security-plan.mjs', from: 'if (opts?.narrative !== true) planText = narrative(planText);', to: 'planText = narrative(planText);' },
   { name: 'benign script names are not removed before detection', from: "m.benign ? n.replace(m.benign, ' ') : n", to: 'n' },
   { name: 'the reassess record line is not recognised', from: 'const reassessLine = (l) => /^risk_reassess:', to: 'const reassessLine = (l) => false && /^risk_reassess:' },
 ];
@@ -78,10 +85,10 @@ async function runMutant(t, mutant) {
   cpSync(join(SKILLS, 'ship-ticket', 'references'), join(root, 'skills', 'ship-ticket', 'references'), { recursive: true });
   cpSync(join(SKILLS, 'vapt'), join(root, 'skills', 'vapt'), { recursive: true });
   if (mutant) {
-    const file = join(dir, 'test-kinds.mjs'), text = lf(readFileSync(file, 'utf8'));
+    const file = join(dir, mutant.file ?? 'test-kinds.mjs'), text = lf(readFileSync(file, 'utf8'));
     assert.equal(text.split(mutant.from).length, 2, `mutant "${mutant.name}": its target text occurs exactly once`);
     writeFileSync(file, text.replace(mutant.from, () => mutant.to));
-    const load = await run(['--input-type=module', '-e', "await import('./test-kinds.mjs')"], dir);
+    const load = await run(['--input-type=module', '-e', `await import('./${mutant.file ?? 'test-kinds.mjs'}')`], dir);
     if (load.code !== 0) return { invalid: true, tail: load.out.slice(-800) };
   }
   const r = await run(['--test', '--test-reporter=tap', '--test-name-pattern=\\[R\\d+\\]', TEST_FILE], dir);

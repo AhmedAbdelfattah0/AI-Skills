@@ -260,9 +260,11 @@ items or waivers without the `test-triggers:` line is `plan_tags_missing`, never
 `test-triggers`, `lifecycle-item`, `test-waiver`, the `risk_floor:` record and its `classes=` field, the `security-plan`
 block, the `security-pairs` line and the RUN-STATE markers. It looks for each marker's token in a normalised copy of
 every line (NFKC; format and default-ignorable characters such as zero-width spaces and variation selectors removed;
-Markdown backslash escapes removed; lower case; unicode dashes and `_` folded to `-`). The words of a token are joined
-by dashes (or, for the three plan keys, by whitespace before a colon: `Test triggers:`), so prose ("this test
-triggers a reload") and camelCase identifiers carry no token, while snake_case ones (`test_triggers`) do. The first five tokens are the bare words; the block, pairs and RUN-STATE tokens are the words
+HTML character references such as `&#45;` decoded; inline HTML tags removed; Markdown backslash escapes removed; lower
+case; unicode dashes and `_` folded to `-`). A token starts a word (`latest waiver:` carries none). Its words are joined
+by dashes (or, for the three plan keys, by whitespace followed within 8 non-alphanumeric characters by a colon:
+`Test triggers:`, `**Test triggers**:`), so prose ("this test triggers a reload") and camelCase identifiers carry no
+token, while snake_case ones (`test_triggers`) do. The first five tokens are the bare words; the block, pairs and RUN-STATE tokens are the words
 in their marker syntax (`<!-- security-plan`, `security-plan:`, a `"selection_digest":` key, `security-pairs sha256`,
 `RUN-STATE:BEGIN`/`END`), because real plans use those words in prose. A line that carries a token must parse strictly
 as that marker, else the marker's code (`plan_line_invalid`, `waiver_invalid`, `risk_floor_invalid`,
@@ -271,8 +273,13 @@ a refusal, never an absent one. Markers in fences or comments count. Benign: the
 `security-plan.mjs`, and the `risk_reassess:` record line (ignored here). A pairs line without its block is
 `security_block_invalid`. RUN-STATE is cut at whole lines: it must be absent or exactly one `BEGIN` line followed by one
 `END` line, with no other marker line in the plan (an event record, a line starting with `{`, may name the markers).
-Not caught (read as absent): homoglyphs, misspellings, words joined by nothing, and words joined by a space with no
-colon after them.
+That one cut (`planNarrative`) is the only narrative every parse reads: the block is parsed from it with no second cut
+(`parsePlanSecurityBlock(text, { narrative: true })`), and it must equal the engine's own reading of the raw plan
+(`parsePlanSecurityBlock(plan)`, which cuts at substrings), else `security_block_invalid`.
+Not caught (read as absent): homoglyphs, combining marks, misspellings, words joined by nothing, and space-joined words
+whose colon is not near them (`Test triggers (tags):`). One well-formed RUN-STATE pair wrapped around narrative still
+hides it (plan trust, S-01b2). The prose scan behind the syntax tokens covered 650 real plans, none opted in: it shows
+the unopted path is stable, not that opted-in plans never refuse prose (the opted-in path is pinned by the tests).
 
 **Tag convention.** A test title carries `[kind:<kind id>]` for each kind it proves and `[plan:<id>]` for each item
 it covers, exact and case-sensitive (`[kind:negative]`; `non-negative` or `[kind:Negative]` do not count).

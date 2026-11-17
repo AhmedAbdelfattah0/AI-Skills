@@ -101,24 +101,37 @@ export function validateDeclaration(d) {
 // marker's refusal code; a near miss is never read as absent. Absence of the token is genuine absence. Detection reads a
 // normalised COPY of each line: NFKC (fullwidth forms and compatibility spaces fold); every format (\p{Cf}) and default-
 // ignorable code point removed (zero-width space, soft hyphen, BOM, variation selector, combining grapheme joiner, Hangul
-// filler); a Markdown backslash escape before ASCII punctuation removed; lower case; every dash (\p{Pd}, U+2212) and `_`
-// folded to `-`. A token is the marker's words joined by one or more dashes, with optional whitespace around them. Plain
+// filler); HTML character references for ASCII punctuation decoded (`&#45;`, `&#x2d;`, `&hyphen;`, `&lowbar;`, `&colon;`);
+// inline HTML tags (`<b>`, `</code>`) removed; a Markdown backslash escape before ASCII punctuation removed; lower case;
+// every dash (\p{Pd}, U+2212) and `_` folded to `-`. A token starts at a word boundary (`latest waiver:` and
+// `attest-triggers` carry none) and is the marker's words joined by one or more dashes, with optional whitespace around them. Plain
 // whitespace or nothing never joins words, so prose ("this test triggers a reload", "the risk floor") and camelCase
 // identifiers (`runState`, `testTriggers`) carry no token; snake_case ones (`test_triggers`, `run_state`) do. The three
-// plan keys also match whitespace-joined words before a colon (`Test triggers:`). Strict
+// plan keys also match whitespace-joined words followed by at most 8 non-alphanumeric characters and a colon
+// (`Test triggers:`, `**Test triggers**:`, `_Test triggers_:`). Strict
 // parsing always reads the RAW line. Markers inside code fences or HTML comments count like any other line (the plan
 // header is a comment). NOT caught (they read as absent): homoglyphs such as a Cyrillic letter, misspellings
-// (`test-trigers`), words joined by nothing (`testtriggers:`), and words joined by whitespace with no colon after them.
+// (`test-trigers`), combining marks inside a word, words joined by nothing (`testtriggers:`), and whitespace-joined
+// words whose colon is not near them (`Test triggers (tags):`).
 const LINES = /\r?\n/;
 const RS_BEGIN = '<!-- RUN-STATE:BEGIN -->', RS_END = '<!-- RUN-STATE:END -->';
 const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 const MD_ESCAPE = /\\(?=[!-/:-@[-`{-~])/g;
 const FOLD_DASH = /[_\p{Pd}\u2212]/gu;
-export const normaliseForDetection = (l) => l.normalize('NFKC').replace(INVISIBLE, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
+const NAMED = Object.freeze({ hyphen: '-', dash: '-', minus: '-', ndash: '-', mdash: '-', lowbar: '_', colon: ':', nbsp: ' ', lt: '<', gt: '>', excl: '!' });
+const ENTITY = /&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z]{2,8}));/gi;
+const decodeEntities = (l) => l.replace(ENTITY, (all, d, h, n) => {
+  const c = d ? Number(d) : h ? parseInt(h, 16) : -1;
+  if (c >= 0) return c <= 0x10ffff ? String.fromCodePoint(c) : all;
+  return NAMED[n.toLowerCase()] ?? all;
+});
+const INLINE_TAG = /<\/?[a-z][a-z0-9]*\s*\/?>/gi;
+export const normaliseForDetection = (l) => decodeEntities(l).normalize('NFKC').replace(INVISIBLE, '').replace(INLINE_TAG, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
 const JOIN = '\\s*-+\\s*';
-const token = (...words) => new RegExp(words.join(JOIN));
-// a plan key: its words joined by dashes, or by whitespace when a colon follows (`Test triggers:`; 0 hits in 650 real plans)
-const keyToken = (a, b) => new RegExp(`${a}${JOIN}${b}|${a}\\s+${b}\\s*:`);
+const EDGE = '(?<![a-z0-9])'; // a token starts a word
+const token = (...words) => new RegExp(EDGE + words.join(JOIN));
+// a plan key: its words joined by dashes, or by whitespace when a colon follows closely (0 such lines in 650 real plans)
+const keyToken = (a, b) => new RegExp(`${EDGE}(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`);
 const KEY_LINE = (key) => new RegExp(`^\\s*${key}:(?!:)(.*)$`); // the strict plan-key line (a doubled colon is a near miss)
 const keyLine = (key) => (l) => KEY_LINE(key).test(l);
 const floorLine = (l) => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l.trimStart()); // parseRecordedLine's own filter; it validates the rest
@@ -139,7 +152,7 @@ export const MARKERS = f([
   f({ id: 'risk-floor', token: token('risk', 'floor'), code: 'risk_floor_invalid', benign: /risk-floor(?:\.test)?\.mjs\b/g, valid: (l) => floorLine(l) || reassessLine(l) }),
   f({ id: 'classes', token: /classes\s*=/, code: 'risk_floor_invalid', valid: (l) => floorLine(l) || reassessLine(l) }),
   // the three below are SYNTAX tokens (the words in their marker context), since real plans use the bare words in prose
-  // (650 plans scanned: "Security-plan size", `security_pairs_mismatch`, "## RUN-STATE", "the RUN-STATE block")
+  // (650 real, unopted plans scanned for prose: "Security-plan size", `security_pairs_mismatch`, "## RUN-STATE", "the RUN-STATE block")
   f({ id: 'security-plan', token: new RegExp(`<!-+\\s*security${JOIN}plan|security${JOIN}plan\\s*[:=]|"selection-digest"\\s*:`), code: 'security_block_invalid', benign: /security-plan(?:\.test)?\.mjs\b/g, valid: (l) => BLOCK_LINE.test(l) }),
   f({ id: 'security-pairs', token: new RegExp(`security${JOIN}pairs\\s*(?:sha|[:=])`), code: 'security_block_invalid', valid: (l) => PAIRS_LINE.test(l) }),
   f({ id: 'run-state', token: new RegExp(`run${JOIN}state[\\s:=]*(?:begin|end)\\b`), code: 'run_state_invalid', event: true, valid: (l, i) => l.trim() === [RS_BEGIN, RS_END][i] }),
@@ -158,7 +171,7 @@ export function carriers(text, m) {
  * markers are not well-formed. An event record (a line starting with `{`) may name the markers in its text: real START
  * events carry "file bytes before RUN-STATE:BEGIN". Every other line carrying a BEGIN/END token is a marker line.
  */
-function narrative(t) {
+export function planNarrative(t) {
   const m = MARKER['run-state'], ls = t.split('\n');
   const at = ls.flatMap((l, i) => (carriers(l, m).length ? [i] : []));
   if (!at.length) return t;
@@ -171,7 +184,7 @@ const linesOf = (text, key) => text.split(LINES).map((l) => KEY_LINE(key).exec(l
 export function requiredFor({ planText, declaration = null, baseSha = null }) {
   const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), ...o });
   if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
-  const text = narrative(planText);
+  const text = planNarrative(planText); // the ONE narrative every parse below reads
   // opt-in: a repository declaration or any opt-in token (scanned over the whole plan when RUN-STATE is malformed)
   if (!declaration && !MARKERS.some((m) => m.opt_in && carriers(text ?? planText, m).length)) return out('not_declared');
   if (text === null) return (errors.push('run_state_invalid'), out('refused'));
@@ -203,8 +216,10 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
   }
   // security surfaces: a verified block, or none at all (any security-plan or security-pairs token demands the verified block)
   if (carriers(text, MARKER['security-plan']).length || carriers(text, MARKER['security-pairs']).length) {
-    const block = parsePlanSecurityBlock(text); // the same narrative (its own RUN-STATE cut finds no marker left)
-    if (!block) errors.push('security_block_invalid');
+    // the same narrative, never re-cut; and it must agree with the engine's own reading of the raw plan (run-engine.mjs
+    // binds parsePlanSecurityBlock(plan), which cuts RUN-STATE at substrings): a disagreement is a refusal, not a choice
+    const block = parsePlanSecurityBlock(text, { narrative: true });
+    if (!block || JSON.stringify(parsePlanSecurityBlock(planText)) !== JSON.stringify(block)) errors.push('security_block_invalid');
     else for (const s of block.surfaces) { if (Object.hasOwn(SURFACE_TAGS, s.kind)) SURFACE_TAGS[s.kind].forEach((t) => tags.add(t)); else errors.push('surface_kind_unmapped'); }
   }
   const items = [];
