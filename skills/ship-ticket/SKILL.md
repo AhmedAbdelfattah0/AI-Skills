@@ -249,6 +249,12 @@ broad cross-subsystem changes, or an explicit repository/user requirement. The
 preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
+A deterministic floor runs first: `node scripts/risk-floor.mjs check --ticket <file|-> --paths <json>
+--claimed <profile>` matches money, tenancy, auth, public-contract, data-shape and
+shared-surface keywords in the ticket text and planned paths. A floor of **ELEVATED**
+is final: it forces the profile and the bounded plan debate, and judgement such as
+"read-only display" cannot lower it. Record its `record_line` in the plan header.
+
 If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
 begins. A missing counterpart falls back to CodeRabbit; if both are missing, use

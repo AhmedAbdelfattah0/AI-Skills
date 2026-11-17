@@ -110,6 +110,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
      review_profile: STANDARD|ELEVATED
      review_profile_reasons: [<evidence-backed trigger>]
+     risk_floor: <the `risk-floor.mjs check` record_line; run on ticket text and planned paths before classifying>
      review_timeouts: {primary: 12m, optional: 10m, confirmation: 6m}
      owned_screens:                      one entry per screen:
        - impl: <path>
@@ -121,6 +122,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
+<The risk floor decides first: a floor of ELEVATED sets review ELEVATED and requires the bounded §7 debate; judgement may raise it, never lower it. Over-classifying a comment-only or read-only change is accepted; keep that debate to one call.>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 
