@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Provider-reported usage: extraction from real CLI output and aggregation.
- * Only numeric counters leave this module — never prompts, responses, auth
+ * Only numeric counters (and the optional `models_used` list of safe model names) leave this module — never prompts, responses, auth
  * tokens or raw events. Unknown is never converted into zero.
  *
  * Extraction shapes (verified against the installed CLIs, 2026-11-04):

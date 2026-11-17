@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { buildRun, attachUsage, aggregateUsage, aggregate } from './run-summary.mjs';
+import { buildRun, attachUsage, aggregateUsage } from './run-summary.mjs';
 import { evaluateRun, suggest, evaluate } from './eval.mjs';
 
 const script = fileURLToPath(new URL('./eval.mjs', import.meta.url));
@@ -497,8 +497,8 @@ test('S-04a1 models_used: an attempt names every model its usage records carry; 
     { attempt_id: 'att-2', kind: 'node', node: 'b', started_at: iso(0), envelope: { ended_at: iso(4 * SEC) } }] };
   const records = [rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', api_ms: 6000, models_used: ['claude-sonnet-x'] }),
     rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', source_execution_id: 'second', models_used: ['claude-haiku-x', 'claude-sonnet-x'] }),
-    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-2' })];
-  const m = evaluateRun(attachUsage(build('T1', 'run-1'), records), { state, records });
+    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-2' }), null];
+  const m = evaluateRun(attachUsage(build('T1', 'run-1'), records.filter(Boolean)), { state, records });
   const by = Object.fromEntries(m.attempt_timing.map((a) => [a.attempt_id, a]));
   assert.deepEqual(by['att-1'].models_used, ['claude-haiku-x', 'claude-sonnet-x']);
   assert.equal('models_used' in by['att-2'], false);
@@ -518,20 +518,34 @@ test('S-04a1 normUtc: an offset stamp is normalised to UTC in intervals and open
   assert.equal(run.intervals[0].duration_ms, 4000);
 });
 
+test('S-04a1 normUtc: negative, fractional and colon-less offsets convert; a malformed stamp is returned unchanged', async () => {
+  const { normUtc } = await import('./run-summary.mjs');
+  assert.equal(normUtc('2026-01-01T05:30:00.000+05:30'), '2026-01-01T00:00:00.000Z');
+  assert.equal(normUtc('2026-01-01T00:00:00.000-0200'), '2026-01-01T02:00:00.000Z');
+  assert.equal(normUtc('2026-01-01T00:00:00.000-02:00'), '2026-01-01T02:00:00.000Z');
+  assert.equal(normUtc('2026-13-99T00:00:00+02:00'), '2026-13-99T00:00:00+02:00');
+  assert.equal(normUtc('2026-01-01T00:00:00.000Z'), '2026-01-01T00:00:00.000Z');
+  assert.equal(normUtc(undefined), undefined);
+});
+
 // T-C1: the legacy figures of old logs (no offsets, models or unfinished rounds) are byte-identical to origin/main.
-const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'legacy-figures.golden.json');
-function legacyFixtureReport() {
-  const rows = (id) => roundOf(id, 'a', [['primary_review', 0, 100], ['optional_review', 20, 120], ['review_reconcile', 130, 200], ['review_repair', 210, 250]],
-    { repair_batches: 1, confirmation_count: 0, gap_reason: 'wait', primary_ceiling_ms: 600000 }, [0, 300]);
-  const runs = [buildRun('T1', 'run-1', [...runRows('T1', 'run-1', { build: 90, review: 40, repairs: 2, ui: true }), ...rows('run-1')]),
-    buildRun('T1', 'run-2', runRows('T1', 'run-2')), buildRun('T2', 'run-3', rows('run-3'))];
-  const records = [rec('run-1', 'orchestrator', 80, 20), rec('run-1', 'reviewer', 20, 5, { api_ms: 900 }), rec('run-3', 'builder', 7, 1, { reported_cost_usd: 1.5, cost_basis: 'list' })];
-  const states = { T1: { run_id: 'run-1', attempts: [{ attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(10 * SEC) } }],
-    events: [{ seq: 0, type: 'GATE' }, { seq: 1, type: 'RESUME' }] } };
-  return { evaluate: evaluate({ runs, states, records }), aggregate: aggregate(runs), runs };
-}
-test('T-C1 legacy golden: eval and run-summary output for old logs is byte-identical to the origin/main capture', () => {
-  const text = `${JSON.stringify(legacyFixtureReport(), null, 2)}\n`;
-  if (process.env.UPDATE_LEGACY_GOLDEN === '1') writeFileSync(GOLDEN, text);
-  assert.equal(text, readFileSync(GOLDEN, 'utf8'));
+// The golden is captured from the base commit by legacy-golden.mjs (git archive, never the working tree); this test replays the
+// same capture on the candidate scripts. Fixtures: legacy-golden.capture.test-helper.mjs (engine units, attempts with api/other time,
+// parallel groups, 3-round runs, 21 single-round runs so P50 and P95 are computed, resources, usage, the S-27-min legacy engine state,
+// plus the eval CLI and `run-log summary`).
+test('T-C1 legacy golden: eval, run-summary and run-log summary output for old logs is byte-identical to the origin/main capture', async () => {
+  const { capture } = await import('./legacy-golden.capture.test-helper.mjs');
+  const { BASE_SHA, GOLDEN } = await import('./legacy-golden.mjs');
+  const golden = JSON.parse(readFileSync(GOLDEN, 'utf8'));
+  assert.equal(golden.base_sha, BASE_SHA);
+  assert.equal(BASE_SHA, '752371eb91a2df5568bf7a455d1ccb3d635dd687', 'the baseline is origin/main 752371e (ASTF-21 merge), never re-pointed to candidate code');
+  const got = await capture(dirname(fileURLToPath(import.meta.url)));
+  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(golden.data, null, 1));
+  // The fixtures really exercise the figures (a golden of unknowns would pass vacuously).
+  const t1 = got.library.runs.find((r) => r.ticket === 'T1');
+  assert.ok(t1.units && Object.keys(t1.units).length === 2 && t1.peak_rss_mb === 640 && t1.attempt_timing[0].api_ms === 60000);
+  assert.equal(got.library.cross_run.review_round_wall_ms.p95 > 0, true);
+  assert.equal(typeof got.library.cross_run.review_round_wall_ms.p50, 'number');
+  assert.ok(t1.review_rounds.length === 3 && t1.review_rounds.some((r) => r.missing_roles.length));
+  assert.ok(got.summary_cli.runs.some((r) => r.missing_review_intervals.count > 0) && got.summary_cli.runs.some((r) => r.parallel_groups.length));
 });

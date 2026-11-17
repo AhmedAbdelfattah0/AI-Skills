@@ -187,7 +187,7 @@ identity metrics, an invalid `gap_reason` or an oversized value refuse a start; 
 `skill_revision` or ceiling never refuses: it is recorded as `unknown` and reported
 `unknown`; do not retry or wait on it, because the REVIEW phase start row is what
 authorizes a REPAIR. Time covered by no interval: end the phase with
-`--metric gap_reason=no_start_stamp|wait|host_sleep|unknown` (a start refuses any other value; an end records it as `unknown`, so the interval always closes). `summary` reports
+`--metric gap_reason=no_start_stamp|wait|host_sleep|unknown` (a start refuses any other value). On an `end`, an invalid, over-long (over 512 characters), multi-line or repeated `gap_reason` or `skill_revision` is recorded as `unknown` with a stderr note naming the rejected value, so such a value cannot leave the interval open; the identity metrics (`candidate_id`, `review_execution`) stay strict, and an end is still refused for other malformed input (an unknown interval, a bad `--metric` form). `summary` reports
 `missing_review_intervals` (a count; `unknown` without execution IDs; `at_least` with a
 known sum when some runs are unknown).
 
@@ -216,7 +216,7 @@ After collecting the result, end that same event with the registered
 completion alone is not a passing review. The helper verifies repository,
 read-only mode and dispatch binding, then imports only whitelisted timing/status
 metadata plus a result digest into `carrier_timing`: `started_at`, `ended_at`,
-`duration_ms`, `collection_delay_ms`, `source=relay_result`, `tool` and `status`.
+`duration_ms`, `collection_delay_ms`, `source=relay_result`, `tool` and `status`, plus `exit` (the relay's exit code) and `usage` when the result carries them: token counters under the `usage.mjs` names (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`) for both the Claude and Codex key spellings, any other non-negative integer counter under `other`, and a stderr note for anything not imported. Absent means unavailable, never 0.
 Candidate/execution identity comes from the registered dispatch. The result path
 and contents are not exposed in the summary. Repeating the identical import is
 idempotent; do not add `--metric` on that repeated end call.
@@ -361,3 +361,10 @@ Investigate an old open phase with no open wait against transcript/carrier
 evidence before calling it a continuation defect. For the next full-stack trial,
 check provenance, enforced deadlines, complete counters and real timing sources
 first; do not rerun shipped tickets merely to fill missing telemetry.
+
+## Legacy-path telemetry notes (ASTF-42 S-04a1)
+
+- `eval` `attempt_timing[].models_used` (sorted) appears only when a usage record joined to the attempt names a model; absent means unknown. `usage.mjs` records carry the same optional string array.
+- `eval` `review_round_wall_ms.excluded_unknown` also counts rounds with an unfinished interval or an open REVIEW phase: their truncated wall still prints on the round but never enters the percentiles.
+- Stamps with a non-Z offset (for example `+02:00`) are normalised to UTC in `intervals` and `open_intervals`; Z stamps are untouched.
+- The legacy figures of logs without offsets, models or unfinished rounds are guarded by `legacy-figures.golden.json`, captured from origin/main by `legacy-golden.mjs` (maintainer only; it archives the pinned base commit, never the working tree).

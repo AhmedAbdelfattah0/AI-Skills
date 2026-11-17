@@ -447,27 +447,64 @@ test('a REVIEW phase ended with an invalid gap_reason is closed, not left open',
   assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown');
 });
 
-test('S-04a1 relay import: exit code and numeric usage are kept when the result carries them, absent (never 0) when not', (t) => {
-  const run = (extra) => {
+test('S-04a1 relay import: exit code and normalised usage are kept when the result carries them, absent (never 0) when not', (t) => {
+  const run = (extra, tool = 'claude') => {
     const f = fixture(t);
     const resultPath = join(f.repo, 'result.json');
     const start = f.cli('start', ...eventArgs, '--carrier-result', resultPath, '--metric', 'candidate_id=sha-123', '--metric', 'review_execution=review-abc');
     assert.equal(start.status, 0, start.stderr);
     const timestamp = JSON.parse(start.stdout).timestamp;
-    writeFileSync(resultPath, JSON.stringify({ schema: 'delegate-relay.result.v1', tool: 'claude', readOnly: true, workdir: f.repo, status: 'timeout',
-      startedAt: timestamp, finishedAt: timestamp, finalMessage: 'SECRET-TEXT', ...extra }));
+    writeFileSync(resultPath, JSON.stringify({ schema: 'delegate-relay.result.v1', ...(tool === 'claude' ? { tool, readOnly: true } : { codexVersion: 'test', sandbox: 'read-only' }),
+      workdir: f.repo, status: 'timeout', startedAt: timestamp, finishedAt: timestamp, finalMessage: 'SECRET-TEXT', ...extra }));
     const ended = f.cli('end', ...eventArgs, '--carrier-result', resultPath);
     assert.equal(ended.status, 0, ended.stderr);
     assert.ok(!readFileSync(f.path, 'utf8').includes('SECRET'));
-    return JSON.parse(ended.stdout).carrier_timing;
+    return { timing: JSON.parse(ended.stdout).carrier_timing, stderr: ended.stderr };
   };
-  const withBoth = run({ exitCode: 0, usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: -1, note: 'x', reasoning_output_tokens: 1.5 } });
-  assert.equal(withBoth.exit, 0);
-  assert.deepEqual(withBoth.usage, { input_tokens: 10, output_tokens: 2 }, 'only non-negative safe integers of the five counters survive');
+  // Real shape captured from Claude Code 2.1.318 (carrier-usage.test.mjs): every counter survives under the usage.mjs names.
+  const claude = run({ exitCode: 0, usage: { input_tokens: 2, cache_creation_input_tokens: 26257, cache_read_input_tokens: 11391, output_tokens: 4,
+    output_tokens_details: { thinking_tokens: 0 } } });
+  assert.equal(claude.timing.exit, 0);
+  assert.deepEqual(claude.timing.usage, { input_tokens: 2, output_tokens: 4, cache_read_tokens: 11391, cache_write_tokens: 26257 });
+  assert.match(claude.stderr, /output_tokens_details/, 'a non-numeric usage field is named on stderr, never dropped silently');
+  // Real Codex shape (Codex CLI 0.166.0).
+  const codex = run({ exitCode: 0, usage: { input_tokens: 28116, cached_input_tokens: 7, cache_write_input_tokens: 3, output_tokens: 5, reasoning_output_tokens: 2 } }, 'codex');
+  assert.deepEqual(codex.timing.usage, { input_tokens: 28116, output_tokens: 5, cache_read_tokens: 7, cache_write_tokens: 3, reasoning_tokens: 2 });
+  // An unknown numeric counter is kept under `other`, an invalid known one is named on stderr.
+  const odd = run({ usage: { input_tokens: 5, web_search_requests: 3, output_tokens: -1 } });
+  assert.deepEqual(odd.timing.usage, { input_tokens: 5, other: { web_search_requests: 3 } });
+  assert.match(odd.stderr, /output_tokens/);
   const without = run({});
-  assert.equal('exit' in without, false);
-  assert.equal('usage' in without, false);
-  assert.equal('usage' in run({ usage: { note: 'x' } }), false, 'a usage object with no valid counter adds no key');
+  assert.equal('exit' in without.timing, false);
+  assert.equal('usage' in without.timing, false);
+  assert.equal('usage' in run({ usage: { note: 'x' } }).timing, false, 'a usage object with no numeric counter adds no key');
+});
+
+test('gap_reason on END: an over-long, multi-line or repeated value still closes the REVIEW phase as unknown, with a diagnostic', (t) => {
+  const m = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
+  const cases = { long: ['gap_reason=' + 'x'.repeat(600)], newline: ['gap_reason=a\nb'], repeated: ['gap_reason=wait', 'gap_reason=sleep'], numeric: ['gap_reason=7'] };
+  for (const [label, metrics] of Object.entries(cases)) {
+    const f = fixture(t);
+    const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', `ph-${label}`);
+    assert.equal(f.cli('start', ...args, ...m).status, 0);
+    const ended = f.cli('end', ...args, ...metrics.flatMap((v) => ['--metric', v]));
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`);
+    assert.match(ended.stderr, /recorded as unknown/);
+    const run = f.summary().runs[0];
+    assert.equal(run.open_intervals.length, 0, label);
+    assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown', label);
+  }
+  // Sibling END-path field: an invalid skill_revision on a REVIEW end is recorded as unknown, not a refusal that leaves the phase open.
+  const f = fixture(t);
+  const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-sk');
+  assert.equal(f.cli('start', ...args, ...m, '--metric', 'skill_revision=r1').status, 0);
+  assert.equal(f.cli('end', ...args, '--metric', 'skill_revision=bad value with spaces').status, 0);
+  assert.equal(f.summary().runs[0].intervals[0].metrics.skill_revision, 'unknown');
+  // Identity stays strict on END: a changed review_execution is still refused (the identity binding is not telemetry).
+  const g = fixture(t);
+  const gargs = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-id');
+  assert.equal(g.cli('start', ...gargs, ...m).status, 0);
+  assert.equal(g.cli('end', ...gargs, '--metric', 'review_execution=review-2').status, 1);
 });
 
 const roundRows = (id, { drop = [], open = [], extra = [], phaseMetrics = { repair_batches: 1, confirmation_count: 1 } } = {}) => {
@@ -547,4 +584,15 @@ test('run-log and eval import one review-interval table', () => {
   }
   assert.equal(REVIEW_ROLE_OF.contract_review, 'primary');
   assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 4 && GAP_REASONS.includes('host_sleep') && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
+});
+
+test('S-04a1 summary: an unfinished repair under a declared 0 (or no declaration) is counted by missing_review_intervals', (t) => {
+  for (const declared of [{ repair_batches: 0, confirmation_count: 0 }, {}]) {
+    const m = { review_execution: 'review-1', candidate_id: 'sha-1' };
+    const f = fixture(t, [...pair('ph', 'phase', 'REVIEW', 0, 100, { ...m, ...declared }), pair('rep', 'activity', 'review_repair', 10, 20, m)[0]]);
+    const s = f.summary();
+    assert.ok(s.runs[0].missing_review_intervals.count >= 1);
+    assert.ok(s.runs[0].missing_review_intervals.items.some((i) => i.role === 'repair' && i.reason === 'open_without_end'));
+    assert.notEqual(s.aggregate.missing_review_intervals, 0);
+  }
 });

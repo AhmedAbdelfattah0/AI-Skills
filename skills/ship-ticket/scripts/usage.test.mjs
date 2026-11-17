@@ -340,3 +340,16 @@ test('S-04a1 usage: models_used lists every model the claude CLI billed (sorted,
   const records = fn('importSessionUsage')(join(session(t), 'sess-1.jsonl'), { runId: 'run-1', ...WINDOW });
   assert.deepEqual(byId(records)['sess-1:msg_a'].models_used, ['claude-x']);
 });
+
+test('S-04a1 sibling: the real Claude and Codex shapes lose no counter through extractUsage and importCodexRelay (no silent key drop)', (t) => {
+  const claude = U.extractUsage('claude', JSON.stringify({ type: 'result', total_cost_usd: 0.5, usage: { input_tokens: 2, cache_creation_input_tokens: 26257,
+    cache_read_input_tokens: 11391, output_tokens: 4, output_tokens_details: { thinking_tokens: 0 } } }));
+  assert.deepEqual([claude.input_tokens, claude.output_tokens, claude.cache_read_tokens, claude.cache_write_tokens], [2, 4, 11391, 26257]);
+  const codex = U.extractUsage('codex', '{"type":"turn.completed","usage":{"input_tokens":28116,"cached_input_tokens":9,"cache_write_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2}}');
+  assert.deepEqual([codex.input_tokens, codex.output_tokens, codex.cache_read_tokens, codex.cache_write_tokens, codex.reasoning_tokens], [28116, 5, 9, 3, 2]);
+  const root = tmp(t);
+  const file = join(root, 'relay.json');
+  writeFileSync(file, JSON.stringify({ execution_id: 'ex-1', usage: { input_tokens: 28116, cached_input_tokens: 9, cache_write_input_tokens: 3, output_tokens: 5, reasoning_output_tokens: 2 } }));
+  const r = U.importCodexRelay(file, { runId: 'run-1' });
+  assert.deepEqual([r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.reasoning_tokens], [28116, 5, 9, 3, 2]);
+});
