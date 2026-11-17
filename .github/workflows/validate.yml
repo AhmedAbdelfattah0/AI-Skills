@@ -78,6 +78,7 @@ jobs:
           skills/ship-ticket/scripts/candidate-id.test.mjs
           skills/ship-ticket/scripts/usage.test.mjs
           skills/ship-ticket/scripts/gate.test.mjs
+          skills/ship-ticket/scripts/lib/durable-io.test.mjs
           skills/ship-ticket/scripts/run-engine.test.mjs
           skills/ship-ticket/scripts/run-engine-repair.test.mjs
           skills/ship-ticket/scripts/run-engine-review3.test.mjs
