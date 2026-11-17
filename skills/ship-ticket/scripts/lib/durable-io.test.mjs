@@ -31,8 +31,8 @@
  * | 20 | :336 waits for an empty record                                   | adapted     | waits, then rethrows lock_malformed (not a timeout) |
  * | 21 | :336 waits for an incomplete record                              | adapted     | same |
  * | 22 | :336 waits for a record that is not a PID                        | adapted     | same |
- * | 23 | :336 waits for a record naming a process group (pid 0)           | adapted     | JSON record; POSIX only (kill(0, 0) probes the own group) |
- * | 24 | :336 waits for a record beyond the int32 range                   | DIVERGES    | ours probes it as dead and RECOVERS the lock; ported as a todo, see UNRESOLVED |
+ * | 23 | :336 waits for a record naming a process group (pid 0)           | adapted     | refused as lock_malformed (fail closed), not waited |
+ * | 24 | :336 waits for a record beyond the int32 range                   | adapted     | refused as lock_malformed (fail closed; was recovered before S-30a) |
  * | 25 | :336 waits for a record beyond the safe integer range            | adapted     | raw text: lock_malformed |
  * | 26 | :360 waits for a holder under another user (probe EPERM)         | adapted     | process.kill mocked under the real processInfo |
  * | 27 | :373 keeps its own lock when the runtime cannot probe itself     | unsupported | browser-worker shim; our processInfo is the only probe |
@@ -46,7 +46,7 @@
  * | 35 | :475 runs when its claim cannot be removed afterwards            | unsupported | no fault seam on the marker unlink (it is swallowed) |
  * | 36 | :485 waits for the caller-stated limit                           | adapted     | there is no default wait: no waitMs is one attempt (AC1) |
  *
- * Totals: 8 applicable, 19 adapted, 8 unsupported, 1 divergent (todo).
+ * Totals: 8 applicable, 20 adapted, 8 unsupported.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -61,6 +61,10 @@ import { acquireLock, writeStateAtomic } from './durable-io.mjs';
 import { processInfo } from '../engine-quiesce.mjs';
 
 const WIN = process.platform === 'win32';
+/** Fail fast on any unhandled rejection in this process; the last test also asserts there was none. */
+const UNHANDLED = [];
+process.on('unhandledRejection', (e) => { UNHANDLED.push(e); process.exitCode = 1; });
+const existsLock = (f) => { try { statSync(f); return true; } catch { return false; } };
 const POSIX_ONLY = WIN ? 'POSIX only' : false;
 /** A PID no process has (upstream's EXITED_PID): the probe reports it absent. */
 const EXITED_PID = 2_000_000_000;
@@ -262,17 +266,27 @@ test('AC3 every back-off sleep listens to the signal, so an abort interrupts it'
     await new Promise(r => setTimeout(r, ms));
     assert.equal(getEventListeners(controller.signal, 'abort').length, 1, `listening after ${ms} ms`);
   }
-  controller.abort();
-  await assert.rejects(waiter, { name: 'AbortError' });
+  const reason = new Error('stop while sleeping');
+  controller.abort(reason);
+  await assert.rejects(waiter, (e) => e === reason); // the timer's own AbortError is not the reason
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
 });
 
-test('AC3 an already-aborted signal creates nothing even when the lock is free', async (t) => {
-  const dir = scratch(t);
+test('AC3 an already-aborted signal makes no attempt: nothing created, no recovery started', async (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'document.lock');
   const signal = AbortSignal.abort();
   await assert.rejects(acquireLock(ctxIn(dir), { waitMs: 1000, signal }), { name: 'AbortError' });
   await assert.rejects(acquireLock(ctxIn(dir), { signal }), { name: 'AbortError' });
   assert.deepEqual(readdirSync(dir), []);
+  // A stale holder would start a recovery (the hook fires first): an aborted call never gets there.
+  writeFileSync(lockFile, record(EXITED_PID));
+  const seen = [];
+  const hooks = { boundary: (name) => { seen.push(name); } };
+  for (const waitMs of [undefined, 1000]) {
+    await assert.rejects(acquireLock(ctxIn(dir, { processInfo: deadFor(EXITED_PID), hooks }), { waitMs, signal }), { name: 'AbortError' });
+  }
+  assert.deepEqual(seen, []);
+  assert.equal(readFileSync(lockFile, 'utf8'), record(EXITED_PID));
 });
 
 test('AC2 waitMs must be a finite number >= 0', async (t) => {
@@ -308,7 +322,7 @@ for (const waitMs of [undefined, 1000]) {
     const ft = fakeTime();
     const got = acquireLock(ctxIn(dir, { processInfo: deadFor(EXITED_PID), hooks }), { waitMs, signal: controller.signal, now: ft.now, sleep: ft.sleep });
     await assert.rejects(got, (e) => e === reason);
-    assert.equal(readFileSync(lockFile, 'utf8'), stale);
+    assert.equal(existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : 'removed', stale);
     assert.deepEqual(readdirSync(dir), ['document.lock']);
     assert.deepEqual(ft.slept, []);
   });
@@ -364,7 +378,8 @@ for (const [n, label, render, code, skip] of [
   [20, 'an empty record', () => '', 'lock_malformed'],
   [21, 'an incomplete record', () => '12', 'lock_malformed'],
   [22, 'a record that is not a PID', () => 'holder\n', 'lock_malformed'],
-  [23, 'a record naming a process group', () => record(0), 'lock_timeout', POSIX_ONLY],
+  [23, 'a record naming a process group', () => record(0), 'lock_malformed'],
+  [24, 'a record beyond the int32 range', () => record(2_147_483_648), 'lock_malformed'],
   [25, 'a record beyond the safe integer range', () => '99999999999999999999\n', 'lock_malformed'],
 ]) {
   test(`L${n} waits for the lock of ${label}, then ${code}`, { skip }, async (t) => {
@@ -380,14 +395,13 @@ for (const [n, label, render, code, skip] of [
   });
 }
 
-test('L24 waits for a record beyond the int32 range', { todo: 'DIVERGES: processInfo reports an out-of-range pid as dead, so the lock is recovered (UNRESOLVED, S-30a report)' }, async (t) => {
-  // upstream: atomic-write.spec.ts:336 waits for the lock of a record beyond the int32 range
+test('M2 a record whose pid cannot be probed is refused, never recovered, waitMs or not', async (t) => {
   const dir = scratch(t), lockFile = join(dir, 'document.lock');
-  writeFileSync(lockFile, record(2_147_483_648));
-  const ft = fakeTime();
-  const got = await acquireLock(ctxIn(dir), { waitMs: 50, now: ft.now, sleep: ft.sleep }).catch(e => e);
-  if (got.release) await got.release();
-  assert.equal(got.code, 'lock_timeout');
+  for (const pid of [0, -1, -4242, 1.5, 2_147_483_648, 1e20]) {
+    writeFileSync(lockFile, record(pid));
+    await assert.rejects(acquireLock(ctxIn(dir, { processInfo: () => ({ alive: false, startTime: null }) })), { code: 'lock_malformed' }, `pid ${pid}`);
+    assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).pid, pid);
+  }
 });
 
 test('L26 waits for a holder whose process exists under another user', async (t) => {
@@ -465,6 +479,117 @@ test('L33 retries after the recovery marker is refused, then acquires once it cl
   await got.release();
 });
 
+// ---------------------------------------------------------------- cancellation invariant (every boundary)
+
+const HOSTILE_REASONS = [
+  ['null', () => null], ['undefined (Node substitutes an AbortError)', () => undefined], ['a string', () => 'stop'],
+  ['an Error', () => new Error('stop')], ['{ code: lock_held }', () => ({ code: 'lock_held' })],
+  ['{ code: lock_timeout }', () => ({ code: 'lock_timeout' })], ['a frozen object', () => Object.freeze({ code: 'lock_held', message: 'frozen' })],
+];
+const SCENARIOS = [
+  ['a stale holder (recovery path)', (lockFile) => writeFileSync(lockFile, record(EXITED_PID))],
+  ['a live holder (waiting path)', (lockFile) => writeFileSync(lockFile, record(4242))],
+  ['a free lock (create path)', () => {}],
+];
+
+/**
+ * One acquireLock call with a tick at every boundary it can reach: each processInfo probe, entry to
+ * and after an await inside the lock-stale-observed hook, entry to and after each (fake) sleep.
+ * At tick `abortAt` the signal is aborted with `reason()`, synchronously (`defer` 0) or after
+ * `defer` microtasks (landing between the library's own awaits).
+ */
+async function cancelRun(dir, setup, waitMs, abortAt, defer, reason, at = null) {
+  const lockFile = join(dir, 'document.lock');
+  rmSync(dir, { recursive: true, force: true }); mkdirSync(dir);
+  setup(lockFile);
+  const before = existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : null;
+  const controller = new AbortController();
+  let ticks = 0, t = 0, fired = false;
+  const fire = () => { fired = true; controller.abort(reason()); };
+  const tick = () => {
+    if (++ticks !== abortAt) return;
+    if (defer === 0) return fire();
+    let p = Promise.resolve();
+    for (let i = 1; i < defer; i++) p = p.then(() => {});
+    p.then(fire);
+  };
+  const processInfoTicked = (pid) => { tick(); return pid === EXITED_PID ? { alive: false, startTime: null } : { alive: true, startTime: null }; };
+  const hooks = { boundary: async () => { tick(); await Promise.resolve(); tick(); } };
+  const sleep = async (ms) => { tick(); t += ms; await Promise.resolve(); tick(); };
+  const outcome = await acquireLock(ctxIn(dir, { processInfo: processInfoTicked, hooks }), { waitMs, signal: controller.signal, now: () => t, sleep })
+    .then((handle) => ({ handle }), (error) => ({ error }));
+  // Let a deferred abort that has not fired yet fire now, so `fired` is final.
+  for (let i = 0; i <= defer; i++) await Promise.resolve();
+  const after = existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : null;
+  return { outcome, ticks, fired, signal: controller.signal, entries: readdirSync(dir), lockFile, unchanged: before === after };
+}
+
+test('AC3 cancellation invariant: an abort at any boundary rejects with exactly signal.reason, owning nothing', async (t) => {
+  const dir = scratch(t);
+  const violations = [];
+  let cases = 0;
+  for (const [scenario, setup] of SCENARIOS) {
+    for (const waitMs of [undefined, 1000]) {
+      const base = await cancelRun(dir, setup, waitMs, 0, 0, () => null);
+      if (base.outcome.handle) await base.outcome.handle.release();
+      for (let abortAt = 1; abortAt <= base.ticks; abortAt++) {
+        for (const defer of [0, 1, 2, 3, 5, 8]) {
+          for (const [label, reason] of defer === 0 ? HOSTILE_REASONS : HOSTILE_REASONS.filter(([l]) => l === 'null' || l.includes('lock_held'))) {
+            cases++;
+            const r = await cancelRun(dir, setup, waitMs, abortAt, defer, reason);
+            const where = `${scenario}, waitMs ${waitMs}, abort at tick ${abortAt}/${base.ticks} +${defer} microtasks, reason ${label}`;
+            const ours = existsLock(r.lockFile) && JSON.parse(readFileSync(r.lockFile, 'utf8') || '{}').run_id === 'r';
+            if (r.entries.some(e => e.endsWith('.recovery'))) violations.push(`${where}: recovery marker left`);
+            if (r.outcome.error !== undefined || 'error' in r.outcome) {
+              if (ours) violations.push(`${where}: rejected while owning the lock`);
+              if (r.fired && !Object.is(r.outcome.error, r.signal.reason) && defer === 0) violations.push(`${where}: rejected with ${String(r.outcome.error?.code ?? r.outcome.error)}, not the signal's reason`);
+              if (r.fired && defer === 0 && !r.unchanged) violations.push(`${where}: the lock file changed after the abort`);
+            } else {
+              if (r.fired && defer === 0) violations.push(`${where}: resolved although aborted at a boundary inside the call`);
+              if (!ours) violations.push(`${where}: resolved without owning the lock`);
+              await r.outcome.handle.release();
+            }
+          }
+        }
+      }
+    }
+  }
+  t.diagnostic(`cancellation cases: ${cases}`);
+  assert.ok(cases > 300, `the sweep ran (${cases} cases)`);
+  assert.deepEqual(violations, []);
+});
+
+test('AC3 an abort landing between the recovery\'s create and the call\'s return releases that handle', async (t) => {
+  // Deferring the abort from the hook by 1, 2, 3, ... microtasks walks it through the recovery: some
+  // deferral lands after cancelFirst() let the recovery create our lock but before the call returns.
+  // That handle must be released and the call must reject with the reason (never resolve with it).
+  const dir = scratch(t);
+  const classes = [];
+  for (let defer = 1; defer <= 12; defer++) {
+    const reason = { code: 'lock_held', defer };
+    const r = await cancelRun(dir, SCENARIOS[0][1], undefined, 3, defer, () => reason);
+    if ('handle' in r.outcome) { classes.push('resolved'); await r.outcome.handle.release(); continue; }
+    assert.ok(Object.is(r.outcome.error, reason), `+${defer}: rejected with exactly the reason`);
+    classes.push(existsLock(r.lockFile) ? 'untouched' : 'released');
+  }
+  assert.ok(classes.includes('released'), `some deferral lands inside the window: ${classes.join(' ')}`);
+});
+
+test('AC3 a deferred abort that lands before the call settles still rejects with exactly signal.reason', async (t) => {
+  // The microtask-deferred aborts above may land after the call resolved (then the caller owns the
+  // handle). Here the wait never ends on its own (live holder, deadline never reached), so every
+  // deferred abort lands inside the call and must win, whatever its reason.
+  const dir = scratch(t);
+  for (const [label, reason] of HOSTILE_REASONS) {
+    for (const defer of [1, 2, 3, 5, 8]) {
+      const r = await cancelRun(dir, SCENARIOS[1][1], 1e9, 6, defer, reason);
+      assert.ok('error' in r.outcome, `${label} +${defer}: rejected`);
+      assert.ok(Object.is(r.outcome.error, r.signal.reason), `${label} +${defer}: rejected with exactly the reason`);
+      assert.deepEqual(r.entries, ['document.lock'], `${label} +${defer}: nothing owned or left`);
+    }
+  }
+});
+
 // ---------------------------------------------------------------- regressions from the spike (Z)
 
 test('AC4 / Z S1d a live PID with a different recorded start time is recovered (reuse); the same start time is held', async (t) => {
@@ -492,48 +617,86 @@ test('AC4 / Z S1d a live PID with a different recorded start time is recovered (
  * Child `id`: increment a JSON counter `n` times. Every child first announces `ready-<id>` and waits
  * for `go`. Mode 'lock' takes the lock around each increment. Mode 'race' (the negative control)
  * takes none and forces the lost update: in each round every child reads, waits until all six have
- * read, writes, and waits until all six have written, so each round adds exactly 1.
+ * read, writes, and waits until all six have written, so each round adds exactly 1. Every barrier
+ * wait is bounded: a stranded child reports which barrier and exits 3 (a failure, never a pass).
  */
+const BARRIER_BOUND_MS = 30_000;
 const WORKER = `
-const [lib, dir, file, lockFile, n, mode, id] = process.argv.slice(1);
+const [lib, dir, file, lockFile, n, mode, id, bound] = process.argv.slice(1);
 const { readFileSync, readdirSync, writeFileSync } = await import('node:fs');
 const { join } = await import('node:path');
+const { performance } = await import('node:perf_hooks');
 const { acquireLock, writeStateAtomic } = await import(lib);
 const mark = (name) => writeFileSync(join(dir, name), '');
-const until = async (ok) => { while (!ok()) await new Promise(r => setTimeout(r, 2)); };
+const until = async (ok, what) => {
+  const end = performance.now() + Number(bound);
+  while (!ok()) {
+    if (performance.now() > end) { process.stderr.write('child ' + id + ': barrier ' + what + ' not reached in ' + bound + ' ms\\n'); process.exit(3); }
+    await new Promise(r => setTimeout(r, 2));
+  }
+};
 const all = (prefix) => () => readdirSync(dir).filter(e => e.startsWith(prefix)).length === 6;
 mark('ready-' + id);
-await until(() => readdirSync(dir).includes('go'));
+await until(() => readdirSync(dir).includes('go'), 'go');
 for (let i = 0; i < Number(n); i++) {
   const h = mode === 'lock' ? await acquireLock({ lockFile, runId: 'w' }, { waitMs: 60000 }) : null;
   const v = JSON.parse(readFileSync(file, 'utf8')).n;
-  if (mode === 'race') { mark('r' + i + '-read-' + id); await until(all('r' + i + '-read-')); }
+  if (mode === 'race') { mark('r' + i + '-read-' + id); await until(all('r' + i + '-read-'), 'r' + i + '-read'); }
   await writeStateAtomic(file, { n: v + 1 });
-  if (mode === 'race') { mark('r' + i + '-wrote-' + id); await until(all('r' + i + '-wrote-')); }
+  if (mode === 'race') { mark('r' + i + '-wrote-' + id); await until(all('r' + i + '-wrote-'), 'r' + i + '-wrote'); }
   await h?.release();
 }`;
 
+/**
+ * Run six workers. Exit and spawn-error handlers are attached at spawn; a child that exits before
+ * the start barrier, or fails afterwards, fails the run at once; every wait is bounded; every child
+ * still running is killed in `finally`, on every path.
+ */
 async function contend(t, mode) {
   const dir = scratch(t);
   const file = join(dir, 'counter.json'), lockFile = join(dir, 'counter.lock');
   await writeStateAtomic(file, { n: 0 });
   const lib = new URL('./durable-io.mjs', import.meta.url).href;
-  const kids = Array.from({ length: 6 }, (_, id) => spawn(process.execPath, ['--input-type=module', '-e', WORKER, lib, dir, file, lockFile, '15', mode, String(id)], { stdio: ['ignore', 'ignore', 'pipe'] }));
-  const errs = [];
-  for (const k of kids) k.stderr.on('data', (d) => errs.push(String(d)));
-  const exits = kids.map(k => once(k, 'exit').then(([c]) => c));
-  while (readdirSync(dir).filter(e => e.startsWith('ready-')).length < 6) await new Promise(r => setTimeout(r, 5));
-  writeFileSync(join(dir, 'go'), '');
-  const codes = await Promise.all(exits);
-  return { n: JSON.parse(readFileSync(file, 'utf8')).n, codes, errs: errs.join(''), left: readdirSync(dir).filter(e => e.startsWith('counter.lock')) };
+  const kids = [], exits = [], errs = [];
+  const describe = () => errs.join('') || '(no stderr)';
+  try {
+    for (let id = 0; id < 6; id++) {
+      const k = spawn(process.execPath, ['--input-type=module', '-e', WORKER, lib, dir, file, lockFile, '15', mode, String(id), String(BARRIER_BOUND_MS)], { stdio: ['ignore', 'ignore', 'pipe'] });
+      k.stderr.on('data', (d) => errs.push(String(d)));
+      // Never rejects: an exit or a spawn error resolves it.
+      exits.push(new Promise((resolve) => { k.once('exit', (code, signal) => resolve({ id, code, signal })); k.once('error', (error) => resolve({ id, code: null, error })); }));
+      kids.push(k);
+    }
+    let gone = null;
+    exits.forEach((p) => p.then((r) => { gone ??= r; }));
+    const readyBy = performance.now() + BARRIER_BOUND_MS;
+    while (readdirSync(dir).filter(e => e.startsWith('ready-')).length < 6) {
+      if (gone) assert.fail(`child ${gone.id} ended before the start barrier (code ${gone.code}, ${gone.error ?? gone.signal}): ${describe()}`);
+      if (performance.now() > readyBy) assert.fail(`children not ready within ${BARRIER_BOUND_MS} ms: ${describe()}`);
+      await new Promise(r => setTimeout(r, 5));
+    }
+    writeFileSync(join(dir, 'go'), '');
+    let timer;
+    const bound = new Promise((resolve) => { timer = setTimeout(() => resolve('bound'), 2 * BARRIER_BOUND_MS + 60_000); });
+    const firstFailure = new Promise((resolve) => exits.forEach((p) => p.then((r) => { if (r.code !== 0) resolve(r); })));
+    const done = await Promise.race([Promise.all(exits), firstFailure, bound]).finally(() => clearTimeout(timer));
+    if (done === 'bound') assert.fail(`children did not finish within the bound: ${describe()}`);
+    if (!Array.isArray(done)) assert.fail(`child ${done.id} failed (code ${done.code}, ${done.error ?? done.signal}): ${describe()}`);
+    return { n: JSON.parse(readFileSync(file, 'utf8')).n, left: readdirSync(dir).filter(e => e.startsWith('counter.lock')) };
+  } finally {
+    for (const k of kids) if (k.exitCode === null && k.signalCode === null) k.kill('SIGKILL');
+    await Promise.all(exits);
+  }
 }
 
 test('AC6 / Z S1b 6 processes x 15 increments lose no update under the lock; without it, the forced interleaving loses 75', { skip: WIN ? 'POSIX only here: Windows delete-pending and rename semantics under this load are unverified (follow-up)' : false }, async (t) => {
   const locked = await contend(t, 'lock');
-  assert.deepEqual(locked.codes, [0, 0, 0, 0, 0, 0], locked.errs);
   assert.equal(locked.n, 90);
   assert.deepEqual(locked.left, []);
   const bare = await contend(t, 'race');
-  assert.deepEqual(bare.codes, [0, 0, 0, 0, 0, 0], bare.errs);
   assert.equal(bare.n, 15, 'the negative control loses exactly the 75 interleaved updates');
+});
+
+test('zero unhandled rejections in this test process', () => {
+  assert.deepEqual(UNHANDLED, []);
 });

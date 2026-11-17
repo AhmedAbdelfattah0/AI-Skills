@@ -8,7 +8,12 @@
  * - writeStateAtomic also retries a win32 rename EACCES (upstream's transient set; antivirus
  *   and indexers surface it): the only behavioural change on a default path, win32 only.
  * - Two default-valued seams: writeStateAtomic's `fs.fsyncSync` and acquireLock's `ctx.lockFile`
- *   (default: the per-ticket path, as before). No engine caller passes either.
+ *   (default: the per-ticket path, as before). run-engine.mjs forwards its `ctx.fs` (a test-only
+ *   field) to writeStateAtomic, so an engine test could reach `fs.fsyncSync`; no caller passes
+ *   `ctx.lockFile`.
+ * - acquireLock refuses a lock record whose pid is not an integer in 1..2^31-1 as `lock_malformed`
+ *   (fail closed). Before, such a record was probed as a dead PID (or as a process group) and
+ *   recovered; only a hand-edited or corrupted record can carry one.
  * - acquireLock takes an opt-in second argument `{ waitMs, signal, now, sleep }`. Without it a
  *   call is one attempt, exactly as before.
  *
@@ -118,10 +123,15 @@ const RECOVER = 'stop every engine command for this ticket, confirm no engine pr
  * between our create and our read) and, on win32, `EPERM` (a lock still being deleted). At the
  * deadline `lock_held` and `ENOENT` become `lock_timeout`; `lock_malformed` and `EPERM` are
  * rethrown as they are. Any other error (`lock_foreign_host`, `not_a_repo`, EISDIR, ...) is thrown
- * at once. `signal` is checked before every attempt, during every sleep and after the
- * `lock-stale-observed` hook (the only await inside an attempt) before the recovery marker is
- * created, so an abort rejects with `signal.reason`, owning no lock and leaving no marker. Once a
- * handle is returned the caller owns cancellation.
+ * at once.
+ *
+ * Cancellation rule (one place, `cancelFirst`): once `signal` is aborted the call rejects with
+ * exactly `signal.reason`, whatever value it is (null, a string, an object carrying a `code`, ...;
+ * it is never wrapped or classified), owning no lock and leaving no recovery marker. It is applied
+ * before every attempt, after the `lock-stale-observed` hook (the only await inside an attempt)
+ * before any state change, before an attempt's error is classified, after every sleep, and when an
+ * attempt returns a handle (which is then released). Once the call has resolved, the caller owns
+ * cancellation.
  */
 export async function acquireLock(ctx, { waitMs, signal, now = () => performance.now(), sleep = (ms, sig) => timerSleep(ms, undefined, { signal: sig }) } = {}) {
   const lockFile = ctx.lockFile ?? gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.lock`);
@@ -137,13 +147,20 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
   const handle = { lockFile, release: async () => {
     try { if (JSON.parse(readFileSync(lockFile, 'utf8')).nonce === mine.nonce) unlinkSync(lockFile); } catch { /* already gone */ }
   } };
+  /** The single cancellation rule (see above). */
+  const cancelFirst = () => { if (signal?.aborted) throw signal.reason; };
   const attempt = async () => {
     if (create()) return handle;
     let raw;
     // ENOENT here means the holder released between our create and this read (retryable when waiting).
     try { raw = readFileSync(lockFile, 'utf8'); } catch (e) { if (e.code === 'ENOENT') e.lockVanished = true; throw e; }
     let held;
-    try { held = JSON.parse(raw); if (!held || typeof held.pid !== 'number' || typeof held.host !== 'string') throw new Error(); }
+    try {
+      held = JSON.parse(raw);
+      if (!held || typeof held.pid !== 'number' || typeof held.host !== 'string') throw new Error();
+      // Fail closed: a pid process.kill cannot probe (non-integer, <= 0: a group, > int32) proves nothing.
+      if (!Number.isInteger(held.pid) || held.pid <= 0 || held.pid > 0x7fffffff) throw new Error();
+    }
     catch { throw coded('lock_malformed', `${lockFile} is unreadable; ${RECOVER} it by hand`); }
     if (held.host !== host) throw coded('lock_foreign_host', `${lockFile} is held by host ${held.host}; on that host ${RECOVER} it`);
     const other = info(held.pid) ?? { alive: false, startTime: null };
@@ -152,7 +169,7 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
     const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
     if (other.alive && !reused) throw coded('lock_held', `pid ${held.pid} holds ${lockFile}`);
     await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
-    signal?.throwIfAborted(); // cancellation re-checked after the await, before any state change
+    cancelFirst(); // after the await, before any state change
     const marker = lockFile + '.recovery';
     try { writeFileSync(marker, JSON.stringify({ pid, nonce: mine.nonce }), { flag: 'wx', mode: 0o600 }); }
     catch (e) { if (e.code === 'EEXIST') throw coded('lock_held', `another recovery is in progress (${marker}); if none is, ${RECOVER} the marker`); throw e; }
@@ -165,14 +182,22 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
       return handle;
     } finally { try { unlinkSync(marker); } catch { /* gone */ } }
   };
-  if (waitMs === undefined) { signal?.throwIfAborted(); return attempt(); }
+  /** One attempt under the rule: cancellation before classification; a handle won while aborted is released. */
+  const guarded = async () => {
+    let got;
+    try { got = await attempt(); } catch (e) { cancelFirst(); throw e; }
+    if (signal?.aborted) { await got.release(); throw signal.reason; }
+    return got;
+  };
+  if (waitMs === undefined) { cancelFirst(); return guarded(); }
   if (!Number.isFinite(waitMs) || waitMs < 0) throw new TypeError(`waitMs must be a finite number >= 0, got ${waitMs}`);
   const platform = ctx.platform ?? process.platform;
-  const transient = (e) => ['lock_held', 'lock_malformed'].includes(e.code) || e.lockVanished === true || (platform === 'win32' && e.code === 'EPERM');
+  const transient = (e) => ['lock_held', 'lock_malformed'].includes(e?.code) || e?.lockVanished === true || (platform === 'win32' && e?.code === 'EPERM');
   const deadline = now() + waitMs;
   for (let backoff = 20; ; backoff = Math.min(backoff * 2, 200)) {
-    signal?.throwIfAborted();
-    try { return await attempt(); } catch (e) {
+    cancelFirst();
+    try { return await guarded(); } catch (e) {
+      cancelFirst(); // decided before any classification of `e`
       if (!transient(e)) throw e;
       if (now() >= deadline) {
         if (e.code === 'lock_held' || e.lockVanished) throw coded('lock_timeout', `waited ${waitMs} ms for ${lockFile} (${e.message})`);
@@ -180,6 +205,6 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
       }
     }
     try { await sleep(Math.min(backoff, Math.max(0, deadline - now())), signal); }
-    catch (e) { signal?.throwIfAborted(); throw e; }
+    catch (e) { cancelFirst(); throw e; }
   }
 }
