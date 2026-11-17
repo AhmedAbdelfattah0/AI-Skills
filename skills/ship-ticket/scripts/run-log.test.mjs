@@ -417,18 +417,61 @@ test('optional_review with --carrier-result imports relay timing, the positive s
   assert.ok(timing.collection_delay_ms >= 0);
 });
 
-test('gap_reason accepts only the enum', (t) => {
+test('gap_reason: a start accepts only the enum, an end records anything else as unknown', (t) => {
   const f = fixture(t);
   const start = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1');
   assert.equal(f.cli('start', ...start).status, 0);
-  assert.equal(f.cli('end', ...start, '--metric', 'gap_reason=forgot').status, 1);
-  for (const reason of ['no_start_stamp', 'wait', 'unknown']) {
+  // A0.1 follow-up: an END with a bad value is written as `unknown` (a refused end would leave the interval open); a START still refuses it.
+  const bad = f.cli('end', ...start, '--metric', 'gap_reason=forgot');
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.equal(JSON.parse(bad.stdout).metrics.gap_reason, 'unknown');
+  assert.match(bad.stderr, /gap_reason recorded as unknown/);
+  assert.equal(f.cli('start', ...rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'bad-start'), '--metric', 'gap_reason=forgot').status, 1);
+  for (const reason of ['no_start_stamp', 'wait', 'host_sleep', 'unknown']) {
     const args = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', `gap-${reason}`);
     assert.equal(f.cli('start', ...args).status, 0);
     const ended = f.cli('end', ...args, '--metric', `gap_reason=${reason}`);
     assert.equal(ended.status, 0, ended.stderr);
     assert.equal(JSON.parse(ended.stdout).metrics.gap_reason, reason);
   }
+});
+
+test('a REVIEW phase ended with an invalid gap_reason is closed, not left open', (t) => {
+  const f = fixture(t);
+  const m = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
+  const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-1');
+  assert.equal(f.cli('start', ...args, ...m).status, 0);
+  assert.equal(f.cli('end', ...args, '--metric', 'gap_reason=because').status, 0);
+  const run = f.summary().runs[0];
+  assert.equal(run.open_intervals.length, 0);
+  assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown');
+});
+
+test('gap_reason on END: an over-long, multi-line or repeated value still closes the REVIEW phase as unknown, with a diagnostic', (t) => {
+  const m = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
+  const cases = { long: ['gap_reason=' + 'x'.repeat(600)], newline: ['gap_reason=a\nb'], repeated: ['gap_reason=wait', 'gap_reason=sleep'], numeric: ['gap_reason=7'] };
+  for (const [label, metrics] of Object.entries(cases)) {
+    const f = fixture(t);
+    const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', `ph-${label}`);
+    assert.equal(f.cli('start', ...args, ...m).status, 0);
+    const ended = f.cli('end', ...args, ...metrics.flatMap((v) => ['--metric', v]));
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`);
+    assert.match(ended.stderr, /recorded as unknown/);
+    const run = f.summary().runs[0];
+    assert.equal(run.open_intervals.length, 0, label);
+    assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown', label);
+  }
+  // Sibling END-path field: an invalid skill_revision on a REVIEW end is recorded as unknown, not a refusal that leaves the phase open.
+  const f = fixture(t);
+  const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-sk');
+  assert.equal(f.cli('start', ...args, ...m, '--metric', 'skill_revision=r1').status, 0);
+  assert.equal(f.cli('end', ...args, '--metric', 'skill_revision=bad value with spaces').status, 0);
+  assert.equal(f.summary().runs[0].intervals[0].metrics.skill_revision, 'unknown');
+  // Identity stays strict on END: a changed review_execution is still refused (the identity binding is not telemetry).
+  const g = fixture(t);
+  const gargs = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-id');
+  assert.equal(g.cli('start', ...gargs, ...m).status, 0);
+  assert.equal(g.cli('end', ...gargs, '--metric', 'review_execution=review-2').status, 1);
 });
 
 const roundRows = (id, { drop = [], open = [], extra = [], phaseMetrics = { repair_batches: 1, confirmation_count: 1 } } = {}) => {
@@ -507,5 +550,16 @@ test('run-log and eval import one review-interval table', () => {
     assert.doesNotMatch(text, /primary_review|optional_review|review_reconcile|recovery_ceiling_ms/, `${file} must not repeat the table`);
   }
   assert.equal(REVIEW_ROLE_OF.contract_review, 'primary');
-  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 3 && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
+  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 4 && GAP_REASONS.includes('host_sleep') && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
+});
+
+test('S-04a1 summary: an unfinished repair under a declared 0 (or no declaration) is counted by missing_review_intervals', (t) => {
+  for (const declared of [{ repair_batches: 0, confirmation_count: 0 }, {}]) {
+    const m = { review_execution: 'review-1', candidate_id: 'sha-1' };
+    const f = fixture(t, [...pair('ph', 'phase', 'REVIEW', 0, 100, { ...m, ...declared }), pair('rep', 'activity', 'review_repair', 10, 20, m)[0]]);
+    const s = f.summary();
+    assert.ok(s.runs[0].missing_review_intervals.count >= 1);
+    assert.ok(s.runs[0].missing_review_intervals.items.some((i) => i.role === 'repair' && i.reason === 'open_without_end'));
+    assert.notEqual(s.aggregate.missing_review_intervals, 0);
+  }
 });

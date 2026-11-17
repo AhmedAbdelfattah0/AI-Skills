@@ -453,3 +453,135 @@ test('review round: gap_reason is unknown when the gap is unknown', () => {
   const [r] = roundsOf(rows);
   assert.deepEqual([r.wall_ms, r.unaccounted_gap_ms, r.gap_reason], ['unknown', 'unknown', 'unknown']);
 });
+
+// ---- ASTF-42 S-04a1: legacy-path fixes (A0.1 follow-ups, models_used, normUtc) and the T-C1 byte-equal golden ----------------
+const OPEN_STAMP = (ms) => iso(ms);
+const openStart = (runId, id, name, at, metrics) => [{ schema, ticket: 'T', run_id: runId, event_id: id, kind: 'activity', name, metrics, event: 'start', timestamp: OPEN_STAMP(at * SEC) }];
+
+test('A0.1 follow-up 1: an unfinished repair or confirmation reads as a missing interval, never as 0 missing', () => {
+  const base = { repair_batches: 0, confirmation_count: 0 };
+  const rows = [...roundOf('run-1', 'a', [['primary_review', 0, 100], ['optional_review', 0, 100], ['review_reconcile', 100, 200]], base, [0, 300]),
+    ...openStart('run-1', 'run-1-a-rep', 'review_repair', 210, { review_execution: 'review-a', candidate_id: 'sha-1' })];
+  const [round] = roundsOf(rows);
+  assert.deepEqual(round.missing_roles, ['repair'], 'one repair started and never ended is one missing interval, even when the phase declared 0');
+  const undeclared = [...roundOf('run-1', 'a', [['primary_review', 0, 100]], {}, [0, 300]),
+    ...openStart('run-1', 'run-1-a-conf', 'review_confirmation', 210, { review_execution: 'review-a', candidate_id: 'sha-1' })];
+  assert.ok(roundsOf(undeclared)[0].missing_roles.includes('confirmation'));
+  // Negative: a finished repair beside a declared 1 is not missing.
+  const done = roundOf('run-1', 'a', [['primary_review', 0, 100], ['optional_review', 0, 100], ['review_reconcile', 100, 200], ['review_repair', 210, 250]], { repair_batches: 1, confirmation_count: 0 }, [0, 300]);
+  assert.deepEqual(roundsOf(done)[0].missing_roles, []);
+});
+
+test('A0.1 follow-up 2: a round with an unfinished interval or an open REVIEW phase never feeds the percentiles', () => {
+  const closed = Array.from({ length: 5 }, (_, i) => buildRun('T', `run-${i}`, roundOf(`run-${i}`, 'a', [['primary_review', 0, i + 1]], {}, [0, i + 1])));
+  const openActivity = buildRun('T', 'run-o', [...roundOf('run-o', 'a', [['primary_review', 0, 50]], {}, [0, 50]),
+    ...openStart('run-o', 'run-o-a-rep', 'review_repair', 60, { review_execution: 'review-a', candidate_id: 'sha-1' })]);
+  const openPhase = buildRun('T', 'run-p', [...roundOf('run-p', 'a', [['primary_review', 0, 70]], {}, [0, 70]).slice(2),
+    { schema, ticket: 'T', run_id: 'run-p', event_id: 'ph-open', kind: 'phase', name: 'REVIEW', event: 'start', timestamp: OPEN_STAMP(0),
+      metrics: { review_execution: 'review-a', candidate_id: 'sha-1' } }]);
+  const w = evaluate({ runs: [...closed, openActivity, openPhase] }).cross_run.review_round_wall_ms;
+  assert.deepEqual([w.n, w.excluded_unknown, w.p50], [5, 2, 3 * SEC], 'two unfinished rounds are excluded and counted, the closed p50 is unchanged');
+  // The row itself still prints its (truncated) wall: only the percentile input changes.
+  assert.equal(evaluate({ runs: [openActivity] }).runs[0].review_rounds[0].wall_ms, 50 * SEC);
+});
+
+test('A0.1 follow-up 3 (run-log side): see run-log.test.mjs gap_reason on end; eval reads host_sleep as a declared reason', () => {
+  const [round] = roundsOf(roundOf('run-1', 'a', [['primary_review', 100, 200], ['optional_review', 100, 200], ['review_reconcile', 300, 400]],
+    { repair_batches: 0, confirmation_count: 0, gap_reason: 'host_sleep' }, [100, 400]));
+  assert.equal(round.gap_reason, 'host_sleep');
+});
+
+test('S-04a1 models_used: an attempt names every model its usage records carry; absent (never empty) when none does', () => {
+  const state = { run_id: 'run-1', attempts: [
+    { attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(10 * SEC) } },
+    { attempt_id: 'att-2', kind: 'node', node: 'b', started_at: iso(0), envelope: { ended_at: iso(4 * SEC) } }] };
+  const records = [rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', api_ms: 6000, models_used: ['claude-sonnet-x'] }),
+    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', source_execution_id: 'second', models_used: ['claude-haiku-x', 'claude-sonnet-x'] }),
+    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-2' }), null];
+  const m = evaluateRun(attachUsage(build('T1', 'run-1'), records.filter(Boolean)), { state, records });
+  const by = Object.fromEntries(m.attempt_timing.map((a) => [a.attempt_id, a]));
+  assert.deepEqual(by['att-1'].models_used, ['claude-haiku-x', 'claude-sonnet-x']);
+  assert.equal('models_used' in by['att-2'], false);
+  assert.equal(by['att-1'].api_ms, 6000, 'api_ms still comes from the first record that has it');
+});
+
+test('S-04a1 normUtc: an offset stamp is normalised to UTC in intervals and open intervals; a Z stamp is unchanged', () => {
+  const at = (ms, off) => (off ? new Date(Date.UTC(2026, 0, 1) + ms).toISOString().replace('Z', '').replace(/T(\d\d)/, (_, h) => `T${String((+h + 2) % 24).padStart(2, '0')}`).replace(/\.000$/, '.000') + '+02:00' : iso(ms));
+  const mk = (id, name, s, e, off) => { const b = { schema, ticket: 'T', run_id: 'run-1', event_id: id, kind: 'activity', name, metrics: {} };
+    return [{ ...b, event: 'start', timestamp: at(s, off) }, { ...b, event: 'end', timestamp: at(e, off), duration_ms: e - s, outcome: 'pass' }]; };
+  const run = buildRun('T', 'run-1', [...mk('a', 'x', 1000, 5000, true), ...mk('b', 'y', 1000, 5000, false),
+    { schema, ticket: 'T', run_id: 'run-1', event_id: 'c', kind: 'activity', name: 'z', metrics: {}, event: 'start', timestamp: at(7000, true) }]);
+  assert.equal(run.intervals[0].started_at, iso(1000));
+  assert.equal(run.intervals[0].ended_at, iso(5000));
+  assert.equal(run.intervals[1].started_at, iso(1000), 'a Z stamp is returned unchanged');
+  assert.equal(run.open_intervals[0].started_at, iso(7000));
+  assert.equal(run.intervals[0].duration_ms, 4000);
+});
+
+test('S-04a1 normUtc: negative, fractional and colon-less offsets convert; a malformed stamp is returned unchanged', async () => {
+  const { normUtc } = await import('./run-summary.mjs');
+  assert.equal(normUtc('2026-01-01T05:30:00.000+05:30'), '2026-01-01T00:00:00.000Z');
+  assert.equal(normUtc('2026-01-01T00:00:00.000-0200'), '2026-01-01T02:00:00.000Z');
+  assert.equal(normUtc('2026-01-01T00:00:00.000-02:00'), '2026-01-01T02:00:00.000Z');
+  assert.equal(normUtc('2026-13-99T00:00:00+02:00'), '2026-13-99T00:00:00+02:00');
+  assert.equal(normUtc('2026-01-01T00:00:00.000Z'), '2026-01-01T00:00:00.000Z');
+  assert.equal(normUtc(undefined), undefined);
+});
+
+// T-C1: the legacy figures of old logs (no offsets, models or unfinished rounds) are byte-identical to origin/main.
+// The golden is captured from the base commit by legacy-golden.mjs (git archive, never the working tree); this test replays the
+// same capture on the candidate scripts. Fixtures: legacy-golden.capture.test-helper.mjs (engine units, attempts with api/other time,
+// parallel groups, 3-round runs, 21 single-round runs so P50 and P95 are computed, resources, usage, the S-27-min legacy engine state,
+// plus the eval CLI and `run-log summary`).
+test('T-C1 legacy golden: eval, run-summary and run-log summary output for old logs is byte-identical to the origin/main capture', async () => {
+  const { capture, FROZEN_NOW } = await import('./legacy-golden.capture.test-helper.mjs');
+  const { BASE_SHA, GOLDEN } = await import('./legacy-golden.mjs');
+  const golden = JSON.parse(readFileSync(GOLDEN, 'utf8'));
+  assert.equal(golden.base_sha, BASE_SHA);
+  assert.equal(BASE_SHA, '752371eb91a2df5568bf7a455d1ccb3d635dd687', 'the baseline is origin/main 752371e (ASTF-21 merge), never re-pointed to candidate code');
+  const got = await capture(dirname(fileURLToPath(import.meta.url)));
+  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(golden.data, null, 1));
+  // The fixtures really exercise the figures (a golden of unknowns would pass vacuously).
+  const t1 = got.library.runs.find((r) => r.ticket === 'T1');
+  assert.ok(t1.units && Object.keys(t1.units).length === 2 && t1.peak_rss_mb === 640 && t1.attempt_timing[0].api_ms === 60000);
+  assert.equal(got.library.cross_run.review_round_wall_ms.p95 > 0, true);
+  assert.equal(typeof got.library.cross_run.review_round_wall_ms.p50, 'number');
+  assert.ok(t1.review_rounds.length === 3 && t1.review_rounds.some((r) => r.missing_roles.length));
+  assert.ok(got.summary_cli.runs.some((r) => r.missing_review_intervals.count > 0) && got.summary_cli.runs.some((r) => r.parallel_groups.length));
+  // The carrier fixture must be VALID in the base code, or the carrier figures would be captured as rejected rows (vacuous guard).
+  assert.deepEqual(got.summary_cli.integrity_warnings, []);
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'T1').open_state, 'active_or_unexpected_stop');
+  assert.ok(got.summary_cli.runs.find((r) => r.ticket === 'T1').intervals.some((i) => i.carrier_timing));
+  assert.ok(t1.review_rounds.some((r) => r.intervals.some((i) => i.basis === 'carrier' && i.collection_delay_ms === 10000)));
+  assert.deepEqual(got.summary_cli.runs.find((r) => r.ticket === 'T1').parallel_groups.map((p) => p.timing_basis), ['carrier']);
+  // The frozen clock makes the age of the oldest open interval an exact figure.
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').open_intervals.length, 2);
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').oldest_open_age_ms, FROZEN_NOW - Date.UTC(2026, 0, 1, 0, 0, 10));
+  assert.deepEqual(t1.truncated_outputs, [{ attempt_id: 'att-3', kind: 'node', node: 'c', stdout_bytes: 1234 }]);
+  assert.deepEqual(got.summary_cli.runs.map((r) => r.open_state).filter((v, i, a) => a.indexOf(v) === i).sort(), ['active_or_unexpected_stop', 'closed', 'planning_or_approval', 'waiting']);
+  assert.equal(got.summary_cli.aggregate.standard_review_median_ms > 0 && got.summary_cli.aggregate.elevated_review_median_ms > 0, true);
+  assert.equal(got.summary_cli.aggregate.primary_degradations_observed, 1);
+  assert.equal(got.summary_cli.aggregate.optional_degradations_observed, 1);
+  assert.equal(got.summary_cli.aggregate.failed_runs, 1);
+  assert.notEqual(got.summary_cli.aggregate.standard_review_median_ms, got.summary_cli.aggregate.elevated_review_median_ms);
+  // A carrier-timed interval whose carrier span (710-790 s, 80 s) differs from the logger span (700-800 s, 100 s): the carrier span wins.
+  const primary = t1.review_rounds.find((r) => r.review_execution === 'review-a').intervals.find((i) => i.role === 'primary');
+  assert.deepEqual([primary.basis, primary.duration_ms, primary.collection_delay_ms], ['carrier', 80000, 10000]);
+  assert.equal(t1.review_rounds.find((r) => r.review_execution === 'review-a').overlap_ms, 80000);
+  // Two distinct open starts in one run (10 s and 30 s): the age is measured from the oldest.
+  assert.equal(got.policy_refusal.status, 1);
+  assert.match(got.policy_refusal.stderr, /policy_version_unsupported/);
+});
+
+test('T-C1 generator: re-captures the golden from the pinned base even under hostile GIT_* variables, and reproduces the committed golden', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'legacy-gen-'));
+  try {
+    const out = join(dir, 'golden.json');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const r = spawnSync(process.execPath, [join(here, 'legacy-golden.mjs'), '--out', out], { encoding: 'utf8',
+      env: { ...process.env, GIT_DIR: join(dir, 'not-a-repo'), GIT_WORK_TREE: dir, GIT_INDEX_FILE: join(dir, 'idx') } });
+    assert.equal(r.status, 0, r.stderr);
+    const { lf } = await import('./legacy-golden.mjs');
+    assert.equal(lf(readFileSync(out, 'utf8')), lf(readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8')), 'the committed golden is exactly what the base produces');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

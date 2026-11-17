@@ -187,7 +187,7 @@ identity metrics, an invalid `gap_reason` or an oversized value refuse a start; 
 `skill_revision` or ceiling never refuses: it is recorded as `unknown` and reported
 `unknown`; do not retry or wait on it, because the REVIEW phase start row is what
 authorizes a REPAIR. Time covered by no interval: end the phase with
-`--metric gap_reason=no_start_stamp|wait|unknown`. `summary` reports
+`--metric gap_reason=no_start_stamp|wait|host_sleep|unknown` (a start refuses any other value). On an `end`, an invalid, over-long (over 512 characters), multi-line or repeated `gap_reason` or `skill_revision` is recorded as `unknown` with a stderr note naming the rejected value, so such a value cannot leave the interval open; the identity metrics (`candidate_id`, `review_execution`) stay strict, and an end is still refused for other malformed input (an unknown interval, a bad `--metric` form). `summary` reports
 `missing_review_intervals` (a count; `unknown` without execution IDs; `at_least` with a
 known sum when some runs are unknown).
 
@@ -361,3 +361,21 @@ Investigate an old open phase with no open wait against transcript/carrier
 evidence before calling it a continuation defect. For the next full-stack trial,
 check provenance, enforced deadlines, complete counters and real timing sources
 first; do not rerun shipped tickets merely to fill missing telemetry.
+
+## Legacy-path telemetry notes (ASTF-42 S-04a1)
+
+- `eval` `attempt_timing[].models_used` (sorted) appears only when a usage record joined to the attempt names a model; absent means unknown. `usage.mjs` records carry the same optional string array.
+- `eval` `review_round_wall_ms.excluded_unknown` also counts rounds with an unfinished interval or an open REVIEW phase: their truncated wall still prints on the round but never enters the percentiles.
+- Stamps with a non-Z offset (for example `+02:00`) are normalised to UTC in `intervals` and `open_intervals`; Z stamps are untouched.
+- The legacy figures of logs without offsets, models or unfinished rounds are guarded by `legacy-figures.golden.json`, captured from origin/main by `legacy-golden.mjs` (maintainer only; it archives the pinned base commit, never the working tree).
+
+Deferred to S-04a2 (relay `exit`/`usage` import, removed from S-04a1 after two failed confirmations of the same defect class): the event
+contract must define a CLOSED set of known usage keys with an explicit unknown-key rule, and settle these surviving defects. Inherited
+property names (`constructor`, `__proto__`, `toString`) must not index the key table. A cap on kept unknown counters must report the
+omitted count rather than drop silently. Claude's nested `output_tokens_details.thinking_tokens` needs a mapping or an explicit
+"not imported". `exit` and `usage` must be validated when a log row is read (`validCarrierTiming`). Nested numerics (for example `output_tokens_details`) need an explicit decision too. Both relays' real result shapes
+need fixtures (the Codex relay writes no `usage` today). Until then carrier timing imports only the whitelisted timing/status fields.
+
+Known limit of the END leniency (S-04a1): an invalid or repeated `gap_reason` or `skill_revision` on an `end` is recorded as `unknown` and, because
+start and end metrics merge with the end winning, it overwrites a valid value declared at the start of the same interval. The stderr note
+names the rejected value; omitting the key instead is a candidate refinement for S-04a2.

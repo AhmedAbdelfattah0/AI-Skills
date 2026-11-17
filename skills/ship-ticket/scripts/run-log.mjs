@@ -33,7 +33,7 @@ function usage() {
 Kinds: workflow, phase, activity, wait
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
-metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|unknown
+metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|host_sleep|unknown
 names unaccounted time. Summary reports missing_review_intervals (count or "unknown").
 Optional start/end: --carrier-result <result.json> binds a fresh relay result at
 dispatch and imports its timing on completion. Start requires candidate_id and
@@ -112,7 +112,22 @@ function stringMetric(raw) {
   return raw;
 }
 
-function parseMetrics(values) {
+/**
+ * END-path review telemetry that is validated but must never refuse the end: a refused end leaves its interval (a REVIEW phase
+ * open forever). An invalid, over-long, multi-line or repeated value is recorded as `unknown` with a stderr diagnostic.
+ * Identity metrics (candidate_id, review_execution) stay strict: they are bindings, not telemetry.
+ */
+const LENIENT_END_KEYS = Object.freeze(['gap_reason', 'skill_revision']);
+function lenientEndMetric(metrics, key, value) {
+  const valid = key === 'gap_reason' ? GAP_REASONS.includes(value) : SKILL_REVISION.test(value);
+  const repeated = Object.hasOwn(metrics, key);
+  if (valid && !repeated) { metrics[key] = value; return; }
+  metrics[key] = 'unknown';
+  const why = repeated ? 'repeated' : key === 'gap_reason' ? `not one of: ${[...GAP_REASONS].join(', ')}` : 'not a valid revision';
+  process.stderr.write(`run-log: ${key} recorded as unknown (${why}; got ${JSON.stringify(value.slice(0, 40))})\n`);
+}
+
+function parseMetrics(values, { lenientGap = false } = {}) {
   const metrics = {};
   for (const item of values) {
     const separator = item.indexOf('=');
@@ -120,6 +135,7 @@ function parseMetrics(values) {
     const key = item.slice(0, separator);
     const value = item.slice(separator + 1);
     if (!SAFE_METRIC.test(key)) fail(`invalid metric key: ${key}`);
+    if (lenientGap && LENIENT_END_KEYS.includes(key)) { lenientEndMetric(metrics, key, value); continue; }
     if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
     metrics[key] = STRING_METRICS.includes(key) ? stringMetric(value) : parseMetricValue(value);
     if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
@@ -360,7 +376,7 @@ function end(options) {
     }
     fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
   }
-  const metrics = parseMetrics(options.metric);
+  const metrics = parseMetrics(options.metric, { lenientGap: true });
   for (const key of ['candidate_id', 'review_execution']) {
     if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
   }
