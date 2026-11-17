@@ -43,6 +43,27 @@ The Report block is a fenced `ship-ticket-report` example with exactly the keys 
 `blockers` and `needs_outside_ownership`; with `--t0` there is a fifth key `t0` (`{result, checks:[{name, result}]}`).
 The format is the one in `references/execution-harness.md`.
 
+## Builder quality rules
+
+Put these in every brief's Notes, or point the worker here. They are first-pass rules, so review has less to find.
+
+- **Size the slice.** At most 6 production files or about 500 lines, 6 acceptance criteria, 3 metrics and
+  1 new semantic mechanism. A contract and the calculation that uses it are separate slices. Each slice has
+  output that stands alone. Over a limit: split the DAG node before BUILD.
+- **Reuse before implementation.** Before building generic infrastructure, evaluate the native API, an
+  in-repo module and a mature library, in that order. Custom code needs a one-line justification in the
+  report and the Reuse inventory.
+- **Verify the invariant, not the instance.** When a defect class could recur (an escape, a path check, an
+  ordering rule), write one generic test over all surfaces plus a mutation check that makes it fail, not a
+  patch for the case a reviewer cited.
+- **Decode strictly.** Never decode on-disk names or git output lossily (no replacement characters); fail
+  on invalid bytes.
+- **Tests do not time.** No wall-clock assertions, no sleeps as synchronisation, no shared temp names, no
+  dependence on scheduler order: use injected clocks, barriers, readiness files written after the guarded
+  state exists, and a unique temp directory per test. See `references/prove.md` (Test reliability).
+- **Run targeted checks while building** and leave the full suite to final verification.
+- **Open an early draft PR** when the change must pass the 3-OS CI, so a platform failure shows before REVIEW.
+
 ## Base drift
 
 Record the base SHA at `init`; leave `config.base` as is. At BUILD start, before freeze
