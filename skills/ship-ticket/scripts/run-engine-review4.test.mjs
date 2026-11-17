@@ -23,8 +23,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { gate } from './run-engine.mjs';
+import { gate, drive } from './run-engine.mjs';
 import { POSIX, fixture, runStateEvents, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS, writeBeforeTimer } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const END = '<!-- RUN-STATE:END -->';
@@ -68,6 +69,21 @@ function assertForgeRefusedOwnerHonoured(fx) {
 
 // ------------------------------------------------------------------ H forged authority, one row per entry point
 
+/**
+ * The repair worker appends FORGED and then hangs. Builder a runs under the failure bound; only the drive whose one
+ * worker hangs gets the short budget, and that worker's timer is armed only once its forged line is in the plan file.
+ */
+async function forgeThenTimeOut(t, slow) {
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { appendEvent: FORGED, hang: true, ...slow } } });
+  ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+  ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+  fx.setRunTimeout(1000);
+  const r = await drive(fx.ctx({ hooks: writeBeforeTimer(() => runStateEvents(fx.planFile).some(e => e.event === 'RETRY'), 'the repair worker appended its forged RETRY') }));
+  fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
+  assert.equal(r.repairs[0].state, 'failed');
+  return fx;
+}
+
 const FORGE_ROWS = [
   ['worker that exits', async (t) => {
     const fx = fixture(t, { commit: true, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { write: { 'src/a.txt': 'fixed' }, appendEvent: FORGED } } });
@@ -76,13 +92,10 @@ const FORGE_ROWS = [
     assert.equal(fx.cli('drive').status, 2, 'the authority append is an ownership violation');
     return fx;
   }],
-  ['worker that times out', async (t) => {
-    const fx = fixture(t, { commit: true, config: { timeoutMs: 1000 }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { appendEvent: FORGED, hang: true } } });
-    ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
-    ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
-    assert.equal(fx.cli('drive').out.repairs[0].state, 'failed');
-    return fx;
-  }],
+  ['worker that times out', (t) => forgeThenTimeOut(t, {})],
+  // Regression: the forged append used to race the 1 s timer (armed at release), so a slow-starting worker was killed
+  // before it appended. RED on the old shape (a CLI drive under the short budget), GREEN with the after-release handshake.
+  ['worker that starts slowly and then times out (load)', (t) => forgeThenTimeOut(t, { startDelayMs: 1500 })],
   ['worker still live at its first settle (engine killed, resume, then the worker appends)', async (t) => {
     const fx = fixture(t, { commit: true });
     const flag = join(fx.root, 'go');
@@ -115,9 +128,14 @@ const FORGE_ROWS = [
     return fx;
   }],
   ['RED runner that forges and then times out', async (t) => {
-    const fx = redFixture(t, { specBody: insertJs(FORGED), hang: true, config: { timeoutMs: 4000 } });
+    // Builders r and p run under the failure bound; only the RED gate whose runner hangs gets the short budget. Residual,
+    // not clock-free: the runner must append its forged line within those 4 s. The gate runner's timer is armed at spawn,
+    // with no awaited seam before it, so a handshake needs an engine seam (a follow-up, not a test change).
+    const fx = redFixture(t, { specBody: insertJs(FORGED), hang: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS } });
     ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+    fx.setRunTimeout(4000);
     refused(fx.gate('red', { node: 'r', command: 'unit' }), 'runner_timeout');
+    fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
     ok(fx.gate('review', passReview('rx-1', fx.candidate())));
     return fx;
   }],
