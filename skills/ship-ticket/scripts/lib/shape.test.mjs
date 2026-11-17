@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +70,12 @@ test('work stops promptly: a wide object under maxNodes 1 or maxProblems 1 is no
   validate(probe, { object: {} }, { maxNodes: 1 }); assert.equal(keysSeen, 1);
 });
 
+test('work is charged for every schema field examined, present or not', () => {
+  const fields = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, '?string']));
+  assert.deepEqual(codes({}, { open: true, object: fields }, { maxNodes: 1 }), [':too_large']);
+  assert.deepEqual(codes({}, { open: true, object: fields }), []);
+});
+
 test('schema modifiers are own properties: a polluted Object.prototype does not loosen a schema', () => {
   try {
     for (const k of ['open', 'nullable', 'optional']) Object.prototype[k] = true;
@@ -127,7 +133,7 @@ test('hostile: deep nesting and cycles are bounded, with no stack overflow', () 
   assert.ok(codes(deep, S).includes(`${'/0'.repeat(LIMITS.maxDepth + 1)}:too_deep`));
   assert.deepEqual(codes(deep, S, { maxDepth: 3 }), ['/0/0/0/0:too_deep']);
   assert.ok(validate(deep, S, { maxDepth: 1e9 }).problems.length >= 1); // a huge maxDepth overflows the engine stack: reported, never thrown
-  assert.ok(depthOf(deep) > LIMITS.maxDepth);
+  assert.equal(depthOf(deep), LIMITS.maxDepth + 1); assert.equal(depthOf(deep, 5), 6); // stops as soon as the limit is passed
   const cyc = {}; cyc.self = cyc; assert.ok(depthOf(cyc) > LIMITS.maxDepth);
   assert.equal(depthOf(null), 0); assert.equal(depthOf([]), 1); assert.equal(depthOf({ a: [{}] }), 3);
   assert.equal(depthOf(deep, 1e9, 1000), Infinity);
@@ -240,7 +246,7 @@ const MUTANTS = [
   ['getter invoked', "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    if (!('value' in d)) add(ctx, 'accessor'); else shapeProblem$walk(d.value, s, ctx);", "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    shapeProblem$walk(v[k], s, ctx);"],
   ['array hole accepted', "if (!d) add(ctx, 'sparse'); else if", "if (!d) { /* hole accepted */ } else if"],
   ['array size cap removed', "if (!(n <= ctx.maxItems)) return add(ctx, 'too_large');", ""],
-  ['node budget removed', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; }", ""],
+  ['node budget removed', "  if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; }\n  if (ctx.stack", "  if (ctx.stack"],
   ['depth cap removed', "if (ctx.stack.length > ctx.maxDepth) { add(ctx, 'too_deep'); return; }", ""],
   ['throw not caught', "catch { ctx.stack.length = depth; add(ctx, 'unreadable'); }", "catch (e) { throw e; }"],
   ['NaN is a number', "typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number'"],
@@ -259,8 +265,9 @@ const MUTANTS = [
   ['problem list unbounded', "if (ctx.problems.length >= ctx.maxProblems) ctx.done = true;", ""],
   ['unknown-key loop ignores the problem cap', "if (ctx.done) break;\n    if (++ctx.nodes", "if (++ctx.nodes"],
   ['unknown-key loop ignores the node budget', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; break; }", ""],
-  ['depthOf work budget removed', "if (++work > maxNodes) return Infinity;", ""],
-  ['depthOf default budget infinite', "maxNodes = LIMITS.maxNodes) {\n  let max = 0, work", "maxNodes = Infinity) {\n  let max = 0, work"],
+  ['schema-field loop ignores the node budget', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; } // every schema field examined", "// every schema field examined"],
+  ['depthOf work budget loosened 1000x', "if (++work > maxNodes) return Infinity;", "if (++work > maxNodes * 1000) return Infinity;"],
+  ['depthOf default budget x4', "maxNodes = LIMITS.maxNodes) {\n  let max = 0, work", "maxNodes = LIMITS.maxNodes * 4) {\n  let max = 0, work"],
   ['array length read through a trap', "const ld = Reflect.getOwnPropertyDescriptor(v, 'length');", "const ld = { value: v.length };"],
   ['array length not validated', "|| !Number.isSafeInteger(ld.value) || ld.value < 0", ""],
   ['schema modifiers read inherited', "const mod = (s, k) => (Object.hasOwn(s, k) ? s[k] : undefined);", "const mod = (s, k) => s[k];"],
@@ -268,20 +275,43 @@ const MUTANTS = [
   ['pointer escaping dropped', ".replace(/~/g, '~0').replace(/\\//g, '~1')", ""],
   ['unknown key not cut', "k.slice(0, 40)", "k"],
 ];
-test('mutation: every mutant of shape.mjs is killed by this file', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
-  const src = readFileSync(join(HERE, 'shape.mjs'), 'utf8');
+const CHILD_ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' };
+/** Run this file against `mutatedSrc` in a temp copy of the whole scripts dir (every module the test imports, e.g. ci-snapshot.mjs) -> raw spawn result. */
+function runMutant(mutatedSrc) {
   const dir = mkdtempSync(join(tmpdir(), 'shape-mut-'));
-  const survivors = [];
   try {
-    for (const [name, from, to] of MUTANTS) {
-      assert.equal(src.split(from).length - 1, 1, `mutant "${name}": anchor must occur exactly once`);
-      rmSync(join(dir, 'lib'), { recursive: true, force: true }); mkdirSync(join(dir, 'lib'));
-      writeFileSync(join(dir, 'lib', 'shape.mjs'), src.replace(from, to));
-      copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs'));
-      const r = spawnSync(process.execPath, ['--test', join(dir, 'lib', 'shape.test.mjs')], { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' }, encoding: 'utf8', timeout: 20000 });
-      const killed = r.status === 1 && /^not ok /m.test(r.stdout) || r.error?.code === 'ETIMEDOUT'; // a failing assertion, or a hang the guard existed to prevent; a crash or OOM is not a kill
-      if (!killed) survivors.push(`${name} (status ${r.status})`);
-    }
+    mkdirSync(join(dir, 'lib'));
+    for (const f of readdirSync(join(HERE, '..'))) if (f.endsWith('.mjs') && !f.endsWith('.test.mjs')) copyFileSync(join(HERE, '..', f), join(dir, f));
+    writeFileSync(join(dir, 'lib', 'shape.mjs'), mutatedSrc);
+    copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs'));
+    return spawnSync(process.execPath, ['--test', join(dir, 'lib', 'shape.test.mjs')], { env: CHILD_ENV, encoding: 'utf8', timeout: 60000 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
-  assert.deepEqual(survivors, [], 'surviving mutants');
+}
+/** 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error, a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'. */
+function classify(r) {
+  if (r.error || r.signal || r.status === null) return { verdict: 'invalid', failing: [], why: String(r.error?.code ?? r.signal ?? 'no status') };
+  const blocks = r.stdout.split(/^not ok /m).slice(1);
+  if (r.status === 0 && blocks.length === 0) return { verdict: 'survived', failing: [] };
+  const failing = blocks.map((b) => b.split('\n')[0].replace(/^\d+ - /, '')), nonAssert = blocks.filter((b) => !/code: 'ERR_ASSERTION'/.test(b));
+  if (blocks.length === 0 || nonAssert.length || /ERR_MODULE_NOT_FOUND|SyntaxError/.test(r.stdout + r.stderr)) return { verdict: 'invalid', failing, why: 'non-assertion failure' };
+  return { verdict: 'killed', failing };
+}
+const SRC = readFileSync(join(HERE, 'shape.mjs'), 'utf8');
+test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+  assert.equal(classify(runMutant(`${SRC}\nexport const = ;`)).verdict, 'invalid'); // syntax error
+  assert.equal(classify(runMutant(`import './does-not-exist.mjs';\n${SRC}`)).verdict, 'invalid'); // module not found
+  assert.equal(classify(runMutant(`${SRC}\nthrow new Error('boom');`)).verdict, 'invalid'); // load-time throw
+  assert.equal(classify(runMutant(SRC)).verdict, 'survived');
+  assert.equal(classify(runMutant(SRC.replace(MUTANTS[0][1], MUTANTS[0][2]))).verdict, 'killed');
+  assert.equal(classify({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }).verdict, 'invalid'); // timeout / crash
+});
+test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+  const bad = [];
+  for (const [name, from, to] of MUTANTS) {
+    assert.equal(SRC.split(from).length - 1, 1, `mutant "${name}": anchor must occur exactly once`);
+    const c = classify(runMutant(SRC.replace(from, to)));
+    console.log(`# mutant ${c.verdict}: ${name} <- ${c.failing.slice(0, 3).map((n) => n.slice(0, 60)).join(' | ')}`);
+    if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict} ${c.why ?? ''}`);
+  }
+  assert.deepEqual(bad, [], 'mutants not killed by an assertion');
 });

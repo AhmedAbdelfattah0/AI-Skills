@@ -97,6 +97,7 @@ function check(v, spec, ctx) {
   }
   for (const [k, s] of Object.entries(spec.object)) {
     if (ctx.done) return;
+    if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; } // every schema field examined is work, present or not
     const d = Reflect.getOwnPropertyDescriptor(v, k);
     if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }
     ctx.stack.push(k);
