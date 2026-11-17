@@ -86,26 +86,30 @@ export function processGone(pid) {
   return r.stdout.trim().startsWith('Z');
 }
 
-/** Names whose value is a failure bound (>= WORKER_FAILURE_BOUND_MS), so `timeoutMs: <name>` never races a worker. */
-export const BOUND_NAMES = new Set(['WORKER_FAILURE_BOUND_MS', 'BUDGET_MS']);
+/** The one name trusted as a failure bound everywhere. Any other name is resolved from its `const NAME = <number>` in the same file. */
+export const BOUND_NAMES = new Set(['WORKER_FAILURE_BOUND_MS']);
 
 /**
- * Every `timeoutMs: <value>` in the given test sources whose value is a number below WORKER_FAILURE_BOUND_MS
- * or a name not in BOUND_NAMES: { file, line, text }. A run-wide timeoutMs bounds every worker and the
- * proof and check runners, so a short one is only for a DAG that is validated and never driven, a
- * function-level input with a fake runner, or a run whose every attempt hangs; anything else sets it
- * short only around the hanging step (fixture setRunTimeout). `sources` is [{ file, text }].
+ * Every `timeoutMs: <value>` in the given test sources whose value is a number below WORKER_FAILURE_BOUND_MS, or a
+ * name that is not WORKER_FAILURE_BOUND_MS and does not resolve, in that file, to a constant at least that large:
+ * { file, line, text }. Also every `setRunTimeout(<short>)` in a file with fewer restoring
+ * `setRunTimeout(WORKER_FAILURE_BOUND_MS)` calls than short ones ({ file, line: 0, text: 'unpaired setRunTimeout' }).
+ * A run-wide timeoutMs bounds every worker and the proof and check runners, so a short one is only for a DAG
+ * that is validated and never driven, a function-level input with a fake runner, or a run whose every attempt
+ * hangs; anything else sets it short only around the hanging step (fixture setRunTimeout). `sources` is [{ file, text }].
  */
 export function shortRunTimeouts(sources) {
   const out = [];
   for (const { file, text } of sources) {
+    const consts = new Map([...text.matchAll(/\bconst\s+([A-Z_][A-Z0-9_]*)\s*=\s*(\d[\d_]*)\s*;/g)].map(m => [m[1], Number(m[2].replace(/_/g, ''))]));
+    const short = (v) => (/^\d/.test(v) ? Number(v.replace(/_/g, '')) < WORKER_FAILURE_BOUND_MS
+      : !BOUND_NAMES.has(v) && !((consts.get(v) ?? 0) >= WORKER_FAILURE_BOUND_MS));
+    let shortSets = 0, restores = 0;
     text.split('\n').forEach((line, i) => {
-      for (const m of line.matchAll(/\btimeoutMs:\s*([A-Za-z_$][\w$]*|\d[\d_]*)/g)) {
-        const v = m[1];
-        const short = /^\d/.test(v) ? Number(v.replace(/_/g, '')) < WORKER_FAILURE_BOUND_MS : !BOUND_NAMES.has(v);
-        if (short) out.push({ file, line: i + 1, text: line.trim() });
-      }
+      for (const m of line.matchAll(/\btimeoutMs:\s*([A-Za-z_$][\w$]*|\d[\d_]*)/g)) if (short(m[1])) out.push({ file, line: i + 1, text: line.trim() });
+      for (const m of line.matchAll(/\bsetRunTimeout\(\s*([A-Za-z_$][\w$]*|\d[\d_]*)\s*\)/g)) { if (short(m[1])) shortSets++; else restores++; }
     });
+    if (shortSets > restores) out.push({ file, line: 0, text: 'unpaired setRunTimeout' });
   }
   return out;
 }

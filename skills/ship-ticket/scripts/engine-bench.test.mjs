@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, rmSync, cpSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep, relative } from 'node:path';
-import { buildNodes } from './engine-bench.mjs';
-import { runScenarios, peakConcurrency } from './engine-bench-scenarios.mjs';
+import { buildNodes, scenarioExit } from './engine-bench.mjs';
+import { runScenarios, peakConcurrency, judgePair, ADMISSION_ENV } from './engine-bench-scenarios.mjs';
 import { loadRecord, referenceBytes, sections } from './load-record.mjs';
 
 const BENCH = fileURLToPath(new URL('./engine-bench.mjs', import.meta.url));
@@ -30,6 +30,40 @@ test('the bench CLI runs both modes to completion and reports numeric counts', {
     assert.equal(out[mode].nodes_completed, 3, mode);
     for (const k of ['orchestrator_commands', 'bytes_read', 'wall_ms']) assert.equal(typeof out[mode][k], 'number', `${mode}.${k}`);
   }
+});
+
+// ------------------------------------------------------------------ ENVIRONMENT never masks a genuine failure
+
+const PAIR_BOUND = ['outcome_done', 'peak_at_least_2'];
+const judged = (checks, facts) => judgePair({ checks, pairBound: PAIR_BOUND, pairMembers: ['p1', 'p2'], refusedNodes: ['p2'], failedNodes: ['p1'], ...facts });
+
+test('judgePair: a refusal-only shortfall is ENVIRONMENT (ok null, never a pass); every check passing is a pass', () => {
+  assert.deepEqual(judged({ outcome_done: false, peak_at_least_2: false, plain_done: true }), { ok: null, environment: ADMISSION_ENV, failing: ['outcome_done', 'peak_at_least_2'] });
+  assert.deepEqual(judged({ outcome_done: true, peak_at_least_2: true, plain_done: true }, { refusedNodes: ['p2'] }), { ok: true, failing: [] }, 'a refusal that cost nothing is a pass');
+});
+
+test('judgePair: a genuine failure beside a refusal stays a FAILURE', () => {
+  const cases = [
+    ['an independent check fails', { outcome_done: false, peak_at_least_2: false, plain_done: false }, {}],
+    ['a node outside the pair failed', { outcome_done: false, peak_at_least_2: false, plain_done: true }, { failedNodes: ['p1', 'plain'] }],
+    ['the refused node is not a pair member', { outcome_done: false, peak_at_least_2: false, plain_done: true }, { refusedNodes: ['plain'] }],
+    ['no refusal at all', { outcome_done: false, peak_at_least_2: true, plain_done: true }, { refusedNodes: [] }],
+    ['a check is undefined (not true)', { outcome_done: true, peak_at_least_2: true, plain_done: undefined }, {}],
+  ];
+  for (const [why, checks, facts] of cases) {
+    const j = judged(checks, facts);
+    assert.equal(j.ok, false, why);
+    assert.equal(j.environment, undefined, why);
+  }
+});
+
+test('scenarioExit: failure 1 (also beside an ENVIRONMENT result, and for a missing ok), ENVIRONMENT only 3, all pass 0', () => {
+  const env = { ok: null, environment: ADMISSION_ENV };
+  assert.equal(scenarioExit([{ ok: true }, { ok: false }, env]), 1);
+  assert.equal(scenarioExit([{ ok: true }, {}]), 1, 'a missing ok is a failure');
+  assert.equal(scenarioExit([{ ok: true }, { ok: null }]), 1, 'ok null without an environment code is a failure');
+  assert.equal(scenarioExit([{ ok: true }, env]), 3);
+  assert.equal(scenarioExit([{ ok: true }, { ok: true }]), 0);
 });
 
 // ------------------------------------------------------------------ ten scenarios (engine-bench-scenarios.mjs)

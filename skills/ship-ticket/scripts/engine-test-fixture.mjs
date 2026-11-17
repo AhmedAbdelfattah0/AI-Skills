@@ -36,7 +36,7 @@ export function gitPath(repo, rel) {
  *   (inserts that event inside RUN-STATE), appendRaw <text> (inserts those exact bytes), appendLate {event} (the same, just before the worker
  *   finishes, e.g. after waitFor), editPlan (edits the
  *   narrative), breakGit (makes `git status` fail), sleeper <pidfile> (leaves a background
- *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open),
+ *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open until killed),
  *   killGroup, exit <code>, hang, delayMs <ms> (finishes normally after that long: a slow worker), waitFor <file>.
  */
 export const FAKE_CLI = (root) => `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -65,7 +65,8 @@ if (b.sleeper) {
   writeFileSync(b.sleeper, String(s.pid)); s.unref();
 }
 if (b.holdStdout) {
-  const h = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: ['ignore', 'inherit', 'ignore'] });
+  // Lives until killed (never ends by itself), so a launcher that waited for stdout to close could only end by the timer.
+  const h = spawn(process.execPath, ['-e', 'setInterval(() => {}, 2147483647)'], { stdio: ['ignore', 'inherit', 'ignore'] });
   writeFileSync(b.holdStdout, String(h.pid)); h.unref();
 }
 function finish() {
@@ -242,7 +243,7 @@ export function runLogEvents(file) {
 export async function waitUntil(pred, ms = 6000) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (await pred()) return true; await delay(50); }
-  return false;
+  return Boolean(await pred()); // one last look: a stalled event loop must not turn a reached state into a timeout
 }
 
 /** A complete review.md primary artifact (non-empty coverage, criteria and rule rows). */
