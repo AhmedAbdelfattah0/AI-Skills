@@ -29,7 +29,7 @@
  * declaration invalid (fail closed), never a silent non-match. Directory semantics (git-style): a pattern matches a path if it matches the
  * path OR ANY ANCESTOR of it, so `db/migrations`, `db/migrations/` and `db/migrations/**` all cover `db/migrations/1.sql`; a pattern without
  * an inner `/` matches at any depth. Only the PATTERN's `*` is a wildcard: a filename containing `*`, `?` or `[` is plain text. Matching is
- * case-INSENSITIVE (Unicode full case folding: sigma, sharp s, dotted I), NFC-normalised, ignores default-ignorable (Cf) characters; in a PATH `\` counts as `/`, `./` and `.` segments are dropped,
+ * case-INSENSITIVE (per-code-point Unicode case folding: sigma, sharp s, dotted I; over-matching folds such as the ligature fi are accepted), NFC-normalised, ignores default-ignorable (Cf) characters; in a PATH `\` counts as `/`, `./` and `.` segments are dropped,
  * and a `..` segment or an absolute path is malformed (over-classifying is accepted, under-classifying is not).
  * Planned entries that may denote a directory or a set (end with `/`, contain `*`, or have no `.` in the last segment) are conservative: they
  * floor ELEVATED if a declared glob matches them or may match anything below them.
