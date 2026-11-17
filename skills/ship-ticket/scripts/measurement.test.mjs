@@ -183,7 +183,10 @@ test('AC8: failed, abandoned and censored runs count in M1, M4 and M8 population
   const wf = (ticket, run, outcome, open) => (outcome === 'open' ? [{ ...pair(run, 'workflow', 'ship-ticket', day('10'), day('11'))[0], ticket }] : pair(run, 'workflow', 'ship-ticket', day('10'), day('11'), {}, outcome).map((r) => ({ ...r, ticket })));
   const mode = (ticket, run) => pair(run, 'activity', 'run_mode', day('10'), day('10'), { mode: 'engine' }).map((r) => ({ ...r, ticket }));
   const rows = [];
-  for (const [ticket, outcome] of [['T-ok', 'complete'], ['T-fail', 'fail'], ['T-aband', 'abandoned'], ['T-open', 'open']]) rows.push(...wf(ticket, `run-${ticket}`, outcome), ...mode(ticket, `run-${ticket}`));
+  for (const [ticket, outcome] of [['T-ok', 'complete'], ['T-fail', 'fail'], ['T-aband', 'abandoned'], ['T-open', 'open']]) {
+    rows.push(...wf(ticket, `run-${ticket}`, outcome), ...mode(ticket, `run-${ticket}`),
+      ...pair(`run-${ticket}`, 'activity', 'measurement_complete', day('10'), day('10'), { scopes: 'review' }).map((r) => ({ ...r, ticket })));
+  }
   // only T-ok has a first review round, and it passes both lanes
   for (const lane of ['opus', 'codex']) rows.push(...pair('run-T-ok', 'activity', 'review_round', day('10'), day('10'), { n: 1, round_kind: 'original', lane, verdict: 'PASS', majors: 0, minors: 0 }).map((r) => ({ ...r, ticket: 'T-ok' })));
   const runs = [...new Set(rows.map((r) => r.run_id))].map((id) => buildRun(rows.find((r) => r.run_id === id).ticket, id, rows.filter((r) => r.run_id === id)));
@@ -326,7 +329,7 @@ test('FIX1: events of different runs never collapse; a recovery run numbering fr
     ...wf('r2'), ...mode('r2', 'recovery', { supersedes_run_id: 'r1' }), ...gate('r2', 1, 12), ...gate('r2', 2, 13), ...round('r2', 1, 'opus'), ...round('r2', 1, 'codex'),
     ...ev('r2', 'finding', D(12), D(12), { fingerprint: 'fp', repeat: true, severity: 'Major' }), ...ev('r2', 'finding', D(13), D(13), { fingerprint: 'fp', repeat: true, severity: 'Major' }),
     ...ev('r2', 'finding', D(11), D(11), { fingerprint: 'fp', repeat: false, severity: 'Major' })];
-  const m = measure(rows);
+  const m = measure([...rows, ...done('gate,findings')]);
   assert.equal(m.tickets[TICKET].counts.gate_runs, 4);
   assert.equal(m.metrics.M2.repeat_findings, 2);
   assert.equal(m.metrics.M2.value, 1);
@@ -392,9 +395,9 @@ test('FIX3d: M8 never reports Claude as not used or a numeric total for an undec
 
 test('FIX4: M3 counts every severity; one unclassified finding keeps it partial', () => {
   const f = (fp, sev, catchable) => ev('r1', 'finding', D(11), D(11), { fingerprint: fp, repeat: false, severity: sev, ...(catchable === undefined ? {} : { builder_catchable: catchable }) });
-  const all = measure([...wf('r1'), ...mode('r1', 'engine'), ...f('a', 'Major', true), ...f('b', 'Minor', true), ...f('c', 'Minor', false)]).metrics.M3;
+  const all = measure([...wf('r1'), ...mode('r1', 'engine'), ...done('findings'), ...f('a', 'Major', true), ...f('b', 'Minor', true), ...f('c', 'Minor', false)]).metrics.M3;
   assert.equal(all.value, 2);
-  const partial = measure([...wf('r1'), ...mode('r1', 'engine'), ...f('a', 'Major', true), ...f('b', 'Minor')]).metrics.M3;
+  const partial = measure([...wf('r1'), ...mode('r1', 'engine'), ...done('findings'), ...f('a', 'Major', true), ...f('b', 'Minor')]).metrics.M3;
   assert.equal(partial.value, 'partial');
   assert.equal(partial.unclassified, 1);
   assert.equal(partial.catchable_known, 1);
@@ -462,4 +465,51 @@ test('FIX7: run-engine resume appends a run_mode recovery event; a telemetry fai
   assert.equal(r2.status, 0, r2.stdout + r2.stderr);
   assert.match(r2.stderr, /telemetry/);
   assert.ok(JSON.parse(readFileSync(fx2.stateFile(), 'utf8')).events.some((e) => e.type === 'RESUME'));
+});
+
+// ======================= repair batch 2 (confirmation review of 2c196a3) =======================
+test('FIX1b: an identical repeat re-emitted under a new event id collapses; distinct repeats stay distinct', () => {
+  const rep = (id, at) => asTicket(pair('r1', 'activity', 'finding', at, at, { fingerprint: 'fp', repeat: true, severity: 'Major' }).map((r) => ({ ...r, event_id: id })));
+  const base = [...wf('r1'), ...mode('r1', 'engine'), ...done('findings')].map((r) => ({ ...r }));
+  const same = measure([...base, ...rep('a', D(11)), ...rep('b', D(11))]);
+  assert.equal(same.metrics.M2.repeat_findings, 1);
+  assert.equal(measure([...base, ...rep('a', D(11)), ...rep('b', D(12))]).metrics.M2.repeat_findings, 2);
+});
+
+test('FIX2b: an estimated confirmation or finding makes M4 estimated', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'), ...done('review,repair'),
+    ...ev('r1', 'review_round', D(11), D(12), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0 }),
+    ...ev('r1', 'confirmation', D(13), D(13), { n: 2, label: 'estimated' })];
+  assert.equal(measure(rows).metrics.M4.label, 'estimated');
+});
+
+test('FIX3: a partial history is a lower bound, never target attainment or a full deduction', () => {
+  const rows = [...asTicket(pair('r1', 'phase', 'PLAN', D(10), D(11))), ...asTicket(pair('r1', 'phase', 'SHIP', D(18), D(20))), ...wf('r1'), ...mode('r1', 'engine'),
+    ...ev('r1', 'review_round', D(12), D(13), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0 }),
+    ...ev('r1', 'repair_batch', D(13), D(14), { n: 1 }), ...ev('r1', 'owner_decision', D(15), D(16), { n: 1 }), ...ev('r1', 'host_sleep', D(16), D(17), {}),
+    ...ev('r1', 'finding', D(12), D(12), { fingerprint: 'a', repeat: false, severity: 'Major', builder_catchable: true })];
+  const m = measure(rows).metrics;
+  assert.deepEqual(m.M4.value[TICKET].rounds, { at_least: 1 });
+  assert.equal(m.M4.tickets_within_target, 0);
+  assert.equal(m.M4.of, 0);
+  assert.equal(m.M4.label, 'estimated');
+  const b = m.M5.value[TICKET].M5b;
+  assert.deepEqual([b.human_wait_ms, b.host_sleep_ms], [{ at_least: 3600000 }, { at_least: 3600000 }]);
+  assert.deepEqual([b.awake_ms_with_wait, b.awake_ms_excluding_wait], ['unavailable', 'unavailable']);
+  assert.deepEqual(m.M2.value, { at_least: 1 });
+  assert.equal(m.M2.label, 'estimated');
+  // the same history with the scopes declared is exact and measured
+  const full = measure([...rows, ...ev('r1', 'measurement_complete', D(20), D(20), { scopes: 'review,repair,owner,sleep,findings' })]).metrics;
+  assert.equal(full.M4.value[TICKET].rounds, 1);
+  assert.deepEqual([full.M4.tickets_within_target, full.M4.of], [1, 1]);
+  assert.equal(full.M5.value[TICKET].M5b.human_wait_ms, 3600000);
+  assert.equal(full.M2.value, 1);
+});
+
+test('FIX4b: a ticket with no recorded review is unavailable for M1, not a measured failure', () => {
+  const m = measure([...wf('r1', 'fail'), ...mode('r1', 'engine')]).metrics.M1;
+  assert.equal(m.value, 'unavailable');
+  assert.equal(m.label, 'unavailable');
+  assert.equal(m.unrecorded_reviews, 1);
+  assert.equal(m.denominator, 0);
 });

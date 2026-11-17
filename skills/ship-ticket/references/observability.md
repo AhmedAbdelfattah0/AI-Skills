@@ -418,4 +418,7 @@ names): `complete` delivered, `fail` failed, `abandoned`, `open` censored. Each 
 
 Limit (AC6): `recovery` is emitted by the engine on `resume`; there is no `adopt` command in this tree. `fallback` (execution lane
 unavailable) has no engine path yet: the orchestrator runs the `event` command above by hand. It becomes automatic with the execution
-lane (S-18/S-03), so AC6 is met for recovery and only partly met for fallback.
+lane (S-18/S-03), so AC6 is PARTLY met: recovery is automatic on `resume`, fallback stays manual until the S-18 execution lane.
+`populations.run_modes` counts mode events (modes), not runs.
+
+Completeness is never inferred from a positive count. Without a `measurement_complete` scope, a count is a lower bound `{ "at_least": n }` labelled `estimated`: M4 never reports target attainment, M5 never subtracts a full sleep or wait, and M2/M3 do not claim a total. A ticket with no recorded review and no `review` scope is `unavailable` for M1 and counted in `unrecorded_reviews`. A repeat finding without `round` is identified by its fingerprint and timestamps (or an emitter-supplied `occurrence`), so an identical re-emission collapses and distinct repeats stay distinct.

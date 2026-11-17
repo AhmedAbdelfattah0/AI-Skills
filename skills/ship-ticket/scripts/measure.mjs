@@ -176,7 +176,7 @@ function logicalKey(e) {
   switch (e.name) {
     case 'review_round': return `${r}|${m.n}|${m.lane}|${m.candidate_sha ?? ''}|${m.packet_sha256 ?? ''}`;
     case 'repair_batch': case 'confirmation': case 'gate_run': case 'owner_decision': return `${r}|${m.n}`;
-    case 'finding': return `${r}|${m.fingerprint}|${m.repeat}|${m.round ?? (m.repeat ? e.event_id : '')}`;
+    case 'finding': return `${r}|${m.fingerprint}|${m.repeat}|${m.round ?? ''}|${m.repeat && m.round === undefined ? `${m.occurrence ?? ''}|${e.start}|${e.end}` : ''}`;
     case 'run_mode': return `${r}|${m.mode}`;
     case 'measurement_complete': return `${r}|${m.scopes}`;
     default: return `${r}|${e.start}|${e.end}`;
@@ -208,8 +208,9 @@ function assemble(runs, bad) {
     const by = (name) => events.filter((e) => e.name === name);
     const scopes = new Set(by('measurement_complete').flatMap((e) => e.metrics.scopes.split(',')));
     const declared = (scope) => scopes.has(scope);
-    // A count is a number only when events exist or the scope was declared complete; otherwise it was not recorded.
-    const count = (n, scope) => (n > 0 || declared(scope) ? n : UNAVAILABLE);
+    // A count is exact only when its scope was declared complete. Observed events without the declaration are a lower bound
+    // ({ at_least }); nothing observed and nothing declared is not recorded (unavailable). Never inferred from count > 0.
+    const count = (n, scope) => (declared(scope) ? n : n > 0 ? { at_least: n } : UNAVAILABLE);
     const roundNs = new Set(by('review_round').map((e) => `${e.run_id}|${e.metrics.n}`));
     const confirmNs = new Set([...by('confirmation').map((e) => `${e.run_id}|${e.metrics.n}`), ...by('review_round').filter((e) => e.metrics.round_kind === 'confirmation').map((e) => `${e.run_id}|${e.metrics.n}`)]);
     tickets[ticket] = { instrumented: events.length > 0, status: STATUS[head.outcome] ?? 'unknown', head_run_id: head.run_id, declared,
@@ -224,11 +225,14 @@ function assemble(runs, bad) {
 function m1(started) {
   const by_status = { delivered: 0, failed: 0, abandoned: 0, censored: 0 };
   const started_by_status = { ...by_status };
-  let numerator = 0, incomplete = 0;
+  let numerator = 0, incomplete = 0, unrecorded = 0, denominator = 0;
   const labels = [];
   for (const t of started) {
-    if (t.status in started_by_status) started_by_status[t.status] += 1;
     const originals = t.by('review_round').filter((e) => e.metrics.round_kind === 'original');
+    // No review recorded and none declared: whether it happened is unknown, so the ticket is unavailable for M1 (not a failure).
+    if (!originals.length && !t.declared('review') && !t.by('review_round').length) { unrecorded += 1; continue; }
+    denominator += 1;
+    if (t.status in started_by_status) started_by_status[t.status] += 1;
     if (!originals.length) continue;
     const n = Math.min(...originals.map((e) => e.metrics.n));
     const lanes = t.by('review_round').filter((e) => e.metrics.n === n && e.run_id === originals.find((o) => o.metrics.n === n).run_id);
@@ -237,9 +241,8 @@ function m1(started) {
     if (lanes.length < 2 || lanes.some((e) => e.metrics.verdict === UNAVAILABLE || !isCount(e.metrics.majors))) incomplete += 1;
     if (ok) { numerator += 1; if (t.status in by_status) by_status[t.status] += 1; }
   }
-  const denominator = started.length;
   return { value: denominator ? Math.round(numerator / denominator * 1000) / 1000 : UNAVAILABLE, numerator, denominator, by_status, started_by_status,
-    incomplete_first_rounds: incomplete, label: denominator ? worst(labels) : UNAVAILABLE };
+    unrecorded_reviews: unrecorded, incomplete_first_rounds: incomplete, label: denominator ? worst(labels) : UNAVAILABLE };
 }
 
 const SEVERE = (e) => MAJOR.has(String(e.metrics.severity).toLowerCase());
@@ -264,7 +267,10 @@ function m2m3(started) {
   const catchable = classified.filter(Boolean).length, unclassified = distinct.size - classified.length;
   const M3 = !classified.length ? { value: UNAVAILABLE, label: UNAVAILABLE, unclassified, of_distinct_findings: distinct.size }
     : { value: unclassified ? 'partial' : catchable, catchable_known: catchable, unclassified, of_distinct_findings: distinct.size, label: unclassified ? 'estimated' : labels };
-  return [{ value: majors.size, per_ticket: per, repeat_findings: findings.filter(({ e }) => e.metrics.repeat === true).length, label: labels }, M3];
+  const exact = started.every((t) => t.declared('findings'));
+  const lower = (v) => (exact ? v : { at_least: v });
+  return [{ value: lower(majors.size), per_ticket: per, repeat_findings: findings.filter(({ e }) => e.metrics.repeat === true).length, label: exact ? labels : worst([labels, 'estimated']) },
+    { ...M3, ...(known(M3.value) ? { value: lower(M3.value), label: exact ? M3.label : worst([M3.label, 'estimated']) } : {}) }];
 }
 
 function m4(started) {
@@ -272,8 +278,11 @@ function m4(started) {
     repeat_findings: t.by('finding').filter((e) => e.metrics.repeat === true).length, status: t.status }]));
   const known4 = started.filter((t) => isCount(t.counts.review_rounds) && isCount(t.counts.repair_batches));
   const within = known4.filter((t) => t.counts.review_rounds <= 2 && t.counts.repair_batches <= 1).length;
-  const labels = known4.flatMap((t) => [...t.by('review_round'), ...t.by('repair_batch')].map((e) => e.label));
-  return { value, tickets_within_target: within, of: known4.length, unrecorded_tickets: started.length - known4.length, label: known4.length ? worst(labels) : UNAVAILABLE };
+  const inputs = (t) => ['review_round', 'repair_batch', 'confirmation', 'finding'].flatMap((n) => t.by(n)).map((e) => e.label);
+  const partial = started.some((t) => [t.counts.review_rounds, t.counts.repair_batches].some((c) => c?.at_least !== undefined));
+  const labels = started.flatMap(inputs).concat(partial ? ['estimated'] : []);
+  return { value, tickets_within_target: within, of: known4.length, unrecorded_tickets: started.length - known4.length,
+    label: known4.length || partial ? worst(labels) : UNAVAILABLE };
 }
 
 const NA = (missing) => ({ value: UNAVAILABLE, label: UNAVAILABLE, missing });
@@ -285,15 +294,16 @@ function m5(started, runsOf) {
     const all = runs.flatMap((r) => r.intervals);
     const phase = (name) => all.filter((i) => i.kind === 'phase' && i.name === name);
     const sleeps = t.by('host_sleep'), waits = t.by('owner_decision');
-    const sleepKnown = sleeps.length > 0 || t.declared('sleep'), ownerKnown = waits.length > 0 || t.declared('owner');
+    const sleepKnown = t.declared('sleep'), ownerKnown = t.declared('owner');
+    const bound = (known_, v, seen) => (known_ ? v : seen ? { at_least: v } : UNAVAILABLE);
     const window = (a, b, substitutions) => {
       const sleep = spanLen(clip(sleeps.map((e) => [e.start, e.end]), [a, b]));
       const human = spanLen(clip([...sleeps, ...waits].map((e) => [e.start, e.end]), [a, b])) - sleep;
       const used = [...sleeps, ...waits].filter((e) => e.end > a && e.start < b);
       const withWait = sleepKnown ? b - a - sleep : UNAVAILABLE;
-      return { elapsed_ms: b - a, host_sleep_ms: sleepKnown ? sleep : UNAVAILABLE, human_wait_ms: ownerKnown ? human : UNAVAILABLE, awake_ms_with_wait: withWait,
+      return { elapsed_ms: b - a, host_sleep_ms: bound(sleepKnown, sleep, sleeps.length > 0), human_wait_ms: bound(ownerKnown, human, waits.length > 0), awake_ms_with_wait: withWait,
         awake_ms_excluding_wait: sleepKnown && ownerKnown ? withWait - human : UNAVAILABLE, substitutions,
-        label: worst(['estimated', ...used.map((e) => e.label), ...(sleepKnown && ownerKnown ? [] : ['unavailable'])]) };
+        label: worst(['estimated', ...used.map((e) => e.label), ...(sleepKnown && ownerKnown ? [] : ['estimated'])]) };
     };
     const headWorkflow = runs.find((r) => r.run_id === t.head_run_id)?.intervals.filter((i) => i.kind === 'workflow').at(-1);
     const begin = Math.min(...all.map((i) => Date.parse(i.started_at)), Infinity);
