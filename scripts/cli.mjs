@@ -507,6 +507,7 @@ const RETIRED_SKILLS = {
   'angular-code-quality': 'code-quality',
   'backend-code-quality': 'code-quality',
 };
+const SUCCESSORS = new Set(Object.values(RETIRED_SKILLS));
 
 // Why an existing successor directory must not be replaced, or null when it is
 // absent or ours and untouched. Never overwrites what somebody else made or edited.
@@ -525,6 +526,8 @@ function successorCollision(dst, src, record) {
 function cmdInstall(args) {
   const wantCopy = args.includes('--copy') || args.includes('-c');
   const wantLink = args.includes('--link') || args.includes('-l');
+  // --force lets install replace a successor (code-quality) that is edited or not ours.
+  const force = args.includes('--force') || args.includes('-f');
 
   // Parse --target <t1,t2|all> and --dest <path>; remaining bare words = skill names.
   const { names, targetSpec, destOverride } = parseFlags(args);
@@ -593,35 +596,33 @@ function cmdInstall(args) {
     if (!names.length) manifest.all = true;
 
     let ok = 0;
-    for (const name of targets) {
+    let collided = 0;
+    // Requested names first, then the successors their aliases need.
+    for (const [name, alias] of [...targets.map((n) => [n, null]), ...successorOf]) {
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
+      // A successor holds the rules its aliases point at. Whether it was named,
+      // part of a bare install or pulled in by an alias, never replace one that
+      // somebody edited or installed independently, unless --force says so.
+      const why = SUCCESSORS.has(name) && !force && successorCollision(dst, src, manifest.skills[name]);
+      if (why) {
+        const need = alias ? `needed by the ${alias} alias, which holds no rules — ` : '';
+        console.log(`   ! ${name}  ${need}${why}, left alone; resolve this collision or re-run with --force`);
+        process.exitCode = 1;
+        collided++;
+        continue;
+      }
       // Same build-then-swap as update: a re-install over a working skill must
       // not be able to leave a hole where that skill was.
       if (applySkill(src, dst, mode, manifest, name)) {
-        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}`);
-        ok++;
-      } else if (mode === 'link') {
-        console.error('   symlink failed — retry with --copy');
-      }
-    }
-    for (const [name, alias] of successorOf) {
-      const src = join(SKILLS_DIR, name);
-      const dst = join(dir, name);
-      const why = successorCollision(dst, src, manifest.skills[name]);
-      if (why) {
-        console.log(`   ! ${name}  needed by the ${alias} alias, which holds no rules — ${why}, left alone; resolve this collision`);
-        continue;
-      }
-      if (applySkill(src, dst, mode, manifest, name)) {
-        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}  (successor of ${alias})`);
+        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}${alias ? `  (successor of ${alias})` : ''}`);
         ok++;
       } else if (mode === 'link') {
         console.error('   symlink failed — retry with --copy');
       }
     }
     if (ok) writeManifest(dir, manifest);
-    console.log(`\n✅ [${label}] installed ${ok}/${targets.length + successorOf.size} skill(s) into ${dir}  (mode: ${mode})\n`);
+    console.log(`\n${collided ? '⚠️ ' : '✅'} [${label}] installed ${ok}/${targets.length + successorOf.size} skill(s) into ${dir}  (mode: ${mode})${collided ? `, ${collided} left alone` : ''}\n`);
   }
   if (mode === 'link') console.log(`   edits in ${SKILLS_DIR} are live everywhere they're linked.`);
   console.log(`   run "update" later to bring them up to date.`);

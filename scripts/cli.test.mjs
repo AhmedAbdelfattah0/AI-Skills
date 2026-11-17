@@ -267,6 +267,95 @@ test('install leaves a successor symlink that is not ours alone', (t) => {
   assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'another collection\n');
 });
 
+// The same protection holds when code-quality is named or part of a bare install.
+const namedCollision = (why) => new RegExp(`! code-quality {2}${why}, left alone; resolve this collision or re-run with --force`);
+
+function foreignLink(t, w) {
+  const elsewhere = join(w.root, 'elsewhere-cq');
+  put(join(elsewhere, 'SKILL.md'), 'another collection\n');
+  mkdirSync(w.claudeDir(), { recursive: true });
+  try { symlinkSync(elsewhere, w.claudeDir('code-quality'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch { t.skip('symlinks not permitted here'); return false; }
+  return true;
+}
+
+for (const mode of ['--copy', '--link']) {
+  test(`a bare ${mode} install leaves an edited code-quality alone and installs the rest`, (t) => {
+    const w = aliasWorld(t);
+    w.run(['install', '--copy', 'code-quality']);
+    writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
+    const r = w.run(['install', mode]);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, namedCollision('edited after install'));
+    assert.match(r.out, /installed 3\/4 skill.*1 left alone/);
+    assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'my own edit\n');
+    assert.ok(existsSync(w.claudeDir('alpha', 'SKILL.md')));
+  });
+
+  test(`a bare ${mode} install leaves a foreign code-quality symlink alone`, (t) => {
+    const w = aliasWorld(t);
+    if (!foreignLink(t, w)) return;
+    const r = w.run(['install', mode]);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, namedCollision('a symlink that is not ours'));
+    assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'another collection\n');
+  });
+
+  test(`a repeated ${mode} install of an alias is idempotent`, (t) => {
+    const w = aliasWorld(t);
+    assert.equal(w.run(['install', mode, 'angular-code-quality']).status, 0);
+    w.writeSkill('code-quality', ['The rules, revised.']);
+    const r = w.run(['install', mode, 'angular-code-quality']);
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(r.out, /left alone/);
+    assert.match(read(w.claudeDir('code-quality', 'SKILL.md')), /The rules, revised\./, 'an untouched managed successor is refreshed');
+  });
+}
+
+test('a bare install leaves a code-quality directory it never installed alone', (t) => {
+  const w = aliasWorld(t);
+  put(w.claudeDir('code-quality', 'SKILL.md'), 'somebody else owns this\n');
+  const r = w.run(['install', '--copy']);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, namedCollision('present but not installed by us'));
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'somebody else owns this\n');
+});
+
+test('naming the alias and code-quality keeps an edited code-quality; --force replaces it', (t) => {
+  const w = aliasWorld(t);
+  w.run(['install', '--copy', 'angular-code-quality']);
+  writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
+  const r = w.run(['install', '--copy', 'angular-code-quality', 'code-quality']);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, namedCollision('edited after install'));
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'my own edit\n');
+  const forced = w.run(['install', '--copy', '--force', 'angular-code-quality', 'code-quality']);
+  assert.equal(forced.status, 0, forced.out);
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+});
+
+// The legacy bash installer writes no manifest, so update cannot repair an
+// alias-only install made with it: it refuses the alias names instead.
+for (const alias of ['angular-code-quality', 'backend-code-quality']) {
+  test(`scripts/install.sh refuses the rule-less alias ${alias}`, (t) => {
+    if (process.platform === 'win32') { t.skip('bash installer is not run on Windows'); return; }
+    const w = aliasWorld(t);
+    cpSync(join(SCRIPTS, 'install.sh'), join(w.lib, 'scripts', 'install.sh'));
+    const sh = (args) => spawnSync('bash', [join(w.lib, 'scripts', 'install.sh'), ...args],
+      { cwd: w.root, env: childEnv({ HOME: w.home }), encoding: 'utf8' });
+    for (const mode of ['--copy', '--link']) {
+      const r = sh([mode, alias]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, new RegExp(`${alias} is a deprecated alias with no rules: install code-quality instead`));
+      assert.ok(!existsSync(w.claudeDir(alias)), 'the alias was not installed');
+    }
+    // Positive control in link mode: a --copy run exits 1 on its last line (pre-existing, outside CQ-2).
+    const ok = sh(['--link', 'code-quality']);
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+  });
+}
+
 test('update installs the successor of an older alias-only link install', (t) => {
   const w = aliasWorld(t);
   aliasOnlyInstall(w, '--link');

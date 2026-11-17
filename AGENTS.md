@@ -231,8 +231,12 @@ rules (`NG-*`) live in `references/stack-angular.md` and backend rules (`BE-*`) 
 `references/stack-backend.md`; a backend diff loads the whole of `stack-backend.md`, because
 security rules are never progressive. `angular-code-quality` and `backend-code-quality` remain
 for one release as rule-less aliases (O-6; CQ-4 removes them) that point at those references;
-`install` and `update` put `code-quality` beside an alias (`RETIRED_SKILLS` in `scripts/cli.mjs`)
-and never overwrite a foreign or edited `code-quality`. Their project
+`install` and `update` put `code-quality` beside an alias (`RETIRED_SKILLS` in `scripts/cli.mjs`).
+Neither replaces a `code-quality` that is edited or was not installed by this tool without an
+explicit flag: `install` (named, bare or alias-driven) reports the collision and needs `--force`;
+`update` needs `--force` for an edited copy and `--adopt` for an unrecorded directory, and
+never replaces a symlink that is not its own.
+`scripts/install.sh` writes no manifest, so it refuses the alias names. Their project
 paths `.claude/angular-code-quality/` and `.claude/backend-code-quality/` are protocol
 identifiers the merged skill still reads and writes. `references/angular.md` and `nodejs.md`
 are **constitution-level summaries only** — each carries a header deferring to its stack
