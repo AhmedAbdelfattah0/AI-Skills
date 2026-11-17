@@ -204,8 +204,69 @@ check is not reported), `fast_check_failed`, `fast_check_skipped`, `declaration_
 worker's own claim: re-run `run` yourself before freeze.
 
 **Status: AC1 is only partly met.** The parser (`t0Declared`) and `verify` exist and are tested; the engine does not
-call `verify` at freeze and the carrier does not require `t0`. That freeze integration, the risk-triggered semantic
-test kinds (T1-S) and mutation validity are separate slices (S-01b, S-01c).
+call `verify` at freeze and the carrier does not require `t0`. That freeze integration and mutation validity are
+separate slices (S-01b2, S-01c); the risk-triggered test kinds are below.
+
+## Risk-triggered test kinds (T1-S)
+
+Cheap checks do not catch a missing scenario. Which semantic test kinds a change needs is a **table lookup**, not a
+builder's choice: `scripts/test-kinds.mjs` reads the approved plan and lists the required kinds, and before freeze
+checks that a test title carries each one. Opt in per plan or per repository; with neither, nothing changes.
+
+The kinds (`KINDS` in the script, with their definitions) follow the classes (a)-(g): `negative` (a), `race` (b),
+`stale-N2` and `error-twin` (c), `lifecycle-destroy` and `ownership` (d), `contract-producer` and `contract-consumer`
+(e), `real-entrypoint` (f), `regression` (g). The table (`TAGS`) maps a surface tag to kinds:
+
+| Tag | Required kinds |
+|---|---|
+| `async-state` | `stale-N2`, `error-twin`, `negative` |
+| `ui-lifecycle` | `lifecycle-destroy` |
+| `concurrency` | `race` |
+| `money` | `negative`, `race` |
+| `tenancy` | `negative`, `ownership` |
+| `auth`, `input-path` | `negative` |
+| `shared-contract` | `contract-producer`, `contract-consumer` |
+| `entrypoint` | `real-entrypoint` |
+| `repair` | `regression` |
+
+Tags come from three places, all in the plan narrative (the RUN-STATE block never counts):
+
+- exactly one line `test-triggers: <tag>, <tag>` (or `test-triggers: none`);
+- the plan's `risk_floor:` record line (`scripts/risk-floor.mjs`): a class named like a tag is that tag,
+  `risk_declaration_changed` adds nothing, and any other class must be mapped by the repository;
+- the verified security block (`scripts/security-plan.mjs`): each surface kind maps to tags (`SURFACE_TAGS`).
+
+A repository extends the table in `.ship-ticket/test-triggers.json`, read from the base commit only:
+`{"version":1,"tags":{"<tag>":["<kind>"]},"classes":{"<risk class>":["<tag>"]}}`. It can add tags and kinds, never
+remove one. When the file exists, every plan needs the `test-triggers:` line.
+
+Two more plan lines: `lifecycle-item: <id> <text>` makes the item a required entry of its own, covered by a test whose
+title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` is the owner's disposition that removes one
+requirement. The plan is owner-approved, so a waiver anywhere else does not count. Every line that mentions one of
+the three keys must be exactly one of these lines: a bulleted, bold or differently cased key is `plan_line_invalid`,
+and a plan that uses items or waivers without the `test-triggers:` line is `plan_tags_missing`, never `not_declared`.
+
+**Tag convention.** A test title carries `[kind:<kind id>]` for each kind it proves and `[plan:<id>]` for each item
+it covers, exact and case-sensitive (`[kind:negative]`; `non-negative` or `[kind:Negative]` do not count).
+
+```text
+node scripts/test-kinds.mjs require --repo <repo> --base <base sha> --plan <plan.md> > require.json
+node scripts/brief.mjs build ... --test-kinds require.json --out <brief>
+node scripts/test-kinds.mjs check --repo <repo> --base <base sha> --plan <plan.md> --report-file <final message file>
+```
+
+`brief.mjs build --test-kinds` lists the kinds, their definitions and the items in Required tests and asks for a
+report key `test_titles` (the worker report parser accepts it; a malformed one is `test_titles_invalid`). `check`
+recomputes the requirement from the plan and exits 1 with `freeze_refused` and the reasons `missing_test_kinds`
+and/or `unmapped_lifecycle_item`, or `refused` with an error code (`unknown_tag`, `risk_class_unmapped`,
+`risk_floor_invalid`, `risk_floor_missing`, `security_block_invalid`, `surface_kind_unmapped`, `plan_tags_missing`,
+`plan_line_invalid`, `waiver_invalid`, `declaration_invalid`, `test_titles_missing`). Record its `record_line`
+(numbers and enums only) in RUN-STATE.
+
+**Status: advisory.** No engine step runs `check` at freeze yet (S-01b2). A title marker is the worker's claim and
+does not prove that the test exercises the property; mutation (S-01c) and the reviewers cover that. Only the
+`async-state`, `ui-lifecycle`, `entrypoint` and `shared-contract` rows are pinned by acceptance tests; the other
+rows and `SURFACE_TAGS` are provisional.
 
 ## The static proof
 

@@ -13,7 +13,7 @@
  *   brief.mjs lint <brief>
  * Output is deterministic: no clock, no randomness, no absolute path. The last line is
  * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 18; its repository imports are the read-only
- * RISK_EVIDENCE table of harness.mjs and the T0 declaration validator of fast-checks.mjs.
+ * RISK_EVIDENCE table of harness.mjs, the T0 declaration validator of fast-checks.mjs and the test-kind table of test-kinds.mjs.
  *
  * Exit codes: 0 success, 1 a failed lint or any other refused input (unknown node, plan without a
  * RUN-STATE block, unreadable file, invalid JSON, a refused --out), 2 a usage error or a DAG or recon
@@ -24,6 +24,7 @@ import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync } from '
 import { basename, isAbsolute, resolve } from 'node:path';
 import { RISK_EVIDENCE, isEntrypoint } from './harness.mjs';
 import { validateDeclaration } from './fast-checks.mjs';
+import { KINDS, ITEM_ID } from './test-kinds.mjs';
 
 export const SECTIONS = [
   'Task', 'Approved plan and digest', 'Ownership', 'Forbidden paths', 'Dependencies and reads',
@@ -143,8 +144,39 @@ const T0_REPORT_LINES = [
   '```',
 ];
 
+// Only when the plan's T1-S triggers require test kinds (`--test-kinds`, the `test-kinds.mjs require` output). Absent or
+// `not_declared` leaves the brief byte-identical; a refused or malformed requirement refuses the brief.
+function testKindLines(r, withT0) {
+  if (r === null || r === undefined || r?.status === 'not_declared') return null;
+  if (!r || r.status !== 'required' || !Array.isArray(r.kinds) || !Array.isArray(r.items)
+    || !r.kinds.every((k) => typeof k === 'string' && Object.hasOwn(KINDS, k)) || !r.items.every((i) => typeof i === 'string' && ITEM_ID.test(i)))
+    throw fail('the test-kinds requirement is refused or malformed; run `test-kinds.mjs require` and fix the plan first');
+  return {
+    tests: [
+      'Required test kinds (risk-triggered by the approved plan; `scripts/test-kinds.mjs`). Prove each one in at least one test whose title carries its marker:',
+      '',
+      ...bullets(r.kinds.map((k) => `${code(`[kind:${k}]`)} (${KINDS[k].letter}): ${KINDS[k].definition}.`), 'none'),
+      '',
+      ...(r.items.length ? [`Plan lifecycle items, each covered by a test whose title carries its marker: ${r.items.map((i) => code(`[plan:${i}]`)).join(', ')}.`, ''] : []),
+      'A kind or item you cannot prove goes in `blockers`; only the owner can waive one, in the plan.',
+      '',
+    ],
+    report: [
+      '',
+      'This plan requires test kinds. Add the key `test_titles` beside the keys above: the full title of every test you added or',
+      'changed, markers included. Before freeze the orchestrator runs `test-kinds.mjs check`, which refuses freeze while a kind',
+      'or item is missing (`freeze_refused`). A marker on a test that does not prove the property is a defect, not a pass.',
+      '',
+      '```ship-ticket-report',
+      `{"tests":[],"red_seen":[],"blockers":[],"needs_outside_ownership":[],${withT0 ? '"t0":{"result":"pass","checks":[{"name":"<check name>","result":"pass"}]},' : ''}"test_titles":["<test title> [kind:<kind id>]"]}`,
+      '```',
+    ],
+  };
+}
+
 /** Build the brief text (digest line included) for one DAG node. Throws a `briefError` on a refused input. */
-export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon = null, notes = null, t0 = null }) {
+export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon = null, notes = null, t0 = null, testKinds = null }) {
+  const kindLines = testKindLines(testKinds, Boolean(t0));
   const nodes = asList(dag && dag.nodes);
   if (!nodes.length) throw fail('the DAG has no nodes');
   const node = nodes.find((n) => n && n.id === nodeId);
@@ -220,6 +252,7 @@ export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon 
   if (f.checks.length) tests.push(`Checks (named test commands): ${f.checks.map(code).join(', ')}`, '');
   if (risk.length) tests.push(`Risk labels: ${risk.join(', ')}. Evidence kinds these labels require: ${evidenceKinds.length ? evidenceKinds.map(code).join(', ') : 'none'}.`, '');
   if (f.evidence.length) tests.push(`Declared evidence: ${f.evidence.map(code).join(', ')}`, '');
+  if (kindLines) tests.push(...kindLines.tests);
   tests.push('- Run every test file you add or change and list each command with its result in the report block.');
   section('Required tests', tests);
   section('Reuse inventory', reuseLines(recon));
@@ -232,6 +265,7 @@ export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon 
     '',
     ...REPORT_EXAMPLE,
     ...(t0 ? T0_REPORT_LINES : []),
+    ...(kindLines ? kindLines.report : []),
   ]);
 
   const body = lines.join('\n').replace(/\n+$/, '\n');
@@ -343,7 +377,7 @@ export function main(argv) {
   const [command, ...rest] = argv;
   try {
     if (command === 'build') {
-      const { opts } = parseFlags(rest, ['dag', 'node', 'plan', 'recon', 'notes', 'out', 't0']);
+      const { opts } = parseFlags(rest, ['dag', 'node', 'plan', 'recon', 'notes', 'out', 't0', 'test-kinds']);
       for (const k of ['dag', 'node', 'plan', 'out']) if (!opts[k]) throw Object.assign(new Error(`build needs --${k}`), { usage: true });
       const text = buildBrief({
         dag: readJson(opts.dag, 'DAG'),
@@ -353,8 +387,9 @@ export function main(argv) {
         recon: opts.recon ? readJson(opts.recon, 'recon file') : null,
         notes: opts.notes ? readText(opts.notes, 'notes file') : null,
         t0: opts.t0 ? readT0(opts.t0) : null,
+        testKinds: opts['test-kinds'] ? readJson(opts['test-kinds'], 'test-kinds requirement') : null,
       });
-      checkOut(opts.out, [opts.dag, opts.plan, opts.recon, opts.notes, opts.t0]);
+      checkOut(opts.out, [opts.dag, opts.plan, opts.recon, opts.notes, opts.t0, opts['test-kinds']]);
       writeFileSync(opts.out, text);
       const digest = text.trimEnd().split('\n').pop();
       process.stdout.write(`brief written for node ${opts.node}: ${digest}\n`);
@@ -372,7 +407,7 @@ export function main(argv) {
       process.stdout.write('brief lint ok\n');
       return 0;
     }
-    throw Object.assign(new Error('usage: brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] --out <file> | brief.mjs lint <brief>'), { usage: true });
+    throw Object.assign(new Error('usage: brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
   } catch (err) {
     if (!err.briefError && !err.usage) throw err;
     process.stderr.write(`brief: ${err.message}\n`);
