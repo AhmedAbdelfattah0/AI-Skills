@@ -18,7 +18,8 @@
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
 import { truncatedOutputs } from './run-summary.mjs';
@@ -33,6 +34,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
+import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, runPolicy, skillCommit } from './engine-policy.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -40,7 +42,7 @@ export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
 const STATE_SCHEMA = 'ship-ticket-engine-state-v1';
 const STATUS_SCHEMA = 'ship-ticket-engine-status-v1';
 const CTX_KEYS = new Set(['repoRoot', 'ticket', 'runId', 'dagFile', 'env', 'verifySubscription', 'handleSignals', 'spawn',
-  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'catalogFile', 'now']);
+  'pid', 'host', 'processInfo', 'groupAlive', 'platform', 'fs', 'hooks', 'allowApiBilling', 'until', 'admissionProbe', 'policy', 'catalogFile', 'now']);
 const MARKS = { 'failed->pending': ['failed', 'pending'], 'pending->cancelled': ['pending', 'cancelled'] };
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_RETRIES = 1;
@@ -101,12 +103,14 @@ function auditNow(ctx) {
 /** Context for one command: paths, state, serialized commits and live in-process attempts. */
 function open(ctx) {
   const P = locate(ctx);
-  const E = { ctx, P, S: null, live: new Map(), refused: new Set(), lock: Promise.resolve(), verifyBinding: () => verifyBinding(E),
+  const E = { ctx, P, S: null, policy: null, live: new Map(), refused: new Set(), lock: Promise.resolve(), verifyBinding: () => verifyBinding(E),
     stamps: { ev: new Map(), end: new Map() },
     alive: (pgid) => (ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)))(pgid),
     load() {
       if (!existsSync(P.state)) throw coded('no_state', `no engine state for ${ctx.ticket}; run init`);
       E.S = JSON.parse(readFileSync(P.state, 'utf8'));
+      // S-27-min: before any default or check, the run's policy version must be one this engine supports (fail closed).
+      E.policy = runPolicy(E.S, ctx.policy);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -282,6 +286,16 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (outside.length) throw coded('security_pairs_mismatch', `the approved §3a surface path(s) ${outside.join(', ')} lie outside every node's writes (the Design Contract); re-plan and re-approve`);
 }
 
+/**
+ * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
+ * test simulating another engine) and the commit of the skill checkout this module runs from.
+ */
+function newRunPolicy(ctx) {
+  const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
+  return { policy_version: runPolicy({ policy_version: engine.current }, engine).version,
+    skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
+}
+
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
 export async function init(ctx) {
   return locked(ctx, async (E) => {
@@ -308,7 +322,8 @@ export async function init(ctx) {
       ...(dag.nodes.some(n => n.unit !== undefined) ? { unit_checks: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
-        .map(u => [u, { chain: [] }])) } : {}) };
+        .map(u => [u, { chain: [] }])) } : {}),
+      ...newRunPolicy(ctx) };
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -517,7 +532,7 @@ export async function archive(ctx) {
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state']);
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

@@ -296,7 +296,12 @@ function goldenRun(t, config) {
   step('ship-ready', fx.gate('ship-ready', {}));
   step('resume', fx.cli('resume'));
   step('status-2', fx.cli('status'));
-  return normalizer(fx.root)({ outputs: outs, state: fx.readState(), engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
+  // S-27-min: init also records the run's policy version and the skill commit (run-engine-policy.test.mjs); the golden predates both.
+  const state = fx.readState();
+  assert.equal(state.policy_version, 1);
+  assert.match(state.skill_commit, /^(?:[0-9a-f]{40}|unknown)$/);
+  delete state.policy_version; delete state.skill_commit;
+  return normalizer(fx.root)({ outputs: outs, state, engine_log: runLogEvents(fx.engineLog()), run_state: runStateEvents(fx.planFile) });
 }
 
 test('[R9] the golden file hash is pinned (main plus the one proof started_at line), and the golden scenario with config.auditRecord false reproduces it (only the bound config names the key)', { skip: WIN_SKIP }, (t) => {

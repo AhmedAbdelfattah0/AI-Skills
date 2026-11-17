@@ -34,6 +34,7 @@ import { RELEASE_BYTE, launcherArgs } from './launcher.mjs';
 import { parseRunState, malformedReason, workerRunStateAppend } from './run-state.mjs';
 import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
 import { finalMessage, parseWorkerReport } from './worker-report.mjs';
+import { runPolicy } from './engine-policy.mjs';
 
 export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
@@ -143,6 +144,7 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
   if (existsSync(stateFile)) {
     let state;
     try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { fail('engine state ' + stateFile + ' is unreadable; REPAIR is not authorized'); }
+    try { runPolicy(state); } catch (e) { fail(e.message + '; REPAIR is not authorized'); } // S-27-min: never read a run this install cannot interpret
     if (state?.run_id !== approval.run_id) fail('engine state belongs to run ' + state?.run_id + ', not ' + approval.run_id + '; REPAIR is not authorized');
     // The final review chain, and with config.unitReview each unit's review chain (engine-unit-review.mjs).
     // A unit FAIL authorizes only the repair the engine opened for it (repair_opened), never a terminal FAIL.
