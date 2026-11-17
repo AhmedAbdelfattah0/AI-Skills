@@ -13,13 +13,18 @@
  * lane lifecycle is S-03b; this slice is the stand-alone check. `--out` must live OUTSIDE the checked tree (and its
  * git dir): a path resolving inside is refused, so the tool can neither modify the tree it checks nor make it `changed`.
  * A snapshot records, from git and the filesystem and never from anything the tree configures: HEAD (symbolic ref
- * and sha), hashes of the ref set, the index (stage entries, assume-unchanged/skip-worktree flags, intent-to-add),
- * the repository config, the ignore rules (info/exclude, core.excludesFile, every .gitignore seen) and the hooks
- * directory, and for every path of the tree (tracked, untracked, and any directory entry git does not list) its
+ * and sha), the index (stage entries, assume-unchanged/skip-worktree flags, intent-to-add),
+ * the ignore rules (info/exclude, core.excludesFile resolved against the tree top, every .gitignore seen) and the hooks
+ * directory (content, owner exec bit, subdirectories, symlink targets), and for every path of the tree (tracked, untracked, and any directory entry git does not list) its
  * kind, OWNER exec bit (git's rule: group/other bits are invisible to git and are not compared) and the sha256 of its
  * CONTENT (a symlink: of its target). Path keys are the hex of the raw path bytes. It does not hash `git status` text
  * and does not trust mtime. Files are read raw (no autocrlf, textconv or filters). Taking a snapshot never rewrites
  * the index (GIT_OPTIONAL_LOCKS=0, read-only git commands). A git warning on a listing is a failure, not a pass.
+ *
+ * SHARED git state (every other ref, tags, remote-tracking refs, the common config) is moved by sibling worktrees, fetches and
+ * maintenance, so it is stored by ref name and reported separately as `shared_git` (ref names whose sha moved, config changed);
+ * it never changes the tree verdict or exit code unless `compare --strict-shared`. HEAD and its symref DO decide.
+ * `--out` is written only as a NEW file (exclusive temp file, linked into place); an existing path is refused.
  *
  * Result: unchanged | changed | unknown. `unknown` (an unreadable path or directory, a git failure, an invalid
  * record) is a FAIL, never "unchanged". Exit: 0 unchanged, 1 changed/unknown/failure, 2 usage.
@@ -33,15 +38,15 @@
  * where the OS has no exec bit (Windows) file modes are NOT compared (reported as `degraded`, never as equal).
  */
 import { spawnSync } from 'node:child_process';
-import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, linkSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
 
 export const SCHEMA = 'tree-snapshot/1';
 export const LIMITS = [
   'the content of git-ignored files is not examined (the ignore rules themselves are hashed)',
-  'shared .git is covered by HEAD, refs, index, config, hooks and exclude only',
+  'shared .git state (other refs, tags, common config) is reported as shared_git and does not decide the verdict unless --strict-shared; objects, reflogs and other config files are not examined',
   'writes by absolute path outside this tree are not seen',
   'nested repositories and submodules are covered by the HEAD their directory reports; files inside are not',
   'only the owner exec bit is compared (git ignores group/other bits); not compared at all where the OS has none',
@@ -49,7 +54,7 @@ export const LIMITS = [
   'detected-class check, not an isolation boundary (same user)',
 ];
 const MAX_LISTED = 200;
-const KINDS = ['file', 'symlink', 'repo', 'missing', 'unreadable', 'other', 'emptydir'];
+const KINDS = ['file', 'symlink', 'repo', 'dir', 'missing', 'unreadable', 'other', 'emptydir'];
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const caseFold = process.platform === 'win32' || process.platform === 'darwin';
 // Every inherited GIT_* variable removed (GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG_*, GIT_REPLACE_REF_BASE ...); no
@@ -69,7 +74,29 @@ const hexOf = (raw) => raw.toString('hex');
 const sub = (parent, name) => (parent.length ? Buffer.concat([parent, Buffer.from('/'), name]) : name);
 /** A path usable with fs: a string when it round-trips through UTF-8 (so Windows namespacing applies), else the raw Buffer. */
 const absOf = (top, raw) => { const s = raw.toString('utf8'); return Buffer.from(s, 'utf8').equals(raw) ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
-const fileSha = (path) => { try { return sha(readFileSync(path)); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } };
+/** sha256 of a file read in 1 MiB chunks (no whole-file Buffer, so no 2 GiB ceiling). */
+function hashFile(path) {
+  const h = createHash('sha256'); const fd = openSync(path, 'r'); const buf = Buffer.alloc(1 << 20);
+  try { for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n)); } finally { closeSync(fd); }
+  return h.digest('hex');
+}
+const fileSha = (path) => { try { return hashFile(path); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } };
+const hasDotGit = (abs) => { try { lstatSync(join(abs.toString(), '.git')); return true; } catch { return false; } };
+/** Digest of a directory tree (git's hooks): relative path, kind, owner exec bit, and content (symlink: target); subdirectories enumerated. */
+function dirDigest(dir, modeSupported) {
+  const rows = [];
+  const visit = (abs, rel) => {
+    for (const name of readdirSync(abs).sort()) {
+      const full = join(abs, name); const r = rel ? rel + '/' + name : name; const st = lstatSync(full);
+      if (st.isSymbolicLink()) rows.push([r, 'l', readlinkSync(full)]);
+      else if (st.isDirectory()) { rows.push([r, 'd']); visit(full, r); }
+      else if (st.isFile()) rows.push([r, 'f', modeSupported ? (st.mode & 0o100) !== 0 : null, hashFile(full)]);
+      else rows.push([r, 'o']);
+    }
+  };
+  try { visit(dir, ''); } catch (e) { if (e.code === 'ENOENT' && rows.length === 0) return 'absent'; throw e; }
+  return sha(JSON.stringify(rows));
+}
 
 function entryOf(top, raw, modeSupported) {
   const base = { p: hexOf(raw), n: raw.toString('utf8') };
@@ -78,12 +105,13 @@ function entryOf(top, raw, modeSupported) {
   try { st = lstatSync(abs); } catch (e) { return { ...base, k: e.code === 'ENOENT' || e.code === 'ENOTDIR' ? 'missing' : 'unreadable' }; }
   try {
     if (st.isSymbolicLink()) return { ...base, k: 'symlink', h: sha(readlinkSync(abs, { encoding: 'buffer' })) };
-    if (st.isDirectory()) { // submodule or nested repository: HEAD only (documented limit)
-      let head = 'none'; try { head = text(gitRaw(abs.toString(), ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits or not a repo */ }
+    if (st.isDirectory()) {
+      if (!hasDotGit(abs)) return { ...base, k: 'dir' }; // an ordinary directory (even one where git expects a file): enumerated by the walk
+      let head = 'none'; try { head = text(gitRaw(abs.toString(), ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits */ } // nested repository / submodule: HEAD only (documented limit)
       return { ...base, k: 'repo', h: head };
     }
     if (!st.isFile()) return { ...base, k: 'other' };
-    return { ...base, k: 'file', x: modeSupported ? (st.mode & 0o100) !== 0 : null, h: sha(readFileSync(abs)) };
+    return { ...base, k: 'file', x: modeSupported ? (st.mode & 0o100) !== 0 : null, h: hashFile(abs) };
   } catch { return { ...base, k: 'unreadable' }; }
 }
 
@@ -99,7 +127,7 @@ function walk(top, rel, ctx, out) {
     if (!rel.length && name.equals(Buffer.from('.git'))) continue;
     const raw = sub(rel, name); const key = hexOf(raw);
     let st; try { st = lstatSync(absOf(top, raw)); } catch { out.push({ p: key, n: raw.toString('utf8'), k: 'unreadable' }); continue; }
-    if (st.isDirectory()) { if (!ctx.known.has(key) && !ctx.ignoredDirs.has(key)) walk(top, raw, ctx, out); }
+    if (st.isDirectory()) { if (!ctx.ignoredDirs.has(key) && !hasDotGit(absOf(top, raw))) walk(top, raw, ctx, out); } // every directory, whatever git knows about the path; nested repositories are HEAD-only
     else if (!ctx.known.has(key) && !ctx.ignoredFiles.has(key)) out.push(entryOf(top, raw, ctx.modeSupported));
   }
 }
@@ -136,16 +164,17 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform } 
   const modeSupported = platform !== 'win32';
   let headSha = null; try { headSha = text(gitRaw(top, ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* unborn */ }
   let symref = null; try { symref = text(gitRaw(top, ['symbolic-ref', '-q', 'HEAD'])); } catch { /* detached */ }
-  const refs = sha(gitRaw(top, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], true));
+  const refs = text(gitRaw(top, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], true)).split('\n').filter(Boolean).sort(); // shared state: reported by name, never decides the tree verdict
   // The index: stage entries, assume-unchanged/skip-worktree flags, and the in-memory flags (intent-to-add, stage, valid, skip-worktree).
   const flags = [...gitRaw(top, ['ls-files', '--debug'], true).toString().matchAll(/^\s+size: -?\d+\tflags: ([0-9a-f]+)$/gm)].map((m) => ((parseInt(m[1], 16) & 0x6000b000) >>> 0).toString(16));
   const index = sha(Buffer.concat([gitRaw(top, ['ls-files', '-s', '-z'], true), Buffer.from('\0--flags--\0'), gitRaw(top, ['ls-files', '-v', '-z'], true), Buffer.from('\0--debug--\0' + flags.join(','))]));
   const gitPath = (name) => resolve(top, text(gitRaw(top, ['rev-parse', '--git-path', name])));
   const config = fileSha(gitPath('config'));
-  let excludesFile = null; try { excludesFile = text(gitRaw(top, ['config', '--path', '--get', 'core.excludesFile'])); } catch { /* unset */ }
-  if (!excludesFile) excludesFile = join(process.env.XDG_CONFIG_HOME || join(process.env.HOME || process.env.USERPROFILE || '', '.config'), 'git', 'ignore');
-  const hookDir = gitPath('hooks'); let hooks = 'absent';
-  try { hooks = sha(JSON.stringify(readdirSync(hookDir).sort().map((f) => [f, fileSha(join(hookDir, f))]))); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  let configured = null; try { configured = text(gitRaw(top, ['config', '--path', '--get', 'core.excludesFile'])); } catch { /* unset */ }
+  // git resolves a relative core.excludesFile against the work tree top (never the caller's cwd); a configured file we cannot read is unknown, not absent
+  const excludesFile = configured ? resolve(top, configured) : join(process.env.XDG_CONFIG_HOME || join(process.env.HOME || process.env.USERPROFILE || '', '.config'), 'git', 'ignore');
+  const excludesSha = configured ? hashFile(excludesFile) : fileSha(excludesFile);
+  const hooks = dirDigest(gitPath('hooks'), modeSupported);
   const tracked = zList(gitRaw(top, ['ls-files', '-z'], true));
   const untracked = zList(gitRaw(top, ['ls-files', '-z', '--others', '--exclude-standard'], true));
   const ignored = zList(gitRaw(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], true));
@@ -160,7 +189,7 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform } 
   const extra = []; walk(top, Buffer.alloc(0), ctx, extra);
   for (const e of extra) if (!byKey.has(e.p)) byKey.set(e.p, e);
   const entries = [...byKey.values()].sort((a, b) => (a.p < b.p ? -1 : a.p > b.p ? 1 : 0));
-  const excludes = sha(JSON.stringify([fileSha(gitPath('info/exclude')), fileSha(excludesFile)]));
+  const excludes = sha(JSON.stringify([fileSha(gitPath('info/exclude')), excludesSha]));
   const rec = { schema: SCHEMA, lane, top, mode_checked: modeSupported, head: { sha: headSha, symref }, refs, index, config, excludes, hooks, entries };
   return { ...rec, identity: sha(JSON.stringify(bodyOf(rec))) };
 }
@@ -176,7 +205,8 @@ export function validateSnapshot(s) {
   if (typeof s.mode_checked !== 'boolean') return bad('mode_checked');
   const h = s.head;
   if (!h || typeof h !== 'object' || !(h.sha === null || /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(h.sha)) || !(h.symref === null || typeof h.symref === 'string')) return bad('head');
-  for (const k of ['refs', 'index', 'excludes', 'identity']) if (typeof s[k] !== 'string' || !HEX64.test(s[k])) return bad(k);
+  if (!Array.isArray(s.refs) || !s.refs.every((r) => typeof r === 'string' && /^\S+ [0-9a-f]{40,64}( \S*)?$/.test(r))) return bad('refs');
+  for (const k of ['index', 'excludes', 'identity']) if (typeof s[k] !== 'string' || !HEX64.test(s[k])) return bad(k);
   for (const k of ['config', 'hooks']) if (typeof s[k] !== 'string' || !(s[k] === 'absent' || HEX64.test(s[k]))) return bad(k);
   if (!Array.isArray(s.entries)) return bad('entries');
   let prev = null;
@@ -195,7 +225,7 @@ export function validateSnapshot(s) {
 }
 
 /** Compare two snapshots. `unchanged` only when nothing differs AND nothing was unreadable AND both records are valid. */
-export function compareSnapshots(before, after) {
+export function compareSnapshots(before, after, { strictShared = false } = {}) {
   const base = { limits: LIMITS, lane: before?.lane ?? null, before_identity: before?.identity ?? null, after_identity: after?.identity ?? null };
   const invalid = validateSnapshot(before) ? 'before: ' + validateSnapshot(before) : validateSnapshot(after) ? 'after: ' + validateSnapshot(after) : null;
   if (invalid) return { ...base, result: 'unknown', reason: 'invalid snapshot record (' + invalid + ')', changed: [], degraded: [] };
@@ -203,7 +233,13 @@ export function compareSnapshots(before, after) {
   const changed = []; const degraded = [];
   const flag = (what, ok) => { if (!ok) changed.push({ path: null, what }); };
   flag('head', before.head.sha === after.head.sha && before.head.symref === after.head.symref);
-  for (const k of ['refs', 'index', 'config', 'excludes', 'hooks']) flag(k, before[k] === after[k]);
+  for (const k of ['index', 'excludes', 'hooks']) flag(k, before[k] === after[k]);
+  // Shared state (every other ref, tags, remote-tracking refs, the common config) moves with sibling worktrees, IDE fetches and maintenance:
+  // reported separately and NOT part of the tree verdict unless strictShared.
+  const refMap = (snap) => new Map(snap.refs.map((r) => [r.split(' ')[0], r]));
+  const rb = refMap(before); const ra = refMap(after); const sharedRefs = [];
+  for (const name of [...new Set([...rb.keys(), ...ra.keys()])].sort()) if (rb.get(name) !== ra.get(name)) sharedRefs.push({ ref: name, before: rb.get(name)?.split(' ')[1] ?? null, after: ra.get(name)?.split(' ')[1] ?? null });
+  const shared_git = { result: sharedRefs.length || before.config !== after.config ? 'changed' : 'unchanged', refs: sharedRefs.slice(0, MAX_LISTED), config: before.config !== after.config };
   const modes = before.mode_checked && after.mode_checked;
   if (!modes) degraded.push('file_mode_not_compared');
   const b = new Map(before.entries.map((e) => [e.p, e])); const a = new Map(after.entries.map((e) => [e.p, e]));
@@ -216,14 +252,31 @@ export function compareSnapshots(before, after) {
     else if (x.h !== y.h) changed.push({ path: n, what: 'content' });
     else if (modes && x.x !== y.x) changed.push({ path: n, what: 'mode' });
   }
-  const result = changed.some((c) => c.what !== 'unknown') ? 'changed' : unknown ? 'unknown' : 'unchanged';
-  return { ...base, result, changed: changed.slice(0, MAX_LISTED), changed_count: changed.length, degraded };
+  let result = changed.some((c) => c.what !== 'unknown') ? 'changed' : unknown ? 'unknown' : 'unchanged';
+  if (result === 'unchanged' && strictShared && shared_git.result === 'changed') result = 'changed';
+  return { ...base, result, changed: changed.slice(0, MAX_LISTED), changed_count: changed.length, degraded, shared_git };
 }
 
 function parseFlags(argv, allowed) {
   const f = {};
-  for (let i = 0; i < argv.length; i += 2) { if (!argv[i].startsWith('--') || !allowed.includes(argv[i].slice(2)) || argv[i + 1] === undefined || f[argv[i].slice(2)] !== undefined) return null; f[argv[i].slice(2)] = argv[i + 1]; }
+  for (let i = 0; i < argv.length; i += 2) { if (!argv[i].startsWith('--') || !allowed.includes(argv[i].slice(2)) || argv[i + 1] === undefined || argv[i + 1].startsWith('--') || f[argv[i].slice(2)] !== undefined) return null; f[argv[i].slice(2)] = argv[i + 1]; }
   return f;
+}
+/**
+ * Write `data` to a NEW file `out`, never opening an existing one (a hard link or bind mount of a tracked inode, a symlink, an
+ * existing record): temp file created exclusively (0600, no symlink following) in the same directory, then linked into place
+ * (fails if `out` exists), falling back to rename only where hard links are unsupported. Returns a refusal reason or null.
+ */
+function writeNew(out, data) {
+  try { lstatSync(out); return `--out ${'exists'}: refusing to open an existing file (choose a new path outside the tree)`; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const tmp = join(dirname(out), `.${basename(out)}.tmp-${randomBytes(6).toString('hex')}`);
+  const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
+  try { writeSync(fd, data); } finally { closeSync(fd); }
+  try { linkSync(tmp, out); unlinkSync(tmp); } catch (e) {
+    if (e.code === 'EEXIST') { unlinkSync(tmp); return '--out exists: refusing to open an existing file'; }
+    try { renameSync(tmp, out); } catch (e2) { try { unlinkSync(tmp); } catch { /* gone */ } throw e2; }
+  }
+  return null;
 }
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } };
 const unknownOut = (reason) => { process.stdout.write(JSON.stringify({ result: 'unknown', reason, changed: [], limits: LIMITS }) + '\n'); return 1; };
@@ -240,15 +293,16 @@ export function main(argv) {
         if (isInside(out, treeRoots(f.repo).roots)) return unknownOut('--out resolves inside the checked tree or its git directory; write the record outside it');
       }
       const out = JSON.stringify(takeSnapshot(resolve(f.repo), { lane: f.lane ?? null })) + '\n';
-      if (f.out) writeFileSync(f.out, out); else process.stdout.write(out);
+      if (f.out) { const why = writeNew(f.out, out); if (why) return unknownOut(why); } else process.stdout.write(out);
       return 0;
     }
     if (cmd === 'compare') {
-      const f = parseFlags(rest, ['before', 'repo', 'after']);
+      const strictShared = rest.includes('--strict-shared');
+      const f = parseFlags(rest.filter((a) => a !== '--strict-shared'), ['before', 'repo', 'after']);
       if (!f || !f.before || (f.repo === undefined) === (f.after === undefined)) return usage();
       const before = readJson(f.before);
       const after = f.after ? readJson(f.after) : (validateSnapshot(before) ? null : takeSnapshot(resolve(f.repo), { lane: before.lane }));
-      const v = compareSnapshots(before, after);
+      const v = compareSnapshots(before, after, { strictShared });
       process.stdout.write(JSON.stringify(v) + '\n');
       return v.result === 'unchanged' ? 0 : 1;
     }

@@ -5,7 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, chmodSync, utimesSync, statSync, realpathSync, readdirSync, renameSync, existsSync, lstatSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, chmodSync, utimesSync, statSync, realpathSync, readdirSync, renameSync, existsSync, lstatSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -76,16 +77,18 @@ test('AC3 index-only add, HEAD move, new branch/tag, new untracked file are each
   s = takeSnapshot(repo);
   git(repo, 'commit', '-q', '-m', 'second');
   v = verdict(s, repo);
-  assert.ok(v.changed.some((c) => c.what === 'head') && v.changed.some((c) => c.what === 'refs'));
+  assert.deepEqual(paths(v), ['head:null']); assert.equal(v.shared_git.result, 'changed'); // the branch moved too, but that is shared state
   s = takeSnapshot(repo);
   git(repo, 'tag', 'lane-tag');
-  assert.deepEqual(paths(verdict(s, repo)), ['refs:null']);
+  v = verdict(s, repo);
+  assert.equal(v.result, 'unchanged'); assert.equal(v.shared_git.result, 'changed'); assert.deepEqual(v.shared_git.refs.map((r) => r.ref), ['refs/tags/lane-tag']);
   s = takeSnapshot(repo);
   put(repo, 'new.txt', 'x');
   assert.deepEqual(paths(verdict(s, repo)), ['added:new.txt']);
   s = takeSnapshot(repo);
   git(repo, 'config', 'user.nickname', 'zz');
-  assert.deepEqual(paths(verdict(s, repo)), ['config:null']);
+  v = verdict(s, repo);
+  assert.equal(v.result, 'unchanged'); assert.equal(v.shared_git.config, true); assert.equal(v.shared_git.result, 'changed');
 });
 
 test('AC3 a mode-only change is detected (POSIX)', { skip: win && 'no exec bit on Windows; see the degrade test' }, (t) => {
@@ -227,7 +230,7 @@ test('FAIL-CLOSED: an unreadable path (file, or file under an unsearchable direc
   const { dir, repo } = fixture(t);
   put(repo, 'sub/x.txt', 'x'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'sub');
   for (const [target, back, expected] of [['a.txt', 0o644, 'unknown:a.txt'], ['sub', 0o755, 'unknown:sub/x.txt']]) {
-    const f = join(dir, 's.json'); cli('snapshot', '--repo', repo, '--out', f);
+    const f = join(dir, 's-' + target + '.json'); cli('snapshot', '--repo', repo, '--out', f);
     chmodSync(join(repo, target), 0o000);
     try {
       const r = cli('compare', '--before', f, '--repo', repo);
@@ -358,7 +361,7 @@ test('fix7 malformed records are invalid (unknown, exit 1): the counterexample a
   const drop = (k) => { const c = { ...good }; delete c[k]; return c; };
   for (const k of ['top', 'head', 'refs', 'index', 'config', 'identity', 'entries', 'mode_checked', 'excludes', 'hooks']) { assert.ok(validateSnapshot(drop(k)), 'missing ' + k); assert.equal(compareSnapshots(good, drop(k)).result, 'unknown', k); }
   const mut = [
-    { ...good, refs: 'zz' }, { ...good, head: { ...good.head, sha: 'nothex' } }, { ...good, identity: '0'.repeat(64) },
+    { ...good, refs: 'zz' }, { ...good, refs: [1] }, { ...good, head: { ...good.head, sha: 'nothex' } }, { ...good, identity: '0'.repeat(64) },
     { ...good, entries: [good.entries[1], good.entries[0], ...good.entries.slice(2)] }, // unordered
     { ...good, entries: [good.entries[0], good.entries[0], ...good.entries.slice(1)] }, // duplicate
     { ...good, entries: [{ ...good.entries[0], h: 'short' }, ...good.entries.slice(1)] },
@@ -405,7 +408,7 @@ test('INVARIANT: every difference git would see, or that changes what is enumera
     'assume-unchanged': (r) => git(r, 'update-index', '--assume-unchanged', 'a.txt'),
     'skip-worktree': (r) => git(r, 'update-index', '--skip-worktree', 'a.txt'),
     commit: (r) => { put(r, 'a.txt', 'c\n'); git(r, 'commit', '-q', '-am', 'c'); },
-    branch: (r) => git(r, 'branch', 'side'),
+    branch: (r) => git(r, 'branch', 'side'), // shared state: tree verdict stays unchanged, shared_git reports it
     'file-to-dir': (r) => { rmSync(join(r, 'a.txt')); mkdirSync(join(r, 'a.txt')); put(r, 'a.txt/in', 'x'); },
     ...(win ? {} : {
       'chmod-u-x': (r) => chmodSync(join(r, 'b.sh'), 0o655),
@@ -426,10 +429,114 @@ test('INVARIANT: every difference git would see, or that changes what is enumera
     const { repo } = fixture(t);
     const s = takeSnapshot(repo); const o1 = observe(repo);
     mutate(repo);
-    let o2; let v; try { o2 = observe(repo); try { v = verdict(s, repo); } catch { v = { result: 'unknown' }; } } finally { try { chmodSync(join(repo, 'ud'), 0o755); } catch { /* absent */ } }
-    assert.notEqual(o1, o2, name + ': the mutator must be observable');
-    assert.notEqual(v.result, 'unchanged', name);
+    let o2;
+    try {
+      o2 = observe(repo);
+      assert.notEqual(o1, o2, name + ': the mutator must be observable');
+      if (name === 'unreadable-new-dir') assert.throws(() => verdict(s, repo), /warned|permission/i, name); // fail-closed: the tool refuses
+      else if (name === 'branch') { const v = verdict(s, repo); assert.equal(v.result, 'unchanged', name); assert.equal(v.shared_git.result, 'changed', name); }
+      else assert.equal(verdict(s, repo).result, 'changed', name); // any tool error or `unknown` here FAILS the test
+    } finally { try { chmodSync(join(repo, 'ud'), 0o755); } catch { /* absent */ } }
   }
   // the control: a group-bit-only change is invisible to git AND to the snapshot
   if (!win) { const { repo } = fixture(t); const s = takeSnapshot(repo); const o1 = observe(repo); chmodSync(join(repo, 'a.txt'), 0o664); assert.equal(observe(repo), o1); assert.equal(verdict(s, repo).result, 'unchanged'); }
+});
+
+// ---- confirmation-repair batch ----------------------------------------------------------------------------------
+const outN = (() => { let n = 0; return (dir) => join(dir, `rec${n++}.json`); })();
+
+test('c1 --out never opens an existing file: a hard link to a tracked file, an existing file and a symlink are refused and untouched', { skip: win && 'symlink/hard-link semantics are exercised on POSIX; Windows CI covers the plain path' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const before = readFileSync(join(repo, 'a.txt'), 'utf8');
+  linkSync(join(repo, 'a.txt'), join(dir, 'ext-hardlink')); // an alias of a tracked inode, outside the tree
+  writeFileSync(join(dir, 'existing.json'), 'keep');
+  symlinkSync(join(dir, 'existing.json'), join(dir, 'ln.json'));
+  for (const out of ['ext-hardlink', 'existing.json', 'ln.json']) {
+    const r = cli('snapshot', '--repo', repo, '--out', join(dir, out));
+    assert.equal(r.status, 1, out); assert.match(r.out.reason, /exists/, out);
+  }
+  assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), before); assert.equal(readFileSync(join(dir, 'existing.json'), 'utf8'), 'keep');
+  const ok = outN(dir); assert.equal(cli('snapshot', '--repo', repo, '--out', ok).status, 0);
+  assert.equal(validateSnapshot(JSON.parse(readFileSync(ok, 'utf8'))), null);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.includes('.tmp')), []); // no temp file left behind
+});
+
+test('c2 a directory occupying a tracked path is enumerated: a.txt -> empty dir, then a.txt/empty/ created', (t) => {
+  const { repo } = fixture(t);
+  rmSync(join(repo, 'a.txt')); mkdirSync(join(repo, 'a.txt'));
+  const s = takeSnapshot(repo);
+  assert.equal(ent(s, 'a.txt').k, 'dir');
+  mkdirSync(join(repo, 'a.txt', 'empty'));
+  assert.deepEqual(paths(verdict(s, repo)), ['added:a.txt/empty']);
+});
+
+test('c2 siblings: a file inside such a directory, and an ordinary directory in place of a tracked file, are changes', (t) => {
+  const { repo } = fixture(t);
+  const s0 = takeSnapshot(repo);
+  rmSync(join(repo, 'a.txt')); mkdirSync(join(repo, 'a.txt'));
+  assert.ok(paths(verdict(s0, repo)).includes('kind:a.txt'));
+  const s = takeSnapshot(repo); put(repo, 'a.txt/in.txt', 'x');
+  assert.deepEqual(paths(verdict(s, repo)), ['added:a.txt/in.txt']);
+});
+
+const hooksDir = (repo) => join(repo, '.git', 'hooks');
+test('c3 hook mode (owner exec bit), kind, subdirectories and symlinks are part of the hooks digest', { skip: win && 'no exec bit on Windows' }, (t) => {
+  const { repo } = fixture(t);
+  const h = join(hooksDir(repo), 'pre-commit'); writeFileSync(h, '#!/bin/sh\n'); chmodSync(h, 0o644);
+  let s = takeSnapshot(repo); chmodSync(h, 0o755);
+  assert.deepEqual(paths(verdict(s, repo)), ['hooks:null']);
+  mkdirSync(join(hooksDir(repo), 'sub')); writeFileSync(join(hooksDir(repo), 'sub', 'x'), '1'); // a subdirectory must not make the tool fail
+  s = takeSnapshot(repo); writeFileSync(join(hooksDir(repo), 'sub', 'x'), '2');
+  assert.deepEqual(paths(verdict(s, repo)), ['hooks:null']);
+  symlinkSync('pre-commit', join(hooksDir(repo), 'link')); s = takeSnapshot(repo);
+  rmSync(join(hooksDir(repo), 'link')); symlinkSync('other', join(hooksDir(repo), 'link'));
+  assert.deepEqual(paths(verdict(s, repo)), ['hooks:null']);
+});
+
+test('c4 a RELATIVE core.excludesFile resolves against the tree top, whatever the caller cwd; a configured but missing file is unknown', (t) => {
+  const { dir, repo } = fixture(t);
+  git(repo, 'config', 'core.excludesFile', '.git/info/custom-ignore');
+  writeFileSync(join(repo, '.git', 'info', 'custom-ignore'), 'one\n');
+  cliCwd = dir; t.after(() => { cliCwd = undefined; });
+  const f = outN(dir); assert.equal(cli('snapshot', '--repo', repo, '--out', f).status, 0);
+  writeFileSync(join(repo, '.git', 'info', 'custom-ignore'), 'one\n# comment\n');
+  const r = cli('compare', '--before', f, '--repo', repo);
+  assert.equal(r.status, 1); assert.deepEqual(r.out.changed.map((c) => c.what), ['excludes']);
+  rmSync(join(repo, '.git', 'info', 'custom-ignore'));
+  const m = cli('compare', '--before', f, '--repo', repo); assert.equal(m.status, 1); assert.equal(m.out.result, 'unknown');
+});
+
+test('c5 shared git state is reported separately: a sibling-worktree commit and a fetch leave the tree unchanged (exit 0) but name the refs', { skip: win && 'worktree/remote fixtures run on POSIX' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const wt = join(dir, 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'other', wt);
+  const remote = join(dir, 'remote.git'); git(dir, 'init', '-q', '--bare', remote); git(repo, 'remote', 'add', 'origin', remote); git(repo, 'push', '-q', 'origin', 'main');
+  const f = outN(dir); assert.equal(cli('snapshot', '--repo', repo, '--out', f).status, 0);
+  put(wt, 'w.txt', 'w'); git(wt, 'add', '-A'); git(wt, 'commit', '-q', '-m', 'sibling'); // sibling worktree commit
+  const clone = join(dir, 'clone'); git(dir, 'clone', '-q', remote, clone); put(clone, 'c.txt', 'c'); git(clone, 'add', '-A'); git(clone, 'commit', '-q', '-m', 'c'); git(clone, 'push', '-q', 'origin', 'HEAD:main');
+  git(repo, 'fetch', '-q', 'origin'); // fetch moves refs/remotes/origin/main
+  let r = cli('compare', '--before', f, '--repo', repo);
+  assert.equal(r.status, 0); assert.equal(r.out.result, 'unchanged'); assert.equal(r.out.shared_git.result, 'changed');
+  const names = r.out.shared_git.refs.map((x) => x.ref); // (git may also create origin/HEAD)
+  assert.ok(names.includes('refs/heads/other') && names.includes('refs/remotes/origin/main'), names.join());
+  r = cli('compare', '--before', f, '--repo', repo, '--strict-shared'); assert.equal(r.status, 1); assert.equal(r.out.result, 'changed');
+  const f2 = outN(dir); cli('snapshot', '--repo', repo, '--out', f2); git(repo, 'branch', 'by-lane');
+  r = cli('compare', '--before', f2, '--repo', repo); assert.equal(r.status, 0); assert.deepEqual(r.out.shared_git.refs.map((x) => x.ref), ['refs/heads/by-lane']);
+  git(repo, 'branch', '-q', '-D', 'by-lane'); const quiet = cli('compare', '--before', f2, '--repo', repo); assert.equal(quiet.out.shared_git.result, 'unchanged');
+});
+
+test('c6 files are hashed in chunks (no whole-file Buffer): a multi-chunk file hashes like sha256, and a one-byte edit past the first chunk is seen', (t) => {
+  const { repo } = fixture(t);
+  const big = Buffer.alloc(3 * 1024 * 1024 + 17, 7); put(repo, 'big.bin', ''); writeFileSync(join(repo, 'big.bin'), big);
+  const s = takeSnapshot(repo);
+  assert.equal(ent(s, 'big.bin').h, createHash('sha256').update(big).digest('hex'));
+  big[big.length - 1] = 8; writeFileSync(join(repo, 'big.bin'), big);
+  assert.deepEqual(paths(verdict(s, repo)), ['content:big.bin']);
+});
+
+test('c6 the CLI parser rejects a flag-shaped value (usage, exit 2) instead of consuming it', (t) => {
+  const { dir, repo } = fixture(t);
+  assert.equal(cli('snapshot', '--repo', repo, '--lane', '--out').status, 2); // without the rule: lane = "--out", a success
+  assert.equal(cli('snapshot', '--repo', '--lane', 'x').status, 2);
+  const f = outN(dir); assert.equal(cli('snapshot', '--repo', repo, '--out', f).status, 0);
+  assert.equal(cli('compare', '--before', f, '--after', '--repo').status, 2); // without the rule: after = "--repo", a read failure (exit 1)
 });
