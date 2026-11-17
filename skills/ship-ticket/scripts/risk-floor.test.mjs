@@ -75,34 +75,58 @@ test('malformed input fails closed (CLI): bad paths JSON, undecodable bytes, UTF
     const viaPaths = run(['check', '--ticket', '-', '--paths', tmpFile(b), '--claimed', 'STANDARD'], 'fix typo'); assert.equal(viaPaths.status, 1, `${k} paths`);
   }
   assert.equal(run(['check', '--paths', '["README.md"]', '--claimed', 'STANDARD']).status, 1); // --ticket is required
+  for (const p of ['["src/\\ud800/x.ts"]', '["\\udc00"]']) assert.equal(run(['check', '--ticket', '-', '--paths', p, '--claimed', 'STANDARD'], 'fix typo').status, 1, p); // JSON-escaped lone surrogate
   for (const t of ['', 'null', ' undefined\n', '​', '---']) assert.equal(run(['check', '--ticket', '-', '--paths', '["src/app/footer.component.ts"]', '--claimed', 'STANDARD'], t).status, 1, JSON.stringify(t));
   assert.equal(out(run(['check', '--ticket', '/nonexistent/x'])).final, 'ELEVATED');
   assert.equal(run(['check', '--ticket', tmpFile(Buffer.from('﻿fix typo')), '--claimed', 'STANDARD']).status, 0); // a UTF-8 BOM is fine
-  const big = run(['check', '--ticket', '-', '--claimed', 'ELEVATED'], 'a '.repeat(1_100_000)); assert.equal(big.status, 1); assert.ok(out(big).classes.includes('input-too-large'));
+  const big = run(['check', '--ticket', '-', '--claimed', 'ELEVATED'], 'a '.repeat(1_100_000)); assert.equal(big.status, 1); assert.ok(out(big).classes.includes('malformed_input'));
 });
 
-// ---- THE INVARIANT: every catalog keyword is detected in every identifier form ----
+// ---- INDEPENDENT ORACLE: a frozen, hand-written keyword list that does NOT come from the module. Deleting a catalog keyword
+// turns the deletion test red; a form that regresses turns the forms test red. Extending the catalog needs a visible edit here.
+const FROZEN = {
+  money: ['price', 'pricing', 'bill', 'pay', 'paying', 'payment', 'payout', 'paypal', 'invoic', 'invoice', 'invoicing', 'refund', 'checkout', 'stripe', 'currenc', 'currency', 'subscri', 'subscription', 'discount', 'coupon',
+    'tax', 'taxes', 'vat', 'fee', 'fees', 'money', 'charg', 'charge', 'charging', 'wallet', 'ledger', 'transaction', 'cart', 'order', 'orders', 'plan', 'plans', 'renewal'],
+  tenancy: ['tenan', 'tenant', 'multi tenant', 'rls', 'row level security', 'org id', 'organization id', 'organisation id', 'workspace id', 'store id', 'shop id', 'merchant id', 'account id', 'team id', 'idor', 'ownership'],
+  auth: ['auth', 'login', 'logout', 'log in', 'logged in', 'sign', 'sign in', 'signin', 'sign up', 'signup', 'session', 'jwt', 'oauth', 'oidc', 'saml', 'sso', 'password', 'permission', 'role', 'rbac', 'acl',
+    'admin', 'staff', 'secret', 'credential', 'api key', 'access token', 'refresh token', 'recovery token', 'csrf token', 'bearer', 'cookie', 'mfa', '2fa', 'two factor', 'otp', 'cors', 'csrf', 'suspen'],
+  'public-contract': ['public api', 'api', 'api contract', 'openapi', 'swagger', 'webhook', 'graphql', 'grpc', 'endpoint', 'route', 'breaking change', 'event schema', 'event', 'events'],
+  'data-shape': ['migrat', 'migration', 'schema', 'alembic', 'drizzle', 'prisma', 'flyway', 'liquibase', 'sql', 'env', 'changelog xml'],
+  shared: ['shared', 'design system']
+};
+const sq = (k) => k.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
-const squashedKw = (k) => k.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-function variants(k) {
-  const words = k.split(/\s+/), sq = squashedKw(k), camel = words.map(cap).join(''), U = sq.toUpperCase();
-  const shared = [k, U, words.map(cap).join(' '), `x${camel}Y`, words.join('_'), words.join('-'), `src/${words.join('-')}/x.ts`, `src\\${sq}\\x.ts`, `${U}Id`, `V1${U}`, `HS256${U}`, `${U}Db`, `${U}2`];
-  // 4+ characters are matched inside any identifier, so glued lowercase and mixed forms must work too. 1-3 characters are matched as whole tokens or uppercase runs.
-  return sq.length >= 4 || /\d/.test(sq) ? [...shared, sq, `${cap(sq)}Service`, `src/Xyz${camel}Client.ts`, `${camel}Id`, `V1${camel}`, `${camel}2`, `xyz${sq}abc`] : shared;
+const SEEN = new Set(['invoice', 'currency', 'subscription', 'tenant', 'charge', 'charging', 'migration', 'invoicing']); // frozen examples that need not be catalog entries (a stem covers them)
+
+test('oracle: every frozen keyword is still covered by the module catalog (deletion detection)', () => {
+  for (const [cls, ks] of Object.entries(FROZEN)) {
+    const have = RF.CLASSES[cls].map(sq);
+    for (const k of ks) assert.ok(have.some((h) => h === sq(k) || (SEEN.has(k) && sq(k).includes(h))), `catalog lost ${cls}:${k}`);
+  }
+});
+
+function forms(k) {
+  const w = k.split(/\s+/), s = sq(k), U = s.toUpperCase(), camel = w.map(cap).join(''), lowerCamel = w[0] + w.slice(1).map(cap).join('');
+  const f = [k, k.toUpperCase(), w.map(cap).join(' '), `${lowerCamel}Rate`, `${lowerCamel}Client`, `get${camel}Rate`, `x${camel}Y`, w.join('_'), w.join('-'), `${U}Rate`, `${U}Id`,
+    `${s}2`, `v1${s}`, `${cap(s)}2`, `${U}2`, `V1${U}`, `src/${w.join('-')}/x.ts`, `src\\${s}\\x.ts`, `src/Xyz${camel}Client.ts`, `${lowerCamel}.service.ts`];
+  if (!/\d/.test(s)) f.push(s.split('').join('.'), s.split('').join('-'), s.split('').join('_'), s.split('').join(':'));
+  return f;
 }
-test('INVARIANT: every keyword of every class floors ELEVATED in lower/UPPER/Cap/camel/snake/kebab/path/Id/digit forms (text and path)', () => {
-  for (const [cls, ks] of Object.entries(RF.CLASSES)) for (const k of ks) for (const v of variants(k)) {
+test('oracle: every frozen keyword floors ELEVATED (right class) in lower/UPPER/Cap/lowerCamel/camel/snake/kebab/dotted/digit/path forms', () => {
+  const T0 = 'update the thing';
+  for (const [cls, ks] of Object.entries(FROZEN)) for (const k of ks) for (const v of forms(k)) {
     assert.ok(RF.riskFloor({ ticketText: v }).classes.includes(cls), `text ${cls}:${k} -> ${JSON.stringify(v)}`);
-    assert.ok(RF.riskFloor({ ticketText: T, paths: [v] }).classes.includes(cls), `path ${cls}:${k} -> ${JSON.stringify(v)}`);
+    assert.ok(RF.riskFloor({ ticketText: T0, paths: [v] }).classes.includes(cls), `path ${cls}:${k} -> ${JSON.stringify(v)}`);
   }
 });
 
 test('regression: named counterexamples from the reviews', () => {
-  const texts = ['GraphQL', 'gRPC', '2Fa', '2FA', 'OTPId', 'ACLId', 'customerVATId', 'SQLDb', 'V1API', 'v2API', 'HS256JWT', 'Base64JWT', 'v1SSO', 'v2RBAC', 'x509SAML', 'S3ACL', 'JWTId', 'RBACId',
+  const texts = ['taxRate', 'vatAmount', 'apiClient', 'jwtVerify', 'otpCode', 'rlsPolicy', 'getTaxRate', 'api2', 'v1api', 'Api2', 'Api2Client', 'sha256jwt', 'p.a.y', 'j-w-t', 's_q_l', 'a:p:i', 'Fix invoicing totals',
+    'Stop double charging customers', 'Fix paying flow', 'Change plan limits', 'Rename payload; events', 'GraphQL', 'gRPC', '2Fa', '2FA', 'OTPId', 'ACLId', 'customerVATId', 'SQLDb', 'V1API', 'v2API', 'HS256JWT', 'Base64JWT', 'v1SSO', 'v2RBAC', 'x509SAML', 'S3ACL', 'JWTId', 'RBACId',
     'SSOId', 'RLSId', 'OIDCClient', 'JWTService', 'RLSPolicies', 'APIs', 'public APIs', 'Only authorized users', 'authorisation', 'unauthorized', 'Rotate API keys', 'taxes', 'VAT totals',
     'organisation id', 'Migrate OAuth2 client', 'auth0', 'storeId', 'store_id', 'tenantId', 'cart total', 'row level security', 'access tokens', 'Hash stored OTPs', 'two-factor', 'sign in', 'logged in'];
   for (const t of texts) assert.equal(RF.riskFloor({ ticketText: t }).floor, 'ELEVATED', t);
-  for (const p of ['src/GraphQLClient.ts', 'src/gRPCClient.ts', 'src/OTPId.ts', 'src/2FA.ts', 'src/clients/v2API.ts', 'src/shared/ui/Button.tsx', 'alembic/versions/3f2a_add_column.py', 'drizzle/0001_x.sql',
+  for (const p of ['src/events/order-created.ts', 'db/changelog.xml', 'src/services/apiClient.ts', 'src/lib/jwtVerify.ts', 'src/clients/v2api.ts', 'src/p.a.y.ts', 'src/GraphQLClient.ts', 'src/gRPCClient.ts', 'src/OTPId.ts', 'src/2FA.ts', 'src/clients/v2API.ts', 'src/shared/ui/Button.tsx', 'alembic/versions/3f2a_add_column.py', 'drizzle/0001_x.sql',
     'prisma/schema.prisma', 'src/paymentservice.ts', 'src/authmiddleware.ts', '.env', 'apps/api/src/services/cart-validation.service.ts', 'src/páyment.ts', 'src\\billing\\invoice.ts', 'db/migrations/001_init.sql'])
     assert.equal(floorOf({ paths: [p] }), 'ELEVATED', p);
   for (const t of ['BILLING', 'multi \t\ntenant', 'Ｐａｙｍｅｎｔ', 'pri​cing', 'p‮ayment', 'row-level_security', 'updateTenantId helper']) assert.equal(RF.riskFloor({ ticketText: t }).floor, 'ELEVATED', t);
@@ -131,7 +155,9 @@ test('documented over-classification: author/discharge-style substrings floor; t
 });
 
 test('fail closed on size; very long benign and all-uppercase text stay fast', () => {
-  assert.deepEqual(RF.riskFloor({ ticketText: 'a'.repeat(RF.MAX_INPUT + 1) }).classes, ['input-too-large']);
+  assert.deepEqual(RF.riskFloor({ ticketText: 'a'.repeat(RF.MAX_INPUT + 1) }).classes, ['malformed_input']);
+  assert.deepEqual(RF.riskFloor({ ticketText: 'a', paths: ['b'.repeat(RF.MAX_INPUT)] }).classes, ['malformed_input']); // total, not per string
+  assert.equal(run(['check', '--ticket', tmpFile(Buffer.alloc(RF.MAX_INPUT + 1, 97)), '--claimed', 'ELEVATED']).status, 1); // bounded file read
   for (const text of ['word '.repeat(300_000), 'ABCDEFGHIJ'.repeat(150_000)]) { const t = Date.now(); RF.riskFloor({ ticketText: text }); assert.ok(Date.now() - t < 4000); }
 });
 
