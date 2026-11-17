@@ -310,3 +310,156 @@ test('relay import carries exit and token usage only when the result has them (a
     else assert.deepEqual([Object.hasOwn(timing, 'exit'), Object.hasOwn(timing, 'usage')], [false, false]);
   }
 });
+
+// ======================= repair batch 1 (review S-04 b280c79) =======================
+const D = (h, m = 0, sec = 0) => `2026-11-16T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.000Z`;
+const asTicket = (rows, ticket = TICKET) => rows.map((r) => ({ ...r, ticket }));
+const ev = (run, name, at, to, metrics, outcome = 'complete', detail) => asTicket(pair(run, name === 'owner_decision' || name === 'host_sleep' ? 'wait' : 'activity', name, at, to, metrics, outcome, detail));
+const mode = (run, m, extra = {}) => ev(run, 'run_mode', D(10), D(10), { mode: m, ...extra });
+const wf = (run, out = 'complete') => asTicket(pair(run, 'workflow', 'ship-ticket', D(10), D(20), {}, out));
+const done = (scopes) => ev('r2', 'measurement_complete', D(20), D(20), { scopes });
+
+test('FIX1: events of different runs never collapse; a recovery run numbering from 1 adds, repeats without a round all count', () => {
+  const gate = (run, n, h) => ev(run, 'gate_run', D(h), D(h, 10), { n, head_sha: `h${n}`, clean: true, t0_class: false }, 'pass');
+  const round = (run, n, lane) => ev(run, 'review_round', D(11), D(12), { n, round_kind: 'original', lane, verdict: 'PASS', majors: 0, minors: 0 });
+  const rows = [...wf('r1', 'abandoned'), ...mode('r1', 'engine'), ...gate('r1', 1, 10), ...gate('r1', 2, 11), ...round('r1', 1, 'opus'),
+    ...wf('r2'), ...mode('r2', 'recovery', { supersedes_run_id: 'r1' }), ...gate('r2', 1, 12), ...gate('r2', 2, 13), ...round('r2', 1, 'opus'), ...round('r2', 1, 'codex'),
+    ...ev('r2', 'finding', D(12), D(12), { fingerprint: 'fp', repeat: true, severity: 'Major' }), ...ev('r2', 'finding', D(13), D(13), { fingerprint: 'fp', repeat: true, severity: 'Major' }),
+    ...ev('r2', 'finding', D(11), D(11), { fingerprint: 'fp', repeat: false, severity: 'Major' })];
+  const m = measure(rows);
+  assert.equal(m.tickets[TICKET].counts.gate_runs, 4);
+  assert.equal(m.metrics.M2.repeat_findings, 2);
+  assert.equal(m.metrics.M2.value, 1);
+  // one run that resumed in place: engine and recovery run_mode of the SAME run id both count
+  const same = measure([...wf('r1'), ...mode('r1', 'engine'), ...ev('r1', 'run_mode', D(15), D(15), { mode: 'recovery' })]);
+  assert.deepEqual(same.populations.run_modes, { engine: 1, recovery: 1 });
+});
+
+test('FIX2: an estimated round or gate prints estimated in M1, M4 and M7', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'), ...done('review,repair,gate'),
+    ...ev('r1', 'review_round', D(11), D(12), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0, label: 'estimated' }),
+    ...ev('r1', 'review_round', D(11), D(12), { n: 1, round_kind: 'original', lane: 'codex', verdict: 'PASS', majors: 0 }),
+    ...ev('r1', 'gate_run', D(13), D(14), { n: 1, head_sha: 'h', clean: true, t0_class: false, label: 'estimated' }, 'pass')];
+  const { M1, M4, M7 } = measure(rows).metrics;
+  assert.deepEqual([M1.label, M4.label, M7.label], ['estimated', 'estimated', 'estimated']);
+});
+
+test('FIX3a: a ticket that only declared its run mode has unavailable rounds, not 0 within target; a declared scope makes 0 real', () => {
+  const only = measure([...wf('r1'), ...mode('r1', 'engine')]);
+  assert.equal(only.metrics.M4.value[TICKET].rounds, 'unavailable');
+  assert.equal(only.metrics.M4.value[TICKET].batches, 'unavailable');
+  assert.equal(only.metrics.M4.tickets_within_target, 0);
+  assert.equal(only.metrics.M4.of, 0);
+  const declared = measure([...wf('r1'), ...mode('r1', 'engine'), ...done('review,repair')]);
+  assert.equal(declared.metrics.M4.value[TICKET].rounds, 0);
+  assert.equal(declared.metrics.M4.of, 1);
+});
+
+test('FIX3b/c: missing waits, sleep, reconcile, holds, durations and t0 class are unavailable, never 0', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'),
+    ...asTicket(pair('r1', 'phase', 'PLAN', D(10), D(11))), ...asTicket(pair('r1', 'phase', 'SHIP', D(18), D(20))),
+    ...ev('r1', 'review_round', D(12), D(12), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0 }),
+    ...ev('r1', 'gate_run', D(13), D(13), { n: 1, head_sha: 'h', clean: true }, 'fail')];
+  const m = measure(rows).metrics;
+  const b = m.M5.value[TICKET].M5b;
+  assert.equal(b.host_sleep_ms, 'unavailable');
+  assert.equal(b.human_wait_ms, 'unavailable');
+  assert.equal(b.awake_ms_with_wait, 'unavailable');
+  assert.equal(b.elapsed_ms, 36000000);
+  const six = m.M6.value[TICKET];
+  assert.deepEqual([six.review_rounds_ms, six.reconcile_ms, six.gate_hold_ms, six.critical_path_ms], ['unavailable', 'unavailable', 'unavailable', 'unavailable']);
+  const seven = m.M7.value[TICKET];
+  assert.deepEqual([seven.t2_wall_ms, seven.t0_class_failures], ['unavailable', 'unavailable']);
+});
+
+test('FIX3d: M8 never reports Claude as not used or a numeric total for an undeclared population; state usage is read; predecessor cost is failed/abandoned', () => {
+  const rows = [...wf('r1', 'abandoned'), ...mode('r1', 'engine'), ...wf('r2'), ...mode('r2', 'supervised', { supersedes_run_id: 'r1' })];
+  const rec = (run, usd) => ({ provider: 'claude', run_id: run, role: 'builder', source_execution_id: `e-${run}`, input_tokens: 1, reported_cost_usd: usd, cost_basis: 'list' });
+  assert.equal(measure(rows).metrics.M8.value.claude.usd, 'unavailable');
+  const partial = measure(rows, [rec('r1', 4), rec('r2', 6)]).metrics.M8.value;
+  assert.match(String(partial.total_usd), /^unavailable: usage population not declared complete/);
+  assert.equal(partial.delivered_claude_usd, 6);
+  assert.equal(partial.failed_or_abandoned_claude_usd, 4);
+  assert.equal(partial.claude.measured_usd, 10);
+  const full = measure([...rows, ...done('usage')], [rec('r1', 4), rec('r2', 6)]).metrics.M8.value;
+  assert.equal(full.total_usd, 10);
+  assert.equal(full.codex.usd, 'not_used');
+  // eval joins the engine state's own usage records
+  const runs = runsOf(rows);
+  const out = evaluate({ runs, states: { [TICKET]: { run_id: 'r2', usage: [rec('r2', 6)] } }, records: [] });
+  assert.equal(out.measurement.metrics.M8.value.claude.usd, 6);
+});
+
+test('FIX4: M3 counts every severity; one unclassified finding keeps it partial', () => {
+  const f = (fp, sev, catchable) => ev('r1', 'finding', D(11), D(11), { fingerprint: fp, repeat: false, severity: sev, ...(catchable === undefined ? {} : { builder_catchable: catchable }) });
+  const all = measure([...wf('r1'), ...mode('r1', 'engine'), ...f('a', 'Major', true), ...f('b', 'Minor', true), ...f('c', 'Minor', false)]).metrics.M3;
+  assert.equal(all.value, 2);
+  const partial = measure([...wf('r1'), ...mode('r1', 'engine'), ...f('a', 'Major', true), ...f('b', 'Minor')]).metrics.M3;
+  assert.equal(partial.value, 'partial');
+  assert.equal(partial.unclassified, 1);
+  assert.equal(partial.catchable_known, 1);
+});
+
+test('FIX5: M5 names its endpoint substitutions and is estimated; a missing endpoint is unavailable and named', () => {
+  const full = measure(scrum202Rows(), scrum202Usage()).metrics.M5.value[TICKET];
+  assert.equal(full.M5a.label, 'estimated');
+  assert.match(full.M5a.substitutions.join(' '), /SHIP_READY/);
+  assert.match(full.M5b.substitutions.join(' '), /merge/);
+  const none = measure([...wf('r1'), ...mode('r1', 'engine')]).metrics.M5.value[TICKET];
+  assert.equal(none.M5a.value, 'unavailable');
+  assert.match(none.M5a.missing.join(' '), /plan approval/);
+});
+
+test('FIX6: M6 starts at the earliest dispatch of ALL lanes and ends at the last REQUIRED result', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'),
+    ...ev('r1', 'review_round', D(11), D(11, 30), { n: 1, round_kind: 'original', lane: 'optional', verdict: 'PASS', majors: 0, required: false }),
+    ...ev('r1', 'review_round', D(11, 10), D(11, 20), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0 })];
+  assert.equal(measure(rows).metrics.M6.value[TICKET].review_rounds_ms, 20 * 60000);
+});
+
+test('FIX8: AskUserQuestion and ExitPlanMode answers are owner decisions; handbacks and other tool results are not', () => {
+  const ts = (min) => `2026-11-16T10:${String(min).padStart(2, '0')}:00.000Z`;
+  const L = [
+    { type: 'assistant', timestamp: ts(1), message: { id: 'a1', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu-ask', name: 'AskUserQuestion', input: {} }] } },
+    { type: 'user', uuid: 'u1', timestamp: ts(4), toolUseResult: { answers: {} }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-ask', content: 'ok' }] } },
+    { type: 'assistant', timestamp: ts(5), message: { id: 'a2', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu-plan', name: 'ExitPlanMode', input: {} }] } },
+    { type: 'user', uuid: 'u2', timestamp: ts(9), toolUseResult: {}, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-plan', content: 'approved' }] } },
+    { type: 'assistant', timestamp: ts(10), message: { id: 'a3', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu-bash', name: 'Bash', input: {} }] } },
+    { type: 'user', uuid: 'u3', timestamp: ts(11), toolUseResult: {}, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu-bash', content: 'x' }] } },
+    { type: 'assistant', timestamp: ts(12), message: { id: 'a4', stop_reason: 'end_turn', content: [] } },
+    { type: 'user', uuid: 'u4', timestamp: ts(13), message: { role: 'user', content: 'Another Claude session sent a message: handback' } }];
+  const w = ownerDecisionsFromSession(L.map((l) => JSON.stringify(l)).join('\n'));
+  assert.deepEqual(w.map((x) => [x.decision_class, x.wait_ms]), [['ask_user_question', 180000], ['plan_approval', 240000]]);
+});
+
+test('FIX9: a round whose REVIEW phase is still open (no open activity) stays out of the percentiles', () => {
+  const mk = (n, openPhase) => {
+    const base = { candidate_id: 'c', review_execution: `review-${n}` };
+    const day = `2026-11-16T${String(10 + n).padStart(2, '0')}`;
+    const rows = [...pair(`r${n}`, 'activity', 'primary_review', `${day}:00:00.000Z`, `${day}:10:00.000Z`, base), ...pair(`r${n}`, 'activity', 'optional_review', `${day}:00:00.000Z`, `${day}:10:00.000Z`, base),
+      ...pair(`r${n}`, 'activity', 'review_reconcile', `${day}:10:00.000Z`, `${day}:11:00.000Z`, base)];
+    if (openPhase) rows.push({ ...pair(`r${n}`, 'phase', 'REVIEW', `${day}:00:00.000Z`, `${day}:30:00.000Z`, base)[0] });
+    return buildRun(TICKET, `r${n}`, asTicket(rows));
+  };
+  const out = evaluate({ runs: [1, 2, 3, 4, 5].map((n) => mk(n, n === 5)) });
+  assert.equal(out.cross_run.review_round_wall_ms.n, 4);
+  assert.equal(out.cross_run.review_round_wall_ms.excluded_unknown, 1);
+});
+
+test('FIX7: run-engine resume appends a run_mode recovery event; a telemetry failure never fails resume', async (t) => {
+  const { fixture } = await import('./engine-test-fixture.mjs');
+  const fx = fixture(t, { commit: true });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const r = fx.cli('resume');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rows = readFileSync(fx.runLog(), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((x) => [x.event, x.name, x.metrics.mode ?? null]), [['start', 'run_mode', 'recovery'], ['end', 'run_mode', null]]);
+  // telemetry failure: the run log path is a directory, so the helper cannot append
+  const fx2 = fixture(t, { commit: true });
+  assert.equal(fx2.cli('init', { dag: fx2.dagFile }).status, 0);
+  mkdirSync(fx2.runLog(), { recursive: true });
+  const r2 = fx2.cli('resume');
+  assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  assert.match(r2.stderr, /telemetry/);
+  assert.ok(JSON.parse(readFileSync(fx2.stateFile(), 'utf8')).events.some((e) => e.type === 'RESUME'));
+});

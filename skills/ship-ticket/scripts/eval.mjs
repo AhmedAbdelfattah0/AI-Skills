@@ -179,7 +179,9 @@ function reviewRounds(run) {
     const overlap = p.length && o.length ? union(p).reduce((n, [a, b]) => n + union(o).reduce((m, [c, d]) => m + Math.max(0, Math.min(b, d) - Math.max(a, c)), 0), 0) : UNKNOWN;
     const shorter = p.length && o.length ? Math.min(spanLength(p), spanLength(o)) : 0;
     const declared = phase?.metrics.gap_reason;
-    const truncated = expected.some(({ open }) => open > 0);
+    // Unfinished: an open interval of the round, or its REVIEW phase itself still open (A0.1 follow-up 2).
+    const truncated = expected.some(({ open }) => open > 0)
+      || (run.open_intervals ?? []).some((i) => i.kind === 'phase' && i.name === 'REVIEW' && i.metrics?.review_execution === id);
     const ceilings = Object.fromEntries(CEILING_METRICS.map((k) => [k, known(phase?.metrics[k]) ? phase.metrics[k] : UNKNOWN]));
     const row = { review_execution: id, skill_revision: phase?.metrics.skill_revision ?? UNKNOWN, ceilings,
       intervals: roles.map((i) => ({ role: REVIEW_ROLE_OF[i.name], event_id: i.event_id, started_at: new Date(spanOf(i)[0]).toISOString(),
@@ -325,7 +327,7 @@ export function evaluate({ runs, states = {}, records = [], repoRoot = null, now
         ? Math.max(...metrics.map((m) => m.peak_rss_mb).filter(known)) : UNKNOWN, suggestions_fired: fired,
       ...aggregateUsage(joined) },
     // S-04: present only when the run log carries measurement events, so old runs print exactly as before.
-    ...(hasMeasurementEvents(joined) ? { measurement: measurementOf(joined, { records, now }) } : {}),
+    ...(hasMeasurementEvents(joined) ? { measurement: measurementOf(joined, { records: dedupeUsage([...records, ...Object.values(states).flatMap(stateUsage)]), now }) } : {}),
     note: 'Read-only. unknown means the source did not carry the value. Suggestions are never applied.' };
 }
 

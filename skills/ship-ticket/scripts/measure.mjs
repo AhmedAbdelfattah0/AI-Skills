@@ -22,10 +22,12 @@ const ROUND_KINDS = ['original', 'confirmation', 'final'];
 const VERDICTS = ['PASS', 'FAIL', 'unavailable'];
 /** Event name -> run-log kind. Point events are a zero-length interval. */
 export const EVENT_KIND = Object.freeze({ run_mode: 'activity', review_round: 'activity', repair_batch: 'activity', confirmation: 'activity',
-  gate_run: 'activity', finding: 'activity', owner_decision: 'wait', host_sleep: 'wait' });
+  gate_run: 'activity', finding: 'activity', measurement_complete: 'activity', owner_decision: 'wait', host_sleep: 'wait' });
+/** What a `measurement_complete` event may declare as recorded in full: absent events of that kind then mean "none occurred", not "not recorded". */
+export const SCOPES = Object.freeze(['review', 'repair', 'gate', 'owner', 'sleep', 'findings', 'usage']);
 /** Event metrics kept as strings (a numeric-looking sha must not become a number). */
 export const EVENT_STRING_METRICS = Object.freeze(['mode', 'supersedes_run_id', 'reason', 'round_kind', 'lane', 'candidate_sha', 'packet_sha256',
-  'verdict', 'head_sha', 'manifest_sha256', 'fingerprint', 'severity', 'decision_class', 'authority_event_id', 'label']);
+  'verdict', 'head_sha', 'manifest_sha256', 'fingerprint', 'severity', 'decision_class', 'authority_event_id', 'label', 'scopes']);
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const POINT_NAMES = new Set(Object.keys(EVENT_KIND));
 const known = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -70,6 +72,8 @@ export function validateEvent(name, metrics, detail) {
     const gates = detail?.per_gate;
     need(gates === undefined || (Array.isArray(gates) && gates.every((g) => g && typeof g.name === 'string' && isCount(g.ms) && Number.isInteger(g.exit) && typeof g.key === 'string')),
       'detail.per_gate must be [{name, ms, exit, key}]');
+  } else if (name === 'measurement_complete') {
+    need(typeof metrics.scopes === 'string' && metrics.scopes.split(',').every((x) => SCOPES.includes(x)), `scopes must be a comma list of ${SCOPES.join('|')}`);
   } else if (name === 'finding') {
     need(str('fingerprint'), 'fingerprint is required');
     need(typeof metrics.repeat === 'boolean', 'repeat must be true or false');
@@ -91,36 +95,49 @@ function humanText(ev) {
   return text.trim() && !NOT_HUMAN.test(text) ? text : null;
 }
 
+/** Tools whose answer is an owner decision, with the class recorded for it. */
+const ASKS = { AskUserQuestion: 'ask_user_question', ExitPlanMode: 'plan_approval' };
+
 /**
- * Owner decisions of a Claude session transcript (text of the JSONL): a human `user` message that follows an assistant turn that
- * ended awaiting the owner (`end_turn`, or an AskUserQuestion/ExitPlanMode call). `wait_ms` is the gap between those two timestamps,
- * so it is `estimated`, not measured. Subagent handbacks, tool results, meta and sidechain records are not human; a repeated
- * (streamed) record counts once. A human message that interrupts a running turn is not a wait and is not returned.
+ * Owner decisions of a Claude session transcript (text of the JSONL). Three shapes count: an AskUserQuestion or ExitPlanMode answer
+ * (a `tool_result` user record for that tool_use; the wait runs from the asking assistant record), and a human text message after an
+ * assistant turn that ended awaiting the owner (`end_turn`). `wait_ms` is a timestamp gap, so the label is `estimated`. Subagent
+ * handbacks, other tool results, meta and sidechain records are not human; a repeated (streamed) record counts once. A human message
+ * that interrupts a running turn is not a wait and is not returned.
  */
 export function ownerDecisionsFromSession(text, { since, until } = {}) {
   const from = since ? Date.parse(since) : null, to = until ? Date.parse(until) : null;
-  const seen = new Set(), out = [];
+  const seen = new Set(), out = [], pending = new Map();
   let last = null;
+  const push = (key, ts, wait, decision_class) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (wait === null || wait < 0 || (from !== null && ts < from) || (to !== null && ts > to)) return;
+    out.push({ n: out.length + 1, decision_class, started_at: new Date(ts - wait).toISOString(), ended_at: new Date(ts).toISOString(), wait_ms: wait, label: 'estimated' });
+  };
   for (const raw of String(text).split(/\r?\n/)) {
     let ev;
     try { ev = JSON.parse(raw); } catch { continue; }
     const ts = Date.parse(ev?.timestamp);
-    if (!Number.isFinite(ts)) continue;
+    if (!Number.isFinite(ts) || ev.isSidechain === true) continue;
+    const blocks = Array.isArray(ev.message?.content) ? ev.message.content : [];
     if (ev.type === 'assistant') {
-      if (ev.isSidechain === true) continue;
-      const blocks = Array.isArray(ev.message?.content) ? ev.message.content : [];
-      const asks = blocks.some((b) => b?.type === 'tool_use' && ['AskUserQuestion', 'ExitPlanMode'].includes(b.name));
-      last = { ts, awaits: ev.message?.stop_reason === 'end_turn' || asks };
+      for (const b of blocks) if (b?.type === 'tool_use' && ASKS[b.name] && typeof b.id === 'string') pending.set(b.id, { ts, cls: ASKS[b.name] });
+      last = { ts, awaits: ev.message?.stop_reason === 'end_turn' };
     } else if (ev.type === 'user') {
+      const answered = blocks.find((b) => b?.type === 'tool_result' && pending.has(b.tool_use_id));
+      if (answered) {
+        const ask = pending.get(answered.tool_use_id);
+        pending.delete(answered.tool_use_id);
+        last = null;
+        push(typeof ev.uuid === 'string' ? ev.uuid : `${ts}|${answered.tool_use_id}`, ts, ts - ask.ts, ask.cls);
+        continue;
+      }
       const body = humanText(ev);
       if (body === null) continue;
-      const key = typeof ev.uuid === 'string' ? ev.uuid : `${ts}|${body}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
       const wait = last?.awaits ? ts - last.ts : null;
       last = null;
-      if (wait === null || wait < 0 || (from !== null && ts < from) || (to !== null && ts > to)) continue;
-      out.push({ n: out.length + 1, started_at: new Date(ts - wait).toISOString(), ended_at: new Date(ts).toISOString(), wait_ms: wait, label: 'estimated' });
+      push(typeof ev.uuid === 'string' ? ev.uuid : `${ts}|${body}`, ts, wait, 'owner_message');
     }
   }
   return out;
@@ -133,6 +150,7 @@ const worst = (labels) => labels.reduce((a, b) => (rank[b] > rank[a] ? b : a), '
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 const spanLen = (spans) => union(spans).reduce((n, [a, b]) => n + b - a, 0);
 const clip = (spans, [a, b]) => spans.map(([s, e]) => [Math.max(s, a), Math.min(e, b)]).filter(([s, e]) => e > s);
+const MAJOR = new Set(['major', 'blocker', 'critical']);
 
 /** The measurement events of one run, with carrier times preferred and a label each; malformed events are counted, not read. */
 function eventsOf(run, bad) {
@@ -148,15 +166,20 @@ function eventsOf(run, bad) {
   return out;
 }
 
-/** One logical event, whatever stream it came from: a re-emitted record under a new event_id is the same event. */
+/**
+ * One logical event, whatever stream it came from: a re-emitted record under a new event_id is the same event. The run is part of
+ * the identity (a recovery run numbers from 1 again), and so is the candidate/packet of a lane. A repeated finding without a round
+ * is told apart by its own event id, so repeats are never merged away.
+ */
 function logicalKey(e) {
-  const m = e.metrics;
+  const m = e.metrics, r = e.run_id;
   switch (e.name) {
-    case 'review_round': return `${m.n}|${m.lane}`;
-    case 'repair_batch': case 'confirmation': case 'gate_run': case 'owner_decision': return `${m.n}`;
-    case 'finding': return `${m.fingerprint}|${m.repeat}|${m.round ?? ''}`;
-    case 'run_mode': return e.run_id;
-    default: return `${e.start}|${e.end}`;
+    case 'review_round': return `${r}|${m.n}|${m.lane}|${m.candidate_sha ?? ''}|${m.packet_sha256 ?? ''}`;
+    case 'repair_batch': case 'confirmation': case 'gate_run': case 'owner_decision': return `${r}|${m.n}`;
+    case 'finding': return `${r}|${m.fingerprint}|${m.repeat}|${m.round ?? (m.repeat ? e.event_id : '')}`;
+    case 'run_mode': return `${r}|${m.mode}`;
+    case 'measurement_complete': return `${r}|${m.scopes}`;
+    default: return `${r}|${e.start}|${e.end}`;
   }
 }
 function dedupe(events) {
@@ -183,12 +206,17 @@ function assemble(runs, bad) {
     const heads = list.filter((r) => !superseded.has(r.run_id)).sort((a, b) => first(a) - first(b));
     const head = heads.at(-1) ?? list.at(-1);
     const by = (name) => events.filter((e) => e.name === name);
-    const roundNs = new Set(by('review_round').map((e) => e.metrics.n));
-    const confirmNs = new Set([...by('confirmation').map((e) => e.metrics.n), ...by('review_round').filter((e) => e.metrics.round_kind === 'confirmation').map((e) => e.metrics.n)]);
-    tickets[ticket] = { instrumented: events.length > 0, status: STATUS[head.outcome] ?? 'unknown', head_run_id: head.run_id,
+    const scopes = new Set(by('measurement_complete').flatMap((e) => e.metrics.scopes.split(',')));
+    const declared = (scope) => scopes.has(scope);
+    // A count is a number only when events exist or the scope was declared complete; otherwise it was not recorded.
+    const count = (n, scope) => (n > 0 || declared(scope) ? n : UNAVAILABLE);
+    const roundNs = new Set(by('review_round').map((e) => `${e.run_id}|${e.metrics.n}`));
+    const confirmNs = new Set([...by('confirmation').map((e) => `${e.run_id}|${e.metrics.n}`), ...by('review_round').filter((e) => e.metrics.round_kind === 'confirmation').map((e) => `${e.run_id}|${e.metrics.n}`)]);
+    tickets[ticket] = { instrumented: events.length > 0, status: STATUS[head.outcome] ?? 'unknown', head_run_id: head.run_id, declared,
       runs: list.map((r) => r.run_id), events, by,
-      counts: { review_rounds: roundNs.size, repair_batches: new Set(by('repair_batch').map((e) => e.metrics.n)).size, confirmations: confirmNs.size,
-        gate_runs: by('gate_run').length, owner_waits: by('owner_decision').length, findings: by('finding').length } };
+      counts: { review_rounds: count(roundNs.size, 'review'), repair_batches: count(new Set(by('repair_batch').map((e) => `${e.run_id}|${e.metrics.n}`)).size, 'repair'),
+        confirmations: count(confirmNs.size, 'repair'), gate_runs: count(by('gate_run').length, 'gate'), owner_waits: count(by('owner_decision').length, 'owner'),
+        findings: count(by('finding').length, 'findings') } };
   }
   return tickets;
 }
@@ -197,40 +225,58 @@ function m1(started) {
   const by_status = { delivered: 0, failed: 0, abandoned: 0, censored: 0 };
   const started_by_status = { ...by_status };
   let numerator = 0, incomplete = 0;
+  const labels = [];
   for (const t of started) {
     if (t.status in started_by_status) started_by_status[t.status] += 1;
     const originals = t.by('review_round').filter((e) => e.metrics.round_kind === 'original');
     if (!originals.length) continue;
     const n = Math.min(...originals.map((e) => e.metrics.n));
-    const lanes = t.by('review_round').filter((e) => e.metrics.n === n);
+    const lanes = t.by('review_round').filter((e) => e.metrics.n === n && e.run_id === originals.find((o) => o.metrics.n === n).run_id);
+    labels.push(...lanes.map((e) => e.label));
     const ok = lanes.length >= 2 && lanes.every((e) => e.metrics.verdict === 'PASS' && e.metrics.majors === 0);
     if (lanes.length < 2 || lanes.some((e) => e.metrics.verdict === UNAVAILABLE || !isCount(e.metrics.majors))) incomplete += 1;
     if (ok) { numerator += 1; if (t.status in by_status) by_status[t.status] += 1; }
   }
   const denominator = started.length;
   return { value: denominator ? Math.round(numerator / denominator * 1000) / 1000 : UNAVAILABLE, numerator, denominator, by_status, started_by_status,
-    incomplete_first_rounds: incomplete, label: denominator ? 'measured' : UNAVAILABLE };
+    incomplete_first_rounds: incomplete, label: denominator ? worst(labels) : UNAVAILABLE };
 }
 
-function m2m3(tickets) {
-  const findings = Object.entries(tickets).flatMap(([id, t]) => t.by('finding').map((e) => ({ id, e })));
+const SEVERE = (e) => MAJOR.has(String(e.metrics.severity).toLowerCase());
+function m2m3(started) {
+  const findings = started.flatMap((t) => t.by('finding').map((e) => ({ id: t.id, e })));
   if (!findings.length) return [{ value: UNAVAILABLE, label: UNAVAILABLE }, { value: UNAVAILABLE, label: UNAVAILABLE }];
-  const majors = new Map();
-  for (const { id, e } of findings) if (String(e.metrics.severity).toLowerCase() === 'major') majors.set(`${id}|${e.metrics.fingerprint}`, { ...majors.get(`${id}|${e.metrics.fingerprint}`), catchable: majors.get(`${id}|${e.metrics.fingerprint}`)?.catchable || e.metrics.builder_catchable === true });
-  const per = {};
-  for (const key of majors.keys()) { const id = key.split('|')[0]; per[id] = (per[id] ?? 0) + 1; }
   const labels = worst(findings.map(({ e }) => e.label));
-  const hasCatchable = findings.some(({ e }) => typeof e.metrics.builder_catchable === 'boolean');
-  return [{ value: majors.size, per_ticket: per, repeat_findings: findings.filter(({ e }) => e.metrics.repeat === true).length, label: labels },
-    hasCatchable ? { value: [...majors.values()].filter((m) => m.catchable).length, of_distinct_majors: majors.size, label: labels } : { value: UNAVAILABLE, label: UNAVAILABLE }];
+  const majors = new Set(), per = {};
+  for (const { id, e } of findings.filter(({ e }) => SEVERE(e))) {
+    const key = `${id}|${e.metrics.fingerprint}`;
+    if (!majors.has(key)) { majors.add(key); per[id] = (per[id] ?? 0) + 1; }
+  }
+  // M3: every distinct finding that reached review or a gate, whatever its severity, classified by builder_catchable.
+  const distinct = new Map();
+  for (const { id, e } of findings) {
+    const key = `${id}|${e.metrics.fingerprint}`;
+    const c = typeof e.metrics.builder_catchable === 'boolean' ? e.metrics.builder_catchable : undefined;
+    const prev = distinct.get(key);
+    distinct.set(key, prev === undefined || prev === false ? (c ?? prev) : prev);
+  }
+  const classified = [...distinct.values()].filter((v) => typeof v === 'boolean');
+  const catchable = classified.filter(Boolean).length, unclassified = distinct.size - classified.length;
+  const M3 = !classified.length ? { value: UNAVAILABLE, label: UNAVAILABLE, unclassified, of_distinct_findings: distinct.size }
+    : { value: unclassified ? 'partial' : catchable, catchable_known: catchable, unclassified, of_distinct_findings: distinct.size, label: unclassified ? 'estimated' : labels };
+  return [{ value: majors.size, per_ticket: per, repeat_findings: findings.filter(({ e }) => e.metrics.repeat === true).length, label: labels }, M3];
 }
 
 function m4(started) {
   const value = Object.fromEntries(started.map((t) => [t.id, { rounds: t.counts.review_rounds, batches: t.counts.repair_batches, confirmations: t.counts.confirmations,
     repeat_findings: t.by('finding').filter((e) => e.metrics.repeat === true).length, status: t.status }]));
-  const within = started.filter((t) => t.counts.review_rounds <= 2 && t.counts.repair_batches <= 1).length;
-  return { value, tickets_within_target: within, of: started.length, label: started.length ? 'measured' : UNAVAILABLE };
+  const known4 = started.filter((t) => isCount(t.counts.review_rounds) && isCount(t.counts.repair_batches));
+  const within = known4.filter((t) => t.counts.review_rounds <= 2 && t.counts.repair_batches <= 1).length;
+  const labels = known4.flatMap((t) => [...t.by('review_round'), ...t.by('repair_batch')].map((e) => e.label));
+  return { value, tickets_within_target: within, of: known4.length, unrecorded_tickets: started.length - known4.length, label: known4.length ? worst(labels) : UNAVAILABLE };
 }
+
+const NA = (missing) => ({ value: UNAVAILABLE, label: UNAVAILABLE, missing });
 
 function m5(started, runsOf) {
   const value = {};
@@ -239,43 +285,59 @@ function m5(started, runsOf) {
     const all = runs.flatMap((r) => r.intervals);
     const phase = (name) => all.filter((i) => i.kind === 'phase' && i.name === name);
     const sleeps = t.by('host_sleep'), waits = t.by('owner_decision');
-    const window = (a, b) => {
-      if (!known(a) || !known(b) || b <= a) return UNAVAILABLE;
+    const sleepKnown = sleeps.length > 0 || t.declared('sleep'), ownerKnown = waits.length > 0 || t.declared('owner');
+    const window = (a, b, substitutions) => {
       const sleep = spanLen(clip(sleeps.map((e) => [e.start, e.end]), [a, b]));
       const human = spanLen(clip([...sleeps, ...waits].map((e) => [e.start, e.end]), [a, b])) - sleep;
       const used = [...sleeps, ...waits].filter((e) => e.end > a && e.start < b);
-      return { awake_ms_with_wait: b - a - sleep, awake_ms_excluding_wait: b - a - sleep - human, host_sleep_ms: sleep, human_wait_ms: human,
-        label: worst(used.map((e) => e.label)) };
+      const withWait = sleepKnown ? b - a - sleep : UNAVAILABLE;
+      return { elapsed_ms: b - a, host_sleep_ms: sleepKnown ? sleep : UNAVAILABLE, human_wait_ms: ownerKnown ? human : UNAVAILABLE, awake_ms_with_wait: withWait,
+        awake_ms_excluding_wait: sleepKnown && ownerKnown ? withWait - human : UNAVAILABLE, substitutions,
+        label: worst(['estimated', ...used.map((e) => e.label), ...(sleepKnown && ownerKnown ? [] : ['unavailable'])]) };
     };
     const headWorkflow = runs.find((r) => r.run_id === t.head_run_id)?.intervals.filter((i) => i.kind === 'workflow').at(-1);
     const begin = Math.min(...all.map((i) => Date.parse(i.started_at)), Infinity);
     const planEnd = phase('PLAN').length ? Math.max(...phase('PLAN').map((i) => Date.parse(i.ended_at))) : NaN;
     const shipStart = phase('SHIP').length ? Math.min(...phase('SHIP').map((i) => Date.parse(i.started_at))) : NaN;
-    value[t.id] = { M5a: window(planEnd, shipStart), M5b: t.status === 'delivered' && headWorkflow ? window(begin, Date.parse(headWorkflow.ended_at)) : UNAVAILABLE };
+    const a = [!known(planEnd) && 'plan approval (PLAN phase end)', !known(shipStart) && 'SHIP_READY (SHIP phase start)'].filter(Boolean);
+    const b = [t.status !== 'delivered' && 'merge (the head run is not delivered)', !headWorkflow && 'merge (head run workflow end)', !known(begin) && 'first skill invocation (no interval)'].filter(Boolean);
+    value[t.id] = {
+      M5a: a.length || shipStart <= planEnd ? NA(a.length ? a : ['SHIP_READY after plan approval']) : window(planEnd, shipStart, ['approval = PLAN phase end', 'SHIP_READY = SHIP phase start (no SHIP_READY event is recorded)']),
+      M5b: b.length ? NA(b) : window(begin, Date.parse(headWorkflow.ended_at), ['first skill invocation = first recorded interval start', 'merge = head run workflow end (no merge event is recorded)']) };
   }
-  const parts = Object.values(value).flatMap((v) => [v.M5a, v.M5b]).filter((v) => v !== UNAVAILABLE);
+  const parts = Object.values(value).flatMap((v) => [v.M5a, v.M5b]).filter((v) => v.label !== UNAVAILABLE);
   return { value, label: parts.length ? worst(parts.map((p) => p.label)) : UNAVAILABLE,
-    note: 'M5a = plan approval (PLAN end) to SHIP start; M5b = first interval to the head run workflow end (delivered only). Host sleep excluded; human wait reported with and without.' };
+    note: 'M5a = approval to SHIP_READY, M5b = first invocation to merge; both use the named substitutions and are therefore estimated. Host sleep is excluded; an unrecorded sleep or wait is unavailable, never 0.' };
 }
 
 function m6(started, runsOf) {
   const value = {};
   for (const t of started) {
     const rounds = new Map();
-    for (const e of t.by('review_round').filter((x) => x.metrics.required !== false)) {
-      const r = rounds.get(e.metrics.n) ?? [Infinity, -Infinity];
-      rounds.set(e.metrics.n, [Math.min(r[0], e.start), Math.max(r[1], e.end)]);
+    for (const e of t.by('review_round')) {
+      const key = `${e.run_id}|${e.metrics.n}`;
+      const r = rounds.get(key) ?? { start: Infinity, end: -Infinity, ok: true, required: false };
+      r.start = Math.min(r.start, e.start); // every lane's dispatch counts toward the start (dispatch skew)
+      if (e.metrics.required !== false) { r.required = true; r.end = Math.max(r.end, e.end); r.ok &&= e.end > e.start; }
+      rounds.set(key, r);
     }
     if (!rounds.size) continue;
+    const hulls = [...rounds.values()];
+    const wallOk = hulls.every((r) => r.required && r.ok && r.end > r.start);
     const reconcile = runsOf(t.id).flatMap((r) => r.intervals).filter((i) => i.kind === 'activity' && REVIEW_ROLE_OF[i.name] === 'reconcile')
       .map((i) => [Date.parse(i.carrier_timing?.started_at ?? i.started_at), Date.parse(i.carrier_timing?.ended_at ?? i.ended_at)]);
-    const holds = t.by('gate_run').filter((e) => e.metrics.holds_review === true && known(e.metrics.hold_ms)).map((e) => [e.start, e.start + e.metrics.hold_ms]);
-    const hulls = [...rounds.values()];
-    value[t.id] = { review_rounds_ms: spanLen(hulls), reconcile_ms: spanLen(reconcile), gate_hold_ms: spanLen(holds), critical_path_ms: spanLen([...hulls, ...reconcile, ...holds]),
-      label: worst([...t.by('review_round'), ...t.by('gate_run')].map((e) => e.label)) };
+    const holdEvents = t.by('gate_run').filter((e) => e.metrics.holds_review === true && known(e.metrics.hold_ms));
+    const holds = holdEvents.map((e) => [e.start, e.start + e.metrics.hold_ms]);
+    const parts = {
+      review_rounds_ms: wallOk ? spanLen(hulls.map((r) => [r.start, r.end])) : UNAVAILABLE,
+      reconcile_ms: reconcile.length || t.declared('review') ? spanLen(reconcile) : UNAVAILABLE,
+      gate_hold_ms: holds.length || t.declared('gate') ? spanLen(holds) : UNAVAILABLE };
+    const all = Object.values(parts).every(known);
+    value[t.id] = { ...parts, critical_path_ms: all ? spanLen([...hulls.map((r) => [r.start, r.end]), ...reconcile, ...holds]) : UNAVAILABLE,
+      label: worst([...t.by('review_round'), ...holdEvents].map((e) => e.label).concat(all ? [] : ['unavailable'])) };
   }
   const ids = Object.keys(value);
-  return { value, label: ids.length ? worst(ids.map((i) => value[i].label)) : UNAVAILABLE, note: 'rounds + reconciliation + gate holds, overlap counted once' };
+  return { value, label: ids.length ? worst(ids.map((i) => value[i].label)) : UNAVAILABLE, note: 'earliest dispatch of any lane to the last required result, plus reconciliation and gate holds, overlap counted once' };
 }
 
 function m7(started) {
@@ -293,11 +355,13 @@ function m7(started) {
         for (const g of list) if (g.exit === 0) passed.add(`${g.name}|${g.key}`);
       }
     }
-    value[t.id] = { t2_runs: gates.length, t2_wall_ms: gates.reduce((n, g) => n + g.end - g.start, 0),
-      t0_class_failures: gates.filter((g) => g.outcome === 'fail' && g.metrics.t0_class === true).length, failed_runs: gates.filter((g) => g.outcome === 'fail').length,
-      dirty_runs: gates.filter((g) => g.metrics.clean === false).length, redundant_gate_executions: redundant };
+    const failed = gates.filter((g) => g.outcome === 'fail');
+    value[t.id] = { t2_runs: gates.length, t2_wall_ms: gates.every((g) => g.end > g.start) ? gates.reduce((n, g) => n + g.end - g.start, 0) : UNAVAILABLE,
+      t0_class_failures: failed.every((g) => typeof g.metrics.t0_class === 'boolean') ? failed.filter((g) => g.metrics.t0_class === true).length : UNAVAILABLE,
+      failed_runs: failed.length, dirty_runs: gates.filter((g) => g.metrics.clean === false).length, redundant_gate_executions: redundant };
   }
-  return { value, label: Object.keys(value).length ? 'measured' : UNAVAILABLE };
+  const labels = started.flatMap((t) => t.by('gate_run').map((e) => e.label));
+  return { value, label: Object.keys(value).length ? worst(labels) : UNAVAILABLE };
 }
 
 const costOf = (r) => (known(r.reported_cost_usd) && r.cost_basis === 'list' ? { usd: r.reported_cost_usd, label: 'measured' }
@@ -319,20 +383,27 @@ function m8(started, records) {
   const ticketOfRun = new Map(started.flatMap((t) => t.runs.map((r) => [r, t])));
   const mine = (Array.isArray(records) ? records : []).filter((r) => r && ticketOfRun.has(r.run_id));
   const ofProvider = (list, p) => list.filter((r) => r.provider === p);
+  const declared = started.length > 0 && started.every((t) => t.declared('usage'));
   const codexLane = started.some((t) => t.by('review_round').some((e) => /^codex/i.test(e.metrics.lane)));
-  const used = ['claude', 'codex'].filter((p) => ofProvider(mine, p).length || (p === 'codex' && codexLane));
-  const cost = Object.fromEntries(['claude', 'codex'].map((p) => [p, used.includes(p) ? providerCost(ofProvider(mine, p)) : { usd: 'not_used', label: 'measured', records: 0 }]));
-  const missing = used.filter((p) => cost[p].usd === UNAVAILABLE);
+  const claude = providerCost(ofProvider(mine, 'claude'));
+  const codexUsed = ofProvider(mine, 'codex').length > 0 || codexLane;
+  const codex = codexUsed ? providerCost(ofProvider(mine, 'codex')) : declared ? { usd: 'not_used', label: 'measured', records: 0 } : { usd: UNAVAILABLE, label: UNAVAILABLE, records: 0 };
+  const providers = [['claude', claude], ['codex', codex]];
+  const missing = providers.filter(([, c]) => c.usd === UNAVAILABLE).map(([n]) => n);
   const delivered = started.filter((t) => t.status === 'delivered').length;
-  const total = used.length && !missing.length ? round6(used.reduce((n, p) => n + cost[p].usd, 0)) : unavailableText(missing);
-  const claudeBy = (statuses) => providerCost(ofProvider(mine, 'claude').filter((r) => statuses.includes(ticketOfRun.get(r.run_id).status))).usd;
-  const status = (s) => (ofProvider(mine, 'claude').some((r) => s.includes(ticketOfRun.get(r.run_id).status)) ? claudeBy(s) : UNAVAILABLE);
-  return { value: { claude: cost.claude, codex: cost.codex, total_usd: total,
+  const numeric = declared && !missing.length;
+  const total = numeric ? round6(providers.reduce((n, [, c]) => n + (known(c.usd) ? c.usd : 0), 0))
+    : declared ? unavailableText(missing) : `unavailable: usage population not declared complete (measurement_complete scopes=usage)${missing.length ? `; ${unavailableText(missing)}` : ''}`;
+  // A predecessor (superseded) run never delivered, whatever the ticket's final status.
+  const bucket = (r) => { const t = ticketOfRun.get(r.run_id); return r.run_id !== t.head_run_id ? 'failed_or_abandoned' : t.status === 'delivered' ? 'delivered' : ['failed', 'abandoned'].includes(t.status) ? 'failed_or_abandoned' : t.status; };
+  const bucketCost = (p, b) => { const list = ofProvider(mine, p).filter((r) => bucket(r) === b); return list.length ? providerCost(list).usd : UNAVAILABLE; };
+  return { value: { claude, codex, total_usd: total,
     per_delivered_ticket_usd: typeof total === 'number' ? (delivered ? round6(total / delivered) : UNAVAILABLE) : total,
-    delivered_tickets: delivered, delivered_claude_usd: status(['delivered']), failed_or_abandoned_claude_usd: status(['failed', 'abandoned']), censored_claude_usd: status(['censored']),
+    delivered_tickets: delivered, delivered_claude_usd: bucketCost('claude', 'delivered'), failed_or_abandoned_claude_usd: bucketCost('claude', 'failed_or_abandoned'),
+    failed_or_abandoned_codex_usd: bucketCost('codex', 'failed_or_abandoned'), censored_claude_usd: bucketCost('claude', 'censored'),
     models_used: [...new Set(mine.flatMap((r) => (Array.isArray(r.models_used) ? r.models_used : [])))].sort() },
-  label: used.length ? worst(used.map((p) => cost[p].label)) : UNAVAILABLE,
-  note: 'List-equivalent cost of all attempts. A provider with any record lacking a cost is unavailable, and so is the total; unknown is never 0.' };
+  label: started.length ? worst(providers.filter(([, c]) => c.usd !== 'not_used').map(([, c]) => c.label).concat(numeric ? [] : ['unavailable'])) : UNAVAILABLE,
+  note: 'List-equivalent cost of all attempts. The total is a number only when every actor population is declared complete and every provider record is priced; unknown is never 0.' };
 }
 
 function m9(started, now) {
@@ -367,7 +438,7 @@ export function measurementOf(runs, { records = [], now = Date.now() } = {}) {
     populations.tickets[t.status] += 1;
     for (const e of t.by('run_mode')) populations.run_modes[e.metrics.mode] = (populations.run_modes[e.metrics.mode] ?? 0) + 1;
   }
-  const [M2, M3] = m2m3(Object.fromEntries(started.map((t) => [t.id, t])));
+  const [M2, M3] = m2m3(started);
   return { schema: MEASURE_SCHEMA, labels: { measured: 'read from a recorded event or provider counter', estimated: 'derived or priced; never a recorded fact', unavailable: 'the source did not carry it; never 0' },
     populations,
     tickets: Object.fromEntries(started.map((t) => [t.id, { status: t.status, head_run_id: t.head_run_id, instrumented: true, runs: t.runs, counts: t.counts }])),

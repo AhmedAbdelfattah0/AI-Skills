@@ -1,5 +1,6 @@
 // Synthetic S-04 fixture: the SCRUM-202 timeline reduced to counts, kinds, durations and clock formats (ASTF-42).
-// No transcript text, no tokens, no sink telemetry: every identifier below is invented. Gate and engine stamps
+// No transcript text, no tokens, no sink telemetry. Identifiers are synthetic except the ticket key, the deferred ticket numbers and the
+// durations/costs, which are copied from the published forensic summary on purpose. Gate and engine stamps
 // use +02:00 on purpose (the forensic report found local-time stamps next to Z stamps).
 const SCHEMA = 'ship-ticket-run-log-v1';
 export const TICKET = 'SCRUM-202';
@@ -74,6 +75,8 @@ export function scrum202Rows() {
     ...pair('run-B', 'workflow', 'ship-ticket', z('17:27:42'), z('21:29:00'), {}, 'complete'),
     ...pair('run-B', 'activity', 'run_mode', z('17:27:42'), z('17:27:42'), { mode: 'supervised', supersedes_run_id: 'run-A', label: 'measured' }),
     ...pair('run-B', 'phase', 'SHIP', z('21:07:15'), z('21:29:00'), {}, 'pass'),
+    // The orchestrator declares which kinds of event it recorded completely: absent kinds then mean "none occurred", not "not recorded".
+    ...pair('run-B', 'activity', 'measurement_complete', z('21:29:00'), z('21:29:00'), { scopes: 'review,repair,gate,owner,sleep,findings,usage' }),
   ];
   for (const [run, at, s, cls, retries] of OWNER_WAITS) {
     rows.push(...pair(run, 'wait', 'owner_decision', z(at), z(add(at, s)), { n: rows.length, decision_class: cls, retries_granted: retries, wait_ms: s * 1000, label: 'estimated' }));

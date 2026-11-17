@@ -365,7 +365,7 @@ first; do not rerun shipped tickets merely to fill missing telemetry.
 
 ## Measurement events and metrics M1-M10 (S-04)
 
-Every execution mode (engine, supervised, recovery, fallback) writes the same optional events into the
+Every execution mode (engine, supervised, recovery, fallback) can write the same optional events into the
 ordinary run log. They are rows of `ship-ticket-run-log-v1` (an optional `detail` object beside `metrics`), so
 old readers parse them unchanged; stop calling the emitter and the feature is gone. One command writes
 a start/end pair (a point event when no times are given; `--started-at`/`--ended-at` import a past event):
@@ -377,24 +377,25 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs event --repo <TARGET_REPO> --ticket
 
 | Event | Required metrics | Notes |
 |---|---|---|
-| `run_mode` | `mode=engine\|supervised\|recovery\|fallback` | `supersedes_run_id=<run>` when this run replaces another (resume/adopt, supervised completion); `reason=execution_lane_unavailable` on a fallback. Emit it at the start of every run. |
+| `run_mode` | `mode=engine\|supervised\|recovery\|fallback` | `supersedes_run_id=<run>` when this run replaces another (supervised completion); `reason=execution_lane_unavailable` on a fallback. Emit `engine` or `supervised` at the start of a run. `run-engine resume` emits `recovery` itself (best effort: a telemetry failure is a stderr note and never changes the exit code or the state). |
+| `measurement_complete` | `scopes=` comma list of `review,repair,gate,owner,sleep,findings,usage` | the orchestrator declares which kinds it recorded in full; only then does an absent kind mean "none occurred" (0) instead of "not recorded" (`unavailable`) |
 | `review_round` | `n`, `round_kind=original\|confirmation\|final`, `lane`, `verdict=PASS\|FAIL\|unavailable` | one per lane per round; `majors`, `minors`, `candidate_sha`, `packet_sha256`; the interval is the dispatch-to-result time (a relay carrier time wins) |
 | `repair_batch` | `n` | `authority_event_id`; `--detail '{"finding_ids":[...]}'` |
 | `confirmation` | `n` | `repair_batch=<n>` |
-| `gate_run` | `n`, `head_sha`, `clean` | `manifest_sha256`; `--detail '{"per_gate":[{"name","ms","exit","key"}]}'`; `holds_review=true` with `hold_ms` when reviewers waited for it; `t0_class=true` when it failed on a builder-catchable defect |
+| `gate_run` | `n`, `head_sha`, `clean` | `manifest_sha256`; `--detail '{"per_gate":[{"name","ms","exit","key"}]}'`; `holds_review=true` with `hold_ms` when reviewers waited for it; `t0_class=true\|false` when it failed (a failed run without it makes the T0 count `unavailable`); pass `--outcome fail` for a failed run and real `--started-at/--ended-at` (a point event has no duration) |
 | `owner_decision` | `n` | a `wait`: its interval is the owner wait; `decision_class`, `retries_granted` |
-| `finding` | `fingerprint`, `repeat`, `severity` | `round`, `builder_catchable`, `deferred=true` for a knowingly deferred finding |
+| `finding` | `fingerprint`, `repeat`, `severity` | `round` (a repeat without one is told apart by its event id), `builder_catchable=true\|false`, `deferred=true` for a knowingly deferred finding |
 | `host_sleep` | none | a `wait` with `gap_reason=host_sleep`; excluded from awake time |
 
 Each event may carry `label=measured|estimated|unavailable` (default `measured`). The label of a whole event is
 the only granularity; a value derived from timestamps (for example owner waits from a transcript) must say
 `estimated`. `measure.mjs owner-waits --session <session.jsonl>` derives owner decisions from a Claude
-transcript: only a human `user` message after an assistant turn that awaited the owner counts; a subagent
+transcript: an AskUserQuestion or ExitPlanMode answer (a tool result for that call), or a human `user` message after an assistant turn that awaited the owner, counts; a subagent
 handback ("Another Claude session sent a message"), a tool result, a meta or sidechain record is not a human
 decision, and a repeated streamed record counts once. Usage records may carry `models_used[]` (every model
 of the attempt; `usage.mjs` fills it from the CLI's `modelUsage` and from session `message.model`), and a
 priced-by-hand record uses `estimated_cost_usd` (never `reported_cost_usd`). A relay result's `exitCode` and
-token `usage`, when it carries them, are imported into `carrier_timing` as `exit` and `usage`; absent means unavailable.
+token `usage`, when it carries them, are imported into `carrier_timing` as `exit` and `usage`; absent means unavailable. The codex relay result has `exitCode` but no `usage` field today, so the usage import is inert until a relay writes one.
 
 `eval.mjs report` adds a `measurement` block only when the log has such events (reports for old runs are
 unchanged). A ticket with any event is instrumented and *started*; the rest are counted `uninstrumented` and
@@ -403,13 +404,18 @@ names): `complete` delivered, `fail` failed, `abandoned`, `open` censored. Each 
 
 - M1 first-pass acceptance: started tickets whose first `original` round has at least two lanes, all `PASS` with `majors=0`.
   Failed, abandoned and censored tickets stay in the denominator and are listed in `started_by_status`.
-- M2/M3 distinct `Major` fingerprints (`repeat` findings counted apart); `unavailable` without finding events or `builder_catchable`.
+- M2 distinct Major/Blocker/Critical fingerprints (`repeat` findings counted apart); M3 distinct findings of any severity with `builder_catchable=true`, `partial` while any finding is unclassified, `unavailable` without classifications.
 - M4 rounds (distinct `n`), repair batches, confirmations per ticket, and how many are within 2 rounds and 1 batch.
-- M5 `M5a` (plan approval to SHIP start) and `M5b` (first interval to head workflow end, delivered tickets): awake time with and
-  without human wait; `host_sleep` always excluded.
-- M6 per-round dispatch-to-last-required-result, plus reconciliation and gate holds, overlap counted once.
+- M5 `M5a` (plan approval to SHIP_READY) and `M5b` (first invocation to merge, delivered tickets). No SHIP_READY or merge event exists yet, so
+  both use named substitutions (PLAN end, SHIP start, first interval, head workflow end) and print `estimated`; a missing endpoint prints
+  `unavailable` naming it. An unrecorded sleep or owner wait is `unavailable` unless `measurement_complete` declares `sleep`/`owner`.
+- M6 per-round earliest dispatch of any lane to the last required result (a point event has no duration: `unavailable`), plus reconciliation and gate holds, overlap counted once.
 - M7 gate runs, total wall, T0-class failures, and redundant executions (`unavailable` unless every run has `per_gate` keys).
 - M8 list-equivalent cost of all attempts. A provider with any record lacking a cost is `unavailable`, and so is the total:
-  it prints `Codex unavailable`, never a partial sum or 0. Failed/abandoned/censored cost is reported separately.
+  it prints `Codex unavailable`, never a partial sum or 0, and the total is only numeric when `measurement_complete` declares `usage` (engine state usage is read too). A superseded predecessor run's cost is reported in the failed/abandoned bucket, with Claude and Codex apart.
 - M9 `unavailable until the 30-day window matures`; deferred findings are listed apart by severity.
 - M10 `unavailable`: it needs the S-24 eligibility record and S-16 replays.
+
+Limit (AC6): `recovery` is emitted by the engine on `resume`; there is no `adopt` command in this tree. `fallback` (execution lane
+unavailable) has no engine path yet: the orchestrator runs the `event` command above by hand. It becomes automatic with the execution
+lane (S-18/S-03), so AC6 is met for recovery and only partly met for fallback.

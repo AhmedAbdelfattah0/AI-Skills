@@ -417,7 +417,7 @@ test('optional_review with --carrier-result imports relay timing, the positive s
   assert.ok(timing.collection_delay_ms >= 0);
 });
 
-test('gap_reason accepts only the enum', (t) => {
+test('gap_reason: a start accepts only the enum, an end records anything else as unknown', (t) => {
   const f = fixture(t);
   const start = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1');
   assert.equal(f.cli('start', ...start).status, 0);

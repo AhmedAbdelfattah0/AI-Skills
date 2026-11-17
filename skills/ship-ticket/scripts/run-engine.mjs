@@ -21,6 +21,7 @@ import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readd
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { isEntrypoint } from './harness.mjs';
 import { truncatedOutputs } from './run-summary.mjs';
 import { eventLine } from './run-state.mjs';
@@ -340,9 +341,30 @@ export async function status(ctx) {
 
 /** Reconcile attempts, the outbox, spent judgments and staleness after a crash or restart (refused when the binding drifted). */
 export async function resume(ctx) {
+  let resumed = false;
+  const result = await resumeLocked(ctx, () => { resumed = true; });
+  if (resumed) emitRecoveryMode(ctx);
+  return result;
+}
+
+/**
+ * S-04 (ASTF-42) telemetry: a resume is a recovery run, so append a `run_mode` event through the run-log helper. Best effort by
+ * contract: any failure is reported on stderr and swallowed, and it never changes the result, the state or the exit code.
+ */
+function emitRecoveryMode(ctx) {
+  try {
+    const helper = join(dirname(fileURLToPath(import.meta.url)), 'run-log.mjs');
+    const r = spawnSync(process.execPath, [helper, 'event', '--repo', ctx.repoRoot, '--ticket', ctx.ticket, '--run-id', ctx.runId, '--name', 'run_mode',
+      '--event-id', `resume-${Date.now().toString(36)}-${process.pid}`, '--metric', 'mode=recovery'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], timeout: 15000 });
+    if (r.status !== 0) process.stderr.write(`run-engine: telemetry: recovery run_mode not recorded (${(r.stderr || r.error?.message || 'failed').trim().split('\n')[0]})\n`);
+  } catch (e) { process.stderr.write(`run-engine: telemetry: recovery run_mode not recorded (${e.message})\n`); }
+}
+
+async function resumeLocked(ctx, onResumed) {
   return locked(ctx, async (E) => {
     const unbound = verifyBinding(E);
     if (unbound.length) return view(E, unbound);
+    onResumed();
     await deliver(E);
     const live = await reconcile(E, 1000);
     const cleared = clearSpent(E.S);
