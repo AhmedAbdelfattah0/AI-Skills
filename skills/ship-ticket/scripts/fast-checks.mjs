@@ -91,7 +91,18 @@ const stop = (code, reason) => ({ stop: { code, reason } });
 export function utf8Path(raw) { const p = raw.toString('utf8'); return Buffer.from(p, 'utf8').equals(raw) ? p : null; }
 const caseFold = process.platform === 'win32' || process.platform === 'darwin';
 const norm = (p) => (caseFold ? p.toLowerCase() : p);
-const realOr = (p) => { try { return realpathSync(p); } catch { return null; } };
+// `.native` expands Windows 8.3 short names (RUNNER~1) so every path compared in this module has one spelling.
+const realOr = (p) => { try { return realpathSync.native(p); } catch { return null; } };
+/**
+ * A top-level-relative git path (always `/`-separated) as a path relative to the `--repo` directory, whose own
+ * top-level-relative `prefix` git reported (`''` or `pkg/`). Pure string work on git's spellings: no filesystem path
+ * is ever compared with another, so short/long names, drive-letter case and separators cannot skew it.
+ */
+export function relativeToPrefix(prefix, p) {
+  const pre = prefix.split('/').filter(Boolean); const parts = p.split('/');
+  let i = 0; while (i < pre.length && i < parts.length - 1 && pre[i] === parts[i]) i++;
+  return [...Array(pre.length - i).fill('..'), ...parts.slice(i)].join('/');
+}
 
 /**
  * Everything T0 needs before running a command, all read from git, none of it trusted from the tree under test:
@@ -109,10 +120,11 @@ const realOr = (p) => { try { return realpathSync(p); } catch { return null; } }
  */
 export function prepare(repo, base) {
   if (typeof base !== 'string' || !base || base.startsWith('-')) return stop('base_invalid', '--base must be a commit-ish that does not start with "-"');
-  let top; let sha; let repoReal;
+  let top; let sha; let repoReal; let prefix;
   try {
-    repoReal = realpathSync(repo);
-    top = realpathSync(git(repoReal, ['rev-parse', '--show-toplevel']));
+    repoReal = realpathSync.native(repo);
+    top = realpathSync.native(git(repoReal, ['rev-parse', '--show-toplevel']));
+    prefix = git(repoReal, ['rev-parse', '--show-prefix']);
   } catch { return stop('file_set_unavailable', 'git could not resolve the repository'); }
   try { sha = git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}']); } catch { return stop('base_invalid', 'git could not resolve --base to a commit'); }
   let decl = null;
@@ -145,7 +157,7 @@ export function prepare(repo, base) {
     if (!st.isFile()) return stop('unsupported_changed_surface', 'a changed path is a submodule, nested repository, directory or symlink, which T0 cannot scan');
     changed.push(p);
   }
-  const files = changed.map((p) => { const r = relative(repoReal, join(top, p)).split(sep).join('/'); return r.startsWith('-') ? `./${r}` : r; });
+  const files = changed.map((p) => { const r = relativeToPrefix(prefix, p); return r.startsWith('-') ? `./${r}` : r; });
   const changedReal = new Set(changed.map((p) => norm(realOr(join(top, p)) ?? join(top, p))));
   return { top, repoReal, decl, changed, files, changedReal };
 }
@@ -266,7 +278,7 @@ export function verifyReport({ repo, base, text }) {
 
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 function logActivity(repo, ticket, runId, phase, extra) {
-  const top = (() => { try { return realpathSync(git(repo, ['rev-parse', '--show-toplevel'])); } catch { return repo; } })();
+  const top = (() => { try { return realpathSync.native(git(repo, ['rev-parse', '--show-toplevel'])); } catch { return repo; } })();
   const r = spawnSync(process.execPath, [RUN_LOG, phase, '--repo', top, '--ticket', ticket, '--run-id', runId, '--kind', 'activity', '--name', 't0_check', '--event-id', extra.eventId, ...extra.args], { cwd: top, env: cleanEnv(), encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) process.stderr.write(`fast-checks: run-log ${phase} not recorded (verdict unchanged): ${String(r.stderr).trim().split('\n')[0]}\n`);
 }

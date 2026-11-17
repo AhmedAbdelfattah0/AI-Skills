@@ -4,12 +4,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync, symlinkSync, linkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync, symlinkSync, linkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import path, { join, dirname } from 'node:path';
 import { parseWorkerReport } from './worker-report.mjs';
 import { buildBrief, lintBrief } from './brief.mjs';
-import { killTree, utf8Path, stripNewline } from './fast-checks.mjs';
+import { killTree, utf8Path, stripNewline, relativeToPrefix } from './fast-checks.mjs';
 
 const CLI = fileURLToPath(new URL('./fast-checks.mjs', import.meta.url));
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
@@ -52,7 +52,7 @@ process.exit(bad ? 1 : 0);
 
 // prefix '' = repo is the git top level; 'pkg/' = --repo is a subdirectory of it.
 function fixture(t, checks, { prefix = '' } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'fastchk-'));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'fastchk-'))); // one spelling (no 8.3 short names)
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const top = join(dir, 'repo');
   mkdirSync(top);
@@ -588,4 +588,18 @@ test('G1: --repo <toplevel>/src: the t0_check row lands in <toplevel>/.git and n
   assert.ok(existsSync(join(fx.top, '.git', 'ai-skills', 'ship-ticket', 'T7.jsonl')), 'row in the checked top level');
   assert.ok(!existsSync(join(fx.dir, '.git')), 'nothing created above the top level');
   assert.ok(!existsSync(join(fx.top, 'src', '.git')));
+});
+
+test('W1 unit: relativeToPrefix works on git spellings only (no filesystem path is compared), incl. Windows-style roots', () => {
+  assert.equal(relativeToPrefix('', 'src/new.ts'), 'src/new.ts');
+  assert.equal(relativeToPrefix('pkg/', 'pkg/src/a.ts'), 'src/a.ts');
+  assert.equal(relativeToPrefix('pkg/', 'other/x.ts'), '../other/x.ts');
+  assert.equal(relativeToPrefix('a/b/', 'a/c/y.ts'), '../c/y.ts');
+  assert.equal(relativeToPrefix('a/b/', 'a/b/c/y.ts'), 'c/y.ts');
+  assert.equal(relativeToPrefix('pkg/', 'pkg/pkg2'), 'pkg2', 'a file named like a prefix part is not a directory');
+  // The Windows failure: the same directory spelled two ways must not leak into the result. Only git's prefix is used.
+  const long = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\fastchk-x\\repo';
+  const short = 'c:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\fastchk-x\\repo';
+  assert.notEqual(path.win32.relative(short, path.win32.join(long, 'src', 'new.ts')), 'src\\new.ts', 'documents why path.relative cannot be used');
+  assert.equal(relativeToPrefix('', 'src/new.ts'), 'src/new.ts');
 });
