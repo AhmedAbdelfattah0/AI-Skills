@@ -16,7 +16,10 @@
  *   recovered; only a hand-edited or corrupted record can carry one.
  * - acquireLock takes an opt-in second argument `{ waitMs, signal, now, sleep }`. Without it a
  *   call is one attempt, exactly as before. Cancellation follows invariants I1-I4 (see acquireLock);
- *   the `TEST_SEAM` option key is test-only and engine-io.mjs does not re-export it.
+ *   the `TEST_SEAM` option key is test-only and engine-io.mjs does not re-export it. With
+ *   `waitMs`, an invalid value is now refused before the lock-path lookup and the directory create
+ *   (4e487d9 refused it after them). The lock-stale-observed hook is awaited as is: a hook that
+ *   never settles delays cancellation (hooks are test and crash-injection seams).
  *
  * Opt-in bounded wait: derived from deepseek-harness@39163dd30f703a79079e2d2446545cff3c453738
  * packages/util/atomic-write/src/index.ts `withFileLock` (retry loop, exponential back-off
@@ -116,8 +119,8 @@ const RECOVER = 'stop every engine command for this ticket, confirm no engine pr
  * caller passes it). `options[TEST_SEAM] = { step(name), readLock(path), unlinkLock(path) }`:
  * - `step(name)` is called synchronously at each named point of the call: `enter`, `attempt`,
  *   `acquired` (our exclusive create succeeded), `hook`/`hooked` (around the lock-stale-observed
- *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the one
- *   success return; nothing is awaited between it and the return). A test aborts the signal from
+ *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the final
+ *   cancellation check, which is the last thing before the one success return). A test aborts the signal from
  *   it, synchronously or after N microtasks, to reach every await and microtask boundary.
  * - `readLock`/`unlinkLock` replace readFileSync/unlinkSync in the cancellation release only
  *   (fault injection for the leak report). The normal `handle.release()` and the stale-lock
@@ -263,8 +266,9 @@ export async function acquireLock(ctx, options = {}) {
     catch (e) { cancelFirst(); throw e; }
     step('slept');
   }
-  // I1, the one success exit: nothing is awaited between this check and the return.
-  cancelFirst();
+  // I1, the one success exit: the check is the last thing before the return (no await, no foreign
+  // code between them; the test seam runs before it).
   step('commit');
+  cancelFirst();
   return handle;
 }
