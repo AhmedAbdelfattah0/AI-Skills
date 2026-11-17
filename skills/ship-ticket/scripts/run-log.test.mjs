@@ -447,39 +447,6 @@ test('a REVIEW phase ended with an invalid gap_reason is closed, not left open',
   assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown');
 });
 
-test('S-04a1 relay import: exit code and normalised usage are kept when the result carries them, absent (never 0) when not', (t) => {
-  const run = (extra, tool = 'claude') => {
-    const f = fixture(t);
-    const resultPath = join(f.repo, 'result.json');
-    const start = f.cli('start', ...eventArgs, '--carrier-result', resultPath, '--metric', 'candidate_id=sha-123', '--metric', 'review_execution=review-abc');
-    assert.equal(start.status, 0, start.stderr);
-    const timestamp = JSON.parse(start.stdout).timestamp;
-    writeFileSync(resultPath, JSON.stringify({ schema: 'delegate-relay.result.v1', ...(tool === 'claude' ? { tool, readOnly: true } : { codexVersion: 'test', sandbox: 'read-only' }),
-      workdir: f.repo, status: 'timeout', startedAt: timestamp, finishedAt: timestamp, finalMessage: 'SECRET-TEXT', ...extra }));
-    const ended = f.cli('end', ...eventArgs, '--carrier-result', resultPath);
-    assert.equal(ended.status, 0, ended.stderr);
-    assert.ok(!readFileSync(f.path, 'utf8').includes('SECRET'));
-    return { timing: JSON.parse(ended.stdout).carrier_timing, stderr: ended.stderr };
-  };
-  // Real shape captured from Claude Code 2.1.318 (carrier-usage.test.mjs): every counter survives under the usage.mjs names.
-  const claude = run({ exitCode: 0, usage: { input_tokens: 2, cache_creation_input_tokens: 26257, cache_read_input_tokens: 11391, output_tokens: 4,
-    output_tokens_details: { thinking_tokens: 0 } } });
-  assert.equal(claude.timing.exit, 0);
-  assert.deepEqual(claude.timing.usage, { input_tokens: 2, output_tokens: 4, cache_read_tokens: 11391, cache_write_tokens: 26257 });
-  assert.match(claude.stderr, /output_tokens_details/, 'a non-numeric usage field is named on stderr, never dropped silently');
-  // Real Codex shape (Codex CLI 0.166.0).
-  const codex = run({ exitCode: 0, usage: { input_tokens: 28116, cached_input_tokens: 7, cache_write_input_tokens: 3, output_tokens: 5, reasoning_output_tokens: 2 } }, 'codex');
-  assert.deepEqual(codex.timing.usage, { input_tokens: 28116, output_tokens: 5, cache_read_tokens: 7, cache_write_tokens: 3, reasoning_tokens: 2 });
-  // An unknown numeric counter is kept under `other`, an invalid known one is named on stderr.
-  const odd = run({ usage: { input_tokens: 5, web_search_requests: 3, output_tokens: -1 } });
-  assert.deepEqual(odd.timing.usage, { input_tokens: 5, other: { web_search_requests: 3 } });
-  assert.match(odd.stderr, /output_tokens/);
-  const without = run({});
-  assert.equal('exit' in without.timing, false);
-  assert.equal('usage' in without.timing, false);
-  assert.equal('usage' in run({ usage: { note: 'x' } }).timing, false, 'a usage object with no numeric counter adds no key');
-});
-
 test('gap_reason on END: an over-long, multi-line or repeated value still closes the REVIEW phase as unknown, with a diagnostic', (t) => {
   const m = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
   const cases = { long: ['gap_reason=' + 'x'.repeat(600)], newline: ['gap_reason=a\nb'], repeated: ['gap_reason=wait', 'gap_reason=sleep'], numeric: ['gap_reason=7'] };

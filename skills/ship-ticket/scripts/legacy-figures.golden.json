@@ -39,7 +39,7 @@
       "BUILD": 600000,
       "REVIEW": 750000
      },
-     "review_executions": 3,
+     "review_executions": 4,
      "peak_rss_mb": 640,
      "peak_cpu_pct": 95,
      "parallel_efficiency": 0.813,
@@ -129,8 +129,8 @@
          "started_at": "2026-01-01T00:11:40.000Z",
          "ended_at": "2026-01-01T00:13:20.000Z",
          "duration_ms": 100000,
-         "basis": "logger",
-         "collection_delay_ms": "unknown"
+         "basis": "carrier",
+         "collection_delay_ms": 0
         },
         {
          "role": "second_opinion",
@@ -347,6 +347,14 @@
        "causes": []
       }
      },
+     "truncated_outputs": [
+      {
+       "attempt_id": "att-3",
+       "kind": "node",
+       "node": "c",
+       "stdout_bytes": 1234
+      }
+     ],
      "suggestions": [
       {
        "rule": "split_session",
@@ -2091,6 +2099,72 @@
      "suggestions": []
     },
     {
+     "ticket": "W",
+     "run_id": "run-w",
+     "outcome": "open",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
+    },
+    {
+     "ticket": "N",
+     "run_id": "run-n",
+     "outcome": "open",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
+    },
+    {
      "ticket": "L",
      "run_id": "run-l",
      "outcome": "complete",
@@ -2268,7 +2342,7 @@
     }
    ],
    "cross_run": {
-    "runs": 24,
+    "runs": 26,
     "orchestrator_share_pct_median": 62.7,
     "review_repairs_median": 0,
     "review_round_wall_ms": {
@@ -2301,25 +2375,25 @@
    "note": "Read-only. unknown means the source did not carry the value. Suggestions are never applied."
   },
   "aggregate": {
-   "runs": 23,
+   "runs": 25,
    "completed_runs": 2,
    "failed_runs": 0,
-   "open_runs": 1,
-   "integrity_affected_runs": 1,
-   "planning_runs": 0,
-   "waiting_runs": 0,
-   "open_without_wait": 0,
+   "open_runs": 3,
+   "integrity_affected_runs": 0,
+   "planning_runs": 1,
+   "waiting_runs": 1,
+   "open_without_wait": 1,
    "review_median_ms": 115000,
-   "standard_review_median_ms": null,
-   "elevated_review_median_ms": null,
+   "standard_review_median_ms": 115000,
+   "elevated_review_median_ms": 115000,
    "review_to_build_ratio_median": 1.25,
    "review_to_build_excluding_recorded_waits_ratio_median": 1.3888888888888888,
    "counter_mismatch_runs": 2,
-   "primary_degradations_observed": 0,
+   "primary_degradations_observed": 1,
    "optional_degradations_observed": 0,
    "parallel_groups": 1,
    "peak_concurrency": 2,
-   "frontend_backend_union_overlap_pct_median": 93.1
+   "frontend_backend_union_overlap_pct_median": 92.9
   },
   "eval_cli": {
    "schema": "ship-ticket-eval-v1",
@@ -2364,6 +2438,39 @@
      "proof_reruns": "unknown",
      "review_usage_share_pct": "unknown",
      "unattributed_share_pct": 0,
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
+    },
+    {
+     "ticket": "N",
+     "run_id": "run-n",
+     "outcome": "open",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
      "attempt_timing": "unknown",
      "proof_wall_ms": "unknown",
      "review_rounds": "unknown",
@@ -4124,7 +4231,7 @@
       "BUILD": 600000,
       "REVIEW": 750000
      },
-     "review_executions": 3,
+     "review_executions": 4,
      "peak_rss_mb": 640,
      "peak_cpu_pct": 95,
      "parallel_efficiency": 0.813,
@@ -4214,8 +4321,8 @@
          "started_at": "2026-01-01T00:11:40.000Z",
          "ended_at": "2026-01-01T00:13:20.000Z",
          "duration_ms": 100000,
-         "basis": "logger",
-         "collection_delay_ms": "unknown"
+         "basis": "carrier",
+         "collection_delay_ms": 0
         },
         {
          "role": "second_opinion",
@@ -4365,6 +4472,14 @@
      ],
      "ui_ticket": true,
      "review_to_build_ratio": 1.25,
+     "truncated_outputs": [
+      {
+       "attempt_id": "att-3",
+       "kind": "node",
+       "node": "c",
+       "stdout_bytes": 1234
+      }
+     ],
      "suggestions": [
       {
        "rule": "split_session",
@@ -4388,10 +4503,43 @@
        }
       }
      ]
+    },
+    {
+     "ticket": "W",
+     "run_id": "run-w",
+     "outcome": "open",
+     "tokens_by_role": "unknown",
+     "tokens_by_phase": "unknown",
+     "orchestrator_share_pct": "unknown",
+     "wall_ms_by_phase": {},
+     "review_executions": 0,
+     "peak_rss_mb": "unknown",
+     "peak_cpu_pct": "unknown",
+     "parallel_efficiency": "unknown",
+     "terminal_review_outcomes": "unknown",
+     "retries_authorized": "unknown",
+     "cost_per_accepted_ticket": "unknown",
+     "review_repairs": "unknown",
+     "confirmations": "unknown",
+     "findings_by_severity": "unknown",
+     "resumes": "unknown",
+     "infra_retries": "unknown",
+     "admission_refusals": "unknown",
+     "retry_count": "unknown",
+     "gate_calls": "unknown",
+     "proof_reruns": "unknown",
+     "review_usage_share_pct": "unknown",
+     "unattributed_share_pct": "unknown",
+     "attempt_timing": "unknown",
+     "proof_wall_ms": "unknown",
+     "review_rounds": "unknown",
+     "ui_ticket": false,
+     "review_to_build_ratio": "unknown",
+     "suggestions": []
     }
    ],
    "cross_run": {
-    "runs": 23,
+    "runs": 25,
     "orchestrator_share_pct_median": 81.35,
     "review_repairs_median": 0,
     "review_round_wall_ms": {
@@ -4426,36 +4574,30 @@
   "summary_cli": {
    "schema": "ship-ticket-run-summary-v2",
    "event_schema": "ship-ticket-run-log-v1",
-   "integrity_warnings": [
-    {
-     "ticket": "T1",
-     "line": 16,
-     "code": "invalid_carrier_timing"
-    }
-   ],
+   "integrity_warnings": [],
    "aggregate": {
-    "runs": 23,
+    "runs": 25,
     "completed_runs": 2,
     "failed_runs": 0,
-    "open_runs": 1,
-    "integrity_affected_runs": 1,
-    "planning_runs": 0,
-    "waiting_runs": 0,
-    "open_without_wait": 0,
+    "open_runs": 3,
+    "integrity_affected_runs": 0,
+    "planning_runs": 1,
+    "waiting_runs": 1,
+    "open_without_wait": 1,
     "review_median_ms": 115000,
-    "standard_review_median_ms": null,
-    "elevated_review_median_ms": null,
+    "standard_review_median_ms": 115000,
+    "elevated_review_median_ms": 115000,
     "review_to_build_ratio_median": 1.25,
     "review_to_build_excluding_recorded_waits_ratio_median": 1.3888888888888888,
     "counter_mismatch_runs": 2,
-    "primary_degradations_observed": 0,
+    "primary_degradations_observed": 1,
     "optional_degradations_observed": 0,
     "parallel_groups": 1,
     "peak_concurrency": 2,
-    "frontend_backend_union_overlap_pct_median": 93.1,
+    "frontend_backend_union_overlap_pct_median": 92.9,
     "missing_review_intervals": "at_least",
-    "missing_review_intervals_known_sum": 2,
-    "missing_review_intervals_unknown_runs": 1
+    "missing_review_intervals_known_sum": 1,
+    "missing_review_intervals_unknown_runs": 3
    },
    "runs": [
     {
@@ -4546,13 +4688,67 @@
      }
     },
     {
+     "ticket": "N",
+     "run_id": "run-n",
+     "outcome": "open",
+     "open_state": "planning_or_approval",
+     "integrity_warnings": [],
+     "oldest_open_age_ms": 86380000,
+     "review_profile": null,
+     "durations": {
+      "workflow_ms": null,
+      "phase_ms": null,
+      "activity_ms": null,
+      "wait_ms": null,
+      "build_ms": null,
+      "review_ms": null,
+      "build_wall_excluding_recorded_waits_ms": null,
+      "review_wall_excluding_recorded_waits_ms": null
+     },
+     "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+     "counters": {
+      "repair_batches": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "confirmations": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "primary_degradations_observed": 0,
+      "optional_degradations_observed": 0
+     },
+     "review_executions": [],
+     "review_execution_coverage": "legacy_unknown",
+     "phase_coverage": [],
+     "parallel_groups": [],
+     "open_intervals": [
+      {
+       "event_id": "n-open",
+       "kind": "activity",
+       "name": "native_plan_mode",
+       "started_at": "2026-01-01T00:00:20.000Z",
+       "metrics": {}
+      }
+     ],
+     "intervals": [],
+     "missing_review_intervals": {
+      "count": "unknown",
+      "items": []
+     }
+    },
+    {
      "ticket": "P",
      "run_id": "run-p0",
      "outcome": "unknown",
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 15000,
@@ -4589,7 +4785,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -4641,7 +4838,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -4696,7 +4894,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 25000,
@@ -4733,7 +4931,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -4785,7 +4984,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -4840,7 +5040,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 35000,
@@ -4877,7 +5077,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -4929,7 +5130,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -4984,7 +5186,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 45000,
@@ -5009,7 +5211,7 @@
        "declaration_complete": true,
        "mismatch": false
       },
-      "primary_degradations_observed": 0,
+      "primary_degradations_observed": 1,
       "optional_degradations_observed": 0
      },
      "review_executions": [
@@ -5021,7 +5223,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -5036,7 +5239,7 @@
          "declaration_complete": true,
          "mismatch": false
         },
-        "primary_degradations_observed": 0,
+        "primary_degradations_observed": 1,
         "optional_degradations_observed": 0
        },
        "event_ids": [
@@ -5073,7 +5276,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -5083,7 +5287,7 @@
        "started_at": "2026-01-01T00:00:00.000Z",
        "ended_at": "2026-01-01T00:00:40.000Z",
        "duration_ms": 40000,
-       "outcome": "pass",
+       "outcome": "degraded",
        "metrics": {
         "review_execution": "review-a",
         "candidate_id": "sha-1"
@@ -5128,7 +5332,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 55000,
@@ -5165,7 +5369,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -5217,7 +5422,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -5272,7 +5478,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 65000,
@@ -5309,7 +5515,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -5361,7 +5568,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -5416,7 +5624,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 75000,
@@ -5453,7 +5661,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -5505,7 +5714,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -5560,7 +5770,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 85000,
@@ -5597,7 +5807,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -5649,7 +5860,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -5704,7 +5916,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 95000,
@@ -5741,7 +5953,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -5793,7 +6006,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -5848,7 +6062,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 105000,
@@ -5885,7 +6099,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -5937,7 +6152,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -5992,7 +6208,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 115000,
@@ -6029,7 +6245,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -6081,7 +6298,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -6136,7 +6354,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 125000,
@@ -6173,7 +6391,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -6225,7 +6444,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -6280,7 +6500,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 135000,
@@ -6317,7 +6537,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -6369,7 +6590,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -6424,7 +6646,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 145000,
@@ -6461,7 +6683,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -6513,7 +6736,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -6568,7 +6792,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 155000,
@@ -6605,7 +6829,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -6657,7 +6882,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -6712,7 +6938,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 165000,
@@ -6749,7 +6975,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -6801,7 +7028,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -6856,7 +7084,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 175000,
@@ -6893,7 +7121,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -6945,7 +7174,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -7000,7 +7230,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 185000,
@@ -7037,7 +7267,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -7089,7 +7320,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -7144,7 +7376,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 195000,
@@ -7181,7 +7413,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -7233,7 +7466,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -7288,7 +7522,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "elevated",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 205000,
@@ -7325,7 +7559,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        },
        "counters": {
         "repair_batches": {
@@ -7377,7 +7612,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "elevated"
        }
       },
       {
@@ -7432,7 +7668,7 @@
      "open_state": "closed",
      "integrity_warnings": [],
      "oldest_open_age_ms": null,
-     "review_profile": null,
+     "review_profile": "standard",
      "durations": {
       "workflow_ms": null,
       "phase_ms": 215000,
@@ -7469,7 +7705,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        },
        "counters": {
         "repair_batches": {
@@ -7521,7 +7758,8 @@
         "skill_revision": "rev-1",
         "primary_ceiling_ms": 600000,
         "repair_batches": 0,
-        "confirmation_count": 0
+        "confirmation_count": 0,
+        "review_profile": "standard"
        }
       },
       {
@@ -7573,19 +7811,14 @@
      "ticket": "T1",
      "run_id": "run-1",
      "outcome": "complete",
-     "open_state": "unknown_due_to_integrity",
-     "integrity_warnings": [
-      {
-       "line": 16,
-       "code": "invalid_carrier_timing"
-      }
-     ],
-     "oldest_open_age_ms": "now-dependent",
+     "open_state": "active_or_unexpected_stop",
+     "integrity_warnings": [],
+     "oldest_open_age_ms": 84500000,
      "review_profile": null,
      "durations": {
       "workflow_ms": 2000000,
       "phase_ms": 1450000,
-      "activity_ms": 1190000,
+      "activity_ms": 1290000,
       "wait_ms": 60000,
       "build_ms": 600000,
       "review_ms": 750000,
@@ -7610,6 +7843,30 @@
       "optional_degradations_observed": 0
      },
      "review_executions": [
+      {
+       "review_execution": "review-pg",
+       "metadata": {},
+       "counters": {
+        "repair_batches": {
+         "observed": 0,
+         "declared": null,
+         "declaration_complete": false,
+         "mismatch": null
+        },
+        "confirmations": {
+         "observed": 0,
+         "declared": null,
+         "declaration_complete": false,
+         "mismatch": null
+        },
+        "primary_degradations_observed": 0,
+        "optional_degradations_observed": 0
+       },
+       "event_ids": [
+        "fe",
+        "be"
+       ]
+      },
       {
        "review_execution": "review-a",
        "metadata": {
@@ -7639,6 +7896,7 @@
        },
        "event_ids": [
         "run-1-a-ph",
+        "run-1-a-primary_review",
         "run-1-a-optional_review",
         "run-1-a-review_reconcile",
         "run-1-a-review_repair",
@@ -7726,13 +7984,13 @@
        "event_id": "build",
        "name": "BUILD",
        "recorded_wait_overlap_ms": 60000,
-       "uninstrumented_ms": 250000
+       "uninstrumented_ms": 260000
       },
       {
        "event_id": "run-1-a-ph",
        "name": "REVIEW",
        "recorded_wait_overlap_ms": 0,
-       "uninstrumented_ms": 60000
+       "uninstrumented_ms": 50000
       },
       {
        "event_id": "run-1-b-ph",
@@ -7752,18 +8010,18 @@
        "parallel_group": "wave-1",
        "member_count": 2,
        "started_at": "2026-01-01T00:01:50.000Z",
-       "ended_at": "2026-01-01T00:06:40.000Z",
-       "wall_ms": 290000,
-       "summed_member_ms": 560000,
-       "concurrent_wall_overlap_ms": 270000,
+       "ended_at": "2026-01-01T00:06:30.000Z",
+       "wall_ms": 280000,
+       "summed_member_ms": 540000,
+       "concurrent_wall_overlap_ms": 260000,
        "peak_concurrency": 2,
-       "timing_basis": "logger_intervals",
-       "carrier_timed_members": 0,
+       "timing_basis": "carrier",
+       "carrier_timed_members": 2,
        "flags": [],
-       "frontend_backend_overlap_ms": 270000,
-       "frontend_overlap_pct": 93.1,
+       "frontend_backend_overlap_ms": 260000,
+       "frontend_overlap_pct": 92.9,
        "backend_overlap_pct": 100,
-       "frontend_backend_union_overlap_pct": 93.1,
+       "frontend_backend_union_overlap_pct": 92.9,
        "members": [
         {
          "event_id": "fe",
@@ -7779,16 +8037,6 @@
       }
      ],
      "open_intervals": [
-      {
-       "event_id": "run-1-a-primary_review",
-       "kind": "activity",
-       "name": "primary_review",
-       "started_at": "2026-01-01T00:11:40.000Z",
-       "metrics": {
-        "review_execution": "review-a",
-        "candidate_id": "sha-1"
-       }
-      },
       {
        "event_id": "open-1",
        "kind": "activity",
@@ -7839,7 +8087,21 @@
        "duration_ms": 290000,
        "outcome": "pass",
        "metrics": {
-        "parallel_group": "wave-1"
+        "parallel_group": "wave-1",
+        "candidate_id": "sha-1",
+        "review_execution": "review-pg"
+       },
+       "carrier_timing": {
+        "source": "relay_result",
+        "tool": "claude",
+        "status": "completed",
+        "result_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_id": "sha-1",
+        "review_execution": "review-pg",
+        "started_at": "2026-01-01T00:01:50.000Z",
+        "ended_at": "2026-01-01T00:06:30.000Z",
+        "duration_ms": 280000,
+        "collection_delay_ms": 10000
        }
       },
       {
@@ -7851,7 +8113,21 @@
        "duration_ms": 270000,
        "outcome": "pass",
        "metrics": {
-        "parallel_group": "wave-1"
+        "parallel_group": "wave-1",
+        "candidate_id": "sha-1",
+        "review_execution": "review-pg"
+       },
+       "carrier_timing": {
+        "source": "relay_result",
+        "tool": "claude",
+        "status": "completed",
+        "result_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_id": "sha-1",
+        "review_execution": "review-pg",
+        "started_at": "2026-01-01T00:01:50.000Z",
+        "ended_at": "2026-01-01T00:06:10.000Z",
+        "duration_ms": 260000,
+        "collection_delay_ms": 10000
        }
       },
       {
@@ -7880,6 +8156,31 @@
         "repair_batches": 1,
         "confirmation_count": 1,
         "gap_reason": "wait"
+       }
+      },
+      {
+       "event_id": "run-1-a-primary_review",
+       "kind": "activity",
+       "name": "primary_review",
+       "started_at": "2026-01-01T00:11:40.000Z",
+       "ended_at": "2026-01-01T00:13:20.000Z",
+       "duration_ms": 100000,
+       "outcome": "pass",
+       "metrics": {
+        "review_execution": "review-a",
+        "candidate_id": "sha-1"
+       },
+       "carrier_timing": {
+        "source": "relay_result",
+        "tool": "claude",
+        "status": "completed",
+        "result_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "candidate_id": "sha-1",
+        "review_execution": "review-a",
+        "started_at": "2026-01-01T00:11:40.000Z",
+        "ended_at": "2026-01-01T00:13:20.000Z",
+        "duration_ms": 100000,
+        "collection_delay_ms": 0
        }
       },
       {
@@ -8062,13 +8363,8 @@
       }
      ],
      "missing_review_intervals": {
-      "count": 2,
+      "count": 1,
       "items": [
-       {
-        "review_execution": "review-a",
-        "role": "primary",
-        "reason": "open_without_end"
-       },
        {
         "review_execution": "review-b",
         "role": "repair",
@@ -8076,8 +8372,67 @@
        }
       ]
      }
+    },
+    {
+     "ticket": "W",
+     "run_id": "run-w",
+     "outcome": "open",
+     "open_state": "waiting",
+     "integrity_warnings": [],
+     "oldest_open_age_ms": 86390000,
+     "review_profile": null,
+     "durations": {
+      "workflow_ms": null,
+      "phase_ms": null,
+      "activity_ms": null,
+      "wait_ms": null,
+      "build_ms": null,
+      "review_ms": null,
+      "build_wall_excluding_recorded_waits_ms": null,
+      "review_wall_excluding_recorded_waits_ms": null
+     },
+     "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+     "counters": {
+      "repair_batches": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "confirmations": {
+       "observed": 0,
+       "declared": null,
+       "declaration_complete": false,
+       "mismatch": null
+      },
+      "primary_degradations_observed": 0,
+      "optional_degradations_observed": 0
+     },
+     "review_executions": [],
+     "review_execution_coverage": "legacy_unknown",
+     "phase_coverage": [],
+     "parallel_groups": [],
+     "open_intervals": [
+      {
+       "event_id": "w-open",
+       "kind": "wait",
+       "name": "user_approval",
+       "started_at": "2026-01-01T00:00:10.000Z",
+       "metrics": {}
+      }
+     ],
+     "intervals": [],
+     "missing_review_intervals": {
+      "count": "unknown",
+      "items": []
+     }
     }
    ]
+  },
+  "policy_refusal": {
+   "status": 1,
+   "stdout": "",
+   "stderr": "eval: X: policy_version_unsupported: the run records policy_version 99, but the installed engine supports policy_version 1; resume it with an engine that supports its version (reinstall the skill commit recorded as skill_commit), or archive it and start a new run\n"
   }
  }
 }

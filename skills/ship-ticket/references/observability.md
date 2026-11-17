@@ -216,7 +216,7 @@ After collecting the result, end that same event with the registered
 completion alone is not a passing review. The helper verifies repository,
 read-only mode and dispatch binding, then imports only whitelisted timing/status
 metadata plus a result digest into `carrier_timing`: `started_at`, `ended_at`,
-`duration_ms`, `collection_delay_ms`, `source=relay_result`, `tool` and `status`, plus `exit` (the relay's exit code) and `usage` when the result carries them: token counters under the `usage.mjs` names (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`) for both the Claude and Codex key spellings, any other non-negative integer counter under `other`, and a stderr note for anything not imported. Absent means unavailable, never 0.
+`duration_ms`, `collection_delay_ms`, `source=relay_result`, `tool` and `status`.
 Candidate/execution identity comes from the registered dispatch. The result path
 and contents are not exposed in the summary. Repeating the identical import is
 idempotent; do not add `--metric` on that repeated end call.
@@ -368,3 +368,10 @@ first; do not rerun shipped tickets merely to fill missing telemetry.
 - `eval` `review_round_wall_ms.excluded_unknown` also counts rounds with an unfinished interval or an open REVIEW phase: their truncated wall still prints on the round but never enters the percentiles.
 - Stamps with a non-Z offset (for example `+02:00`) are normalised to UTC in `intervals` and `open_intervals`; Z stamps are untouched.
 - The legacy figures of logs without offsets, models or unfinished rounds are guarded by `legacy-figures.golden.json`, captured from origin/main by `legacy-golden.mjs` (maintainer only; it archives the pinned base commit, never the working tree).
+
+Deferred to S-04a2 (relay `exit`/`usage` import, removed from S-04a1 after two failed confirmations of the same defect class): the event
+contract must define a CLOSED set of known usage keys with an explicit unknown-key rule, and settle these surviving defects. Inherited
+property names (`constructor`, `__proto__`, `toString`) must not index the key table. A cap on kept unknown counters must report the
+omitted count rather than drop silently. Claude's nested `output_tokens_details.thinking_tokens` needs a mapping or an explicit
+"not imported". `exit` and `usage` must be validated when a log row is read (`validCarrierTiming`). Both relays' real result shapes
+need fixtures (the Codex relay writes no `usage` today). Until then carrier timing imports only the whitelisted timing/status fields.

@@ -255,42 +255,11 @@ function importCarrier(options, started, root, timestamp) {
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < Date.parse(started.timestamp)
     || end < start || end > timestamp.getTime()) fail('invalid carrier execution timestamps');
   // Import only timing and enum metadata, never model output or credential-bearing paths.
-  const usage = carrierUsage(result.usage);
   return { source: 'relay_result', tool, status: result.status,
     result_sha256: createHash('sha256').update(bytes).digest('hex'),
     candidate_id: binding.candidate_id, review_execution: binding.review_execution,
     started_at: result.startedAt, ended_at: result.finishedAt,
-    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end,
-    // Optional: present only when the relay result carries them; absence means unavailable, never 0.
-    ...(Number.isInteger(result.exitCode) ? { exit: result.exitCode } : {}),
-    ...(usage ? { usage } : {}) };
-}
-
-/** Relay `usage` key -> the usage.mjs counter name (Claude CLI and Codex CLI shapes, see usage.mjs header). */
-const RELAY_USAGE_KEYS = Object.freeze({
-  input_tokens: 'input_tokens', output_tokens: 'output_tokens',
-  cache_read_input_tokens: 'cache_read_tokens', cached_input_tokens: 'cache_read_tokens',
-  cache_creation_input_tokens: 'cache_write_tokens', cache_write_input_tokens: 'cache_write_tokens',
-  reasoning_output_tokens: 'reasoning_tokens',
-});
-/**
- * Token counters of a relay result's `usage` under the usage.mjs names; null when it reports none (never an invented 0).
- * A numeric key this table does not know is kept under `other`; anything else that is not kept is named on stderr, never dropped silently.
- */
-function carrierUsage(usage) {
-  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
-  const out = {}, other = {}, dropped = [];
-  for (const [key, value] of Object.entries(usage)) {
-    const ok = Number.isSafeInteger(value) && value >= 0;
-    const to = RELAY_USAGE_KEYS[key];
-    if (!ok) dropped.push(key);
-    else if (to && out[to] === undefined) out[to] = value;
-    else if (SAFE_METRIC.test(key) && Object.keys(other).length < 8) other[key] = value;
-    else dropped.push(key);
-  }
-  if (dropped.length) process.stderr.write(`run-log: relay usage fields not imported (not a non-negative integer counter): ${dropped.slice(0, 8).map((k) => JSON.stringify(k.slice(0, 40))).join(', ')}\n`);
-  if (Object.keys(other).length) out.other = other;
-  return Object.keys(out).length ? out : null;
+    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end };
 }
 
 function appendRow(directory, ticket, row) {

@@ -534,7 +534,7 @@ test('S-04a1 normUtc: negative, fractional and colon-less offsets convert; a mal
 // parallel groups, 3-round runs, 21 single-round runs so P50 and P95 are computed, resources, usage, the S-27-min legacy engine state,
 // plus the eval CLI and `run-log summary`).
 test('T-C1 legacy golden: eval, run-summary and run-log summary output for old logs is byte-identical to the origin/main capture', async () => {
-  const { capture } = await import('./legacy-golden.capture.test-helper.mjs');
+  const { capture, FROZEN_NOW } = await import('./legacy-golden.capture.test-helper.mjs');
   const { BASE_SHA, GOLDEN } = await import('./legacy-golden.mjs');
   const golden = JSON.parse(readFileSync(GOLDEN, 'utf8'));
   assert.equal(golden.base_sha, BASE_SHA);
@@ -548,4 +548,19 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   assert.equal(typeof got.library.cross_run.review_round_wall_ms.p50, 'number');
   assert.ok(t1.review_rounds.length === 3 && t1.review_rounds.some((r) => r.missing_roles.length));
   assert.ok(got.summary_cli.runs.some((r) => r.missing_review_intervals.count > 0) && got.summary_cli.runs.some((r) => r.parallel_groups.length));
+  // The carrier fixture must be VALID in the base code, or the carrier figures would be captured as rejected rows (vacuous guard).
+  assert.deepEqual(got.summary_cli.integrity_warnings, []);
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'T1').open_state, 'active_or_unexpected_stop');
+  assert.ok(got.summary_cli.runs.find((r) => r.ticket === 'T1').intervals.some((i) => i.carrier_timing));
+  assert.ok(t1.review_rounds.some((r) => r.intervals.some((i) => i.basis === 'carrier' && i.collection_delay_ms === 0)));
+  assert.deepEqual(got.summary_cli.runs.find((r) => r.ticket === 'T1').parallel_groups.map((p) => p.timing_basis), ['carrier']);
+  // The frozen clock makes the age of the oldest open interval an exact figure.
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').open_intervals.length, 1);
+  assert.equal(got.summary_cli.runs.find((r) => r.ticket === 'W').oldest_open_age_ms, FROZEN_NOW - Date.UTC(2026, 0, 1, 0, 0, 10));
+  assert.deepEqual(t1.truncated_outputs, [{ attempt_id: 'att-3', kind: 'node', node: 'c', stdout_bytes: 1234 }]);
+  assert.deepEqual(got.summary_cli.runs.map((r) => r.open_state).filter((v, i, a) => a.indexOf(v) === i).sort(), ['active_or_unexpected_stop', 'closed', 'planning_or_approval', 'waiting']);
+  assert.equal(got.summary_cli.aggregate.standard_review_median_ms > 0 && got.summary_cli.aggregate.elevated_review_median_ms > 0, true);
+  assert.equal(got.summary_cli.aggregate.primary_degradations_observed, 1);
+  assert.equal(got.policy_refusal.status, 1);
+  assert.match(got.policy_refusal.stderr, /policy_version_unsupported/);
 });
