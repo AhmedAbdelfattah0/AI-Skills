@@ -57,7 +57,7 @@ test('adversarial: case, whitespace, unicode, separators, camelCase, path separa
   hit({ ticketText: 'BILLING' });
   hit({ ticketText: 'multi \t\ntenant' });
   hit({ ticketText: 'Ｐａｙｍｅｎｔ' });          // fullwidth "Payment"
-  hit({ ticketText: 'pay​ment' === 'x' ? '' : 'pri​cing' });         // zero-width inside the word
+  hit({ ticketText: 'pri\u200Bcing' });         // zero-width inside the word
   hit({ ticketText: 'row-level_security' });
   hit({ ticketText: 'updateTenantId helper' });
   hit({ paths: ['src\\billing\\invoice.ts'] });
@@ -70,7 +70,7 @@ test('adversarial: keywords inside other words do not match (author, taxonomy, d
 });
 
 test('fail closed: empty and oversized input floor to ELEVATED, very long benign text is handled', () => {
-  assert.deepEqual(RF.riskFloor({ ticketText: '   ' }).classes, ['no-input']);
+  assert.deepEqual(RF.riskFloor({ ticketText: '   ' }).classes, ['malformed_input']);
   assert.equal(RF.riskFloor({}).floor, 'ELEVATED');
   assert.deepEqual(RF.riskFloor({ ticketText: 'a'.repeat(RF.MAX_INPUT + 1) }).classes, ['input-too-large']);
   const t = Date.now();
@@ -160,32 +160,83 @@ test('corpus: realistic risky tickets all floor ELEVATED; benign ones may stay S
   for (const t of CORPUS_BENIGN) assert.equal(RF.riskFloor({ ticketText: t, paths: ['README.md'] }).floor, 'STANDARD', t);
 });
 
-const PLAN = (o = {}) => `---\nrun_id: x\nplan_debate: {max_calls: 3, total_timeout: 20m, status: ${o.status ?? 'CONVERGED'}}\nreview_profile: ${o.profile ?? 'ELEVATED'}\nrisk_floor: ${o.rec ?? 'risk-floor: floor=ELEVATED; classes=money; claimed=STANDARD; final=ELEVATED; input sha256:' + 'a'.repeat(64)}\n---\nbody\n`;
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-const verify = (text) => { const f = join(mkdtempSync(join(tmpdir(), 'rf-')), 'plan.md'); writeFileSync(f, text); return run(['verify', '--plan', f]); };
-
-test('M4: verify fails on missing/inconsistent record, skipped debate, low profile; passes a consistent plan', () => {
-  assert.equal(verify(PLAN()).status, 0);
-  const code = (t) => { const r = verify(t); assert.equal(r.status, 1); return out(r).errors; };
-  assert.ok(code(PLAN({ rec: '<the record>' })).includes('no_record'));
-  assert.ok(code(PLAN({ rec: 'risk-floor: floor=ELEVATED; classes=money; claimed=STANDARD; final=STANDARD; input sha256:' + 'a'.repeat(64) })).includes('final_below_floor'));
-  assert.ok(code(PLAN({ status: 'SKIPPED' })).includes('debate_skipped'));
-  assert.ok(code(PLAN({ profile: 'STANDARD' })).includes('profile_below_floor'));
-  assert.ok(code(PLAN().replace(/plan_debate:.*\n/, '')).includes('debate_missing'));
-  assert.ok(code(PLAN().replace(/review_profile:.*\n/, '')).includes('profile_below_floor'));
-  assert.ok(code('no header at all').includes('no_record'));
-  assert.equal(verify(PLAN({ status: 'SKIPPED', profile: 'STANDARD', rec: 'risk-floor: floor=STANDARD; classes=none; claimed=STANDARD; final=STANDARD; input sha256:' + 'b'.repeat(64) })).status, 0);
-  assert.equal(run(['verify', '--plan', '/nonexistent']).status, 1);
-});
-
-test('docs: no reference still limits the plan debate to money/auth tickets; honesty wording present', async () => {
-  const { readFileSync } = await import('node:fs');
-  const ref = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
-  assert.doesNotMatch(ref('references/cross-model.md'), /debate runs only for money or auth/);
+test('docs: no file still limits the plan debate to money/auth tickets; honesty wording present; no verify mention', async () => {
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const root = new URL('../', import.meta.url);
+  const files = ['SKILL.md', ...readdirSync(new URL('references/', root)).map((f) => `references/${f}`)];
+  for (const f of files) {
+    const t = readFileSync(new URL(f, root), 'utf8');
+    assert.doesNotMatch(t, /debate runs only for money or auth|cross-model plan debate\s+only for money or auth|Skip it, and record the skip, for UI/i, f);
+    assert.doesNotMatch(t, /risk-floor\.mjs verify/, f);
+  }
+  const ref = (f) => readFileSync(new URL(f, root), 'utf8');
   assert.match(ref('references/cross-model.md'), /risk floor/i);
+  assert.match(ref('SKILL.md'), /risk floor is ELEVATED/i);
   for (const f of ['SKILL.md', 'references/plan.md']) assert.match(ref(f), /best-effort lexical floor/i);
   assert.match(ref('SKILL.md'), /advisory, not enforced/i);
   assert.doesNotMatch(ref('SKILL.md') + ref('scripts/risk-floor.mjs'), /never under-classify|is final: it forces/);
+});
+
+test('CLI parsing is strict and fails closed (exit 1, final ELEVATED): missing values, unknown/duplicate flags, positionals', () => {
+  assert.equal(run(['check', '--ticket', '-', '--claimed=ELEVATED'], 'fix typo').status, 0);
+  assert.equal(run(['check', '--ticket=-', '--claimed=standard'], 'fix typo').status, 0);
+  const bads = [['--ticket', '-', '--paths'], ['--ticket', '-', '--claimed'], ['--ticket'], ['--ticket', '-', '--claimd', 'ELEVATED'],
+    ['--ticket', '-', '--claimed', 'ELEVATED', '--claimed', 'STANDARD'], ['--ticket', '-', '--ticket', '-'], ['--ticket', '-', 'extra'],
+    ['--ticket', '-', '--paths', '--claimed', 'STANDARD'], ['--ticket', '-', '--claimed=']];
+  for (const a of bads) { const r = run(['check', ...a], 'fix typo'); assert.equal(r.status, 1, a.join(' ')); assert.equal(out(r).final, 'ELEVATED', a.join(' ')); }
+  for (const a of [['--ticket', '-', '--claimed', '--paths=[]'], ['--ticket', '-', '--paths', '--claimed=ELEVATED']]) assert.equal(out(run(['check', ...a], 'fix typo')).error, 'bad_input', a.join(' ')); // a flag is never a value
+  assert.equal(run(['verify', '--plan', 'x']).status, 1); // verify is not part of this slice
+});
+
+test('meaningful content after normalisation: empty-normalising input is malformed, exit 1 even when claimed ELEVATED', () => {
+  for (const t of ['​', '---', '   ', '...!!!', '​​']) {
+    const r = run(['check', '--ticket', '-', '--claimed', 'ELEVATED'], t);
+    assert.equal(r.status, 1, JSON.stringify(t)); assert.equal(out(r).final, 'ELEVATED'); assert.ok(out(r).classes.includes('malformed_input'));
+  }
+  assert.equal(run(['check', '--ticket', '-', '--paths', '["---"]', '--claimed', 'ELEVATED'], '').status, 1);
+  assert.equal(run(['check', '--ticket', '-', '--paths', '["src/pricing/x.ts"]', '--claimed', 'ELEVATED'], '').status, 0); // paths alone are evaluated
+  assert.equal(run(['check', '--ticket', '-', '--paths', 'null', '--claimed', 'ELEVATED'], 'x').status, 1);
+  const big = run(['check', '--ticket', '-', '--claimed', 'ELEVATED'], 'a '.repeat(1_100_000));
+  assert.equal(big.status, 1); assert.ok(out(big).classes.includes('input-too-large'));
+});
+
+test('normalisation holes: digit+acronym and acronym+short word stay matchable', () => {
+  for (const t of ['2FA', 'JWTId', 'RBACId', 'SSOId', 'RLSId', 'OIDCClient', 'enable 2FA for staff']) assert.equal(RF.riskFloor({ ticketText: t }).floor, 'ELEVATED', t);
+  for (const p of ['src/2FA.ts', 'src/JWTId.ts', 'src/RBACId.ts']) assert.equal(RF.riskFloor({ paths: [p] }).floor, 'ELEVATED', p);
+});
+
+// One sample per keyword fragment: removing any keyword or stem turns this red (the fragment list must equal the sample list).
+const SAMPLES = {
+  money: { 'prices?': 'price', pricing: 'pricing', 'bill\\w*': 'billed', 'pay(?:ments?|outs?|ing|pal)?': 'pay', 'invoic\\w*': 'invoicing', 'refund\\w*': 'refunded', 'check ?out': 'checkout',
+    stripe: 'stripe', 'currenc\\w*': 'currencies', 'subscri\\w*': 'subscription', 'discount\\w*': 'discounts', 'coupons?': 'coupon', 'tax(?:es)?': 'taxes', vat: 'VAT', 'fees?': 'fee',
+    money: 'money', 'charg\\w*': 'charged', 'wallets?': 'wallet', 'ledgers?': 'ledger', 'transactions?': 'transaction', 'carts?': 'cart', 'cart totals?': 'cart total', 'orders?': 'order',
+    'plans?': 'plan', 'renewals?': 'renewal' },
+  tenancy: { 'tenan\\w*': 'tenancy', 'multi ?tenan\\w*': 'multitenant', rls: 'RLS', 'row level security': 'row level security',
+    '(?:org|organi[sz]ation|workspace|store|shop|merchant|account|team) ids?': 'merchantId', idor: 'IDOR', ownership: 'ownership' },
+  auth: { auth: 'auth', authn: 'authn', authz: 'authz', 'authenticat\\w*': 'authenticated', '(?:un)?authori[sz]\\w*': 'unauthorised', 'log ?(?:in|ins|out|ged)': 'logout', 'sign ?(?:in|up|ed)?': 'signup',
+    'sessions?': 'session', 'jwts?': 'jwt', oauth: 'oauth', oidc: 'oidc', saml: 'saml', sso: 'sso', 'passwords?': 'password', 'permissions?': 'permission', 'roles?': 'role', rbac: 'rbac',
+    'acls?': 'acl', 'admin\\w*': 'administrator', staff: 'staff', 'secrets?': 'secret', 'credentials?': 'credential', 'api ?keys?': 'API key',
+    '(?:access|refresh|recovery|csrf|bearer|auth|api|session|reset|jwt|id|verification) tokens?': 'reset token', bearer: 'bearer', 'cookies?': 'cookie', mfa: 'mfa', '2fa': '2fa', otp: 'otp', cors: 'cors', csrf: 'csrf', 'suspen\\w*': 'suspended' },
+  'public-contract': { 'public apis?': 'public API', 'apis?': 'api', openapi: 'openapi', swagger: 'swagger', 'webhooks?': 'webhook', graphql: 'graphql', grpc: 'grpc', 'routes?': 'route',
+    'endpoints?': 'endpoint', 'breaking changes?': 'breaking change', 'event schemas?': 'event schema', 'events?': 'event', 'api contracts?': 'api contract' },
+  'data-shape': { 'migrat\\w*': 'migration', 'schemas?': 'schema', alembic: 'alembic', drizzle: 'drizzle', prisma: 'prisma', flyway: 'flyway', liquibase: 'liquibase', sql: 'sql', 'changelog xml': 'changelog.xml', env: '.env' },
+  shared: { shared: 'shared', 'shared (?:components?|contracts?|librar(?:y|ies)|modules?)': 'shared library', 'design systems?': 'design system' }
+};
+const STEM_SAMPLES = { payment: 'paymentservice', billing: 'billingjob', invoice: 'invoiceexport', checkout: 'checkoutflow', subscription: 'subscriptionrepo', stripe: 'stripeclient',
+  tenant: 'tenantscope', password: 'passwordreset', credential: 'credentialstore', authoriz: 'authorizer', authentic: 'authenticator', oauth: 'oauthclient', apikey: 'apikeystore',
+  authmiddleware: 'authmiddleware', nextauth: 'nextauth', webhook: 'webhookrelay', openapi: 'openapispec', migration: 'migrationrunner' };
+
+test('every keyword fragment and stem has its own passing sample (removing any one turns this red)', () => {
+  assert.deepEqual(Object.keys(RF.CLASSES).sort(), Object.keys(SAMPLES).sort());
+  const stems = [];
+  for (const [cls, { words, stems: st }] of Object.entries(RF.CLASSES)) {
+    assert.deepEqual([...words].sort(), Object.keys(SAMPLES[cls]).sort(), `${cls} words`);
+    for (const [frag, sample] of Object.entries(SAMPLES[cls])) {
+      assert.ok(RF.riskFloor({ ticketText: `touch the ${sample} handling` }).classes.includes(cls), `${cls}:${frag}`);
+      assert.ok(RF.riskFloor({ paths: [`src/${sample.replace(/ /g, '-')}/x.ts`] }).classes.includes(cls), `${cls}:${frag} path`);
+    }
+    stems.push(...st);
+  }
+  assert.deepEqual([...stems].sort(), Object.keys(STEM_SAMPLES).sort());
+  for (const [stem, sample] of Object.entries(STEM_SAMPLES)) assert.equal(RF.riskFloor({ paths: [`src/${sample}.ts`] }).floor, 'ELEVATED', stem);
 });

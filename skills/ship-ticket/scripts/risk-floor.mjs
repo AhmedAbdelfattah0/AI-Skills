@@ -5,13 +5,12 @@
  * is NOT evidence of low risk (a lexical list cannot know every wording). Matching may over-classify; the keyword list is
  * amendable by the owner. Unusable input (empty, oversized, malformed, unknown claim) fails closed to ELEVATED.
  *
- *   risk-floor.mjs check  --ticket <file|-> [--paths <file|json array of strings>] [--claimed STANDARD|ELEVATED, any case]
- *   risk-floor.mjs verify --plan <plan file>
- * Exit codes. check: 0 = the claim already meets the floor; 2 = the claim was below the floor (use `final`, run the debate);
- * 1 = unusable input, unknown claim or usage error (output still carries final=ELEVATED, never a lower profile).
- * verify: 0 = the plan's recorded `risk_floor` line, `review_profile` and `plan_debate.status` agree with the floor;
- * 1 = `errors` lists why. verify is ADVISORY, NOT ENFORCED: no gate or engine step runs it yet (wiring is S-23/S-24);
- * the orchestrator MUST run it before plan approval. It checks the plan is self-consistent, not that the floor was honestly run.
+ *   risk-floor.mjs check --ticket <file|-> [--paths <file|json array of strings>] [--claimed STANDARD|ELEVATED, any case]
+ * Flags take `--flag value` or `--flag=value`; a missing value, an unknown flag, a repeated flag or a positional argument is an error.
+ * Exit codes: 0 = the claim already meets the floor; 2 = the claim was below the floor (use `final`, run the debate);
+ * 1 = unusable input (empty after normalisation, malformed, oversized), unknown claim or usage error. The output of an exit-1 run
+ * still carries final=ELEVATED, never a lower profile, and exit 1 holds even when the claim is ELEVATED.
+ * ADVISORY, NOT ENFORCED: no script reads the plan's recorded line. Checking the plan record is deferred to the S-23/S-24 wiring.
  */
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -40,7 +39,7 @@ export const CLASSES = {
 // such as JWTService) and letter/digit boundaries, turn every other separator into one space.
 export function normalise(s) {
   return String(s).normalize('NFKD').replace(/[\p{Cf}\p{M}᠎]/gu, '').normalize('NFKC')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z]{2,})/g, '$1 $2')
+    .replace(/(JWT|RBAC|SSO|RLS|OIDC|SAML|MFA|CSRF|CORS)(?=[A-Z])/g, '$1 ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/(\d)([A-Z][a-z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z]{2,})/g, '$1 $2')
     .replace(/([A-Za-z])(\d)/g, '$1 $2').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 const PATTERNS = Object.entries(CLASSES).map(([cls, { words, stems }]) =>
@@ -60,10 +59,9 @@ const isStr = (x) => typeof x === 'string' && x.trim() !== '';
 
 export function riskFloor({ ticketText = '', paths = [] } = {}) {
   const hits = [];
-  const malformed = typeof ticketText !== 'string' || !Array.isArray(paths) || !paths.every(isStr);
+  const malformed = typeof ticketText !== 'string' || !Array.isArray(paths) || !paths.every((p) => isStr(p) && normalise(p) !== '') || (normalise(ticketText) === '' && paths.length === 0);
   if (malformed) hits.push({ class: 'malformed_input', signal: '', source: 'input' });
   else if (ticketText.length + paths.reduce((a, p) => a + p.length, 0) > MAX_INPUT) hits.push({ class: 'input-too-large', signal: '', source: 'input' });
-  else if (!ticketText.trim() && paths.length === 0) hits.push({ class: 'no-input', signal: '', source: 'input' });
   else { scan(ticketText, 'ticket', hits); for (const p of paths) scan(p, `path:${p.slice(0, 200)}`, hits); }
   const classes = [...new Set(hits.map((h) => h.class))].sort();
   const floor = hits.length ? 'ELEVATED' : 'STANDARD';
@@ -88,36 +86,30 @@ export function check(input = {}) {
   return { ...r, claimed, final, ...(bad ? { error: 'bad_claim' } : {}), raised: bad || RANK[final] > RANK[c ?? 'STANDARD'] || (c === null && final === 'ELEVATED'),
     record_line: `risk-floor: floor=${r.floor}; classes=${r.classes.join(',') || 'none'}; claimed=${claimed}; final=${final}; input sha256:${digest}` };
 }
-export const exitCodeFor = (r) => (r.error || r.classes.includes('malformed_input') ? 1 : r.raised ? 2 : 0);
+export const exitCodeFor = (r) => (r.error || r.classes.includes('malformed_input') || r.classes.includes('input-too-large') ? 1 : r.raised ? 2 : 0);
 
-const REC = /risk-floor: floor=(STANDARD|ELEVATED); classes=[^;]*; claimed=\w+; final=(STANDARD|ELEVATED); input sha256:[0-9a-f]{64}/;
-export function verifyPlan(text) {
-  const errors = [], m = REC.exec(text);
-  if (!m) return ['no_record'];
-  const [, floor, final] = m;
-  if (RANK[final] < RANK[floor]) errors.push('final_below_floor');
-  if (floor === 'ELEVATED') {
-    const prof = /^[ \t]*review_profile:[ \t]*(STANDARD|ELEVATED)[ \t]*$/m.exec(text);
-    if (!prof || prof[1] !== 'ELEVATED') errors.push('profile_below_floor');
-    const st = /plan_debate:[^\n]*status:[ \t]*(\w+)[ \t]*[},]/.exec(text);
-    if (!st) errors.push('debate_missing'); else if (st[1] === 'SKIPPED') errors.push('debate_skipped');
+const FLAGS = ['ticket', 'paths', 'claimed'];
+// Strict parser: `--flag value` or `--flag=value`; null on any missing value, unknown or repeated flag, or positional argument.
+export function parseFlags(args) {
+  const o = {};
+  for (let i = 0; i < args.length; i++) {
+    const m = /^--([^=]+)(?:=([\s\S]*))?$/.exec(args[i]);
+    if (!m || !FLAGS.includes(m[1]) || Object.hasOwn(o, m[1])) return null;
+    let v = m[2];
+    if (v === undefined) { v = args[++i]; if (v === undefined || v.startsWith('--')) return null; }
+    o[m[1]] = v;
   }
-  return errors;
+  return o;
 }
 
-function argOf(argv, name) { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; }
 export function main(argv) {
-  const usage = { ok: false, final: 'ELEVATED', error: 'bad_input', usage: 'risk-floor.mjs check --ticket <file|-> [--paths <file|json>] [--claimed <profile>] | verify --plan <file>' };
-  if (argv[0] === 'verify') {
-    let text; try { text = readFileSync(argv[1] === '--plan' ? argv[2] : '', 'utf8'); } catch { return { code: 1, out: { ...usage, errors: ['plan_unreadable'] } }; }
-    const errors = verifyPlan(text); return { code: errors.length ? 1 : 0, out: { ok: !errors.length, errors } };
-  }
-  if (argv[0] !== 'check') return { code: 1, out: usage };
-  const t = argOf(argv, 'ticket'), p = argOf(argv, 'paths');
+  const usage = { ok: false, final: 'ELEVATED', error: 'bad_input', usage: 'risk-floor.mjs check --ticket <file|-> [--paths <file|json>] [--claimed <profile>]' };
+  const f = argv[0] === 'check' ? parseFlags(argv.slice(1)) : null;
+  if (!f) return { code: 1, out: usage };
   let ticketText = '', paths = [], unreadable = false;
-  try { if (t) ticketText = readFileSync(t === '-' ? 0 : t, 'utf8'); } catch { unreadable = true; }
-  if (p !== undefined) { try { paths = JSON.parse(p.trim().startsWith('[') ? p : readFileSync(p, 'utf8')); } catch { paths = null; } }
-  const r = check({ ticketText: unreadable ? null : ticketText, paths, claimed: argv.includes('--claimed') ? (argOf(argv, 'claimed') ?? '') : undefined });
+  try { if (f.ticket !== undefined) ticketText = readFileSync(f.ticket === '-' ? 0 : f.ticket, 'utf8'); } catch { unreadable = true; }
+  if (f.paths !== undefined) { try { paths = JSON.parse(f.paths.trim().startsWith('[') ? f.paths : readFileSync(f.paths, 'utf8')); } catch { paths = null; } }
+  const r = check({ ticketText: unreadable ? null : ticketText, paths, claimed: f.claimed });
   return { code: exitCodeFor(r), out: r };
 }
 

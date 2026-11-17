@@ -256,9 +256,8 @@ data-shape and shared-surface wording in the ticket text and planned paths. A fl
 never lowers, and a read-only or display-only framing does not lower it. Absence of a
 match is NOT evidence of low risk, and the keyword list is amendable by the owner. Unusable
 input, an unknown claim or a nonzero exit other than 2 means ELEVATED. Record its
-`record_line` in the plan header and run `risk-floor.mjs verify --plan <plan>` before
-plan approval. Today that check is advisory, not enforced: no gate or engine step runs
-it yet (wiring is S-23/S-24).
+`record_line` in the plan header. Today this is advisory, not enforced: no gate or engine
+step reads the record (checking it is deferred to the S-23/S-24 wiring).
 
 ## Security sensitivity
 
@@ -552,8 +551,8 @@ dependencies:
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
 - **Survey and planning.** Use one survey agent. Use the cross-model plan debate
-  only for money or auth tickets. Skip it, and record the skip, for UI or
-  low-risk work. The REVIEW second opinion is never skipped (see REVIEW).
+  when the risk floor is ELEVATED or the ticket is money or auth. Skip it, and
+  record the skip, only below the floor. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a

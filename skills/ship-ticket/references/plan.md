@@ -122,7 +122,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
-<The risk floor is a best-effort lexical floor and runs first: a floor of ELEVATED requires review ELEVATED and the bounded §7 debate; judgement may raise it, never lower it, and a missing match is not evidence of low risk. Over-classifying a comment-only or read-only change is accepted; such a debate may converge in one call within the normal budget. `risk-floor.mjs verify --plan` checks the record; it is advisory until the gate wiring (S-23/S-24).>
+<The risk floor is a best-effort lexical floor and runs first: a floor of ELEVATED requires review ELEVATED and the bounded §7 debate; judgement may raise it, never lower it, and a missing match is not evidence of low risk. Over-classifying a comment-only or read-only change is accepted; such a debate may converge in one call within the normal budget. This is advisory, not enforced: nothing reads the record yet. Deferred to the S-23/S-24 gate wiring: a plan-record check that parses exactly one strict `risk_floor:` header, requires final >= floor and final >= claim, review_profile >= final, a case-insensitive debate-status allowlist, and fails on duplicate keys.>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 
