@@ -378,13 +378,13 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs event --repo <TARGET_REPO> --ticket
 | Event | Required metrics | Notes |
 |---|---|---|
 | `run_mode` | `mode=engine\|supervised\|recovery\|fallback` | `supersedes_run_id=<run>` when this run replaces another (supervised completion); `reason=execution_lane_unavailable` on a fallback. Emit `engine` or `supervised` at the start of a run. `run-engine resume` emits `recovery` itself (best effort: a telemetry failure is a stderr note and never changes the exit code or the state). |
-| `measurement_complete` | `scopes=` comma list of `review,repair,gate,owner,sleep,findings,usage` | the orchestrator declares which kinds it recorded in full; only then does an absent kind mean "none occurred" (0) instead of "not recorded" (`unavailable`) |
+| `measurement_complete` | `scopes=` comma list of `review,repair,gate,owner,sleep,findings,usage` | the orchestrator declares which kinds it recorded in full (see the completeness rule below). Only the head run's declaration counts, and it covers the whole ticket, predecessor runs included; one in a superseded run is ignored |
 | `review_round` | `n`, `round_kind=original\|confirmation\|final`, `lane`, `verdict=PASS\|FAIL\|unavailable` | one per lane per round; `majors`, `minors`, `candidate_sha`, `packet_sha256`; the interval is the dispatch-to-result time (a relay carrier time wins) |
 | `repair_batch` | `n` | `authority_event_id`; `--detail '{"finding_ids":[...]}'` |
 | `confirmation` | `n` | `repair_batch=<n>` |
 | `gate_run` | `n`, `head_sha`, `clean` | `manifest_sha256`; `--detail '{"per_gate":[{"name","ms","exit","key"}]}'`; `holds_review=true` with `hold_ms` when reviewers waited for it; `t0_class=true\|false` when it failed (a failed run without it makes the T0 count `unavailable`); pass `--outcome fail` for a failed run and real `--started-at/--ended-at` (a point event has no duration) |
 | `owner_decision` | `n` | a `wait`: its interval is the owner wait; `decision_class`, `retries_granted` |
-| `finding` | `fingerprint`, `repeat`, `severity` | `round` (a repeat without one is told apart by its event id), `builder_catchable=true\|false`, `deferred=true` for a knowingly deferred finding |
+| `finding` | `fingerprint`, `repeat`, `severity` | `round`; `occurrence=<positive integer or short id>` tells apart repeats of one fingerprint that have no `round` and the same timestamps (without either, such repeats are one finding); `builder_catchable=true\|false`, `deferred=true` for a knowingly deferred finding |
 | `host_sleep` | none | a `wait` with `gap_reason=host_sleep`; excluded from awake time |
 
 Each event may carry `label=measured|estimated|unavailable` (default `measured`). The label of a whole event is
@@ -402,18 +402,22 @@ unchanged). A ticket with any event is instrumented and *started*; the rest are 
 left out of every denominator. A ticket's status comes from its head run (the run no `supersedes_run_id`
 names): `complete` delivered, `fail` failed, `abandoned`, `open` censored. Each metric prints `value` and `label`:
 
-- M1 first-pass acceptance: started tickets whose first `original` round has at least two lanes, all `PASS` with `majors=0`.
-  Failed, abandoned and censored tickets stay in the denominator and are listed in `started_by_status`.
+- M1 first-pass acceptance: started tickets whose first `original` round has at least two lanes, all `PASS` with `majors=0`. The
+  `denominator` is every started ticket, failed, abandoned and censored included (`started_by_status`); with `review` declared, a ticket
+  with no original round counts as not accepted. Without `review` on every started ticket, M1 is `unavailable` (an unrecorded earlier
+  round could flip a pass, so no bound exists); `unrecorded_reviews` counts tickets with no review event and no scope,
+  `undeclared_review_tickets` those with review events but no scope.
 - M2 distinct Major/Blocker/Critical fingerprints (`repeat` findings counted apart); M3 distinct findings of any severity with `builder_catchable=true`, `partial` while any finding is unclassified, `unavailable` without classifications.
-- M4 rounds (distinct `n`), repair batches, confirmations per ticket, and how many are within 2 rounds and 1 batch.
+- M4 rounds (distinct `n`), repair batches, confirmations and repeat findings per ticket, and how many tickets are within 2 rounds and 1 batch (`unavailable` unless every started ticket declares `review` and `repair`; `of` counts the tickets that do).
 - M5 `M5a` (plan approval to SHIP_READY) and `M5b` (first invocation to merge, delivered tickets). No SHIP_READY or merge event exists yet, so
   both use named substitutions (PLAN end, SHIP start, first interval, head workflow end) and print `estimated`; a missing endpoint prints
-  `unavailable` naming it. An unrecorded sleep or owner wait is `unavailable` unless `measurement_complete` declares `sleep`/`owner`.
+  `unavailable` naming it. Sleep, human wait and awake time follow the completeness rule: human wait needs `owner` and `sleep`
+  (an unrecorded sleep overlapping a wait could make it 0), `awake_ms_with_wait` needs `sleep`, `awake_ms_excluding_wait` both.
 - M6 per-round earliest dispatch of any lane to the last required result (a point event has no duration: `unavailable`), plus reconciliation and gate holds, overlap counted once.
 - M7 gate runs, total wall, T0-class failures, and redundant executions (`unavailable` unless every run has `per_gate` keys).
 - M8 list-equivalent cost of all attempts. A provider with any record lacking a cost is `unavailable`, and so is the total:
   it prints `Codex unavailable`, never a partial sum or 0, and the total is only numeric when `measurement_complete` declares `usage` (engine state usage is read too). A superseded predecessor run's cost is reported in the failed/abandoned bucket, with Claude and Codex apart.
-- M9 `unavailable until the 30-day window matures`; deferred findings are listed apart by severity.
+- M9 `unavailable until the 30-day window matures`; deferred findings are listed apart by severity (`deferred_findings_label`).
 - M10 `unavailable`: it needs the S-24 eligibility record and S-16 replays.
 
 Limit (AC6): `recovery` is emitted by the engine on `resume`; there is no `adopt` command in this tree. `fallback` (execution lane
@@ -421,4 +425,22 @@ unavailable) has no engine path yet: the orchestrator runs the `event` command a
 lane (S-18/S-03), so AC6 is PARTLY met: recovery is automatic on `resume`, fallback stays manual until the S-18 execution lane.
 `populations.run_modes` counts mode events (modes), not runs.
 
-Completeness is never inferred from a positive count. Without a `measurement_complete` scope, a count is a lower bound `{ "at_least": n }` labelled `estimated`: M4 never reports target attainment, M5 never subtracts a full sleep or wait, and M2/M3 do not claim a total. A ticket with no recorded review and no `review` scope is `unavailable` for M1 and counted in `unrecorded_reviews`. A repeat finding without `round` is identified by its fingerprint and timestamps (or an emitter-supplied `occurrence`), so an identical re-emission collapses and distinct repeats stay distinct.
+**The completeness rule (one rule, every metric).** Completeness is never inferred from what was recorded. `measure.mjs`
+registers every number it prints in `INPUT_SCOPES`: the event kinds it reads, the `measurement_complete` scopes those kinds need
+(`review_round` and `review_reconcile` need `review`; `repair_batch` and `confirmation` need `repair`; `gate_run` `gate`;
+`owner_decision` `owner`; `host_sleep` `sleep`; `finding` `findings`; usage records `usage`), and each scope's polarity. One function,
+`resolve`, prints every value:
+
+- every needed scope declared by every ticket in the value's population: the number, labelled the worst of the labels of the
+  events it read (and never better than the metric's ceiling: M5 `estimated`, M9/M10 `unavailable`);
+- a needed scope missing, all missing scopes `lower` (an unrecorded event can only raise the value: counts, sums, unions, lower
+  costs) and something seen: `{ "at_least": n }`, labelled at best `estimated`;
+- otherwise (nothing seen, or a missing scope that could lower the value or flip a ratio or an attainment: M1, M4 within target,
+  human wait and awake time without `sleep`, the M8 total): `unavailable`, never 0.
+
+So a partial history is never a measured total, never a target attainment and never a full deduction, in M1-M10 and in
+`tickets.<id>.counts` alike (which carries its own `label`). With a scope declared and no event of its kind, the value is a real 0 (for example M2 with `findings`
+declared and no finding). Numbers that only describe the population (`populations`, M1 `denominator` and `started_by_status`, M4 `of`,
+M8 `records`) are listed in `BOOKKEEPING` and printed exactly. A test walks the whole output and fails on a number registered in neither,
+and a property test drops each needed scope and each event kind of every registered value in turn. An owner decision is identified by
+its run, `n` and times, so waits imported from two sessions that both number from 1 stay apart.
