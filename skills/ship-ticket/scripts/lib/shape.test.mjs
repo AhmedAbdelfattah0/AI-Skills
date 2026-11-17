@@ -277,14 +277,14 @@ const MUTANTS = [
 ];
 const CHILD_ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' };
 /** Run this file against `mutatedSrc` in a temp copy of the whole scripts dir (every module the test imports, e.g. ci-snapshot.mjs) -> raw spawn result. */
-function runMutant(mutatedSrc) {
+function runMutant(mutatedSrc, { testSrc, env = CHILD_ENV, args = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'shape-mut-'));
   try {
     mkdirSync(join(dir, 'lib'));
     for (const f of readdirSync(join(HERE, '..'))) if (f.endsWith('.mjs') && !f.endsWith('.test.mjs')) copyFileSync(join(HERE, '..', f), join(dir, f));
     writeFileSync(join(dir, 'lib', 'shape.mjs'), mutatedSrc);
-    copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs'));
-    return spawnSync(process.execPath, ['--test', join(dir, 'lib', 'shape.test.mjs')], { env: CHILD_ENV, encoding: 'utf8', timeout: 60000 });
+    if (testSrc === undefined) copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs')); else writeFileSync(join(dir, 'lib', 'shape.test.mjs'), testSrc);
+    return spawnSync(process.execPath, ['--test', ...args, join(dir, 'lib', 'shape.test.mjs')], { env, encoding: 'utf8', timeout: 60000 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 /** 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error, a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'. */
@@ -297,9 +297,11 @@ function classify(r) {
   return { verdict: 'killed', failing };
 }
 // Anchors are LF text: a Windows checkout (autocrlf) has CRLF, so the source is normalised to LF before matching, and every mutant is written back as LF.
-const lf = (s) => s.replace(/\r\n/g, '\n');
-const SRC = lf(readFileSync(join(HERE, 'shape.mjs'), 'utf8'));
-test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+// ONE loader, used by the mutation harness and by the CRLF test alike.
+const loadMutationSource = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+const LOADER_CHILD = process.env.SHAPE_LOADER_CHILD === '1';
+const SRC = loadMutationSource(join(HERE, 'shape.mjs'));
+test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
   assert.equal(classify(runMutant(`${SRC}\nexport const = ;`)).verdict, 'invalid'); // syntax error
   assert.equal(classify(runMutant(`import './does-not-exist.mjs';\n${SRC}`)).verdict, 'invalid'); // module not found
   assert.equal(classify(runMutant(`${SRC}\nthrow new Error('boom');`)).verdict, 'invalid'); // load-time throw
@@ -307,17 +309,36 @@ test('mutation harness self-test: broken module loading is INVALID, an equivalen
   assert.equal(classify(runMutant(SRC.replace(MUTANTS[0][1], MUTANTS[0][2]))).verdict, 'killed');
   assert.equal(classify({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }).verdict, 'invalid'); // timeout / crash
 });
-test('mutation harness is line-ending independent: a CRLF copy of shape.mjs (a Windows checkout) anchors and kills the same way', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
-  const crlf = SRC.replace(/\n/g, '\r\n');
-  assert.ok(crlf.includes('\r\n') && crlf !== SRC);
-  assert.equal(lf(crlf), SRC);
-  for (const [name, from] of MUTANTS) assert.equal(lf(crlf).split(from).length - 1, 1, `${name}: anchor on a CRLF source`);
-  assert.ok(MUTANTS.some(([, from]) => from.includes('\n')), 'the multi-line anchors are the ones CRLF breaks');
-  const bad = [];
-  for (const [name, from, to] of MUTANTS) if (from.includes('\n')) { const c = classify(runMutant(lf(crlf).replace(from, to))); if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict}`); }
-  assert.deepEqual(bad, []);
+const CRLF_TEST = 'mutation harness is line-ending independent';
+test(`${CRLF_TEST}: the REAL loader over a CRLF copy of shape.mjs (a Windows checkout) anchors and kills the same way`, { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shape-crlf-'));
+  try {
+    const crlfFile = join(dir, 'shape.mjs');
+    writeFileSync(crlfFile, SRC.replace(/\n/g, '\r\n'));
+    assert.ok(readFileSync(crlfFile, 'utf8').includes('\r\n'), 'the fixture really has CRLF');
+    const src = loadMutationSource(crlfFile);
+    assert.equal(src, SRC);
+    for (const [name, from] of MUTANTS) assert.equal(src.split(from).length - 1, 1, `${name}: anchor on a CRLF source`);
+    const multi = MUTANTS.filter(([, from]) => from.includes('\n'));
+    assert.ok(multi.length >= 4, 'the multi-line anchors are the ones CRLF breaks');
+    if (LOADER_CHILD) return; // the loader-mutant child needs only the anchor assertions above
+    const bad = [];
+    for (const [name, from, to] of multi) { const c = classify(runMutant(src.replace(from, to))); if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict}`); }
+    assert.deepEqual(bad, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+test('mutation of the loader itself: without its CRLF normalisation the CRLF test fails by assertion (on every OS)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
+  const self = readFileSync(join(HERE, 'shape.test.mjs'), 'utf8').replace(/\r\n/g, '\n');
+  const from = "readFileSync(path, 'utf8').replace(/\\r\\n/g, '\\n');";
+  assert.equal(self.split(from).length - 1, 1, 'loader anchor');
+  const env = { ...CHILD_ENV, SHAPE_MUTANT_RUN: '0', SHAPE_LOADER_CHILD: '1' };
+  const mutated = classify(runMutant(SRC, { testSrc: self.replace(from, "readFileSync(path, 'utf8');"), env, args: ['--test-name-pattern', CRLF_TEST] }));
+  assert.equal(mutated.verdict, 'killed', JSON.stringify(mutated));
+  assert.ok(mutated.failing.some((n) => n.includes(CRLF_TEST)));
+  const intact = classify(runMutant(SRC, { testSrc: self, env, args: ['--test-name-pattern', CRLF_TEST] })); // control: the unmutated loader passes
+  assert.equal(intact.verdict, 'survived');
+});
+test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
   const bad = [];
   for (const [name, from, to] of MUTANTS) {
     assert.equal(SRC.split(from).length - 1, 1, `mutant "${name}": anchor must occur exactly once`);
