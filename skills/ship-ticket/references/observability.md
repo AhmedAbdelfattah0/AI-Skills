@@ -187,7 +187,7 @@ identity metrics, an invalid `gap_reason` or an oversized value refuse a start; 
 `skill_revision` or ceiling never refuses: it is recorded as `unknown` and reported
 `unknown`; do not retry or wait on it, because the REVIEW phase start row is what
 authorizes a REPAIR. Time covered by no interval: end the phase with
-`--metric gap_reason=no_start_stamp|wait|unknown`. `summary` reports
+`--metric gap_reason=no_start_stamp|wait|host_sleep|unknown` (a start refuses any other value; an end records it as `unknown`, so the interval always closes). `summary` reports
 `missing_review_intervals` (a count; `unknown` without execution IDs; `at_least` with a
 known sum when some runs are unknown).
 

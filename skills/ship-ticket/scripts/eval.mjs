@@ -106,9 +106,12 @@ function attemptTiming(state, records) {
   return attempts.map((a) => {
     const s = ms(a.started_at), e = ms(a.envelope?.ended_at ?? a.ended_at);
     const wall = Number.isFinite(s) && Number.isFinite(e) && e >= s ? e - s : UNKNOWN;
-    const api = [...stateUsage(state), ...records].find((r) => known(r?.api_ms) && (r.attempt_id === a.attempt_id || r.source_execution_id === a.attempt_id))?.api_ms;
+    const mine = [...stateUsage(state), ...records].filter((r) => r?.attempt_id === a.attempt_id || r?.source_execution_id === a.attempt_id);
+    const api = mine.find((r) => known(r?.api_ms))?.api_ms;
+    // Every model the attempt's usage names; the key exists only when some record carried a model list.
+    const models = [...new Set(mine.flatMap((r) => (Array.isArray(r.models_used) ? r.models_used : [])))].sort();
     return { attempt_id: a.attempt_id, kind: a.kind ?? UNKNOWN, node: a.node ?? UNKNOWN, wall_ms: wall, api_ms: known(api) ? api : UNKNOWN,
-      other_ms: known(wall) && known(api) ? wall - api : UNKNOWN };
+      other_ms: known(wall) && known(api) ? wall - api : UNKNOWN, ...(models.length ? { models_used: models } : {}) };
   });
 }
 
@@ -175,14 +178,20 @@ function reviewRounds(run) {
     const overlap = p.length && o.length ? union(p).reduce((n, [a, b]) => n + union(o).reduce((m, [c, d]) => m + Math.max(0, Math.min(b, d) - Math.max(a, c)), 0), 0) : UNKNOWN;
     const shorter = p.length && o.length ? Math.min(spanLength(p), spanLength(o)) : 0;
     const declared = phase?.metrics.gap_reason;
+    // Unfinished: an open interval of the round, or its REVIEW phase itself still open (A0.1 follow-up 2).
+    const truncated = expected.some(({ open }) => open > 0)
+      || (run.open_intervals ?? []).some((i) => i.kind === 'phase' && i.name === 'REVIEW' && i.metrics?.review_execution === id);
     const ceilings = Object.fromEntries(CEILING_METRICS.map((k) => [k, known(phase?.metrics[k]) ? phase.metrics[k] : UNKNOWN]));
-    return { review_execution: id, skill_revision: phase?.metrics.skill_revision ?? UNKNOWN, ceilings,
+    const row = { review_execution: id, skill_revision: phase?.metrics.skill_revision ?? UNKNOWN, ceilings,
       intervals: roles.map((i) => ({ role: REVIEW_ROLE_OF[i.name], event_id: i.event_id, started_at: new Date(spanOf(i)[0]).toISOString(),
         ended_at: new Date(spanOf(i)[1]).toISOString(), duration_ms: spanOf(i)[1] - spanOf(i)[0],
         basis: i.carrier_timing ? 'carrier' : 'logger', collection_delay_ms: i.carrier_timing?.collection_delay_ms ?? UNKNOWN })),
       missing_roles: missing, wall_ms: wall, unaccounted_gap_ms: gap,
       gap_reason: !known(gap) ? UNKNOWN : gap === 0 ? 'none' : GAP_REASONS.includes(declared) ? declared : UNKNOWN,
       overlap_ms: overlap, concurrency_ratio: known(overlap) && shorter > 0 ? Math.round(overlap / shorter * 1000) / 1000 : UNKNOWN };
+    // A round with an unfinished interval has a truncated wall: kept out of the percentiles (not an output field).
+    Object.defineProperty(row, 'truncated', { value: truncated, enumerable: false });
+    return row;
   });
 }
 
@@ -306,7 +315,7 @@ export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
   });
   const fired = {};
   for (const s of metrics.flatMap((m) => m.suggestions)) fired[s.rule] = (fired[s.rule] ?? 0) + 1;
-  const walls = metrics.flatMap((m) => (Array.isArray(m.review_rounds) ? m.review_rounds : [])).map((r) => r.wall_ms);
+  const walls = metrics.flatMap((m) => (Array.isArray(m.review_rounds) ? m.review_rounds : [])).map((r) => (r.truncated ? UNKNOWN : r.wall_ms));
   const roundWalls = walls.filter(known);
   return { schema: EVAL_SCHEMA, runs: metrics,
     cross_run: { runs: metrics.length, orchestrator_share_pct_median: median(metrics.map((m) => m.orchestrator_share_pct)),

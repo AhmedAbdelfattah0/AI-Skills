@@ -1,0 +1,826 @@
+{
+  "evaluate": {
+    "schema": "ship-ticket-eval-v1",
+    "runs": [
+      {
+        "ticket": "T1",
+        "run_id": "run-1",
+        "outcome": "complete",
+        "tokens_by_role": {
+          "orchestrator": {
+            "events": 1,
+            "processed_tokens": 100
+          },
+          "reviewer": {
+            "events": 1,
+            "processed_tokens": 25
+          }
+        },
+        "tokens_by_phase": {
+          "phase unknown": {
+            "events": 2,
+            "processed_tokens": 125
+          }
+        },
+        "orchestrator_share_pct": 80,
+        "wall_ms_by_phase": {
+          "PLAN": 10000,
+          "BUILD": 90000,
+          "REVIEW": 340000
+        },
+        "review_executions": 1,
+        "peak_rss_mb": "unknown",
+        "peak_cpu_pct": "unknown",
+        "parallel_efficiency": 1,
+        "terminal_review_outcomes": "unknown",
+        "retries_authorized": "unknown",
+        "cost_per_accepted_ticket": "unknown",
+        "review_repairs": 3,
+        "confirmations": 0,
+        "findings_by_severity": "unknown",
+        "resumes": {
+          "attempts": 1,
+          "outcomes": {
+            "unknown": 1
+          }
+        },
+        "infra_retries": 0,
+        "admission_refusals": 0,
+        "retry_count": "unknown",
+        "gate_calls": 1,
+        "proof_reruns": 0,
+        "review_usage_share_pct": 20,
+        "unattributed_share_pct": 0,
+        "attempt_timing": [
+          {
+            "attempt_id": "att-1",
+            "kind": "node",
+            "node": "a",
+            "wall_ms": 10000,
+            "api_ms": "unknown",
+            "other_ms": "unknown"
+          }
+        ],
+        "proof_wall_ms": "unknown",
+        "review_rounds": [
+          {
+            "review_execution": "review-a",
+            "skill_revision": "unknown",
+            "ceilings": {
+              "primary_ceiling_ms": 600000,
+              "recovery_ceiling_ms": "unknown",
+              "optional_ceiling_ms": "unknown",
+              "confirmation_ceiling_ms": "unknown"
+            },
+            "intervals": [
+              {
+                "role": "primary",
+                "event_id": "run-1-a-primary_review",
+                "started_at": "2026-01-01T00:00:00.000Z",
+                "ended_at": "2026-01-01T00:01:40.000Z",
+                "duration_ms": 100000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "second_opinion",
+                "event_id": "run-1-a-optional_review",
+                "started_at": "2026-01-01T00:00:20.000Z",
+                "ended_at": "2026-01-01T00:02:00.000Z",
+                "duration_ms": 100000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "reconcile",
+                "event_id": "run-1-a-review_reconcile",
+                "started_at": "2026-01-01T00:02:10.000Z",
+                "ended_at": "2026-01-01T00:03:20.000Z",
+                "duration_ms": 70000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "repair",
+                "event_id": "run-1-a-review_repair",
+                "started_at": "2026-01-01T00:03:30.000Z",
+                "ended_at": "2026-01-01T00:04:10.000Z",
+                "duration_ms": 40000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              }
+            ],
+            "missing_roles": [],
+            "wall_ms": 300000,
+            "unaccounted_gap_ms": 70000,
+            "gap_reason": "wait",
+            "overlap_ms": 80000,
+            "concurrency_ratio": 0.8
+          }
+        ],
+        "ui_ticket": true,
+        "review_to_build_ratio": 3.778,
+        "suggestions": [
+          {
+            "rule": "split_session",
+            "message": "The orchestrator used more than half of the tokens: split the session (one fresh session per ticket or wave).",
+            "evidence": {
+              "orchestrator_share_pct": 80
+            }
+          },
+          {
+            "rule": "parity_probe_first",
+            "message": "Review took more than 1.2x the build on a UI ticket: run the parity probe first.",
+            "evidence": {
+              "review_to_build_ratio": 3.778
+            }
+          },
+          {
+            "rule": "brief_too_weak",
+            "message": "More than one REVIEW repair was needed: the brief was too weak.",
+            "evidence": {
+              "review_repairs": 3
+            }
+          }
+        ]
+      },
+      {
+        "ticket": "T1",
+        "run_id": "run-2",
+        "outcome": "complete",
+        "tokens_by_role": "unknown",
+        "tokens_by_phase": "unknown",
+        "orchestrator_share_pct": "unknown",
+        "wall_ms_by_phase": {
+          "PLAN": 10000,
+          "BUILD": 100000,
+          "REVIEW": 50000
+        },
+        "review_executions": 0,
+        "peak_rss_mb": "unknown",
+        "peak_cpu_pct": "unknown",
+        "parallel_efficiency": "unknown",
+        "terminal_review_outcomes": "unknown",
+        "retries_authorized": "unknown",
+        "cost_per_accepted_ticket": "unknown",
+        "review_repairs": 0,
+        "confirmations": 0,
+        "findings_by_severity": "unknown",
+        "resumes": "unknown",
+        "infra_retries": "unknown",
+        "admission_refusals": "unknown",
+        "retry_count": "unknown",
+        "gate_calls": "unknown",
+        "proof_reruns": "unknown",
+        "review_usage_share_pct": "unknown",
+        "unattributed_share_pct": "unknown",
+        "attempt_timing": "unknown",
+        "proof_wall_ms": "unknown",
+        "review_rounds": "unknown",
+        "ui_ticket": false,
+        "review_to_build_ratio": 0.5,
+        "suggestions": []
+      },
+      {
+        "ticket": "T2",
+        "run_id": "run-3",
+        "outcome": "unknown",
+        "tokens_by_role": {
+          "builder": {
+            "events": 1,
+            "processed_tokens": 8
+          }
+        },
+        "tokens_by_phase": {
+          "phase unknown": {
+            "events": 1,
+            "processed_tokens": 8
+          }
+        },
+        "orchestrator_share_pct": "unknown",
+        "wall_ms_by_phase": {
+          "REVIEW": 300000
+        },
+        "review_executions": 1,
+        "peak_rss_mb": "unknown",
+        "peak_cpu_pct": "unknown",
+        "parallel_efficiency": "unknown",
+        "terminal_review_outcomes": "unknown",
+        "retries_authorized": "unknown",
+        "cost_per_accepted_ticket": "unknown",
+        "review_repairs": 1,
+        "confirmations": 0,
+        "findings_by_severity": "unknown",
+        "resumes": "unknown",
+        "infra_retries": "unknown",
+        "admission_refusals": "unknown",
+        "retry_count": "unknown",
+        "gate_calls": "unknown",
+        "proof_reruns": "unknown",
+        "review_usage_share_pct": "unknown",
+        "unattributed_share_pct": 0,
+        "attempt_timing": "unknown",
+        "proof_wall_ms": "unknown",
+        "review_rounds": [
+          {
+            "review_execution": "review-a",
+            "skill_revision": "unknown",
+            "ceilings": {
+              "primary_ceiling_ms": 600000,
+              "recovery_ceiling_ms": "unknown",
+              "optional_ceiling_ms": "unknown",
+              "confirmation_ceiling_ms": "unknown"
+            },
+            "intervals": [
+              {
+                "role": "primary",
+                "event_id": "run-3-a-primary_review",
+                "started_at": "2026-01-01T00:00:00.000Z",
+                "ended_at": "2026-01-01T00:01:40.000Z",
+                "duration_ms": 100000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "second_opinion",
+                "event_id": "run-3-a-optional_review",
+                "started_at": "2026-01-01T00:00:20.000Z",
+                "ended_at": "2026-01-01T00:02:00.000Z",
+                "duration_ms": 100000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "reconcile",
+                "event_id": "run-3-a-review_reconcile",
+                "started_at": "2026-01-01T00:02:10.000Z",
+                "ended_at": "2026-01-01T00:03:20.000Z",
+                "duration_ms": 70000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              },
+              {
+                "role": "repair",
+                "event_id": "run-3-a-review_repair",
+                "started_at": "2026-01-01T00:03:30.000Z",
+                "ended_at": "2026-01-01T00:04:10.000Z",
+                "duration_ms": 40000,
+                "basis": "logger",
+                "collection_delay_ms": "unknown"
+              }
+            ],
+            "missing_roles": [],
+            "wall_ms": 300000,
+            "unaccounted_gap_ms": 70000,
+            "gap_reason": "wait",
+            "overlap_ms": 80000,
+            "concurrency_ratio": 0.8
+          }
+        ],
+        "ui_ticket": false,
+        "review_to_build_ratio": "unknown",
+        "suggestions": []
+      }
+    ],
+    "cross_run": {
+      "runs": 3,
+      "orchestrator_share_pct_median": 80,
+      "review_repairs_median": 1,
+      "review_round_wall_ms": {
+        "n": 2,
+        "excluded_unknown": 0,
+        "p50": "insufficient_n",
+        "p95": "insufficient_n"
+      },
+      "peak_rss_mb_max": "unknown",
+      "suggestions_fired": {
+        "split_session": 1,
+        "parity_probe_first": 1,
+        "brief_too_weak": 1
+      },
+      "accepted_tickets": 1,
+      "cost_per_accepted_ticket_by_basis": {},
+      "note": "Partitioned by cost_basis; bases are never added together."
+    },
+    "note": "Read-only. unknown means the source did not carry the value. Suggestions are never applied."
+  },
+  "aggregate": {
+    "runs": 3,
+    "completed_runs": 2,
+    "failed_runs": 0,
+    "open_runs": 0,
+    "integrity_affected_runs": 0,
+    "planning_runs": 0,
+    "waiting_runs": 0,
+    "open_without_wait": 0,
+    "review_median_ms": 300000,
+    "standard_review_median_ms": null,
+    "elevated_review_median_ms": null,
+    "review_to_build_ratio_median": 2.138888888888889,
+    "review_to_build_excluding_recorded_waits_ratio_median": 1.9166666666666667,
+    "counter_mismatch_runs": 1,
+    "primary_degradations_observed": 0,
+    "optional_degradations_observed": 0,
+    "parallel_groups": 0,
+    "peak_concurrency": null,
+    "frontend_backend_union_overlap_pct_median": null
+  },
+  "runs": [
+    {
+      "ticket": "T1",
+      "run_id": "run-1",
+      "outcome": "complete",
+      "open_state": "closed",
+      "integrity_warnings": [],
+      "oldest_open_age_ms": null,
+      "review_profile": null,
+      "durations": {
+        "workflow_ms": 140000,
+        "phase_ms": 440000,
+        "activity_ms": 310010,
+        "wait_ms": null,
+        "build_ms": 90000,
+        "review_ms": 340000,
+        "build_wall_excluding_recorded_waits_ms": 90000,
+        "review_wall_excluding_recorded_waits_ms": 300000
+      },
+      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+      "counters": {
+        "repair_batches": {
+          "observed": 3,
+          "declared": 3,
+          "declaration_complete": true,
+          "mismatch": false
+        },
+        "confirmations": {
+          "observed": 0,
+          "declared": 2,
+          "declaration_complete": true,
+          "mismatch": true
+        },
+        "primary_degradations_observed": 0,
+        "optional_degradations_observed": 0
+      },
+      "review_executions": [
+        {
+          "review_execution": "review-a",
+          "metadata": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1",
+            "repair_batches": 1,
+            "confirmation_count": 0,
+            "gap_reason": "wait",
+            "primary_ceiling_ms": 600000
+          },
+          "counters": {
+            "repair_batches": {
+              "observed": 1,
+              "declared": 1,
+              "declaration_complete": true,
+              "mismatch": false
+            },
+            "confirmations": {
+              "observed": 0,
+              "declared": 0,
+              "declaration_complete": true,
+              "mismatch": false
+            },
+            "primary_degradations_observed": 0,
+            "optional_degradations_observed": 0
+          },
+          "event_ids": [
+            "run-1-a-ph",
+            "run-1-a-primary_review",
+            "run-1-a-optional_review",
+            "run-1-a-review_reconcile",
+            "run-1-a-review_repair"
+          ]
+        }
+      ],
+      "review_execution_coverage": "recorded_ids_only",
+      "phase_coverage": [
+        {
+          "event_id": "run-1-plan",
+          "name": "PLAN",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 0
+        },
+        {
+          "event_id": "run-1-build",
+          "name": "BUILD",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 0
+        },
+        {
+          "event_id": "run-1-review",
+          "name": "REVIEW",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 10000
+        },
+        {
+          "event_id": "run-1-a-ph",
+          "name": "REVIEW",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 70000
+        }
+      ],
+      "parallel_groups": [],
+      "open_intervals": [],
+      "intervals": [
+        {
+          "event_id": "run-1-wf",
+          "kind": "workflow",
+          "name": "ticket",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:02:20.000Z",
+          "duration_ms": 140000,
+          "outcome": "complete",
+          "metrics": {
+            "ui_ticket": true
+          }
+        },
+        {
+          "event_id": "run-1-plan",
+          "kind": "phase",
+          "name": "PLAN",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:00:10.000Z",
+          "duration_ms": 10000,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-1-build",
+          "kind": "phase",
+          "name": "BUILD",
+          "started_at": "2026-01-01T00:00:10.000Z",
+          "ended_at": "2026-01-01T00:01:40.000Z",
+          "duration_ms": 90000,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-1-review",
+          "kind": "phase",
+          "name": "REVIEW",
+          "started_at": "2026-01-01T00:01:40.000Z",
+          "ended_at": "2026-01-01T00:02:20.000Z",
+          "duration_ms": 40000,
+          "outcome": "pass",
+          "metrics": {
+            "repair_batches": 2,
+            "confirmation_count": 2
+          }
+        },
+        {
+          "event_id": "run-1-rep-0",
+          "kind": "activity",
+          "name": "review_repair",
+          "started_at": "2026-01-01T00:01:40.000Z",
+          "ended_at": "2026-01-01T00:01:40.005Z",
+          "duration_ms": 5,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-1-rep-1",
+          "kind": "activity",
+          "name": "review_repair",
+          "started_at": "2026-01-01T00:01:40.001Z",
+          "ended_at": "2026-01-01T00:01:40.006Z",
+          "duration_ms": 5,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-1-a-ph",
+          "kind": "phase",
+          "name": "REVIEW",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:05:00.000Z",
+          "duration_ms": 300000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1",
+            "repair_batches": 1,
+            "confirmation_count": 0,
+            "gap_reason": "wait",
+            "primary_ceiling_ms": 600000
+          }
+        },
+        {
+          "event_id": "run-1-a-primary_review",
+          "kind": "activity",
+          "name": "primary_review",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:01:40.000Z",
+          "duration_ms": 100000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-1-a-optional_review",
+          "kind": "activity",
+          "name": "optional_review",
+          "started_at": "2026-01-01T00:00:20.000Z",
+          "ended_at": "2026-01-01T00:02:00.000Z",
+          "duration_ms": 100000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-1-a-review_reconcile",
+          "kind": "activity",
+          "name": "review_reconcile",
+          "started_at": "2026-01-01T00:02:10.000Z",
+          "ended_at": "2026-01-01T00:03:20.000Z",
+          "duration_ms": 70000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-1-a-review_repair",
+          "kind": "activity",
+          "name": "review_repair",
+          "started_at": "2026-01-01T00:03:30.000Z",
+          "ended_at": "2026-01-01T00:04:10.000Z",
+          "duration_ms": 40000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        }
+      ]
+    },
+    {
+      "ticket": "T1",
+      "run_id": "run-2",
+      "outcome": "complete",
+      "open_state": "closed",
+      "integrity_warnings": [],
+      "oldest_open_age_ms": null,
+      "review_profile": null,
+      "durations": {
+        "workflow_ms": 160000,
+        "phase_ms": 160000,
+        "activity_ms": null,
+        "wait_ms": null,
+        "build_ms": 100000,
+        "review_ms": 50000,
+        "build_wall_excluding_recorded_waits_ms": 100000,
+        "review_wall_excluding_recorded_waits_ms": 50000
+      },
+      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+      "counters": {
+        "repair_batches": {
+          "observed": 0,
+          "declared": 0,
+          "declaration_complete": true,
+          "mismatch": false
+        },
+        "confirmations": {
+          "observed": 0,
+          "declared": 0,
+          "declaration_complete": true,
+          "mismatch": false
+        },
+        "primary_degradations_observed": 0,
+        "optional_degradations_observed": 0
+      },
+      "review_executions": [],
+      "review_execution_coverage": "legacy_unknown",
+      "phase_coverage": [
+        {
+          "event_id": "run-2-plan",
+          "name": "PLAN",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 10000
+        },
+        {
+          "event_id": "run-2-build",
+          "name": "BUILD",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 100000
+        },
+        {
+          "event_id": "run-2-review",
+          "name": "REVIEW",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 50000
+        }
+      ],
+      "parallel_groups": [],
+      "open_intervals": [],
+      "intervals": [
+        {
+          "event_id": "run-2-wf",
+          "kind": "workflow",
+          "name": "ticket",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:02:40.000Z",
+          "duration_ms": 160000,
+          "outcome": "complete",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-2-plan",
+          "kind": "phase",
+          "name": "PLAN",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:00:10.000Z",
+          "duration_ms": 10000,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-2-build",
+          "kind": "phase",
+          "name": "BUILD",
+          "started_at": "2026-01-01T00:00:10.000Z",
+          "ended_at": "2026-01-01T00:01:50.000Z",
+          "duration_ms": 100000,
+          "outcome": "pass",
+          "metrics": {}
+        },
+        {
+          "event_id": "run-2-review",
+          "kind": "phase",
+          "name": "REVIEW",
+          "started_at": "2026-01-01T00:01:50.000Z",
+          "ended_at": "2026-01-01T00:02:40.000Z",
+          "duration_ms": 50000,
+          "outcome": "pass",
+          "metrics": {
+            "repair_batches": 0,
+            "confirmation_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "ticket": "T2",
+      "run_id": "run-3",
+      "outcome": "unknown",
+      "open_state": "closed",
+      "integrity_warnings": [],
+      "oldest_open_age_ms": null,
+      "review_profile": null,
+      "durations": {
+        "workflow_ms": null,
+        "phase_ms": 300000,
+        "activity_ms": 310000,
+        "wait_ms": null,
+        "build_ms": null,
+        "review_ms": 300000,
+        "build_wall_excluding_recorded_waits_ms": null,
+        "review_wall_excluding_recorded_waits_ms": 300000
+      },
+      "measurement_caveat": "Intervals can include delayed collection and unrecorded waits; adjusted wall time is not active compute. Missing activity events do not prove absence of work.",
+      "counters": {
+        "repair_batches": {
+          "observed": 1,
+          "declared": 1,
+          "declaration_complete": true,
+          "mismatch": false
+        },
+        "confirmations": {
+          "observed": 0,
+          "declared": 0,
+          "declaration_complete": true,
+          "mismatch": false
+        },
+        "primary_degradations_observed": 0,
+        "optional_degradations_observed": 0
+      },
+      "review_executions": [
+        {
+          "review_execution": "review-a",
+          "metadata": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1",
+            "repair_batches": 1,
+            "confirmation_count": 0,
+            "gap_reason": "wait",
+            "primary_ceiling_ms": 600000
+          },
+          "counters": {
+            "repair_batches": {
+              "observed": 1,
+              "declared": 1,
+              "declaration_complete": true,
+              "mismatch": false
+            },
+            "confirmations": {
+              "observed": 0,
+              "declared": 0,
+              "declaration_complete": true,
+              "mismatch": false
+            },
+            "primary_degradations_observed": 0,
+            "optional_degradations_observed": 0
+          },
+          "event_ids": [
+            "run-3-a-ph",
+            "run-3-a-primary_review",
+            "run-3-a-optional_review",
+            "run-3-a-review_reconcile",
+            "run-3-a-review_repair"
+          ]
+        }
+      ],
+      "review_execution_coverage": "recorded_ids_only",
+      "phase_coverage": [
+        {
+          "event_id": "run-3-a-ph",
+          "name": "REVIEW",
+          "recorded_wait_overlap_ms": 0,
+          "uninstrumented_ms": 70000
+        }
+      ],
+      "parallel_groups": [],
+      "open_intervals": [],
+      "intervals": [
+        {
+          "event_id": "run-3-a-ph",
+          "kind": "phase",
+          "name": "REVIEW",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:05:00.000Z",
+          "duration_ms": 300000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1",
+            "repair_batches": 1,
+            "confirmation_count": 0,
+            "gap_reason": "wait",
+            "primary_ceiling_ms": 600000
+          }
+        },
+        {
+          "event_id": "run-3-a-primary_review",
+          "kind": "activity",
+          "name": "primary_review",
+          "started_at": "2026-01-01T00:00:00.000Z",
+          "ended_at": "2026-01-01T00:01:40.000Z",
+          "duration_ms": 100000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-3-a-optional_review",
+          "kind": "activity",
+          "name": "optional_review",
+          "started_at": "2026-01-01T00:00:20.000Z",
+          "ended_at": "2026-01-01T00:02:00.000Z",
+          "duration_ms": 100000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-3-a-review_reconcile",
+          "kind": "activity",
+          "name": "review_reconcile",
+          "started_at": "2026-01-01T00:02:10.000Z",
+          "ended_at": "2026-01-01T00:03:20.000Z",
+          "duration_ms": 70000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        },
+        {
+          "event_id": "run-3-a-review_repair",
+          "kind": "activity",
+          "name": "review_repair",
+          "started_at": "2026-01-01T00:03:30.000Z",
+          "ended_at": "2026-01-01T00:04:10.000Z",
+          "duration_ms": 40000,
+          "outcome": "pass",
+          "metrics": {
+            "review_execution": "review-a",
+            "candidate_id": "sha-1"
+          }
+        }
+      ]
+    }
+  ]
+}

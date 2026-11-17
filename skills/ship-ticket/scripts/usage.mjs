@@ -29,6 +29,12 @@ const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : nu
 /** Optional non-counter telemetry (`api_ms`, `num_turns`): the key is present only when the provider reported a valid value. */
 const optional = (key, value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? { [key]: Math.round(value) } : {});
 
+/** `{ models_used }` (sorted, de-duplicated, safe names only) or `{}` when no model is named. */
+const modelsField = (names) => {
+  const list = [...new Set(names.filter((n) => typeof n === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,80}$/.test(n)))].sort();
+  return list.length ? { models_used: list } : {};
+};
+
 function sumInto(target, key, value) {
   if (value === null) return;
   target[key] = (target[key] ?? 0) + value;
@@ -52,6 +58,8 @@ export function extractUsage(provider, stdout) {
       cost_basis: bases.length && bases.every(b => b === bases[0]) && /^[a-z_]{1,32}$/.test(bases[0]) ? bases[0] : null,
       // Non-counters, absent (reported `unknown`, never 0) unless the CLI carried them; never summed into a budget.
       ...optional('api_ms', parsed.duration_api_ms), ...(count(parsed.num_turns) === null ? {} : { num_turns: parsed.num_turns }),
+      // Every model the CLI billed for this run, sorted; absent when the CLI named none.
+      ...modelsField(Object.keys(parsed.modelUsage ?? {})),
     };
   }
   if (provider === 'codex') {
@@ -227,7 +235,7 @@ export function importSessionUsage(sessionJsonl, { runId, role = 'orchestrator',
       last.delete(ev.message.id); // re-insert so order follows the last revision
       last.set(ev.message.id, { provider: 'claude', run_id: runId, role: fileRole, ...tag, source: 'session',
         source_execution_id: `${name}:${ev.message.id}`, ...counters, reasoning_tokens: null, reported_cost_usd: null,
-        cost_basis: null, timestamp: typeof ev.timestamp === 'string' ? ev.timestamp : null });
+        cost_basis: null, timestamp: typeof ev.timestamp === 'string' ? ev.timestamp : null, ...modelsField([ev.message.model]) });
     }
     records.push(...last.values());
   }

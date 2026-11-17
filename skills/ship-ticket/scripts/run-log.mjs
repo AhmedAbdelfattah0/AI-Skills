@@ -33,7 +33,7 @@ function usage() {
 Kinds: workflow, phase, activity, wait
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
-metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|unknown
+metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|host_sleep|unknown
 names unaccounted time. Summary reports missing_review_intervals (count or "unknown").
 Optional start/end: --carrier-result <result.json> binds a fresh relay result at
 dispatch and imports its timing on completion. Start requires candidate_id and
@@ -112,7 +112,7 @@ function stringMetric(raw) {
   return raw;
 }
 
-function parseMetrics(values) {
+function parseMetrics(values, { lenientGap = false } = {}) {
   const metrics = {};
   for (const item of values) {
     const separator = item.indexOf('=');
@@ -122,7 +122,12 @@ function parseMetrics(values) {
     if (!SAFE_METRIC.test(key)) fail(`invalid metric key: ${key}`);
     if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
     metrics[key] = STRING_METRICS.includes(key) ? stringMetric(value) : parseMetricValue(value);
-    if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
+    if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) {
+      // An END must always be written: a refused end would leave its interval (a REVIEW phase) open forever.
+      if (!lenientGap) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
+      process.stderr.write(`run-log: gap_reason recorded as unknown (not one of: ${[...GAP_REASONS].join(', ')})\n`);
+      metrics[key] = 'unknown';
+    }
     if (['review_execution', 'previous_review_execution'].includes(key)
       && (typeof metrics[key] !== 'string' || !/^review-[A-Za-z0-9._-]+$/.test(metrics[key]))) {
       fail(`${key} must be a prefixed review-<opaque> ID`);
@@ -243,7 +248,20 @@ function importCarrier(options, started, root, timestamp) {
     result_sha256: createHash('sha256').update(bytes).digest('hex'),
     candidate_id: binding.candidate_id, review_execution: binding.review_execution,
     started_at: result.startedAt, ended_at: result.finishedAt,
-    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end };
+    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end,
+    // Optional: present only when the relay result carries them; absence means unavailable, never 0.
+    ...(Number.isInteger(result.exitCode) ? { exit: result.exitCode } : {}),
+    ...(carrierUsage(result.usage) ? { usage: carrierUsage(result.usage) } : {}) };
+}
+
+/** Numeric token counters of a relay result's `usage`; null when it reports none (never an invented 0). */
+function carrierUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
+  const out = {};
+  for (const key of ['input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'reasoning_output_tokens']) {
+    if (Number.isSafeInteger(usage[key]) && usage[key] >= 0) out[key] = usage[key];
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function appendRow(directory, ticket, row) {
@@ -360,7 +378,7 @@ function end(options) {
     }
     fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
   }
-  const metrics = parseMetrics(options.metric);
+  const metrics = parseMetrics(options.metric, { lenientGap: true });
   for (const key of ['candidate_id', 'review_execution']) {
     if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
   }

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { buildRun, attachUsage, aggregateUsage } from './run-summary.mjs';
+import { buildRun, attachUsage, aggregateUsage, aggregate } from './run-summary.mjs';
 import { evaluateRun, suggest, evaluate } from './eval.mjs';
 
 const script = fileURLToPath(new URL('./eval.mjs', import.meta.url));
@@ -452,4 +452,86 @@ test('review round: gap_reason is unknown when the gap is unknown', () => {
   const rows = [pair('T', 'run-1', 's', 'activity', 'primary_review', 0, 1, { review_execution: 'review-z', candidate_id: 'sha-1' })[0]];
   const [r] = roundsOf(rows);
   assert.deepEqual([r.wall_ms, r.unaccounted_gap_ms, r.gap_reason], ['unknown', 'unknown', 'unknown']);
+});
+
+// ---- ASTF-42 S-04a1: legacy-path fixes (A0.1 follow-ups, models_used, normUtc) and the T-C1 byte-equal golden ----------------
+const OPEN_STAMP = (ms) => iso(ms);
+const openStart = (runId, id, name, at, metrics) => [{ schema, ticket: 'T', run_id: runId, event_id: id, kind: 'activity', name, metrics, event: 'start', timestamp: OPEN_STAMP(at * SEC) }];
+
+test('A0.1 follow-up 1: an unfinished repair or confirmation reads as a missing interval, never as 0 missing', () => {
+  const base = { repair_batches: 0, confirmation_count: 0 };
+  const rows = [...roundOf('run-1', 'a', [['primary_review', 0, 100], ['optional_review', 0, 100], ['review_reconcile', 100, 200]], base, [0, 300]),
+    ...openStart('run-1', 'run-1-a-rep', 'review_repair', 210, { review_execution: 'review-a', candidate_id: 'sha-1' })];
+  const [round] = roundsOf(rows);
+  assert.deepEqual(round.missing_roles, ['repair'], 'one repair started and never ended is one missing interval, even when the phase declared 0');
+  const undeclared = [...roundOf('run-1', 'a', [['primary_review', 0, 100]], {}, [0, 300]),
+    ...openStart('run-1', 'run-1-a-conf', 'review_confirmation', 210, { review_execution: 'review-a', candidate_id: 'sha-1' })];
+  assert.ok(roundsOf(undeclared)[0].missing_roles.includes('confirmation'));
+  // Negative: a finished repair beside a declared 1 is not missing.
+  const done = roundOf('run-1', 'a', [['primary_review', 0, 100], ['optional_review', 0, 100], ['review_reconcile', 100, 200], ['review_repair', 210, 250]], { repair_batches: 1, confirmation_count: 0 }, [0, 300]);
+  assert.deepEqual(roundsOf(done)[0].missing_roles, []);
+});
+
+test('A0.1 follow-up 2: a round with an unfinished interval or an open REVIEW phase never feeds the percentiles', () => {
+  const closed = Array.from({ length: 5 }, (_, i) => buildRun('T', `run-${i}`, roundOf(`run-${i}`, 'a', [['primary_review', 0, i + 1]], {}, [0, i + 1])));
+  const openActivity = buildRun('T', 'run-o', [...roundOf('run-o', 'a', [['primary_review', 0, 50]], {}, [0, 50]),
+    ...openStart('run-o', 'run-o-a-rep', 'review_repair', 60, { review_execution: 'review-a', candidate_id: 'sha-1' })]);
+  const openPhase = buildRun('T', 'run-p', [...roundOf('run-p', 'a', [['primary_review', 0, 70]], {}, [0, 70]).slice(2),
+    { schema, ticket: 'T', run_id: 'run-p', event_id: 'ph-open', kind: 'phase', name: 'REVIEW', event: 'start', timestamp: OPEN_STAMP(0),
+      metrics: { review_execution: 'review-a', candidate_id: 'sha-1' } }]);
+  const w = evaluate({ runs: [...closed, openActivity, openPhase] }).cross_run.review_round_wall_ms;
+  assert.deepEqual([w.n, w.excluded_unknown, w.p50], [5, 2, 3 * SEC], 'two unfinished rounds are excluded and counted, the closed p50 is unchanged');
+  // The row itself still prints its (truncated) wall: only the percentile input changes.
+  assert.equal(evaluate({ runs: [openActivity] }).runs[0].review_rounds[0].wall_ms, 50 * SEC);
+});
+
+test('A0.1 follow-up 3 (run-log side): see run-log.test.mjs gap_reason on end; eval reads host_sleep as a declared reason', () => {
+  const [round] = roundsOf(roundOf('run-1', 'a', [['primary_review', 100, 200], ['optional_review', 100, 200], ['review_reconcile', 300, 400]],
+    { repair_batches: 0, confirmation_count: 0, gap_reason: 'host_sleep' }, [100, 400]));
+  assert.equal(round.gap_reason, 'host_sleep');
+});
+
+test('S-04a1 models_used: an attempt names every model its usage records carry; absent (never empty) when none does', () => {
+  const state = { run_id: 'run-1', attempts: [
+    { attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(10 * SEC) } },
+    { attempt_id: 'att-2', kind: 'node', node: 'b', started_at: iso(0), envelope: { ended_at: iso(4 * SEC) } }] };
+  const records = [rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', api_ms: 6000, models_used: ['claude-sonnet-x'] }),
+    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-1', source_execution_id: 'second', models_used: ['claude-haiku-x', 'claude-sonnet-x'] }),
+    rec('run-1', 'builder', 5, 0, { attempt_id: 'att-2' })];
+  const m = evaluateRun(attachUsage(build('T1', 'run-1'), records), { state, records });
+  const by = Object.fromEntries(m.attempt_timing.map((a) => [a.attempt_id, a]));
+  assert.deepEqual(by['att-1'].models_used, ['claude-haiku-x', 'claude-sonnet-x']);
+  assert.equal('models_used' in by['att-2'], false);
+  assert.equal(by['att-1'].api_ms, 6000, 'api_ms still comes from the first record that has it');
+});
+
+test('S-04a1 normUtc: an offset stamp is normalised to UTC in intervals and open intervals; a Z stamp is unchanged', () => {
+  const at = (ms, off) => (off ? new Date(Date.UTC(2026, 0, 1) + ms).toISOString().replace('Z', '').replace(/T(\d\d)/, (_, h) => `T${String((+h + 2) % 24).padStart(2, '0')}`).replace(/\.000$/, '.000') + '+02:00' : iso(ms));
+  const mk = (id, name, s, e, off) => { const b = { schema, ticket: 'T', run_id: 'run-1', event_id: id, kind: 'activity', name, metrics: {} };
+    return [{ ...b, event: 'start', timestamp: at(s, off) }, { ...b, event: 'end', timestamp: at(e, off), duration_ms: e - s, outcome: 'pass' }]; };
+  const run = buildRun('T', 'run-1', [...mk('a', 'x', 1000, 5000, true), ...mk('b', 'y', 1000, 5000, false),
+    { schema, ticket: 'T', run_id: 'run-1', event_id: 'c', kind: 'activity', name: 'z', metrics: {}, event: 'start', timestamp: at(7000, true) }]);
+  assert.equal(run.intervals[0].started_at, iso(1000));
+  assert.equal(run.intervals[0].ended_at, iso(5000));
+  assert.equal(run.intervals[1].started_at, iso(1000), 'a Z stamp is returned unchanged');
+  assert.equal(run.open_intervals[0].started_at, iso(7000));
+  assert.equal(run.intervals[0].duration_ms, 4000);
+});
+
+// T-C1: the legacy figures of old logs (no offsets, models or unfinished rounds) are byte-identical to origin/main.
+const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'legacy-figures.golden.json');
+function legacyFixtureReport() {
+  const rows = (id) => roundOf(id, 'a', [['primary_review', 0, 100], ['optional_review', 20, 120], ['review_reconcile', 130, 200], ['review_repair', 210, 250]],
+    { repair_batches: 1, confirmation_count: 0, gap_reason: 'wait', primary_ceiling_ms: 600000 }, [0, 300]);
+  const runs = [buildRun('T1', 'run-1', [...runRows('T1', 'run-1', { build: 90, review: 40, repairs: 2, ui: true }), ...rows('run-1')]),
+    buildRun('T1', 'run-2', runRows('T1', 'run-2')), buildRun('T2', 'run-3', rows('run-3'))];
+  const records = [rec('run-1', 'orchestrator', 80, 20), rec('run-1', 'reviewer', 20, 5, { api_ms: 900 }), rec('run-3', 'builder', 7, 1, { reported_cost_usd: 1.5, cost_basis: 'list' })];
+  const states = { T1: { run_id: 'run-1', attempts: [{ attempt_id: 'att-1', kind: 'node', node: 'a', started_at: iso(0), envelope: { ended_at: iso(10 * SEC) } }],
+    events: [{ seq: 0, type: 'GATE' }, { seq: 1, type: 'RESUME' }] } };
+  return { evaluate: evaluate({ runs, states, records }), aggregate: aggregate(runs), runs };
+}
+test('T-C1 legacy golden: eval and run-summary output for old logs is byte-identical to the origin/main capture', () => {
+  const text = `${JSON.stringify(legacyFixtureReport(), null, 2)}\n`;
+  if (process.env.UPDATE_LEGACY_GOLDEN === '1') writeFileSync(GOLDEN, text);
+  assert.equal(text, readFileSync(GOLDEN, 'utf8'));
 });

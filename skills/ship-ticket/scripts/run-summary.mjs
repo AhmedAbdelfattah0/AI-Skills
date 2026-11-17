@@ -6,6 +6,8 @@ const median = (values) => {
   const n = sorted.length;
   return n ? (sorted[Math.floor((n - 1) / 2)] + sorted[Math.floor(n / 2)]) / 2 : null;
 };
+/** Stamps with a non-Z offset (local +02:00 gate or engine times) become UTC ISO; Z stamps are returned unchanged. */
+export const normUtc = (stamp) => (typeof stamp === 'string' && /[+-]\d\d:?\d\d$/.test(stamp) && Number.isFinite(Date.parse(stamp)) ? new Date(stamp).toISOString() : stamp);
 const span = (i) => [Date.parse(i.started_at), Date.parse(i.ended_at)];
 export function union(spans) {
   const result = [];
@@ -112,7 +114,7 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
     const duration = Date.parse(row.timestamp) - Date.parse(start.timestamp);
     if (row.duration_ms !== duration) warn('duration_mismatch', row.event_id);
     const interval = { event_id: row.event_id, kind: row.kind, name: row.name,
-      started_at: start.timestamp, ended_at: row.timestamp, duration_ms: duration,
+      started_at: normUtc(start.timestamp), ended_at: normUtc(row.timestamp), duration_ms: duration,
       outcome: row.outcome, metrics: { ...start.metrics, ...row.metrics } };
     for (const key of ['candidate_id', 'review_execution']) {
       if (row.metrics[key] !== undefined && row.metrics[key] !== start.metrics[key]) {
@@ -132,7 +134,7 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
     intervals.push(interval);
     starts.delete(row.event_id);
   }
-  const open = [...starts.values()].map((r) => ({ event_id: r.event_id, kind: r.kind, name: r.name, started_at: r.timestamp, metrics: r.metrics }));
+  const open = [...starts.values()].map((r) => ({ event_id: r.event_id, kind: r.kind, name: r.name, started_at: normUtc(r.timestamp), metrics: r.metrics }));
   const phases = intervals.filter((i) => i.kind === 'phase');
   const phaseDuration = (name) => sum(phases.filter((i) => i.name === name).map((i) => i.duration_ms));
   // Native-mode switch waits include planning and are not pure user waits.

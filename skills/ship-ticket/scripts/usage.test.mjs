@@ -328,3 +328,15 @@ test('P0 usage: import-session records the role unattributed unless one is named
   const r2 = Object.fromEntries(readFileSync(out2, 'utf8').trim().split('\n').map(JSON.parse).map(r => [r.source_execution_id, r.role]));
   assert.deepEqual([r2['agent-x:msg_c'], r2['sess-1:msg_a']], ['reviewer', 'unattributed']);
 });
+
+test('S-04a1 usage: models_used lists every model the claude CLI billed (sorted, safe names only), absent when none; session import carries the message model', (t) => {
+  const extractUsage = fn('extractUsage');
+  const base = { usage: { input_tokens: 5, output_tokens: 1 } };
+  const named = extractUsage('claude', JSON.stringify({ ...base, modelUsage: { 'claude-sonnet-x': {}, 'claude-haiku-x': {}, 'bad name; rm': {} } }));
+  assert.deepEqual(named.models_used, ['claude-haiku-x', 'claude-sonnet-x']);
+  assert.equal('models_used' in extractUsage('claude', JSON.stringify(base)), false, 'no modelUsage => key absent');
+  assert.equal('models_used' in extractUsage('claude', JSON.stringify({ ...base, modelUsage: {} })), false);
+  assert.equal('models_used' in extractUsage('codex', '{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":1}}'), false, 'codex: never invented');
+  const records = fn('importSessionUsage')(join(session(t), 'sess-1.jsonl'), { runId: 'run-1', ...WINDOW });
+  assert.deepEqual(byId(records)['sess-1:msg_a'].models_used, ['claude-x']);
+});

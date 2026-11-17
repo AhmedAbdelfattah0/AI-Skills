@@ -417,18 +417,57 @@ test('optional_review with --carrier-result imports relay timing, the positive s
   assert.ok(timing.collection_delay_ms >= 0);
 });
 
-test('gap_reason accepts only the enum', (t) => {
+test('gap_reason: a start accepts only the enum, an end records anything else as unknown', (t) => {
   const f = fixture(t);
   const start = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1');
   assert.equal(f.cli('start', ...start).status, 0);
-  assert.equal(f.cli('end', ...start, '--metric', 'gap_reason=forgot').status, 1);
-  for (const reason of ['no_start_stamp', 'wait', 'unknown']) {
+  // A0.1 follow-up: an END with a bad value is written as `unknown` (a refused end would leave the interval open); a START still refuses it.
+  const bad = f.cli('end', ...start, '--metric', 'gap_reason=forgot');
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.equal(JSON.parse(bad.stdout).metrics.gap_reason, 'unknown');
+  assert.match(bad.stderr, /gap_reason recorded as unknown/);
+  assert.equal(f.cli('start', ...rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'bad-start'), '--metric', 'gap_reason=forgot').status, 1);
+  for (const reason of ['no_start_stamp', 'wait', 'host_sleep', 'unknown']) {
     const args = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', `gap-${reason}`);
     assert.equal(f.cli('start', ...args).status, 0);
     const ended = f.cli('end', ...args, '--metric', `gap_reason=${reason}`);
     assert.equal(ended.status, 0, ended.stderr);
     assert.equal(JSON.parse(ended.stdout).metrics.gap_reason, reason);
   }
+});
+
+test('a REVIEW phase ended with an invalid gap_reason is closed, not left open', (t) => {
+  const f = fixture(t);
+  const m = ['--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-1'];
+  const args = rid('--kind', 'phase', '--name', 'REVIEW', '--event-id', 'ph-1');
+  assert.equal(f.cli('start', ...args, ...m).status, 0);
+  assert.equal(f.cli('end', ...args, '--metric', 'gap_reason=because').status, 0);
+  const run = f.summary().runs[0];
+  assert.equal(run.open_intervals.length, 0);
+  assert.equal(run.intervals.find((i) => i.name === 'REVIEW').metrics.gap_reason, 'unknown');
+});
+
+test('S-04a1 relay import: exit code and numeric usage are kept when the result carries them, absent (never 0) when not', (t) => {
+  const run = (extra) => {
+    const f = fixture(t);
+    const resultPath = join(f.repo, 'result.json');
+    const start = f.cli('start', ...eventArgs, '--carrier-result', resultPath, '--metric', 'candidate_id=sha-123', '--metric', 'review_execution=review-abc');
+    assert.equal(start.status, 0, start.stderr);
+    const timestamp = JSON.parse(start.stdout).timestamp;
+    writeFileSync(resultPath, JSON.stringify({ schema: 'delegate-relay.result.v1', tool: 'claude', readOnly: true, workdir: f.repo, status: 'timeout',
+      startedAt: timestamp, finishedAt: timestamp, finalMessage: 'SECRET-TEXT', ...extra }));
+    const ended = f.cli('end', ...eventArgs, '--carrier-result', resultPath);
+    assert.equal(ended.status, 0, ended.stderr);
+    assert.ok(!readFileSync(f.path, 'utf8').includes('SECRET'));
+    return JSON.parse(ended.stdout).carrier_timing;
+  };
+  const withBoth = run({ exitCode: 0, usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: -1, note: 'x', reasoning_output_tokens: 1.5 } });
+  assert.equal(withBoth.exit, 0);
+  assert.deepEqual(withBoth.usage, { input_tokens: 10, output_tokens: 2 }, 'only non-negative safe integers of the five counters survive');
+  const without = run({});
+  assert.equal('exit' in without, false);
+  assert.equal('usage' in without, false);
+  assert.equal('usage' in run({ usage: { note: 'x' } }), false, 'a usage object with no valid counter adds no key');
 });
 
 const roundRows = (id, { drop = [], open = [], extra = [], phaseMetrics = { repair_batches: 1, confirmation_count: 1 } } = {}) => {
@@ -507,5 +546,5 @@ test('run-log and eval import one review-interval table', () => {
     assert.doesNotMatch(text, /primary_review|optional_review|review_reconcile|recovery_ceiling_ms/, `${file} must not repeat the table`);
   }
   assert.equal(REVIEW_ROLE_OF.contract_review, 'primary');
-  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 3 && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
+  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 4 && GAP_REASONS.includes('host_sleep') && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
 });
