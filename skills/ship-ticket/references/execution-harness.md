@@ -279,6 +279,35 @@ START. Digests are written `sha256:<hex>` (the skill's form); the legacy
 (`run_mismatch`) and both digests (`approval_mismatch`, `dag_mismatch`); a mismatch
 mutates nothing.
 
+**Policy version (S-27 minimum).** `init` records two more state fields. `policy_version` is
+the engine's semantics version; today it is `1`, which means the engine as it was before the field
+existed. `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
+is the literal `unknown` for a copy install, for a copy nested untracked in another repository, and
+when git fails. It names HEAD only, not uncommitted edits to the installed scripts.
+
+Every command that loads the state checks the run's version before anything else, using
+`scripts/engine-policy.mjs` (`policySemantics`). Those commands are `status`, `resume`, `drive`,
+`mark`, `clear-unit`, `rebind` and every `gate`, and the carrier's REPAIR authorization does the same
+check. A version this engine does not support is refused with `policy_version_unsupported` and
+nothing is written. A `gate` reports the refusal as exit 2 and every other command exits 1. A
+present but malformed value is also refused. A state without the key is version 1 and is never
+back-filled, so existing runs behave exactly as before. `archive` stays open, so a run that no
+installed engine can resume can still be copied out.
+
+This is **not executable pinning**: the engine's scripts still run from disk as installed. A
+version records which semantics a run started under; it does not keep the code for them. A later
+change to semantics must add a version and keep the old version's code path reachable through its
+flags. Otherwise it must drop the old version, so that old runs are refused rather than silently
+re-interpreted.
+
+To roll back, revert the PR and check out the earlier commit in the installed checkout
+(`git -C ~/.ai-skills checkout <prior main>`). Runs that the newer engine stamped with a version
+the older engine lacks are then refused, not resumed.
+
+Reverting this change itself removes the check, and the extra fields become inert. Before a later
+slice adds version 2, that revert is safe. After it, the revert would let an engine that knows
+nothing of version 2 resume a version 2 run. Never revert a version table that is already in use.
+
 **Lock and persistence.** Every mutating command takes one lock file created
 with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and
 releases it on every exit path. On `lock_held` wait for the holder and retry; never delete the lock file by hand. Only the same host may recover it, and only when

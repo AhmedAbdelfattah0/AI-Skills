@@ -119,6 +119,10 @@ function goldenRun(t) {
 
 test('golden: a v1 DAG without unit fields yields the pre-Wave-2a state, events and outputs', { skip: WIN_SKIP }, (t) => {
   const { fx, record } = goldenRun(t);
+  // S-27-min: init also records the run's policy version and the skill commit (run-engine-policy.test.mjs); the golden predates both.
+  assert.equal(record.state.policy_version, 1);
+  assert.match(record.state.skill_commit, /^(?:[0-9a-f]{40}|unknown)$/);
+  delete record.state.policy_version; delete record.state.skill_commit;
   const got = normalizer(fx.root)(record);
   assert.equal(got.outputs.find(o => o.name === 'ship-ready').status, 0, J(got.outputs.at(-3)));
   if (process.env.UPDATE_GOLDEN === '1') { writeFileSync(GOLDEN, J(got, null, 1) + '\n'); return; }
