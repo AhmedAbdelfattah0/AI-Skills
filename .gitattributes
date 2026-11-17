@@ -1,0 +1,3 @@
+# T-C1 fixtures are compared as text against regenerated output: pin LF so core.autocrlf checkouts (Windows CI) match.
+skills/ship-ticket/scripts/legacy-figures.golden.json text eol=lf
+skills/ship-ticket/scripts/legacy-golden.s27-state.json text eol=lf

@@ -573,7 +573,7 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   assert.match(got.policy_refusal.stderr, /policy_version_unsupported/);
 });
 
-test('T-C1 generator: re-captures the golden from the pinned base even under hostile GIT_* variables, and reproduces the committed golden', () => {
+test('T-C1 generator: re-captures the golden from the pinned base even under hostile GIT_* variables, and reproduces the committed golden', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'legacy-gen-'));
   try {
     const out = join(dir, 'golden.json');
@@ -581,6 +581,7 @@ test('T-C1 generator: re-captures the golden from the pinned base even under hos
     const r = spawnSync(process.execPath, [join(here, 'legacy-golden.mjs'), '--out', out], { encoding: 'utf8',
       env: { ...process.env, GIT_DIR: join(dir, 'not-a-repo'), GIT_WORK_TREE: dir, GIT_INDEX_FILE: join(dir, 'idx') } });
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(readFileSync(out, 'utf8'), readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8'), 'the committed golden is exactly what the base produces');
+    const { lf } = await import('./legacy-golden.mjs');
+    assert.equal(lf(readFileSync(out, 'utf8')), lf(readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8')), 'the committed golden is exactly what the base produces');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
