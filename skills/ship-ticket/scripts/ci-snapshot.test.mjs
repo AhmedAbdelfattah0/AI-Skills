@@ -465,7 +465,16 @@ function recordReads(texts, reads, biz, enums) {
     has(t, k) { rec(kind, k, Array.isArray(t)); return Reflect.has(t, k); },
     // Key ENUMERATION is not a read of a named field; it is recorded separately, and business-code enumeration (not the validator, not the traversal helpers) is what the test forbids.
     ownKeys(t) { const stack = new Error().stack; if (!/at (depthOf|canon|sha256|shapeProblem)\b/.test(stack)) enums.add(kind); return Reflect.ownKeys(t); },
-    getOwnPropertyDescriptor(t, k) { if (!ENUM_FRAME.test(new Error().stack)) rec(kind, k, Array.isArray(t)); return Reflect.getOwnPropertyDescriptor(t, k); },
+    getOwnPropertyDescriptor(t, k) {
+      if (!ENUM_FRAME.test(new Error().stack)) rec(kind, k, Array.isArray(t));
+      const d = Reflect.getOwnPropertyDescriptor(t, k);
+      // An object-valued descriptor must not hand business code a RAW object: wrap it exactly as the `get` trap does (JSON.parse properties are configurable, so the proxy invariants allow it).
+      if (d && d.configurable && 'value' in d && d.value && typeof d.value === 'object') {
+        const child = Array.isArray(t) ? (/^\d+$/.test(String(k)) ? `${kind}[]` : null) : (typeof k === 'string' ? `${kind}.${k}` : null);
+        if (child) return { ...d, value: wrap(d.value, child) };
+      }
+      return d;
+    },
   });
   JSON.parse = (text, ...rest) => { const v = orig(text, ...rest); const kind = tag.get(text); return kind && v && typeof v === 'object' ? wrap(v, kind) : v; };
   try { return buildSnapshot({ texts, repo: REPO, sha: SHA, origin: ORIGIN }); } finally { JSON.parse = orig; }
