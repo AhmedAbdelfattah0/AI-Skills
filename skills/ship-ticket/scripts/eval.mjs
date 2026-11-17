@@ -309,7 +309,15 @@ const median = (values) => {
  *   `runs` are `buildRun` results; `states` maps ticket → engine state.
  */
 export function evaluate({ runs, states = {}, records = [], repoRoot = null, now = Date.now() }) {
-  const joined = runs.map((r) => attachUsage(r, records));
+  // attachUsage copies the run's enumerable fields; the reader's lost-row list (not printed) must survive for the measurement.
+  const joined = runs.map((r) => Object.defineProperty(attachUsage(r, records), 'lost_rows', { value: r.lost_rows ?? [], enumerable: false, writable: true }));
+  // S-04: a log with measurement events prints only the labelled measurement block. The legacy per-run and cross-run figures carry
+  // no label and no completeness check (they would print a partial history as a total), so they stay for logs without such events.
+  if (hasMeasurementEvents(joined)) {
+    return { schema: EVAL_SCHEMA, runs: joined.map((r) => ({ ticket: r.ticket, run_id: r.run_id, outcome: r.outcome })),
+      measurement: measurementOf(joined, { records: dedupeUsage([...records, ...Object.values(states).flatMap(stateUsage)]), now }),
+      note: 'Read-only. This log carries S-04 measurement events, so only the labelled measurement block is printed; the unlabelled legacy per-run and cross-run figures are printed for logs without them.' };
+  }
   const metrics = joined.map((r) => {
     const m = evaluateRun(r, { state: states[r.ticket], repoRoot, records });
     return { ...m, suggestions: suggest(m, rawValues(r)) };
@@ -326,8 +334,6 @@ export function evaluate({ runs, states = {}, records = [], repoRoot = null, now
       peak_rss_mb_max: metrics.map((m) => m.peak_rss_mb).filter(known).reduce((a, b) => Math.max(a, b), -1) >= 0
         ? Math.max(...metrics.map((m) => m.peak_rss_mb).filter(known)) : UNKNOWN, suggestions_fired: fired,
       ...aggregateUsage(joined) },
-    // S-04: present only when the run log carries measurement events, so old runs print exactly as before.
-    ...(hasMeasurementEvents(joined) ? { measurement: measurementOf(joined, { records: dedupeUsage([...records, ...Object.values(states).flatMap(stateUsage)]), now }) } : {}),
     note: 'Read-only. unknown means the source did not carry the value. Suggestions are never applied.' };
 }
 
@@ -410,12 +416,18 @@ function report(options) {
   for (const ticket of tickets) {
     const log = join(dir, `${ticket}.jsonl`);
     const byRun = new Map();
-    for (const row of existsSync(log) ? readJsonl(log) : []) {
+    const malformed = { lines: 0 };
+    for (const row of existsSync(log) ? readJsonl(log, malformed) : []) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
-      if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
+      if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) { malformed.lines += 1; continue; }
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
     }
-    for (const [runId, rows] of byRun) runs.push(buildRun(ticket, runId, rows));
+    for (const [runId, rows] of byRun) {
+      const run = buildRun(ticket, runId, rows);
+      // A line the reader could not attribute may belong to any run of the ticket: each is marked as having lost rows (S-04 inputs).
+      if (malformed.lines) run.lost_rows.push(...Array.from({ length: malformed.lines }, () => 'malformed_line'));
+      runs.push(run);
+    }
     const statePath = join(dir, `${ticket}.state.json`);
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }
     // S-27-min: a run this install cannot interpret refuses the whole report (fail closed, like every engine command).

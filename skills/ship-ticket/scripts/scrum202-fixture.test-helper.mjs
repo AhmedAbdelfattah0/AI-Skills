@@ -76,6 +76,8 @@ export function scrum202Rows() {
     ...pair('run-B', 'activity', 'run_mode', z('17:27:42'), z('17:27:42'), { mode: 'supervised', supersedes_run_id: 'run-A', label: 'measured' }),
     ...pair('run-B', 'phase', 'SHIP', z('21:07:15'), z('21:29:00'), {}, 'pass'),
     // The orchestrator declares which kinds of event it recorded completely: absent kinds then mean "none occurred", not "not recorded".
+    // Each run declares for itself: run-A (the engine run superseded at 17:27) declares its own recording complete at its end.
+    ...pair('run-A', 'activity', 'measurement_complete', z('17:27:28'), z('17:27:28'), { scopes: 'review,repair,gate,owner,sleep,findings,usage' }),
     ...pair('run-B', 'activity', 'measurement_complete', z('21:29:00'), z('21:29:00'), { scopes: 'review,repair,gate,owner,sleep,findings,usage' }),
   ];
   for (const [run, at, s, cls, retries] of OWNER_WAITS) {

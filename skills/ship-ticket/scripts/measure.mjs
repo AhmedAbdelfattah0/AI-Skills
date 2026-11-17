@@ -168,13 +168,16 @@ const PT = (m, f) => `metrics.${m}.value.{ticket}.${f}`;
 const COUNT = (f) => `tickets.{ticket}.counts.${f}`;
 const W = (f) => `metrics.M5.value.{ticket}.*.${f}`;
 const M5_LABEL = 'metrics.M5.value.{ticket}.*.label';
-const M8_USAGE = { kinds: ['usage', 'review_round'], degrade_only: ['review_round'] };
+/** A first original round lane whose verdict or Major count is missing cannot say whether the ticket passed. */
+const ORIGINAL_KNOWN = (e) => e.name !== 'review_round' || e.metrics.round_kind !== 'original' || e.metrics.verdict === 'FAIL' || (e.metrics.verdict === 'PASS' && isCount(e.metrics.majors));
+/** A gate that held review without a recorded hold duration has an unknown hold. */
+const HOLD_KNOWN = (e) => e.name !== 'gate_run' || e.metrics.holds_review !== true || known(e.metrics.hold_ms);
 
 /**
  * INPUT_SCOPES: every number the measurement prints, with the scopes it needs, their polarity, the event kinds it reads, where it is
  * printed (`path`; `{ticket}` is a ticket id, `*` any key) and where its label is printed. `ceiling` is the best label the value can
- * have (M5 is always derived from substitutions; M9/M10 have no source yet). `degrade_only` kinds are read only to make a value
- * unavailable (M8 reads review lanes to know Codex was used), so they add no label and need no scope.
+ * have (M5 is always derived from substitutions; M9/M10 have no source yet). `requires` marks an input whose field the value needs
+ * but that does not carry it: such an input is unknown for that value, exactly like an unfinished interval.
  * `resolve` is the only function that turns a computed number into a printed value; it throws for a key that is not here.
  */
 export const INPUT_SCOPES = Object.freeze({
@@ -185,10 +188,10 @@ export const INPUT_SCOPES = Object.freeze({
   'counts.owner_waits': def(COUNT('owner_waits'), 'tickets.{ticket}.counts.label', ['owner_decision'], { owner: LOWER }),
   'counts.findings': def(COUNT('findings'), 'tickets.{ticket}.counts.label', ['finding'], { findings: LOWER }),
   // M1 is a share of a "first" round: an unrecorded earlier round can flip a pass, so no bound exists without the review scope.
-  'M1.value': def('metrics.M1.value', 'metrics.M1.label', ['review_round'], { review: NONE }),
-  'M1.numerator': def('metrics.M1.numerator', 'metrics.M1.label', ['review_round'], { review: NONE }),
-  'M1.by_status': def('metrics.M1.by_status.*', 'metrics.M1.label', ['review_round'], { review: NONE }),
-  'M1.incomplete_first_rounds': def('metrics.M1.incomplete_first_rounds', 'metrics.M1.label', ['review_round'], { review: NONE }),
+  'M1.value': def('metrics.M1.value', 'metrics.M1.label', ['review_round'], { review: NONE }, { requires: ORIGINAL_KNOWN }),
+  'M1.numerator': def('metrics.M1.numerator', 'metrics.M1.label', ['review_round'], { review: NONE }, { requires: ORIGINAL_KNOWN }),
+  'M1.by_status': def('metrics.M1.by_status.*', 'metrics.M1.label', ['review_round'], { review: NONE }, { requires: ORIGINAL_KNOWN }),
+  'M1.incomplete_first_rounds': def('metrics.M1.incomplete_first_rounds', 'metrics.M1.label', ['review_round'], { review: NONE }, { requires: ORIGINAL_KNOWN }),
   'M2.value': def('metrics.M2.value', 'metrics.M2.label', ['finding'], { findings: LOWER }),
   'M2.repeat_findings': def('metrics.M2.repeat_findings', 'metrics.M2.label', ['finding'], { findings: LOWER }),
   'M2.per_ticket': def('metrics.M2.per_ticket.{ticket}', 'metrics.M2.label', ['finding'], { findings: LOWER }),
@@ -210,23 +213,27 @@ export const INPUT_SCOPES = Object.freeze({
   'M5.awake_ms_excluding_wait': def(W('awake_ms_excluding_wait'), M5_LABEL, ['owner_decision', 'host_sleep', 'run'], { owner: NONE, sleep: NONE }, { ceiling: 'estimated' }),
   'M6.review_rounds_ms': def(PT('M6', 'review_rounds_ms'), 'metrics.M6.value.{ticket}.label', ['review_round'], { review: LOWER }),
   'M6.reconcile_ms': def(PT('M6', 'reconcile_ms'), 'metrics.M6.value.{ticket}.label', ['reconcile'], { review: LOWER }),
-  'M6.gate_hold_ms': def(PT('M6', 'gate_hold_ms'), 'metrics.M6.value.{ticket}.label', ['gate_run'], { gate: LOWER }),
-  'M6.critical_path_ms': def(PT('M6', 'critical_path_ms'), 'metrics.M6.value.{ticket}.label', ['review_round', 'reconcile', 'gate_run'], { review: LOWER, gate: LOWER }),
+  'M6.gate_hold_ms': def(PT('M6', 'gate_hold_ms'), 'metrics.M6.value.{ticket}.label', ['gate_run'], { gate: LOWER }, { requires: HOLD_KNOWN }),
+  'M6.critical_path_ms': def(PT('M6', 'critical_path_ms'), 'metrics.M6.value.{ticket}.label', ['review_round', 'reconcile', 'gate_run'], { review: LOWER, gate: LOWER }, { requires: HOLD_KNOWN }),
   'M7.t2_runs': def(PT('M7', 't2_runs'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
   'M7.t2_wall_ms': def(PT('M7', 't2_wall_ms'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
   'M7.t0_class_failures': def(PT('M7', 't0_class_failures'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
   'M7.failed_runs': def(PT('M7', 'failed_runs'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
   'M7.dirty_runs': def(PT('M7', 'dirty_runs'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
   'M7.redundant_gate_executions': def(PT('M7', 'redundant_gate_executions'), 'metrics.M7.label', ['gate_run'], { gate: LOWER }),
-  'M8.provider_usd': def('metrics.M8.value.*.usd', 'metrics.M8.value.*.label', M8_USAGE.kinds, { usage: LOWER }, { degrade_only: M8_USAGE.degrade_only }),
-  'M8.provider_measured_usd': def('metrics.M8.value.*.measured_usd', 'metrics.M8.value.*.label', M8_USAGE.kinds, { usage: LOWER }, { degrade_only: M8_USAGE.degrade_only }),
-  'M8.provider_estimated_usd': def('metrics.M8.value.*.estimated_usd', 'metrics.M8.value.*.label', M8_USAGE.kinds, { usage: LOWER }, { degrade_only: M8_USAGE.degrade_only }),
-  'M8.total_usd': def('metrics.M8.value.total_usd', 'metrics.M8.label', M8_USAGE.kinds, { usage: NONE }, { degrade_only: M8_USAGE.degrade_only }),
-  'M8.per_delivered_ticket_usd': def('metrics.M8.value.per_delivered_ticket_usd', 'metrics.M8.label', M8_USAGE.kinds, { usage: NONE }, { degrade_only: M8_USAGE.degrade_only }),
-  'M8.delivered_claude_usd': def('metrics.M8.value.delivered_claude_usd', 'metrics.M8.label', ['usage'], { usage: LOWER }),
-  'M8.failed_or_abandoned_claude_usd': def('metrics.M8.value.failed_or_abandoned_claude_usd', 'metrics.M8.label', ['usage'], { usage: LOWER }),
-  'M8.failed_or_abandoned_codex_usd': def('metrics.M8.value.failed_or_abandoned_codex_usd', 'metrics.M8.label', ['usage'], { usage: LOWER }),
-  'M8.censored_claude_usd': def('metrics.M8.value.censored_claude_usd', 'metrics.M8.label', ['usage'], { usage: LOWER }),
+  // Usage records can replace each other (eval keeps the fuller record of one execution), so no cost is monotone: no bound without `usage`.
+  'M8.provider_usd': def('metrics.M8.value.*.usd', 'metrics.M8.value.*.label', ['usage'], { usage: NONE }),
+  'M8.provider_measured_usd': def('metrics.M8.value.*.measured_usd', 'metrics.M8.value.*.label', ['usage'], { usage: NONE }),
+  'M8.provider_estimated_usd': def('metrics.M8.value.*.estimated_usd', 'metrics.M8.value.*.label', ['usage'], { usage: NONE }),
+  // Evidence that Codex ran: its review lanes plus its usage records. "not used" is printed only when this is an exact 0.
+  'M8.codex_use_evidence': def('metrics.M8.value.codex.use_evidence', 'metrics.M8.value.codex.label', ['review_round', 'usage'], { review: LOWER, usage: LOWER }),
+  // The totals count Codex as 0 only through a resolved `codex_use_evidence` of exactly 0, which already needs `review`.
+  'M8.total_usd': def('metrics.M8.value.total_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
+  'M8.per_delivered_ticket_usd': def('metrics.M8.value.per_delivered_ticket_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
+  'M8.delivered_claude_usd': def('metrics.M8.value.delivered_claude_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
+  'M8.failed_or_abandoned_claude_usd': def('metrics.M8.value.failed_or_abandoned_claude_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
+  'M8.failed_or_abandoned_codex_usd': def('metrics.M8.value.failed_or_abandoned_codex_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
+  'M8.censored_claude_usd': def('metrics.M8.value.censored_claude_usd', 'metrics.M8.label', ['usage'], { usage: NONE }),
   'M9.value': def('metrics.M9.value', 'metrics.M9.label', ['run'], {}, { ceiling: 'unavailable' }),
   'M9.deferred_findings': def('metrics.M9.deferred_findings.*', 'metrics.M9.deferred_findings_label', ['finding'], { findings: LOWER }),
   'M10.value': def('metrics.M10.value', 'metrics.M10.label', [], {}, { ceiling: 'unavailable' }),
@@ -246,6 +253,7 @@ export const BOOKKEEPING = Object.freeze({
   'metrics.M8.value.*.records': 'usage records read for the provider',
   'metrics.M8.value.*.unknown_records': 'usage records without a cost',
   'metrics.M8.value.delivered_tickets': 'delivered tickets (the M8 divisor)',
+  'report.skipped_usage_lines': 'eval report root: usage file lines that were not JSON (the usage scope is not declared by them)',
 });
 
 function spec(key) {
@@ -254,29 +262,37 @@ function spec(key) {
   return s;
 }
 
-/** The inputs `key` may read, from the tickets of `pop`; reading a kind the table does not register throws. */
-function read(key, pop, kind) {
+/** Every input of `key`'s kinds in `pop`, known or not; reading a kind the table does not register throws. */
+function inputsOf(key, pop, kind) {
   const s = spec(key);
   const kinds = kind === undefined ? s.kinds : [kind];
   for (const k of kinds) if (!s.kinds.includes(k)) throw new Error(`measure: ${key} reads ${k}, which INPUT_SCOPES does not register`);
   return pop.flatMap((t) => kinds.flatMap((k) => t.inputs[k] ?? []));
 }
+/** The known inputs a metric computes from. Unknown inputs (unfinished, malformed, conflicting) never reach a computation; `resolve` sees them. */
+const read = (key, pop, kind) => inputsOf(key, pop, kind).filter((e) => e.known);
 
 /**
- * The one completeness decision. `raw` is the number computed from `used`, the inputs actually read (default: every registered kind of
- * the population). Every scope declared by every ticket of `pop` -> the number, labelled the worst of its inputs and the ceiling.
- * A missing scope -> `{at_least}` labelled at best `estimated` when every missing scope is `lower` and something was seen (raw > 0),
- * else `unavailable`. An uncomputable raw is `unavailable`.
+ * The one completeness decision. `raw` is the number computed from `used` (default: every known input of the key's kinds in `pop`;
+ * a caller may narrow it, never widen it). An input the value cannot trust makes it `unavailable`, whatever was declared: an unknown
+ * input of a registered kind (unfinished interval, malformed or conflicting event) or one missing a field the key `requires`. Then:
+ * every scope declared by every ticket of `pop` -> the number, labelled the worst of its inputs and the ceiling; a missing scope ->
+ * `{at_least}` labelled at best `estimated` when every missing scope is `lower` and something was seen (raw > 0), else `unavailable`.
  */
-export function resolve(key, pop, raw, used = read(key, pop)) {
+export function resolve(key, pop, raw, used) {
   const s = spec(key);
-  for (const e of used) if (!s.kinds.includes(e.name)) throw new Error(`measure: ${key} used ${e.name}, which INPUT_SCOPES does not register`);
-  if (!known(raw) || !pop.length) return { value: UNAVAILABLE, label: UNAVAILABLE };
-  const labels = [s.ceiling, ...used.filter((e) => !(s.degrade_only ?? []).includes(e.name)).map((e) => e.label)];
+  const all = inputsOf(key, pop);
+  const readable = new Set(all.filter((e) => e.known));
+  const inputs = used ?? [...readable];
+  for (const e of inputs) if (!readable.has(e)) throw new Error(`measure: ${key} used an input that is not one of its known registered inputs (${e?.name})`);
+  const NA = { value: UNAVAILABLE, label: UNAVAILABLE };
+  if (!known(raw) || !pop.length) return NA;
+  if (all.some((e) => !e.known || (s.requires && !s.requires(e)))) return NA;
+  const labels = [s.ceiling, ...inputs.map((e) => e.label)];
   const missing = Object.keys(s.scopes).filter((scope) => !pop.every((t) => t.scopes.has(scope)));
   if (!missing.length) return { value: raw, label: worst(labels) };
   if (raw > 0 && missing.every((scope) => s.scopes[scope] === LOWER)) return { value: { at_least: raw }, label: worst([...labels, 'estimated']) };
-  return { value: UNAVAILABLE, label: UNAVAILABLE };
+  return NA;
 }
 
 /** A printer for one labelled object: each value goes through `resolve`; the object's label is the worst label of the values it printed. */
@@ -291,52 +307,100 @@ function printer() {
   return put;
 }
 
-// ---- events -------------------------------------------------------------------------------------
+// ---- inputs: every transform from a run-log row to an input preserves or degrades, never upgrades ----
 
-/** The measurement events of one run, with carrier times preferred and a label each; malformed events are counted, not read. */
-function eventsOf(run, bad) {
+const labelOf = (metrics) => (metrics?.label === undefined ? 'measured' : LABELS.includes(metrics.label) ? metrics.label : UNAVAILABLE);
+/** An input whose value cannot be read: it keeps its kind, so every value reading that kind is poisoned. */
+const unknownInput = (name, run_id, start, why) => ({ name, run_id, start, end: NaN, metrics: {}, label: UNAVAILABLE, known: false, why });
+
+/**
+ * The measurement inputs of one run. A valid closed event is a known input with its own label (carrier times preferred). An event
+ * that fails validation, is logged under the wrong kind, or is still open is an UNKNOWN input of its kind (never dropped, never 0).
+ * `reconcile` (the review_reconcile activity) and `run` (every workflow/phase/activity interval) follow the same rule. A run whose
+ * rows the reader lost (`lost_rows`: a dropped row that is not a byte-identical duplicate, or a malformed log line) has an unknown
+ * `run` input and declares nothing.
+ */
+function inputsOfRun(run, bad) {
   const out = [];
+  const time = (i, k) => Date.parse(i.carrier_timing ? i.carrier_timing[k] : i[k]);
   for (const i of run.intervals) {
-    if (EVENT_KIND[i.name] !== i.kind || !POINT_NAMES.has(i.name)) continue;
-    try { validateEvent(i.name, i.metrics, i.detail); } catch { bad.count += 1; continue; }
-    const c = i.carrier_timing;
-    const s = Date.parse(c ? c.started_at : i.started_at), e = Date.parse(c ? c.ended_at : i.ended_at);
-    out.push({ name: i.name, run_id: run.run_id, event_id: i.event_id, start: s, end: e, metrics: i.metrics, detail: i.detail, outcome: i.outcome,
-      label: LABELS.includes(i.metrics.label) ? i.metrics.label : 'measured' });
+    if (EVENT_KIND[i.name] !== undefined) {
+      let ok = EVENT_KIND[i.name] === i.kind;
+      if (ok) { try { validateEvent(i.name, i.metrics, i.detail); } catch { ok = false; } }
+      if (!ok) { bad.count += 1; out.push(unknownInput(i.name, run.run_id, Date.parse(i.started_at), 'invalid')); continue; }
+      out.push({ name: i.name, run_id: run.run_id, event_id: i.event_id, start: time(i, 'started_at'), end: time(i, 'ended_at'), metrics: i.metrics, detail: i.detail,
+        outcome: i.outcome, label: labelOf(i.metrics), known: true });
+    }
+    if (i.kind === 'activity' && REVIEW_ROLE_OF[i.name] === 'reconcile') {
+      out.push({ name: 'reconcile', run_id: run.run_id, start: time(i, 'started_at'), end: time(i, 'ended_at'), metrics: i.metrics, label: labelOf(i.metrics), known: true });
+    }
+    out.push({ name: 'run', kind: i.kind, interval: i.name, run_id: run.run_id, start: Date.parse(i.started_at), end: Date.parse(i.ended_at), metrics: i.metrics,
+      label: labelOf(i.metrics), known: true });
   }
+  for (const i of run.open_intervals ?? []) {
+    const start = Date.parse(i.started_at);
+    if (EVENT_KIND[i.name] !== undefined) out.push(unknownInput(i.name, run.run_id, start, 'open'));
+    if (i.kind === 'activity' && REVIEW_ROLE_OF[i.name] === 'reconcile') out.push(unknownInput('reconcile', run.run_id, start, 'open'));
+    out.push(unknownInput('run', run.run_id, start, 'open'));
+  }
+  if ((run.lost_rows ?? []).length) out.push(unknownInput('run', run.run_id, NaN, 'rows lost by the reader'));
   return out;
 }
 
 /**
  * One logical event, whatever stream it came from: a re-emitted record under a new event_id is the same event. The run is part of
  * the identity (a recovery run numbers from 1 again), and so is the candidate/packet of a lane. A repeat finding without a round is
- * told apart by its timestamps and an emitter-supplied `occurrence`; an owner decision by its times (two sessions may both number from 1).
+ * told apart by its timestamps and an emitter-supplied `occurrence`; an owner decision by its times and class, never by `n` (an
+ * import renumbers `n` per window, and two sessions may both number from 1).
  */
 function logicalKey(e) {
   const m = e.metrics, r = e.run_id;
   switch (e.name) {
     case 'review_round': return `${r}|${m.n}|${m.lane}|${m.candidate_sha ?? ''}|${m.packet_sha256 ?? ''}`;
     case 'repair_batch': case 'confirmation': case 'gate_run': return `${r}|${m.n}`;
-    case 'owner_decision': return `${r}|${m.n}|${e.start}|${e.end}`;
+    case 'owner_decision': return `${r}|${e.start}|${e.end}|${m.decision_class ?? ''}`;
     case 'finding': return `${r}|${m.fingerprint}|${m.repeat}|${m.round ?? ''}|${m.repeat && m.round === undefined ? `${m.occurrence ?? ''}|${e.start}|${e.end}` : ''}`;
     case 'run_mode': return `${r}|${m.mode}`;
     case 'measurement_complete': return `${r}|${m.scopes}`;
     default: return `${r}|${e.start}|${e.end}`;
   }
 }
-function dedupe(events) {
-  const seen = new Set();
-  return [...events].sort((a, b) => a.start - b.start || a.end - b.end).filter((e) => {
+/** What two copies of one logical event must agree on: everything but the event id, the label (merged as the worst) and an owner decision's import-window `n`. */
+const content = (e) => JSON.stringify([e.start, e.end, e.outcome ?? null, e.detail ?? null,
+  Object.entries(e.metrics).filter(([k]) => k !== 'label' && !(e.name === 'owner_decision' && k === 'n')).sort(([a], [b]) => (a < b ? -1 : 1))]);
+/** Copies of one logical event merge into one input with the worst label; copies that disagree merge into an unknown input. */
+function dedupe(inputs) {
+  const groups = new Map(), out = [];
+  for (const e of inputs) {
+    if (!e.known || !POINT_NAMES.has(e.name)) { out.push(e); continue; }
     const key = `${e.name}|${logicalKey(e)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const g = groups.get(key);
+    if (g) g.push(e); else { const list = [e]; groups.set(key, list); out.push(list); }
+  }
+  return out.map((x) => {
+    if (!Array.isArray(x)) return x;
+    if (x.length === 1) return x[0];
+    const agree = x.every((e) => content(e) === content(x[0]));
+    return agree ? { ...x[0], label: worst(x.map((e) => e.label)) } : unknownInput(x[0].name, x[0].run_id, x[0].start, 'conflicting copies');
+  }).sort((a, b) => (a.start || 0) - (b.start || 0) || (a.end || 0) - (b.end || 0));
 }
 
 const STATUS = { complete: 'delivered', fail: 'failed', abandoned: 'abandoned', open: 'censored' };
 const costOf = (r) => (known(r.reported_cost_usd) && r.cost_basis === 'list' ? { usd: r.reported_cost_usd, label: 'measured' }
   : known(r.estimated_cost_usd) ? { usd: r.estimated_cost_usd, label: 'estimated' } : null);
+const S04 = (e) => POINT_NAMES.has(e.name) || e.name === 'reconcile';
+
+/**
+ * The scopes a run declares for ITSELF: a known, `measured` `measurement_complete` of that run, emitted after every other measurement
+ * input of the run started. A ticket's scope is complete only when every run of the ticket declares it, so a later run cannot vouch
+ * for a predecessor it did not record, and a run whose rows were lost declares nothing.
+ */
+function declaredScopes(run, inputs) {
+  if ((run.lost_rows ?? []).length) return new Set();
+  const mine = inputs.filter((e) => e.run_id === run.run_id);
+  const last = Math.max(...mine.filter((e) => S04(e) && e.name !== 'measurement_complete').map((e) => e.start).filter(Number.isFinite), -Infinity);
+  return new Set(mine.filter((e) => e.name === 'measurement_complete' && e.known && e.label === 'measured' && e.start >= last).flatMap((e) => e.metrics.scopes.split(',')));
+}
 
 /** Tickets of `runs`: status, head run (the one no run supersedes), declared scopes, and the inputs by kind that only `read` hands out. */
 function assemble(runs, bad, records) {
@@ -344,22 +408,18 @@ function assemble(runs, bad, records) {
   for (const run of runs) byTicket.set(run.ticket, [...(byTicket.get(run.ticket) ?? []), run]);
   const tickets = [];
   for (const [id, list] of byTicket) {
-    const events = dedupe(list.flatMap((r) => eventsOf(r, bad)));
-    const superseded = new Set(events.filter((e) => e.name === 'run_mode' && e.metrics.supersedes_run_id).map((e) => e.metrics.supersedes_run_id));
+    const all = dedupe(list.flatMap((r) => inputsOfRun(r, bad)));
+    const superseded = new Set(all.filter((e) => e.known && e.name === 'run_mode' && e.metrics.supersedes_run_id).map((e) => e.metrics.supersedes_run_id));
     const first = (r) => Math.min(...r.intervals.map((i) => Date.parse(i.started_at)).concat(r.open_intervals.map((i) => Date.parse(i.started_at))), Infinity);
     const heads = list.filter((r) => !superseded.has(r.run_id)).sort((a, b) => first(a) - first(b));
     const head = heads.at(-1) ?? list.at(-1);
     const inputs = {};
-    for (const e of events) (inputs[e.name] ??= []).push(e);
-    const intervals = list.flatMap((r) => r.intervals.map((i) => ({ i, run_id: r.run_id })));
-    inputs.run = intervals.map(({ i, run_id }) => ({ name: 'run', kind: i.kind, interval: i.name, run_id, start: Date.parse(i.started_at), end: Date.parse(i.ended_at), label: 'measured' }));
-    inputs.reconcile = intervals.filter(({ i }) => i.kind === 'activity' && REVIEW_ROLE_OF[i.name] === 'reconcile').map(({ i, run_id }) => ({ name: 'reconcile', run_id,
-      start: Date.parse(i.carrier_timing?.started_at ?? i.started_at), end: Date.parse(i.carrier_timing?.ended_at ?? i.ended_at), label: 'measured' }));
+    for (const e of all) (inputs[e.name] ??= []).push(e);
     const runIds = new Set(list.map((r) => r.run_id));
-    inputs.usage = records.filter((r) => r && runIds.has(r.run_id)).map((record) => ({ name: 'usage', run_id: record.run_id, record, label: costOf(record)?.label ?? UNAVAILABLE }));
-    const t = { id, instrumented: events.length > 0, status: STATUS[head.outcome] ?? 'unknown', head_run_id: head.run_id, runs: list.map((r) => r.run_id), inputs,
-      // Only the head run's declaration counts: it covers the whole ticket (predecessor runs included); a superseded run cannot vouch for its successor.
-      scopes: new Set((inputs.measurement_complete ?? []).filter((e) => e.run_id === head.run_id).flatMap((e) => e.metrics.scopes.split(','))) };
+    inputs.usage = records.filter((r) => r && runIds.has(r.run_id)).map((record) => ({ name: 'usage', run_id: record.run_id, record, label: costOf(record)?.label ?? UNAVAILABLE, known: true }));
+    const perRun = list.map((r) => declaredScopes(r, all));
+    const t = { id, instrumented: all.some((e) => POINT_NAMES.has(e.name)), status: STATUS[head.outcome] ?? 'unknown', head_run_id: head.run_id, runs: list.map((r) => r.run_id), inputs,
+      scopes: new Set(SCOPES.filter((scope) => perRun.every((set) => set.has(scope)))) };
     const put = printer();
     t.counts = { review_rounds: put('counts.review_rounds', [t], nDistinct(read('counts.review_rounds', [t]))),
       repair_batches: put('counts.repair_batches', [t], nDistinct(read('counts.repair_batches', [t]))),
@@ -545,14 +605,18 @@ function m8(started) {
   const usage = read('M8.total_usd', started, 'usage');
   const ofProvider = (list, p) => list.filter((e) => e.record.provider === p);
   const declared = started.length > 0 && started.every((t) => t.scopes.has('usage'));
-  const codexLane = read('M8.total_usd', started, 'review_round').some((e) => /^codex/i.test(String(e.metrics.lane)));
-  const notUsed = (p) => p === 'codex' && !ofProvider(usage, p).length && !codexLane;
+  // "Codex not used" is a claim of absence: it needs both the review lanes and the usage records recorded in full (an exact 0).
+  const codexLanes = read('M8.codex_use_evidence', started, 'review_round').filter((e) => /^codex/i.test(String(e.metrics.lane)));
+  const codexRecords = ofProvider(read('M8.codex_use_evidence', started, 'usage'), 'codex');
+  const evidence = resolve('M8.codex_use_evidence', started, codexLanes.length + codexRecords.length, [...codexLanes, ...codexRecords]);
+  const notUsed = (p) => p === 'codex' && evidence.value === 0;
   const provider = (p) => {
-    if (notUsed(p)) return declared ? { usd: 'not_used', label: 'measured', records: 0 } : { usd: UNAVAILABLE, label: UNAVAILABLE, records: 0 };
+    const extra = p === 'codex' ? { use_evidence: evidence.value } : {};
+    if (notUsed(p)) return { usd: 'not_used', ...extra, label: evidence.label, records: 0 };
     const used = ofProvider(usage, p), raw = priceOf(used), own = printer();
     const out = { usd: own('M8.provider_usd', started, raw.usd, used), measured_usd: own('M8.provider_measured_usd', started, raw.measured, used),
-      estimated_usd: own('M8.provider_estimated_usd', started, raw.estimated, used) };
-    return { ...out, label: own.label(), records: used.length, ...(raw.unknown ? { unknown_records: raw.unknown } : {}) };
+      estimated_usd: own('M8.provider_estimated_usd', started, raw.estimated, used), ...extra };
+    return { ...out, label: own.label(p === 'codex' && evidence.value !== UNAVAILABLE ? [evidence.label] : []), records: used.length, ...(raw.unknown ? { unknown_records: raw.unknown } : {}) };
   };
   const claude = provider('claude'), codex = provider('codex');
   const providers = [['claude', claude], ['codex', codex]];
@@ -607,7 +671,7 @@ export function measurementOf(runs, { records = [], now = Date.now() } = {}) {
     uninstrumented: tickets.length - started.length }, run_modes: {}, invalid_events: bad.count };
   for (const t of started) {
     populations.tickets[t.status] += 1;
-    for (const e of t.inputs.run_mode ?? []) populations.run_modes[e.metrics.mode] = (populations.run_modes[e.metrics.mode] ?? 0) + 1;
+    for (const e of (t.inputs.run_mode ?? []).filter((x) => x.known)) populations.run_modes[e.metrics.mode] = (populations.run_modes[e.metrics.mode] ?? 0) + 1;
   }
   const [M2, M3] = m2m3(started);
   return { schema: MEASURE_SCHEMA, labels: { measured: 'read from a recorded event or provider counter', estimated: 'derived or priced; never a recorded fact', unavailable: 'the source did not carry it; never 0' },
@@ -618,7 +682,7 @@ export function measurementOf(runs, { records = [], now = Date.now() } = {}) {
 }
 
 /** True when any run carries an S-04 event (decides whether eval adds a `measurement` block). */
-export const hasMeasurementEvents = (runs) => runs.some((r) => r.intervals.some((i) => EVENT_KIND[i.name] === i.kind));
+export const hasMeasurementEvents = (runs) => runs.some((r) => [...r.intervals, ...(r.open_intervals ?? [])].some((i) => EVENT_KIND[i.name] !== undefined));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);

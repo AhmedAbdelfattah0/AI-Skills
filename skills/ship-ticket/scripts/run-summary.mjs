@@ -94,6 +94,9 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
   const seen = new Set();
   const intervals = [];
   const warnings = [...fileWarnings];
+  // Rows the pairing dropped that are not byte-identical to a row it kept: information lost, not a streamed duplicate (read by measure.mjs).
+  const kept = new Set(), lost = [];
+  const drop = (row) => { if (!kept.has(JSON.stringify(row))) lost.push(row.event_id); };
   const warn = (code, eventId) => {
     if (!warnings.some((w) => w.code === code && w.event_id === eventId && w.run_id === runId)) {
       warnings.push({ code, event_id: eventId, run_id: runId });
@@ -101,16 +104,19 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
   };
   for (const row of rows) {
     if (row.event === 'start') {
-      if (seen.has(row.event_id)) { warn('duplicate_start', row.event_id); continue; }
+      if (seen.has(row.event_id)) { warn('duplicate_start', row.event_id); drop(row); continue; }
       seen.add(row.event_id);
+      kept.add(JSON.stringify(row));
       starts.set(row.event_id, row);
       continue;
     }
     const start = starts.get(row.event_id);
     if (!start || start.kind !== row.kind || start.name !== row.name || Date.parse(row.timestamp) < Date.parse(start.timestamp)) {
       warn('invalid_pair', row.event_id);
+      drop(row);
       continue;
     }
+    kept.add(JSON.stringify(row));
     const duration = Date.parse(row.timestamp) - Date.parse(start.timestamp);
     if (row.duration_ms !== duration) warn('duration_mismatch', row.event_id);
     const interval = { event_id: row.event_id, kind: row.kind, name: row.name,
@@ -165,7 +171,7 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
   else if (open.some((i) => i.kind === 'wait')) state = 'waiting';
   else if (open.some((i) => i.name === 'native_plan_mode')) state = 'planning_or_approval';
   else if (open.length) state = 'active_or_unexpected_stop';
-  return {
+  const run = {
     ticket, run_id: runId,
     outcome: workflows.at(-1)?.outcome ?? (open.length ? 'open' : 'unknown'),
     open_state: state,
@@ -183,6 +189,9 @@ export function buildRun(ticket, runId, rows, fileWarnings = []) {
     review_execution_coverage: executionIds.length ? 'recorded_ids_only' : 'legacy_unknown',
     phase_coverage: phaseCoverage, parallel_groups: parallelGroups(intervals), open_intervals: open, intervals,
   };
+  // Not part of the printed summary (old readers and reports are unchanged); a reader may mark more (eval: malformed lines).
+  Object.defineProperty(run, 'lost_rows', { value: lost, enumerable: false, writable: true });
+  return run;
 }
 
 export function aggregate(runs) {

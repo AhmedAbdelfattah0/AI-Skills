@@ -321,7 +321,8 @@ const asTicket = (rows, ticket = TICKET) => rows.map((r) => ({ ...r, ticket }));
 const ev = (run, name, at, to, metrics, outcome = 'complete', detail) => asTicket(pair(run, name === 'owner_decision' || name === 'host_sleep' ? 'wait' : 'activity', name, at, to, metrics, outcome, detail));
 const mode = (run, m, extra = {}) => ev(run, 'run_mode', D(10), D(10), { mode: m, ...extra });
 const wf = (run, out = 'complete') => asTicket(pair(run, 'workflow', 'ship-ticket', D(10), D(20), {}, out));
-const done = (scopes) => ev('r2', 'measurement_complete', D(20), D(20), { scopes });
+// every run declares for itself (round 4): the declaration goes on r1 and r2
+const done = (scopes) => [...ev('r1', 'measurement_complete', D(20), D(20), { scopes }), ...ev('r2', 'measurement_complete', D(20), D(20), { scopes })];
 
 test('FIX1: events of different runs never collapse; a recovery run numbering from 1 adds, repeats without a round all count', () => {
   const gate = (run, n, h) => ev(run, 'gate_run', D(h), D(h, 10), { n, head_sha: `h${n}`, clean: true, t0_class: false }, 'pass');
@@ -382,18 +383,17 @@ test('FIX3d: M8 never reports Claude as not used or a numeric total for an undec
   assert.equal(measure(rows).metrics.M8.value.claude.usd, 'unavailable');
   const partial = measure(rows, [rec('r1', 4), rec('r2', 6)]).metrics.M8.value;
   assert.match(String(partial.total_usd), /^unavailable: usage population not declared complete/);
-  // undeclared usage: what was seen is a lower bound (round 3)
-  assert.deepEqual(partial.delivered_claude_usd, { at_least: 6 });
-  assert.deepEqual(partial.failed_or_abandoned_claude_usd, { at_least: 4 });
-  assert.deepEqual(partial.claude.measured_usd, { at_least: 10 });
-  assert.equal(partial.claude.label, 'estimated');
-  const full = measure([...rows, ...done('usage')], [rec('r1', 4), rec('r2', 6)]).metrics.M8.value;
+  // undeclared usage: costs are not monotone (a record can replace another, round 4), so no bound is printed
+  assert.deepEqual([partial.delivered_claude_usd, partial.failed_or_abandoned_claude_usd, partial.claude.measured_usd], ['unavailable', 'unavailable', 'unavailable']);
+  // "Codex not used" needs the review lanes recorded too (round 4)
+  const full = measure([...rows, ...done('usage,review')], [rec('r1', 4), rec('r2', 6)]).metrics.M8.value;
   assert.equal(full.total_usd, 10);
+  assert.deepEqual([full.delivered_claude_usd, full.failed_or_abandoned_claude_usd], [6, 4]);
   assert.equal(full.codex.usd, 'not_used');
   // eval joins the engine state's own usage records
-  const runs = runsOf(rows);
+  const runs = runsOf([...rows, ...done('usage,review')]);
   const out = evaluate({ runs, states: { [TICKET]: { run_id: 'r2', usage: [rec('r2', 6)] } }, records: [] });
-  assert.deepEqual(out.measurement.metrics.M8.value.claude.usd, { at_least: 6 }); // read, and a lower bound while usage is undeclared
+  assert.equal(out.measurement.metrics.M8.value.claude.usd, 6);
 });
 
 test('FIX4: M3 counts every severity; one unclassified finding keeps it partial', () => {
@@ -591,10 +591,10 @@ function fullHistory() {
   const at = (ticket, run, kind, name, from, to, metrics = {}, outcome = 'complete', detail) => asTicket(pair(run, kind, name, from, to, metrics, outcome, detail), ticket);
   const act = (ticket, run, name, from, to, metrics, outcome, detail) => at(ticket, run, 'activity', name, from, to, metrics, outcome, detail);
   const round = (ticket, run, n, kind, lane, from, to, verdict = 'PASS', majors = 0) => act(ticket, run, 'review_round', from, to, { n, round_kind: kind, lane, verdict, majors, minors: 0 });
-  const decl = (ticket, run) => act(ticket, run, 'measurement_complete', D(20), D(20), { scopes: ALL_SCOPES });
+  const decl = (ticket, run, at = D(20)) => act(ticket, run, 'measurement_complete', at, at, { scopes: ALL_SCOPES });
   const finding = (from, metrics) => act('T-A', 'a1', 'finding', from, from, { severity: 'Major', repeat: false, builder_catchable: true, ...metrics });
   const rows = [
-    ...at('T-A', 'a0', 'workflow', 'ship-ticket', D(9), D(10), {}, 'abandoned'), ...act('T-A', 'a0', 'run_mode', D(9), D(9), { mode: 'engine' }),
+    ...at('T-A', 'a0', 'workflow', 'ship-ticket', D(9), D(10), {}, 'abandoned'), ...act('T-A', 'a0', 'run_mode', D(9), D(9), { mode: 'engine' }), ...decl('T-A', 'a0', D(10)),
     ...at('T-A', 'a1', 'workflow', 'ship-ticket', D(10), D(20), {}, 'complete'), ...act('T-A', 'a1', 'run_mode', D(10), D(10), { mode: 'supervised', supersedes_run_id: 'a0' }),
     ...at('T-A', 'a1', 'phase', 'PLAN', D(10), D(11)), ...at('T-A', 'a1', 'phase', 'SHIP', D(18), D(20)), ...decl('T-A', 'a1'),
     ...round('T-A', 'a1', 1, 'original', 'opus', D(11), D(12)), ...round('T-A', 'a1', 1, 'original', 'codex', D(11, 5), D(12, 10)),
@@ -729,4 +729,268 @@ test('R3: the event command accepts occurrence as a positive integer or a short 
   assert.equal(finding('f4', '0').status, 1);
   const rows = readFileSync(f.log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.event === 'start');
   assert.deepEqual(rows.map((r) => r.metrics.occurrence), [2, 'session-b.3']);
+});
+
+// ======================= repair batch 4 (round-4 review of f795093): inputs carry their own truth =======================
+const openStart = (run, kind, name, at, metrics, ticket = TICKET) => asTicket([pair(run, kind, name, at, at, metrics)[0]], ticket);
+const evalOf = (rows, records = []) => evaluate({ runs: runsOf(rows), records, now: NOW });
+
+test('R4-C1: a reconciliation keeps its own label (estimated stays estimated)', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'review,gate'),
+    ...ev('r1', 'review_reconcile', D(12), D(12, 10), { candidate_id: 'c', review_execution: 'review-1', label: 'estimated' })];
+  const six = measure(rows).metrics.M6.value[TICKET];
+  assert.equal(six.reconcile_ms, 600000);
+  assert.equal(six.label, 'estimated');
+});
+
+test('R4-C2: an unfinished (open) round, gate or wait is unknown, never a measured 0', () => {
+  const rows = [asTicket(pair('r1', 'workflow', 'ship-ticket', D(10), D(20)))[0], ...mode('r1', 'engine'), ...declare('r1', 'review,repair,gate,owner,sleep,findings'),
+    ...openStart('r1', 'activity', 'review_round', D(11), { n: 1, round_kind: 'original', lane: 'opus', verdict: 'PASS', majors: 0 }),
+    ...openStart('r1', 'activity', 'gate_run', D(12), { n: 1, head_sha: 'h', clean: true }),
+    ...openStart('r1', 'wait', 'owner_decision', D(13), { n: 1 })];
+  const m = measure(rows);
+  const c = m.tickets[TICKET].counts;
+  assert.deepEqual([c.review_rounds, c.gate_runs, c.owner_waits], ['unavailable', 'unavailable', 'unavailable']);
+  assert.equal(m.metrics.M4.value[TICKET].rounds, 'unavailable');
+  assert.equal(m.metrics.M4.tickets_within_target, 'unavailable');
+  assert.deepEqual([m.metrics.M6.value[TICKET].review_rounds_ms, m.metrics.M6.value[TICKET].critical_path_ms], ['unavailable', 'unavailable']);
+  assert.deepEqual([m.metrics.M7.value[TICKET].t2_runs, m.metrics.M7.value[TICKET].t2_wall_ms], ['unavailable', 'unavailable']);
+});
+
+test('R4-C3: a gate hold without hold_ms is unknown, not a measured 0', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'review,gate'),
+    ...ev('r1', 'gate_run', D(13), D(13, 10), { n: 1, head_sha: 'h', clean: true, holds_review: true }, 'pass')];
+  const six = measure(rows).metrics.M6.value[TICKET];
+  assert.deepEqual([six.gate_hold_ms, six.critical_path_ms], ['unavailable', 'unavailable']);
+});
+
+test('R4-C4: an unavailable verdict or a PASS without majors makes M1 unavailable, not a measured 0', () => {
+  const lanes = (extra) => ['opus', 'codex'].flatMap((lane) => ev('r1', 'review_round', D(11), D(12), { n: 1, round_kind: 'original', lane, ...extra }));
+  for (const extra of [{ verdict: 'unavailable' }, { verdict: 'PASS' }]) {
+    const m1 = measure([...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'review'), ...lanes(extra)]).metrics.M1;
+    assert.deepEqual([m1.value, m1.numerator, m1.label], ['unavailable', 'unavailable', 'unavailable'], JSON.stringify(extra));
+  }
+});
+
+test('R4-C5: provider costs are not monotone (a usage record can replace another), so undeclared usage is unavailable', () => {
+  const rows = [...wf('r1'), ...mode('r1', 'engine')];
+  const est = { provider: 'claude', run_id: 'r1', role: 'builder', source_execution_id: 'x', input_tokens: 1, estimated_cost_usd: 10 };
+  const fuller = { provider: 'claude', run_id: 'r1', role: 'builder', source_execution_id: 'x', input_tokens: 2, reported_cost_usd: 5, cost_basis: 'list' };
+  // the counterexample: adding a record lowers the provider cost from 10 to 5
+  const one = evaluate({ runs: runsOf(rows), states: { [TICKET]: { run_id: 'r1', usage: [est] } }, now: NOW }).measurement.metrics.M8.value.claude;
+  const two = evaluate({ runs: runsOf(rows), states: { [TICKET]: { run_id: 'r1', usage: [est, fuller] } }, now: NOW }).measurement.metrics.M8.value.claude;
+  for (const c of [one, two]) assert.deepEqual([c.usd, c.measured_usd, c.estimated_usd], ['unavailable', 'unavailable', 'unavailable']);
+  assert.deepEqual(measure(rows, [est]).metrics.M8.value.delivered_claude_usd, 'unavailable');
+});
+
+test('R4-C6: an instrumented eval report prints no legacy numbers outside the measurement registry', () => {
+  const rows = [...asTicket(pair('r1', 'phase', 'REVIEW', D(11), D(12))), ...wf('r1'), ...mode('r1', 'engine')];
+  const out = evalOf(rows, [{ provider: 'claude', run_id: 'r1', role: 'builder', source_execution_id: 'b', input_tokens: 1, reported_cost_usd: 3, cost_basis: 'list' }]);
+  assert.ok(out.measurement);
+  assert.deepEqual(Object.keys(out.runs[0]).sort(), ['outcome', 'run_id', 'ticket']);
+  assert.equal(out.cross_run, undefined);
+});
+
+test('R4-C7: re-importing owner waits with an overlapping --since window counts each decision once', () => {
+  const at = (m) => `2026-11-16T10:${String(m).padStart(2, '0')}:00.000Z`;
+  const L = [{ type: 'assistant', timestamp: at(1), message: { id: 'a1', stop_reason: 'end_turn', content: [] } }, { type: 'user', uuid: 'u1', timestamp: at(3), message: { role: 'user', content: 'yes' } },
+    { type: 'assistant', timestamp: at(5), message: { id: 'a2', stop_reason: 'end_turn', content: [] } }, { type: 'user', uuid: 'u2', timestamp: at(9), message: { role: 'user', content: 'go' } }];
+  const text = L.map((l) => JSON.stringify(l)).join('\n');
+  const first = ownerDecisionsFromSession(text), second = ownerDecisionsFromSession(text, { since: at(4) });
+  assert.deepEqual([first.length, second.length, second[0].n], [2, 1, 1]);
+  const asEvents = (list, tag) => list.flatMap((w) => ev('r1', 'owner_decision', w.started_at, w.ended_at, { n: w.n, decision_class: w.decision_class, label: w.label }).map((r) => ({ ...r, event_id: `${tag}-${w.n}` })));
+  const m = measure([...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'owner'), ...asEvents(first, 'a'), ...asEvents(second, 'b')]);
+  assert.equal(m.tickets[TICKET].counts.owner_waits, 2);
+});
+
+test('R4-O1: Codex is "not used" only when the review lanes were recorded in full too', () => {
+  const rec = (usd) => ({ provider: 'claude', run_id: 'r1', role: 'builder', source_execution_id: `c-${usd}`, input_tokens: 1, reported_cost_usd: usd, cost_basis: 'list' });
+  const v = measure([...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'usage')], [rec(4), rec(6)]).metrics.M8;
+  assert.equal(v.value.codex.usd, 'unavailable');
+  assert.match(String(v.value.total_usd), /unavailable/);
+  assert.notEqual(v.label, 'measured');
+  const full = measure([...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'usage,review')], [rec(4), rec(6)]).metrics.M8.value;
+  assert.deepEqual([full.codex.usd, full.total_usd], ['not_used', 10]);
+});
+
+test('R4-O2: the head run cannot declare a predecessor complete; each run declares for itself', () => {
+  const gate = (run, n) => ev(run, 'gate_run', D(13), D(13, 10), { n, head_sha: `h${n}`, clean: true }, 'pass');
+  const rows = [...wf('r1', 'abandoned'), ...mode('r1', 'engine'), ...gate('r1', 1), ...wf('r2'), ...mode('r2', 'recovery', { supersedes_run_id: 'r1' }), ...gate('r2', 1), ...declare('r2', 'gate')];
+  assert.deepEqual(measure(rows).metrics.M7.value[TICKET].t2_runs, { at_least: 2 });
+  assert.equal(measure([...rows, ...declare('r1', 'gate')]).metrics.M7.value[TICKET].t2_runs, 2);
+});
+
+test('R4-I: dropped, malformed or conflicting inputs degrade the value; a weak or early declaration declares nothing', () => {
+  const base = [...wf('r1'), ...mode('r1', 'engine'), ...declare('r1', 'gate')];
+  const gate = (n, extra = {}) => ev('r1', 'gate_run', D(13), D(13, 10), { n, head_sha: `h${n}`, clean: true, ...extra }, 'pass');
+  // an invalid gate event (no head_sha) is an unknown gate, not a missing one
+  assert.equal(measure([...base, ...gate(1), ...ev('r1', 'gate_run', D(14), D(14, 10), { n: 2, clean: true }, 'pass')]).metrics.M7.value[TICKET].t2_runs, 'unavailable');
+  // two copies of one logical gate that disagree are unknown
+  const copy = gate(1, { clean: false }).map((r) => ({ ...r, event_id: 'copy' }));
+  assert.equal(measure([...base, ...gate(1), ...copy]).metrics.M7.value[TICKET].t2_runs, 'unavailable');
+  // the worse label of two identical copies wins
+  const est = gate(1, { label: 'estimated' }).map((r) => ({ ...r, event_id: 'copy2' }));
+  assert.equal(measure([...base, ...gate(1), ...est]).metrics.M7.label, 'estimated');
+  // a declaration labelled estimated, or emitted before later events of its run, declares nothing
+  const weak = [...wf('r1'), ...mode('r1', 'engine'), ...ev('r1', 'measurement_complete', D(20), D(20), { scopes: 'gate', label: 'estimated' }), ...gate(1)];
+  assert.deepEqual(measure(weak).metrics.M7.value[TICKET].t2_runs, { at_least: 1 });
+  const early = [...wf('r1'), ...mode('r1', 'engine'), ...ev('r1', 'measurement_complete', D(10), D(10), { scopes: 'gate' }), ...gate(1)];
+  assert.deepEqual(measure(early).metrics.M7.value[TICKET].t2_runs, { at_least: 1 });
+});
+
+// ---- generic fuzz: perturbation decides what each printed value depends on (the oracle never reads INPUT_SCOPES' scopes or polarity) ----
+const buildAll = (rows) => [...new Set(rows.map((r) => r.run_id))].map((id) => buildRun(rows.find((r) => r.run_id === id).ticket, id, rows.filter((r) => r.run_id === id)));
+const report = (rows, records = []) => evaluate({ runs: buildAll(rows), records, now: NOW });
+/** Every registered number of a measurement block, by key and position, with the label printed for it (INPUT_SCOPES is used only to find it). */
+function printed(m) {
+  const out = new Map();
+  for (const t of Object.keys(m.tickets)) for (const key of Object.keys(INPUT_SCOPES)) {
+    leavesAt(m, key, t).forEach((l, i) => out.set(`${key}|${INPUT_SCOPES[key].path.includes('{ticket}') ? t : '-'}|${i}`, l));
+  }
+  return out;
+}
+const num = (v) => (typeof v === 'number' ? v : isBound(v) ? v.at_least : null);
+const changed = (a, b) => JSON.stringify(a?.value) !== JSON.stringify(b?.value);
+/** SCRUM-202 with every event and usage record measured: the fuzz baseline. */
+function measuredScrum202() {
+  const rows = scrum202Rows().map((r) => (r.metrics?.label ? { ...r, metrics: { ...r.metrics, label: 'measured' } } : r));
+  const records = scrum202Usage().map((r) => (known(r.estimated_cost_usd) && !known(r.reported_cost_usd) ? { ...(({ estimated_cost_usd, ...x }) => x)(r), reported_cost_usd: r.estimated_cost_usd, cost_basis: 'list' } : r));
+  return { rows, records };
+}
+function known(v) { return typeof v === 'number' && Number.isFinite(v); }
+// The kinds each scope's declaration covers, as the reference states them (independent of measure.mjs).
+const KINDS_OF_SCOPE = { review: ['review_round', 'review_reconcile'], repair: ['repair_batch', 'confirmation'], gate: ['gate_run'], owner: ['owner_decision'], sleep: ['host_sleep'], findings: ['finding'] };
+const S04_NAMES = ['run_mode', 'review_round', 'repair_batch', 'confirmation', 'gate_run', 'finding', 'measurement_complete', 'owner_decision', 'host_sleep', 'review_reconcile'];
+const VALUE_FIELDS = { review_round: ['majors'], gate_run: ['hold_ms', 't0_class'] }; // fields a value can need beyond validation
+const REQUIRED_FIELDS = { review_round: ['n', 'round_kind', 'lane', 'verdict'], repair_batch: ['n'], confirmation: ['n'], gate_run: ['n', 'head_sha', 'clean'], owner_decision: ['n'],
+  finding: ['fingerprint', 'repeat', 'severity'], run_mode: ['mode'], measurement_complete: ['scopes'] };
+
+test('FUZZ: no mutation of a complete, measured history prints a dependent value as measured, bare-exact or 0', (t) => {
+  const B = measuredScrum202();
+  const base = report(B.rows, B.records).measurement;
+  const P0 = printed(base);
+  const ids = [...new Set(B.rows.filter((r) => S04_NAMES.includes(r.name)).map((r) => r.event_id))];
+  const edit = (id, f) => B.rows.flatMap((r) => (r.event_id !== id ? [r] : f(r)));
+  const setStart = (id, g) => edit(id, (r) => [r.event === 'start' ? { ...r, metrics: g({ ...r.metrics }) } : r]);
+  const tally = { mutations: 0, assertions: 0 };
+  const run = (rows, records, check) => { const P = printed(report(rows, records).measurement); tally.mutations += 1; check(P); };
+  const notMeasuredExact = (P, deps, why) => { for (const k of deps) { const l = P.get(k); tally.assertions += 1;
+    assert.ok(!l || typeof l.value !== 'number' || l.label !== 'measured', `${why}: ${k} printed ${JSON.stringify(l?.value)} measured`);
+    if (l && isBound(l.value)) assert.notEqual(l.label, 'measured', `${why}: ${k} bound labelled measured`); } };
+  const unavailableAll = (P, deps, why) => { for (const k of deps) { const l = P.get(k); tally.assertions += 1;
+    assert.ok(!l || isUnavailable(l.value), `${why}: ${k} printed ${JSON.stringify(l?.value)} (expected unavailable)`); } };
+  const noFalseZero = (P, why) => { for (const [k, l0] of P0) { const l = P.get(k);
+    if (num(l0.value) > 0 && l && l.value === 0) assert.fail(`${why}: ${k} went from ${JSON.stringify(l0.value)} to 0`); } };
+  const depsOf = (P1) => [...P0.keys()].filter((k) => changed(P0.get(k), P1.get(k)) || !P1.has(k));
+  for (const id of ids) {
+    const name = B.rows.find((r) => r.event_id === id).name;
+    const deps = depsOf(printed(report(B.rows.filter((r) => r.event_id !== id), B.records).measurement));
+    for (const label of ['estimated', 'unavailable']) run(setStart(id, (m) => ({ ...m, label })), B.records, (P) => { notMeasuredExact(P, deps, `${id} label=${label}`); noFalseZero(P, id); });
+    // a value input left open or malformed poisons what reads it; a meta event (declaration, run mode) left open or malformed only declares nothing
+    const meta = ['measurement_complete', 'run_mode'].includes(name);
+    const expect = (P, why) => (meta ? notMeasuredExact(P, deps, why) : unavailableAll(P, deps, why));
+    run(B.rows.filter((r) => !(r.event_id === id && r.event === 'end')), B.records, (P) => { expect(P, `${id} left open`); noFalseZero(P, id); });
+    for (const f of REQUIRED_FIELDS[name] ?? []) run(setStart(id, (m) => { delete m[f]; return m; }), B.records, (P) => { expect(P, `${id} without ${f}`); noFalseZero(P, id); });
+    for (const f of VALUE_FIELDS[name] ?? []) {
+      const start = B.rows.find((r) => r.event_id === id && r.event === 'start');
+      if (start.metrics[f] === undefined) continue;
+      const flipped = typeof start.metrics[f] === 'boolean' ? !start.metrics[f] : start.metrics[f] + 1;
+      const fdeps = depsOf(printed(report(setStart(id, (m) => ({ ...m, [f]: flipped })), B.records).measurement));
+      run(setStart(id, (m) => { delete m[f]; return m; }), B.records, (P) => { unavailableAll(P, fdeps, `${id} without ${f}`); noFalseZero(P, id); });
+    }
+  }
+  // a whole kind dropped together with its scope; each scope dropped with its events kept
+  for (const [scope, kinds] of Object.entries(KINDS_OF_SCOPE)) {
+    const without = (rows) => rows.map((r) => (r.name === 'measurement_complete' && r.event === 'start' ? { ...r, metrics: { ...r.metrics, scopes: r.metrics.scopes.split(',').filter((x) => x !== scope).join(',') } } : r));
+    const deps = depsOf(printed(report(B.rows.filter((r) => !kinds.includes(r.name)), B.records).measurement));
+    run(without(B.rows), B.records, (P) => notMeasuredExact(P, deps, `scope ${scope} dropped`));
+    run(without(B.rows.filter((r) => !kinds.includes(r.name))), B.records, (P) => { notMeasuredExact(P, deps, `kind ${kinds} and scope ${scope} dropped`); });
+    // replay those events into a run that declares nothing, and split them off into one
+    const moved = B.rows.filter((r) => kinds.includes(r.name));
+    run([...B.rows, ...moved.map((r) => ({ ...r, run_id: 'run-C', event_id: `${r.event_id}-C` }))], B.records, (P) => { notMeasuredExact(P, deps, `${scope} replayed into run-C`); noFalseZero(P, `${scope} replay`); });
+    run([...B.rows.filter((r) => !kinds.includes(r.name)), ...moved.map((r) => ({ ...r, run_id: 'run-C' }))], B.records, (P) => { notMeasuredExact(P, deps, `${scope} split into run-C`); noFalseZero(P, `${scope} split`); });
+  }
+  { // usage records: dropped with the scope, or the scope dropped alone
+    const without = B.rows.map((r) => (r.name === 'measurement_complete' && r.event === 'start' ? { ...r, metrics: { ...r.metrics, scopes: r.metrics.scopes.replace(',usage', '') } } : r));
+    const deps = depsOf(printed(report(B.rows, []).measurement));
+    run(without, B.records, (P) => notMeasuredExact(P, deps, 'usage scope dropped'));
+    for (let i = 0; i < B.records.length; i += 1) {
+      const rdeps = depsOf(printed(report(B.rows, B.records.filter((_, j) => j !== i)).measurement));
+      run(B.rows, B.records.map((r, j) => (j === i ? { ...r, reported_cost_usd: undefined } : r)), (P) => { notMeasuredExact(P, rdeps, `usage record ${i} unpriced`); noFalseZero(P, `usage ${i}`); });
+    }
+  }
+  // identical replays inside their own run change nothing
+  run([...B.rows, ...B.rows.filter((r) => S04_NAMES.includes(r.name)).map((r) => ({ ...r, event_id: `${r.event_id}-again` }))], B.records, (P) => {
+    for (const [k, l] of P0) { tally.assertions += 1; assert.deepEqual(P.get(k), l, `replay changed ${k}`); }
+  });
+  t.diagnostic(`fuzz: ${JSON.stringify(tally)}`);
+  assert.ok(tally.mutations >= 400 && tally.assertions >= 1500, JSON.stringify(tally));
+});
+
+test('FUZZ: every number in the whole eval report is registered, and bookkeeping is all that bypasses resolve', () => {
+  const B = measuredScrum202();
+  for (const out of [report(B.rows, B.records), evaluate({ runs: buildAll(fullHistory().rows), records: fullHistory().records, now: NOW })]) {
+    const ids = new Set(Object.keys(out.measurement.tickets));
+    const templates = [...Object.values(INPUT_SCOPES).map((s) => `measurement.${s.path}`), ...Object.keys(BOOKKEEPING).map((p) => (p.startsWith('report.') ? p.slice(7) : `measurement.${p}`))].map((t) => t.split('.'));
+    const match = (segs) => templates.some((t) => t.length === segs.length && t.every((s, i) => s === '*' || (s === '{ticket}' ? ids.has(segs[i]) : s === segs[i])));
+    const walk = (node, segs) => {
+      if (typeof node === 'number' || isBound(node)) { assert.ok(match(segs), `unregistered number at ${segs.join('.')}`); return; }
+      if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) walk(v, [...segs, k]);
+    };
+    walk(out, []);
+    assert.deepEqual(Object.keys(out).sort(), ['measurement', 'note', 'runs', 'schema']);
+  }
+});
+
+// generators: one more valid, known event of each kind (or a usage record that replaces another)
+const GEN = {
+  review_round: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'review_round', D(19), D(19, 10), { n: 7, round_kind: 'final', lane: 'opus', verdict: 'PASS', majors: 0 }), 'T-A')],
+  review_lane: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'review_round', D(11), D(12, 30), { n: 1, round_kind: 'original', lane: 'gemini', verdict: 'FAIL', majors: 1 }), 'T-A')],
+  reconcile: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'review_reconcile', D(19, 20), D(19, 30), { candidate_id: 'c1', review_execution: 'review-9' }), 'T-A')],
+  repair_batch: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'repair_batch', D(19, 40), D(19, 50), { n: 7 }), 'T-A')],
+  confirmation: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'confirmation', D(19, 55), D(19, 55), { n: 8 }), 'T-A')],
+  gate_run: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'gate_run', D(17, 40), D(17, 50), { n: 9, head_sha: 'h9', clean: false, t0_class: true, holds_review: true, hold_ms: 60000 }, 'fail',
+    { per_gate: [{ name: 'test', ms: 1, exit: 0, key: 'k2' }] }), 'T-A')],
+  owner_decision: (h) => [...h.rows, ...asTicket(pair('a1', 'wait', 'owner_decision', D(18, 10), D(18, 20), { n: 5, decision_class: 'x' }), 'T-A')],
+  host_sleep: (h) => [...h.rows, ...asTicket(pair('a1', 'wait', 'host_sleep', D(18, 30), D(18, 40), { gap_reason: 'host_sleep' }), 'T-A')],
+  finding: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'finding', D(19), D(19), { fingerprint: 'fp9', repeat: true, severity: 'Major', builder_catchable: true, deferred: true, round: 9 }), 'T-A')],
+  classify: (h) => [...h.rows, ...asTicket(pair('a1', 'activity', 'finding', D(19), D(19), { fingerprint: 'fpU', repeat: false, severity: 'Minor', builder_catchable: true, round: 9 }), 'T-A')],
+};
+const REPLACE = (h) => [...h.records, { ...h.records[0], input_tokens: 99, reported_cost_usd: 0.5 }]; // same execution, fuller record, lower cost
+
+test('POLARITY (semantic): wherever a lower bound is printed, adding any event never lowers it; a usage record that replaces another is covered', () => {
+  // the full history plus one unclassified finding and one estimate-priced record, so those values are not 0
+  const h0 = fullHistory();
+  const h = { rows: [...h0.rows, ...asTicket(pair('a1', 'activity', 'finding', D(12, 5), D(12, 5), { fingerprint: 'fpU', repeat: false, severity: 'Minor', round: 1 }), 'T-A')],
+    records: [...h0.records, { provider: 'claude', run_id: 'a1', role: 'reviewer', source_execution_id: 'est-1', input_tokens: 1, estimated_cost_usd: 2 }] };
+  let compared = 0;
+  for (const scope of SCOPES) {
+    const dropped = { ...h, rows: h.rows.map((r) => (r.name === 'measurement_complete' && r.event === 'start' ? { ...r, metrics: { ...r.metrics, scopes: r.metrics.scopes.split(',').filter((x) => x !== scope).join(',') } } : r)) };
+    const before = printed(evaluate({ runs: buildAll(dropped.rows), records: dropped.records, now: NOW }).measurement);
+    const variants = [...Object.values(GEN).map((g) => ({ rows: g(dropped), records: dropped.records })), { rows: dropped.rows, records: REPLACE(dropped) }];
+    for (const v of variants) {
+      const after = printed(evaluate({ runs: buildAll(v.rows), records: v.records, now: NOW }).measurement);
+      for (const [k, l] of before) {
+        if (!isBound(l.value)) continue;
+        const a = after.get(k);
+        compared += 1;
+        assert.ok(!a || isUnavailable(a.value) || (isBound(a.value) && a.value.at_least >= l.value.at_least),
+          `${k} without ${scope}: printed {at_least: ${l.value.at_least}} but one more input gives ${JSON.stringify(a?.value)}`);
+      }
+    }
+  }
+  assert.ok(compared > 300, `compared ${compared}`);
+});
+
+test('R4-L: rows the reader lost (a conflicting duplicate start, a malformed log line) void the run\'s declaration', (t) => {
+  const gate = ev('r1', 'gate_run', D(13), D(13, 10), { n: 1, head_sha: 'h1', clean: true }, 'pass');
+  const rows = [...wf('r1'), ...mode('r1', 'engine'), ...gate, ...declare('r1', 'gate')];
+  assert.equal(measure(rows).metrics.M7.value[TICKET].t2_runs, 1);
+  assert.equal(measure([...rows, ...rows.filter((r) => r.name === 'gate_run')]).metrics.M7.value[TICKET].t2_runs, 1); // a byte-identical stream copy loses nothing
+  const conflicting = { ...gate[0], metrics: { ...gate[0].metrics, n: 2 } };
+  assert.deepEqual(measure([...rows, conflicting]).metrics.M7.value[TICKET].t2_runs, { at_least: 1 });
+  const f = repo(t, rows);
+  writeFileSync(f.log, `${readFileSync(f.log, 'utf8')}{not json\n`);
+  const out = JSON.parse(f.cli(evalCli, 'report', '--repo', f.root, '--ticket', TICKET).stdout);
+  assert.deepEqual(out.measurement.metrics.M7.value[TICKET].t2_runs, { at_least: 1 });
 });
