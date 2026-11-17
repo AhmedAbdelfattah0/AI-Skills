@@ -85,3 +85,27 @@ export function processGone(pid) {
   if (r.error || r.status !== 0) return vanished();
   return r.stdout.trim().startsWith('Z');
 }
+
+/** Names whose value is a failure bound (>= WORKER_FAILURE_BOUND_MS), so `timeoutMs: <name>` never races a worker. */
+export const BOUND_NAMES = new Set(['WORKER_FAILURE_BOUND_MS', 'BUDGET_MS']);
+
+/**
+ * Every `timeoutMs: <value>` in the given test sources whose value is a number below WORKER_FAILURE_BOUND_MS
+ * or a name not in BOUND_NAMES: { file, line, text }. A run-wide timeoutMs bounds every worker and the
+ * proof and check runners, so a short one is only for a DAG that is validated and never driven, a
+ * function-level input with a fake runner, or a run whose every attempt hangs; anything else sets it
+ * short only around the hanging step (fixture setRunTimeout). `sources` is [{ file, text }].
+ */
+export function shortRunTimeouts(sources) {
+  const out = [];
+  for (const { file, text } of sources) {
+    text.split('\n').forEach((line, i) => {
+      for (const m of line.matchAll(/\btimeoutMs:\s*([A-Za-z_$][\w$]*|\d[\d_]*)/g)) {
+        const v = m[1];
+        const short = /^\d/.test(v) ? Number(v.replace(/_/g, '')) < WORKER_FAILURE_BOUND_MS : !BOUND_NAMES.has(v);
+        if (short) out.push({ file, line: i + 1, text: line.trim() });
+      }
+    });
+  }
+  return out;
+}

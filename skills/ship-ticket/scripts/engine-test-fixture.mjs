@@ -177,6 +177,13 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     prompt: promptFor,
     readState: () => JSON.parse(readFileSync(fx.stateFile(), 'utf8')),
     editState: (fn) => { const s = fx.readState(); fn(s); writeFileSync(fx.stateFile(), JSON.stringify(s)); },
+    /**
+     * Test injection of a per-step budget. The engine has one run-wide timeoutMs (workers AND proof/check
+     * runners), bound at init. A test whose subject is a timeout sets it short only around the command
+     * whose worker hangs (between commands) and restores the failure bound after, so nothing that should
+     * finish by itself ever races a short timer (FLAKE-root-cause-report.md).
+     */
+    setRunTimeout: (ms) => fx.editState((s) => { s.config.timeoutMs = ms; }),
     /** Run the real engine CLI: `node run-engine.mjs <cmd> --repo --ticket --run-id [--flag value...]`. */
     cli: (cmd, flags = {}, { runId = 'run-1', timeout = 60000 } = {}) => {
       const args = [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', runId,

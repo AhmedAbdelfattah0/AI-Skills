@@ -36,6 +36,13 @@ test('the bench CLI runs both modes to completion and reports numeric counts', {
 
 const METRICS = ['orchestrator_commands', 'bytes_read', 'reference_bytes', 'wall_ms', 'nodes_completed', 'judgments', 'owner_interventions', 'proof_runs', 'retries'];
 const scenario = async (id) => (await runScenarios(id, { buildNodes }))[0];
+/** A pair scenario the host refused admission to is reported as an ENVIRONMENT skip naming its code: never a pass, never a mechanism failure. */
+const environmentSkip = (t, r) => {
+  if (!r.environment) return false;
+  assert.equal(r.ok, null, 'an environment result is not a pass');
+  t.skip(`${r.environment}: the live admission probe refused a concurrent member, so the pair could not meet (FLAKE-root-cause-report.md)`);
+  return true;
+};
 /** The result is complete and ok; every metric is a number. wall_ms is never asserted beyond its type. */
 function assertResult(r, id) {
   assert.equal(r.id, id);
@@ -62,8 +69,9 @@ test('S1 one node completes with the smallest command count', { skip: N7_SKIP },
   assert.equal(r.metrics.nodes_completed, 1);
 });
 
-test('S2 frontend and backend are dispatched in the same wave, between the contract and the join', { skip: N7_SKIP }, async () => {
+test('S2 frontend and backend are dispatched in the same wave, between the contract and the join', { skip: N7_SKIP }, async (t) => {
   const r = await scenario('S2');
+  if (environmentSkip(t, r)) return;
   assertResult(r, 'S2');
   assert.equal(r.shows.outcome, 'done', 'each worker waits for the other to start, so only a concurrent dispatch can finish');
   assert.equal(r.shows.frontend_and_backend_in_one_wave, true);
@@ -96,8 +104,9 @@ test('S3 an auth-sensitive change: ship-ready needs accepted RED and the risk ev
   assert.equal(r.metrics.reference_bytes, referenceBytes({ security: true }));
 });
 
-test('S4 six nodes in two waves and a join all complete within the configured width', { skip: N7_SKIP }, async () => {
+test('S4 six nodes in two waves and a join all complete within the configured width', { skip: N7_SKIP }, async (t) => {
   const r = await scenario('S4');
+  if (environmentSkip(t, r)) return;
   assertResult(r, 'S4');
   assert.equal(r.metrics.nodes_completed, 6);
   assert.equal(r.shows.width, 2);

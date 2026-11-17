@@ -161,17 +161,25 @@ async function lockBarrier(t) {
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: flag }, b: { write: { 'src/b.txt': 'b1' } } });
   await init(fx.ctx());
   const nodeOf = new Map();
-  let thrown = false;
+  let thrown = false, lockBeforeRelease = null, lockAtSettle = null;
+  // No timer: the lock is observed at the throw point (a still blocked on its flag), then the test releases a, and the
+  // lock is observed again right after the state commit that first records a done (its 'dir-fsync' boundary).
   const hooks = { boundary: async (name, info) => {
     if (name === 'after-intent') nodeOf.set(info.attempt_id, info.node);
+    if (name === 'dir-fsync' && thrown && lockAtSettle === null && info.file === fx.stateFile()) {
+      if (JSON.parse(readFileSync(info.file, 'utf8')).nodes?.a?.state === 'done') lockAtSettle = existsSync(fx.lockFile());
+    }
     if (name === 'after-release' && nodeOf.get(info.attempt_id) === 'b' && !thrown) {
       thrown = true;
-      setTimeout(() => writeFileSync(flag, ''), 300);
+      lockBeforeRelease = existsSync(fx.lockFile());
+      writeFileSync(flag, ''); // release the sibling only after observing the lock held
       throw injected();
     }
   } };
   await assert.rejects(async () => drive(fx.ctx({ hooks, admissionProbe: ROOMY_HOST })), { code: 'injected' });
   assert.equal(thrown, true);
+  assert.equal(lockBeforeRelease, true, 'the lock is held while sibling a is still blocked');
+  assert.equal(lockAtSettle, true, 'the lock is still held at the commit that records a settled');
   assert.equal(existsSync(fx.lockFile()), false, 'the lock is released on the way out');
   assert.equal(fx.readState().nodes.a.state, 'done', 'the sibling settled and committed before the lock was released');
 }

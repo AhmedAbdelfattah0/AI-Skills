@@ -134,7 +134,8 @@ if (isEntrypoint(import.meta.url)) {
     if (!results) process.exit(1);
     if (argv.includes('--json')) process.stdout.write(JSON.stringify(results, null, 2) + '\n');
     else for (const r of results) process.stdout.write(JSON.stringify(r) + '\n');
-    process.exitCode = results.every(r => r.ok) ? 0 : 1;
+    // An ENVIRONMENT result (ok null: the host refused admission) is neither a pass nor a mechanism failure: exit 3.
+    process.exitCode = results.some(r => r.ok === false) ? 1 : results.some(r => r.environment) ? 3 : 0;
   } else {
     const n = at >= 0 ? Number(argv[at + 1]) : 6;
     if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json] | --scenario <S1..S10|all> [--json]\n'); process.exit(1); }

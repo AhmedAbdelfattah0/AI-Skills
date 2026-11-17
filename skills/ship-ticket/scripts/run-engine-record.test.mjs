@@ -296,6 +296,9 @@ test('[R1] unit review chains: with config.auditRecord absent or false, every re
 test('[R1] the unit chain scenario depends on admission: a refused second member shifts every later seq (the observed load failure, reproduced)', { skip: WIN_SKIP }, async (t) => {
   // One CPU: a and c (2 members) are refused together, exactly what low host memory did on the loaded macOS run.
   const run = await unitRun(t, 'absent', 'PASS', { ...ROOMY_HOST, cpus: () => [{}] });
+  for (const r of [run.cliOriginal, run.apiOriginal, run.apiConfirmation]) ok(r, 'refused admission');
+  assert.deepEqual([run.cliOriginal.out.code, run.apiOriginal.out.code, run.apiConfirmation.out.code], ['unit_review_accepted', 'unit_review_accepted', 'unit_review_accepted'],
+    'a refusal only serializes: every gate is still accepted');
   const [orig, repair] = run.chains.api;
   assert.deepEqual([orig.evidence_id, orig.seq, repair.new_candidate, repair.seq], ['api@3', 7, 'api@16', 12], J(run.chains.api));
   assert.notEqual(repair.old_candidate, orig.tree_candidate, 'api was checked before c wrote src/c.txt');

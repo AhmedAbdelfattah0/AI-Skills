@@ -107,6 +107,14 @@ const node = (id, extra = {}) => ({ id, writes: [`src/${id}.txt`], ...extra });
 const writeOf = (id) => ({ write: { [`src/${id}.txt`]: id } });
 const plain = (...ids) => Object.fromEntries(ids.map(id => [id, writeOf(id)]));
 
+/**
+ * The environment code of a world whose engine refused admission (live host memory / CPU probe): a pair below
+ * cannot meet then, so its result says nothing about the mechanism. Reported as ENVIRONMENT, never pass or fail.
+ */
+export const ADMISSION_ENV = 'ENVIRONMENT_ADMISSION_REFUSED';
+const admissionRefused = (w) => (w.fx.readState().events ?? []).some(e => e.type === 'ADMISSION_REFUSED');
+const environmentOf = (w, result) => (admissionRefused(w) ? { ...result, ok: null, environment: ADMISSION_ENV } : result);
+
 /** Both nodes of a pair write their own start marker, then wait for the other's: neither can finish unless both run at once. */
 function pair(w, a, b) {
   const started = (id) => w.flag(`${id}-started`);
@@ -129,6 +137,7 @@ async function s2(meter) {
     nodes: [node('contract'), node('frontend', { deps: ['contract'] }), node('backend', { deps: ['contract'] }), node('join', { deps: ['frontend', 'backend'] })] });
   w.fx.behave({ ...plain('contract', 'join'), ...pair(w, 'frontend', 'backend') });
   w.init(); const d = w.cli('drive');
+  if (admissionRefused(w)) return environmentOf(w, { shows: { outcome: d.out?.outcome ?? null, nodes: states(d.out) }, ok: false });
   const attempts = w.fx.readState().attempts.filter(a => a.kind === 'node');
   const get = (id) => attempts.find(a => a.node === id);
   const order = w.fx.runs();
@@ -137,7 +146,7 @@ async function s2(meter) {
     frontend_and_backend_in_one_wave: Boolean(get('frontend') && get('backend') && overlap(get('frontend'), get('backend'))),
     peak_concurrency: peakConcurrency(attempts) };
   // Each of the two workers waits for the other's start marker before it can finish, so a completed run proves one wave.
-  return { shows, ok: shows.outcome === 'done' && shows.frontend_and_backend_in_one_wave && shows.peak_concurrency >= 2 && shows.waves_in_order };
+  return environmentOf(w, { shows, ok: shows.outcome === 'done' && shows.frontend_and_backend_in_one_wave && shows.peak_concurrency >= 2 && shows.waves_in_order });
 }
 
 async function s3(meter) {
@@ -179,7 +188,7 @@ async function s4(meter, { buildNodes }) {
   const attempts = w.fx.readState().attempts.filter(a => a.kind === 'node');
   const wave = waveOrder(w.fx.runs(), [['n1', 'n2', 'n3'], ['n4', 'n5'], ['n6']]);
   const shows = { outcome: d.out?.outcome ?? null, width, nodes: states(d.out), peak_concurrency: peakConcurrency(attempts), ...{ start_waves: wave.groups, waves_in_order: wave.in_order } };
-  return { shows, ok: shows.outcome === 'done' && doneCount(d.out) === 6 && shows.peak_concurrency >= 2 && shows.peak_concurrency <= width && shows.waves_in_order };
+  return environmentOf(w, { shows, ok: shows.outcome === 'done' && doneCount(d.out) === 6 && shows.peak_concurrency >= 2 && shows.peak_concurrency <= width && shows.waves_in_order });
 }
 
 async function s5(meter) {
@@ -481,10 +490,10 @@ export async function runScenario(def, deps, record = loadRecord()) {
   const meter = newMeter();
   const t0 = Date.now();
   try {
-    const { shows, ok } = await def.run(meter, deps);
+    const { shows, ok, environment } = await def.run(meter, deps);
     const last = meter.worlds.map(w => w.last);
     const executions = meter.worlds.map(w => w.executions());
-    return { ...base, ok, shows, metrics: {
+    return { ...base, ok, ...(environment ? { environment } : {}), shows, metrics: {
       orchestrator_commands: meter.commands, bytes_read: meter.bytes, reference_bytes: referenceBytes(def.flags, record), wall_ms: Date.now() - t0,
       nodes_completed: sum(last.map(doneCount)), judgments: meter.seen.size, owner_interventions: sum(last.map(s => s?.judgments?.length ?? 0)),
       proof_runs: sum(executions.map(e => e.proof + e.red)), retries: sum(last.map(s => sum(Object.values(s?.nodes ?? {}).map(n => n.retries ?? 0)))) } };
