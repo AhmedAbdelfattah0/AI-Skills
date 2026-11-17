@@ -58,7 +58,7 @@ draft every ticket's plan there (one section per ticket, each with its own
 scope, contract and risks), and present them in a single `ExitPlanMode` call.
 On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
 its own START event and digest. A ticket whose plan must wait for a sibling
-(money/auth debate, an unmerged dependency) goes through Plan Mode again when
+(an ELEVATED-floor or money/auth debate, an unmerged dependency) goes through Plan Mode again when
 its turn comes; never start BUILD on a wave ticket whose plan was not in an
 approved `ExitPlanMode`.
 
@@ -122,7 +122,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
-<The risk floor decides first: a floor of ELEVATED sets review ELEVATED and requires the bounded §7 debate; judgement may raise it, never lower it. Over-classifying a comment-only or read-only change is accepted; keep that debate to one call.>
+<The risk floor is a best-effort lexical floor and runs first: a floor of ELEVATED requires review ELEVATED and the bounded §7 debate; judgement may raise it, never lower it, and a missing match is not evidence of low risk. Over-classifying a comment-only or read-only change is accepted; such a debate may converge in one call within the normal budget. `risk-floor.mjs verify --plan` checks the record; it is advisory until the gate wiring (S-23/S-24).>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 

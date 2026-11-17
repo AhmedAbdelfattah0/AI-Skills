@@ -249,17 +249,16 @@ broad cross-subsystem changes, or an explicit repository/user requirement. The
 preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
-A deterministic floor runs first: `node scripts/risk-floor.mjs check --ticket <file|-> --paths <json>
---claimed <profile>` matches money, tenancy, auth, public-contract, data-shape and
-shared-surface keywords in the ticket text and planned paths. A floor of **ELEVATED**
-is final: it forces the profile and the bounded plan debate, and judgement such as
-"read-only display" cannot lower it. Record its `record_line` in the plan header.
-
-If the independent primary route or enforceable deadline is absent, follow the
-capability/explicit-exception procedure in the review reference before REVIEW
-begins. A missing counterpart falls back to CodeRabbit; if both are missing, use
-**WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
-serializes the two reviews.
+A best-effort lexical floor runs first: `node scripts/risk-floor.mjs check --ticket <file|->
+[--paths <json array>] --claimed <profile>` matches money, tenancy, auth, public-contract,
+data-shape and shared-surface wording in the ticket text and planned paths. A floor of
+**ELEVATED** requires that profile and the bounded plan debate; the floor raises and
+never lowers, and a read-only or display-only framing does not lower it. Absence of a
+match is NOT evidence of low risk, and the keyword list is amendable by the owner. Unusable
+input, an unknown claim or a nonzero exit other than 2 means ELEVATED. Record its
+`record_line` in the plan header and run `risk-floor.mjs verify --plan <plan>` before
+plan approval. Today that check is advisory, not enforced: no gate or engine step runs
+it yet (wiring is S-23/S-24).
 
 ## Security sensitivity
 
