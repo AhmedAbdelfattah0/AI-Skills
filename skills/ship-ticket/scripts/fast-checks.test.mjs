@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { parseWorkerReport } from './worker-report.mjs';
 import { buildBrief, lintBrief } from './brief.mjs';
-import { killTree, utf8Path } from './fast-checks.mjs';
+import { killTree, utf8Path, stripNewline } from './fast-checks.mjs';
 
 const CLI = fileURLToPath(new URL('./fast-checks.mjs', import.meta.url));
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
@@ -542,4 +542,39 @@ test('A2 unit: utf8Path refuses bytes that only a lossy decode would alias (runs
   assert.equal(utf8Path(Buffer.from('src/ok.ts')), 'src/ok.ts');
   assert.equal(utf8Path(Buffer.from([0x73, 0xff, 0x2e, 0x74, 0x73])), null);
   assert.equal(utf8Path(Buffer.from(' lead space.ts')), ' lead space.ts');
+});
+
+test('F1: only the single trailing LF git emits is stripped (a trailing CR belongs to a directory name)', (t) => {
+  assert.equal(stripNewline(Buffer.from('/r/pkg\r\n')), '/r/pkg\r');
+  assert.equal(stripNewline(Buffer.from('/r/pkg\n')), '/r/pkg');
+  assert.equal(stripNewline(Buffer.from(' /r/ x \n')), ' /r/ x ');
+  if (process.platform === 'win32') return;
+  const fx = fixture(t, (d) => [d('jwt')], { prefix: 'cr\r/' });
+  put(fx.top, 'cr\r/src/new.spec.ts', `const t = '${JWT}';\n`);
+  const r = fx.run();
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(fx.seen().includes('src/new.spec.ts'), fx.seen().join(','));
+});
+
+test('F2: an inherited GIT_DIR cannot send the t0_check row to ANOTHER repository (and checks get a GIT_*-free env)', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  const other = mkdtempSync(join(tmpdir(), 'fastchk-o-')); t.after(() => rmSync(other, { recursive: true, force: true }));
+  git(other, 'init', '-q', '-b', 'main');
+  put(fx.top, 'src/new.ts', 'x\n');
+  const r = fx.cli('run', ['--base', fx.base, '--ticket', 'T9', '--run-id', 'run-9'], { env: { ...process.env, GIT_DIR: join(other, '.git'), GIT_WORK_TREE: other } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(fx.top, '.git', 'ai-skills', 'ship-ticket', 'T9.jsonl')), 'the row landed in the checked repository');
+  assert.ok(!existsSync(join(other, '.git', 'ai-skills')), 'nothing was written into the other repository');
+});
+
+test('F2 sibling: a declared check never sees an inherited GIT_* variable', (t) => {
+  const fx = fixture(t);
+  const probe = join(fx.tools, 'probe.mjs');
+  writeFileSync(probe, `import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], Object.keys(process.env).filter((k) => k.startsWith('GIT_')).join(','));`);
+  const out = join(fx.tools, 'env.txt');
+  fx.declare([{ name: 'probe', kind: 'other', cmd: [process.execPath, probe, out] }]);
+  git(fx.top, 'add', '-A'); git(fx.top, 'commit', '-q', '-m', 'probe');
+  const r = fx.cli('run', ['--base', git(fx.top, 'rev-parse', 'HEAD')], { env: { ...process.env, GIT_DIR: join(fx.top, '.git'), GIT_AUTHOR_NAME: 'x' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(out, 'utf8'), '');
 });

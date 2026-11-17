@@ -78,10 +78,13 @@ export function validateDeclaration(decl) {
 const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE'];
 // No replacement objects (`git replace` is writable by the worker and rewrites what a pinned base reads), literal
 // pathspecs (a directory name with glob characters), and no fsmonitor hook.
-const gitEnv = () => { const e = { ...process.env }; for (const k of GIT_ENV_DROP) delete e[k]; e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_LITERAL_PATHSPECS = '1'; return e; };
+/** The environment with EVERY inherited GIT_* variable removed: used for each child this module spawns (git, run-log, declared checks). */
+const cleanEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return e; };
+const gitEnv = () => { const e = cleanEnv(); e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_LITERAL_PATHSPECS = '1'; return e; };
 const gitRaw = (cwd, args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-const noNl = (b) => b.toString('utf8').replace(/\r?\n$/, ''); // strip ONLY the trailing newline: a leading space is part of a name
-const git = (cwd, args) => noNl(gitRaw(cwd, args));
+/** Strip ONLY the single trailing LF git emits: a leading space or a trailing CR belongs to a directory name. */
+export const stripNewline = (b) => b.toString('utf8').replace(/\n$/, '');
+const git = (cwd, args) => stripNewline(gitRaw(cwd, args));
 const zRaw = (buf) => { const out = []; let at = 0; for (let i = 0; i < buf.length; i++) if (buf[i] === 0) { if (i > at) out.push(buf.subarray(at, i)); at = i + 1; } if (at < buf.length) out.push(buf.subarray(at)); return out; };
 const stop = (code, reason) => ({ stop: { code, reason } });
 /** The path as a string only when it survives a UTF-8 round trip (argv cannot carry other bytes); null otherwise. */
@@ -209,7 +212,7 @@ function runOne(cwd, check, prep) {
       done(out);
     };
     let timer;
-    try { child = spawn(check.cmd[0], args, { cwd, stdio: ['ignore', fd, fd], detached: process.platform !== 'win32', windowsHide: true }); } catch { return finish({}); }
+    try { child = spawn(check.cmd[0], args, { cwd, env: cleanEnv(), stdio: ['ignore', fd, fd], detached: process.platform !== 'win32', windowsHide: true }); } catch { return finish({}); }
     timer = setTimeout(() => finish({ timed_out: true }), check.timeout_ms);
     child.on('error', () => finish({}));
     child.on('exit', (code, signal) => finish({ exit: code, result: code === 0 && !signal ? 'pass' : 'fail' }));
@@ -263,7 +266,7 @@ export function verifyReport({ repo, base, text }) {
 
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 function logActivity(repo, ticket, runId, phase, extra) {
-  const r = spawnSync(process.execPath, [RUN_LOG, phase, '--repo', repo, '--ticket', ticket, '--run-id', runId, '--kind', 'activity', '--name', 't0_check', '--event-id', extra.eventId, ...extra.args], { encoding: 'utf8', timeout: 30000 });
+  const r = spawnSync(process.execPath, [RUN_LOG, phase, '--repo', repo, '--ticket', ticket, '--run-id', runId, '--kind', 'activity', '--name', 't0_check', '--event-id', extra.eventId, ...extra.args], { cwd: repo, env: cleanEnv(), encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) process.stderr.write(`fast-checks: run-log ${phase} not recorded (verdict unchanged): ${String(r.stderr).trim().split('\n')[0]}\n`);
 }
 

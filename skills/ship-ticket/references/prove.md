@@ -115,8 +115,8 @@ whatever the repository has). It exists because a JWT-shaped literal in an uncom
 feedback. It does not prove semantic correctness; REVIEW and the tests still do that.
 
 **T0 is DETECTED-class, advisory feedback. It is not an enforced or anti-tamper boundary.** It catches honest
-mistakes and clumsy shortcuts early and cheaply. The authority is the orchestrator's own independent re-run of
-`run`, the reviewers, and the final full gates; a worker acting in the same repository as the same user can still
+mistakes and clumsy shortcuts early and cheaply. The orchestrator's own independent re-run of `run` only guards against a
+forged claim; the reviewers and the final full gates are the authority; a worker acting in the same repository as the same user can still
 defeat T0, and nothing here claims otherwise (see "Limits" below).
 
 ### The declaration and who may author it
@@ -155,6 +155,8 @@ stops shell interpolation of file names; it does not make a declaration trusted.
   base and HEAD (declare a history-mode scanner such as `gitleaks git <base>..HEAD` as its own check if wanted).
 - A descendant that leaves the process group (`setsid`, daemonizing) is not killed on timeout (Windows: `taskkill
   /T`, with a direct-child fallback reported as a degraded kill). The verdict is still a failure.
+- A changed file inside a directory argument (for example `semgrep --config rules/`) is not seen by `checker_modified`: name the files.
+- A bare command name is not looked up on PATH for `checker_modified`; only paths on disk are compared.
 - On Windows an executable planted in the repository folder can shadow a PATH tool. A changed config the declared
   command does not name, as above.
 - The declared commands, a fake binary earlier on PATH, or edits to the skill install by the same user are outside
@@ -162,7 +164,7 @@ stops shell interpolation of file names; it does not make a declaration trusted.
 
 ### Running it
 
-From the skill's `scripts/` directory, after every edit and again before handing over:
+From the ship-ticket skill directory (the one holding `scripts/` and `references/`), after every edit and again before handing over:
 
 ```text
 node scripts/fast-checks.mjs run --repo <repo> --base <base sha> [--ticket <key> --run-id <id>]
