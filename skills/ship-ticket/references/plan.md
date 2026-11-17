@@ -110,7 +110,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
      review_profile: STANDARD|ELEVATED
      review_profile_reasons: [<evidence-backed trigger>]
-     risk_floor: <the `risk-floor.mjs check` record_line; run on ticket text and planned paths before classifying>
+     risk_floor: <the `risk-floor.mjs check` record_line (planned paths) and, before release, the `reassess` record_line (actual changed paths)>
      review_timeouts: {primary: 12m, optional: 10m, confirmation: 6m}
      owned_screens:                      one entry per screen:
        - impl: <path>
@@ -122,7 +122,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
-<The risk floor is a best-effort lexical floor and runs first: a floor of ELEVATED requires review ELEVATED and the bounded §7 debate; judgement may raise it, never lower it, and a missing match is not evidence of low risk. Over-classifying a comment-only or read-only change is accepted; such a debate may converge in one call within the normal budget. This is advisory, not enforced: nothing reads the record yet. Deferred to the S-23/S-24 gate wiring: a plan-record check that parses exactly one strict `risk_floor:` header, requires final >= floor and final >= claim, review_profile >= final, a case-insensitive debate-status allowlist, and fails on duplicate keys.>
+<The structural path floor (`risk-floor.mjs`, project paths from `.ship-ticket/risk-paths.json` at base) and your semantic assessment both apply: the review profile is the higher of the two and of the recorded claim. A floor of ELEVATED requires review ELEVATED and the bounded §7 debate. A floor only raises, and an unmatched path is not evidence of low risk. Advisory, not enforced until the driver wiring (S-23/S-24). Deferred: a plan-record check (exactly one strict `risk_floor:` header, final >= floor and claim, review_profile >= final, debate-status allowlist, duplicate keys fail) and a measured text-matching corpus experiment (findings of the dropped keyword floor: lowerCamel, digit-adjacent, single-character separators, encodings, inflections).>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 
