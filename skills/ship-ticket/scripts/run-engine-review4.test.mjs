@@ -78,9 +78,10 @@ async function forgeThenTimeOut(t, slow) {
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
   ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
   fx.setRunTimeout(1000);
-  const r = await drive(fx.ctx({ hooks: writeBeforeTimer(() => runStateEvents(fx.planFile).some(e => e.event === 'RETRY'), 'the repair worker appended its forged RETRY') }));
+  const r = await drive(fx.ctx({ hooks: writeBeforeTimer(t, () => runStateEvents(fx.planFile).some(e => e.event === 'RETRY'), 'the repair worker appended its forged RETRY') }));
   fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
   assert.equal(r.repairs[0].state, 'failed');
+  assert.deepEqual(fx.readState().attempts.filter(a => a.kind === 'repair').map(a => a.status), ['timed_out'], 'killed by the timer, never retried');
   return fx;
 }
 

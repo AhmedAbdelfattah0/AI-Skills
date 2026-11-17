@@ -150,7 +150,7 @@ test('R3 drive keeps the lock until every launched attempt has settled, then ret
 // only b's release writes, timed out and was 'failed'. The scenario needs a and b running at once, so admission is pinned.
 test('R3 (load) the lock barrier holds while the host reports memory pressure (macOS: a low-memory vm_stat first on PATH)', { skip: WIN_SKIP || LOW_MEMORY_SKIP }, async (t) => {
   shadowLowMemoryVmStat(t);
-  assert.equal(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 }).admitted, false, 'the injection is live: the host probe refuses two members');
+  assert.deepEqual((({ admitted, reasons }) => ({ admitted, reasons }))(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 })), { admitted: false, reasons: ['memory'] }, 'the injection is live: the host probe refuses two members');
   await lockBarrier(t);
 });
 

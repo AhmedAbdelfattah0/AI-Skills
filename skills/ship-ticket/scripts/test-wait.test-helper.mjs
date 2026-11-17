@@ -71,13 +71,40 @@ export async function waitFor(pred, what, { ms = HANDSHAKE_BOUND_MS, every = 25 
   }
 }
 
+/** POSIX: true when no process of group `pgid` is left (kill(-pgid, 0) reports ESRCH). */
+export function groupGone(pgid) {
+  try { process.kill(-pgid, 0); return false; } catch (e) { return e.code === 'ESRCH'; }
+}
+
 /**
  * `ctx.hooks` for an in-process drive whose one dispatched worker writes something and then hangs under a short
  * run timeout. The engine arms an attempt's timer only after its 'after-release' boundary returns
  * (engine-attempts.mjs runAttempt), so waiting there for the worker's own write (`pred`) makes "the write, then
  * the timeout" a handshake: a worker that starts slowly is never killed before it wrote.
+ *
+ * Failure-safe: while the hook waits, the engine has no timer on that attempt, so nothing but this helper would
+ * kill it. The worker's process group is recorded at 'after-pid' (before the handshake) and, if the handshake is
+ * not seen within `ms` (a failure bound), the group is SIGKILLed and its termination awaited before the hook throws
+ * an error naming the handshake. `t.after` also kills a group still alive when the test ends, whatever failed.
+ * `.pgid` is the recorded group (null until 'after-pid').
  */
-export const writeBeforeTimer = (pred, what) => ({ boundary: async (name) => { if (name === 'after-release') await waitFor(pred, what); } });
+export function writeBeforeTimer(t, pred, what, { ms = HANDSHAKE_BOUND_MS } = {}) {
+  let pgid = null;
+  const kill = () => { if (pgid) try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ } };
+  t.after(async () => { if (pgid && !groupGone(pgid)) { kill(); await waitFor(() => groupGone(pgid), `worker group ${pgid} gone at teardown`); } });
+  return {
+    get pgid() { return pgid; },
+    boundary: async (name, info) => {
+      if (name === 'after-pid') pgid = info.pgid;
+      if (name !== 'after-release') return;
+      try { await waitFor(pred, what, { ms }); } catch (e) {
+        kill();
+        await waitFor(() => !pgid || groupGone(pgid), `worker group ${pgid} gone after the failed handshake`);
+        throw new Error(`${e.message}; the worker's process group ${pgid} was killed and is gone`);
+      }
+    },
+  };
+}
 
 /** Wait until `path` exists (a marker the child writes). */
 export const waitForFile = (path, what, opts) => waitFor(() => existsSync(path), `${what} (waiting for ${path})`, opts);

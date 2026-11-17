@@ -307,7 +307,7 @@ test('[R1] the unit chain scenario depends on admission: a refused second member
 test('[R1] unit review chains stay byte-identical while the host reports memory pressure (macOS: a low-memory vm_stat first on PATH)', { skip: LOW_MEMORY_SKIP }, async (t) => {
   shadowLowMemoryVmStat(t);
   // Positive signal: the injection is live, so the live host probe refuses two members (a green run is not vacuous).
-  assert.equal(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 }).admitted, false, 'the low-memory vm_stat is what the host probe reads');
+  assert.deepEqual((({ admitted, reasons }) => ({ admitted, reasons }))(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 })), { admitted: false, reasons: ['memory'] }, 'the low-memory vm_stat is what the host probe reads');
   const run = await unitRun(t, 'absent');
   assert.equal(J(run.chains.api), J(BASE_UNIT_CHAINS.api), 'unit api chain under host memory pressure');
   assert.equal(J(run.chains.cli), J(BASE_UNIT_CHAINS.cli), 'unit cli chain under host memory pressure');
@@ -703,7 +703,7 @@ test('[R5] stamps never change once given: across commands, a CLI restart, queue
 // refused c beside r, nothing queued, and `queued >= 1` failed. Admission is pinned; RED unpinned under this injection.
 test('[R5] (load) stamps and queued commits hold while the host reports memory pressure (macOS: a low-memory vm_stat first on PATH)', { skip: WIN_SKIP || LOW_MEMORY_SKIP, timeout: 120000 }, async (t) => {
   shadowLowMemoryVmStat(t);
-  assert.equal(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 }).admitted, false, 'the injection is live: the host probe refuses two members');
+  assert.deepEqual((({ admitted, reasons }) => ({ admitted, reasons }))(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 })), { admitted: false, reasons: ['memory'] }, 'the injection is live: the host probe refuses two members');
   await stampsNeverChange(t);
 });
 

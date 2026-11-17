@@ -36,7 +36,7 @@ import { spawnSync } from 'node:child_process';
 import { init, drive, gate } from './run-engine.mjs';
 import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
   primaryReview, secondOpinion } from './engine-test-fixture.mjs';
-import { WORKER_FAILURE_BOUND_MS, ROOMY_HOST, writeBeforeTimer } from './test-wait.test-helper.mjs';
+import { WORKER_FAILURE_BOUND_MS, ROOMY_HOST, writeBeforeTimer, groupGone } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const FAILING_SPEC = `import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails on assertion', () => { assert.equal(1, 2); });\n`;
@@ -293,6 +293,18 @@ test('G (load) a forged RETRY from a worker that starts slowly and then hangs is
   await forgedThenHangs(t, { startDelayMs: 1500 });
 });
 
+// The handshake's failure path: the worker never writes (no append), so the after-release wait expires. The helper must
+// kill the worker's group and await it before failing the drive: no stranded launcher or provider keeps the test open.
+test('G a writeBeforeTimer handshake that never completes fails the drive and leaves no worker process', { skip: WIN_SKIP }, async (t) => {
+  // The run keeps the failure bound: the engine arms no timer while the handshake waits, so only the helper can kill.
+  const fx = failed(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { fix: { hang: true } } });
+  const hooks = writeBeforeTimer(t, () => false, 'a write the worker never makes', { ms: 1000 });
+  await assert.rejects(drive(fx.ctx({ hooks })), /handshake not observed within 1000 ms: a write the worker never makes; the worker's process group \d+ was killed and is gone/);
+  assert.ok(Number.isInteger(hooks.pgid) && hooks.pgid > 0, 'the worker group was recorded before the handshake');
+  assert.equal(groupGone(hooks.pgid), true, 'no process of the worker group is left');
+  assert.ok(fx.runs('fix').length > 0, 'the worker had started');
+});
+
 /** A repair worker that appends a forged RETRY and then hangs: its drive times out, the forged line is never honoured. */
 async function forgedThenHangs(t, slow) {
   const forged = { run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' };
@@ -301,9 +313,10 @@ async function forgedThenHangs(t, slow) {
   const fx = failed(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { fix: { appendEvent: forged, hang: true, ...slow } } });
   const forgedIn = () => runStateEvents(fx.planFile).some(e => e.event === 'RETRY');
   fx.setRunTimeout(1000);
-  const r = await drive(fx.ctx({ hooks: writeBeforeTimer(forgedIn, 'the repair worker appended its forged RETRY') }));
+  const r = await drive(fx.ctx({ hooks: writeBeforeTimer(t, forgedIn, 'the repair worker appended its forged RETRY') }));
   fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
   assert.equal(r.repairs[0].state, 'failed', JSON.stringify(r));
+  assert.deepEqual(fx.readState().attempts.filter(a => a.kind === 'repair').map(a => a.status), ['timed_out'], 'killed by the timer, never retried');
   assert.ok(forgedIn(), 'the forged line is in the plan file');
   refused(fx.gate('review', passReview('rx-2', fx.candidate())), 'retry_unauthorized');
 }
