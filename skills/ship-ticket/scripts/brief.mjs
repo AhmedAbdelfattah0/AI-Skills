@@ -119,6 +119,7 @@ const WORKER_RULES = [
   'The orchestrator owns shared seams, barriers, reconciliation and all Git operations.',
   'Write the failing test first when a RED spec is listed, and run it to see it fail before you write the code.',
   'Run only the test files listed under Required tests, never the whole suite, unless the brief says so.',
+  'A test must not pass or fail by machine speed or host state: a short timeout may bound only the step meant to time out (make other failures by exit code, not by a timer), wait on a marker the child writes instead of sleeping, and pin every host-derived input (free memory, CPU count, clock) that decides an exact expected value.',
   'Never print or store a home directory path, user name or email address in any repository file.',
 ];
 

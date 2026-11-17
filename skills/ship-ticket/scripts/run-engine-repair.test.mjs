@@ -64,7 +64,8 @@ import { init, drive, acquireLock, planNarrativeDigest } from './run-engine.mjs'
 import { verifyReviewExecution } from './carrier.mjs';
 import { POSIX, fixture, codes, runStateEvents, runLogEvents, waitUntil, delay, passReview, failReview,
   confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
-import { WORKER_FAILURE_BOUND_MS, processGone } from './test-wait.test-helper.mjs';
+import { WORKER_FAILURE_BOUND_MS, processGone, ROOMY_HOST, shadowLowMemoryVmStat, LOW_MEMORY_SKIP } from './test-wait.test-helper.mjs';
+import { admit } from './harness.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const injected = () => Object.assign(new Error('injected fault'), { code: 'injected' });
@@ -143,8 +144,18 @@ test('R2 unknown quiescence after a clean exit is a judgment point and the node 
 
 // ------------------------------------------------------------------ R3 lock barrier
 
-test('R3 drive keeps the lock until every launched attempt has settled, then rethrows', { skip: WIN_SKIP }, async (t) => {
-  // timeoutMs is only a failure bound: worker a ends when the flag appears (#49).
+test('R3 drive keeps the lock until every launched attempt has settled, then rethrows', { skip: WIN_SKIP }, (t) => lockBarrier(t));
+
+// Regression (FLAKE-root-cause-report.md): a loaded macOS host refused b admission beside a, so a waited 120 s for a flag
+// only b's release writes, timed out and was 'failed'. The scenario needs a and b running at once, so admission is pinned.
+test('R3 (load) the lock barrier holds while the host reports memory pressure (macOS: a low-memory vm_stat first on PATH)', { skip: WIN_SKIP || LOW_MEMORY_SKIP }, async (t) => {
+  shadowLowMemoryVmStat(t);
+  assert.equal(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 }).admitted, false, 'the injection is live: the host probe refuses two members');
+  await lockBarrier(t);
+});
+
+async function lockBarrier(t) {
+  // timeoutMs is only a failure bound: worker a ends when the flag appears (#49). Admission is pinned: the flag needs b beside a.
   const fx = fixture(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, nodes: [{ id: 'a', writes: ['src/a.txt'] }, { id: 'b', writes: ['src/b.txt'] }] });
   const flag = join(fx.root, 'release-a');
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, waitFor: flag }, b: { write: { 'src/b.txt': 'b1' } } });
@@ -159,11 +170,11 @@ test('R3 drive keeps the lock until every launched attempt has settled, then ret
       throw injected();
     }
   } };
-  await assert.rejects(async () => drive(fx.ctx({ hooks })), { code: 'injected' });
+  await assert.rejects(async () => drive(fx.ctx({ hooks, admissionProbe: ROOMY_HOST })), { code: 'injected' });
   assert.equal(thrown, true);
   assert.equal(existsSync(fx.lockFile()), false, 'the lock is released on the way out');
   assert.equal(fx.readState().nodes.a.state, 'done', 'the sibling settled and committed before the lock was released');
-});
+}
 
 // ------------------------------------------------------------------ R4 RED runner recovery and durable locks
 

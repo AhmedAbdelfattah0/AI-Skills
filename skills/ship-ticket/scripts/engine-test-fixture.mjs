@@ -37,7 +37,7 @@ export function gitPath(repo, rel) {
  *   finishes, e.g. after waitFor), editPlan (edits the
  *   narrative), breakGit (makes `git status` fail), sleeper <pidfile> (leaves a background
  *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open),
- *   killGroup, exit <code>, hang, waitFor <file>.
+ *   killGroup, exit <code>, hang, delayMs <ms> (finishes normally after that long: a slow worker), waitFor <file>.
  */
 export const FAKE_CLI = (root) => `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -75,6 +75,7 @@ function finish() {
   process.stdout.write(b.apiMs === undefined ? ${JSON.stringify(CLAUDE_OUT)} : JSON.stringify({ ...JSON.parse(${JSON.stringify(CLAUDE_OUT)}), duration_api_ms: b.apiMs, num_turns: 3 }));
 }
 if (b.hang) setInterval(() => {}, 1000);
+else if (b.delayMs) setTimeout(finish, b.delayMs);
 else if (b.waitFor) { const t = setInterval(() => { if (existsSync(b.waitFor)) { clearInterval(t); finish(); } }, 50); }
 else finish();
 `;
@@ -191,9 +192,17 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
       writeFileSync(file, typeof input === 'string' ? input : JSON.stringify(input));
       return fx.cli(`gate ${kind}`, { input: file }, opts);
     },
-    /** Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. */
-    spawnCli: (cmd, flags = {}) => spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
-      ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' }),
+    /**
+     * Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. It has
+     * no spawn timeout, so it is killed when the test ends: an assertion that fails before the test's own
+     * kill must not leave a live engine holding the test file (and the whole `node --test` job) open.
+     */
+    spawnCli: (cmd, flags = {}) => {
+      const child = spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
+        ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' });
+      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+      return child;
+    },
     candidate: () => {
       const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', 'HEAD', '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'],
         { encoding: 'utf8' });

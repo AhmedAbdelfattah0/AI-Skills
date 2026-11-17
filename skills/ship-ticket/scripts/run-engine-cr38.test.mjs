@@ -29,6 +29,7 @@ import { gitDirty, verifyReviewExecution } from './carrier.mjs';
 import { addUsageRecords } from './usage.mjs';
 import { suggest, evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);
@@ -55,16 +56,35 @@ test('4505924540 a proof that changed the work tree proves nothing: a RETRY revi
   assert.deepEqual(shipEvents(fx), [], 'SHIP_READY is never granted for a tree no proof tested');
 });
 
-/** A run whose final-review repair worker hangs past the timeout (the repair fails, nothing written). */
-function failedRepair(t) {
-  const fx = fixture(t, { commit: true, config: { timeoutMs: 1000, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } } }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { hang: true } } });
+/**
+ * A run whose final-review repair worker fails (provider error, then the same on its one automatic
+ * retry; nothing written). `slowMs` makes builder `a` and the proof command each take that long, as
+ * a starved runner does. The failure is the worker's own exit, not a timer: the run's timeoutMs bounds
+ * every worker AND the proof, so it is only the failure bound (FLAKE-root-cause-report.md, failure 1).
+ */
+function failedRepair(t, { slowMs = 0 } = {}) {
+  const proof = slowMs ? { cmd: process.execPath, args: ['-e', `setTimeout(() => {}, ${slowMs})`] } : { cmd: process.execPath, args: ['-e', ''] };
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: proof } },
+    behaviour: { a: { write: { 'src/a.txt': 'a1' }, ...(slowMs ? { delayMs: slowMs } : {}) }, fix: { exit: 1 } } });
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
   ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
   return fx;
 }
 
 test('4505924571 a failed review repair is a repair_failed judgment: drive never reports done (exit 0); an owner RETRY continues', { skip: WIN_SKIP }, (t) => {
-  const fx = failedRepair(t);
+  repairFailedThenRetry(failedRepair(t));
+});
+
+// Regression (CI ubuntu Node 18 job 134267621207: ship-ready missing_local_proof; Docker --cpus 2: node a timed out):
+// the same contract when the builder and the proof are each slower than the 1 s the scenario used to share with them.
+test('4505924571 (load) the failed-repair contract holds when the builder and the proof each take 1.5 s', { skip: WIN_SKIP }, (t) => {
+  repairFailedThenRetry(failedRepair(t, { slowMs: 1500 }));
+});
+
+function repairFailedThenRetry(fx) {
+  const first = fx.cli('drive'); // the provider error with nothing written is retried once automatically
+  ok(first);
+  assert.deepEqual([first.out.outcome, first.out.repairs[0].state], ['waiting', 'pending'], first.stdout);
   const r = fx.cli('drive');
   assert.equal(r.out.repairs[0].state, 'failed', r.stdout);
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -80,7 +100,7 @@ test('4505924571 a failed review repair is a repair_failed judgment: drive never
   assert.equal(d.out.outcome, 'done');
   assert.equal(d.out.judgments.length, 0, d.stdout);
   ok(fx.gate('ship-ready', {}));
-});
+}
 
 /** A final-review FAIL on `src/a.txt` repaired by `fix`; node a carries `risk`. */
 function repaired(t, risk = []) {
