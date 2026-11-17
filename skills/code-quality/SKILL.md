@@ -58,7 +58,7 @@ it loads `stack-backend.md`, never only the core.
 |---|---|
 | Any review or build | this file + `references/universal-principles.md` + `references/ai-failure-modes.md` |
 | Angular | + `references/stack-angular.md` (`NG-*`) |
-| UI with a design reference | + `references/angular-design-fidelity.md` |
+| Angular UI with a design reference (Angular only) | + `references/angular-design-fidelity.md` |
 | Any backend, any language | + `references/stack-backend.md` (`BE-*`) |
 | Webhook / tenancy / PostgreSQL RLS | + `references/backend-webhook-safety.md` / `references/backend-multi-tenancy.md` / `references/backend-postgres-rls.sql` |
 | No `CLAUDE.md` to read | + `references/angular-profile-template.md` or `references/backend-profile-template.md` |
@@ -75,7 +75,7 @@ listed at the end of each stack reference.
 
 ## Rule Tiers
 
-Every rule below carries one tier marker. The tier decides who may override it.
+Every `NG-*`/`BE-*` rule in the stack references carries one tier marker. The tier decides who may override it.
 
 | Tier | Meaning | Who may override |
 |---|---|---|
@@ -95,10 +95,10 @@ Conflicts are resolved here, before implementation — never mid-file.
 
 1. `[NN]` invariants
 2. `CLAUDE.md` project conventions
-3. This skill's `[ARCH]` rules **and** the `code-quality` hub's core
+3. The stack references' `[ARCH]` rules **and** the universal core
    (`universal-principles.md`, `ai-failure-modes.md`) — applied **jointly**, not
-   ranked. This skill builds on that core; where both speak, both apply.
-4. This skill's `[D]` defaults
+   ranked. The stack rules build on that core; where both speak, both apply.
+4. The stack references' `[D]` defaults
 5. Existing repo convention (match it) — only where 1–4 are silent
 6. Convenience, speed, "simpler for now", "we'll refactor later" — **never a tiebreaker**
 
@@ -257,7 +257,9 @@ Read and write these unchanged; no project migrates: `.code-quality.md`,
 ## Rules for Claude
 
 - **Load before code**: Always read `.code-quality.md` before writing any code in the project
-- **Constitution wins**: If `.code-quality.md` contradicts this SKILL.md, the constitution wins
+- **Constitution scope**: `.code-quality.md` ranks with `CLAUDE.md` in STEP 0. It may replace `[D]`
+  defaults, and `[ARCH]` rules project-wide only; it never overrides an `[NN]` rule or any security invariant. An `[NN]`
+  deviation still needs an explicit, recorded user waiver and a deviation-ledger entry (STEP 0C)
 - **No silent drift**: If asked to violate a rule, flag it explicitly and ask for confirmation.
   A granted exception is documented in a code comment naming the rule, the reason, and a
   **revisit trigger** (the condition under which to reconsider) — an exception with no exit
@@ -289,4 +291,5 @@ rather than being half-reviewed.
   but never per-file — a second pattern for one concern is drift.
 - **Verification Pass feels heavy for a tiny change:** only rules named in the
   Design Contract (plus every `[NN]`) need a row — not the whole catalogue.
-- **Constitution and this SKILL.md disagree:** the constitution wins.
+- **Constitution and this SKILL.md disagree:** the constitution wins only for `[D]` defaults and
+  project-wide `[ARCH]` rules (STEP 0); it never overrides an `[NN]` rule or any security invariant.

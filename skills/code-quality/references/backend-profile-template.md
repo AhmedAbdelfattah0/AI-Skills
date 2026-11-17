@@ -1,6 +1,6 @@
 # CLAUDE.md — Backend
 
-> Scaffold produced by the backend-code-quality skill. Fill every TODO, delete this line.
+> Scaffold produced by the code-quality skill (stack: backend). Fill every TODO, delete this line.
 > This file is the source of truth; the skill defers to it over its own defaults.
 
 ## Stack

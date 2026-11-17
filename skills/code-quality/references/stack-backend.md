@@ -10,7 +10,7 @@ security tiers, a Design Contract gate, and an evidence-backed Verification Pass
 
 Stack-agnostic. This skill enforces a universal set of backend disciplines and adapts the
 concrete implementation to whatever stack the project uses. It does not assume a language,
-framework, runtime, or datastore. Stack-specific code lives in `references/` and is labeled as a
+framework, runtime, or datastore. Stack-specific code lives in the `backend-*` references and is labeled as a
 reference implementation to adapt — never as the only way.
 
 **The principle is always the spine; the snippet is one expression of it.**
@@ -39,12 +39,20 @@ Rule Tiers and STEP 0 are in `../SKILL.md`. For backend work these lines read
 An `[ARCH]` rule may be *replaced across the project*; it may never be *skipped in one handler*.
 A second pattern for the same concern is drift, not pragmatism.
 
+STEP 0 opening line, backend wording:
+
 Conflicts are resolved here, before implementation — never mid-handler.
+
+STEP 0 item 6, backend wording (items 1–5 are unchanged):
 
 6. Convenience, speed, "we'll harden it before launch" — **never a tiebreaker**
 
+The line after the list, backend wording:
+
 If 1 and 2 collide, stop and say so. Do not pick one silently. In backend work this collision is
 usually the interesting finding, not a nuisance.
+
+The closing paragraph of STEP 0, backend wording:
 
 What this does **not** license: skipping an `[ARCH]` rule because one handler finds
 it inconvenient, or because the repo is merely *inconsistent* here. If the repo
@@ -428,7 +436,8 @@ VERIFICATION
 - Every `[NN]` rule is **always in force** and always appears in the table. `[ARCH]` and `[D]`
   rules appear when the Design Contract named them.
 - A `[NN]` FAIL is stated to the user in plain language, not buried in a table row.
-- `AI-FM` row (`../SKILL.md`), backend wording of its last sentence:
+- `AI-FM` row (`../SKILL.md`): for backend, its last two lines read ("…or FAIL with"
+  continues):
   the offending mode named. These catch what BE-* rules can't: the model's own biases (e.g. a
   webhook handler that swallows the signature error it should propagate).
 - **One `TEST` row is in force whenever the diff includes test files** (`*.test.ts`,

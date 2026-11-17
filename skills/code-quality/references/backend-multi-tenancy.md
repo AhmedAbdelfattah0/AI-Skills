@@ -9,7 +9,7 @@ is how cross-tenant leaks happen. In all models the tenant identity comes from t
 ## Model 1 — Database-enforced row isolation (strongest)
 
 The datastore itself filters rows by tenant, independent of application code. Postgres
-Row-Level Security is the canonical example (see `postgres-rls-migration.sql`).
+Row-Level Security is the canonical example (see `backend-postgres-rls.sql`).
 
 - **Pro:** fail-closed by default; a forgotten `WHERE` clause cannot leak data; isolation
   survives bugs in the app layer.

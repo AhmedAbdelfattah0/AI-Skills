@@ -266,4 +266,5 @@ After updating:
 - **No `.code-quality.md` and the stack is exotic:** the two always-load core
   files (`universal-principles`, `ai-failure-modes`) still apply — write the
   constitution from those plus the interview.
-- **Constitution and this SKILL.md disagree:** the constitution wins.
+- **Constitution and `../SKILL.md` disagree:** the constitution wins only for `[D]` defaults and
+  project-wide `[ARCH]` rules (STEP 0); it never overrides an `[NN]` rule or any security invariant.

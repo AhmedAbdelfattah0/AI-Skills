@@ -1,6 +1,6 @@
 # CLAUDE.md — Frontend (Angular)
 
-> Scaffold produced by the `angular-code-quality` skill. Fill every TODO, delete this line.
+> Scaffold produced by the `code-quality` skill (stack: angular). Fill every TODO, delete this line.
 > This file is the source of truth. The skill defers to it over its own `[D]` defaults, and
 > may override its `[ARCH]` rules **project-wide** — but never file-by-file.
 >
