@@ -528,10 +528,10 @@ command exits during argument parsing. So a Codex pass is either *instructed*
 (bare prompt, scope stated in the prompt text) or *scoped* (`--base`, no
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
-worktree paths**, so dedupe and strip the prefix before anything is posted.
-**The elevated Codex opinion carries the same constraint** — it used to
-document `codex review --uncommitted "<instructions>"`, which exits during
-argument parsing on 0.145.0, and now states the scope in the prompt instead.
+worktree paths**, so dedupe and strip the prefix before quoting it.
+**The elevated Codex opinion carries the same constraint:** it states the scope in the
+prompt, because `codex review --uncommitted "<instructions>"` exits during argument
+parsing on 0.145.0.
 **That optional opinion always sets `-c model_reasoning_effort=` explicitly rather than
 inheriting the account's global default** — measured on this repo, same diff and
 prompt, `xhigh` took 384s against `medium`'s 177s (2.2x) — and asks for
