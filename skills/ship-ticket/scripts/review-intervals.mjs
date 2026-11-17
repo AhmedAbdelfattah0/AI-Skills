@@ -9,7 +9,7 @@ export const REVIEW_ROLE_OF = Object.freeze({
 });
 /** Activities whose START must carry candidate_id and review_execution (identity binding); the partition reviewers keep their legacy optional metrics. */
 export const IDENTITY_ACTIVITIES = Object.freeze(['primary_review', 'optional_review', 'review_repair', 'review_confirmation', 'review_reconcile']);
-export const GAP_REASONS = Object.freeze(['no_start_stamp', 'wait', 'unknown']);
+export const GAP_REASONS = Object.freeze(['no_start_stamp', 'wait', 'host_sleep', 'unknown']);
 export const CEILING_METRICS = Object.freeze(['primary_ceiling_ms', 'recovery_ceiling_ms', 'optional_ceiling_ms', 'confirmation_ceiling_ms']);
 /** Metrics kept as strings (never numeric-coerced). */
 export const STRING_METRICS = Object.freeze(['candidate_id', 'skill_revision']);
@@ -38,6 +38,10 @@ export function expectedReviewRoles(run) {
       if (Number.isInteger(phase?.metrics[metric]) && phase.metrics[metric] > 0) expected[role] = phase.metrics[metric];
     }
     const tally = (list, role) => list.filter((i) => i.kind === 'activity' && REVIEW_ROLE_OF[i.name] === role && i.metrics?.review_execution === id).length;
+    // An undeclared or under-declared repair/confirmation that was observed (even unfinished) is still expected:
+    // an open repair must read as a missing interval, never as 0 (A0.1 follow-up).
+    for (const role of ['repair', 'confirmation']) expected[role] = Math.max(expected[role] ?? 0, tally(run.intervals, role) + tally(pending, role));
+    for (const role of ['repair', 'confirmation']) if (!expected[role]) delete expected[role];
     return { review_execution: id, phase,
       roles: Object.entries(expected).map(([role, n]) => ({ role, expected: n, closed: tally(run.intervals, role), open: tally(pending, role) })) };
   });

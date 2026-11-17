@@ -187,7 +187,8 @@ identity metrics, an invalid `gap_reason` or an oversized value refuse a start; 
 `skill_revision` or ceiling never refuses: it is recorded as `unknown` and reported
 `unknown`; do not retry or wait on it, because the REVIEW phase start row is what
 authorizes a REPAIR. Time covered by no interval: end the phase with
-`--metric gap_reason=no_start_stamp|wait|unknown`. `summary` reports
+`--metric gap_reason=no_start_stamp|wait|host_sleep|unknown` (`host_sleep`: the machine was asleep; an
+invalid value on an `end` is written as `unknown` with a stderr note, never refused, so the phase still closes). `summary` reports
 `missing_review_intervals` (a count; `unknown` without execution IDs; `at_least` with a
 known sum when some runs are unknown).
 
@@ -361,3 +362,54 @@ Investigate an old open phase with no open wait against transcript/carrier
 evidence before calling it a continuation defect. For the next full-stack trial,
 check provenance, enforced deadlines, complete counters and real timing sources
 first; do not rerun shipped tickets merely to fill missing telemetry.
+
+## Measurement events and metrics M1-M10 (S-04)
+
+Every execution mode (engine, supervised, recovery, fallback) writes the same optional events into the
+ordinary run log. They are rows of `ship-ticket-run-log-v1` (an optional `detail` object beside `metrics`), so
+old readers parse them unchanged; stop calling the emitter and the feature is gone. One command writes
+a start/end pair (a point event when no times are given; `--started-at`/`--ended-at` import a past event):
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs event --repo <TARGET_REPO> --ticket <TICKET> --run-id <RUN_ID> \
+  --name <event> --event-id <unique> --metric key=value ... [--detail '<json>'] [--started-at <iso> --ended-at <iso>]
+```
+
+| Event | Required metrics | Notes |
+|---|---|---|
+| `run_mode` | `mode=engine\|supervised\|recovery\|fallback` | `supersedes_run_id=<run>` when this run replaces another (resume/adopt, supervised completion); `reason=execution_lane_unavailable` on a fallback. Emit it at the start of every run. |
+| `review_round` | `n`, `round_kind=original\|confirmation\|final`, `lane`, `verdict=PASS\|FAIL\|unavailable` | one per lane per round; `majors`, `minors`, `candidate_sha`, `packet_sha256`; the interval is the dispatch-to-result time (a relay carrier time wins) |
+| `repair_batch` | `n` | `authority_event_id`; `--detail '{"finding_ids":[...]}'` |
+| `confirmation` | `n` | `repair_batch=<n>` |
+| `gate_run` | `n`, `head_sha`, `clean` | `manifest_sha256`; `--detail '{"per_gate":[{"name","ms","exit","key"}]}'`; `holds_review=true` with `hold_ms` when reviewers waited for it; `t0_class=true` when it failed on a builder-catchable defect |
+| `owner_decision` | `n` | a `wait`: its interval is the owner wait; `decision_class`, `retries_granted` |
+| `finding` | `fingerprint`, `repeat`, `severity` | `round`, `builder_catchable`, `deferred=true` for a knowingly deferred finding |
+| `host_sleep` | none | a `wait` with `gap_reason=host_sleep`; excluded from awake time |
+
+Each event may carry `label=measured|estimated|unavailable` (default `measured`). The label of a whole event is
+the only granularity; a value derived from timestamps (for example owner waits from a transcript) must say
+`estimated`. `measure.mjs owner-waits --session <session.jsonl>` derives owner decisions from a Claude
+transcript: only a human `user` message after an assistant turn that awaited the owner counts; a subagent
+handback ("Another Claude session sent a message"), a tool result, a meta or sidechain record is not a human
+decision, and a repeated streamed record counts once. Usage records may carry `models_used[]` (every model
+of the attempt; `usage.mjs` fills it from the CLI's `modelUsage` and from session `message.model`), and a
+priced-by-hand record uses `estimated_cost_usd` (never `reported_cost_usd`). A relay result's `exitCode` and
+token `usage`, when it carries them, are imported into `carrier_timing` as `exit` and `usage`; absent means unavailable.
+
+`eval.mjs report` adds a `measurement` block only when the log has such events (reports for old runs are
+unchanged). A ticket with any event is instrumented and *started*; the rest are counted `uninstrumented` and
+left out of every denominator. A ticket's status comes from its head run (the run no `supersedes_run_id`
+names): `complete` delivered, `fail` failed, `abandoned`, `open` censored. Each metric prints `value` and `label`:
+
+- M1 first-pass acceptance: started tickets whose first `original` round has at least two lanes, all `PASS` with `majors=0`.
+  Failed, abandoned and censored tickets stay in the denominator and are listed in `started_by_status`.
+- M2/M3 distinct `Major` fingerprints (`repeat` findings counted apart); `unavailable` without finding events or `builder_catchable`.
+- M4 rounds (distinct `n`), repair batches, confirmations per ticket, and how many are within 2 rounds and 1 batch.
+- M5 `M5a` (plan approval to SHIP start) and `M5b` (first interval to head workflow end, delivered tickets): awake time with and
+  without human wait; `host_sleep` always excluded.
+- M6 per-round dispatch-to-last-required-result, plus reconciliation and gate holds, overlap counted once.
+- M7 gate runs, total wall, T0-class failures, and redundant executions (`unavailable` unless every run has `per_gate` keys).
+- M8 list-equivalent cost of all attempts. A provider with any record lacking a cost is `unavailable`, and so is the total:
+  it prints `Codex unavailable`, never a partial sum or 0. Failed/abandoned/censored cost is reported separately.
+- M9 `unavailable until the 30-day window matures`; deferred findings are listed apart by severity.
+- M10 `unavailable`: it needs the S-24 eligibility record and S-16 replays.

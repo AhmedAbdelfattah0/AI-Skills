@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
+import { EVENT_KIND, EVENT_STRING_METRICS, validateEvent } from './measure.mjs';
 
 const SCHEMA = 'ship-ticket-run-log-v1';
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
@@ -28,9 +29,12 @@ function usage() {
   return `Usage:
   run-log.mjs start --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--metric key=value ...]
   run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>]
+  run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> --event-id <id> [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>] [--outcome <value>]
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
+Measurement events (S-04, optional): run_mode, review_round, repair_batch, confirmation, gate_run, owner_decision, finding,
+host_sleep. The event command writes one start/end pair (a point event when no times are given); see references/observability.md.
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
 metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|unknown
@@ -112,7 +116,7 @@ function stringMetric(raw) {
   return raw;
 }
 
-function parseMetrics(values) {
+function parseMetrics(values, { lenientGap = false } = {}) {
   const metrics = {};
   for (const item of values) {
     const separator = item.indexOf('=');
@@ -121,8 +125,13 @@ function parseMetrics(values) {
     const value = item.slice(separator + 1);
     if (!SAFE_METRIC.test(key)) fail(`invalid metric key: ${key}`);
     if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
-    metrics[key] = STRING_METRICS.includes(key) ? stringMetric(value) : parseMetricValue(value);
-    if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
+    metrics[key] = STRING_METRICS.includes(key) || EVENT_STRING_METRICS.includes(key) ? stringMetric(value) : parseMetricValue(value);
+    if (key === 'gap_reason' && !GAP_REASONS.includes(metrics[key])) {
+      // An END must always be written: a refused end would leave its interval (a REVIEW phase) open forever.
+      if (!lenientGap) fail(`gap_reason must be one of: ${[...GAP_REASONS].join(', ')}`);
+      process.stderr.write(`run-log: gap_reason recorded as unknown (not one of: ${[...GAP_REASONS].join(', ')})\n`);
+      metrics[key] = 'unknown';
+    }
     if (['review_execution', 'previous_review_execution'].includes(key)
       && (typeof metrics[key] !== 'string' || !/^review-[A-Za-z0-9._-]+$/.test(metrics[key]))) {
       fail(`${key} must be a prefixed review-<opaque> ID`);
@@ -243,7 +252,20 @@ function importCarrier(options, started, root, timestamp) {
     result_sha256: createHash('sha256').update(bytes).digest('hex'),
     candidate_id: binding.candidate_id, review_execution: binding.review_execution,
     started_at: result.startedAt, ended_at: result.finishedAt,
-    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end };
+    duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end,
+    // Optional (S-04): present only when the relay result carries them; a reader treats absence as unavailable.
+    ...(Number.isInteger(result.exitCode) ? { exit: result.exitCode } : {}),
+    ...(carrierUsage(result.usage) ? { usage: carrierUsage(result.usage) } : {}) };
+}
+
+/** Numeric token counters of a relay result's `usage`; null when it reports none (never an invented 0). */
+function carrierUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
+  const out = {};
+  for (const key of ['input_tokens', 'output_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'reasoning_output_tokens']) {
+    if (Number.isSafeInteger(usage[key]) && usage[key] >= 0) out[key] = usage[key];
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function appendRow(directory, ticket, row) {
@@ -289,6 +311,40 @@ function validateReviewStart(interval, metrics) {
     delete metrics[key];
   }
   if (noted.length) process.stderr.write(`run-log: recorded as unknown (not refused): ${noted.join(', ')}\n`);
+}
+
+/** `event`: one S-04 measurement event as a start/end pair of ordinary run-log rows (droppable: nothing reads them but eval). */
+function eventCommand(options) {
+  const repo = requireOption(options, 'repo');
+  const { directory } = locations(repo);
+  const ticket = validateId('ticket', requireOption(options, 'ticket'));
+  const runId = validateId('run id', requireOption(options, 'run-id'));
+  const name = requireOption(options, 'name');
+  const eventId = validateId('event id', requireOption(options, 'event-id'));
+  const kind = EVENT_KIND[name];
+  if (!kind) fail(`--name must be one of: ${Object.keys(EVENT_KIND).join(', ')}`);
+  const metrics = parseMetrics(options.metric);
+  let detail;
+  if (options.detail !== undefined) {
+    try { detail = JSON.parse(options.detail); } catch { fail('--detail must be valid JSON'); }
+  }
+  try { validateEvent(name, metrics, detail); } catch (error) { fail(error.message); }
+  const stamp = (key) => {
+    const raw = options[key];
+    if (raw === undefined) return null;
+    if (!Number.isFinite(Date.parse(raw))) fail(`--${key} must be an ISO timestamp`);
+    return new Date(raw);
+  };
+  const now = new Date();
+  const from = stamp('started-at') ?? now, to = stamp('ended-at') ?? from;
+  if (to < from) fail('--ended-at must not be before --started-at');
+  const path = logPath(directory, ticket);
+  if (readRows(path).rows.some((row) => row.run_id === runId && row.event_id === eventId)) fail(`event ${eventId} already exists in run ${runId}`);
+  const base = { schema: SCHEMA, ticket, run_id: runId, event_id: eventId, kind, name };
+  appendRow(directory, ticket, { ...base, event: 'start', timestamp: from.toISOString(), metrics });
+  const row = { ...base, event: 'end', timestamp: to.toISOString(), duration_ms: to - from, outcome: options.outcome ?? 'complete', metrics: {}, ...(detail ? { detail } : {}) };
+  appendRow(directory, ticket, row);
+  process.stdout.write(`${JSON.stringify(row)}\n`);
 }
 
 /** Review intervals with no closed start/end pair; `unknown` without review_execution ids (built on review-intervals.mjs). */
@@ -360,7 +416,7 @@ function end(options) {
     }
     fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
   }
-  const metrics = parseMetrics(options.metric);
+  const metrics = parseMetrics(options.metric, { lenientGap: true });
   for (const key of ['candidate_id', 'review_execution']) {
     if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
   }
@@ -436,5 +492,6 @@ function summary(options) {
 const { command, options } = parseArgs(process.argv.slice(2));
 if (command === 'start') start(options);
 else if (command === 'end') end(options);
+else if (command === 'event') eventCommand(options);
 else if (command === 'summary') summary(options);
 else fail(`unknown command: ${command}`);

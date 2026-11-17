@@ -421,8 +421,12 @@ test('gap_reason accepts only the enum', (t) => {
   const f = fixture(t);
   const start = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'build-1');
   assert.equal(f.cli('start', ...start).status, 0);
-  assert.equal(f.cli('end', ...start, '--metric', 'gap_reason=forgot').status, 1);
-  for (const reason of ['no_start_stamp', 'wait', 'unknown']) {
+  // A0.1 follow-up: an END with a bad value is written as `unknown` (a refused end would leave the interval open); a START still refuses it.
+  const bad = f.cli('end', ...start, '--metric', 'gap_reason=forgot');
+  assert.equal(bad.status, 0, bad.stderr);
+  assert.equal(JSON.parse(bad.stdout).metrics.gap_reason, 'unknown');
+  assert.equal(f.cli('start', ...rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', 'bad-start'), '--metric', 'gap_reason=forgot').status, 1);
+  for (const reason of ['no_start_stamp', 'wait', 'host_sleep', 'unknown']) {
     const args = rid('--kind', 'activity', '--name', 'frontend_build', '--event-id', `gap-${reason}`);
     assert.equal(f.cli('start', ...args).status, 0);
     const ended = f.cli('end', ...args, '--metric', `gap_reason=${reason}`);
@@ -507,5 +511,5 @@ test('run-log and eval import one review-interval table', () => {
     assert.doesNotMatch(text, /primary_review|optional_review|review_reconcile|recovery_ceiling_ms/, `${file} must not repeat the table`);
   }
   assert.equal(REVIEW_ROLE_OF.contract_review, 'primary');
-  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 3 && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
+  assert.ok(IDENTITY_ACTIVITIES.every((n) => REVIEW_ROLE_OF[n]) && GAP_REASONS.length === 4 && GAP_REASONS.includes('host_sleep') && CEILING_METRICS.length === 4 && STRING_METRICS.includes('skill_revision'));
 });
