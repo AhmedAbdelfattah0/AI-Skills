@@ -87,10 +87,15 @@ test('the capability table pins every mechanism within its enforced floor and ne
   for (const c of CAPABILITIES) {
     assert.match(c.evidence, /\.adoc/, c.id);
     assert.ok(!String(c.since).startsWith('2.44'), c.id);
-    if (c.since === null) { assert.match(c.enforcement, /^not-relied-on/); continue; }
+    if (/^not-relied-on/.test(c.enforcement)) continue; // documented, never assumed at a floor
     assert.ok(atLeast(info(floorOf[c.enforcement]), c.since.split('.').map(Number)), `${c.id} ${c.since} above its floor`);
   }
-  assert.equal(CAPABILITIES.find((c) => c.id === '--no-lazy-fetch').since, '2.45.0');
+  const since = Object.fromEntries(CAPABILITIES.map((c) => [c.id, [c.since, c.enforcement.split(' ')[0]]]));
+  assert.deepEqual(since['--no-lazy-fetch'], ['2.45.0', 'partial-clone-floor']);
+  assert.deepEqual(since['--end-of-options (parse-options commands)'], ['2.24.0', 'floor']);
+  assert.deepEqual(since['rev-parse --end-of-options'], ['2.30.0', 'floor']);
+  assert.deepEqual(since['--end-of-options <rev> -- <path>'], ['2.43.1', 'not-relied-on'], 'combined form is above the 2.32 floor');
+  assert.deepEqual(since.GIT_GRAFT_FILE, [null, 'not-relied-on:']);
 });
 
 // ------------------------------------------------------------------ binary resolution (AC3)
@@ -130,6 +135,29 @@ test('POSIX rules (injected fs): relative entries never resolve, whatever the pr
   const r = (PATH) => resolveGitBinary({ env: { PATH }, cwd: '/work', exclude: [], platform: 'linux', fs });
   assert.equal(r('.:sub::/good'), '/good/git');
   assert.equal(r('/plant:/good'), '/plant/git', 'control: an absolute dir resolves');
+});
+
+test('a relative cwd or exclude is refused, not resolved against the process cwd', () => {
+  const fs = { realpath: () => null, isExecutableFile: () => false };
+  const bad = [
+    { cwd: 'work', platform: 'linux' }, { cwd: '/work', exclude: ['cand'], platform: 'linux' }, { cwd: '', platform: 'linux' },
+    { cwd: 'D:\\a\\repo', exclude: ['cand'], platform: 'win32' }, { cwd: 'D:repo', platform: 'win32' }, { cwd: '\\repo', platform: 'win32' },
+  ];
+  for (const o of bad) assert.throws(() => resolveGitBinary({ env: { PATH: '/g' }, fs, ...o }), code('git_resolver_bad_arg'), JSON.stringify(o));
+  assert.throws(() => resolveGitBinary({ env: { PATH: '/g' }, cwd: '/work', exclude: ['/cand'], platform: 'linux', fs }), code('git_unavailable'), 'control');
+});
+
+test('macOS: a case-variant PATH spelling of the cwd is still refused', { skip: process.platform !== 'darwin' && 'case-insensitive APFS only' }, (t) => {
+  const root = tmp(t);
+  const plant = join(root, 'plant');
+  fakeGit(plant, 'echo planted');
+  const good = fakeGit(join(root, 'good'), 'echo "git version 2.55.0"');
+  const upper = plant.toUpperCase();
+  assert.ok(existsSync(join(upper, 'git')), 'the volume is case-insensitive, so the plant is reachable');
+  assert.equal(resolveGitBinary({ env: { PATH: `${upper}:${dirname(good)}` }, cwd: plant }), good);
+  const elsewhere = join(root, 'elsewhere');
+  mkdirSync(elsewhere);
+  assert.equal(resolveGitBinary({ env: { PATH: `${upper}:${dirname(good)}` }, cwd: elsewhere }), join(plant, 'git'), 'control');
 });
 
 test('POSIX: a non-executable file or a directory named git is skipped', { skip: !posix && 'POSIX modes' }, (t) => {
@@ -204,24 +232,96 @@ test('probeGit refuses a failing, old or malformed git', { skip: !posix && 'POSI
   assert.equal(probe('echo "git version 2.44.0"')().noLazyFetch, false);
 });
 
+test('a git that ignores SIGTERM cannot hold probeGit past its timeout (external watchdog)', { skip: !posix && 'POSIX signal traps; Windows has no SIGTERM to ignore' }, (t) => {
+  const root = tmp(t);
+  const pidFile = join(root, 'pid');
+  const d = join(root, 'g');
+  fakeGit(d, `echo $$ > '${pidFile}'\ntrap '' TERM\nwhile :; do :; done`);
+  const cwd = join(root, 'cwd');
+  mkdirSync(cwd);
+  const pid = () => Number(readFileSync(pidFile, 'utf8'));
+  const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+  t.after(() => { if (existsSync(pidFile) && alive(pid())) process.kill(pid(), 'SIGKILL'); });
+  const mod = JSON.stringify(pathToFileURL(join(here, 'git-capability.mjs')).href);
+  const opts = JSON.stringify({ env: { PATH: d }, cwd, timeoutMs: 2000 });
+  const script = `import(${mod}).then((m) => { try { m.probeGit(${opts}); console.log('returned'); } catch (e) { console.log(e.code); } });`;
+  const started = Date.now();
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL' });
+  assert.equal(r.error, undefined, 'the external watchdog had to kill the probe: it hung');
+  assert.equal(r.stdout.trim(), 'git_timeout', r.stderr);
+  assert.ok(Date.now() - started < 15_000);
+  assert.ok(existsSync(pidFile), 'the TERM-ignoring git really ran');
+  assert.equal(alive(pid()), false, 'and was killed');
+});
+
 // ------------------------------------------------------------------ static: no bare git
+// A heuristic for lib/git-*.mjs only; the real ratchet is design T1/T3 (S-02a0e). Unsupported import
+// forms are rejected outright rather than tracked: one static, named, unaliased child_process import.
+
+const SPAWNERS = ['spawn', 'spawnSync', 'execFile', 'execFileSync'];
+function spawnViolations(src) {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const v = [];
+  const imports = [...code.matchAll(/^import\s*\{([^}]*)\}\s*from\s*'node:child_process';$/gm)];
+  if (imports.length > 1 || (code.match(/child_process/g) ?? []).length !== imports.length) v.push('child_process: only one static named import');
+  if (/\b(?:require|createRequire)\s*\(|\bimport\s*\(|process\s*\.\s*(?:binding|dlopen)/.test(code)) v.push('require or dynamic import');
+  if (/\bshell\s*:(?!\s*false\b)/.test(code)) v.push('shell option');
+  const names = imports.flatMap((m) => m[1].split(',').map((n) => n.trim()).filter(Boolean));
+  for (const n of names) if (!SPAWNERS.includes(n)) v.push(`import form: ${n}`);
+  const body = code.replace(/^import\s*\{[^}]*\}\s*from\s*'node:child_process';$/gm, '');
+  let sites = 0;
+  for (const n of names.filter((x) => SPAWNERS.includes(x))) {
+    for (const m of body.matchAll(new RegExp(`\\b${n}\\b(\\s*\\(\\s*([^,)]*))?`, 'g'))) {
+      sites++;
+      const arg = m[2] ?? '';
+      if (!m[1]) { v.push(`${n} used without a call`); continue; }
+      const via = /^([A-Za-z_$][\w$]*)$/.exec(arg) ? 'resolveGitBinary' : /^([A-Za-z_$][\w$]*)\.path$/.test(arg) ? 'probeGit' : null;
+      const id = arg.split('.')[0];
+      if (!via || !new RegExp(`\\b(?:const|let)\\s+${id.replace(/\$/g, '\\$')}\\s*=\\s*${via}\\(`).test(body)) v.push(`executable ${arg || '?'} not from the resolver`);
+    }
+  }
+  return { v, sites };
+}
 
 test('no lib/git-*.mjs module spawns a literal executable, a shell, or bypasses the resolver', () => {
   const mods = readdirSync(here).filter((f) => /^git-.*\.mjs$/.test(f) && !f.endsWith('.test.mjs'));
   assert.ok(mods.includes('git-capability.mjs'));
   let sites = 0;
   for (const f of mods) {
-    const src = readFileSync(join(here, f), 'utf8').replace(/^\s*\/\/.*$/gm, '');
-    assert.doesNotMatch(src, /(?<![.\w$])(?:exec|execSync|fork)\s*\(/, `${f}: shell or fork call`);
-    assert.doesNotMatch(src, /\bshell\s*:(?!\s*false\b)/, `${f}: shell option`);
-    for (const m of src.matchAll(/\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*([^,)]*)/g)) {
-      sites++;
-      assert.match(m[1], /^[A-Za-z_$][\w$.]*$/, `${f}: executable must be a resolved identifier, got ${m[1]}`);
-      const id = m[1].split('.')[0];
-      assert.match(src, new RegExp(`\\b${id.replace('$', '\\$')}\\s*=\\s*resolveGitBinary\\(`), `${f}: ${id} not from resolveGitBinary`);
-    }
+    const r = spawnViolations(readFileSync(join(here, f), 'utf8'));
+    assert.deepEqual(r.v, [], f);
+    sites += r.sites;
   }
   assert.ok(sites > 0, 'the scan saw at least one spawn site');
+});
+
+test('the spawn guard rejects aliased, namespace, default, require and dynamic forms (negative fixtures)', () => {
+  const imp = "import { spawnSync } from 'node:child_process';\n";
+  const bad = {
+    alias: "import { spawnSync as run } from 'node:child_process';\nconst bin = resolveGitBinary();\nrun('git', []);",
+    namespace: "import * as cp from 'node:child_process';\nconst bin = resolveGitBinary();\ncp.spawnSync('git');",
+    default: "import cp from 'node:child_process';\ncp.spawnSync('git');",
+    require: "const cp = require('node:child_process');\ncp.spawnSync('git');",
+    requireAlias: "const { spawnSync: run } = require('child_process');\nrun('git');",
+    dynamic: "const { spawnSync: run } = await import('node:child_process');\nrun('git');",
+    computedRequire: "const cp = require('node:child' + '_process');\ncp.spawnSync('git');",
+    computedImport: "const cp = await import(['node:child', 'process'].join('_'));\ncp.spawnSync('git');",
+    unprefixed: 'import { spawnSync } from "child_process";\nspawnSync(\'git\');',
+    twoImports: imp + "import { spawn } from 'node:child_process';\nconst bin = resolveGitBinary();\nspawn(bin);",
+    rebind: imp + "const run = spawnSync;\nrun('git');",
+    literal: imp + "spawnSync('git', []);",
+    template: imp + 'spawnSync(`git`, []);',
+    notResolved: imp + "const bin = '/usr/bin/git';\nspawnSync(bin, []);",
+    wrongSource: imp + 'const gi = resolveGitBinary();\nspawnSync(gi.path, []);',
+    exec: "import { exec } from 'node:child_process';\nexec('git status');",
+    shell: imp + "const bin = resolveGitBinary();\nspawnSync(bin, [], { shell: true });",
+  };
+  for (const [name, src] of Object.entries(bad)) assert.notDeepEqual(spawnViolations(src).v, [], name);
+  const good = [
+    imp + "const bin = resolveGitBinary();\nspawnSync(bin, ['--version'], { shell: false });",
+    imp + "const gi = probeGit();\nspawnSync(gi.path, ['status']);",
+  ];
+  for (const src of good) assert.deepEqual(spawnViolations(src), { v: [], sites: 1 }, src);
 });
 
 // ------------------------------------------------------------------ T6 capability matrix on this runner's git (AC4)
@@ -262,7 +362,11 @@ test('T6: the runner git honours COUNT pairs, GIT_CONFIG_GLOBAL, --end-of-option
   const gitDir = ok(['rev-parse', '--path-format=absolute', '--git-dir'], { cwd: src });
   assert.ok(isAbsolute(gitDir), gitDir);
   assert.equal(realpathSync.native(gitDir), realpathSync.native(join(src, '.git')));
+  // rev-parse row (2.30.0) and parse-options row (2.24.0; cat-file is a parse-options command). The
+  // combined `--end-of-options <rev> -- <path>` form is not relied on below 2.43.1, so it is not asserted.
   assert.match(ok(['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'], { cwd: src }), /^[0-9a-f]{40,64}$/);
+  assert.equal(ok(['cat-file', '-t', '--end-of-options', 'HEAD'], { cwd: src }), 'commit');
+  assert.notEqual(git(['cat-file', '-t', '--end-of-options', '--batch'], { cwd: src }).status, 0, 'an option after it is an object name');
   const opt = git(['rev-parse', '--verify', '--quiet', '--end-of-options', '--git-dir'], { cwd: src });
   assert.deepEqual([opt.status !== 0, opt.out], [true, ''], 'an option after --end-of-options is an operand');
 
@@ -279,3 +383,29 @@ test('T6: the runner git honours COUNT pairs, GIT_CONFIG_GLOBAL, --end-of-option
   assert.equal(git(['--no-lazy-fetch', 'cat-file', '-e', blob], { cwd: dst }).status, 0);
   // Grafts refusal (the fourth T6 row) needs a handle bootstrap: it lands with S-02a0c.
 });
+
+// ------------------------------------------------------------------ mutation evidence (AC5)
+// Each mutant was applied to a scratch copy of git-capability.mjs; every one turned this file red.
+// | Mutant                                   | Killed by                                              |
+// |------------------------------------------|--------------------------------------------------------|
+// | relative PATH entry allowed              | POSIX rules (injected fs); Windows rules               |
+// | cwd not banned                           | POSIX plant; Windows rules; probeGit GIT_* scrub       |
+// | realpath not checked (spelling only)     | POSIX plant (symlink); macOS case-variant              |
+// | general floor 2.31                       | general floor; capability table; probeGit refuses      |
+// | pre-release ignored                      | general floor; partial clones                          |
+// | version regex unanchored (start / end)   | malformed version output (+ probeGit refuses)          |
+// | partial-clone check dropped              | partial clones                                         |
+// | bare 'git' spawn                         | no lib/git-*.mjs module spawns ...                     |
+// | case-sensitive GIT_* scrub               | probeGit GIT_* scrub                                   |
+// | Windows quotes not stripped              | Windows rules                                          |
+// | drive-relative entry treated absolute    | Windows rules                                          |
+// | executable check dropped                 | POSIX non-executable                                   |
+// | noLazyFetch against the general floor    | probeGit refuses                                       |
+// | floor not enforced in probeGit           | probeGit refuses                                       |
+// | Windows binary name git.cmd              | Windows rules                                          |
+// | killSignal SIGTERM (default)             | SIGTERM-ignoring git (external watchdog)               |
+// | relative cwd/exclude accepted            | relative cwd or exclude is refused                     |
+// | guard: aliased import accepted           | negative fixtures                                      |
+// | guard: probeGit().path form rejected     | negative fixtures (good forms)                         |
+// | guard: require/dynamic import accepted   | negative fixtures (computed require/import)            |
+// | --end-of-options combined row as 'floor' | capability table                                       |
