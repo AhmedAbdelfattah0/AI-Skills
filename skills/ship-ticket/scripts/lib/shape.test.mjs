@@ -296,7 +296,9 @@ function classify(r) {
   if (blocks.length === 0 || nonAssert.length || /ERR_MODULE_NOT_FOUND|SyntaxError/.test(r.stdout + r.stderr)) return { verdict: 'invalid', failing, why: 'non-assertion failure' };
   return { verdict: 'killed', failing };
 }
-const SRC = readFileSync(join(HERE, 'shape.mjs'), 'utf8');
+// Anchors are LF text: a Windows checkout (autocrlf) has CRLF, so the source is normalised to LF before matching, and every mutant is written back as LF.
+const lf = (s) => s.replace(/\r\n/g, '\n');
+const SRC = lf(readFileSync(join(HERE, 'shape.mjs'), 'utf8'));
 test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
   assert.equal(classify(runMutant(`${SRC}\nexport const = ;`)).verdict, 'invalid'); // syntax error
   assert.equal(classify(runMutant(`import './does-not-exist.mjs';\n${SRC}`)).verdict, 'invalid'); // module not found
@@ -304,6 +306,16 @@ test('mutation harness self-test: broken module loading is INVALID, an equivalen
   assert.equal(classify(runMutant(SRC)).verdict, 'survived');
   assert.equal(classify(runMutant(SRC.replace(MUTANTS[0][1], MUTANTS[0][2]))).verdict, 'killed');
   assert.equal(classify({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }).verdict, 'invalid'); // timeout / crash
+});
+test('mutation harness is line-ending independent: a CRLF copy of shape.mjs (a Windows checkout) anchors and kills the same way', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+  const crlf = SRC.replace(/\n/g, '\r\n');
+  assert.ok(crlf.includes('\r\n') && crlf !== SRC);
+  assert.equal(lf(crlf), SRC);
+  for (const [name, from] of MUTANTS) assert.equal(lf(crlf).split(from).length - 1, 1, `${name}: anchor on a CRLF source`);
+  assert.ok(MUTANTS.some(([, from]) => from.includes('\n')), 'the multi-line anchors are the ones CRLF breaks');
+  const bad = [];
+  for (const [name, from, to] of MUTANTS) if (from.includes('\n')) { const c = classify(runMutant(lf(crlf).replace(from, to))); if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict}`); }
+  assert.deepEqual(bad, []);
 });
 test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
   const bad = [];
