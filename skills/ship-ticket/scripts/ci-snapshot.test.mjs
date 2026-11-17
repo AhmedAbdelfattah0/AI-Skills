@@ -5,14 +5,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, truncateSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSnapshot, readSnapshot, classifyJob, idStr, checkRunRef, PREDICATES } from './ci-snapshot.mjs';
+import { buildSnapshot, readSnapshot, classifyJob, idStr, checkRunRef, PREDICATES, SITES, NOT_ATTESTED, CONCLUSIONS } from './ci-snapshot.mjs';
 
 const CLI = fileURLToPath(new URL('./ci-snapshot.mjs', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('./fixtures/ci-snapshot/scrum202-abf4d7ea-actions-jobs.jsonl', import.meta.url));
 const REPO = 'acme/widgets';
+const ORIGIN = 'https://api.github.com';
 const SHA = 'abf4d7ea1e2257c1dcc42052f156307e81e81d34';
 const nl = (items, total = items.length) => [{ total_count: total }, ...items].map((x) => JSON.stringify(x)).join('\n') + '\n';
 const url = (id, repo = REPO) => `https://api.github.com/repos/${repo}/check-runs/${id}`;
@@ -27,12 +28,12 @@ const base = () => ({
   annotations: {},
 });
 const texts = (s) => ({ checkRuns: nl(s.checks), jobs: Object.fromEntries(Object.entries(s.jobs).map(([k, v]) => [k + '.jsonl', nl(v)])), annotations: s.annotations, problems: [] });
-const build = (s = base(), over = {}) => buildSnapshot({ texts: { ...texts(s), ...over }, repo: REPO, sha: SHA });
+const build = (s = base(), over = {}) => buildSnapshot({ texts: { ...texts(s), ...over }, repo: REPO, sha: SHA, origin: ORIGIN });
 const row = (snap, id) => snap.check_runs.find((r) => r.id === String(id));
 
 test('the synthetic replica is complete and fully bound (baseline for every mutation below)', () => {
   const s = build();
-  assert.equal(s.state, 'complete'); assert.equal(s.binding_complete, true);
+  assert.equal(s.state, 'snapshot_valid'); assert.equal(s.internally_consistent, true);
   assert.equal(row(s, 1).binding, 'bound'); assert.equal(row(s, 4).binding, 'external');
   assert.match(s.provider_snapshot_sha256, /^[0-9a-f]{64}$/);
 });
@@ -51,20 +52,20 @@ test('AC1: a failure-class job with missing or null steps or runner_name is unkn
 test('AC5 + fixture: the real SCRUM-202 jobs: six zero-step failures are ok, preview (skipped, null runner) is outside_r3; no total_count so the set is incomplete', () => {
   const real = readFileSync(FIXTURE, 'utf8').trim().split('\n');
   const perRun = {}; for (const l of real) (perRun[`run${JSON.parse(l).run_id}.jsonl`] ??= []).push(l);
-  const s = buildSnapshot({ texts: { checkRuns: nl([]), jobs: Object.fromEntries(Object.entries(perRun).map(([k, v]) => [k, v.join('\n')])), annotations: {}, problems: [] }, repo: REPO, sha: SHA });
+  const s = buildSnapshot({ texts: { checkRuns: nl([]), jobs: Object.fromEntries(Object.entries(perRun).map(([k, v]) => [k, v.join('\n')])), annotations: {}, problems: [] }, repo: REPO, sha: SHA, origin: ORIGIN });
   // all seven lines in ONE file mixes runs: the coherence predicate refuses it
-  assert.equal(buildSnapshot({ texts: { checkRuns: nl([]), jobs: { 'all.jsonl': real.join('\n') }, annotations: {}, problems: [] }, repo: REPO, sha: SHA }).state, 'invalid');
+  assert.equal(buildSnapshot({ texts: { checkRuns: nl([]), jobs: { 'all.jsonl': real.join('\n') }, annotations: {}, problems: [] }, repo: REPO, sha: SHA, origin: ORIGIN }).state, 'invalid');
   const by = Object.fromEntries(s.jobs.map((j) => [j.name, j]));
   assert.deepEqual(Object.keys(by).sort(), ['audit', 'design-parity', 'nn-guard', 'preview', 'sast', 'secrets', 'verify']);
-  for (const n of ['audit', 'design-parity', 'nn-guard', 'sast', 'secrets', 'verify']) { assert.equal(by[n].input_status, 'ok'); assert.equal(by[n].steps, 0); }
+  for (const n of ['audit', 'design-parity', 'nn-guard', 'sast', 'secrets', 'verify']) { assert.equal(by[n].input_status, 'ok'); assert.equal(by[n].inputs.steps.length, 0); }
   assert.equal(by.preview.input_status, 'outside_r3');
   assert.equal(s.state, 'incomplete'); assert.ok(s.reasons.includes('jobs_run43960407722.jsonl_no_total_count'));
-  assert.equal(s.binding_complete, false);
+  assert.equal(s.internally_consistent, false);
   assert.equal(s.jobs.every((j) => j.bound === false), true); // no check_run_url: orphan, not bound
   // mutation of the real rows: drop steps / null the runner -> unknown
   const lines = readFileSync(FIXTURE, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   delete lines[0].steps; lines[1].runner_name = null; lines[6].runner_name = undefined;
-  const m = buildSnapshot({ texts: { checkRuns: nl([]), jobs: { 'real.jsonl': lines.map((l) => JSON.stringify(l)).join('\n') }, annotations: {}, problems: [] }, repo: REPO, sha: SHA });
+  const m = buildSnapshot({ texts: { checkRuns: nl([]), jobs: { 'real.jsonl': lines.map((l) => JSON.stringify(l)).join('\n') }, annotations: {}, problems: [] }, repo: REPO, sha: SHA, origin: ORIGIN });
   assert.deepEqual(m.jobs.map((j) => j.input_status), ['unknown', 'unknown', 'ok', 'ok', 'ok', 'ok', 'unknown']);
 });
 
@@ -80,7 +81,7 @@ test('AC2: an incomplete page set is incomplete (total mismatch, disagreeing tot
   assert.ok(build(s, { jobs: null }).reasons.includes('jobs_missing'));
   const short = { ...texts(s).jobs, 'run100-2.jsonl': nl([], 1) };
   assert.ok(build(s, { jobs: short }).reasons.includes('jobs_run100-2.jsonl_items_differ_from_total'));
-  assert.equal(build(s, { jobs: short }).binding_complete, false);
+  assert.equal(build(s, { jobs: short }).internally_consistent, false);
 });
 
 test('AC3: a check run not bound to exactly one job and attempt is unbound (each cause)', () => {
@@ -99,7 +100,7 @@ test('AC3: a check run not bound to exactly one job and attempt is unbound (each
     const snap = build(s);
     const r = row(snap, 2);
     assert.equal(r.binding, 'unbound', why); assert.equal(r.reason, why); assert.equal(r.input_status, 'unbound');
-    assert.equal(snap.binding_complete, false, why); assert.ok(snap.unbound_check_runs.includes('2'), why);
+    assert.equal(snap.internally_consistent, false, why); assert.ok(snap.unbound_check_runs.includes('2'), why);
   }
   // no check_run_url at all: the job is an orphan and the check run unbound
   const s = base(); delete s.jobs['run100-2'][0].check_run_url;
@@ -150,21 +151,21 @@ test('negatives: invalid input is invalid, never complete', () => {
   assert.equal(build(s, { checkRuns: nl(s.checks) + 'not json\n' }).state, 'invalid');
   assert.equal(build(s, { checkRuns: nl(s.checks) + '[1]\n' }).state, 'invalid');
   assert.equal(build(s, { checkRuns: nl(s.checks) + JSON.stringify({ stray: 1 }) + '\n' }).state, 'invalid');
-  assert.equal(buildSnapshot({ texts: texts(s), repo: 'no-slash', sha: SHA }).state, 'invalid');
-  assert.equal(buildSnapshot({ texts: texts(s), repo: REPO, sha: 'abc' }).state, 'invalid');
-  assert.equal(buildSnapshot({ texts: texts(s), repo: 'ACME/Widgets', sha: SHA.toUpperCase() }).binding_complete, true); // identity compare is case-normalised on the request side
-  assert.deepEqual(checkRunRef('https://api.github.com/repos/A/B/check-runs/5'), { repo: 'a/b', id: '5' });
-  assert.equal(checkRunRef('https://api.github.com/repos/a/b/check-runs/5/x'), null);
+  assert.equal(buildSnapshot({ texts: texts(s), repo: 'no-slash', sha: SHA, origin: ORIGIN }).state, 'invalid');
+  assert.equal(buildSnapshot({ texts: texts(s), repo: REPO, sha: 'abc', origin: ORIGIN }).state, 'invalid');
+  assert.equal(buildSnapshot({ texts: texts(s), repo: 'ACME/Widgets', sha: SHA.toUpperCase(), origin: ORIGIN }).internally_consistent, true); // identity compare is case-normalised on the request side
+  assert.deepEqual(checkRunRef('https://api.github.com/repos/A/B/check-runs/5', ORIGIN), { repo: 'a/b', id: '5' });
+  assert.equal(checkRunRef('https://api.github.com/repos/a/b/check-runs/5/x', ORIGIN), null);
 });
 
 test('annotations: the listed count must equal output.annotations_count', () => {
   const ann = (n) => Array.from({ length: n }, (_, i) => JSON.stringify({ message: `m${i}` })).join('\n') + '\n';
   const s = base(); s.checks[0].output.annotations_count = 1; s.annotations['1.jsonl'] = ann(1);
-  const ok = build(s); assert.deepEqual(row(ok, 1).annotations, { status: 'present', messages: ['m0'] });
+  const ok = build(s); assert.deepEqual([row(ok, 1).annotations.status, row(ok, 1).annotations.messages, row(ok, 1).annotations.count], ['present', ['m0'], 1]); assert.match(row(ok, 1).annotations.sha256, /^[0-9a-f]{64}$/);
   const none = base(); none.checks[0].output.annotations_count = 1;
   assert.equal(row(build(none), 1).annotations.status, 'missing');
   const short = base(); short.checks[0].output.annotations_count = 2; short.annotations['1.jsonl'] = ann(1);
-  assert.deepEqual(row(build(short), 1).annotations, { status: 'incomplete', messages: [], expected: 2, listed: 1 });
+  assert.deepEqual([row(build(short), 1).annotations.status, row(build(short), 1).annotations.expected, row(build(short), 1).annotations.listed], ['incomplete', 2, 1]);
   const extra = base(); extra.annotations['1.jsonl'] = ann(1);
   assert.equal(row(build(extra), 1).annotations.status, 'incomplete');
   const unk = base(); delete unk.checks[0].output;
@@ -182,30 +183,25 @@ function writeDir(root, s, t = texts(s)) {
   for (const [k, v] of Object.entries(t.jobs)) writeFileSync(join(root, 'jobs', k), v);
   for (const [k, v] of Object.entries(t.annotations)) writeFileSync(join(root, 'annotations', k), v);
 }
-const trySymlink = (target, path) => { try { symlinkSync(target, path); return true; } catch { return false; } }; // Windows without privilege: skip
-const cli = (dir, sha = SHA) => spawnSync(process.execPath, [CLI, 'check', '--snapshot', dir, '--repo', REPO, '--sha', sha], { encoding: 'utf8' });
+const cli = (dir, sha = SHA) => spawnSync(process.execPath, [CLI, 'check', '--snapshot', dir, '--repo', REPO, '--sha', sha, '--origin', ORIGIN], { encoding: 'utf8' });
 
 test('CLI + reader: a complete bound directory exits 0; every filesystem hazard fails closed', () => {
   const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
   try {
     const good = join(root, 'good'); mkdirSync(good); writeDir(good, base());
     const r = cli(good);
-    assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).binding_complete, true);
-    assert.equal(JSON.stringify(readSnapshot({ dir: good, repo: REPO, sha: SHA })), JSON.stringify(JSON.parse(r.stdout)));
+    assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).internally_consistent, true);
+    assert.equal(JSON.stringify(readSnapshot({ dir: good, repo: REPO, sha: SHA, origin: ORIGIN })), JSON.stringify(JSON.parse(r.stdout)));
 
     const bad = join(root, 'bad'); mkdirSync(bad); writeDir(bad, base()); writeFileSync(join(bad, 'jobs', 'run100-1.jsonl'), nl([], 1));
     const rb = cli(bad); assert.equal(rb.status, 1); assert.equal(JSON.parse(rb.stdout).state, 'incomplete');
 
     const extra = join(root, 'extra'); mkdirSync(extra); writeDir(extra, base()); writeFileSync(join(extra, 'notes.txt'), 'x');
-    assert.ok(JSON.parse(cli(extra).stdout).reasons.includes('snapshot_unexpected_entry'));
+    assert.ok(JSON.parse(cli(extra).stdout).reasons.includes('unexpected_entry'));
 
     const utf = join(root, 'utf'); mkdirSync(utf); writeDir(utf, base()); writeFileSync(join(utf, 'check-runs.jsonl'), Buffer.concat([Buffer.from('{"total_count":1}\n{"id":1,"name":"v'), Buffer.from([0xff]), Buffer.from('"}\n')])); // valid JSON once decoded leniently
     assert.equal(JSON.parse(cli(utf).stdout).state, 'invalid');
 
-    const sym = join(root, 'sym'); mkdirSync(sym); writeDir(sym, base());
-    writeFileSync(join(root, 'real.jsonl'), nl(base().checks));
-    rmSync(join(sym, 'check-runs.jsonl'));
-    if (trySymlink(join(root, 'real.jsonl'), join(sym, 'check-runs.jsonl'))) assert.equal(JSON.parse(cli(sym).stdout).state, 'invalid');
 
     const crlf = join(root, 'crlf'); mkdirSync(crlf); writeDir(crlf, base());
     writeFileSync(join(crlf, 'check-runs.jsonl'), nl(base().checks).replace(/\n/g, '\r\n'));
@@ -216,62 +212,113 @@ test('CLI + reader: a complete bound directory exits 0; every filesystem hazard 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-// ---- the completeness predicates: ONE table, each broken in turn from a complete snapshot -------------------------
-// Each case: { s(s) mutates the synthetic snapshot, t(t) mutates the texts, args: { sha }, root: 'symlink' | 'extra' }.
+// ---- the completeness predicates: ONE table, each reason of each predicate broken in turn from a complete snapshot ----
+// Case: { reason, s(s) mutates the synthetic snapshot, t(texts) mutates the texts, args, root: <file-system hazard>, want }.
+const big = () => base().checks;
 const CASES = {
-  identity_args: [{ sha: 'abc' }],
-  files_safe: [{ root: 'symlink' }, { root: 'extra' }, { t: (x) => { x.annotations['999.jsonl'] = '{"message":"m"}\n'; } }],
-  lines_wellformed: [{ t: (x) => { x.checkRuns += 'not json\n'; } }, { s: (s) => { s.checks[3].name = 7; } }],
-  pages_complete: [{ t: (x) => { x.checkRuns = nl(base().checks, 9); } }, { t: (x) => { delete x.jobs['run100-2.jsonl']; x.jobs['run100-2.jsonl'] = nl([], 1); } }],
-  ids_canonical_unique: [{ s: (s) => { s.jobs['run100-2'][0].id = 1; } }, { s: (s) => { s.checks[3].id = '04'; } }, { s: (s) => { s.checks[3].id = 2 ** 60; } }],
-  check_bound_to_repo: [{ s: (s) => { s.checks[3].url = url(4, 'other/widgets'); } }, { s: (s) => { delete s.checks[3].url; } }, { s: (s) => { s.checks[3].head_sha = 'f'.repeat(40); } }],
-  actions_check_one_job: [{ s: (s) => { delete s.jobs['run100-2']; } }, { s: (s) => { s.jobs['run100-2'][0].head_sha = 'f'.repeat(40); } }, { s: (s) => { s.jobs['run100-2'][0].name = 'lint'; } },
-    { s: (s) => { s.jobs['run100-2'][0].run_attempt = 1.5; } }, { s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2, 'other/widgets'); } }],
-  ids_agree: [{ s: (s) => { s.jobs['run100-2'][0].id = 99; } }, { s: (s) => { s.checks[1].url = url(98); } }],
-  job_files_coherent: [{ s: (s) => { s.jobs['run100-1'].push(s.jobs['run200-1'].pop()); } }],
-  job_name_unique: [{ s: (s) => { s.checks.push(check({ id: 5 })); s.jobs['run100-1'].push(job({ id: 5 })); } }],
-  status_consistent: [{ s: (s) => { s.checks[0].status = 'in_progress'; } }, { s: (s) => { s.jobs['run100-1'][0].status = 'queued'; } }, { s: (s) => { s.jobs['run100-2'][0].conclusion = 'failure'; } },
-    { s: (s) => { s.checks[3].status = 'in_progress'; } }],
-  no_orphan_jobs: [{ s: (s) => { s.jobs['run100-2'].push(job({ id: 77, name: 'x', run_attempt: 2, check_run_url: url(77) })); } }],
-  annotations_complete: [{ s: (s) => { s.checks[0].output.annotations_count = 1; } }, { s: (s) => { delete s.checks[3].output; } }, { s: (s) => { s.checks[0].output.annotations_count = 2; s.annotations['1.jsonl'] = '{"message":"a"}\n'; } }],
+  identity_args: [{ reason: 'repo_malformed', args: { repo: 'x' } }, { reason: 'sha_malformed', args: { sha: 'abc' } }, { reason: 'origin_malformed', args: { origin: 'http://api.github.com' } }],
+  files_safe: [{ reason: 'file_not_regular_or_too_large', root: 'dircheck' }, { reason: 'file_not_regular_or_too_large', root: 'oversized' }, { reason: 'file_not_regular_or_too_large', root: 'filelink' },
+    { reason: 'file_unreadable_or_not_utf8', root: 'badutf8' }, { reason: 'entry_not_a_directory', root: 'jobs_is_file' }, { reason: 'dir_unreadable', root: 'unreadable' },
+    { reason: 'unexpected_entry', root: 'extra' }, { reason: 'unexpected_entry', root: 'extra_in_jobs' }, { reason: 'unexpected_entry', root: 'extra_in_annotations' }, { reason: 'root_not_a_real_directory', root: 'missing_root' }, { reason: 'root_not_a_real_directory', root: 'symlink' }, { reason: 'root_not_a_real_directory', root: 'symlink_slash' },
+    { reason: 'annotation_file_unexpected', t: (x) => { x.annotations['999.jsonl'] = '{"message":"m"}\n'; } }],
+  lines_wellformed: [{ reason: 'not_json_lines', t: (x) => { x.checkRuns += 'not json\n'; } }, { reason: 'unrecognised_line', t: (x) => { x.checkRuns += '{"stray":1}\n'; } },
+    { reason: 'name_not_string', s: (s) => { s.checks[3].name = 7; } }, { reason: 'annotation_not_an_annotation', t: (x) => { x.annotations['1.jsonl'] = '{"x":1}\n'; } }],
+  pages_complete: [{ reason: 'check_runs_missing', root: 'nocheckfile' }, { reason: 'jobs_missing', root: 'nojobsdir' }, { reason: 'no_total_count', t: (x) => { x.checkRuns = big().map((c) => JSON.stringify(c)).join('\n'); } },
+    { reason: 'total_count_disagree', t: (x) => { x.checkRuns = JSON.stringify({ total_count: 3 }) + '\n' + nl(big()); } }, { reason: 'items_differ_from_total', t: (x) => { x.checkRuns = nl(big(), 9); } }],
+  ids_canonical_unique: [{ reason: 'id_invalid', s: (s) => { s.checks[3].id = '04'; } }, { reason: 'id_invalid', s: (s) => { s.checks[3].id = 2 ** 60; } }, { reason: 'id_duplicate', s: (s) => { s.jobs['run100-2'][0].id = 1; } }],
+  non_empty: [{ reason: 'no_check_runs', want: 'empty', s: (s) => { s.checks = []; s.jobs = {}; } }],
+  check_bound_to_repo: [{ reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = url(4, 'other/widgets'); } }, { reason: 'own_url_not_origin_repo', s: (s) => { s.checks[3].url = s.checks[3].url.replace('api.github.com', 'ghe.example'); } },
+    { reason: 'own_url_not_origin_repo', s: (s) => { delete s.checks[3].url; } }, { reason: 'head_sha_mismatch', s: (s) => { s.checks[3].head_sha = 'f'.repeat(40); } }, { reason: 'app_missing', s: (s) => { s.checks[3].app = null; } }],
+  ids_agree: [{ reason: 'own_id_mismatch', s: (s) => { s.checks[1].url = url(98); } }, { reason: 'job_id_mismatch', s: (s) => { s.jobs['run100-2'][0].id = 99; } }],
+  actions_check_one_job: [{ reason: 'no_job', s: (s) => { delete s.jobs['run100-2']; } }, { reason: 'no_job', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2).replace('api.github.com', 'ghe.example'); } },
+    { reason: 'job_repo_mismatch', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2, 'other/widgets'); } }, { reason: 'job_head_sha_mismatch', s: (s) => { s.jobs['run100-2'][0].head_sha = 'f'.repeat(40); } },
+    { reason: 'job_name_mismatch', s: (s) => { s.jobs['run100-2'][0].name = 'lint'; } }, { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1.5; } },
+    { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1e100; } }, { reason: 'job_identity_invalid', s: (s) => { delete s.jobs['run100-2'][0].run_id; } }],
+  job_files_coherent: [{ reason: 'mixed_run_attempt', s: (s) => { s.jobs['run100-1'].push(s.jobs['run200-1'].pop()); } }],
+  job_name_unique: [{ reason: 'ambiguous_job_name', s: (s) => { s.checks.push(check({ id: 5 })); s.jobs['run100-1'].push(job({ id: 5 })); } }],
+  status_consistent: [{ reason: 'check_not_completed', s: (s) => { s.checks[0].status = 'in_progress'; } }, { reason: 'check_not_completed', s: (s) => { s.checks[3].status = 'in_progress'; } },
+    { reason: 'job_not_completed', s: (s) => { s.jobs['run100-1'][0].status = 'queued'; } }, { reason: 'conclusion_mismatch', s: (s) => { s.jobs['run100-2'][0].conclusion = 'failure'; } }],
+  outcomes_known: [{ reason: 'check_conclusion_unknown', s: (s) => { s.checks[1].conclusion = null; } }, { reason: 'check_conclusion_unknown', s: (s) => { delete s.checks[1].conclusion; s.jobs['run100-2'][0].conclusion = null; } },
+    { reason: 'check_conclusion_unknown', s: (s) => { s.checks[3].conclusion = 'bogus'; } }, { reason: 'job_conclusion_unknown', s: (s) => { s.jobs['run100-2'][0].conclusion = 'bogus'; } }],
+  job_inputs_known: [{ reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].steps; } }, { reason: 'job_inputs_unknown', s: (s) => { delete s.jobs['run100-1'][0].runner_name; } }],
+  attempts_contiguous: [{ reason: 'attempt_gap', s: (s) => { s.checks.splice(0, 1); delete s.jobs['run100-1']; } }],
+  no_orphan_jobs: [{ reason: 'not_bound', s: (s) => { s.jobs['run100-2'].push(job({ id: 77, name: 'x', run_attempt: 2, check_run_url: url(77) })); } }],
+  annotations_complete: [{ reason: 'annotations_missing', s: (s) => { s.checks[0].output.annotations_count = 1; } }, { reason: 'annotations_unknown', s: (s) => { delete s.checks[3].output; } },
+    { reason: 'annotations_incomplete', s: (s) => { s.checks[0].output.annotations_count = 2; s.annotations['1.jsonl'] = '{"message":"a"}\n'; } }],
+};
+const observed = new Set(), skippedReasons = new Set();
+const SKIPPABLE = ['EPERM', 'EACCES', 'ENOSYS', 'EOPNOTSUPP', 'UNKNOWN']; // the only symlink/chmod errors that mean "this platform or account cannot"
+
+const hazard = (kind, root, dir) => {
+  const cr = join(dir, 'check-runs.jsonl');
+  if (kind === 'extra') writeFileSync(join(dir, 'notes.txt'), 'x');
+  else if (kind === 'extra_in_jobs') writeFileSync(join(dir, 'jobs', 'notes.txt'), 'x');
+  else if (kind === 'extra_in_annotations') writeFileSync(join(dir, 'annotations', 'notes.txt'), 'x');
+  else if (kind === 'dircheck') { rmSync(cr); mkdirSync(cr); }
+  else if (kind === 'oversized') truncateSync(cr, 64 * 1024 * 1024 + 1);
+  else if (kind === 'badutf8') writeFileSync(cr, Buffer.concat([Buffer.from('{"total_count":1}\n{"id":1,"name":"v'), Buffer.from([0xff]), Buffer.from('"}\n')]));
+  else if (kind === 'jobs_is_file') { rmSync(join(dir, 'jobs'), { recursive: true }); writeFileSync(join(dir, 'jobs'), 'x'); }
+  else if (kind === 'nocheckfile') rmSync(cr);
+  else if (kind === 'nojobsdir') rmSync(join(dir, 'jobs'), { recursive: true });
+  else if (kind === 'missing_root') return join(root, 'nope');
+  else if (kind === 'filelink' || kind === 'symlink' || kind === 'symlink_slash' || kind === 'unreadable') {
+    try {
+      if (kind === 'filelink') { writeFileSync(join(root, 'real.jsonl'), readFileSync(cr)); rmSync(cr); symlinkSync(join(root, 'real.jsonl'), cr); }
+      else if (kind === 'unreadable') { if (process.platform === 'win32' || process.getuid?.() === 0) throw Object.assign(new Error('root or Windows ignores chmod'), { code: 'EPERM' }); chmodSync(join(dir, 'jobs'), 0); }
+      else { const link = join(root, 'link'); symlinkSync(dir, link); return kind === 'symlink_slash' ? link + '/' : link; }
+    } catch (e) { if (SKIPPABLE.includes(e.code)) return { skip: `${kind}: ${e.code}` }; throw e; }
+  }
+  return dir;
 };
 
-test('completeness registry: every predicate in PREDICATES has a breaking case, and no case names an unknown one', () => {
-  assert.deepEqual(Object.keys(CASES).sort(), [...PREDICATES].sort());
-  for (const [p, list] of Object.entries(CASES)) assert.ok(list.length > 0, p);
-});
-
-test('completeness: the baseline is complete with no failed predicate and exits 0', () => {
+test('completeness: the baseline is complete with no failed predicate, exits 0, and states what it does not attest', () => {
   const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
   try {
     writeDir(root, base());
     const r = cli(root);
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    assert.deepEqual([out.state, out.failed_predicates, out.reasons], ['complete', [], []]);
+    assert.deepEqual([out.state, out.failed_predicates, out.reasons, out.origin], ['snapshot_valid', [], [], ORIGIN]);
+    assert.deepEqual(out.not_attested, [...NOT_ATTESTED]); assert.ok(NOT_ATTESTED.length >= 5);
+    assert.ok(NOT_ATTESTED.some((x) => x.startsWith('ci_outcome')) && NOT_ATTESTED.some((x) => x.startsWith('upstream_exhaustiveness')));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 for (const [predicate, list] of Object.entries(CASES)) {
-  test(`completeness: breaking ${predicate} makes the snapshot not complete (state, failed_predicates, exit)`, () => {
+  test(`completeness: breaking ${predicate} makes the snapshot not complete (state, exact reason, predicate, exit)`, (tc) => {
+    const skipped = [];
     list.forEach((c, i) => {
       const root = mkdtempSync(join(tmpdir(), 'cisnap-'));
+      let dir = join(root, 'snap');
       try {
         const s = base(); c.s?.(s);
         const x = texts(s); c.t?.(x);
-        let dir = join(root, 'snap'); mkdirSync(dir); writeDir(dir, s, x);
-        if (c.root === 'extra') writeFileSync(join(dir, 'notes.txt'), 'x');
-        if (c.root === 'symlink') { const link = join(root, 'link'); if (!trySymlink(dir, link)) return; dir = link; }
-        const r = cli(dir, c.sha ?? SHA);
+        mkdirSync(dir); writeDir(dir, s, x);
+        const d = c.root ? hazard(c.root, root, dir) : dir;
+        if (d?.skip) { skipped.push(d.skip); skippedReasons.add(c.reason); return; }
+        const r = spawnSync(process.execPath, [CLI, 'check', '--snapshot', d, '--repo', c.args?.repo ?? REPO, '--sha', c.args?.sha ?? SHA, '--origin', c.args?.origin ?? ORIGIN], { encoding: 'utf8' });
         const out = JSON.parse(r.stdout);
-        const why = `${predicate}[${i}] ${out.reasons.join(',')}`;
-        assert.notEqual(out.state, 'complete', why); assert.notEqual(r.status, 0, why);
-        assert.ok(out.failed_predicates.includes(predicate), `${why} -> ${out.failed_predicates}`);
-        assert.equal(out.binding_complete, false, why);
-      } finally { rmSync(root, { recursive: true, force: true }); }
+        const why = `${predicate}[${i}] ${c.reason}: ${out.reasons.join(',')}`;
+        assert.equal(out.state, c.want ?? out.state, why); assert.notEqual(out.state, 'snapshot_valid', why); assert.notEqual(r.status, 0, why);
+        assert.ok(out.reasons.some((q) => q === c.reason || q.endsWith(`_${c.reason}`)), why);
+        assert.ok(out.failed_predicates.includes(predicate), why);
+        assert.equal(out.internally_consistent, false, why);
+        observed.add(c.reason);
+      } finally { try { chmodSync(join(dir, 'jobs'), 0o755); } catch { /* absent */ } rmSync(root, { recursive: true, force: true }); }
     });
+    if (skipped.length) tc.skip(`SKIPPED on this platform/account: ${skipped.join('; ')}`);
   });
 }
+
+test('completeness registry: every predicate has cases, every site reason in SITES fired (or was explicitly skipped), nothing else is listed', () => {
+  assert.deepEqual(Object.keys(CASES).sort(), [...PREDICATES].sort());
+  assert.deepEqual(Object.keys(SITES).sort(), [...PREDICATES].sort());
+  for (const [p, reasons] of Object.entries(SITES)) for (const r of reasons) {
+    assert.ok(observed.has(r) || skippedReasons.has(r), `${p}/${r}: no table case fired this site`);
+    assert.ok(CASES[p].some((c) => c.reason === r), `${p}/${r}: no case names it`);
+  }
+  assert.ok(CONCLUSIONS.includes('startup_failure') && !CONCLUSIONS.includes('bogus'));
+});
 
 test('supersession: only a completed, executed higher attempt of the same run and job name supersedes', () => {
   assert.equal(row(build(), 1).supersession, 'superseded');
@@ -289,5 +336,38 @@ test('supersession: only a completed, executed higher attempt of the same run an
 });
 
 test('ids: a leading zero is not canonical anywhere (ids and URL references)', () => {
-  assert.equal(idStr('01'), null); assert.equal(idStr('0'), '0'); assert.equal(checkRunRef('https://api.github.com/repos/a/b/check-runs/01'), null);
+  assert.equal(idStr('01'), null); assert.equal(idStr('0'), '0'); assert.equal(checkRunRef('https://api.github.com/repos/a/b/check-runs/01', ORIGIN), null);
+});
+
+test('rows carry the raw classification inputs with explicit absent/null/string markers (S-05b needs them)', () => {
+  const s = base();
+  s.jobs['run100-1'][0].steps = [{ name: 'a', status: 'completed', conclusion: 'failure', number: 1 }]; s.jobs['run100-1'][0].runner_name = 'host'; s.jobs['run100-1'][0].started_at = '2026-11-16T21:28:16Z';
+  const a = row(build(s), 1).job_inputs;
+  assert.deepEqual([a.runner_name_state, a.runner_name, a.steps, a.started_at, a.status, a.conclusion, a.run_attempt], ['string', 'host', [{ name: 'a', status: 'completed', conclusion: 'failure', number: 1 }], '2026-11-16T21:28:16Z', 'completed', 'failure', 1]);
+  const b = row(build(), 1).job_inputs; // runner_name "" is a string, distinguishable from null and absent
+  assert.deepEqual([b.runner_name_state, b.runner_name, b.steps_state], ['string', '', 'array']);
+  const n = base(); n.jobs['run100-1'][0].runner_name = null; delete n.jobs['run100-1'][0].steps;
+  const c = build(n).jobs.find((j) => j.id === '1');
+  assert.deepEqual([c.inputs.runner_name_state, c.inputs.steps_state, c.inputs_unknown], ['null', 'absent', true]);
+});
+
+test('two provider installations cannot be mixed: another origin is not bound, a GHES base path works', () => {
+  const s = base();
+  const ghes = JSON.parse(JSON.stringify(s).replaceAll('https://api.github.com', 'https://ghe.example:8443/api/v3'));
+  assert.equal(buildSnapshot({ texts: texts(ghes), repo: REPO, sha: SHA, origin: 'https://ghe.example:8443/api/v3/' }).state, 'snapshot_valid');
+  assert.notEqual(buildSnapshot({ texts: texts(ghes), repo: REPO, sha: SHA, origin: ORIGIN }).state, 'snapshot_valid');
+  assert.notEqual(buildSnapshot({ texts: texts(ghes), repo: REPO, sha: SHA, origin: 'https://ghe.example/api/v3' }).state, 'snapshot_valid'); // port matters
+});
+
+test('terminology: the module and its header never use the ambiguous `complete` as a state or field name', () => {
+  const src = readFileSync(fileURLToPath(new URL('./ci-snapshot.mjs', import.meta.url)), 'utf8');
+  const old = ['binding', 'complete'].join('_');
+  assert.equal(src.includes(old), false);
+  assert.equal(new RegExp('[\'"`]complete[\'"`]').test(src), false, 'a quoted "complete" state value');
+  assert.equal(new RegExp('state[^\\n]{0,24}\\bcomplete\\b').test(src), false, '`state ... complete` in prose or code');
+  assert.equal(new RegExp('\\bcomplete is never').test(src), false);
+  assert.match(src, /snapshot_valid/); assert.match(src, /internally_consistent/); assert.match(src, /not_attested/);
+  const s = build();
+  assert.deepEqual([s.state, s.internally_consistent, Object.hasOwn(s, old)], ['snapshot_valid', true, false]);
+  assert.ok(['snapshot_valid', 'incomplete', 'empty', 'invalid'].includes(build(base(), { checkRuns: nl([]) }).state));
 });
