@@ -118,6 +118,7 @@ export const SHAPES = Object.freeze({
     steps: { arrayOf: { object: { name: 'string', status: { enum: STATUSES }, conclusion: { enum: CONCLUSIONS, nullable: true }, number: 'posint', started_at: '?ts|null', completed_at: '?ts|null' } }, nullable: true, optional: true } } },
   page: { open: true, object: { total_count: '?int' } },
 });
+// Validation lives in lib/shape.mjs. shapeProblem keeps NO item/node cap by default (legacy verdicts for any array length); depthOf is called unbounded because JSON.parse output cannot share references.
 export { idStr, shapeProblem };
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -145,7 +146,7 @@ function objectLines(text) {
     let v;
     try { v = JSON.parse(l); } catch { return null; }
     if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
-    if (depthOf(v) > MAX_DEPTH) return 'too_deep';
+    if (depthOf(v, MAX_DEPTH, Infinity) > MAX_DEPTH) return 'too_deep';
     out.push(v);
   }
   return out;

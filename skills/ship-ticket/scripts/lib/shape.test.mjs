@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CODES, depthOf, idStr, isTimestamp, LIMITS, shapeProblem, validate } from './shape.mjs';
+import { SHAPES, shapeProblem as ciShapeProblem } from '../ci-snapshot.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const codes = (v, s, o) => validate(v, s, o).problems.map((p) => `${p.path}:${p.code}`);
@@ -36,10 +37,54 @@ test('shapeProblem: the legacy first-problem string form', () => {
   assert.equal(shapeProblem(1, { object: {} }), '$:not_object');
 });
 
+test('depthOf: a shared-reference DAG is bounded by counted work, not wall clock', () => {
+  let x = {}; for (let i = 0; i < 32; i++) x = { a: x, b: x }; // 32 objects, 2^32 paths
+  let visits = 0; const hook = (o) => new Proxy(o, { ownKeys(t) { visits++; return Reflect.ownKeys(t); } });
+  let y = hook({}); for (let i = 0; i < 32; i++) y = hook({ a: y, b: y });
+  assert.equal(depthOf(y, 1e9, 500), Infinity); assert.ok(visits <= 500, `visits ${visits}`);
+  assert.equal(depthOf(y, 1e9), Infinity); // the default budget (LIMITS.maxNodes) also terminates
+  assert.ok(visits <= 500 + LIMITS.maxNodes);
+  assert.equal(depthOf({ a: { b: 1 } }, 32, Infinity), 2);
+});
+
+test('legacy limits: shapeProblem has no item or node cap by default, validate does; depthOf stays unbounded where the caller says so', () => {
+  const labels = new Array(LIMITS.maxItems + 1).fill('l');
+  assert.equal(ciShapeProblem(labels, SHAPES.labels), null);
+  assert.equal(shapeProblem(labels, { arrayOf: 'string' }), null);
+  assert.equal(shapeProblem(labels, { arrayOf: 'string' }, '$', { maxItems: 10 }), '$:too_large');
+  assert.deepEqual(codes(labels, SHAPES.labels), [':too_large']);
+  const wide = Object.fromEntries(Array.from({ length: LIMITS.maxNodes + 5 }, (_, i) => [`k${i}`, 1]));
+  assert.equal(shapeProblem(wide, { open: true, object: {} }), null);
+  assert.equal(shapeProblem(wide, { object: {} }), '$.k0:unknown_key');
+  assert.deepEqual(validate(wide, { object: {} }, { maxNodes: 10 }).problems.map((p) => p.code), ['unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'too_large']);
+  assert.match(readFileSync(join(HERE, '..', 'ci-snapshot.mjs'), 'utf8'), /depthOf\(v, MAX_DEPTH, Infinity\)/);
+});
+
+test('work stops promptly: a wide object under maxNodes 1 or maxProblems 1 is not enumerated to the end', () => {
+  let descriptorReads = 0;
+  const wide = new Proxy(Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, 1])), { getOwnPropertyDescriptor(t, k) { descriptorReads++; return Reflect.getOwnPropertyDescriptor(t, k); } });
+  assert.deepEqual(codes(wide, { object: { a: '?string' } }, { maxNodes: 3 }).map((c) => c.split(':')[1]), ['unknown_key', 'unknown_key', 'too_large']);
+  assert.deepEqual(codes(wide, { object: {} }, { maxProblems: 1 }).length, 1);
+  assert.ok(descriptorReads <= 2, `descriptor reads ${descriptorReads}`);
+  let keysSeen = 0; const probe = new Proxy({}, { ownKeys() { keysSeen++; return []; } });
+  validate(probe, { object: {} }, { maxNodes: 1 }); assert.equal(keysSeen, 1);
+});
+
+test('schema modifiers are own properties: a polluted Object.prototype does not loosen a schema', () => {
+  try {
+    for (const k of ['open', 'nullable', 'optional']) Object.prototype[k] = true;
+    assert.deepEqual(codes({ x: 1 }, { object: {} }), ['/x:unknown_key']);
+    assert.deepEqual(codes(null, { object: {} }), [':not_object']);
+    assert.deepEqual(codes({}, { object: { a: 'string' } }), ['/a:missing']);
+  } finally { for (const k of ['open', 'nullable', 'optional']) delete Object.prototype[k]; }
+  assert.ok(POLLUTED());
+});
+
 test('truncation: maxProblems bounds the list and says so', () => {
   const r = validate(Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`k${i}`, 1])), { object: {} }, { maxProblems: 5 });
   assert.equal(r.problems.length, 5); assert.equal(r.truncated, true);
   assert.equal(validate({ k: 1 }, { object: {} }).truncated, false);
+  assert.deepEqual(validate({ a: 1, b: 1 }, { object: {} }, { maxProblems: 2 }).problems.length, 2); // the list reached the cap: more may exist
 });
 
 test('hostile: __proto__ / constructor / prototype keys are unknown keys, and nothing is polluted', () => {
@@ -80,7 +125,8 @@ test('hostile: deep nesting and cycles are bounded, with no stack overflow', () 
   const S = { arrayOf: null }; S.arrayOf = S; // a self-referential schema
   let deep = []; for (let i = 0; i < 200000; i++) deep = [deep];
   assert.ok(codes(deep, S).includes(`${'/0'.repeat(LIMITS.maxDepth + 1)}:too_deep`));
-  assert.equal(codes(deep, S, { maxDepth: 3 }).length >= 1, true);
+  assert.deepEqual(codes(deep, S, { maxDepth: 3 }), ['/0/0/0/0:too_deep']);
+  assert.ok(validate(deep, S, { maxDepth: 1e9 }).problems.length >= 1); // a huge maxDepth overflows the engine stack: reported, never thrown
   assert.ok(depthOf(deep) > LIMITS.maxDepth);
   const cyc = {}; cyc.self = cyc; assert.ok(depthOf(cyc) > LIMITS.maxDepth);
   assert.equal(depthOf(null), 0); assert.equal(depthOf([]), 1); assert.equal(depthOf({ a: [{}] }), 3);
@@ -118,7 +164,13 @@ test('hostile: Proxy objects never throw out of validate or depthOf', () => {
   assert.doesNotThrow(() => validate(proxy, { object: { a: 'string' } })); assert.doesNotThrow(() => depthOf(proxy));
   assert.ok(!validate(proxy, { object: { a: 'string' } }).ok);
   assert.deepEqual(codes(new Proxy({ a: 'x' }, {}), { object: { a: 'string' } }), []); // a well-behaved proxy is just an object
-  assert.deepEqual(codes(new Proxy(['x'], { get() { throw new Error('g'); } }), { arrayOf: 'string' }).length >= 0, true);
+  // an array is never read through `get`: a lying or throwing `get` trap is not consulted, and the real element is judged
+  let getCalls = 0;
+  const lying = new Proxy([123], { get(t, k, r) { getCalls++; return k === 'length' ? 0 : Reflect.get(t, k, r); } });
+  assert.deepEqual(codes(lying, { arrayOf: 'string' }), ['/0:bad_type']); assert.equal(getCalls, 0);
+  assert.deepEqual(codes(new Proxy(['x'], { get() { throw new Error('g'); } }), { arrayOf: 'string' }), []);
+  assert.deepEqual(codes(new Proxy([123], { getOwnPropertyDescriptor() { throw new Error('d'); } }), { arrayOf: 'string' }), [':unreadable']);
+  assert.deepEqual(codes(new Proxy([1], { getOwnPropertyDescriptor(t, k) { return k === 'length' ? { value: -1, configurable: false, writable: true } : Reflect.getOwnPropertyDescriptor(t, k); } }), { arrayOf: 'string' }).length, 1);
   const bad = { object: { a: 'string' } }; Object.defineProperty(bad, 'enum', { get() { throw new Error('schema'); } });
   assert.doesNotThrow(() => validate({ a: 'x' }, bad)); assert.doesNotThrow(() => shapeProblem({ a: 'x' }, bad));
 });
@@ -169,7 +221,7 @@ test('invariant: every primitive accepts exactly its own corpus entries and reje
     checked++;
   }
   assert.equal(checked, Object.keys(SCHEMAS).length * Object.keys(CORPUS).length);
-  for (const [name, schema] of Object.entries(SCHEMAS)) for (const label of Object.keys(ACCEPT)) assert.ok(label in SCHEMAS, label); // every ACCEPT row has a schema
+  for (const label of Object.keys(ACCEPT)) assert.ok(label in SCHEMAS, label); // every ACCEPT row has a schema
   // nullable and optional modifiers on top of every primitive
   for (const [name, schema] of Object.entries(SCHEMAS)) {
     if (typeof schema === 'string') continue;
@@ -183,7 +235,7 @@ test('invariant: every primitive accepts exactly its own corpus entries and reje
 
 // ---- mutation check: each mutant of shape.mjs must be killed by this file --------------------------------------------
 const MUTANTS = [
-  ['unknown keys allowed', "if (!spec.open) for (const k of Reflect.ownKeys(v))", "if (false) for (const k of Reflect.ownKeys(v))"],
+  ['unknown keys allowed', "if (mod(spec, 'open') !== true) for (const k of Reflect.ownKeys(v))", "if (false) for (const k of Reflect.ownKeys(v))"],
   ['own check dropped (inherited values read)', "const d = Reflect.getOwnPropertyDescriptor(v, k);", "const d = k in v ? { value: v[k] } : undefined;"],
   ['getter invoked', "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    if (!('value' in d)) add(ctx, 'accessor'); else shapeProblem$walk(d.value, s, ctx);", "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    shapeProblem$walk(v[k], s, ctx);"],
   ['array hole accepted', "if (!d) add(ctx, 'sparse'); else if", "if (!d) { /* hole accepted */ } else if"],
@@ -198,14 +250,21 @@ const MUTANTS = [
   ['id allows leading zero', "/^(0|[1-9]\\d*)$/.test(v)", "/^\\d+$/.test(v)"],
   ['timestamp calendar round trip dropped', "&& d.toISOString().slice(0, 19) === whole.slice(0, 19)", ""],
   ['enum accepts any string', "typeof v === 'string' && spec.enum.includes(v)", "typeof v === 'string'"],
-  ['null always accepted', "if (v === null && spec.nullable) return;", "if (v === null) return;"],
+  ['null always accepted', "if (v === null && mod(spec, 'nullable') === true) return;", "if (v === null) return;"],
   ['optional ignored', "if (!isOptional(s)) add(ctx, 'missing', k)", "add(ctx, 'missing', k)"],
   ['non-plain objects accepted', "|| !plain(v)", ""],
   ['symbol key named after a string', "typeof k === 'symbol' ? '<symbol>' : k.slice(0, 40)", "String(k)"],
   ['depthOf ignores limit', "if (max > limit) return max;", ""],
-  ['depthOf invokes getters', "if (p && 'value' in p) stack.push([p.value, d + 1]);", "stack.push([x[k], d + 1]);"],
+  ['depthOf invokes getters', "if (p && 'value' in p && p.value && typeof p.value === 'object') stack.push([p.value, d + 1]);", "stack.push([x[k], d + 1]);"],
   ['problem list unbounded', "if (ctx.problems.length >= ctx.maxProblems) ctx.done = true;", ""],
-  ['unknown-key loop ignores the problem cap', "if (!ctx.done && !Object.hasOwn(spec.object, k))", "if (!Object.hasOwn(spec.object, k))"],
+  ['unknown-key loop ignores the problem cap', "if (ctx.done) break;\n    if (++ctx.nodes", "if (++ctx.nodes"],
+  ['unknown-key loop ignores the node budget', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; break; }", ""],
+  ['depthOf work budget removed', "if (++work > maxNodes) return Infinity;", ""],
+  ['depthOf default budget infinite', "maxNodes = LIMITS.maxNodes) {\n  let max = 0, work", "maxNodes = Infinity) {\n  let max = 0, work"],
+  ['array length read through a trap', "const ld = Reflect.getOwnPropertyDescriptor(v, 'length');", "const ld = { value: v.length };"],
+  ['array length not validated', "|| !Number.isSafeInteger(ld.value) || ld.value < 0", ""],
+  ['schema modifiers read inherited', "const mod = (s, k) => (Object.hasOwn(s, k) ? s[k] : undefined);", "const mod = (s, k) => s[k];"],
+  ['legacy wrapper capped', "{ maxItems: Infinity, maxNodes: Infinity, ...o }", "{ ...o }"],
   ['pointer escaping dropped', ".replace(/~/g, '~0').replace(/\\//g, '~1')", ""],
   ['unknown key not cut', "k.slice(0, 40)", "k"],
 ];
@@ -220,7 +279,8 @@ test('mutation: every mutant of shape.mjs is killed by this file', { skip: proce
       writeFileSync(join(dir, 'lib', 'shape.mjs'), src.replace(from, to));
       copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs'));
       const r = spawnSync(process.execPath, ['--test', join(dir, 'lib', 'shape.test.mjs')], { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' }, encoding: 'utf8', timeout: 20000 });
-      if (r.status === 0) survivors.push(name);
+      const killed = r.status === 1 && /^not ok /m.test(r.stdout) || r.error?.code === 'ETIMEDOUT'; // a failing assertion, or a hang the guard existed to prevent; a crash or OOM is not a kill
+      if (!killed) survivors.push(`${name} (status ${r.status})`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
   assert.deepEqual(survivors, [], 'surviving mutants');

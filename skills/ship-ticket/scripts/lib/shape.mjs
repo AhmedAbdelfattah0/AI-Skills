@@ -12,15 +12,26 @@
  *   validate(value, schema, opts?) -> { ok, problems: [{ code, path }], truncated }
  *     code: one of CODES (stable, machine-readable). path: JSON pointer ('' = root, '/a/0/b'; keys escaped ~0 ~1,
  *     an unknown key is cut at 40 chars and a symbol key shows as '<symbol>'). Problems come in schema order, unknown keys first.
- *     opts: maxDepth (32), maxItems per array (100000), maxNodes visited (1000000), maxProblems (50). Past maxNodes: `too_large`.
- *   shapeProblem(value, spec, path = '$') -> null | '<path>:<code>' (the FIRST problem; legacy `$.a[0]` path form).
- *   depthOf(value, limit = MAX_DEPTH, maxNodes = Infinity) -> nesting depth, stopping once above `limit` (also cycle safe).
+ *     opts: maxDepth (32), maxItems per array (100000), maxNodes of work (1000000: every value visited and every key examined),
+ *     maxProblems (50); each also accepts Infinity. Past maxItems or maxNodes: `too_large`. `truncated` = the list stopped at
+ *     maxProblems or the node budget ran out, so more problems may exist.
+ *   shapeProblem(value, spec, path = '$', opts = {}) -> null | '<path>:<code>' (the FIRST problem; legacy `$.a[0]` path form).
+ *     LEGACY LIMITS: unlike validate, shapeProblem has NO item or node cap by default (maxItems/maxNodes Infinity; only maxDepth 32),
+ *     because the CI snapshot verifier needs its old verdicts for arbitrarily long label/step arrays. Pass opts to bound it.
+ *   depthOf(value, limit = MAX_DEPTH, maxNodes = LIMITS.maxNodes) -> nesting depth, stopping once above `limit`; Infinity when the
+ *     work budget (every object visited, REPEATS included, and every key examined) runs out, so a shared-reference DAG or a
+ *     cycle cannot take exponential time. Pass Infinity only for trees that cannot share references (JSON.parse output).
  *
- * Hostile input is a problem, never a throw and never a side effect: only OWN properties are read, through their
- * descriptors (a getter is reported as `accessor` and never invoked; an inherited `constructor` is not a value);
+ * Hostile data is a problem, never a throw and never a side effect: only OWN properties are read, through their
+ * descriptors, including an array's `length` (a getter is reported as `accessor` and never invoked; an inherited `constructor` is not a value);
  * `__proto__`, symbol and non-enumerable keys are unknown keys of a closed object; holes in an array are `sparse`;
- * a non-plain object (array where an object is expected, class instance, Map, Date) is `not_object`; NaN and Infinity are not numbers; a throwing Proxy
- * trap is `unreadable`; work is bounded by the limits above. The input and the schema are never mutated.
+ * a non-plain object (array where an object is expected, class instance, Map, Date; also a cross-realm one) is `not_object`; NaN and Infinity are
+ * not numbers; work is bounded by the limits above (listing the own keys of a very wide object is materialised once by the engine, an
+ * unavoidable cost that is counted but not interruptible). The input and the schema are never mutated.
+ * PROXIES: a Proxy is read only through its ownKeys, getOwnPropertyDescriptor, getPrototypeOf and isArray traps (never `get`/`has`);
+ * a throwing trap is `unreadable`. A Proxy whose descriptor traps LIE can make validation lie: this validates data (JSON.parse
+ * output and plain objects), it is not a sandbox for arbitrary exotic objects.
+ * `id` = a non-negative safe integer or a canonical digit string.
  */
 export const MAX_DEPTH = 32;
 export const LIMITS = Object.freeze({ maxDepth: MAX_DEPTH, maxItems: 100000, maxNodes: 1000000, maxProblems: 50 });
@@ -40,7 +51,8 @@ const SCALARS = {
   int: (v) => Number.isSafeInteger(v), posint: (v) => Number.isSafeInteger(v) && v >= 1, uint: (v) => Number.isSafeInteger(v) && v >= 0, id: (v) => idStr(v) !== null, ts: isTimestamp,
 };
 const scalarOk = (v, tok) => Object.hasOwn(SCALARS, tok) && SCALARS[tok](v);
-const isOptional = (s) => (typeof s === 'string' ? s.startsWith('?') : s !== null && typeof s === 'object' && s.optional === true);
+const mod = (s, k) => (Object.hasOwn(s, k) ? s[k] : undefined); // schema modifiers are own properties only: a polluted Object.prototype must not loosen a schema
+const isOptional = (s) => (typeof s === 'string' ? s.startsWith('?') : s !== null && typeof s === 'object' && mod(s, 'optional') === true);
 const plain = (v) => { const p = Reflect.getPrototypeOf(v); return p === Object.prototype || p === null; };
 
 function add(ctx, code, extra) {
@@ -60,11 +72,13 @@ function shapeProblem$walk(v, spec, ctx) {
 function check(v, spec, ctx) {
   if (typeof spec === 'string') { if (!spec.replace(/^\?/, '').split('|').some((tok) => scalarOk(v, tok))) add(ctx, 'bad_type'); return; }
   if (spec === null || typeof spec !== 'object') return add(ctx, 'bad_schema');
-  if (v === null && spec.nullable) return;
-  if (spec.enum) { if (!(typeof v === 'string' && spec.enum.includes(v))) add(ctx, 'not_in_set'); return; }
-  if (spec.arrayOf) {
+  if (v === null && mod(spec, 'nullable') === true) return;
+  if (mod(spec, 'enum')) { if (!(typeof v === 'string' && spec.enum.includes(v))) add(ctx, 'not_in_set'); return; }
+  if (mod(spec, 'arrayOf')) {
     if (!Array.isArray(v)) return add(ctx, 'not_array');
-    const n = v.length;
+    const ld = Reflect.getOwnPropertyDescriptor(v, 'length'); // never `v.length`: that would run a Proxy `get` trap, which may lie
+    if (!ld || !('value' in ld) || !Number.isSafeInteger(ld.value) || ld.value < 0) return add(ctx, 'unreadable');
+    const n = ld.value;
     if (!(n <= ctx.maxItems)) return add(ctx, 'too_large');
     for (let i = 0; i < n && !ctx.done; i++) {
       const d = Reflect.getOwnPropertyDescriptor(v, i);
@@ -74,9 +88,13 @@ function check(v, spec, ctx) {
     }
     return;
   }
-  if (!spec.object || typeof spec.object !== 'object') return add(ctx, 'bad_schema');
+  if (!mod(spec, 'object') || typeof spec.object !== 'object') return add(ctx, 'bad_schema');
   if (!v || typeof v !== 'object' || !plain(v)) return add(ctx, 'not_object');
-  if (!spec.open) for (const k of Reflect.ownKeys(v)) if (!ctx.done && !Object.hasOwn(spec.object, k)) add(ctx, 'unknown_key', typeof k === 'symbol' ? '<symbol>' : k.slice(0, 40));
+  if (mod(spec, 'open') !== true) for (const k of Reflect.ownKeys(v)) {
+    if (ctx.done) break;
+    if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; break; }
+    if (!Object.hasOwn(spec.object, k)) add(ctx, 'unknown_key', typeof k === 'symbol' ? '<symbol>' : k.slice(0, 40));
+  }
   for (const [k, s] of Object.entries(spec.object)) {
     if (ctx.done) return;
     const d = Reflect.getOwnPropertyDescriptor(v, k);
@@ -87,7 +105,7 @@ function check(v, spec, ctx) {
   }
 }
 
-const lim = (x, d) => (Number.isSafeInteger(x) && x >= 1 ? x : d);
+const lim = (x, d) => (x === Infinity || (Number.isSafeInteger(x) && x >= 1) ? x : d);
 function run(value, spec, o, maxProblems) {
   const ctx = { problems: [], stack: [], nodes: 0, done: false, maxDepth: lim(o.maxDepth, LIMITS.maxDepth), maxItems: lim(o.maxItems, LIMITS.maxItems), maxNodes: lim(o.maxNodes, LIMITS.maxNodes), maxProblems };
   shapeProblem$walk(value, spec, ctx);
@@ -105,22 +123,27 @@ export function validate(value, schema, opts) {
 }
 
 /** null when `v` matches `spec`, else the first problem as `<path>:<code>` (built from the path only; never throws, never stringifies a value). */
-export function shapeProblem(v, spec, path = '$') {
+export function shapeProblem(v, spec, path = '$', opts) {
   let ctx;
-  try { ctx = run(v, spec, {}, 1); } catch { return `${path}:unreadable`; }
+  try { const o = opts !== null && typeof opts === 'object' ? opts : {}; ctx = run(v, spec, { maxItems: Infinity, maxNodes: Infinity, ...o }, 1); } catch { return `${path}:unreadable`; }
   const p = ctx.problems[0];
   return p ? `${path}${p.path.map((s) => (typeof s === 'number' ? `[${s}]` : `.${s}`)).join('')}:${p.code}` : null;
 }
 
-/** Nesting depth of the own enumerable data of `x` (getters are not invoked), stopping once above `limit`; Infinity when unreadable or past `maxNodes`. Cycle safe. */
-export function depthOf(v, limit = MAX_DEPTH, maxNodes = Infinity) {
-  let max = 0, nodes = 0; const stack = [[v, 0]];
+/** Nesting depth of the own enumerable data of `x` (getters are not invoked), stopping once above `limit`; Infinity when unreadable or the work budget runs out (see the header). */
+export function depthOf(v, limit = MAX_DEPTH, maxNodes = LIMITS.maxNodes) {
+  let max = 0, work = 0; const stack = [[v, 0]];
   while (stack.length) {
     const [x, d] = stack.pop();
     if (x && typeof x === 'object') {
       max = Math.max(max, d + 1); if (max > limit) return max;
-      if (++nodes > maxNodes) return Infinity;
-      try { for (const k of Reflect.ownKeys(x)) { const p = Reflect.getOwnPropertyDescriptor(x, k); if (p && 'value' in p) stack.push([p.value, d + 1]); } } catch { return Infinity; }
+      try {
+        for (const k of Reflect.ownKeys(x)) {
+          if (++work > maxNodes) return Infinity;
+          const p = Reflect.getOwnPropertyDescriptor(x, k);
+          if (p && 'value' in p && p.value && typeof p.value === 'object') stack.push([p.value, d + 1]);
+        }
+      } catch { return Infinity; }
     }
   }
   return max;
