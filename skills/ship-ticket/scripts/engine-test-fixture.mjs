@@ -4,13 +4,14 @@
  * fake `claude` CLI on PATH, and helpers that drive the REAL engine CLI (`node run-engine.mjs`).
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, chmodSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSpec } from './provider-env.mjs';
+import { HANDSHAKE_BOUND_MS, waitFor, groupGone, processGone } from './test-wait.test-helper.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -108,6 +109,102 @@ export function warmFakeClaude(bin, env) {
 }
 
 /**
+ * Preload (`node --require`, set through the fixture env's NODE_OPTIONS on POSIX): the FIRST thing every node process
+ * started under that env does, before its own script (the launcher's `node -e`, the fake provider, its sleepers, an
+ * engine CLI), is append `{ pid, ppid, leader, at }` to the fixture's registry. `leader`: the process leads its own
+ * group (kill(-pid, 0) finds a group whose id is its pid: only its own can exist while it holds that pid), so pgid = pid;
+ * otherwise it is a member of another group (its leader, when spawned under this env, registered too). Never throws.
+ */
+const REGISTER_PRELOAD = (file) => `'use strict';
+try {
+  let leader = false;
+  if (process.platform !== 'win32') { try { process.kill(-process.pid, 0); leader = true; } catch {} }
+  require('node:fs').appendFileSync(${JSON.stringify(file)}, JSON.stringify({ pid: process.pid, ppid: process.ppid, leader, at: Date.now(), via: 'preload' }) + '\\n');
+} catch {}
+`;
+
+/** Seconds a live process has run (POSIX `ps -o etime=`, [[dd-]hh:]mm:ss), or null when ps cannot say. */
+function elapsedSeconds(pid) {
+  const r = spawnSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, timeout: 5000 });
+  const m = r.status === 0 ? /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(r.stdout.trim()) : null;
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
+}
+
+/**
+ * The fixture's process registry: the one guarantee that no process a fixture's test started outlives the test,
+ * whatever failed and wherever (spawn, a commit before the engine reports the pid, a handshake, the test body).
+ * Cleanup depends only on fixture-owned knowledge, never on a pid the engine delivers at a boundary:
+ * - `spawnFn(inner)`: the fixture's spawn seam (`ctx.spawn`, composed with a test's own). It records the child
+ *   synchronously when spawn returns, before the engine reaches any boundary or commit, and keeps its handle;
+ * - `REGISTER_PRELOAD`: every node process under the fixture env records itself as its first instruction, which also
+ *   covers processes the fixture cannot see spawned (an engine CLI's launchers, the provider, its descendants).
+ * `reap()` (run by the fixture's teardown, idempotent) SIGKILLs every registered group still present and every
+ * registered process still alive, then awaits them all; it throws, naming the survivors, if any is left after
+ * `boundMs`. Scoped to this registry's entries only, never by pattern, and never the test runner's own group: a
+ * group is signalled only when a registered process leads it. A pid is trusted only when it is provably the
+ * registered process: an unexited ChildProcess handle (its pid cannot be reused before it is reaped), a leader gone
+ * while its group has members (a pid is not reallocated while it names a group), or a live process whose start
+ * (`ps etime`, 1 s resolution, 2 s slack) is not after its registration. POSIX; on Windows (no groups, limit D4) it records and
+ * kills only unexited handles.
+ */
+export function processRegistry(root, { platform = process.platform } = {}) {
+  const file = join(root, 'processes.jsonl');
+  const preload = join(root, 'register-process.cjs');
+  writeFileSync(preload, REGISTER_PRELOAD(file));
+  const handles = new Map();
+  const record = (child, leader) => {
+    if (!child?.pid) return child;
+    handles.set(child.pid, child);
+    appendFileSync(file, JSON.stringify({ pid: child.pid, leader, at: Date.now(), via: 'spawn' }) + '\n');
+    return child;
+  };
+  const entries = () => {
+    let lines = [];
+    try { lines = readFileSync(file, 'utf8').split('\n'); } catch { /* nothing registered */ }
+    const byPid = new Map();
+    for (const l of lines) {
+      let e; try { e = JSON.parse(l); } catch { continue; }
+      const prev = byPid.get(e.pid);
+      byPid.set(e.pid, { pid: e.pid, leader: e.leader === true || prev?.leader === true, at: Math.min(e.at, prev?.at ?? Infinity) });
+    }
+    return [...byPid.values()];
+  };
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const unexited = (pid) => { const c = handles.get(pid); return Boolean(c) && c.exitCode === null && c.signalCode === null; };
+  const ours = (e) => {
+    if (unexited(e.pid)) return true;
+    const s = elapsedSeconds(e.pid);
+    // etime is floored to whole seconds, so the start it implies is up to 1 s late; 2 s of slack covers that and the
+    // gap between the ps read and Date.now(). A reused pid started after its registered process died, later than that.
+    return s !== null && Date.now() - s * 1000 <= e.at + 2000;
+  };
+  return {
+    file, preload, entries,
+    /** NODE_OPTIONS that makes every node process under it register itself first (POSIX only). */
+    nodeOptions: (base) => (platform === 'win32' ? base : `${base ? base + ' ' : ''}--require "${preload}"`),
+    /** Spawn seam: `inner` (default child_process.spawn) with each child recorded the moment it exists. */
+    spawnFn: (inner = spawn) => (cmd, args, opts) => record(inner(cmd, args, opts), platform !== 'win32' && opts?.detached === true),
+    record,
+    async reap({ kill = (target, sig) => process.kill(target, sig), boundMs = HANDSHAKE_BOUND_MS } = {}) {
+      if (platform === 'win32') { for (const pid of handles.keys()) if (unexited(pid)) try { handles.get(pid).kill('SIGKILL'); } catch { /* gone */ } return; }
+      const groups = [], pids = [];
+      for (const e of entries()) {
+        const live = alive(e.pid);
+        if (live && !ours(e)) continue; // the pid now names another process: not ours to signal
+        if (e.leader && !groupGone(e.pid)) groups.push(e.pid);
+        else if (live) pids.push(e.pid);
+      }
+      for (const g of groups) try { kill(-g, 'SIGKILL'); } catch { /* already gone */ }
+      for (const p of pids) try { kill(p, 'SIGKILL'); } catch { /* already gone */ }
+      const left = () => [...groups.filter(g => !groupGone(g)).map(g => `group ${g}`), ...pids.filter(p => !processGone(p)).map(p => `pid ${p}`)];
+      try { await waitFor(() => left().length === 0, 'registered processes gone', { ms: boundMs }); } catch {
+        throw new Error(`fixture teardown: registered process(es) survived SIGKILL after ${boundMs} ms: ${left().join(', ')}`);
+      }
+    },
+  };
+}
+
+/**
  * Temp git repo with an approved plan, a DAG file, prompts and a fake `claude` on PATH.
  * bind: 'plan' lists the DAG digest in the narrative; 'dag_bound' records one DAG_BOUND event;
  * 'none' binds nothing. extraEvents(dagDigest) appends further RUN-STATE events.
@@ -119,7 +216,10 @@ export function warmFakeClaude(bin, env) {
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
   behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const processes = processRegistry(root);
+  // One teardown for every fixture test, whatever failed: reap every registered process (failing the test loudly if
+  // one survives), then remove the tree. Registered first, so it holds the registry before anything else runs.
+  t.after(async () => { try { await processes.reap(); } finally { rmSync(root, { recursive: true, force: true }); } });
   const repo = join(root, 'repo');
   for (const d of ['src', 'docs', join('.specs', 'plans')]) mkdirSync(join(repo, d), { recursive: true });
   writeFileSync(join(repo, 'docs', 'in.txt'), 'input v1');
@@ -133,6 +233,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const sep = POSIX ? ':' : ';';
   const { NODE_TEST_CONTEXT: _nested, ...base } = process.env; // a nested `node --test` must not report to this runner
   const env = { ...base, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH) };
+  if (POSIX) env.NODE_OPTIONS = processes.nodeOptions(base.NODE_OPTIONS);
   const warmedUp = warmFakeClaude(bin, env);
 
   const promptFor = (id) => { const p = join(root, `prompt-${id}.txt`); writeFileSync(p, `NODE=${id}\n`); return p; };
@@ -166,9 +267,10 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
 
   let inputSeq = 0;
   const fx = {
-    root, repo, dagFile, dagDigest, planFile, env, warmedUp,
+    root, repo, dagFile, dagDigest, planFile, env, warmedUp, processes,
+    /** Engine ctx; its spawn seam always records into the fixture's process registry (composed with `extra.spawn`). */
     ctx: (extra = {}) => ({ repoRoot: repo, ticket: 'T-1', runId: 'run-1', dagFile, env, verifySubscription: () => true,
-      handleSignals: false, ...extra }),
+      handleSignals: false, ...extra, spawn: processes.spawnFn(extra.spawn) }),
     stateFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'),
     lockFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.lock'),
     runLog: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.jsonl'),
@@ -202,7 +304,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
       return fx.cli(`gate ${kind}`, { input: file }, opts);
     },
     /** Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. */
-    spawnCli: (cmd, flags = {}) => spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
+    spawnCli: (cmd, flags = {}) => processes.spawnFn()(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
       ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' }),
     candidate: () => {
       const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', 'HEAD', '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'],
