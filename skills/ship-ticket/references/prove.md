@@ -157,6 +157,9 @@ stops shell interpolation of file names; it does not make a declaration trusted.
   /T`, with a direct-child fallback reported as a degraded kill). The verdict is still a failure.
 - A changed file inside a directory argument (for example `semgrep --config rules/`) is not seen by `checker_modified`: name the files.
 - A bare command name is not looked up on PATH for `checker_modified`; only paths on disk are compared.
+- The `t0_check` evidence row is written by `run-log.mjs`, whose repository resolution trims pathnames (a checkout whose
+  directory name ends in CR can mis-resolve) and honours HOME/XDG git config; a pre-existing defect tracked as a
+  follow-up under ASTF-42. The verdict never depends on the row.
 - On Windows an executable planted in the repository folder can shadow a PATH tool. A changed config the declared
   command does not name, as above.
 - The declared commands, a fake binary earlier on PATH, or edits to the skill install by the same user are outside

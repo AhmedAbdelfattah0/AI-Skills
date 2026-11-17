@@ -507,7 +507,8 @@ test('A4: no declaration at base returns not_declared BEFORE any changed-surface
 test('A5: killTree falls back to the direct child when taskkill fails, and reports it', () => {
   const calls = [];
   const child = { pid: 123, killed: false, kill() { this.killed = true; return true; }, unref() { calls.push('unref'); } };
-  const degraded = killTree(child, { platform: 'win32', run: () => ({ status: 1 }) });
+  let opts; const degraded = killTree(child, { platform: 'win32', run: (c, a, o) => { opts = o; return { status: 1 }; } });
+  assert.ok(!Object.keys(opts.env).some((k) => k.toUpperCase().startsWith('GIT_')), 'taskkill gets a GIT_*-free env');
   assert.equal(child.killed, true); assert.equal(degraded, true); assert.ok(calls.includes('unref'));
   const ok = { pid: 1, kill() { throw new Error('must not be called'); }, unref() {} };
   assert.equal(killTree(ok, { platform: 'win32', run: () => ({ status: 0 }) }), false);
@@ -577,4 +578,14 @@ test('F2 sibling: a declared check never sees an inherited GIT_* variable', (t) 
   const r = fx.cli('run', ['--base', git(fx.top, 'rev-parse', 'HEAD')], { env: { ...process.env, GIT_DIR: join(fx.top, '.git'), GIT_AUTHOR_NAME: 'x' } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(out, 'utf8'), '');
+});
+
+test('G1: --repo <toplevel>/src: the t0_check row lands in <toplevel>/.git and nothing is created above it', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')], { prefix: 'src/' });
+  put(fx.top, 'src/src/new.ts', 'x\n');
+  const r = fx.run('--ticket', 'T7', '--run-id', 'run-7');
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(fx.top, '.git', 'ai-skills', 'ship-ticket', 'T7.jsonl')), 'row in the checked top level');
+  assert.ok(!existsSync(join(fx.dir, '.git')), 'nothing created above the top level');
+  assert.ok(!existsSync(join(fx.top, 'src', '.git')));
 });

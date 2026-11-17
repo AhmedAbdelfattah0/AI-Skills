@@ -159,7 +159,7 @@ export function killTree(child, { platform = process.platform, run = spawnSync }
   let degraded = false;
   if (child.pid) {
     if (platform === 'win32') {
-      const r = run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      const r = run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', env: cleanEnv() });
       if (r.error || r.status !== 0) { degraded = true; try { child.kill('SIGKILL'); } catch { /* gone */ } }
     } else { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ } }
   }
@@ -266,7 +266,8 @@ export function verifyReport({ repo, base, text }) {
 
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 function logActivity(repo, ticket, runId, phase, extra) {
-  const r = spawnSync(process.execPath, [RUN_LOG, phase, '--repo', repo, '--ticket', ticket, '--run-id', runId, '--kind', 'activity', '--name', 't0_check', '--event-id', extra.eventId, ...extra.args], { cwd: repo, env: cleanEnv(), encoding: 'utf8', timeout: 30000 });
+  const top = (() => { try { return realpathSync(git(repo, ['rev-parse', '--show-toplevel'])); } catch { return repo; } })();
+  const r = spawnSync(process.execPath, [RUN_LOG, phase, '--repo', top, '--ticket', ticket, '--run-id', runId, '--kind', 'activity', '--name', 't0_check', '--event-id', extra.eventId, ...extra.args], { cwd: top, env: cleanEnv(), encoding: 'utf8', timeout: 30000 });
   if (r.status !== 0) process.stderr.write(`fast-checks: run-log ${phase} not recorded (verdict unchanged): ${String(r.stderr).trim().split('\n')[0]}\n`);
 }
 
