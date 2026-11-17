@@ -106,6 +106,52 @@ concurrently. They still join at one barrier and consume one batch; the
 orchestrator rederives evidence from their combined final tree, never from each
 worker's partial view.
 
+## Builder fast checks (T0)
+
+T0 is a short list of deterministic checks the repository declares and every builder or repair worker runs on
+its **working tree** before handing over (lint, typecheck, `nn-guard`, a secrets scan, a static security scan:
+whatever the repository has). It exists because a JWT-shaped literal in an uncommitted spec and an `nn-guard` or
+`prefer-const` finding were each found by a full gate run late, at a cost of one whole gate run. T0 is fast
+feedback. It does not prove semantic correctness; REVIEW and the tests still do that.
+
+Opt in by committing `.ship-ticket/t0.json`:
+
+```json
+{"checks":[{"name":"secrets","kind":"secrets","cmd":["gitleaks","dir","--no-banner","{files}"],"files":true,"timeout_ms":120000}]}
+```
+
+`cmd` is an argv array, never a shell string. `kind` is one of `lint`, `typecheck`, `nn-guard`, `secrets`,
+`security`, `other`. `{files}` becomes one argument per scanned file. The scanners are the repository's own;
+this skill ships none, so declare real ones for that repository (a StoreCraft `local-gates.sh --fast` is a
+separate ticket in that repository).
+
+Run it, from the skill's `scripts/` directory, after every edit and again before handing over:
+
+```text
+node scripts/fast-checks.mjs run --repo <repo> --base <base sha> [--ticket <key> --run-id <id>]
+```
+
+- The scan set is **the working tree**: staged, unstaged and untracked files, a renamed file under its new
+  path, plus (with `--base`) every committed file since the base. Always pass `--base`; without it a rename
+  that is already committed is not seen. Nothing narrows the set to committed files, and `--allow-dirty`
+  does not apply: a dirty secret is scanned.
+- Anything but a clean exit 0 fails: a non-zero exit, a **timeout**, a signal, a missing binary, an invalid or
+  empty declaration, or a file set git cannot list. A timeout is never a pass.
+- stdout is one JSON verdict of names, enums and counts. Scanner output is not in it (a secrets scanner echoes
+  the secret); a failing check's output tail is on stderr for you.
+- With `--ticket` and `--run-id` it records a `t0_check` activity row (`outcome` pass, fail or not_declared;
+  numeric metrics `checks`, `failed`, `files`, `timed_out`). A run-log error never changes the verdict.
+- Not declared: exit 0, code `not_declared`, nothing else changes.
+
+When the repository declares T0, the worker report carries a fifth key `t0`, copied from the verdict's `report`
+(`brief.mjs build --t0 <repo>/.ship-ticket/t0.json` adds this instruction to the brief). The orchestrator runs
+`node scripts/fast-checks.mjs verify --repo <repo> --report-file <final message file>` and does not freeze a
+candidate when it exits 1: `fast_check_missing` (no `t0`), `fast_check_incomplete` (a declared check is not
+reported), `fast_check_failed`. The `t0` value is the worker's own claim: re-run `run` yourself before freeze.
+Status: this slice covers the working-tree runner, the report key and `verify`. The engine does not call `verify`
+at freeze yet, the carrier does not pass `t0Declared`, and the risk-triggered semantic test kinds (T1-S) and
+mutation validity are separate slices.
+
 ## The static proof
 
 Run the routed specialist's **security rows only** — `BE-SEC-*`, `BE-AUTH-*`,

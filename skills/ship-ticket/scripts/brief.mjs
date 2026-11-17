@@ -12,8 +12,8 @@
  *   brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] --out <file>
  *   brief.mjs lint <brief>
  * Output is deterministic: no clock, no randomness, no absolute path. The last line is
- * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 18; the only repository import is the read-only
- * RISK_EVIDENCE table of harness.mjs.
+ * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 18; its repository imports are the read-only
+ * RISK_EVIDENCE table of harness.mjs and the T0 declaration validator of fast-checks.mjs.
  *
  * Exit codes: 0 success, 1 a failed lint or any other refused input (unknown node, plan without a
  * RUN-STATE block, unreadable file, invalid JSON, a refused --out), 2 a usage error or a DAG or recon
@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import { RISK_EVIDENCE, isEntrypoint } from './harness.mjs';
+import { validateDeclaration } from './fast-checks.mjs';
 
 export const SECTIONS = [
   'Task', 'Approved plan and digest', 'Ownership', 'Forbidden paths', 'Dependencies and reads',
@@ -127,8 +128,22 @@ const REPORT_EXAMPLE = [
   '```',
 ];
 
+// Only when the repository declares T0 (`--t0`): the Report block then asks for a fifth key. Absent T0 leaves the brief byte-identical.
+const T0_REPORT_LINES = [
+  '',
+  'This repository declares T0 fast checks. Before you hand over, on your working tree (committed or not), run',
+  '`node scripts/fast-checks.mjs run --repo <repo> --base <base sha>` from the ship-ticket skill directory and fix',
+  'every failure; a timeout is a failure. Then add the `report` object it prints as a fifth key `t0`, so the block',
+  'has these five keys. A report without `t0` is refused (`fast_check_missing`). T0 is fast feedback, not proof of',
+  'correctness.',
+  '',
+  '```ship-ticket-report',
+  '{"tests":[],"red_seen":[],"blockers":[],"needs_outside_ownership":[],"t0":{"result":"pass","checks":[{"name":"<check name>","result":"pass"}]}}',
+  '```',
+];
+
 /** Build the brief text (digest line included) for one DAG node. Throws a `briefError` on a refused input. */
-export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon = null, notes = null }) {
+export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon = null, notes = null, t0 = null }) {
   const nodes = asList(dag && dag.nodes);
   if (!nodes.length) throw fail('the DAG has no nodes');
   const node = nodes.find((n) => n && n.id === nodeId);
@@ -215,6 +230,7 @@ export function buildBrief({ dag, nodeId, planText, planPath = 'plan.md', recon 
     'Each test is a command and `pass` or `fail`. List the failing specs you saw in `red_seen`.',
     '',
     ...REPORT_EXAMPLE,
+    ...(t0 ? T0_REPORT_LINES : []),
   ]);
 
   const body = lines.join('\n').replace(/\n+$/, '\n');
@@ -278,6 +294,13 @@ function parseFlags(args, allowed) {
   return { opts, positional };
 }
 
+function readT0(path) {
+  try { return validateDeclaration(readJson(path, 'T0 declaration')); } catch (err) {
+    if (err.t0Config) throw fail(`T0 declaration ${displayPath(path)} is invalid: ${err.message}`);
+    throw err;
+  }
+}
+
 function readText(path, what) {
   try {
     return readFileSync(path, 'utf8');
@@ -319,7 +342,7 @@ export function main(argv) {
   const [command, ...rest] = argv;
   try {
     if (command === 'build') {
-      const { opts } = parseFlags(rest, ['dag', 'node', 'plan', 'recon', 'notes', 'out']);
+      const { opts } = parseFlags(rest, ['dag', 'node', 'plan', 'recon', 'notes', 'out', 't0']);
       for (const k of ['dag', 'node', 'plan', 'out']) if (!opts[k]) throw Object.assign(new Error(`build needs --${k}`), { usage: true });
       const text = buildBrief({
         dag: readJson(opts.dag, 'DAG'),
@@ -328,6 +351,7 @@ export function main(argv) {
         planPath: opts.plan,
         recon: opts.recon ? readJson(opts.recon, 'recon file') : null,
         notes: opts.notes ? readText(opts.notes, 'notes file') : null,
+        t0: opts.t0 ? readT0(opts.t0) : null,
       });
       checkOut(opts.out, [opts.dag, opts.plan, opts.recon, opts.notes]);
       writeFileSync(opts.out, text);
@@ -347,7 +371,7 @@ export function main(argv) {
       process.stdout.write('brief lint ok\n');
       return 0;
     }
-    throw Object.assign(new Error('usage: brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] --out <file> | brief.mjs lint <brief>'), { usage: true });
+    throw Object.assign(new Error('usage: brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] --out <file> | brief.mjs lint <brief>'), { usage: true });
   } catch (err) {
     if (!err.briefError && !err.usage) throw err;
     process.stderr.write(`brief: ${err.message}\n`);
