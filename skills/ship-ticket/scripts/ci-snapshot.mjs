@@ -36,6 +36,8 @@
  *   ids_agree            check id == the id in its own url; job id == the id in its check_run_url
  *   actions_check_one_job an Actions check run has a job naming it with the same repo, head SHA, name, a SAFE integer
  *                        run_attempt >= 1 and a run id; none: unbound
+ *   raw_fields_typed     every field this module reads from a check run / job (SHAPES.check_run, SHAPES.job, also steps, labels, runner_*,
+ *                        timestamps, step conclusions) has its declared type; a wrong type is flagged, never turned into null
  *   job_files_coherent   all jobs of one file share one run_id and run_attempt
  *   job_name_unique      no two bound jobs share (run_id, run_attempt, name)
  *   status_consistent    check and job `completed`; equal conclusions
@@ -79,6 +81,7 @@ export const SITES = Object.freeze({
   check_bound_to_repo: ['own_url_not_origin_repo', 'head_sha_mismatch', 'app_missing'],
   ids_agree: ['own_id_mismatch', 'job_id_mismatch'],
   actions_check_one_job: ['no_job', 'job_repo_mismatch', 'job_head_sha_mismatch', 'job_name_mismatch', 'job_identity_invalid'],
+  raw_fields_typed: ['field_type'],
   job_files_coherent: ['mixed_run_attempt'],
   job_name_unique: ['ambiguous_job_name'],
   status_consistent: ['check_not_completed', 'job_not_completed', 'conclusion_mismatch'],
@@ -93,23 +96,41 @@ const MAX_BYTES = 64 * 1024 * 1024;
 const OK_CONCLUSIONS = ['success', 'neutral', 'skipped'];
 const failedConclusion = (c) => typeof c === 'string' && !OK_CONCLUSIONS.includes(c);
 const NOT_EXECUTED = ['skipped', 'neutral', 'cancelled'];
-/** The closed schemas of retained provider metadata, described once. Scalars: string, null, int, posint, with `|` for alternatives and a leading `?` for an optional key. */
+const STATUSES = ['queued', 'in_progress', 'completed', 'pending', 'waiting', 'requested'];
+const CONC = { enum: CONCLUSIONS, nullable: true, optional: true };
+const STAT = { enum: STATUSES, optional: true };
+/**
+ * Every field this module READS from a raw object, with its exact type, described once (the invariant test fails if the
+ * module reads a field that is not declared here). Tokens: string, null, int, posint, id (canonical id), ts (strict
+ * ISO-8601 UTC), joined by `|`; a leading `?` = optional key. Objects: { object, open?, nullable?, optional? } (closed
+ * unless `open`: provider objects carry fields this module never reads); { enum, nullable?, optional? }; { arrayOf }.
+ * A wrongly-typed declared field is `raw_fields_typed`: never converted to null silently.
+ */
 export const SHAPES = Object.freeze({
-  step: { object: { name: 'string', status: ['queued', 'in_progress', 'completed', 'pending'], conclusion: 'string|null', number: 'posint', started_at: '?string|null', completed_at: '?string|null' } },
+  step: { object: { name: 'string', status: { enum: STATUSES }, conclusion: { enum: CONCLUSIONS, nullable: true }, number: 'posint', started_at: '?ts|null', completed_at: '?ts|null' } },
   labels: { arrayOf: 'string' },
   annotation: { object: { path: '?string', start_line: '?int', end_line: '?int', start_column: '?int|null', end_column: '?int|null', annotation_level: '?string', title: '?string|null', message: 'string', raw_details: '?string|null', blob_href: '?string' } },
+  check_run: { open: true, object: { id: 'id', name: 'string', head_sha: '?string', status: STAT, conclusion: CONC, started_at: '?ts|null', completed_at: '?ts|null', url: '?string',
+    app: { open: true, nullable: true, optional: true, object: { slug: '?string' } }, output: { open: true, nullable: true, optional: true, object: { annotations_count: '?int|null' } } } },
+  job: { open: true, object: { id: 'id', name: 'string', head_sha: '?string', status: STAT, conclusion: CONC, started_at: '?ts|null', completed_at: '?ts|null', run_id: '?id', run_attempt: '?posint',
+    check_run_url: '?string', runner_name: '?string|null', runner_group_name: '?string|null', labels: { arrayOf: 'string', nullable: true, optional: true },
+    steps: { arrayOf: { object: { name: 'string', status: { enum: STATUSES }, conclusion: { enum: CONCLUSIONS, nullable: true }, number: 'posint', started_at: '?ts|null', completed_at: '?ts|null' } }, nullable: true, optional: true } } },
+  page: { open: true, object: { total_count: '?int' } },
 });
 const MAX_DEPTH = 32;
-const scalarOk = (v, tok) => (tok === 'string' ? typeof v === 'string' : tok === 'null' ? v === null : tok === 'int' ? Number.isSafeInteger(v) : tok === 'posint' ? Number.isSafeInteger(v) && v >= 1 : false);
-/** null when `v` matches `spec`, else a short problem string (never throws, never stringifies a value). */
+const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+const scalarOk = (v, tok) => (tok === 'string' ? typeof v === 'string' : tok === 'null' ? v === null : tok === 'int' ? Number.isSafeInteger(v) : tok === 'posint' ? Number.isSafeInteger(v) && v >= 1
+  : tok === 'id' ? idStr(v) !== null : tok === 'ts' ? typeof v === 'string' && TS.test(v) && !Number.isNaN(Date.parse(v)) : false);
+/** null when `v` matches `spec`, else a short problem string built from the path only (never throws, never stringifies a value). */
 export function shapeProblem(v, spec, path = '$') {
-  if (Array.isArray(spec)) return typeof v === 'string' && spec.includes(v) ? null : `${path}:not_in_set`;
   if (typeof spec === 'string') return spec.replace(/^\?/, '').split('|').some((tok) => scalarOk(v, tok)) ? null : `${path}:bad_type`;
+  if (v === null && spec.nullable) return null;
+  if (spec.enum) return typeof v === 'string' && spec.enum.includes(v) ? null : `${path}:not_in_set`;
   if (spec.arrayOf) { if (!Array.isArray(v)) return `${path}:not_array`; for (let i = 0; i < v.length; i++) { const p = shapeProblem(v[i], spec.arrayOf, `${path}[${i}]`); if (p) return p; } return null; }
   if (!v || typeof v !== 'object' || Array.isArray(v)) return `${path}:not_object`;
-  for (const k of Object.keys(v)) if (!Object.hasOwn(spec.object, k)) return `${path}.${k}:unknown_key`;
+  if (!spec.open) for (const k of Object.keys(v)) if (!Object.hasOwn(spec.object, k)) return `${path}.${k.slice(0, 40)}:unknown_key`;
   for (const [k, s] of Object.entries(spec.object)) {
-    if (!Object.hasOwn(v, k)) { if (typeof s === 'string' && s.startsWith('?')) continue; return `${path}.${k}:missing`; }
+    if (!Object.hasOwn(v, k)) { if (typeof s === 'string' ? s.startsWith('?') : s.optional === true) continue; return `${path}.${k}:missing`; }
     const p = shapeProblem(v[k], s, `${path}.${k}`); if (p) return p;
   }
   return null;
@@ -228,7 +249,7 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
     const r = parsePaged(text, (l) => Object.hasOwn(l, 'name') && Object.hasOwn(l, 'id'));
     raw.jobs[file] = r.lines;
     if (r.state !== 'ok') fail(r.state, r.predicate, `jobs_${file}_${r.reason}`);
-    if (new Set(r.items.map((j) => `${idStr(j.run_id)}/${j.run_attempt}`)).size > 1) fail('invalid', 'job_files_coherent', `jobs_${file}_mixed_run_attempt`);
+    if (new Set(r.items.map((j) => `${idStr(j.run_id)}/${safePos(j.run_attempt) ? j.run_attempt : '?'}`)).size > 1) fail('invalid', 'job_files_coherent', `jobs_${file}_mixed_run_attempt`);
     jobs.push(...r.items);
   }
   for (const x of [...checks, ...jobs]) if (typeof x.name !== 'string') fail('invalid', 'lines_wellformed', 'name_not_string');
@@ -243,16 +264,23 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
     }
   }
 
+  const fieldProblems = [];
+  for (const [kind, list] of [['check_run', checks], ['job', jobs]]) for (const x of list) {
+    const p = shapeProblem(x, SHAPES[kind]);
+    if (p) { fieldProblems.push({ kind, id: idStr(x.id), problem: p.slice(0, 120) }); fail('incomplete', 'raw_fields_typed', `${kind}_${idStr(x.id) ?? 'unknown'}_field_type`); }
+  }
+  const malformedIds = new Set(fieldProblems.map((f) => `${f.kind}:${f.id}`));
+
   const byRef = new Map(); // check-run id -> jobs naming it
   for (const j of jobs) { const ref = checkRunRef(j.check_run_url, org); const k = ref ? ref.id : '\0none'; byRef.set(k, [...(byRef.get(k) ?? []), j]); }
-  const jobRows = jobs.map((j) => ({ id: idStr(j.id), name: typeof j.name === 'string' ? j.name : null, run_id: idStr(j.run_id), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, inputs: jobInputs(j), ...classifyJob(j), bound: false }));
+  const jobRows = jobs.map((j) => ({ id: idStr(j.id), name: typeof j.name === 'string' ? j.name : null, run_id: idStr(j.run_id), run_attempt: safePos(j.run_attempt) ? j.run_attempt : null, fields_malformed: malformedIds.has(`job:${idStr(j.id)}`), inputs: jobInputs(j), ...classifyJob(j), bound: false }));
   const jobRow = new Map(jobRows.map((r) => [r.id, r]));
 
   const rows = [];
   for (const c of checks) {
     const id = idStr(c.id);
     const row = { id, name: typeof c.name === 'string' ? c.name : null, app: typeof c.app?.slug === 'string' ? c.app.slug : null, status: str(c.status), conclusion: str(c.conclusion), started_at: str(c.started_at), completed_at: str(c.completed_at),
-      binding: 'unbound', reason: null, predicate: null, job_id: null, run_id: null, run_attempt: null, job_inputs: null, input_status: 'unbound', supersession: 'not_applicable',
+      fields_malformed: malformedIds.has(`check_run:${id}`), binding: 'unbound', reason: null, predicate: null, job_id: null, run_id: null, run_attempt: null, job_inputs: null, input_status: 'unbound', supersession: 'not_applicable',
       annotations: { status: 'unknown', messages: [], count: null, sha256: null } };
     rows.push(row);
     const unbind = (predicate, reason) => { row.predicate = predicate; row.reason = reason; };
@@ -341,7 +369,7 @@ export function buildSnapshot({ texts, repo, sha, origin }) {
   if (checks.length === 0) fail('empty', 'non_empty', 'no_check_runs');
   const unbound = rows.filter((r) => r.binding === 'unbound').map((r) => r.id);
   const hash = state === 'invalid' ? null : sha256(raw);
-  return { schema: SCHEMA, repo: repoKey, head_sha: head, origin: org, state, not_attested: NOT_ATTESTED, failed_predicates: [...failed].sort(), reasons, internally_consistent: state === 'snapshot_valid',
+  return { schema: SCHEMA, repo: repoKey, head_sha: head, origin: org, state, not_attested: NOT_ATTESTED, failed_predicates: [...failed].sort(), reasons, field_problems: fieldProblems, internally_consistent: state === 'snapshot_valid',
     provider_snapshot_sha256: hash, check_runs: rows.map(({ predicate, ...r }) => r), jobs: jobRows, unbound_check_runs: unbound, orphan_jobs: orphan };
 }
 

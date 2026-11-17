@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, truncateSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -237,6 +238,9 @@ const CASES = {
     { reason: 'job_repo_mismatch', s: (s) => { s.jobs['run100-2'][0].check_run_url = url(2, 'other/widgets'); } }, { reason: 'job_head_sha_mismatch', s: (s) => { s.jobs['run100-2'][0].head_sha = 'f'.repeat(40); } },
     { reason: 'job_name_mismatch', s: (s) => { s.jobs['run100-2'][0].name = 'lint'; } }, { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1.5; } },
     { reason: 'job_identity_invalid', s: (s) => { s.jobs['run100-2'][0].run_attempt = 1e100; } }, { reason: 'job_identity_invalid', s: (s) => { delete s.jobs['run100-2'][0].run_id; } }],
+  raw_fields_typed: [{ reason: 'field_type', s: (s) => { s.checks[0].started_at = {}; } }, { reason: 'field_type', s: (s) => { s.jobs['run100-2'][0].runner_name = {}; } }, { reason: 'field_type', s: (s) => { s.jobs['run100-1'][0].runner_group_name = 7; } },
+    { reason: 'field_type', s: (s) => { s.jobs['run100-2'][0].steps[0].conclusion = 'bogus'; } }, { reason: 'field_type', s: (s) => { s.jobs['run100-2'][0].run_attempt = { toString: 1 }; } },
+    { reason: 'field_type', s: (s) => { s.jobs['run100-1'][0].completed_at = '2026-13-45T99:00:00Z'; } }],
   job_files_coherent: [{ reason: 'mixed_run_attempt', s: (s) => { s.jobs['run100-1'].push(s.jobs['run200-1'].pop()); } }],
   job_name_unique: [{ reason: 'ambiguous_job_name', s: (s) => { s.checks.push(check({ id: 5 })); s.jobs['run100-1'].push(job({ id: 5 })); } }],
   status_consistent: [{ reason: 'check_not_completed', s: (s) => { s.checks[0].status = 'in_progress'; } }, { reason: 'check_not_completed', s: (s) => { s.checks[3].status = 'in_progress'; } },
@@ -259,7 +263,7 @@ const WANT = Object.fromEntries([
     'annotation_file_unexpected', 'not_json_lines', 'unrecognised_line', 'name_not_string', 'annotation_not_an_annotation', 'too_deep', 'id_invalid', 'id_duplicate', 'mixed_run_attempt'].map((r) => [r, 'invalid']),
   ...['check_runs_missing', 'jobs_missing', 'no_total_count', 'total_count_disagree', 'items_differ_from_total', 'own_url_not_origin_repo', 'head_sha_mismatch', 'app_missing', 'own_id_mismatch', 'job_id_mismatch', 'no_job',
     'job_repo_mismatch', 'job_head_sha_mismatch', 'job_name_mismatch', 'job_identity_invalid', 'ambiguous_job_name', 'check_not_completed', 'job_not_completed', 'conclusion_mismatch', 'check_conclusion_unknown',
-    'job_conclusion_unknown', 'job_inputs_unknown', 'malformed_step', 'malformed_labels', 'attempt_gap', 'not_bound', 'annotations_missing', 'annotations_incomplete', 'annotations_unknown'].map((r) => [r, 'incomplete']),
+    'job_conclusion_unknown', 'job_inputs_unknown', 'malformed_step', 'malformed_labels', 'field_type', 'attempt_gap', 'not_bound', 'annotations_missing', 'annotations_incomplete', 'annotations_unknown'].map((r) => [r, 'incomplete']),
   ['no_check_runs', 'empty'],
 ]);
 const observed = new Set(), skippedReasons = new Set();
@@ -411,4 +415,85 @@ test('shape validator: closed schema, scalars, optional keys', () => {
   assert.equal(shapeProblem(['a', 1], SHAPES.labels), '$[1]:bad_type');
   assert.equal(shapeProblem({ message: 'm', title: null }, SHAPES.annotation), null);
   assert.equal(shapeProblem({ message: 'm', x: 1 }, SHAPES.annotation), '$.x:unknown_key');
+});
+
+// ---- THE INVARIANT: every field the module reads is declared in SHAPES, and every declared field is validated -----------
+// A rich synthetic snapshot in which EVERY declared field is populated, and which is snapshot_valid.
+const TSV = '2026-11-16T21:28:16Z';
+const rich = () => {
+  const s = base();
+  Object.assign(s.checks[0], { started_at: TSV, completed_at: TSV, output: { annotations_count: 1 } });
+  Object.assign(s.jobs['run100-1'][0], { started_at: TSV, completed_at: TSV, runner_group_name: 'g', labels: ['self-hosted'], steps: [{ name: 's', status: 'completed', conclusion: 'failure', number: 1, started_at: TSV, completed_at: TSV }] });
+  s.annotations['1.jsonl'] = JSON.stringify({ path: 'a', start_line: 1, end_line: 1, start_column: null, end_column: null, annotation_level: 'failure', title: null, message: 'm', raw_details: null, blob_href: 'h' }) + '\n';
+  return s;
+};
+
+// declared reads, derived from SHAPES with the same kind-path scheme the recorder uses
+const DECLARED = new Map(), SPECS = new Map();
+for (const root of ['check_run', 'job', 'annotation', 'page']) (function walk(kind, spec) {
+  if (spec.object) { DECLARED.set(kind, new Set(Object.keys(spec.object))); SPECS.set(kind, spec.object); for (const [k, s] of Object.entries(spec.object)) if (typeof s === 'object') walk(`${kind}.${k}`, s); }
+  else if (spec.arrayOf && typeof spec.arrayOf === 'object') walk(`${kind}[]`, spec.arrayOf);
+})(root, SHAPES[root]);
+// Read but not a consumed value: the line-kind discriminators of a paginated page (`name` / `id` tell an item from a total_count line).
+const UNCONSUMED_BUT_PRESERVED = { page: ['name', 'id'] };
+
+function recordReads(texts, reads) {
+  const tag = new Map(), orig = JSON.parse;
+  const kindOf = (line, itemKind) => { let o; try { o = orig(line); } catch { return itemKind; } if (!o || typeof o !== 'object') return itemKind; return Object.hasOwn(o, 'total_count') && !Object.hasOwn(o, 'name') ? 'page' : itemKind; };
+  const add = (text, itemKind) => { for (const l of text.split('\n')) if (l.trim()) tag.set(l, kindOf(l, itemKind)); };
+  add(texts.checkRuns, 'check_run');
+  for (const v of Object.values(texts.jobs)) add(v, 'job');
+  for (const v of Object.values(texts.annotations)) for (const l of v.split('\n')) if (l.trim()) tag.set(l, 'annotation');
+  const skipKey = (k) => typeof k !== 'string' || k === 'length' || /^\d+$/.test(k) || ['toJSON', 'then', 'constructor', '__proto__'].includes(k) || typeof Array.prototype[k] === 'function';
+  const traversal = () => /at (depthOf|canon|sha256)\b/.test(new Error().stack);
+  const rec = (kind, k) => { if (!skipKey(k) && !traversal()) { if (!reads.has(kind)) reads.set(kind, new Set()); reads.get(kind).add(k); } };
+  const wrap = (v, kind) => new Proxy(v, {
+    get(t, k, r) {
+      const x = Reflect.get(t, k, r);
+      if (!Array.isArray(t)) rec(kind, k);
+      if (x && typeof x === 'object') return Array.isArray(t) ? (/^\d+$/.test(String(k)) ? wrap(x, `${kind}[]`) : x) : (typeof k === 'string' ? wrap(x, `${kind}.${k}`) : x);
+      return x;
+    },
+    has(t, k) { rec(kind, k); return Reflect.has(t, k); },
+  });
+  JSON.parse = (text, ...rest) => { const v = orig(text, ...rest); const kind = tag.get(text); return kind && v && typeof v === 'object' ? wrap(v, kind) : v; };
+  try { return buildSnapshot({ texts, repo: REPO, sha: SHA, origin: ORIGIN }); } finally { JSON.parse = orig; }
+}
+
+test('invariant: every property the module READS from a raw object is declared in SHAPES (or listed as unconsumed with a reason)', () => {
+  const reads = new Map();
+  const runs = [rich(), base()];
+  for (const list of Object.values(CASES)) for (const c of list) if (!c.root && !c.args) { const s = base(); c.s?.(s); const x = texts(s); c.t?.(x); runs.push([s, x]); }
+  for (const r of runs) { const [s, x] = Array.isArray(r) ? r : [r, texts(r)]; recordReads(x, reads); }
+  const undeclared = [];
+  for (const [kind, keys] of reads) for (const k of keys) if (!DECLARED.get(kind)?.has(k) && !UNCONSUMED_BUT_PRESERVED[kind]?.includes(k)) undeclared.push(`${kind}.${k}`);
+  assert.deepEqual(undeclared, []);
+  // the recorder really sees the consumers (a dead harness would pass vacuously)
+  for (const [kind, keys] of Object.entries({ check_run: ['id', 'name', 'status', 'conclusion', 'started_at', 'url', 'app', 'output', 'head_sha'], job: ['steps', 'runner_name', 'labels', 'runner_group_name', 'check_run_url', 'run_attempt', 'completed_at'],
+    'job.steps[]': ['number', 'conclusion'], annotation: ['message', 'blob_href'], 'check_run.app': ['slug'], 'check_run.output': ['annotations_count'], page: ['total_count'] })) for (const k of keys) assert.ok(reads.get(kind)?.has(k), `recorder saw no read of ${kind}.${k}`);
+});
+
+test('invariant: a wrongly-typed value in ANY declared field is never snapshot_valid (every declared field is validated end to end)', () => {
+  assert.equal(build(rich()).state, 'snapshot_valid');
+  const HUGE = 'x'.repeat(100000), BAD = [{}, 7, true, [], '', HUGE, null, { toString: 1 }];
+  const target = {
+    check_run: (s) => s.checks[0], 'check_run.app': (s) => s.checks[0].app, 'check_run.output': (s) => s.checks[0].output,
+    job: (s) => s.jobs['run100-1'][0], 'job.steps[]': (s) => s.jobs['run100-1'][0].steps[0],
+  };
+  let n = 0;
+  const check = (label, spec, mutate) => { for (const bad of BAD) { if (shapeProblem(bad, spec) === null) continue; const s = rich(); const x = texts(s); mutate(s, x, bad); n++; assert.notEqual(build(s, x).state, 'snapshot_valid', `${label} = ${typeof bad}`); } };
+  for (const [kind, get] of Object.entries(target)) for (const [k, spec] of Object.entries(SPECS.get(kind))) check(`${kind}.${k}`, spec, (s, x, bad) => { get(s)[k] = bad; Object.assign(x, texts(s)); });
+  for (const [k, spec] of Object.entries(SPECS.get('annotation'))) check(`annotation.${k}`, spec, (s, x, bad) => { const o = JSON.parse(s.annotations['1.jsonl']); o[k] = bad; s.annotations['1.jsonl'] = JSON.stringify(o) + '\n'; Object.assign(x, texts(s)); });
+  check('page.total_count', SPECS.get('page').total_count, (s, x, bad) => { const l = x.checkRuns.split('\n'); l[0] = JSON.stringify({ total_count: bad }); x.checkRuns = l.join('\n'); });
+  assert.ok(n > 250, `only ${n} mutations ran`);
+  // declared keys are exactly the walked ones: a field added to SHAPES is automatically covered above
+  assert.deepEqual([...DECLARED.keys()].sort(), ['annotation', 'check_run', 'check_run.app', 'check_run.output', 'job', 'job.steps[]', 'page']);
+});
+
+test('SHAPES golden: the declared types are pinned (loosening a field type must be a deliberate edit of this digest)', () => {
+  const digest = createHash('sha256').update(JSON.stringify(SHAPES)).digest('hex');
+  assert.equal(digest, '7bc13ec6e1e91657ce39f62a35893dd71049cf1e6811d05a838ee2661ce57f2c');
+  // the load-bearing types, spelled out so a reviewer can read them without hashing
+  assert.equal(SHAPES.job.object.runner_name, '?string|null'); assert.equal(SHAPES.job.object.started_at, '?ts|null');
+  assert.deepEqual(SHAPES.step.object.conclusion, { enum: CONCLUSIONS, nullable: true }); assert.equal(SHAPES.check_run.object.id, 'id');
 });
