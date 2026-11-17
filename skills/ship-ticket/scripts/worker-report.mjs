@@ -29,8 +29,14 @@ const stringList = (v) => Array.isArray(v) && v.every(x => typeof x === 'string'
  * final message: `{tests:[{cmd, result:'pass'|'fail'}], red_seen:[], blockers:[],
  * needs_outside_ownership:[]}` (exactly these keys). Returns
  * `{status:'structured', report}` or `{status:'unstructured', failure}`; never throws.
+ *
+ * An optional fifth key `t0:{result:'pass'|'fail', checks:[{name, result:'pass'|'fail'|'skipped'}]}` (fast-checks.mjs) is
+ * accepted and validated when present (malformed: `fast_check_invalid`), so a compliant five-key report is never
+ * downgraded to unstructured. `opts.t0Declared` (default false) is for a repository that declares T0: the key is then
+ * required and its absence is refused as exactly `fast_check_missing`.
  */
-export function parseWorkerReport(text) {
+export function parseWorkerReport(text, opts = {}) {
+  const t0Declared = opts !== null && typeof opts === 'object' && opts.t0Declared === true;
   if (typeof text !== 'string') return { status: 'unstructured', failure: 'no final message' };
   const blocks = [...text.matchAll(REPORT_FENCE)];
   if (!blocks.length) return { status: 'unstructured', failure: 'no ship-ticket-report block' };
@@ -38,12 +44,22 @@ export function parseWorkerReport(text) {
   try { report = JSON.parse(blocks[blocks.length - 1][1]); } catch (e) { return { status: 'unstructured', failure: 'invalid JSON: ' + e.message }; }
   if (!report || typeof report !== 'object' || Array.isArray(report)) return { status: 'unstructured', failure: 'report is not an object' };
   const keys = Object.keys(report);
-  const extra = keys.filter(k => !REPORT_KEYS.includes(k));
+  if (t0Declared && !keys.includes('t0')) return { status: 'unstructured', failure: 'fast_check_missing' };
+  const allowed = [...REPORT_KEYS, 't0'];
+  const extra = keys.filter(k => !allowed.includes(k));
   const missing = REPORT_KEYS.filter(k => !keys.includes(k));
   if (extra.length || missing.length) return { status: 'unstructured', failure: 'report keys: missing [' + missing + '] unexpected [' + extra + ']' };
   if (!Array.isArray(report.tests) || !report.tests.every(t => t && typeof t === 'object' && !Array.isArray(t)
     && typeof t.cmd === 'string' && t.cmd.length > 0 && (t.result === 'pass' || t.result === 'fail')))
     return { status: 'unstructured', failure: 'tests must be [{cmd, result:"pass"|"fail"}]' };
   for (const k of REPORT_KEYS.slice(1)) if (!stringList(report[k])) return { status: 'unstructured', failure: k + ' must be an array of strings' };
+  if (keys.includes('t0')) {
+    const t = report.t0;
+    const verdict = (v) => v === 'pass' || v === 'fail';
+    const checkVerdict = (v) => verdict(v) || v === 'skipped';
+    if (!t || typeof t !== 'object' || Array.isArray(t) || !verdict(t.result) || !Array.isArray(t.checks)
+      || !t.checks.every(c => c && typeof c === 'object' && !Array.isArray(c) && typeof c.name === 'string' && c.name.length > 0 && checkVerdict(c.result)))
+      return { status: 'unstructured', failure: 'fast_check_invalid: t0 must be {result:"pass"|"fail", checks:[{name, result:"pass"|"fail"|"skipped"}]}' };
+  }
   return { status: 'structured', report };
 }

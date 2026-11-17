@@ -181,7 +181,9 @@ What it enforces:
   from the carrier's own snapshot, not the worker's word), `attempt_id` and
   `role` (`builder|repair|evidence`, default by phase). Worker prompts end with a
   fenced `ship-ticket-report` JSON block
-  `{"tests":[{"cmd","result"}],"red_seen":[],"blockers":[],"needs_outside_ownership":[]}`;
+  `{"tests":[{"cmd","result"}],"red_seen":[],"blockers":[],"needs_outside_ownership":[]}`
+  (a repository that declares T0 fast checks adds a fifth key `t0`, accepted when well-formed; see `prove.md`.
+  The carrier does not require it; the orchestrator's `fast-checks.mjs verify` does);
   the last block is validated into the message file. A missing or invalid block
   is not fatal: the result says `report: "unstructured"` with the failure reason.
 

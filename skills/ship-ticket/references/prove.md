@@ -106,6 +106,107 @@ concurrently. They still join at one barrier and consume one batch; the
 orchestrator rederives evidence from their combined final tree, never from each
 worker's partial view.
 
+## Builder fast checks (T0)
+
+T0 is a short list of deterministic checks the repository declares and every builder or repair worker runs on
+its **working tree** before handing over (lint, typecheck, `nn-guard`, a secrets scan, a static security scan:
+whatever the repository has). It exists because a JWT-shaped literal in an uncommitted spec and an `nn-guard` or
+`prefer-const` finding were each found by a full gate run late, at a cost of one whole gate run. T0 is fast
+feedback. It does not prove semantic correctness; REVIEW and the tests still do that.
+
+**T0 is DETECTED-class, advisory feedback. It is not an enforced or anti-tamper boundary.** It catches honest
+mistakes and clumsy shortcuts early and cheaply. The orchestrator's own independent re-run of `run` only guards against a
+forged claim; the reviewers and the final full gates are the authority; a worker acting in the same repository as the same user can still
+defeat T0, and nothing here claims otherwise (see "Limits" below).
+
+### The declaration and who may author it
+
+Opt in by committing `.ship-ticket/t0.json` **at the git top level of the base branch** (one place, whatever
+`--repo` subdirectory is given; a copy inside a subdirectory is not a declaration):
+
+```json
+{"checks":[{"name":"secrets","kind":"secrets","cmd":["gitleaks","dir","--no-banner","{files}"],"files":true,"timeout_ms":120000}]}
+```
+
+`cmd` is an argv array, never a shell string. `kind` is one of `lint`, `typecheck`, `nn-guard`, `secrets`,
+`security`, `other`. `{files}` becomes one argument per scanned file. The scanners are the repository's own;
+this skill ships none (a StoreCraft `local-gates.sh --fast` is a separate ticket in that repository).
+
+**Trust boundary.** The declared commands run with the caller's environment and permissions. Argv execution only
+stops shell interpolation of file names; it does not make a declaration trusted. So:
+- the declaration is authored and reviewed like CI configuration, by someone with authority over the repository,
+  and lands on the base before any ticket relies on it;
+- it is read **from `--base`** (git replacement objects are ignored), never from the branch being checked. A worker that deletes, edits or replaces it
+  gets `declaration_tampered`; a declaration that exists only on the branch is ignored (`not_declared`) and never
+  executed. A ticket that must change it is changed on the base first, by the repository owner;
+- a check fails (`checker_modified`) when its command path, or any argument (or the value after `--opt=`), or the
+  real path behind a symlink among them, is a changed file. So list **every config, rules and ignore file the check
+  depends on as its own argument or file input of the declared command**, and use installed tools, not scripts the
+  ticket is editing. Anything not named in the command (a config found by search, inline suppression comments,
+  imported modules, `node_modules`) is not covered: that is REVIEW's and the final gate's job;
+- the declared command must itself exit non-zero on a finding (eslint warnings, `gitleaks --exit-code 0` pass).
+
+### Limits (stated, not built)
+
+- `--base` is a commit the caller supplies; T0 does not check who pinned it. The orchestrator passes the base SHA
+  it recorded at init; use a full SHA, not a movable ref.
+- `verify` trusts the worker's `t0` claim unless the orchestrator also re-runs `run` itself.
+- Not scanned: a secret that was staged and then cleaned from the working copy, and intermediate commits between
+  base and HEAD (declare a history-mode scanner such as `gitleaks git <base>..HEAD` as its own check if wanted).
+- A descendant that leaves the process group (`setsid`, daemonizing) is not killed on timeout (Windows: `taskkill
+  /T`, with a direct-child fallback reported as a degraded kill). The verdict is still a failure.
+- A changed file inside a directory argument (for example `semgrep --config rules/`) is not seen by `checker_modified`: name the files.
+- A bare command name is not looked up on PATH for `checker_modified`; only paths on disk are compared.
+- The `t0_check` evidence row is written by `run-log.mjs`, whose repository resolution trims pathnames (a checkout whose
+  directory name ends in CR can mis-resolve) and honours HOME/XDG git config; a pre-existing defect tracked as a
+  follow-up under ASTF-42. The verdict never depends on the row.
+- On Windows an executable planted in the repository folder can shadow a PATH tool. A changed config the declared
+  command does not name, as above.
+- The declared commands, a fake binary earlier on PATH, or edits to the skill install by the same user are outside
+  what T0 can see.
+
+### Running it
+
+From the ship-ticket skill directory (the one holding `scripts/` and `references/`), after every edit and again before handing over:
+
+```text
+node scripts/fast-checks.mjs run --repo <repo> --base <base sha> [--ticket <key> --run-id <id>]
+```
+
+- `--base` is required. `--repo` may be a subdirectory of the git top level.
+- The scan set is **the working tree** against base: committed, staged, unstaged and untracked files, a renamed file
+  under its new path (paths are passed relative to `--repo`). Nothing narrows the set to committed files, and
+  `--allow-dirty` does not apply: a dirty secret is scanned. Git-ignored files are out of scope, and the index is not
+  scanned separately (a staged secret whose working copy was cleaned is not seen).
+- A changed submodule, nested repository, symlink, unresolvable path, or a tracked file with an assume-unchanged or
+  skip-worktree bit is a **failure**, never a silent drop.
+- Anything but a clean exit 0 fails: a non-zero exit, a **timeout**, a signal, a missing binary, an invalid or
+  empty declaration, a bad `--base`, or a file set git cannot list. A timeout is never a pass. Each check runs in
+  its own process group and the group is killed on timeout (on Windows `taskkill /T`; whether the tree is gone
+  afterwards is not observable there). Windows `.cmd` shims need their real executable; a very large file list can
+  exceed the OS argument limit and fails closed.
+- A file-scoped check with no changed files is reported `skipped`, not `pass`; `verify` refuses a `skipped` check
+  when files changed (`fast_check_skipped`).
+- stdout is one JSON verdict of names, enums and counts. Scanner output is not in it (a secrets scanner echoes
+  the secret); a failing check's output tail is on stderr for you.
+- With `--ticket` and `--run-id` it records a `t0_check` activity row (`outcome` pass, fail or not_declared;
+  numeric metrics `checks`, `failed`, `files`, `timed_out`). A run-log error never changes the verdict.
+- No declaration at base: exit 0, code `not_declared`, nothing else changes.
+
+### Reporting and verifying
+
+When the repository declares T0, the worker report carries a fifth key `t0`, copied from the verdict's `report`
+(`brief.mjs build --t0 <repo>/.ship-ticket/t0.json` adds this instruction to the brief; an optional well-formed
+`t0` key is accepted by the report parser, so the carrier still reports such a report as structured). The
+orchestrator runs `node scripts/fast-checks.mjs verify --repo <repo> --base <base sha> --report-file <final message file>`
+and does not freeze a candidate when it exits 1: `fast_check_missing` (no `t0`), `fast_check_incomplete` (a declared
+check is not reported), `fast_check_failed`, `fast_check_skipped`, `declaration_tampered`. The `t0` value is the
+worker's own claim: re-run `run` yourself before freeze.
+
+**Status: AC1 is only partly met.** The parser (`t0Declared`) and `verify` exist and are tested; the engine does not
+call `verify` at freeze and the carrier does not require `t0`. That freeze integration, the risk-triggered semantic
+test kinds (T1-S) and mutation validity are separate slices (S-01b, S-01c).
+
 ## The static proof
 
 Run the routed specialist's **security rows only** — `BE-SEC-*`, `BE-AUTH-*`,
