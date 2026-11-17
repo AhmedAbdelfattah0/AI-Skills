@@ -103,6 +103,7 @@ async function stubFixture(t, opts) {
   await init(fx.ctx());
   t.after(async () => {
     for (const g of watched) try { process.kill(-g, 'SIGKILL'); } catch { /* gone */ }
+    fx.processes.dispose();
     rmSync(fx.root, { recursive: true, force: true });
   });
   return { fx, watch: (g) => { watched.add(g); return g; }, teardown: async () => { for (const h of hooks) await h(); } };
@@ -110,7 +111,7 @@ async function stubFixture(t, opts) {
 
 /** The registered group leaders (launchers), each asserted alive: a positive signal that teardown has something to reap. */
 function liveLeaders(fx, watch, what) {
-  const leaders = fx.processes.entries().filter(e => e.leader).map(e => watch(e.pid));
+  const leaders = [...new Set(fx.processes.entries().filter(e => e.leader).map(e => e.pid))].map(watch);
   assert.ok(leaders.length > 0, `${what}: a launcher group was registered`);
   for (const g of leaders) assert.equal(groupGone(g), false, `${what}: group ${g} is alive before teardown`);
   return leaders;
@@ -118,7 +119,10 @@ function liveLeaders(fx, watch, what) {
 
 const allGone = (fx, leaders, what) => {
   for (const g of leaders) assert.equal(groupGone(g), true, `${what}: group ${g} is gone after teardown`);
-  for (const e of fx.processes.entries()) assert.equal(processGone(e.pid), true, `${what}: registered pid ${e.pid} is gone after teardown`);
+  for (const e of fx.processes.entries()) {
+    if (e.sock) assert.equal(existsSync(e.sock), true, `${what}: pid ${e.pid}'s socket exists`);
+    assert.equal(processGone(e.pid), true, `${what}: registered pid ${e.pid} is gone after teardown`);
+  }
 };
 
 test('registry: a commit that throws before after-pid leaves a waiting launcher the engine never reported; teardown reaps it', { skip: REG_SKIP }, async (t) => {
@@ -208,19 +212,48 @@ test('registry: teardown fails loudly, naming it, when a registered process surv
   assert.equal(groupGone(child.pid), true);
 });
 
-test('registry: a registered pid now naming another process is never signalled', { skip: REG_SKIP }, async (t) => {
+/** A dead registered socket: a node process under the fixture env registers itself, then is SIGKILLed. */
+async function deadSocket(fx) {
+  const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { env: fx.env, stdio: 'ignore' });
+  const e = await waitFor(() => fx.processes.entries().find(x => x.pid === c.pid && x.sock), 'the process registered its socket');
+  c.kill('SIGKILL');
+  await new Promise(r => c.once('exit', r));
+  return e.sock;
+}
+
+test('registry: an unrelated process holding a registered (dead) pid, in another group, is never signalled', { skip: REG_SKIP }, async (t) => {
   const { fx } = await stubFixture(t);
-  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  t.after(() => other.kill('SIGKILL'));
+  const sock = await deadSocket(fx);
+  // An unrelated sleeping process in a group of its own, never registered.
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-other.pid, 'SIGKILL'); } catch { /* gone */ } });
   await waitFor(() => !processGone(other.pid), 'the other process runs');
-  // An entry registered 60 s ago for that pid: a registered process that died, its pid since reused by `other`, which
-  // started after the registration.
-  appendFileSync(fx.processes.file, JSON.stringify({ pid: other.pid, leader: false, at: Date.now() - 60000 }) + '\n');
+  // A registration whose process died and whose pid now names `other` (the reuse case): its socket refuses.
+  appendFileSync(fx.processes.file, JSON.stringify({ token: fx.processes.token, pid: other.pid, leader: false, sock, via: 'preload' }) + '\n');
   await fx.processes.reap();
   assert.equal(processGone(other.pid), false, 'the unrelated process is still running');
-  // Control (a fresh registry): the same pid registered after it started is the registered process, and is reaped.
-  const { fx: fresh } = await stubFixture(t);
-  appendFileSync(fresh.processes.file, JSON.stringify({ pid: other.pid, leader: false, at: Date.now() }) + '\n');
-  await fresh.processes.reap();
-  assert.equal(processGone(other.pid), true, 'a pid registered after its start is reaped');
+  assert.equal(groupGone(other.pid), false, 'its group is untouched');
+});
+
+test('registry: an entry teardown cannot decide (no socket, foreign token) fails teardown loudly, naming it', { skip: REG_SKIP }, async (t) => {
+  const { fx } = await stubFixture(t);
+  appendFileSync(fx.processes.file, JSON.stringify({ token: fx.processes.token, pid: 999999, leader: false, sock: null, via: 'preload' }) + '\n'
+    + JSON.stringify({ token: 'another-fixture', pid: 999998, leader: false, sock: null, via: 'preload' }) + '\n');
+  await assert.rejects(fx.processes.reap(), /ownership undecidable: pid 999999: registered without a socket, pid 999998: foreign token/);
+});
+
+test('registry: a spawned group closed at its leader\'s exit is never signalled again', { skip: REG_SKIP }, async (t) => {
+  const { fx } = await stubFixture(t);
+  const child = fx.processes.spawnFn()(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+  await new Promise(r => child.once('exit', r));
+  const sent = [];
+  await fx.processes.reap({ kill: (target) => sent.push(target) });
+  assert.deepEqual(sent.filter(x => Math.abs(x) === child.pid), [], 'the closed group was not signalled');
+});
+
+test('registry: identity is ownership, never time: the registry module reads no clock and runs no ps', () => {
+  const src = readFileSync(join(HERE, 'process-registry.test-helper.mjs'), 'utf8');
+  for (const banned of [/Date\.now/, /performance\.now/, /hrtime/, /etime/, /new Date\(/, /spawnSync/, /\bps\b['"]/]) {
+    assert.equal(banned.test(src), false, `the registry module must not use ${banned}`);
+  }
 });
