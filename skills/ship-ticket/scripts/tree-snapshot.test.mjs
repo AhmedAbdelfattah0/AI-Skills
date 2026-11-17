@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const MODULE = process.env.TREE_SNAPSHOT_UNDER_TEST || fileURLToPath(new URL('./tree-snapshot.mjs', import.meta.url));
-const { takeSnapshot, compareSnapshots, validateSnapshot, LIMITS, dirDigest } = await import(pathToFileURL(MODULE).href);
+const { takeSnapshot, compareSnapshots, validateSnapshot, LIMITS, dirDigest, utf8 } = await import(pathToFileURL(MODULE).href);
 const win = process.platform === 'win32';
 const CASE_INSENSITIVE = (() => { const d = realpathSync.native(mkdtempSync(join(tmpdir(), 'treecase-'))); try { writeFileSync(join(d, 'Ab'), ''); return existsSync(join(d, 'aB')); } finally { rmSync(d, { recursive: true, force: true }); } })();
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -655,4 +655,52 @@ test('b2 the root gitfile is bound: repointing a linked worktree .git at a byte-
   const via = join(dir, 'via'); symlinkSync(real, via); writeFileSync(join(wt, '.git'), `gitdir: ${via}\n`); // identical gitfile bytes below, only the resolution moves
   const s2 = takeSnapshot(wt); rmSync(via); symlinkSync(copy, via);
   assert.deepEqual(paths(verdict(s2, wt)), ['gitdir:null']);
+});
+
+// ---- one decode choke point: every path/name/git output turned into a string goes through utf8() (fatal) ----------
+test('d1 utf8() decodes exact UTF-8 only: valid text and a real U+FFFD/BOM round-trip; invalid bytes throw (never U+FFFD)', () => {
+  assert.equal(utf8(Buffer.from('a/ü/日本')), 'a/ü/日本');
+  assert.equal(utf8(Buffer.from([0xef, 0xbf, 0xbd])), '�'); // the real character, distinct from a decoding failure
+  assert.equal(utf8(Buffer.from([0xef, 0xbb, 0xbf, 0x61])), '﻿a'); // a leading BOM is kept, not stripped
+  for (const bad of [[0xff], [0x61, 0x80], [0xc3], [0xed, 0xa0, 0x80]]) assert.throws(() => utf8(Buffer.from(bad)), /not valid UTF-8/, bad.join());
+});
+test('d1 source: every decode of path, name or git output is utf8() (or text() over it); the remaining decodes are an explicit allowlist', () => {
+  const src = readFileSync(MODULE, 'utf8');
+  assert.match(src, /new TextDecoder\('utf-8', \{ fatal: true, ignoreBOM: true \}\)/);
+  assert.match(src, /const text = \(b\) => utf8\(b\)/);
+  const allowed = new Set(["toString('hex')", "toString('latin1')", 'toString(16)', 'stderr.toString()', 'String(e.message)', "label = (raw) => raw.toString('utf8')"]);
+  const sites = [...src.matchAll(/(?:label = \(raw\) => raw|stderr|\w|\))\.toString\([^)]*\)|\bString\([^)]*\)/g)].map(([m]) => m.replace(/^.*?\.?(toString|String)/, (all, k) => (all.startsWith('label') || all.startsWith('stderr') ? all : k)));
+  assert.ok(sites.length >= 5, 'the scan found decode sites');
+  for (const site of sites) assert.ok(allowed.has(site), 'unlisted decode site: ' + site);
+  assert.equal([...src.matchAll(/realpathSync\.native\(([^()]*)\)/g)].filter(([m]) => !/encoding: 'buffer'/.test(m)).length, 0, 'realpath returns raw bytes');
+});
+test('d2 a hooks directory reached through a non-UTF-8 path is unknown (exit 1), never a lossy sibling', { skip: !RAW_NAMES && 'filesystem rejects non-UTF-8 names' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const ff = Buffer.concat([Buffer.from(repo + '/.git/'), Buffer.from([0xff])]); mkdirSync(ff); mkdirSync(join(repo, '.git', '�'));
+  writeFileSync(join(repo, '.git', 'config'), Buffer.concat([readFileSync(join(repo, '.git', 'config')), Buffer.from('[core]\n\thooksPath = '), ff, Buffer.from('\n')])); // raw bytes (argv would re-encode them)
+  assert.ok(execFileSync('git', ['-C', repo, 'rev-parse', '--git-path', 'hooks']).includes(Buffer.from([0xff])), 'premise: git reports the raw hooks path');
+  const r = cli('snapshot', '--repo', repo, '--out', join(dir, 'h.json'));
+  assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown'); assert.match(r.out.reason, /not valid UTF-8/);
+});
+test('d2 a non-UTF-8 submodule name is unknown, not a HEAD read from a lossy sibling', { skip: !RAW_NAMES && 'filesystem rejects non-UTF-8 names' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const lib = join(dir, 'lib'); mkdirSync(lib); git(lib, 'init', '-q', '-b', 'main'); put(lib, 'l.txt', 'l'); git(lib, 'add', '-A'); git(lib, 'commit', '-q', '-m', 'l');
+  execFileSync('sh', ['-c', 'git -C "$0" -c protocol.file.allow=always submodule add -q "$1" "$(printf \'s\\377\')"', repo, lib]); // raw 0x73 0xFF name
+  const s = takeSnapshot(repo);
+  const e = s.entries.find((x) => x.p === '73ff'); assert.ok(e, 'the submodule entry exists'); assert.equal(e.k, 'unreadable');
+  assert.equal(compareSnapshots(s, s).result, 'unknown');
+});
+test('d2 a gitfile through a non-UTF-8 symlink is exact (raw gitfile bytes, real UTF-8 git dir); retargeting it to a non-UTF-8 git dir is unknown', { skip: (!RAW_NAMES || win) && 'filesystem rejects non-UTF-8 names' }, (t) => {
+  const { dir, repo } = fixture(t);
+  const wt = join(dir, 'wt'); git(repo, 'worktree', 'add', '-q', '-b', 'w', wt);
+  const real = join(repo, '.git', 'worktrees', 'wt');
+  const via = Buffer.concat([Buffer.from(dir + '/'), Buffer.from([0xff])]); symlinkSync(real, via);
+  writeFileSync(join(wt, '.git'), Buffer.concat([Buffer.from('gitdir: '), via, Buffer.from('\n')]));
+  const f = join(dir, 'g.json'); assert.equal(cli('snapshot', '--repo', wt, '--out', f).status, 0); // nothing lossy: no decode failed
+  execFileSync('sh', ['-c', 'cp -Rp "$0" "$(printf "%s/c\\377" "$1")"', real, dir]); // a crafted copy at a non-UTF-8 real path
+  const crafted = Buffer.concat([Buffer.from(dir + '/c'), Buffer.from([0xff])]);
+  writeFileSync(Buffer.concat([crafted, Buffer.from('/commondir')]), join(repo, '.git') + '\n');
+  rmSync(via); symlinkSync(crafted, via); // the gitfile bytes are unchanged; only where they resolve moved
+  const r = cli('compare', '--before', f, '--repo', wt);
+  assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown'); assert.match(r.out.reason, /not valid UTF-8/);
 });

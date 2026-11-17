@@ -12,7 +12,9 @@
  * paths git itself lists as gitlinks (mode 160000). Any other `.git` is an ordinary entry (a file hashed by raw bytes; a
  * directory walked under NESTED_GIT_CAP, beyond which the verdict is `unknown`). tree-snapshot.test.mjs checks a FINITE
  * list of mutators against an independent observation, and a second list under five `.git` marker kinds.
- * No on-disk name or link target is ever decoded: every listing goes through listRaw (Buffer names) and absOf (Buffer paths).
+ * On-disk names are listed and hashed as raw bytes (listRaw, absOf). Every place a path, name or git output becomes a
+ * string goes through ONE decoder, utf8(): exact UTF-8 or it throws, so a non-UTF-8 path makes the verdict `unknown`, never
+ * a lossy U+FFFD spelling of a sibling. (`label` decodes the display name `n` only; comparisons use the hex key `p`.)
  *
  * The orchestrator takes a snapshot before a reviewer lane starts and runs `compare --repo` after it. Wiring into the
  * lane lifecycle is S-03b; this slice is the stand-alone check. `--out` must live OUTSIDE the checked tree (and its
@@ -75,13 +77,17 @@ function gitRaw(cwd, args, strict = false) {
   if (strict && r.stderr.length > 0) throw new Error(`git ${args[0]} warned: ${r.stderr.toString().split('\n')[0]}`);
   return r.stdout;
 }
-const text = (b) => b.toString().replace(/\n$/, '');
+const DEC = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+/** The ONE decoder for paths, names and git output: exact UTF-8 (round-trip checked) or it throws; never a U+FFFD substitute. */
+export const utf8 = (raw) => { let s; try { s = DEC.decode(raw); } catch { s = null; } if (s === null || !Buffer.from(s, 'utf8').equals(raw)) throw new Error('a path or git output is not valid UTF-8'); return s; };
+const tryUtf8 = (raw) => { try { return utf8(raw); } catch { return null; } };
+const label = (raw) => raw.toString('utf8'); // display only (the `n` field); never compared
+const text = (b) => utf8(b).replace(/\n$/, '');
 const zList = (buf) => buf.toString('latin1').split('\0').filter(Boolean).map((x) => Buffer.from(x, 'latin1'));
 const hexOf = (raw) => raw.toString('hex');
 const sub = (parent, name) => (parent.length ? Buffer.concat([parent, Buffer.from('/'), name]) : name);
 /** A path usable with fs: a string when it round-trips through UTF-8 (so Windows namespacing applies), else the raw Buffer. */
-const exactUtf8 = (raw) => { const s = raw.toString('utf8'); return Buffer.from(s, 'utf8').equals(raw) ? s : null; };
-const absOf = (top, raw) => { const s = exactUtf8(raw); return s !== null ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
+const absOf = (top, raw) => { const s = tryUtf8(raw); return s !== null ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
 /** The ONLY directory listing: raw name bytes (a string listing maps distinct invalid-UTF-8 names onto one U+FFFD spelling). */
 const listRaw = (path) => readdirSync(path, { encoding: 'buffer' }).sort(Buffer.compare);
 /** sha256 of a file read in 1 MiB chunks (no whole-file Buffer, so no 2 GiB ceiling). */
@@ -109,7 +115,7 @@ export function dirDigest(dir, modeSupported) {
 }
 
 function entryOf(top, raw, { modeSupported, gitlinks }) {
-  const base = { p: hexOf(raw), n: raw.toString('utf8') };
+  const base = { p: hexOf(raw), n: label(raw) };
   const abs = absOf(top, raw);
   let st;
   try { st = lstatSync(abs); } catch (e) { return { ...base, k: e.code === 'ENOENT' || e.code === 'ENOTDIR' ? 'missing' : 'unreadable' }; }
@@ -117,7 +123,8 @@ function entryOf(top, raw, { modeSupported, gitlinks }) {
     if (st.isSymbolicLink()) return { ...base, k: 'symlink', h: sha(readlinkSync(abs, { encoding: 'buffer' })) };
     if (st.isDirectory()) {
       if (!gitlinks.has(base.p)) return { ...base, k: 'dir' }; // any directory git does not call a gitlink, `.git` inside or not: enumerated by the walk
-      let head = 'none'; try { head = text(gitRaw(abs.toString(), ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits */ } // submodule: HEAD only (documented limit)
+      const cwd = utf8(raw) && abs; // a submodule git cannot be pointed at by a string path: unreadable (unknown), never a lossy sibling
+      let head = 'none'; try { head = text(gitRaw(cwd, ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits */ } // submodule: HEAD only (documented limit)
       return { ...base, k: 'repo', h: head };
     }
     if (!st.isFile()) return { ...base, k: 'other' };
@@ -133,21 +140,21 @@ function entryOf(top, raw, { modeSupported, gitlinks }) {
 function walk(top, rel, ctx, out, cap = null) {
   if (cap?.over) return;
   let names;
-  try { names = listRaw(rel.length ? absOf(top, rel) : top); } catch { out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'unreadable' }); return; }
-  if (names.length === 0 && rel.length && !ctx.known.has(hexOf(rel))) out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'emptydir' });
+  try { names = listRaw(rel.length ? absOf(top, rel) : top); } catch { out.push({ p: hexOf(rel), n: label(rel), k: 'unreadable' }); return; }
+  if (names.length === 0 && rel.length && !ctx.known.has(hexOf(rel))) out.push({ p: hexOf(rel), n: label(rel), k: 'emptydir' });
   for (const name of names) {
     const raw = sub(rel, name); const key = hexOf(raw);
     if ((!rel.length && name.equals(DOTGIT)) || ctx.gitlinks.has(key)) continue; // this repository's git dir; a submodule (documented limit)
-    let st; try { st = lstatSync(absOf(top, raw)); } catch { out.push({ p: key, n: raw.toString('utf8'), k: 'unreadable' }); continue; }
+    let st; try { st = lstatSync(absOf(top, raw)); } catch { out.push({ p: key, n: label(raw), k: 'unreadable' }); continue; }
     const c = cap || (name.equals(DOTGIT) && st.isDirectory() ? { ...ctx.nestedGitCap, at: raw } : null);
-    if (c && (--c.entries < 0 || (c.bytes -= st.isFile() ? st.size : 0) < 0)) { c.over = true; out.push({ p: hexOf(c.at), n: c.at.toString('utf8'), k: 'unreadable' }); return; }
+    if (c && (--c.entries < 0 || (c.bytes -= st.isFile() ? st.size : 0) < 0)) { c.over = true; out.push({ p: hexOf(c.at), n: label(c.at), k: 'unreadable' }); return; }
     if (st.isDirectory()) { if (!ctx.ignoredDirs.has(key)) walk(top, raw, ctx, out, c); } // every directory, whatever git knows about it or what it contains
     else if (!ctx.known.has(key) && !ctx.ignoredFiles.has(key)) out.push(entryOf(top, raw, ctx));
   }
 }
 
 const bodyOf = (s) => ({ schema: s.schema, lane: null, top: s.top, mode_checked: s.mode_checked, head: s.head, refs: s.refs, index: s.index, config: s.config, excludes: s.excludes, hooks: s.hooks, gitdir: s.gitdir, entries: s.entries });
-const REAL = (p) => realpathSync.native(p);
+const REAL = (p) => utf8(realpathSync.native(p, { encoding: 'buffer' }));
 
 /** The real top level and git directories of `repo` (what `--out` must stay out of). Throws when git cannot say. */
 export function treeRoots(repo) {
@@ -161,7 +168,7 @@ export function realOutPath(p) {
   for (let guard = 0; guard < 64; guard++) {
     try { const r = REAL(cur); return rest.length ? join(r, ...rest.reverse()) : r; } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; }
     let link = null; try { if (lstatSync(cur).isSymbolicLink()) link = readlinkSync(cur, { encoding: 'buffer' }); } catch { /* not a link */ }
-    if (link) { const t = exactUtf8(link); if (t === null) throw new Error('a symlink on the --out path has a non-UTF-8 target'); cur = resolve(dirname(cur), t); continue; }
+    if (link) { cur = resolve(dirname(cur), utf8(link)); continue; }
     const parent = dirname(cur); if (parent === cur) throw new Error('no existing ancestor');
     rest.push(basename(cur)); cur = parent;
   }
@@ -180,7 +187,7 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform, n
   let symref = null; try { symref = text(gitRaw(top, ['symbolic-ref', '-q', 'HEAD'])); } catch { /* detached */ }
   const refs = text(gitRaw(top, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], true)).split('\n').filter(Boolean).sort(); // shared state: reported by name, never decides the tree verdict
   // The index: stage entries, assume-unchanged/skip-worktree flags, and the in-memory flags (intent-to-add, stage, valid, skip-worktree).
-  const flags = [...gitRaw(top, ['ls-files', '--debug'], true).toString().matchAll(/^\s+size: -?\d+\tflags: ([0-9a-f]+)$/gm)].map((m) => ((parseInt(m[1], 16) & 0x6000b000) >>> 0).toString(16));
+  const flags = [...gitRaw(top, ['ls-files', '--debug'], true).toString('latin1').matchAll(/^\s+size: -?\d+\tflags: ([0-9a-f]+)$/gm)].map((m) => ((parseInt(m[1], 16) & 0x6000b000) >>> 0).toString(16));
   const staged = gitRaw(top, ['ls-files', '-s', '-z'], true);
   const index = sha(Buffer.concat([staged, Buffer.from('\0--flags--\0'), gitRaw(top, ['ls-files', '-v', '-z'], true), Buffer.from('\0--debug--\0' + flags.join(','))]));
   const gitPath = (name) => resolve(top, text(gitRaw(top, ['rev-parse', '--git-path', name])));
