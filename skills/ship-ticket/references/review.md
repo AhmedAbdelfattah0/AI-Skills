@@ -377,6 +377,12 @@ confirmation after both return.
 
 With `config.unitReview`, the per-unit reviews, the unit repair routing and the final review on unit evidence are in [units.md](units.md); without it none of that applies.
 
+## Tripwire: did a reviewer lane touch the live tree
+
+Before a reviewer lane starts, run `node scripts/tree-snapshot.mjs snapshot --repo <tree> --lane <id> --out <start.json>`; after it ends, run `node scripts/tree-snapshot.mjs compare --before <start.json> --repo <tree>`. Exit 0 is `unchanged`; `changed` or `unknown` (an unreadable path or a git failure) is a FAIL for that lane: report the listed paths and do not accept its findings until the tree is restored and the lane rerun. The snapshot compares file content (not `git status` text or mtime), exec bits, the index, HEAD, the ref set and the repository config. Launch wiring is a later slice; today the orchestrator runs the two commands around the lane.
+
+This is a DETECTED-class check by the same user, not an isolation boundary. It does not see git-ignored files, anything in the shared `.git` beyond HEAD, refs, index and config, writes by absolute path elsewhere, or edits inside a nested repository or submodule beyond its HEAD; where the OS has no exec bit, file modes are not compared and the verdict says so.
+
 ## Record and transition
 
 Append one compact `REVIEW` event to the plan's execution block. When repair ran,
