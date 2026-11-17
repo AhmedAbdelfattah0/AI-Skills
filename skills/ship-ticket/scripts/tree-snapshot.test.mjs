@@ -155,7 +155,7 @@ test('AC6 every verdict states the documented limits', (t) => {
   const r = cli('compare', '--before', f, '--repo', repo);
   assert.equal(r.status, 0); assert.deepEqual(r.out.limits, LIMITS);
   const text = LIMITS.join(' | ');
-  for (const needle of ['git-ignored', 'shared .git', 'absolute path', 'nested repositories', 'same user']) assert.ok(text.includes(needle), needle);
+  for (const needle of ['git-ignored', 'shared .git', 'absolute path', 'submodules', 'same user']) assert.ok(text.includes(needle), needle);
 });
 
 test('a git-ignored file change is NOT seen (documented limit, pinned so it cannot silently change)', (t) => {
@@ -229,13 +229,14 @@ test('sparse / skip-worktree: a tracked path missing from disk is a recorded sta
 test('FAIL-CLOSED: an unreadable path (file, or file under an unsearchable directory) is unknown (exit 1), not unchanged', { skip: POSIX_PERMS }, (t) => {
   const { dir, repo } = fixture(t);
   put(repo, 'sub/x.txt', 'x'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'sub');
-  for (const [target, back, expected] of [['a.txt', 0o644, 'unknown:a.txt'], ['sub', 0o755, 'unknown:sub/x.txt']]) {
+  for (const [target, back, expected] of [['a.txt', 0o644, 'unknown:a.txt'], ['sub', 0o755, null]]) {
     const f = join(dir, 's-' + target + '.json'); cli('snapshot', '--repo', repo, '--out', f);
     chmodSync(join(repo, target), 0o000);
     try {
       const r = cli('compare', '--before', f, '--repo', repo);
       assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown');
-      assert.ok(paths(r.out).includes(expected) || /warned|failed|unreadable/.test(r.out.reason ?? ''), JSON.stringify(r.out)); // per-path unknown, or git's own warning failed the snapshot
+      if (expected) assert.deepEqual(paths(r.out), [expected]); // our own read failed: per-path unknown
+      else assert.match(r.out.reason, /git ls-files warned: .*could not open directory 'sub\/'/); // git's own listing warning failed the snapshot
     } finally { chmodSync(join(repo, target), back); }
   }
 });
@@ -275,7 +276,7 @@ test('fix2 a NEW unreadable directory that git skips is unknown, never unchanged
   }
 });
 
-test('fix2 siblings: a new EMPTY directory and a new empty nested file are changes (they alter what is enumerated)', (t) => {
+test('fix2 a new EMPTY directory is a change (it alters what is enumerated)', (t) => {
   const { repo } = fixture(t);
   const s = takeSnapshot(repo);
   mkdirSync(join(repo, 'emptydir'));
@@ -388,7 +389,7 @@ test('fix9 ignore rules are part of the record: an untracked .gitignore, .git/in
   assert.equal(verdict(s, repo).result, 'changed');
 });
 
-test('fix9 hooks directory is hashed (detective)', { skip: win && 'hook files need no exec bit here but are skipped on Windows CI' }, (t) => {
+test('fix9 hooks directory is hashed (detective)', (t) => {
   const { repo } = fixture(t);
   const s = takeSnapshot(repo);
   writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho x\n');
@@ -423,7 +424,7 @@ test('INVARIANT: every difference git would see, or that changes what is enumera
     const g = (...a) => { try { return git(r, ...a); } catch { return 'ERR'; } };
     let listing; try { listing = readdirSync(r, { recursive: true, encoding: 'utf8' }); } catch { listing = ['ERR']; }
     listing = listing.filter((n) => !/^\.git([\\/]|$)/.test(n)).sort().map((n) => { try { const st = lstatSync(join(r, n)); return n + ':' + (st.isDirectory() ? 'd' : st.isSymbolicLink() ? 'l' : (st.mode & 0o100) ? 'x' : 'f'); } catch { return n + ':?'; } });
-    return JSON.stringify([g('status', '--porcelain=v2', '-uall', '--ignored=no'), g('ls-files', '-s'), g('ls-files', '-v'), g('ls-files', '--debug').replace(/^ +(ctime|mtime|dev|uid|size).*$/gm, '').replace(/flags: /g, 'flags:'), g('diff', 'HEAD', '--raw'), g('for-each-ref'), listing]);
+    return JSON.stringify([g('status', '--porcelain=v2', '-uall', '--ignored=no'), g('ls-files', '-s'), g('ls-files', '-v'), g('ls-files', '--debug').replace(/^ +(ctime|mtime|dev|uid).*$/gm, ''), g('diff', 'HEAD', '--raw'), g('for-each-ref'), listing]);
   };
   for (const [name, mutate] of Object.entries(mutators)) {
     const { repo } = fixture(t);
@@ -539,4 +540,85 @@ test('c6 the CLI parser rejects a flag-shaped value (usage, exit 2) instead of c
   assert.equal(cli('snapshot', '--repo', '--lane', 'x').status, 2);
   const f = outN(dir); assert.equal(cli('snapshot', '--repo', repo, '--out', f).status, 0);
   assert.equal(cli('compare', '--before', f, '--after', '--repo').status, 2); // without the rule: after = "--repo", a read failure (exit 1)
+});
+
+// ---- root-cause batch: no directory is skipped because of a `.git` marker ----------------------------------------
+test('r1 a planted src/.git FILE (gitdir: elsewhere) does not hide its directory: the gitfile and a changed sibling are changes', (t) => {
+  const { dir, repo } = fixture(t);
+  put(repo, 'src/a.js', '1'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'src');
+  let s = takeSnapshot(repo);
+  put(repo, 'src/.git', `gitdir: ${join(dir, 'evil')}\n`);
+  assert.deepEqual(paths(verdict(s, repo)), ['added:src/.git']);
+  s = takeSnapshot(repo); mkdirSync(join(repo, 'src', 'hidden')); put(repo, 'src/.git', 'gitdir: /x\n');
+  assert.deepEqual(paths(verdict(s, repo)), ['content:src/.git', 'added:src/hidden']);
+});
+
+test('r1 an invalid empty .git/ directory in place of a tracked path does not hide a new empty directory below it', (t) => {
+  const { repo } = fixture(t);
+  rmSync(join(repo, 'a.txt')); mkdirSync(join(repo, 'a.txt', '.git'), { recursive: true });
+  const s = takeSnapshot(repo);
+  assert.equal(ent(s, 'a.txt').k, 'dir'); assert.equal(ent(s, 'a.txt/.git').k, 'emptydir');
+  mkdirSync(join(repo, 'a.txt', 'empty'));
+  assert.deepEqual(paths(verdict(s, repo)), ['added:a.txt/empty']);
+});
+
+test('r1 a real gitlink (submodule) is git\'s own exclusion: recorded by its HEAD, contents not walked (documented), no crash', (t) => {
+  const { dir, repo } = fixture(t);
+  const lib = join(dir, 'lib'); mkdirSync(lib); git(lib, 'init', '-q', '-b', 'main'); put(lib, 'l.txt', 'l'); git(lib, 'add', '-A'); git(lib, 'commit', '-q', '-m', 'l');
+  git(repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', lib, 'sub'); git(repo, 'commit', '-q', '-m', 'sub');
+  const s = takeSnapshot(repo);
+  assert.equal(ent(s, 'sub').k, 'repo'); assert.match(ent(s, 'sub').h, /^[0-9a-f]{40}$/);
+  assert.ok(!s.entries.some((e) => e.n.startsWith('sub/')), 'submodule contents are outside scope');
+  put(repo, 'sub/untracked-in-sub.txt', 'x');
+  assert.equal(verdict(s, repo).result, 'unchanged'); // the documented limit, pinned
+  put(lib, 'l2.txt', 'm'); git(lib, 'add', '-A'); git(lib, 'commit', '-q', '-m', 'l2'); git(join(repo, 'sub'), 'pull', '-q', 'origin', 'main');
+  assert.deepEqual(paths(verdict(s, repo)), ['content:sub']); // its HEAD moved
+});
+
+test('r1 a nested .git DIRECTORY is walked under a cap: within it, edits are changes; over it, the verdict is unknown', (t) => {
+  const { repo } = fixture(t);
+  mkdirSync(join(repo, 'n')); git(join(repo, 'n'), 'init', '-q'); // a genuine untracked nested repository
+  const s = takeSnapshot(repo);
+  assert.ok(ent(s, 'n/.git/HEAD') && ent(s, 'n/.git/HEAD').k === 'file');
+  put(repo, 'n/.git/config', '[core]\n\tfsmonitor = /tmp/x\n');
+  assert.deepEqual(paths(verdict(s, repo)), ['content:n/.git/config']);
+  const tight = takeSnapshot(repo, { nestedGitCap: { entries: 3, bytes: 1 << 20 } });
+  assert.equal(ent(tight, 'n/.git').k, 'unreadable');
+  assert.equal(compareSnapshots(tight, tight).result, 'unknown');
+  const byBytes = takeSnapshot(repo, { nestedGitCap: { entries: 1e6, bytes: 10 } }); // the byte cap too
+  assert.equal(ent(byBytes, 'n/.git').k, 'unreadable'); assert.equal(compareSnapshots(byBytes, byBytes).result, 'unknown');
+});
+
+test('r2 hook symlink targets are hashed as raw bytes: targets differing only in invalid UTF-8 are a change', { skip: win && 'symlinks need privileges on Windows' }, (t) => {
+  const { repo } = fixture(t);
+  const ln = Buffer.from(join(hooksDir(repo), 'pre-commit'));
+  symlinkSync(Buffer.from([0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x80]), ln); const s = takeSnapshot(repo);
+  rmSync(join(hooksDir(repo), 'pre-commit')); symlinkSync(Buffer.from([0x2f, 0x74, 0x6d, 0x70, 0x2f, 0x81]), ln);
+  assert.deepEqual(paths(verdict(s, repo)), ['hooks:null']);
+});
+
+test('INVARIANT under .git markers: every mutator under each marker directory (gitfile, invalid dir, symlink, real nested repo; several depths) is detected and its undo restores unchanged', (t) => {
+  const { dir, repo } = fixture(t);
+  put(repo, 'm1/t.txt', 't'); put(repo, 'm2/x/t.txt', 't'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'markers');
+  const markers = { 'm1': (d) => put(repo, d + '/.git', `gitdir: ${join(dir, 'evil')}\n`), 'm2/x': (d) => mkdirSync(join(repo, d, '.git')),
+    'u/v/w': (d) => put(repo, d + '/.git', 'garbage'), 'n/deep': (d) => { mkdirSync(join(repo, d), { recursive: true }); git(join(repo, d), 'init', '-q'); },
+    ...(win ? {} : { 'm3': (d) => { mkdirSync(join(repo, d)); symlinkSync(join(dir, 'nowhere'), join(repo, d, '.git')); } }) };
+  for (const [d, plant] of Object.entries(markers)) { plant(d); put(repo, d + '/f', 'f'); mkdirSync(join(repo, d, 'ed')); if (!win) symlinkSync('f', join(repo, d, 'ln')); }
+  const s = takeSnapshot(repo);
+  assert.equal(compareSnapshots(s, takeSnapshot(repo)).result, 'unchanged');
+  const mutators = {
+    create: [(d) => put(repo, d + '/new', 'n'), (d) => rmSync(join(repo, d, 'new'))],
+    delete: [(d) => rmSync(join(repo, d, 'f')), (d) => put(repo, d + '/f', 'f')],
+    modify: [(d) => put(repo, d + '/f', 'F'), (d) => put(repo, d + '/f', 'f')],
+    'mkdir-empty': [(d) => mkdirSync(join(repo, d, 'e2')), (d) => rmSync(join(repo, d, 'e2'), { recursive: true })],
+    'rmdir-empty': [(d) => rmSync(join(repo, d, 'ed'), { recursive: true }), (d) => mkdirSync(join(repo, d, 'ed'))],
+    ...(win ? {} : {
+      mode: [(d) => chmodSync(join(repo, d, 'f'), 0o755), (d) => chmodSync(join(repo, d, 'f'), 0o644)],
+      retarget: [(d) => { rmSync(join(repo, d, 'ln')); symlinkSync('g', join(repo, d, 'ln')); }, (d) => { rmSync(join(repo, d, 'ln')); symlinkSync('f', join(repo, d, 'ln')); }],
+    }),
+  };
+  for (const d of Object.keys(markers)) for (const [name, [doIt, undo]] of Object.entries(mutators)) {
+    doIt(d); assert.equal(verdict(s, repo).result, 'changed', `${name} under ${d}`);
+    undo(d); assert.equal(verdict(s, repo).result, 'unchanged', `undo ${name} under ${d}`);
+  }
 });

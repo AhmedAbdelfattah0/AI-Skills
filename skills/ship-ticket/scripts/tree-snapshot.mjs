@@ -5,9 +5,13 @@
  *   tree-snapshot.mjs snapshot --repo <path> [--lane <id>] [--out <file>]    start/end state record (JSON)
  *   tree-snapshot.mjs compare  --before <file> (--repo <path> | --after <file>)
  *
- * INVARIANT: for every difference of the working tree that git itself would see, or that changes what is
- * enumerated, the snapshot either HASHES it (=> `changed`) or the result is `unknown`. It can never be `unchanged`.
- * (tree-snapshot.test.mjs checks this generically against an independent observation, plus one test per sibling.)
+ * INVARIANT, except for the documented limits below (git-ignored paths, the content of git submodules, the parts of the
+ * shared .git that are not recorded): for every difference of the working tree that git itself would see, or that changes
+ * what is enumerated, the snapshot either HASHES it (=> `changed`) or the result is `unknown`, never `unchanged`.
+ * No directory is skipped because it contains a `.git`: the walk excludes only this repository's own git directory and the
+ * paths git itself lists as gitlinks (mode 160000). Any other `.git` is an ordinary entry (a file hashed by raw bytes; a
+ * directory walked under NESTED_GIT_CAP, beyond which the verdict is `unknown`). tree-snapshot.test.mjs checks a FINITE
+ * list of mutators against an independent observation, and a second list under `.git` markers of every kind.
  *
  * The orchestrator takes a snapshot before a reviewer lane starts and runs `compare --repo` after it. Wiring into the
  * lane lifecycle is S-03b; this slice is the stand-alone check. `--out` must live OUTSIDE the checked tree (and its
@@ -31,29 +35,31 @@
  *
  * DETECTED-class, not a boundary: a same-user reviewer can also change what this check reads, or restore it.
  * Documented limits (also printed in every verdict): the CONTENT of git-ignored files is not examined (a lane can
- * make a file ignored, which the ignore-rule hashes catch, but not edits to an already-ignored file); the shared .git
- * is covered by HEAD, refs, index, config, hooks and exclude only (objects, reflogs, other config files are not);
- * writes by absolute path outside this tree are not seen; a nested repository or submodule is covered by the HEAD
- * its own directory reports (files inside are not); a process the lane leaves running can write after the compare;
+ * make a file ignored, which the ignore-rule hashes catch, but not creating, editing or deleting an already-ignored
+ * path); of the .git, only HEAD, index, hooks and exclude decide, refs and config are shared_git, the rest is not read;
+ * writes by absolute path outside this tree are not seen; a submodule (gitlink) is covered by the HEAD its directory
+ * reports (files inside are not); a process the lane leaves running can write after the compare;
  * where the OS has no exec bit (Windows) file modes are NOT compared (reported as `degraded`, never as equal).
  */
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants, linkSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { isEntrypoint } from './harness.mjs';
 
 export const SCHEMA = 'tree-snapshot/1';
 export const LIMITS = [
-  'the content of git-ignored files is not examined (the ignore rules themselves are hashed)',
+  'git-ignored paths are not examined: creating, editing or deleting one is not seen (the ignore rules themselves are hashed)',
   'shared .git state (other refs, tags, common config) is reported as shared_git and does not decide the verdict unless --strict-shared; objects, reflogs and other config files are not examined',
   'writes by absolute path outside this tree are not seen',
-  'nested repositories and submodules are covered by the HEAD their directory reports; files inside are not',
+  'submodules (gitlinks) are covered by the HEAD their directory reports; files inside are not. Any other .git (file, directory, untracked nested repository) is walked like any path; one over the size cap makes the verdict unknown',
   'only the owner exec bit is compared (git ignores group/other bits); not compared at all where the OS has none',
   'point-in-time: a process the lane leaves running can write after the compare',
   'detected-class check, not an isolation boundary (same user)',
 ];
 const MAX_LISTED = 200;
+export const NESTED_GIT_CAP = { entries: 20000, bytes: 256 * 1024 * 1024 };
+const DOTGIT = Buffer.from('.git');
 const KINDS = ['file', 'symlink', 'repo', 'dir', 'missing', 'unreadable', 'other', 'emptydir'];
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const caseFold = process.platform === 'win32' || process.platform === 'darwin';
@@ -62,7 +68,7 @@ const caseFold = process.platform === 'win32' || process.platform === 'darwin';
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 /** Run git; a non-zero exit throws; with `strict`, ANY stderr output (a warning such as "could not open directory") throws too. */
 function gitRaw(cwd, args, strict = false) {
-  const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 1024 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), timeout: 600000, maxBuffer: 1024 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`git ${args[0]} failed`);
   if (strict && r.stderr.length > 0) throw new Error(`git ${args[0]} warned: ${r.stderr.toString().split('\n')[0]}`);
@@ -76,29 +82,29 @@ const sub = (parent, name) => (parent.length ? Buffer.concat([parent, Buffer.fro
 const absOf = (top, raw) => { const s = raw.toString('utf8'); return Buffer.from(s, 'utf8').equals(raw) ? top + sep + s : Buffer.concat([Buffer.from(top + sep), raw]); };
 /** sha256 of a file read in 1 MiB chunks (no whole-file Buffer, so no 2 GiB ceiling). */
 function hashFile(path) {
-  const h = createHash('sha256'); const fd = openSync(path, 'r'); const buf = Buffer.alloc(1 << 20);
-  try { for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n)); } finally { closeSync(fd); }
+  const h = createHash('sha256'); const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK || 0)); const buf = Buffer.alloc(1 << 20);
+  try { if (!fstatSync(fd).isFile()) throw new Error('not a regular file'); for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n)); } finally { closeSync(fd); }
   return h.digest('hex');
 }
 const fileSha = (path) => { try { return hashFile(path); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } };
-const hasDotGit = (abs) => { try { lstatSync(join(abs.toString(), '.git')); return true; } catch { return false; } };
 /** Digest of a directory tree (git's hooks): relative path, kind, owner exec bit, and content (symlink: target); subdirectories enumerated. */
 function dirDigest(dir, modeSupported) {
   const rows = [];
   const visit = (abs, rel) => {
     for (const name of readdirSync(abs).sort()) {
       const full = join(abs, name); const r = rel ? rel + '/' + name : name; const st = lstatSync(full);
-      if (st.isSymbolicLink()) rows.push([r, 'l', readlinkSync(full)]);
+      if (st.isSymbolicLink()) rows.push([r, 'l', readlinkSync(full, { encoding: 'buffer' }).toString('hex')]);
       else if (st.isDirectory()) { rows.push([r, 'd']); visit(full, r); }
       else if (st.isFile()) rows.push([r, 'f', modeSupported ? (st.mode & 0o100) !== 0 : null, hashFile(full)]);
       else rows.push([r, 'o']);
     }
   };
-  try { visit(dir, ''); } catch (e) { if (e.code === 'ENOENT' && rows.length === 0) return 'absent'; throw e; }
+  try { readdirSync(dir); } catch (e) { if (e.code === 'ENOENT') return 'absent'; throw e; } // only a missing ROOT is 'absent'
+  visit(dir, '');
   return sha(JSON.stringify(rows));
 }
 
-function entryOf(top, raw, modeSupported) {
+function entryOf(top, raw, { modeSupported, gitlinks }) {
   const base = { p: hexOf(raw), n: raw.toString('utf8') };
   const abs = absOf(top, raw);
   let st;
@@ -106,8 +112,8 @@ function entryOf(top, raw, modeSupported) {
   try {
     if (st.isSymbolicLink()) return { ...base, k: 'symlink', h: sha(readlinkSync(abs, { encoding: 'buffer' })) };
     if (st.isDirectory()) {
-      if (!hasDotGit(abs)) return { ...base, k: 'dir' }; // an ordinary directory (even one where git expects a file): enumerated by the walk
-      let head = 'none'; try { head = text(gitRaw(abs.toString(), ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits */ } // nested repository / submodule: HEAD only (documented limit)
+      if (!gitlinks.has(base.p)) return { ...base, k: 'dir' }; // any directory git does not call a gitlink, `.git` inside or not: enumerated by the walk
+      let head = 'none'; try { head = text(gitRaw(abs.toString(), ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* no commits */ } // submodule: HEAD only (documented limit)
       return { ...base, k: 'repo', h: head };
     }
     if (!st.isFile()) return { ...base, k: 'other' };
@@ -117,18 +123,22 @@ function entryOf(top, raw, modeSupported) {
 
 /**
  * Directory entries git does not list: anything on disk that is not tracked, not listed untracked and not ignored
- * (an unreadable or empty directory, a case-alias spelling) becomes an entry, so git's blind spots are hashed or unknown.
+ * (an unreadable or empty directory, a case-alias spelling, any non-root `.git`) becomes an entry, so git's blind spots
+ * are hashed or unknown. Under a nested `.git` directory, `cap` bounds the entries and bytes; past it that `.git` is unreadable.
  */
-function walk(top, rel, ctx, out) {
+function walk(top, rel, ctx, out, cap = null) {
+  if (cap?.over) return;
   let names;
   try { names = readdirSync(rel.length ? absOf(top, rel) : top, { encoding: 'buffer' }); } catch { out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'unreadable' }); return; }
   if (names.length === 0 && rel.length && !ctx.known.has(hexOf(rel))) out.push({ p: hexOf(rel), n: rel.toString('utf8'), k: 'emptydir' });
   for (const name of names) {
-    if (!rel.length && name.equals(Buffer.from('.git'))) continue;
     const raw = sub(rel, name); const key = hexOf(raw);
+    if ((!rel.length && name.equals(DOTGIT)) || ctx.gitlinks.has(key)) continue; // this repository's git dir; a submodule (documented limit)
     let st; try { st = lstatSync(absOf(top, raw)); } catch { out.push({ p: key, n: raw.toString('utf8'), k: 'unreadable' }); continue; }
-    if (st.isDirectory()) { if (!ctx.ignoredDirs.has(key) && !hasDotGit(absOf(top, raw))) walk(top, raw, ctx, out); } // every directory, whatever git knows about the path; nested repositories are HEAD-only
-    else if (!ctx.known.has(key) && !ctx.ignoredFiles.has(key)) out.push(entryOf(top, raw, ctx.modeSupported));
+    const c = cap || (name.equals(DOTGIT) && st.isDirectory() ? { ...ctx.nestedGitCap, at: raw } : null);
+    if (c && (--c.entries < 0 || (c.bytes -= st.isFile() ? st.size : 0) < 0)) { c.over = true; out.push({ p: hexOf(c.at), n: c.at.toString('utf8'), k: 'unreadable' }); return; }
+    if (st.isDirectory()) { if (!ctx.ignoredDirs.has(key)) walk(top, raw, ctx, out, c); } // every directory, whatever git knows about it or what it contains
+    else if (!ctx.known.has(key) && !ctx.ignoredFiles.has(key)) out.push(entryOf(top, raw, ctx));
   }
 }
 
@@ -159,7 +169,7 @@ export function isInside(p, roots) {
 }
 
 /** Take a snapshot of the tree at `repo`. Throws when git cannot describe the repository (the caller treats that as a FAIL). */
-export function takeSnapshot(repo, { lane = null, platform = process.platform } = {}) {
+export function takeSnapshot(repo, { lane = null, platform = process.platform, nestedGitCap = NESTED_GIT_CAP } = {}) {
   const { top } = treeRoots(repo);
   const modeSupported = platform !== 'win32';
   let headSha = null; try { headSha = text(gitRaw(top, ['rev-parse', '--verify', '-q', 'HEAD'])); } catch { /* unborn */ }
@@ -167,7 +177,8 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform } 
   const refs = text(gitRaw(top, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], true)).split('\n').filter(Boolean).sort(); // shared state: reported by name, never decides the tree verdict
   // The index: stage entries, assume-unchanged/skip-worktree flags, and the in-memory flags (intent-to-add, stage, valid, skip-worktree).
   const flags = [...gitRaw(top, ['ls-files', '--debug'], true).toString().matchAll(/^\s+size: -?\d+\tflags: ([0-9a-f]+)$/gm)].map((m) => ((parseInt(m[1], 16) & 0x6000b000) >>> 0).toString(16));
-  const index = sha(Buffer.concat([gitRaw(top, ['ls-files', '-s', '-z'], true), Buffer.from('\0--flags--\0'), gitRaw(top, ['ls-files', '-v', '-z'], true), Buffer.from('\0--debug--\0' + flags.join(','))]));
+  const staged = gitRaw(top, ['ls-files', '-s', '-z'], true);
+  const index = sha(Buffer.concat([staged, Buffer.from('\0--flags--\0'), gitRaw(top, ['ls-files', '-v', '-z'], true), Buffer.from('\0--debug--\0' + flags.join(','))]));
   const gitPath = (name) => resolve(top, text(gitRaw(top, ['rev-parse', '--git-path', name])));
   const config = fileSha(gitPath('config'));
   let configured = null; try { configured = text(gitRaw(top, ['config', '--path', '--get', 'core.excludesFile'])); } catch { /* unset */ }
@@ -178,13 +189,14 @@ export function takeSnapshot(repo, { lane = null, platform = process.platform } 
   const tracked = zList(gitRaw(top, ['ls-files', '-z'], true));
   const untracked = zList(gitRaw(top, ['ls-files', '-z', '--others', '--exclude-standard'], true));
   const ignored = zList(gitRaw(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], true));
-  const strip = (r) => (r[r.length - 1] === 0x2f ? r.subarray(0, r.length - 1) : r); // nested repositories and ignored directories carry a trailing "/"
-  const ctx = { known: new Set(), ignoredDirs: new Set(), ignoredFiles: new Set(), modeSupported };
+  const strip = (r) => (r[r.length - 1] === 0x2f ? r.subarray(0, r.length - 1) : r); // untracked nested repositories and ignored directories carry a trailing "/"
+  const gitlinks = new Set(zList(staged).filter((r) => r.subarray(0, 7).equals(Buffer.from('160000 '))).map((r) => hexOf(r.subarray(r.indexOf(9) + 1)))); // git's own submodule entries
+  const ctx = { known: new Set(), ignoredDirs: new Set(), ignoredFiles: new Set(), modeSupported, gitlinks, nestedGitCap };
   const byKey = new Map();
-  for (const r of [...tracked, ...untracked]) { const t = strip(r); ctx.known.add(hexOf(t)); if (!byKey.has(hexOf(t))) byKey.set(hexOf(t), entryOf(top, t, modeSupported)); }
+  for (const r of [...tracked, ...untracked]) { const t = strip(r); ctx.known.add(hexOf(t)); if (!byKey.has(hexOf(t))) byKey.set(hexOf(t), entryOf(top, t, ctx)); }
   for (const r of ignored) {
     const t = strip(r); (t !== r ? ctx.ignoredDirs : ctx.ignoredFiles).add(hexOf(t));
-    if (t === r && (t.equals(Buffer.from('.gitignore')) || t.subarray(Math.max(0, t.length - 11)).equals(Buffer.from('/.gitignore')))) byKey.set(hexOf(t), entryOf(top, t, modeSupported)); // an ignored ignore-file still defines "ignored"
+    if (t === r && (t.equals(Buffer.from('.gitignore')) || t.subarray(Math.max(0, t.length - 11)).equals(Buffer.from('/.gitignore')))) byKey.set(hexOf(t), entryOf(top, t, ctx)); // an ignored ignore-file still defines "ignored"
   }
   const extra = []; walk(top, Buffer.alloc(0), ctx, extra);
   for (const e of extra) if (!byKey.has(e.p)) byKey.set(e.p, e);
@@ -262,19 +274,23 @@ function parseFlags(argv, allowed) {
   for (let i = 0; i < argv.length; i += 2) { if (!argv[i].startsWith('--') || !allowed.includes(argv[i].slice(2)) || argv[i + 1] === undefined || argv[i + 1].startsWith('--') || f[argv[i].slice(2)] !== undefined) return null; f[argv[i].slice(2)] = argv[i + 1]; }
   return f;
 }
+const EXISTS = '--out exists: refusing to open an existing file (choose a new path outside the tree)';
+const existsRefusal = (out) => { try { lstatSync(out); return EXISTS; } catch (e) { if (e.code !== 'ENOENT') throw e; return null; } };
+const NO_HARDLINKS = ['EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'ENOSYS'];
 /**
- * Write `data` to a NEW file `out`, never opening an existing one (a hard link or bind mount of a tracked inode, a symlink, an
- * existing record): temp file created exclusively (0600, no symlink following) in the same directory, then linked into place
- * (fails if `out` exists), falling back to rename only where hard links are unsupported. Returns a refusal reason or null.
+ * Write `data` to a NEW file `out` without ever opening an existing one (a hard link or bind mount of a tracked inode, a
+ * symlink, an existing record): a temp file created exclusively (0600, no symlink following) in the same directory, then
+ * hard-linked into place, which fails atomically if `out` exists. Only where the filesystem refuses hard links (NO_HARDLINKS)
+ * does it rename instead, after re-checking that `out` is absent; residual race: a path created between that check and the
+ * rename is REPLACED (its directory entry; no existing inode is ever written). Any other link error fails. Returns a refusal or null.
  */
 function writeNew(out, data) {
-  try { lstatSync(out); return `--out ${'exists'}: refusing to open an existing file (choose a new path outside the tree)`; } catch (e) { if (e.code !== 'ENOENT') throw e; }
   const tmp = join(dirname(out), `.${basename(out)}.tmp-${randomBytes(6).toString('hex')}`);
   const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW || 0), 0o600);
   try { writeSync(fd, data); } finally { closeSync(fd); }
   try { linkSync(tmp, out); unlinkSync(tmp); } catch (e) {
-    if (e.code === 'EEXIST') { unlinkSync(tmp); return '--out exists: refusing to open an existing file'; }
-    try { renameSync(tmp, out); } catch (e2) { try { unlinkSync(tmp); } catch { /* gone */ } throw e2; }
+    const why = e.code === 'EEXIST' ? EXISTS : NO_HARDLINKS.includes(e.code) ? existsRefusal(out) : e;
+    try { if (why) throw why; renameSync(tmp, out); } catch (e2) { try { unlinkSync(tmp); } catch { /* gone */ } if (e2 === EXISTS) return EXISTS; throw e2; }
   }
   return null;
 }
@@ -291,6 +307,7 @@ export function main(argv) {
       if (f.out !== undefined) {
         const out = realOutPath(f.out);
         if (isInside(out, treeRoots(f.repo).roots)) return unknownOut('--out resolves inside the checked tree or its git directory; write the record outside it');
+        const why = existsRefusal(f.out); if (why) return unknownOut(why); // before the (slow) snapshot
       }
       const out = JSON.stringify(takeSnapshot(resolve(f.repo), { lane: f.lane ?? null })) + '\n';
       if (f.out) { const why = writeNew(f.out, out); if (why) return unknownOut(why); } else process.stdout.write(out);
