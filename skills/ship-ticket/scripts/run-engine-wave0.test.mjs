@@ -42,6 +42,7 @@ import { verifyApproval, gitDirty } from './carrier.mjs';
 import { boundRiskEvidence } from './engine-dag.mjs';
 import { gateShipReady } from './gate.mjs';
 import { POSIX, fixture, waitUntil, passReview, failReview, codes } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const FORGED = { run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' };
@@ -277,15 +278,17 @@ test('pgid reuse: an unknown attempt whose recorded leader pid now belongs to an
 // ------------------------------------------------------------------ launcher completes on provider exit
 
 test('launcher: a provider that exits 0 while a descendant holds stdout completes promptly and the group is retired', { skip: WIN_SKIP }, async (t) => {
-  const fx = fixture(t, { commit: true });
+  // No wall-clock window: the holder never ends by itself, so a launcher that waited for stdout to close could end
+  // only by the timer (status timed_out). 'exited' proves completion on the provider's exit; timeoutMs is a failure bound.
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS } });
   const holder = join(fx.root, 'holder.pid');
   fx.behave({ a: { write: { 'src/a.txt': 'a1' }, holdStdout: holder } });
+  t.after(() => { try { process.kill(Number(readFileSync(holder, 'utf8')), 'SIGKILL'); } catch { /* gone or never started */ } }); // it never ends by itself
   ok(fx.cli('init', { dag: fx.dagFile }));
-  const started = Date.now();
   const r = fx.cli('drive');
   ok(r);
   assert.equal(r.out.nodes.a.state, 'done', r.stdout);
-  assert.ok(Date.now() - started < 8000, `completed before the 10 s timeout (${Date.now() - started} ms)`);
+  assert.deepEqual(fx.readState().attempts.filter(a => a.kind === 'node').map(a => a.status), ['exited'], 'completed on the provider exit, not by the timer');
   assert.ok(await waitUntil(() => !pidAlive(Number(readFileSync(holder, 'utf8'))), 5000), 'the stdout holder was killed with the group');
 });
 

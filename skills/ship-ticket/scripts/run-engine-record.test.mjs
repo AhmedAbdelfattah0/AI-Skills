@@ -42,6 +42,7 @@ import { gateReview } from './gate.mjs';
 import { evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
 import { validateEngineDag } from './engine-dag.mjs';
+import { admit } from './harness.mjs';
 import { POSIX, fixture as rawFixture, passReview, failReview, confirmReview, runStateEvents, runLogEvents, waitUntil, gitPath } from './engine-test-fixture.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
@@ -150,17 +151,32 @@ function bound(fx, u) {
 }
 
 /**
+ * Admission probe pinned for the seq-exact unit scenario: 8 CPUs and 64 GiB free, so nodes a and c
+ * are always admitted together. Without it, admit() reads live host memory (vm_stat on macOS) and a
+ * loaded host refuses c (ADMISSION_REFUSED): api's check then runs before c's DISPATCH, every later
+ * seq shifts by one and the repair's old_candidate includes src/c.txt (FLAKE-root-cause-report.md).
+ */
+
+/** `drive` in-process with the pinned admission probe (the CLI has no probe seam); same exit rule as the CLI's status 0. */
+async function pinnedDrive(fx, probe = ROOMY_HOST) {
+  const r = await drive(fx.ctx({ admissionProbe: probe }));
+  assert.notEqual(r.outcome, 'judgment', JSON.stringify(r));
+  return r;
+}
+
+/**
  * Unit chains: unit `cli` (not risky) reviewed PASS without a second opinion and a non-string
  * summary (42); unit `api` (risky) reviewed FAIL with a second opinion and a summary, repaired by
- * drive, then confirmed with a second opinion whose outcome is `soConfirm`.
+ * drive, then confirmed with a second opinion whose outcome is `soConfirm`. Both drives run with the
+ * admission probe pinned (`probe`), the only host input that decides this scenario's schedule.
  */
-function unitRun(t, mode, soConfirm = 'PASS') {
+async function unitRun(t, mode, soConfirm = 'PASS', probe = ROOMY_HOST) {
   const fx = baseFixture(t, { commit: true, config: { unitReview: true, timeoutMs: WORKER_FAILURE_BOUND_MS, acceptanceIds: ['AC1'], modelMap: { strong: 'claude-strong-test' },
     testCommands: { ok: PASS_CMD }, ...auditCfg(mode) },
   nodes: [node('a', { unit: 'api', risk: ['shared-contract'], acceptance: ['AC1'] }), node('c', { unit: 'cli' })],
   behaviour: { a: { write: { 'src/a.txt': 'a1' } }, c: { write: { 'src/c.txt': 'c' } }, fix: { write: { 'src/a.txt': 'fixed' } } } });
   ok(fx.cli('init', { dag: fx.dagFile }));
-  ok(fx.cli('drive'));
+  await pinnedDrive(fx, probe);
   const { id: cliId, ...cliBind } = bound(fx, 'cli');
   const { second_opinion: _so, ...cliPass } = passReview('urx-cli', cliId);
   cliPass.reconciliation = { dispositions: [], summary: 42 };
@@ -169,7 +185,7 @@ function unitRun(t, mode, soConfirm = 'PASS') {
   const apiFail = failReview('urx-1', apiId, 'src/a.txt', fx.prompt('fix'));
   apiFail.reconciliation.summary = SUMMARY;
   const apiOriginal = fx.gate('unit-review', { ...apiBind, ...apiFail });
-  ok(fx.cli('drive'));
+  await pinnedDrive(fx, probe);
   const { id: repaired, ...b } = bound(fx, 'api');
   const c = confirmReview('urx-1', repaired);
   const apiConfirmation = fx.gate('unit-review', { ...b, ...c, second_opinion: { route: 'codex', reviewer_identity: 'codex:gpt',
@@ -265,14 +281,37 @@ test('[R1] final review chain: with config.auditRecord absent or false, every re
   for (const mode of ['absent', false]) assertBaselineFinal(finalRun(t, mode), `auditRecord ${mode}`);
 });
 
-test('[R1] unit review chains: with config.auditRecord absent or false, every record is byte-identical to the pre-W3-record engine', { skip: WIN_SKIP }, (t) => {
+test('[R1] unit review chains: with config.auditRecord absent or false, every record is byte-identical to the pre-W3-record engine', { skip: WIN_SKIP }, async (t) => {
   for (const mode of ['absent', false]) {
-    const run = unitRun(t, mode);
+    const run = await unitRun(t, mode);
     for (const r of [run.cliOriginal, run.apiOriginal, run.apiConfirmation]) ok(r, `auditRecord ${mode}`);
     assert.deepEqual([run.cliOriginal.out.code, run.apiOriginal.out.code, run.apiConfirmation.out.code], ['unit_review_accepted', 'unit_review_accepted', 'unit_review_accepted']);
     assert.equal(J(run.chains.api), J(BASE_UNIT_CHAINS.api), `auditRecord ${mode}: unit api chain`);
     assert.equal(J(run.chains.cli), J(BASE_UNIT_CHAINS.cli), `auditRecord ${mode}: unit cli chain`);
   }
+});
+
+// ---- load-sensitivity regression (FLAKE-root-cause-report.md, failure 2): admission is a host input the scenario must pin
+
+test('[R1] the unit chain scenario depends on admission: a refused second member shifts every later seq (the observed load failure, reproduced)', { skip: WIN_SKIP }, async (t) => {
+  // One CPU: a and c (2 members) are refused together, exactly what low host memory did on the loaded macOS run.
+  const run = await unitRun(t, 'absent', 'PASS', { ...ROOMY_HOST, cpus: () => [{}] });
+  for (const r of [run.cliOriginal, run.apiOriginal, run.apiConfirmation]) ok(r, 'refused admission');
+  assert.deepEqual([run.cliOriginal.out.code, run.apiOriginal.out.code, run.apiConfirmation.out.code], ['unit_review_accepted', 'unit_review_accepted', 'unit_review_accepted'],
+    'a refusal only serializes: every gate is still accepted');
+  const [orig, repair] = run.chains.api;
+  assert.deepEqual([orig.evidence_id, orig.seq, repair.new_candidate, repair.seq], ['api@3', 7, 'api@16', 12], J(run.chains.api));
+  assert.notEqual(repair.old_candidate, orig.tree_candidate, 'api was checked before c wrote src/c.txt');
+  assert.notEqual(J(run.chains.api), J(BASE_UNIT_CHAINS.api), 'so the pinned probe is what keeps the baseline exact');
+});
+
+test('[R1] unit review chains stay byte-identical while the host reports memory pressure (macOS: a low-memory vm_stat first on PATH)', { skip: LOW_MEMORY_SKIP }, async (t) => {
+  shadowLowMemoryVmStat(t);
+  // Positive signal: the injection is live, so the live host probe refuses two members (a green run is not vacuous).
+  assert.equal(admit({ phase: 'BUILD', members: 2, estimatedMemoryMb: 128 }).admitted, false, 'the low-memory vm_stat is what the host probe reads');
+  const run = await unitRun(t, 'absent');
+  assert.equal(J(run.chains.api), J(BASE_UNIT_CHAINS.api), 'unit api chain under host memory pressure');
+  assert.equal(J(run.chains.cli), J(BASE_UNIT_CHAINS.cli), 'unit cli chain under host memory pressure');
 });
 
 /** The golden scenario of run-engine-units.test.mjs (goldenRun), with extra DAG config. */
@@ -358,7 +397,7 @@ test('[R2] reconciliation.summary is normalized at the recording boundary, never
   assert.equal(J(gateReview(structuredClone(refused), { recordVerdicts: true })), J(gateReview(structuredClone(refused))));
 });
 
-test('[R2] engine, switch on: final and unit originals record each reviewer\'s verdict and the reconciliation; the rest is as before', { skip: WIN_SKIP }, (t) => {
+test('[R2] engine, switch on: final and unit originals record each reviewer\'s verdict and the reconciliation; the rest is as before', { skip: WIN_SKIP }, async (t) => {
   const f = finalRun(t, true, 'FAIL');
   assert.equal(f.refusedPassFix.out?.code, 'outcome_inconsistent', 'the refusal stays with the switch on');
   ok(f.original);
@@ -370,7 +409,7 @@ test('[R2] engine, switch on: final and unit originals record each reviewer\'s v
   assert.equal(J(without(fo, NEW_ORIGINAL)), J(BASE_FINAL_CHAIN[0]));
   assert.equal(J(f.chain[1]), J(BASE_FINAL_CHAIN[1]), 'the repair record is unchanged');
 
-  const u = unitRun(t, true, 'PASS');
+  const u = await unitRun(t, true, 'PASS');
   for (const r of [u.cliOriginal, u.apiOriginal, u.apiConfirmation]) ok(r);
   const [api, , apiConf] = u.chains.api, [cli] = u.chains.cli;
   assert.deepEqual([api.outcome, api.primary_outcome, api.second_opinion_outcome, api.second_opinion_identity, api.reconciliation],
@@ -400,7 +439,7 @@ test('[R3] gateReview: a confirmation records the primary\'s verdict as primary_
   }
 });
 
-test('[R3] engine: a final and a unit confirmation with primary PASS and second-opinion FAIL record outcome FAIL and primary_outcome PASS', { skip: WIN_SKIP }, (t) => {
+test('[R3] engine: a final and a unit confirmation with primary PASS and second-opinion FAIL record outcome FAIL and primary_outcome PASS', { skip: WIN_SKIP }, async (t) => {
   const f = finalRun(t, true, 'FAIL');
   ok(f.confirmation);
   assert.equal(f.confirmation.out.code, 'review_accepted');
@@ -410,7 +449,7 @@ test('[R3] engine: a final and a unit confirmation with primary PASS and second-
   assert.equal(f.shipReady.status, 2, 'ship-ready still refuses a FAIL confirmation');
   assert.equal(f.shipReady.out.code, 'review_not_accepted');
 
-  const u = unitRun(t, true, 'FAIL');
+  const u = await unitRun(t, true, 'FAIL');
   assert.equal(u.apiConfirmation.status, 2, 'a failed unit confirmation is terminal');
   assert.equal(u.apiConfirmation.out.code, 'unit_review_terminal');
   const uc = u.chains.api[2];
@@ -430,7 +469,7 @@ import { LIVE } from './engine-quiesce.mjs';
 import { reviewStates } from './engine-unit-review.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { trustedEvents } from './engine-authority.mjs';
-import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
+import { WORKER_FAILURE_BOUND_MS, ROOMY_HOST, shadowLowMemoryVmStat, LOW_MEMORY_SKIP } from './test-wait.test-helper.mjs';
 import { splitLines } from './run-state.mjs';
 import { candidateId } from './engine-io.mjs';
 import { planNarrativeDigest, sha } from './engine-dag.mjs';

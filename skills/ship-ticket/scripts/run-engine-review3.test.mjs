@@ -36,7 +36,7 @@ import { spawnSync } from 'node:child_process';
 import { init, drive, gate } from './run-engine.mjs';
 import { POSIX, fixture, codes, runStateEvents, waitUntil, passReview, failReview, confirmReview,
   primaryReview, secondOpinion } from './engine-test-fixture.mjs';
-import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
+import { WORKER_FAILURE_BOUND_MS, ROOMY_HOST } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const FAILING_SPEC = `import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails on assertion', () => { assert.equal(1, 2); });\n`;
@@ -285,8 +285,11 @@ test('G a worker cannot forge a RETRY: the append is a violation and gate review
 
 test('G a forged RETRY from a worker that then hangs (timed out) is still never honoured', { skip: WIN_SKIP }, async (t) => {
   const forged = { run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' };
-  const fx = failed(t, { config: { timeoutMs: 1000 }, behaviour: { fix: { appendEvent: forged, hang: true } } });
+  // Builder a and the gates run under the failure bound; only the drive whose one worker hangs gets the short budget.
+  const fx = failed(t, { config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { fix: { appendEvent: forged, hang: true } } });
+  fx.setRunTimeout(1000);
   const r = fx.cli('drive');
+  fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
   assert.equal(r.out.repairs[0].state, 'failed', r.stdout);
   assert.ok(runStateEvents(fx.planFile).some(e => e.event === 'RETRY'), 'the forged line is in the plan file');
   refused(fx.gate('review', passReview('rx-2', fx.candidate())), 'retry_unauthorized');
@@ -335,7 +338,8 @@ test('G a throw inside the dispatch loop still waits for every running sibling b
     if (JSON.parse(readFileSync(fx.stateFile(), 'utf8')).attempts.some(x => x.node === 'c' && x.status === 'exited')) writeFileSync(flag, '');
   } };
   let thrown = null, result = null;
-  try { result = await drive(fx.ctx({ hooks })); } catch (e) { thrown = e; }
+  // Admission pinned: a is released only by c's settle, so a and c must run at once (a live refusal would serialize them).
+  try { result = await drive(fx.ctx({ hooks, admissionProbe: ROOMY_HOST })); } catch (e) { thrown = e; }
   const timedOut = fx.readState().attempts.filter(x => x.status === 'timed_out').map(x => `${x.node} (${x.attempt_id})`);
   assert.deepEqual(timedOut, [], `attempt(s) exceeded the ${WORKER_FAILURE_BOUND_MS} ms failure bound (slow machine, or a release that never happened)`);
   assert.equal(thrown?.code, 'EISDIR', thrown ? String(thrown.stack ?? thrown) : `drive resolved without the expected EISDIR: ${JSON.stringify(result?.judgments ?? result)}`);

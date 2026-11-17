@@ -36,8 +36,8 @@ export function gitPath(repo, rel) {
  *   (inserts that event inside RUN-STATE), appendRaw <text> (inserts those exact bytes), appendLate {event} (the same, just before the worker
  *   finishes, e.g. after waitFor), editPlan (edits the
  *   narrative), breakGit (makes `git status` fail), sleeper <pidfile> (leaves a background
- *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open),
- *   killGroup, exit <code>, hang, waitFor <file>.
+ *   child in the process group), holdStdout <pidfile> (the same, holding the provider's stdout open until killed),
+ *   killGroup, exit <code>, hang, delayMs <ms> (finishes normally after that long: a slow worker), waitFor <file>.
  */
 export const FAKE_CLI = (root) => `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -65,7 +65,8 @@ if (b.sleeper) {
   writeFileSync(b.sleeper, String(s.pid)); s.unref();
 }
 if (b.holdStdout) {
-  const h = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: ['ignore', 'inherit', 'ignore'] });
+  // Lives until killed (never ends by itself), so a launcher that waited for stdout to close could only end by the timer.
+  const h = spawn(process.execPath, ['-e', 'setInterval(() => {}, 2147483647)'], { stdio: ['ignore', 'inherit', 'ignore'] });
   writeFileSync(b.holdStdout, String(h.pid)); h.unref();
 }
 function finish() {
@@ -75,6 +76,7 @@ function finish() {
   process.stdout.write(b.apiMs === undefined ? ${JSON.stringify(CLAUDE_OUT)} : JSON.stringify({ ...JSON.parse(${JSON.stringify(CLAUDE_OUT)}), duration_api_ms: b.apiMs, num_turns: 3 }));
 }
 if (b.hang) setInterval(() => {}, 1000);
+else if (b.delayMs) setTimeout(finish, b.delayMs);
 else if (b.waitFor) { const t = setInterval(() => { if (existsSync(b.waitFor)) { clearInterval(t); finish(); } }, 50); }
 else finish();
 `;
@@ -176,6 +178,13 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
     prompt: promptFor,
     readState: () => JSON.parse(readFileSync(fx.stateFile(), 'utf8')),
     editState: (fn) => { const s = fx.readState(); fn(s); writeFileSync(fx.stateFile(), JSON.stringify(s)); },
+    /**
+     * Test injection of a per-step budget. The engine has one run-wide timeoutMs (workers AND proof/check
+     * runners), bound at init. A test whose subject is a timeout sets it short only around the command
+     * whose worker hangs (between commands) and restores the failure bound after, so nothing that should
+     * finish by itself ever races a short timer (FLAKE-root-cause-report.md).
+     */
+    setRunTimeout: (ms) => fx.editState((s) => { s.config.timeoutMs = ms; }),
     /** Run the real engine CLI: `node run-engine.mjs <cmd> --repo --ticket --run-id [--flag value...]`. */
     cli: (cmd, flags = {}, { runId = 'run-1', timeout = 60000 } = {}) => {
       const args = [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', runId,
@@ -191,9 +200,17 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
       writeFileSync(file, typeof input === 'string' ? input : JSON.stringify(input));
       return fx.cli(`gate ${kind}`, { input: file }, opts);
     },
-    /** Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. */
-    spawnCli: (cmd, flags = {}) => spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
-      ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' }),
+    /**
+     * Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. It has
+     * no spawn timeout, so it is killed when the test ends: an assertion that fails before the test's own
+     * kill must not leave a live engine holding the test file (and the whole `node --test` job) open.
+     */
+    spawnCli: (cmd, flags = {}) => {
+      const child = spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
+        ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' });
+      t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+      return child;
+    },
     candidate: () => {
       const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', 'HEAD', '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'],
         { encoding: 'utf8' });
@@ -226,7 +243,7 @@ export function runLogEvents(file) {
 export async function waitUntil(pred, ms = 6000) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (await pred()) return true; await delay(50); }
-  return false;
+  return Boolean(await pred()); // one last look: a stalled event loop must not turn a reached state into a timeout
 }
 
 /** A complete review.md primary artifact (non-empty coverage, criteria and rule rows). */

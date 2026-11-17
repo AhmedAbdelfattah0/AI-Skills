@@ -29,6 +29,7 @@ import { gitDirty, verifyReviewExecution } from './carrier.mjs';
 import { addUsageRecords } from './usage.mjs';
 import { suggest, evaluateRun } from './eval.mjs';
 import { buildRun } from './run-summary.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`);
@@ -55,21 +56,78 @@ test('4505924540 a proof that changed the work tree proves nothing: a RETRY revi
   assert.deepEqual(shipEvents(fx), [], 'SHIP_READY is never granted for a tree no proof tested');
 });
 
-/** A run whose final-review repair worker hangs past the timeout (the repair fails, nothing written). */
-function failedRepair(t) {
-  const fx = fixture(t, { commit: true, config: { timeoutMs: 1000, testCommands: { ok: { cmd: process.execPath, args: ['-e', ''] } } }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { hang: true } } });
+/** Builder `a` and the proof command, each taking `slowMs` (as a starved runner does), or at once. */
+const slowWorld = ({ builderMs = 0, proofMs = 0 } = {}) => ({
+  proof: proofMs ? { cmd: process.execPath, args: ['-e', `setTimeout(() => {}, ${proofMs})`] } : { cmd: process.execPath, args: ['-e', ''] },
+  a: { write: { 'src/a.txt': 'a1' }, ...(builderMs ? { delayMs: builderMs } : {}) } });
+
+/**
+ * A run up to a final-review FAIL whose repair worker `fix` behaves as given. Every worker and the proof run
+ * under the failure bound (WORKER_FAILURE_BOUND_MS): the run-wide timeoutMs bounds them all, so a short one
+ * is set only around the drive whose worker hangs (fx.setRunTimeout; FLAKE-root-cause-report.md, failure 1).
+ */
+function reviewedFail(t, fix, slow = {}) {
+  const w = slowWorld(slow);
+  const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS, testCommands: { ok: w.proof } }, behaviour: { a: w.a, fix } });
   ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
   ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
   return fx;
 }
 
-test('4505924571 a failed review repair is a repair_failed judgment: drive never reports done (exit 0); an owner RETRY continues', { skip: WIN_SKIP }, (t) => {
-  const fx = failedRepair(t);
+/** Timeout contract: the hanging repair is killed by the timer, failed at once (never retried automatically): repair_failed, status 2. */
+function hangingRepairTimesOut(fx) {
+  fx.setRunTimeout(1000); // only this drive: its one worker (the repair) hangs and can only end by the timer
+  const r = fx.cli('drive');
+  fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
+  assert.equal(r.out.repairs[0].state, 'failed', r.stdout);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.equal(r.out.outcome, 'judgment');
+  assert.ok(r.out.judgments.some(j => j.code === 'repair_failed' && j.node === 'repair-rx-1' && /timeout/.test(j.reason)), JSON.stringify(r.out.judgments));
+  const repairs = fx.readState().attempts.filter(a => a.kind === 'repair');
+  assert.deepEqual(repairs.map(a => a.status), ['timed_out'], 'one attempt, timed out, no automatic retry');
+}
+
+/** Exit contract: a provider error with nothing written is retried once automatically, then failed: repair_failed, status 2. */
+function failingRepairExits(fx) {
+  const first = fx.cli('drive');
+  ok(first);
+  assert.deepEqual([first.out.outcome, first.out.repairs[0].state], ['waiting', 'pending'], first.stdout);
   const r = fx.cli('drive');
   assert.equal(r.out.repairs[0].state, 'failed', r.stdout);
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.equal(r.out.outcome, 'judgment');
   assert.ok(r.out.judgments.some(j => j.code === 'repair_failed' && j.node === 'repair-rx-1'), JSON.stringify(r.out.judgments));
+}
+
+test('4505924571 a hanging review repair times out into a repair_failed judgment (never retried, drive never done); an owner RETRY continues to ship-ready', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedFail(t, { hang: true });
+  hangingRepairTimesOut(fx);
+  retryContinues(fx);
+});
+
+test('4505924571 a review repair that fails by provider error is a repair_failed judgment after its one infra retry; an owner RETRY continues', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedFail(t, { exit: 1 });
+  failingRepairExits(fx);
+  retryContinues(fx);
+});
+
+// Regressions (CI ubuntu Node 18 job 134267621207: ship-ready missing_local_proof; Docker --cpus 2: node a timed out).
+// Each is RED on the old scenario (one DAG-wide 1 s budget for builder, repair and proof) and GREEN now: the hang's
+// short budget no longer bounds what should finish by itself.
+test('4505924571 (load) the timeout contract holds when builder a takes 1.5 s, longer than the hang budget', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedFail(t, { hang: true }, { builderMs: 1500 });
+  hangingRepairTimesOut(fx);
+  retryContinues(fx);
+});
+
+test('4505924571 (load) the timeout contract holds when the proof takes 1.5 s, longer than the hang budget', { skip: WIN_SKIP }, (t) => {
+  const fx = reviewedFail(t, { hang: true }, { proofMs: 1500 });
+  hangingRepairTimesOut(fx);
+  retryContinues(fx);
+});
+
+/** After a repair_failed judgment: status reports it; an owner RETRY cancels the repair, drive is done, ship-ready proves. */
+function retryContinues(fx) {
   assert.ok(fx.cli('status').out.judgments.some(j => j.code === 'repair_failed'), 'status reports it too');
   fx.appendRunState(retry('rx-2', 'rx-1'));
   ok(fx.gate('review', passReview('rx-2', fx.candidate())));
@@ -80,7 +138,7 @@ test('4505924571 a failed review repair is a repair_failed judgment: drive never
   assert.equal(d.out.outcome, 'done');
   assert.equal(d.out.judgments.length, 0, d.stdout);
   ok(fx.gate('ship-ready', {}));
-});
+}
 
 /** A final-review FAIL on `src/a.txt` repaired by `fix`; node a carries `risk`. */
 function repaired(t, risk = []) {

@@ -42,7 +42,8 @@ const sum = (xs) => xs.reduce((n, x) => n + x, 0);
 const states = (status) => Object.fromEntries(Object.entries(status?.nodes ?? {}).map(([id, n]) => [id, n.state]));
 const doneCount = (status) => Object.values(status?.nodes ?? {}).filter(n => n.state === 'done').length;
 const reasonOf = (status, code) => (status?.judgments ?? []).find(j => j.code === code)?.reason ?? null;
-const overlap = (a, b) => Date.parse(a.started_at) <= Date.parse(b.envelope.ended_at) && Date.parse(b.started_at) <= Date.parse(a.envelope.ended_at);
+const overlap = (a, b) => Boolean(a.envelope?.ended_at && b.envelope?.ended_at) // a timed-out attempt has no envelope: no proven overlap
+  && Date.parse(a.started_at) <= Date.parse(b.envelope.ended_at) && Date.parse(b.started_at) <= Date.parse(a.envelope.ended_at);
 
 /** Which of `waves` each started node belongs to: `in_order` when every node of a wave started before any of the next; `groups` sorted within a wave. */
 function waveOrder(order, waves) {
@@ -107,6 +108,27 @@ const node = (id, extra = {}) => ({ id, writes: [`src/${id}.txt`], ...extra });
 const writeOf = (id) => ({ write: { [`src/${id}.txt`]: id } });
 const plain = (...ids) => Object.fromEntries(ids.map(id => [id, writeOf(id)]));
 
+/** The outcome code of a pair scenario whose shortfall is explained by a live admission refusal (host memory / CPU probe). */
+export const ADMISSION_ENV = 'ENVIRONMENT_ADMISSION_REFUSED';
+
+/**
+ * Judge a pair scenario from ALL its assertions. `checks` maps every assertion to its result; `pairBound` names the
+ * ones a refused pair member cannot satisfy (the pair cannot meet). Pass when every check holds. ENVIRONMENT
+ * (ok null, never a pass) only when admission refused a pair member, every failing check is pair-bound and every
+ * failed node is a pair member; any other failing check or failed node keeps the result a failure (ok false).
+ */
+export function judgePair({ checks, pairBound, refusedNodes, pairMembers, failedNodes }) {
+  const failing = Object.keys(checks).filter(k => checks[k] !== true);
+  if (!failing.length) return { ok: true, failing };
+  const explained = refusedNodes.some(n => pairMembers.includes(n)) && failing.every(k => pairBound.includes(k))
+    && failedNodes.every(n => pairMembers.includes(n));
+  return explained ? { ok: null, environment: ADMISSION_ENV, failing } : { ok: false, failing };
+}
+
+/** judgePair inputs a world supplies: the nodes admission refused and the nodes that failed. */
+const refusalFacts = (w, status) => ({ refusedNodes: (w.fx.readState().events ?? []).filter(e => e.type === 'ADMISSION_REFUSED').map(e => e.node),
+  failedNodes: Object.entries(status?.nodes ?? {}).filter(([, n]) => n.state === 'failed').map(([id]) => id) });
+
 /** Both nodes of a pair write their own start marker, then wait for the other's: neither can finish unless both run at once. */
 function pair(w, a, b) {
   const started = (id) => w.flag(`${id}-started`);
@@ -137,7 +159,10 @@ async function s2(meter) {
     frontend_and_backend_in_one_wave: Boolean(get('frontend') && get('backend') && overlap(get('frontend'), get('backend'))),
     peak_concurrency: peakConcurrency(attempts) };
   // Each of the two workers waits for the other's start marker before it can finish, so a completed run proves one wave.
-  return { shows, ok: shows.outcome === 'done' && shows.frontend_and_backend_in_one_wave && shows.peak_concurrency >= 2 && shows.waves_in_order };
+  const checks = { outcome_done: shows.outcome === 'done', one_wave: shows.frontend_and_backend_in_one_wave, peak_at_least_2: shows.peak_concurrency >= 2,
+    waves_in_order: shows.waves_in_order, contract_done: shows.nodes.contract === 'done', peak_within_width: shows.peak_concurrency <= 2 };
+  const j = judgePair({ checks, pairBound: ['outcome_done', 'one_wave', 'peak_at_least_2', 'waves_in_order'], pairMembers: ['frontend', 'backend'], ...refusalFacts(w, d.out) });
+  return { shows: { ...shows, failing: j.failing }, ok: j.ok, ...(j.environment ? { environment: j.environment } : {}) };
 }
 
 async function s3(meter) {
@@ -179,7 +204,10 @@ async function s4(meter, { buildNodes }) {
   const attempts = w.fx.readState().attempts.filter(a => a.kind === 'node');
   const wave = waveOrder(w.fx.runs(), [['n1', 'n2', 'n3'], ['n4', 'n5'], ['n6']]);
   const shows = { outcome: d.out?.outcome ?? null, width, nodes: states(d.out), peak_concurrency: peakConcurrency(attempts), ...{ start_waves: wave.groups, waves_in_order: wave.in_order } };
-  return { shows, ok: shows.outcome === 'done' && doneCount(d.out) === 6 && shows.peak_concurrency >= 2 && shows.peak_concurrency <= width && shows.waves_in_order };
+  const checks = { outcome_done: shows.outcome === 'done', all_done: doneCount(d.out) === 6, peak_at_least_2: shows.peak_concurrency >= 2,
+    waves_in_order: shows.waves_in_order, peak_within_width: shows.peak_concurrency <= width, plain_first_wave_done: shows.nodes.n3 === 'done' };
+  const j = judgePair({ checks, pairBound: ['outcome_done', 'all_done', 'peak_at_least_2', 'waves_in_order'], pairMembers: ['n1', 'n2', 'n4', 'n5'], ...refusalFacts(w, d.out) });
+  return { shows: { ...shows, failing: j.failing }, ok: j.ok, ...(j.environment ? { environment: j.environment } : {}) };
 }
 
 async function s5(meter) {
@@ -481,10 +509,10 @@ export async function runScenario(def, deps, record = loadRecord()) {
   const meter = newMeter();
   const t0 = Date.now();
   try {
-    const { shows, ok } = await def.run(meter, deps);
+    const { shows, ok, environment } = await def.run(meter, deps);
     const last = meter.worlds.map(w => w.last);
     const executions = meter.worlds.map(w => w.executions());
-    return { ...base, ok, shows, metrics: {
+    return { ...base, ok, ...(environment ? { environment } : {}), shows, metrics: {
       orchestrator_commands: meter.commands, bytes_read: meter.bytes, reference_bytes: referenceBytes(def.flags, record), wall_ms: Date.now() - t0,
       nodes_completed: sum(last.map(doneCount)), judgments: meter.seen.size, owner_interventions: sum(last.map(s => s?.judgments?.length ?? 0)),
       proof_runs: sum(executions.map(e => e.proof + e.red)), retries: sum(last.map(s => sum(Object.values(s?.nodes ?? {}).map(n => n.retries ?? 0)))) } };

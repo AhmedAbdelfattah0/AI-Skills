@@ -126,6 +126,13 @@ export function bench({ nodes: count = 6 } = {}) {
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/**
+ * Exit code of a scenario run: 1 when any result is not a pass and not an ENVIRONMENT result (a falsy or missing
+ * `ok` counts as failure); else 3 when any is ENVIRONMENT (the host refused admission: neither pass nor failure); else 0.
+ */
+export const scenarioExit = (results) => (results.some(r => r.ok !== true && !(r.ok === null && r.environment)) ? 1
+  : results.some(r => r.environment) ? 3 : 0);
+
 if (isEntrypoint(import.meta.url)) {
   const argv = process.argv.slice(2), at = argv.indexOf('--nodes'), scenarioAt = argv.indexOf('--scenario');
   if (scenarioAt >= 0) {
@@ -134,7 +141,7 @@ if (isEntrypoint(import.meta.url)) {
     if (!results) process.exit(1);
     if (argv.includes('--json')) process.stdout.write(JSON.stringify(results, null, 2) + '\n');
     else for (const r of results) process.stdout.write(JSON.stringify(r) + '\n');
-    process.exitCode = results.every(r => r.ok) ? 0 : 1;
+    process.exitCode = scenarioExit(results);
   } else {
     const n = at >= 0 ? Number(argv[at + 1]) : 6;
     if (!Number.isInteger(n) || n < 1) { process.stderr.write('Usage: engine-bench.mjs [--nodes 6] [--json] | --scenario <S1..S10|all> [--json]\n'); process.exit(1); }

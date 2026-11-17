@@ -25,6 +25,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { gate } from './run-engine.mjs';
 import { POSIX, fixture, runStateEvents, waitUntil, passReview, failReview } from './engine-test-fixture.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment';
 const END = '<!-- RUN-STATE:END -->';
@@ -77,10 +78,13 @@ const FORGE_ROWS = [
     return fx;
   }],
   ['worker that times out', async (t) => {
-    const fx = fixture(t, { commit: true, config: { timeoutMs: 1000 }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { appendEvent: FORGED, hang: true } } });
+    // Builder a runs under the failure bound; only the drive whose one worker (the repair) hangs gets the short budget.
+    const fx = fixture(t, { commit: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS }, behaviour: { a: { write: { 'src/a.txt': 'a1' } }, fix: { appendEvent: FORGED, hang: true } } });
     ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
     ok(fx.gate('review', failReview('rx-1', fx.candidate(), 'src/a.txt', fx.prompt('fix'))));
+    fx.setRunTimeout(1000);
     assert.equal(fx.cli('drive').out.repairs[0].state, 'failed');
+    fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
     return fx;
   }],
   ['worker still live at its first settle (engine killed, resume, then the worker appends)', async (t) => {
@@ -115,9 +119,13 @@ const FORGE_ROWS = [
     return fx;
   }],
   ['RED runner that forges and then times out', async (t) => {
-    const fx = redFixture(t, { specBody: insertJs(FORGED), hang: true, config: { timeoutMs: 4000 } });
+    // Builders r and p run under the failure bound; only the RED gate whose runner hangs gets the short budget. Residual:
+    // the runner must append its forged line within those 4 s before it hangs (a race with the timer, listed in the report).
+    const fx = redFixture(t, { specBody: insertJs(FORGED), hang: true, config: { timeoutMs: WORKER_FAILURE_BOUND_MS } });
     ok(fx.cli('init', { dag: fx.dagFile })); ok(fx.cli('drive'));
+    fx.setRunTimeout(4000);
     refused(fx.gate('red', { node: 'r', command: 'unit' }), 'runner_timeout');
+    fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
     ok(fx.gate('review', passReview('rx-1', fx.candidate())));
     return fx;
   }],

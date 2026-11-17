@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, rmSync, cpSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep, relative } from 'node:path';
-import { buildNodes } from './engine-bench.mjs';
-import { runScenarios, peakConcurrency } from './engine-bench-scenarios.mjs';
+import { buildNodes, scenarioExit } from './engine-bench.mjs';
+import { runScenarios, peakConcurrency, judgePair, ADMISSION_ENV } from './engine-bench-scenarios.mjs';
 import { loadRecord, referenceBytes, sections } from './load-record.mjs';
 
 const BENCH = fileURLToPath(new URL('./engine-bench.mjs', import.meta.url));
@@ -32,10 +32,51 @@ test('the bench CLI runs both modes to completion and reports numeric counts', {
   }
 });
 
+// ------------------------------------------------------------------ ENVIRONMENT never masks a genuine failure
+
+const PAIR_BOUND = ['outcome_done', 'peak_at_least_2'];
+const judged = (checks, facts) => judgePair({ checks, pairBound: PAIR_BOUND, pairMembers: ['p1', 'p2'], refusedNodes: ['p2'], failedNodes: ['p1'], ...facts });
+
+test('judgePair: a refusal-only shortfall is ENVIRONMENT (ok null, never a pass); every check passing is a pass', () => {
+  assert.deepEqual(judged({ outcome_done: false, peak_at_least_2: false, plain_done: true }), { ok: null, environment: ADMISSION_ENV, failing: ['outcome_done', 'peak_at_least_2'] });
+  assert.deepEqual(judged({ outcome_done: true, peak_at_least_2: true, plain_done: true }, { refusedNodes: ['p2'] }), { ok: true, failing: [] }, 'a refusal that cost nothing is a pass');
+});
+
+test('judgePair: a genuine failure beside a refusal stays a FAILURE', () => {
+  const cases = [
+    ['an independent check fails', { outcome_done: false, peak_at_least_2: false, plain_done: false }, {}],
+    ['a node outside the pair failed', { outcome_done: false, peak_at_least_2: false, plain_done: true }, { failedNodes: ['p1', 'plain'] }],
+    ['the refused node is not a pair member', { outcome_done: false, peak_at_least_2: false, plain_done: true }, { refusedNodes: ['plain'] }],
+    ['no refusal at all', { outcome_done: false, peak_at_least_2: true, plain_done: true }, { refusedNodes: [] }],
+    ['a check is undefined (not true)', { outcome_done: true, peak_at_least_2: true, plain_done: undefined }, {}],
+  ];
+  for (const [why, checks, facts] of cases) {
+    const j = judged(checks, facts);
+    assert.equal(j.ok, false, why);
+    assert.equal(j.environment, undefined, why);
+  }
+});
+
+test('scenarioExit: failure 1 (also beside an ENVIRONMENT result, and for a missing ok), ENVIRONMENT only 3, all pass 0', () => {
+  const env = { ok: null, environment: ADMISSION_ENV };
+  assert.equal(scenarioExit([{ ok: true }, { ok: false }, env]), 1);
+  assert.equal(scenarioExit([{ ok: true }, {}]), 1, 'a missing ok is a failure');
+  assert.equal(scenarioExit([{ ok: true }, { ok: null }]), 1, 'ok null without an environment code is a failure');
+  assert.equal(scenarioExit([{ ok: true }, env]), 3);
+  assert.equal(scenarioExit([{ ok: true }, { ok: true }]), 0);
+});
+
 // ------------------------------------------------------------------ ten scenarios (engine-bench-scenarios.mjs)
 
 const METRICS = ['orchestrator_commands', 'bytes_read', 'reference_bytes', 'wall_ms', 'nodes_completed', 'judgments', 'owner_interventions', 'proof_runs', 'retries'];
 const scenario = async (id) => (await runScenarios(id, { buildNodes }))[0];
+/** A pair scenario the host refused admission to is reported as an ENVIRONMENT skip naming its code: never a pass, never a mechanism failure. */
+const environmentSkip = (t, r) => {
+  if (!r.environment) return false;
+  assert.equal(r.ok, null, 'an environment result is not a pass');
+  t.skip(`${r.environment}: the live admission probe refused a concurrent member, so the pair could not meet (FLAKE-root-cause-report.md)`);
+  return true;
+};
 /** The result is complete and ok; every metric is a number. wall_ms is never asserted beyond its type. */
 function assertResult(r, id) {
   assert.equal(r.id, id);
@@ -62,8 +103,9 @@ test('S1 one node completes with the smallest command count', { skip: N7_SKIP },
   assert.equal(r.metrics.nodes_completed, 1);
 });
 
-test('S2 frontend and backend are dispatched in the same wave, between the contract and the join', { skip: N7_SKIP }, async () => {
+test('S2 frontend and backend are dispatched in the same wave, between the contract and the join', { skip: N7_SKIP }, async (t) => {
   const r = await scenario('S2');
+  if (environmentSkip(t, r)) return;
   assertResult(r, 'S2');
   assert.equal(r.shows.outcome, 'done', 'each worker waits for the other to start, so only a concurrent dispatch can finish');
   assert.equal(r.shows.frontend_and_backend_in_one_wave, true);
@@ -96,8 +138,9 @@ test('S3 an auth-sensitive change: ship-ready needs accepted RED and the risk ev
   assert.equal(r.metrics.reference_bytes, referenceBytes({ security: true }));
 });
 
-test('S4 six nodes in two waves and a join all complete within the configured width', { skip: N7_SKIP }, async () => {
+test('S4 six nodes in two waves and a join all complete within the configured width', { skip: N7_SKIP }, async (t) => {
   const r = await scenario('S4');
+  if (environmentSkip(t, r)) return;
   assertResult(r, 'S4');
   assert.equal(r.metrics.nodes_completed, 6);
   assert.equal(r.shows.width, 2);
