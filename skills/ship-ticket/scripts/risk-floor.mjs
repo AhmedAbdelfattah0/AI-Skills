@@ -21,7 +21,7 @@
  * usage error). An exit-1 output still carries final=ELEVATED. Flags take `--flag value` or `--flag=value`; a missing value, unknown or
  * repeated flag, positional argument or unknown command is an error. Files are read as strict UTF-8 (UTF-16/32 BOMs, NUL, invalid bytes rejected).
  * REUSE: real tree paths are enumerated by git itself (diff, ls-files). Matching is ONE custom engine that serves PLANNED and ACTUAL paths alike
- * (so `check` and `reassess` can never disagree). Evaluated and rejected: git pathspec magic (`:(glob,icase)`: a second engine whose trailing `/**`,
+ * (so `check` and `reassess` classify a given path identically; the only intended difference is the conservative reading of planned directory-like entries). Evaluated and rejected: git pathspec magic (`:(glob,icase)`: a second engine whose trailing `/**`,
  * ASCII-only icase and raw-name matching disagree with the normalised matcher), node:path.matchesGlob and fs.glob (Node >= 22 only; CI runs
  * Node 18), picomatch/minimatch (would need vendoring: skills install without npm install).
  * Glob grammar (deliberately small): literal characters, `*` (any run inside ONE path segment), a WHOLE-segment `**`, a trailing `/`.
@@ -56,6 +56,7 @@ export const MAX_DECLARATION = 256 * 1024;
 const MAX_GLOB_CHARS = 256, MAX_GLOB_SEGS = 32, MAX_PATH_CHARS = 4096, MAX_PATH_SEGS = 64, MAX_GLOBS = 256;
 export const STEP_BOUND_PER_PAIR = MAX_GLOB_CHARS * MAX_PATH_CHARS + (MAX_GLOB_SEGS + 2) * (MAX_PATH_SEGS + 1) + 1;
 export const MAX_STEPS = 50_000_000;
+export const testHooks = { afterLstat: null }; // test seam: runs between lstat and open of the working-tree declaration
 export const CHANGED = 'risk_declaration_changed';
 export const DECLARATION_PATH = '.ship-ticket/risk-paths.json';
 const RANK = { STANDARD: 0, ELEVATED: 1 };
@@ -64,9 +65,12 @@ const bad = (code, reason) => Object.assign(new Error(reason), { code });
 
 // ---- paths and globs ----
 const wellFormed = (x) => typeof x === 'string' && x !== '' && !/[\u0000�]|[\uD800-\uDFFF]/u.test(x);
+// Case folding PER CODE POINT (single-character strings have no contextual behaviour): final sigma, sharp s (incl. U+1E9E) and dotted I fold the same
+// way next to wildcards as anywhere else. U+0307 (left by dotted I) is dropped. Upper/lower folding also folds the ligature U+FB01 to `fi` and dotless i to `i` (over-classifying is accepted).
+const fold = (x) => { let o = ''; for (const c of x) o += c.toLowerCase().toUpperCase().toLowerCase(); return o.replace(/\u0307/g, ''); };
 function segmentsOf(p, what, maxChars = MAX_PATH_CHARS, maxSegs = MAX_PATH_SEGS) {
   if (!wellFormed(p) || p.length > maxChars) throw bad('malformed_input', `${what} is not a well-formed string within the budget`);
-  const s = p.replace(/\p{Cf}/gu, '').normalize('NFC').toUpperCase().toLowerCase().replace(/\u0307/g, '').normalize('NFC').replace(/\\/g, '/');
+  const s = fold(p.replace(/\p{Cf}/gu, '').normalize('NFC')).normalize('NFC').replace(/\\/g, '/');
   if (s.startsWith('/') || /^[a-z]:\//.test(s)) throw bad('malformed_input', `${what} is absolute`);
   const segs = [];
   for (const seg of s.split('/')) { if (seg === '' || seg === '.') continue; if (seg === '..') throw bad('malformed_input', `${what} has a ".." segment`); segs.push(seg); }
@@ -204,7 +208,7 @@ const utf8Path = (raw) => { const p = raw.toString('utf8'); return Buffer.from(p
 function listBuf(top, args) {
   try { return gitRaw(top, args, { maxBuffer: LIST_CAP }); } catch { throw bad('malformed_input', 'git listing failed or exceeded the byte cap'); }
 }
-/** Streams NUL-separated entries into `map` (key = raw bytes as latin1): duplicates across union components are collapsed BEFORE counting and the cap aborts the scan itself. */
+/** Scans NUL-separated entries (a fully buffered listing, at most LIST_CAP bytes) into `map` (key = raw bytes as latin1): duplicates across union components are collapsed BEFORE counting and the cap aborts the scan itself. */
 export function addEntries(map, buf, max = MAX_PATHS) {
   for (let at = 0; at < buf.length;) {
     let end = buf.indexOf(0, at); if (end < 0) end = buf.length;
@@ -247,6 +251,7 @@ function readDeclaration(top, sha, { headSha = null, worktree = false } = {}) {
     try {
       const st = lstatSync(full, { throwIfNoEntry: false });
       if (st) {
+        testHooks.afterLstat?.(full);
         if (!st.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file');
         const fd = openSync(full, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0)); // never blocks on a FIFO, never follows a symlink
         try {
@@ -299,9 +304,9 @@ export function changedPaths(top, sha, head) {
 // The recorded plan line, strict: exactly one `[risk_floor: ]risk-floor: ...` line with exactly these keys. `risk_reassess:` lines are ignored.
 const RECORD = /^(?:risk_floor:[ \t]*)?risk-floor: floor=(STANDARD|ELEVATED); classes=[a-z0-9_,-]*; claimed=(STANDARD|ELEVATED); ai=(STANDARD|ELEVATED); final=(STANDARD|ELEVATED); paths=\d+; matched=\d+; base=([0-9a-f]{12}); head=[a-z0-9]+; declaration=(?:[0-9a-f]{16}|none)$/;
 export function parseRecordedLine(text) {
-  const lines = typeof text === 'string' ? text.split(/\r?\n/).filter((l) => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l)) : [];
+  const lines = typeof text === 'string' ? text.split(/\r?\n/).map((l) => l.trimStart()).filter((l) => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l)) : [];
   const m = lines.length === 1 ? RECORD.exec(lines[0]) : null;
-  if (!m) throw bad('recorded_line_invalid', 'the recorded line must be exactly one strict risk-floor record');
+  if (!m || (m[1] === 'ELEVATED' && m[4] === 'STANDARD')) throw bad('recorded_line_invalid', 'the recorded line must be exactly one strict, self-consistent risk-floor record');
   return { floor: m[1], claimed: m[2], ai: m[3], final: m[4], base: m[5] };
 }
 
@@ -342,7 +347,7 @@ export function main(argv) {
     let paths = null; try { paths = parsePathsArg(f['planned-paths']); } catch { /* stays null: malformed */ }
     r = check({ repo: f.repo, base: f.base, plannedPaths: paths, claimed: f.claimed, ai: f.ai });
   } else {
-    let recordedLine = null; try { recordedLine = readText(f['recorded-line']); } catch { /* stays null: base_mismatch */ }
+    let recordedLine = null; try { recordedLine = readText(f['recorded-line']); } catch { /* stays null: recorded_line_invalid */ }
     r = reassess({ repo: f.repo, base: f.base, head: f.head, recordedLine, claimed: f.claimed, ai: f.ai });
   }
   return { code: exitCodeFor(r), out: r };

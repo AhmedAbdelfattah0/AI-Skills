@@ -256,7 +256,7 @@ test('reassess: newline/space filenames survive git -z; bad and flag-looking hea
 const rec = (r, o = {}) => `${o.key ?? 'risk_floor: '}risk-floor: floor=${o.floor ?? 'ELEVATED'}; classes=money; claimed=${o.claimed ?? 'STANDARD'}; ai=${o.ai ?? 'ELEVATED'}; final=${o.final ?? 'ELEVATED'}; paths=1; matched=1; base=${r.base.slice(0, 12)}; head=planned; declaration=${o.decl ?? 'abcdef0123456789'}`;
 test('R-B1 the WHOLE recorded line counts: final is never lower than the recorded claim, ai or final (siblings: each field, now-values, strictness)', () => {
   const r = repo(); writeFileSync(join(r.dir, 'README.md'), 'typo'); const h = commit(r.dir);
-  for (const o of [{}, { ai: 'STANDARD', claimed: 'ELEVATED', final: 'STANDARD' }, { ai: 'STANDARD', claimed: 'STANDARD', final: 'ELEVATED' }, { ai: 'ELEVATED', claimed: 'STANDARD', final: 'STANDARD' }]) {
+  for (const o of [{}, { floor: 'STANDARD', ai: 'STANDARD', claimed: 'ELEVATED', final: 'STANDARD' }, { floor: 'STANDARD', ai: 'STANDARD', claimed: 'STANDARD', final: 'ELEVATED' }, { floor: 'STANDARD', ai: 'ELEVATED', claimed: 'STANDARD', final: 'STANDARD' }]) {
     const x = re(r, h, 'STANDARD', 'STANDARD', rec(r, o)); assert.equal(x.floor, 'STANDARD'); assert.equal(x.final, 'ELEVATED', JSON.stringify(o)); assert.equal(RF.exitCodeFor(x), 2, JSON.stringify(o));
     assert.equal(RF.exitCodeFor(re(r, h, 'ELEVATED', 'STANDARD', rec(r, o))), 0);
   }
@@ -266,6 +266,8 @@ test('R-B1 the WHOLE recorded line counts: final is never lower than the recorde
   }
   assert.equal(RF.exitCodeFor(re(r, h, 'STANDARD', 'STANDARD', `${rec(r)}\n${rec(r, { key: 'risk_reassess: ' })}`)), 2); // a risk_reassess: line is ignored, not a duplicate
   assert.equal(RF.exitCodeFor(re(r, h, 'ELEVATED', 'ELEVATED', rec(r).replace('risk_floor: ', ''))), 0); // the bare check line is accepted
+  assert.equal(RF.exitCodeFor(re(r, h, 'ELEVATED', 'ELEVATED', `     ${rec(r)}`)), 0); // the plan template indents header lines
+  const inc = re(r, h, 'ELEVATED', 'ELEVATED', rec(r, { floor: 'ELEVATED', final: 'STANDARD' })); assert.ok(inc.errors.includes('recorded_line_invalid')); // a floor above its own final is inconsistent
 });
 test('R-M2 WORKTREE includes base->HEAD: a committed change restored in index and working tree still counts (paths and declaration)', () => {
   const r = repo({ 'README.md': 'x', 'apps/api/src/billing/a.ts': 'a' });
@@ -282,14 +284,14 @@ test('git-IGNORED untracked files are outside release scope (not enumerated, no 
   const h = commit(r.dir); const z = re(r, h); assert.deepEqual(z.floor_classes, ['auth', 'schema']); // and through the commit
   const src = readFileSync(SCRIPT, 'utf8'); assert.doesNotMatch(src, /GIT_LITERAL_PATHSPECS: '0'|'-o', '-i'|\$\{x\}`/); assert.match(src, /outside release scope/);
 });
-test('check and reassess classify the same paths identically (one engine): generated path forms through both entry points', () => {
+test('check and reassess classify EACH path identically (one engine; planned-directory conservatism is the only intended difference)', () => {
   const paths = ['.env', 'db/x.sql', 'DB/MIGRATIONS/1.SQL', 'apps/api/src/billing/a.ts', 'apps/api/src/auth/Cafe\u0301.ts', 'apps/api/src/AUTH/x.ts', 'src/checkout/pay.ts', 'README.md', 'docs/a b.md', 'apps/api/src/pricing/x/y.ts', 'a.pricing.ts', 'libs/none/z.ts'];
-  const r = repo({ 'README.md': 'x' });
-  for (const f of paths.filter((x) => x !== 'README.md')) { mkdirSync(dirname(join(r.dir, f)), { recursive: true }); writeFileSync(join(r.dir, f), 'x'); }
-  writeFileSync(join(r.dir, 'README.md'), 'edit'); const h = commit(r.dir);
-  const a = chk(r, paths), b = re(r, h);
-  assert.deepEqual(a.floor_classes, b.floor_classes); assert.equal(a.counts.matched, b.counts.matched); assert.equal(a.counts.paths, b.counts.paths);
-  for (const f of paths) assert.equal(chk(r, [f]).errors.length, 0, f);
+  const r = repo({ 'README.md': 'x' }); let base = r.base, n = 0;
+  for (const f of paths) {
+    mkdirSync(dirname(join(r.dir, f)), { recursive: true }); writeFileSync(join(r.dir, f), `v${n++}`); const h = commit(r.dir);
+    const a = chk(r, [f]), b = RF.reassess({ repo: r.dir, base, head: h, recordedLine: line({ base }), claimed: 'STANDARD', ai: 'STANDARD' });
+    assert.deepEqual(a.floor_classes, b.floor_classes, f); assert.equal(a.counts.matched, b.counts.matched, f); base = h; // roll the base forward so each reassess sees exactly one new path
+  }
 });
 test('bounded enumeration: caps apply WHILE scanning (before any array/view is built), dedupe precedes counting, and hidden-flag scanning allocates nothing', () => {
   const nul = (n, f = (i) => `p${i}`) => Buffer.from(Array.from({ length: n }, (_, i) => f(i)).join('\0') + '\0');
@@ -299,16 +301,28 @@ test('bounded enumeration: caps apply WHILE scanning (before any array/view is b
   assert.throws(() => RF.addEntries(m, nul(60_000, (i) => `q${i}`)), (e) => e.code === 'malformed_input'); // 150k + 60k distinct > cap
   assert.equal(RF.hiddenFlagged(Buffer.from('H a\0h b\0S c\0')), true); assert.equal(RF.hiddenFlagged(Buffer.from('H a\0H b\0')), false);
 });
-test('a FIFO in the declaration slot fails closed without hanging (declaration_tampered)', NIX, () => {
-  const r = repo(); rmSync(join(r.dir, DECL_PATH)); const mk = spawnSync('mkfifo', [join(r.dir, DECL_PATH)]);
-  if (mk.status !== 0) return; // no mkfifo on this platform
-  const x = chk(r, ['README.md']); assert.ok(x.errors.includes('declaration_tampered')); assert.equal(RF.exitCodeFor(x), 1);
+test('a FIFO installed AFTER lstat (race) fails closed without hanging: O_NONBLOCK + fstat before read', NIX, (t) => {
+  const r = repo(); const full = join(r.dir, DECL_PATH);
+  const probe = join(r.dir, 'probe.fifo'); if (spawnSync('mkfifo', [probe]).status !== 0) return t.skip('mkfifo is unavailable on this platform'); rmSync(probe);
+  RF.testHooks.afterLstat = () => { rmSync(full); spawnSync('mkfifo', [full]); };
+  try { const x = chk(r, ['README.md']); assert.ok(x.errors.includes('declaration_tampered'), JSON.stringify(x.errors)); assert.equal(RF.exitCodeFor(x), 1); } finally { RF.testHooks.afterLstat = null; }
+  const r2 = repo(); rmSync(join(r2.dir, DECL_PATH)); spawnSync('mkfifo', [join(r2.dir, DECL_PATH)]); assert.ok(chk(r2, ['README.md']).errors.includes('declaration_tampered')); // already a FIFO at lstat
 });
-test('Unicode order and case folding: Cf stripped, NFC, then full case folding (sigma, sharp s, dotted I), on pattern AND path', () => {
-  for (const [g, p] of [['café.ts', 'cafe\u200d\u0301.ts'], ['café.ts', 'cafe\u0301.ts'], ['cafe\u0301.ts', 'café.ts'], ['CAFÉ.ts', 'cafe\u200d\u0301.ts'], ['caf\u200de\u0301.ts', 'CAFÉ.TS'],
-    ['οσ/**', 'ΟΣ/x.ts'], ['ος/**', 'ΟΣ/x.ts'], ['οσ/**', 'ος/x.ts'], ['strasse', 'STRASSE'], ['strasse', 'straße'], ['STRASSE', 'straße/x.ts'], ['istanbul', 'İSTANBUL'], ['İSTANBUL', 'istanbul/x']])
-    assert.equal(RF.globMatches(g, p), true, JSON.stringify([g, p]));
-  assert.equal(RF.globMatches('strasse', 'strase'), false);
+test('Unicode order and case folding: Cf stripped, NFC, then PER-CODE-POINT case folding (no context), on pattern AND path', () => {
+  const yes = [['café.ts', 'cafe\u200d\u0301.ts'], ['café.ts', 'cafe\u0301.ts'], ['cafe\u0301.ts', 'café.ts'], ['CAFÉ.ts', 'cafe\u200d\u0301.ts'], ['caf\u200de\u0301.ts', 'CAFÉ.TS'],
+    ['οσ/**', 'ΟΣ/x.ts'], ['ος/**', 'ΟΣ/x.ts'], ['οσ/**', 'ος/x.ts'], ['ΟΣ/**', 'οσ/x'], ['strasse', 'STRASSE'], ['strasse', 'straße'], ['STRASSE', 'straße/x.ts'], ['istanbul', 'İSTANBUL'], ['İSTANBUL', 'istanbul/x'],
+    ['strasse.ts', 'STRAẞE.ts'], ['straße.ts', 'STRAẞE.ts'], ['straße.ts', 'STRASSE.ts'], ['STRAẞE/**', 'strasse/x'], ['οσ*.ts', 'οσα.ts'], ['οσ*.ts', 'ΟΣΑ.ts'], ['οσ*.ts', 'οςα.ts'], ['*σ', 'ΛΟΓΟΣ'], ['*ς', 'λογοσ'], ['λογος/**', 'ΛΟΓΟΣ/x'],
+    ['kelvin', '\u212Aelvin'], ['\u212Aelvin', 'kelvin'], ['caf\u0065\u0301/**', 'CAF\u00C9/x'], ['ხ/**', 'ხ/x'], ['\u13A0\u13A1/**', '\uAB70\uAB71/x'], ['file', '\uFB01le'], ['isim', '\u0131s\u0131m']];
+  for (const [g, p] of yes) assert.equal(RF.globMatches(g, p), true, JSON.stringify([g, p]));
+  // stated behaviour: upper/lower folding also folds the ligature U+FB01 to fi and dotless i to i (over-classifies, never under); unrelated spellings stay apart
+  for (const [g, p] of [['strasse', 'strase'], ['ss', 's']]) assert.equal(RF.globMatches(g, p), false, JSON.stringify([g, p]));
+});
+test('case-variant property: every sample name, in generated case/Unicode variants, gives a stable result as a pattern and as a path', () => {
+  const per = (x, f) => [...x].map(f).join('');
+  for (const k of ['billing', 'apps/api/src/auth', 'db migrations', 'Café', 'Straße', 'λογος', 'ΛΟΓΟΣ', 'οσα', 'İstanbul', 'Köln', 'ǅ', 'ᾈ', 'ﬁle', '\u212Aelvin', 'ǆ-x']) {
+    const w = k.replace(/ /g, '-'), vs = new Set([w, w.toUpperCase(), w.toLowerCase(), per(w, (c) => c.toUpperCase()), per(w, (c) => c.toLowerCase()), w.replace(/^./, (c) => c.toUpperCase()), w.normalize('NFD'), w.normalize('NFC')]);
+    for (const a of vs) for (const b of vs) assert.equal(RF.globMatches(a, `${b}/x.ts`), true, `${a} ~ ${b}`);
+  }
 });
 test('budgets count every DP row/cell: 200 classes x 32-segment ** patterns against 200000 planned paths fail closed fast; one pair stays within the bound', () => {
   const glob = Array.from({ length: 32 }, (_, i) => (i % 2 ? 'a' : '**')).join('/'), g = RF.compileGlob(glob), ctx = { steps: 0 };
@@ -351,7 +365,7 @@ test('docs: debate rule is consistent, the unrelated preflight paragraph is inta
   assert.match(ref('references/cross-model.md'), /both STANDARD/);
   assert.match(ref('SKILL.md'), /risk floor or your own assessment is ELEVATED/); assert.match(ref('SKILL.md'), /your own assessment is also STANDARD/);
   for (const f of ['SKILL.md', 'references/plan.md']) { assert.match(ref(f), /not evidence of low risk/); assert.match(ref(f), /advisory, not enforced/i); }
-  assert.match(ref('SKILL.md'), /no_risk_paths_declared/); assert.match(ref('SKILL.md'), /ignored/i); assert.match(ref('SKILL.md'), /Pin `--base`/); assert.match(ref('SKILL.md'), /--recorded-line <file\|->/); assert.match(ref('references/plan.md'), /risk_reassess/); assert.match(ref('scripts/risk-floor.mjs'), /worst-case/i); assert.match(ref('SKILL.md'), /outside release scope/); assert.match(ref('scripts/risk-floor.mjs'), /serves PLANNED and ACTUAL paths/); assert.doesNotMatch(ref('scripts/risk-floor.mjs'), /ONLY for PLANNED/);
+  assert.match(ref('SKILL.md'), /no_risk_paths_declared/); assert.match(ref('SKILL.md'), /ignored/i); assert.match(ref('SKILL.md'), /Pin `--base`/); assert.match(ref('SKILL.md'), /--recorded-line <file\|->/); assert.match(ref('references/plan.md'), /risk_reassess/); assert.match(ref('scripts/risk-floor.mjs'), /worst-case/i); assert.match(ref('SKILL.md'), /outside release scope/); assert.match(ref('references/plan.md'), /outside release scope/); assert.match(ref('scripts/risk-floor.mjs'), /serves PLANNED and ACTUAL paths/); assert.doesNotMatch(ref('scripts/risk-floor.mjs'), /ONLY for PLANNED/);
   assert.doesNotMatch(ref('SKILL.md') + ref('scripts/risk-floor.mjs'), /never under-classify|is final: it forces/);
   assert.doesNotThrow(() => RF.validateDeclaration(JSON.parse(readFileSync(new URL('references/risk-paths.example.json', root), 'utf8'))));
 });
