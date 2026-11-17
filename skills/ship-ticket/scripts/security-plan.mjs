@@ -318,12 +318,15 @@ const countBlocks = (text) => (typeof text === 'string' ? [...narrative(text).ma
 /**
  * The §3a machine block, verified: exactly one block, well-formed, its selection digest recomputes, every pair
  * names a listed surface and control, and every `security-pairs` line in the plan equals the block's. Else null.
- * `opts.narrative: true` means the caller passes text whose RUN-STATE region it already removed (test-kinds.mjs
+ * `opts.alreadyCut: true` means the caller passes text whose RUN-STATE region it already removed (test-kinds.mjs
  * planNarrative): no second cut is applied, so one narrative interpretation holds. Default: unchanged.
  */
 export function parsePlanSecurityBlock(planText, opts = {}) {
   if (typeof planText !== 'string') return null;
-  if (opts?.narrative !== true) planText = narrative(planText);
+  if (opts?.alreadyCut === true) {
+    // uncut text passed by mistake would expose the RUN-STATE body: an exact marker line left in it is a refusal
+    if (planText.split('\n').some((l) => l.trim() === RS_BEGIN || l.trim() === RS_END)) return null;
+  } else planText = narrative(planText);
   const m = [...planText.matchAll(BLOCK_RE)];
   if (m.length !== 1) return null;
   let b;

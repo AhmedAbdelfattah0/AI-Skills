@@ -214,14 +214,14 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
       if (!declared && !builtin) errors.push('risk_class_unmapped'); else [...(declared ?? []), ...(builtin ?? [])].forEach((t) => tags.add(t));
     }
   }
-  // security surfaces: a verified block, or none at all (any security-plan or security-pairs token demands the verified block)
-  if (carriers(text, MARKER['security-plan']).length || carriers(text, MARKER['security-pairs']).length) {
-    // the same narrative, never re-cut; and it must agree with the engine's own reading of the raw plan (run-engine.mjs
-    // binds parsePlanSecurityBlock(plan), which cuts RUN-STATE at substrings): a disagreement is a refusal, not a choice
-    const block = parsePlanSecurityBlock(text, { narrative: true });
-    if (!block || JSON.stringify(parsePlanSecurityBlock(planText)) !== JSON.stringify(block)) errors.push('security_block_invalid');
-    else for (const s of block.surfaces) { if (Object.hasOwn(SURFACE_TAGS, s.kind)) SURFACE_TAGS[s.kind].forEach((t) => tags.add(t)); else errors.push('surface_kind_unmapped'); }
-  }
+  // security surfaces: BOTH readings, ALWAYS (no early exit when the narrative carries no security token). The block is
+  // parsed from the one narrative, never re-cut; the engine binds parsePlanSecurityBlock(plan), which cuts RUN-STATE at
+  // substrings (run-engine.mjs). Any difference between the two (block, pairs, hence kinds) is a refusal, not a choice;
+  // and a security token in the narrative demands a verified block.
+  const blockToken = carriers(text, MARKER['security-plan']).length > 0 || carriers(text, MARKER['security-pairs']).length > 0;
+  const block = parsePlanSecurityBlock(text, { alreadyCut: true }), engineBlock = parsePlanSecurityBlock(planText);
+  if ((blockToken && !block) || JSON.stringify(engineBlock) !== JSON.stringify(block)) errors.push('security_block_invalid');
+  else if (block) for (const s of block.surfaces) { if (Object.hasOwn(SURFACE_TAGS, s.kind)) SURFACE_TAGS[s.kind].forEach((t) => tags.add(t)); else errors.push('surface_kind_unmapped'); }
   const items = [];
   for (const l of linesOf(text, 'lifecycle-item')) { const m = /^(\S+)\s+\S/.exec(l); if (!m || !ITEM_ID.test(m[1]) || Object.hasOwn(KINDS, m[1]) || items.includes(m[1])) errors.push('plan_line_invalid'); else items.push(m[1]); }
   const waivers = new Set();

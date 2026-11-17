@@ -274,8 +274,11 @@ a refusal, never an absent one. Markers in fences or comments count. Benign: the
 `security_block_invalid`. RUN-STATE is cut at whole lines: it must be absent or exactly one `BEGIN` line followed by one
 `END` line, with no other marker line in the plan (an event record, a line starting with `{`, may name the markers).
 That one cut (`planNarrative`) is the only narrative every parse reads: the block is parsed from it with no second cut
-(`parsePlanSecurityBlock(text, { narrative: true })`), and it must equal the engine's own reading of the raw plan
-(`parsePlanSecurityBlock(plan)`, which cuts at substrings), else `security_block_invalid`.
+(`parsePlanSecurityBlock(text, { alreadyCut: true })`), and, always, whether or not a security token remains in the
+narrative, it must equal the engine's own reading of the raw plan
+(`parsePlanSecurityBlock(plan)`, which cuts at substrings), else `security_block_invalid`. So an event record holding a literal
+marker string refuses whenever it moves the engine's cut; this gate does not rely on the engine's own malformed-RUN-STATE
+check.
 Not caught (read as absent): homoglyphs, combining marks, misspellings, words joined by nothing, and space-joined words
 whose colon is not near them (`Test triggers (tags):`). One well-formed RUN-STATE pair wrapped around narrative still
 hides it (plan trust, S-01b2). The prose scan behind the syntax tokens covered 650 real plans, none opted in: it shows

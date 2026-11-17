@@ -552,8 +552,14 @@ const SPLIT_CORPUS = (() => {
     ['nested BEGIN BEGIN END END', `${head}${RS_B}\n${RS_B}\n${rh}\n${RS_E}\n${RS_E}\n`],
     ['END before BEGIN', `${head}${RS_E}\n${rh}\n${RS_B}\n`],
     ['unbalanced: BEGIN, block, no END', `${head}${RS_B}\n${rh}\n`],
+    // Opus M-1: an event record holding a literal marker moves the engine's substring cut while the line cut stays put
+    ['Opus M-1: event line with a literal END inside the region, block after it', `${head}${RS_B}\n{"event":"NOTE","text":"${RS_E}"}\n${rh}\n${RS_E}\n`],
+    ['event line with a literal END before BEGIN, block inside the region', `${head}{"event":"NOTE","text":"${RS_E}"}\n${RS_B}\n${rh}\n${RS_E}\n`],
+    ['event line with a literal BEGIN before the block, region after', `${head}{"event":"NOTE","text":"${RS_B}"}\n${rh}\n${RS_B}\n${RS_E}\n`],
+    ['event line with a literal BEGIN inside the region', `${head}${rh}\n${RS_B}\n{"event":"NOTE","text":"${RS_B}"}\n${RS_E}\n`],
+    ['markers split across lines', `${head}<!-- RUN-STATE:\nBEGIN -->\n${rh}\n<!-- RUN-STATE:\nEND -->\n`],
   ];
-})();
+})().flatMap(([label, p]) => [[label, p], [`${label} (CRLF)`, p.replace(/\n/g, '\r\n')]]);
 const surfaceKinds = (block) => uniq2((block?.surfaces ?? []).flatMap((s) => TK.SURFACE_TAGS[s.kind] ?? []).flatMap((t) => TK.TAGS[t]));
 function uniq2(xs) { return [...new Set(xs)].sort(); }
 
@@ -567,11 +573,20 @@ test('[R6] the composed counterexample and its variants never drop the request-h
   const codex = req(SPLIT_CORPUS[0][1]);
   assert.equal(codex.status, 'refused'); assert.ok(codex.errors.includes('security_block_invalid'), String(codex.errors));
   assert.notEqual(TK.checkTitles(codex, []).status, 'pass', 'empty titles never pass the composed case');
+  for (const [label, p] of SPLIT_CORPUS.filter(([l]) => /literal END|Opus M-1/.test(l))) {
+    const r = req(p);
+    assert.equal(r.status, 'refused', label); assert.ok(r.errors.includes('security_block_invalid'), `${label}: ${r.errors}`);
+  }
+  // the exported option refuses uncut text instead of reading the RUN-STATE body (Opus m-1)
+  const uncut = `# Plan\n\n${RS_B}\n${SP.renderSection3a(FULL_SEL)}\n${RS_E}\n`;
+  assert.equal(SP.parsePlanSecurityBlock(uncut, { alreadyCut: true }), null);
+  assert.equal(SP.parsePlanSecurityBlock(uncut.replace(/\n/g, '\r\n'), { alreadyCut: true }), null);
+  assert.notEqual(SP.parsePlanSecurityBlock(TK.planNarrative(uncut.replace(RS_B, '').replace(RS_E, '')), { alreadyCut: true }), null, 'cut text parses');
   // DISCLOSED RESIDUAL (S-01b2, plan trust): ONE well-formed exact RUN-STATE pair wrapped around narrative hides it, and both
   // readings agree on that. Pinned so a change to it is visible, not because it is desired.
   const wrapped = `# Plan\n\ntest-triggers: none\n${realFloor()}\n${RS_B}\n${SP.renderSection3a(FULL_SEL)}\n${RS_E}\n`;
   assert.deepEqual(req(wrapped).kinds, []);
-  assert.deepEqual(SP.parsePlanSecurityBlock(TK.planNarrative(wrapped), { narrative: true }), SP.parsePlanSecurityBlock(wrapped));
+  assert.deepEqual(SP.parsePlanSecurityBlock(TK.planNarrative(wrapped), { alreadyCut: true }), SP.parsePlanSecurityBlock(wrapped));
 });
 
 test('[R7] differential: whenever a plan is required, the recogniser narrative and the engine reading parse the same block and its kinds are required', (t) => {
@@ -581,7 +596,7 @@ test('[R7] differential: whenever a plan is required, the recogniser narrative a
     const r = req(p);
     if (r.status !== 'required') { assert.equal(r.status, 'refused'); continue; }
     required++;
-    const pre = SP.parsePlanSecurityBlock(TK.planNarrative(p), { narrative: true }), engine = SP.parsePlanSecurityBlock(p);
+    const pre = SP.parsePlanSecurityBlock(TK.planNarrative(p), { alreadyCut: true }), engine = SP.parsePlanSecurityBlock(p);
     assert.deepEqual(pre, engine, 'one narrative: both readings parse the same block');
     if (engine) withBlock++;
     for (const k of surfaceKinds(engine)) assert.ok(r.kinds.includes(k), `surface kind ${k} is required`);
