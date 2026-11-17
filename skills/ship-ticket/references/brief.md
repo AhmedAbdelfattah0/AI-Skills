@@ -18,7 +18,7 @@ node scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--re
 - `--notes` is optional: a text file with what only you know. It is copied under Notes as a quotation.
 - `--t0` is optional and only for a repository that declares T0 fast checks (`references/prove.md`). It adds
   the instruction to run `scripts/fast-checks.mjs run` and report the result as a fifth key `t0`. Without it the
-  brief is byte-identical to what it was before T0 existed.
+  brief is byte-identical to what it was before T0 existed. `--out` may not be the `--t0` file.
 - `--out` is the brief file. For an engine node, point the node's `promptFile` at it.
 
 The output is the same every time for the same inputs: no clock, no random value, no absolute path.

@@ -114,7 +114,9 @@ whatever the repository has). It exists because a JWT-shaped literal in an uncom
 `prefer-const` finding were each found by a full gate run late, at a cost of one whole gate run. T0 is fast
 feedback. It does not prove semantic correctness; REVIEW and the tests still do that.
 
-Opt in by committing `.ship-ticket/t0.json`:
+### The declaration and who may author it
+
+Opt in by committing `.ship-ticket/t0.json` **to the base branch**:
 
 ```json
 {"checks":[{"name":"secrets","kind":"secrets","cmd":["gitleaks","dir","--no-banner","{files}"],"files":true,"timeout_ms":120000}]}
@@ -122,35 +124,60 @@ Opt in by committing `.ship-ticket/t0.json`:
 
 `cmd` is an argv array, never a shell string. `kind` is one of `lint`, `typecheck`, `nn-guard`, `secrets`,
 `security`, `other`. `{files}` becomes one argument per scanned file. The scanners are the repository's own;
-this skill ships none, so declare real ones for that repository (a StoreCraft `local-gates.sh --fast` is a
-separate ticket in that repository).
+this skill ships none (a StoreCraft `local-gates.sh --fast` is a separate ticket in that repository).
 
-Run it, from the skill's `scripts/` directory, after every edit and again before handing over:
+**Trust boundary.** The declared commands run with the caller's environment and permissions. Argv execution only
+stops shell interpolation of file names; it does not make a declaration trusted. So:
+- the declaration is authored and reviewed like CI configuration, by someone with authority over the repository,
+  and lands on the base before any ticket relies on it;
+- it is read **from `--base`**, never from the branch being checked. A worker that deletes, edits or replaces it
+  gets `declaration_tampered`; a declaration that exists only on the branch is ignored (`not_declared`) and never
+  executed. A ticket that must change it is changed on the base first, by the repository owner;
+- a check whose own command path is among the changed files fails (`checker_modified`), so use installed tools,
+  not scripts the ticket is editing;
+- the declared command must itself exit non-zero on a finding (eslint warnings, `gitleaks --exit-code 0` pass).
+
+### Running it
+
+From the skill's `scripts/` directory, after every edit and again before handing over:
 
 ```text
 node scripts/fast-checks.mjs run --repo <repo> --base <base sha> [--ticket <key> --run-id <id>]
 ```
 
-- The scan set is **the working tree**: staged, unstaged and untracked files, a renamed file under its new
-  path, plus (with `--base`) every committed file since the base. Always pass `--base`; without it a rename
-  that is already committed is not seen. Nothing narrows the set to committed files, and `--allow-dirty`
-  does not apply: a dirty secret is scanned.
+- `--base` is required. `--repo` may be a subdirectory of the git top level.
+- The scan set is **the working tree** against base: committed, staged, unstaged and untracked files, a renamed file
+  under its new path (paths are passed relative to `--repo`). Nothing narrows the set to committed files, and
+  `--allow-dirty` does not apply: a dirty secret is scanned. Git-ignored files are out of scope, and the index is not
+  scanned separately (a staged secret whose working copy was cleaned is not seen).
+- A changed submodule, nested repository, symlink, unresolvable path, or a tracked file with an assume-unchanged or
+  skip-worktree bit is a **failure**, never a silent drop.
 - Anything but a clean exit 0 fails: a non-zero exit, a **timeout**, a signal, a missing binary, an invalid or
-  empty declaration, or a file set git cannot list. A timeout is never a pass.
+  empty declaration, a bad `--base`, or a file set git cannot list. A timeout is never a pass. Each check runs in
+  its own process group and the group is killed on timeout (on Windows `taskkill /T`; whether the tree is gone
+  afterwards is not observable there). Windows `.cmd` shims need their real executable; a very large file list can
+  exceed the OS argument limit and fails closed.
+- A file-scoped check with no changed files is reported `skipped`, not `pass`; `verify` refuses a `skipped` check
+  when files changed (`fast_check_skipped`).
 - stdout is one JSON verdict of names, enums and counts. Scanner output is not in it (a secrets scanner echoes
   the secret); a failing check's output tail is on stderr for you.
 - With `--ticket` and `--run-id` it records a `t0_check` activity row (`outcome` pass, fail or not_declared;
   numeric metrics `checks`, `failed`, `files`, `timed_out`). A run-log error never changes the verdict.
-- Not declared: exit 0, code `not_declared`, nothing else changes.
+- No declaration at base: exit 0, code `not_declared`, nothing else changes.
+
+### Reporting and verifying
 
 When the repository declares T0, the worker report carries a fifth key `t0`, copied from the verdict's `report`
-(`brief.mjs build --t0 <repo>/.ship-ticket/t0.json` adds this instruction to the brief). The orchestrator runs
-`node scripts/fast-checks.mjs verify --repo <repo> --report-file <final message file>` and does not freeze a
-candidate when it exits 1: `fast_check_missing` (no `t0`), `fast_check_incomplete` (a declared check is not
-reported), `fast_check_failed`. The `t0` value is the worker's own claim: re-run `run` yourself before freeze.
-Status: this slice covers the working-tree runner, the report key and `verify`. The engine does not call `verify`
-at freeze yet, the carrier does not pass `t0Declared`, and the risk-triggered semantic test kinds (T1-S) and
-mutation validity are separate slices.
+(`brief.mjs build --t0 <repo>/.ship-ticket/t0.json` adds this instruction to the brief; an optional well-formed
+`t0` key is accepted by the report parser, so the carrier still reports such a report as structured). The
+orchestrator runs `node scripts/fast-checks.mjs verify --repo <repo> --base <base sha> --report-file <final message file>`
+and does not freeze a candidate when it exits 1: `fast_check_missing` (no `t0`), `fast_check_incomplete` (a declared
+check is not reported), `fast_check_failed`, `fast_check_skipped`, `declaration_tampered`. The `t0` value is the
+worker's own claim: re-run `run` yourself before freeze.
+
+**Status: AC1 is only partly met.** The parser (`t0Declared`) and `verify` exist and are tested; the engine does not
+call `verify` at freeze and the carrier does not require `t0`. That freeze integration, the risk-triggered semantic
+test kinds (T1-S) and mutation validity are separate slices (S-01b, S-01c).
 
 ## The static proof
 

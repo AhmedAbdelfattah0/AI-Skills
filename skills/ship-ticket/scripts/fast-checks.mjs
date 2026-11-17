@@ -3,30 +3,39 @@
  * T0 fast checks (ASTF-41, S-01a): deterministic, cheap checks a builder runs on the WORKING TREE before it
  * hands over. T0 is fast feedback, not proof: it does not establish semantic correctness.
  *
- *   fast-checks.mjs run    --repo <path> [--base <ref>] [--ticket <key> --run-id <id>]
- *   fast-checks.mjs verify --repo <path> --report-file <file with the worker's final message>
+ *   fast-checks.mjs run    --repo <path> --base <ref> [--ticket <key> --run-id <id>]
+ *   fast-checks.mjs verify --repo <path> --base <ref> --report-file <file with the worker's final message>
  *
- * The repository declares its checks in `<repo>/.ship-ticket/t0.json` (opt-in; absent = not declared, and
- * nothing changes: exit 0, code `not_declared`):
+ * The repository declares its checks in `.ship-ticket/t0.json` (opt-in), read from the TRUSTED `--base` commit and never
+ * from the working tree being checked. `--base` is required. The working-tree copy must equal the base copy
+ * (`declaration_tampered` otherwise); a declaration that exists only on the branch is ignored (`not_declared`). The file
+ * is authored and reviewed like CI configuration by someone with authority over the repository; its commands run with
+ * the caller's environment and permissions (argv exec prevents shell injection, it is not a trust boundary).
  *   {"checks":[{"name":"secrets","kind":"secrets","cmd":["gitleaks","dir","--no-banner","{files}"],
  *               "files":true,"timeout_ms":120000}]}
  * `cmd` is an argv array (never a shell string). `{files}` (required when `files` is true) expands to one argv
  * entry per file in the scan set. `kind` is one of KINDS. This module ships NO scanner: the scanners are the
- * repository's own.
+ * repository's own. A check whose own command path is among the changed files fails (`checker_modified`).
  *
- * The scan set is owned here: tracked changes against HEAD (staged and unstaged; a rename contributes its new
- * path), plus every untracked non-ignored file individually, plus, with `--base`, the committed range
- * base..HEAD. There is no way to narrow it to committed files only. Deleted and non-regular paths are dropped.
+ * The scan set is owned here (see `prepare`): everything whose working-tree state differs from base (committed, staged,
+ * unstaged), every untracked non-ignored file, a rename under its new path; deleted files are dropped. `--repo` may be a
+ * subdirectory of the git top level. A submodule, nested repository, symlink or unresolvable path is a failure
+ * (`unsupported_changed_surface`, `unresolvable_path`), never a silent drop, as is an assume-unchanged or
+ * skip-worktree bit (`index_flags_hidden`). Git-ignored files are out of scope. The index is not scanned separately:
+ * a staged secret whose working copy was cleaned is not seen.
  *
  * Anything but a clean exit 0 is a FAIL: non-zero exit, timeout, signal, spawn error, invalid or empty
  * declaration, an unreadable file set. The verdict JSON holds enums, names and numbers only, never scanner
  * output (a secrets scanner echoes the secret); a failing check's output tail goes to stderr for the builder.
+ * Each check runs in its own process group, killed on timeout (Windows: `taskkill /T`, tree state not observable).
+ * A declared command must itself exit non-zero on a finding (eslint warnings and `--exit-code 0` scanners pass T0); on Windows
+ * a `.cmd` shim needs its real executable; a very large file list can exceed the OS argument limit (fails closed).
  * Exit: 0 pass or not_declared, 1 fail/refused, 2 usage.
  */
-import { spawnSync, execFileSync } from 'node:child_process';
-import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, fstatSync } from 'node:fs';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
+import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, fstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isEntrypoint } from './harness.mjs';
@@ -66,28 +75,108 @@ export function validateDeclaration(decl) {
   return { checks };
 }
 
-/** `{declared:false}` when the repo has no declaration file; else `{declared:true, checks}`. Throws `t0Config` when invalid. */
-export function loadDeclaration(repo) {
-  const path = join(repo, DECLARATION_PATH);
-  if (!existsSync(path)) return { declared: false };
-  let parsed;
-  try { parsed = JSON.parse(readFileSync(path, 'utf8')); } catch (e) { throw refuse(`${DECLARATION_PATH} is not valid JSON`); }
-  return { declared: true, ...validateDeclaration(parsed) };
-}
-
-const git = (repo, args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE'];
+const gitEnv = () => { const e = { ...process.env }; for (const k of GIT_ENV_DROP) delete e[k]; return e; };
+const gitRaw = (cwd, args) => execFileSync('git', args, { cwd, env: gitEnv(), maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (cwd, args) => gitRaw(cwd, args).toString('utf8');
 const zList = (out) => out.split('\0').filter(Boolean);
+const stop = (code, reason) => ({ stop: { code, reason } });
 
 /**
- * The scan set: tracked changes vs HEAD (index and worktree), untracked non-ignored files one by one, and with
- * `base` the committed range. Renames are listed by their new path (rename detection is off, so the old path is a
- * deletion and is dropped). Only existing regular files remain. Throws when git cannot answer.
+ * Everything T0 needs before running a command, all read from git, none of it trusted from the tree under test:
+ *  - the declaration comes from `--base` (the trusted commit). The working-tree copy must be byte-identical to it
+ *    (deleted, edited, replaced by a link: `declaration_tampered`); a declaration only the branch has is ignored
+ *    (`not_declared`), since the branch is the thing being checked;
+ *  - the scan set is every path whose working-tree state differs from base (committed, staged, unstaged) plus every
+ *    untracked non-ignored file, resolved against the git top level so `--repo` may be a subdirectory.
+ * Anything git lists that cannot be scanned as a regular file (submodule, nested repository, symlink, a path that
+ * cannot be resolved) or that git is told to ignore (assume-unchanged / skip-worktree bits) is a stop, never a drop.
+ * Returns `{stop:{code,reason}}` or `{top, repoReal, decl|null, changed:[top-relative], files:[repo-relative args]}`.
  */
-export function scanSet(repo, base = null) {
-  const found = new Set(zList(git(repo, ['diff', '-z', '--name-only', '--no-renames', 'HEAD', '--'])));
-  for (const p of zList(git(repo, ['ls-files', '-z', '--others', '--exclude-standard']))) found.add(p);
-  if (base) for (const p of zList(git(repo, ['diff', '-z', '--name-only', '--no-renames', base, 'HEAD', '--']))) found.add(p);
-  return [...found].filter((p) => { try { return lstatSync(join(repo, p)).isFile(); } catch { return false; } }).sort();
+export function prepare(repo, base) {
+  if (typeof base !== 'string' || !base || base.startsWith('-')) return stop('base_invalid', '--base must be a commit-ish that does not start with "-"');
+  let top; let prefix; let sha; let repoReal;
+  try {
+    repoReal = realpathSync(repo);
+    top = realpathSync(git(repoReal, ['rev-parse', '--show-toplevel']).trim());
+    prefix = git(repoReal, ['rev-parse', '--show-prefix']).trim();
+    sha = git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}']).trim();
+  } catch { return stop(top ? 'base_invalid' : 'file_set_unavailable', 'git could not resolve the repository or --base'); }
+  const declPath = prefix + DECLARATION_PATH;
+  let decl = null;
+  try {
+    const entry = git(top, ['ls-tree', '-z', sha, '--', declPath]);
+    if (entry) {
+      const m = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(entry);
+      if (!m || m[2] !== 'blob' || !/^100(644|755)$/.test(m[1])) return stop('t0_config_invalid', 'the base declaration is not a regular file');
+      const baseBytes = gitRaw(top, ['cat-file', 'blob', m[3]]);
+      let treeBytes = null;
+      try { if (lstatSync(join(repoReal, DECLARATION_PATH)).isFile()) treeBytes = readFileSync(join(repoReal, DECLARATION_PATH)); } catch { /* missing */ }
+      if (!treeBytes || !treeBytes.equals(baseBytes)) return stop('declaration_tampered', `${DECLARATION_PATH} differs from its content at --base (deleted, edited or replaced); the declaration is only read from base`);
+      try { decl = validateDeclaration(JSON.parse(baseBytes.toString('utf8'))); } catch (e) { return stop('t0_config_invalid', e.t0Config ? e.message : `${DECLARATION_PATH} at base is not valid JSON`); }
+    }
+  } catch { return stop('file_set_unavailable', 'git could not read the declaration at --base'); }
+  let changed;
+  try {
+    for (const rec of zList(git(top, ['ls-files', '-v', '-z']))) if (/^[a-zS] /.test(rec)) return stop('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit, which hides edits from git');
+    const found = new Set(zList(git(top, ['diff', '-z', '--name-only', '--no-renames', '--ignore-submodules=none', '--diff-filter=d', sha, '--'])));
+    for (const p of zList(git(top, ['ls-files', '-z', '--others', '--exclude-standard']))) found.add(p);
+    changed = [...found].sort();
+  } catch { return stop('file_set_unavailable', 'git could not list the changed files'); }
+  for (const p of changed) {
+    let st;
+    try { st = lstatSync(join(top, p)); } catch { return stop('unresolvable_path', 'a changed path could not be resolved on disk (not silently dropped)'); }
+    if (!st.isFile()) return stop('unsupported_changed_surface', 'a changed path is a submodule, nested repository, directory or symlink, which T0 cannot scan');
+  }
+  const files = changed.map((p) => { const r = relative(repoReal, join(top, p)).split(sep).join('/'); return r.startsWith('-') ? `./${r}` : r; });
+  return { top, repoReal, decl, changed, files };
+}
+
+/** Kill `child`'s whole tree: POSIX process group, Windows `taskkill /T /F` (the limit: the tree is not observable afterwards). */
+function killTree(child) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') { spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); return; }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ }
+}
+
+/** Run one declared check in its own process group. Output goes to a temp FILE; the group is killed on timeout and after exit. */
+function runOne(cwd, check, prep) {
+  const base = { name: check.name, kind: check.kind, result: 'fail', exit: null, timed_out: false, duration_ms: 0, files: 0 };
+  let args = check.cmd.slice(1);
+  if (check.files) {
+    if (prep.files.length === 0) return Promise.resolve({ ...base, result: 'skipped' });
+    args = args.flatMap((a) => (a === '{files}' ? prep.files : [a]));
+    base.files = prep.files.length;
+  }
+  const touched = check.cmd.filter((a) => a !== '{files}').some((a) => {
+    const abs = resolve(cwd, a);
+    const rel = relative(prep.top, abs).split(sep).join('/');
+    return !rel.startsWith('..') && prep.changed.includes(rel);
+  });
+  if (touched) return Promise.resolve({ ...base, code: 'checker_modified' });
+  const dir = mkdtempSync(join(tmpdir(), 't0-'));
+  const fd = openSync(join(dir, 'out'), 'w+');
+  const started = Date.now();
+  return new Promise((done) => {
+    let settled = false;
+    let child;
+    const finish = (extra) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (child) killTree(child);
+      const out = { ...base, duration_ms: Date.now() - started, ...extra };
+      if (out.result === 'fail') { try { out.output_tail = tail(fd); } catch { /* no tail */ } }
+      try { closeSync(fd); } catch { /* closed */ }
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may hold the file briefly */ }
+      done(out);
+    };
+    let timer;
+    try { child = spawn(check.cmd[0], args, { cwd, stdio: ['ignore', fd, fd], detached: process.platform !== 'win32', windowsHide: true }); } catch { return finish({}); }
+    timer = setTimeout(() => finish({ timed_out: true }), check.timeout_ms);
+    child.on('error', () => finish({}));
+    child.on('exit', (code, signal) => finish({ exit: code, result: code === 0 && !signal ? 'pass' : 'fail' }));
+  });
 }
 
 function tail(fd) {
@@ -98,65 +187,38 @@ function tail(fd) {
   return buf.toString('utf8');
 }
 
-/** Run one declared check. Output goes to a temp FILE (a killed child's grandchildren cannot hold a pipe open). */
-function runOne(repo, check, files) {
-  const out = { name: check.name, kind: check.kind, result: 'fail', exit: null, timed_out: false, skipped: false, duration_ms: 0, files: 0 };
-  let args = check.cmd.slice(1);
-  if (check.files) {
-    if (files.length === 0) return { ...out, result: 'skipped', skipped: true };
-    args = args.flatMap((a) => (a === '{files}' ? files.map((f) => (f.startsWith('-') ? `./${f}` : f)) : [a]));
-    out.files = files.length;
-  }
-  const dir = mkdtempSync(join(tmpdir(), 't0-'));
-  const fd = openSync(join(dir, 'out'), 'w+');
-  const started = Date.now();
-  let r;
-  try {
-    r = spawnSync(check.cmd[0], args, { cwd: repo, stdio: ['ignore', fd, fd], timeout: check.timeout_ms, killSignal: 'SIGKILL', windowsHide: true });
-    out.duration_ms = Date.now() - started;
-    out.exit = Number.isInteger(r.status) ? r.status : null;
-    out.timed_out = r.error?.code === 'ETIMEDOUT';
-    out.result = !r.error && r.status === 0 && !r.signal ? 'pass' : 'fail';
-    if (out.result === 'fail') out.output_tail = tail(fd);
-  } finally { closeSync(fd); rmSync(dir, { recursive: true, force: true }); }
-  return out;
-}
+const stopped = (s) => ({ declared: true, result: 'fail', code: s.stop.code, reason: s.stop.reason, checks: [], files: 0, report: null });
 
 /**
- * Run T0 on the working tree. Returns `{declared, result:'pass'|'fail'|'not_declared', code, checks, files, report}`.
- * `report` is the ready-to-paste worker-report `t0` value (enums and names only).
+ * Run T0 on the working tree against the trusted `base`. Returns `{declared, result:'pass'|'fail'|'not_declared', code,
+ * checks, files, report}`; `report` is the ready-to-paste worker-report `t0` value (names and enums only).
  */
-export function runFastChecks({ repo, base = null }) {
-  let decl;
-  try { decl = loadDeclaration(repo); } catch (e) {
-    if (!e.t0Config) throw e;
-    return { declared: true, result: 'fail', code: 't0_config_invalid', reason: e.message, checks: [], files: 0, report: null };
-  }
-  if (!decl.declared) return { declared: false, result: 'not_declared', code: 'not_declared', checks: [], files: 0, report: null };
-  let files;
-  try { files = scanSet(repo, base); } catch (e) {
-    return { declared: true, result: 'fail', code: 'file_set_unavailable', checks: [], files: 0, report: null };
-  }
-  const checks = decl.checks.map((c) => runOne(repo, c, files));
+export async function runFastChecks({ repo, base = null }) {
+  const prep = prepare(repo, base);
+  if (prep.stop) return stopped(prep);
+  if (!prep.decl) return { declared: false, result: 'not_declared', code: 'not_declared', checks: [], files: 0, report: null };
+  const checks = [];
+  for (const c of prep.decl.checks) checks.push(await runOne(prep.repoReal, c, prep));
   const failed = checks.some((c) => c.result === 'fail');
-  const ranAny = checks.some((c) => c.result === 'pass');
-  const result = !failed && (ranAny || files.length === 0) ? 'pass' : 'fail';
-  const report = { result, checks: checks.map((c) => ({ name: c.name, result: c.result === 'pass' || c.result === 'skipped' ? 'pass' : 'fail' })) };
-  return { declared: true, result, code: result === 'pass' ? 'ok' : 't0_failed', checks, files: files.length, report };
+  const result = failed ? 'fail' : 'pass';
+  const report = { result, checks: checks.map((c) => ({ name: c.name, result: c.result })) };
+  return { declared: true, result, code: result === 'pass' ? 'ok' : 't0_failed', checks, files: prep.files.length, report };
 }
 
-/** Orchestrator check of a worker message against the repo's declaration (AC1). */
-export function verifyReport({ repo, text }) {
-  let decl;
-  try { decl = loadDeclaration(repo); } catch (e) { if (e.t0Config) return { ok: false, code: 't0_config_invalid', reason: e.message }; throw e; }
-  if (!decl.declared) return { ok: true, code: 'not_declared' };
+/** Orchestrator check of a worker message against the BASE declaration and the current tree (AC1). Codes only: no worker text is echoed. */
+export function verifyReport({ repo, base, text }) {
+  const prep = prepare(repo, base);
+  if (prep.stop) return { ok: false, code: prep.stop.code };
+  if (!prep.decl) return { ok: true, code: 'not_declared' };
   const parsed = parseWorkerReport(text, { t0Declared: true });
-  if (parsed.status !== 'structured') return { ok: false, code: parsed.failure.startsWith('fast_check_') ? parsed.failure.split(':')[0] : 'report_unstructured', reason: parsed.failure };
+  if (parsed.status !== 'structured') return { ok: false, code: parsed.failure.startsWith('fast_check_') ? parsed.failure.split(':')[0] : 'report_unstructured' };
   const t0 = parsed.report.t0;
-  const declaredNames = decl.checks.map((c) => c.name).sort();
+  if (!t0.checks.every((c) => SAFE_NAME.test(c.name))) return { ok: false, code: 'fast_check_invalid' };
+  const declaredNames = prep.decl.checks.map((c) => c.name).sort();
   const reportedNames = t0.checks.map((c) => c.name).sort();
-  if (JSON.stringify(declaredNames) !== JSON.stringify(reportedNames)) return { ok: false, code: 'fast_check_incomplete', reason: `declared [${declaredNames}] reported [${reportedNames}]` };
-  if (t0.result !== 'pass' || t0.checks.some((c) => c.result !== 'pass')) return { ok: false, code: 'fast_check_failed' };
+  if (JSON.stringify(declaredNames) !== JSON.stringify(reportedNames)) return { ok: false, code: 'fast_check_incomplete' };
+  if (t0.result !== 'pass' || t0.checks.some((c) => c.result === 'fail')) return { ok: false, code: 'fast_check_failed' };
+  if (prep.files.length > 0 && t0.checks.some((c) => c.result === 'skipped')) return { ok: false, code: 'fast_check_skipped' };
   return { ok: true, code: 'ok' };
 }
 
@@ -175,16 +237,16 @@ function parseFlags(argv, allowed) {
   return f;
 }
 
-export function main(argv) {
+export async function main(argv) {
   const [cmd, ...rest] = argv;
-  const usage = () => { process.stderr.write('Usage: fast-checks.mjs run --repo <path> [--base <ref>] [--ticket <key> --run-id <id>] | verify --repo <path> --report-file <file>\n'); return 2; };
+  const usage = () => { process.stderr.write('Usage: fast-checks.mjs run --repo <path> --base <ref> [--ticket <key> --run-id <id>] | verify --repo <path> --base <ref> --report-file <file>\n'); return 2; };
   if (cmd === 'run') {
     const f = parseFlags(rest, ['repo', 'base', 'ticket', 'run-id']);
-    if (!f || !f.repo || (f.ticket === undefined) !== (f['run-id'] === undefined)) return usage();
+    if (!f || !f.repo || !f.base || (f.ticket === undefined) !== (f['run-id'] === undefined)) return usage();
     const repo = resolve(f.repo);
     const eventId = 't0-' + randomBytes(4).toString('hex');
     if (f.ticket) logActivity(repo, f.ticket, f['run-id'], 'start', { eventId, args: [] });
-    const r = runFastChecks({ repo, base: f.base ?? null });
+    const r = await runFastChecks({ repo, base: f.base });
     if (f.ticket && r.declared) {
       const failedCount = r.checks.filter((c) => c.result === 'fail').length;
       logActivity(repo, f.ticket, f['run-id'], 'end', { eventId, args: ['--outcome', r.result, '--metric', `checks=${r.checks.length}`, '--metric', `failed=${failedCount}`, '--metric', `files=${r.files}`, '--metric', `timed_out=${r.checks.filter((c) => c.timed_out).length}`] });
@@ -196,15 +258,15 @@ export function main(argv) {
     return r.result === 'fail' ? 1 : 0;
   }
   if (cmd === 'verify') {
-    const f = parseFlags(rest, ['repo', 'report-file']);
-    if (!f || !f.repo || !f['report-file']) return usage();
+    const f = parseFlags(rest, ['repo', 'base', 'report-file']);
+    if (!f || !f.repo || !f.base || !f['report-file']) return usage();
     let text;
     try { text = readFileSync(f['report-file'], 'utf8'); } catch { process.stderr.write('fast-checks: cannot read --report-file\n'); return 1; }
-    const v = verifyReport({ repo: resolve(f.repo), text });
+    const v = verifyReport({ repo: resolve(f.repo), base: f.base, text });
     process.stdout.write(JSON.stringify(v) + '\n');
     return v.ok ? 0 : 1;
   }
   return usage();
 }
 
-if (isEntrypoint(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+if (isEntrypoint(import.meta.url)) process.exitCode = await main(process.argv.slice(2));

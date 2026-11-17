@@ -134,7 +134,8 @@ const T0_REPORT_LINES = [
   'This repository declares T0 fast checks. Before you hand over, on your working tree (committed or not), run',
   '`node scripts/fast-checks.mjs run --repo <repo> --base <base sha>` from the ship-ticket skill directory and fix',
   'every failure; a timeout is a failure. Then add the `report` object it prints as a fifth key `t0`, so the block',
-  'has these five keys. A report without `t0` is refused (`fast_check_missing`). T0 is fast feedback, not proof of',
+  'has these five keys. The orchestrator checks it with `fast-checks.mjs verify` and does not freeze a candidate whose',
+  '`t0` is missing (`fast_check_missing`) or failed; the carrier itself does not refuse it. T0 is fast feedback, not proof of',
   'correctness.',
   '',
   '```ship-ticket-report',
@@ -353,7 +354,7 @@ export function main(argv) {
         notes: opts.notes ? readText(opts.notes, 'notes file') : null,
         t0: opts.t0 ? readT0(opts.t0) : null,
       });
-      checkOut(opts.out, [opts.dag, opts.plan, opts.recon, opts.notes]);
+      checkOut(opts.out, [opts.dag, opts.plan, opts.recon, opts.notes, opts.t0]);
       writeFileSync(opts.out, text);
       const digest = text.trimEnd().split('\n').pop();
       process.stdout.write(`brief written for node ${opts.node}: ${digest}\n`);

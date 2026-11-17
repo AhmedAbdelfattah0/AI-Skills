@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync, symlinkSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { parseWorkerReport } from './worker-report.mjs';
@@ -35,39 +35,73 @@ else {
 }
 `;
 
-function fixture(t, checks) {
+// Real (tiny) checker for the SCRUM-202 patterns: a REPLICA of D9 (JWT-shaped literal) and D15 (`let` never reassigned,
+// the word "any" in a comment). It is NOT nn-guard or eslint; it only proves the runner catches such findings.
+const REPLICA = `
+import { readFileSync } from 'node:fs';
+let bad = 0;
+for (const f of process.argv.slice(2)) {
+  const text = readFileSync(f, 'utf8');
+  if (/eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/.test(text)) { bad++; console.error(f + ': D9 jwt-shaped literal'); }
+  for (const m of text.matchAll(/^\\s*let (\\w+)\\b/gm)) if (!new RegExp('\\\\b' + m[1] + '\\\\s*(=[^=]|\\\\+\\\\+|--|\\\\+=)', 'g').test(text.replace(m[0], ''))) { bad++; console.error(f + ': D15 prefer-const ' + m[1]); }
+  if (/\\/\\/.*\\bany\\b/.test(text)) { bad++; console.error(f + ': D15 flagged comment word'); }
+}
+process.exit(bad ? 1 : 0);
+`;
+
+// prefix '' = repo is the git top level; 'pkg/' = --repo is a subdirectory of it.
+function fixture(t, checks, { prefix = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fastchk-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const repo = join(dir, 'repo');
-  mkdirSync(repo);
-  git(repo, 'init', '-q', '-b', 'main');
-  put(repo, 'src/a.spec.ts', 'export const a = 1;\n');
-  put(repo, 'src/keep.ts', 'export const k = 1;\n');
-  git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'base');
-  const base = git(repo, 'rev-parse', 'HEAD');
+  const top = join(dir, 'repo');
+  mkdirSync(top);
+  git(top, 'init', '-q', '-b', 'main');
+  const repo = join(top, prefix);
+  put(top, prefix + 'src/a.spec.ts', 'export const a = 1;\n');
+  put(top, prefix + 'src/keep.ts', 'export const k = 1;\n');
   const tools = join(dir, 'tools'); mkdirSync(tools);
   const scanner = join(tools, 'scanner.mjs'); writeFileSync(scanner, SCANNER);
+  const replica = join(tools, 'replica.mjs'); writeFileSync(replica, REPLICA);
   const record = join(tools, 'record.txt');
   const decl = (mode, extra = {}) => ({ name: 'secrets', kind: 'secrets', cmd: [process.execPath, scanner, record, mode, '{files}'], files: true, ...extra });
-  const declare = (c) => { put(repo, '.ship-ticket/t0.json', JSON.stringify({ checks: c })); };
-  if (checks) declare(checks(decl));
+  const declare = (c) => { put(top, prefix + '.ship-ticket/t0.json', JSON.stringify({ checks: c })); };
+  if (checks) declare(checks(decl, { scanner, replica, record, tools }));
+  git(top, 'add', '-A'); git(top, 'commit', '-q', '-m', 'base');
+  const base = git(top, 'rev-parse', 'HEAD');
   const seen = () => (existsSync(record) ? readFileSync(record, 'utf8').split('\n').filter(Boolean).map((p) => p.replace(/\\/g, '/')) : []);
-  const run = (...args) => spawnSync(process.execPath, [CLI, 'run', '--repo', repo, ...args], { encoding: 'utf8' });
-  return { dir, repo, base, decl, declare, seen, run, record };
+  const cli = (sub, args, opts = {}) => spawnSync(process.execPath, [CLI, sub, '--repo', repo, ...args], { encoding: 'utf8', ...opts });
+  const run = (...args) => cli('run', args.includes('--base') ? args : ['--base', base, ...args]);
+  const p = (rel) => prefix + rel;
+  return { dir, top, repo, base, decl, declare, seen, run, cli, record, scanner, replica, p, tools };
 }
 const json = (r) => JSON.parse(r.stdout);
 
-test('no declaration: not_declared, exit 0, nothing spawned (AC8)', (t) => {
+test('no declaration at base: not_declared, exit 0, nothing spawned (AC8)', (t) => {
   const fx = fixture(t);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
   const r = fx.run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(json(r).code, 'not_declared');
   assert.deepEqual(fx.seen(), []);
 });
 
+test('--base is required for run and verify (usage error, exit 2)', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  assert.equal(fx.cli('run', []).status, 2);
+  assert.equal(fx.cli('verify', ['--report-file', join(fx.dir, 'x')]).status, 2);
+});
+
+test('--base must be a real commit and cannot be an option (m2)', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  for (const bad of ['no-such-ref', '--output=x', 'HEAD:src']) {
+    const r = fx.cli('run', ['--base', bad]);
+    assert.equal(r.status, 1, bad); assert.equal(json(r).code, 'base_invalid', bad);
+  }
+});
+
 test('dirty secret: a JWT-shaped literal in an UNCOMMITTED, UNTRACKED spec fails T0 (AC2, D9 replica)', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  put(fx.repo, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
   const r = fx.run();
   assert.equal(r.status, 1, r.stderr);
   assert.equal(json(r).result, 'fail');
@@ -77,17 +111,17 @@ test('dirty secret: a JWT-shaped literal in an UNCOMMITTED, UNTRACKED spec fails
 
 test('dirty secret: modified-unstaged and staged files are scanned too', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  put(fx.repo, 'src/a.spec.ts', `const t = '${JWT}';\n`);
-  put(fx.repo, 'src/staged.ts', 'export const s = 1;\n'); git(fx.repo, 'add', 'src/staged.ts');
+  put(fx.top, 'src/a.spec.ts', `const t = '${JWT}';\n`);
+  put(fx.top, 'src/staged.ts', 'export const s = 1;\n'); git(fx.top, 'add', 'src/staged.ts');
   const r = fx.run();
   assert.equal(r.status, 1);
   const seen = fx.seen();
   assert.ok(seen.includes('src/a.spec.ts') && seen.includes('src/staged.ts'), seen.join(','));
 });
 
-test('clean working tree with a clean dirty file passes and the file was scanned', (t) => {
+test('clean dirty file passes and the file was scanned; the report carries enums only', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  put(fx.repo, 'src/new.ts', 'export const n = 1;\n');
+  put(fx.top, 'src/new.ts', 'export const n = 1;\n');
   const r = fx.run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(json(r).result, 'pass');
@@ -97,17 +131,16 @@ test('clean working tree with a clean dirty file passes and the file was scanned
 
 test('renamed file is still scanned: staged git mv with an edit, and a committed rename via --base', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  git(fx.repo, 'mv', 'src/a.spec.ts', 'src/b.spec.ts');
-  put(fx.repo, 'src/b.spec.ts', `const t = '${JWT}';\n`);
+  git(fx.top, 'mv', 'src/a.spec.ts', 'src/b.spec.ts');
+  put(fx.top, 'src/b.spec.ts', `const t = '${JWT}';\n`);
   let r = fx.run();
   assert.equal(r.status, 1, r.stderr);
   assert.ok(fx.seen().includes('src/b.spec.ts'), 'staged rename new path: ' + fx.seen());
   assert.ok(!fx.seen().includes('src/a.spec.ts'), 'the deleted old path is not passed');
-  // committed rename: only a --base range can see it
   const fx2 = fixture(t, (d) => [d('jwt')]);
-  git(fx2.repo, 'mv', 'src/a.spec.ts', 'src/c.spec.ts');
-  put(fx2.repo, 'src/c.spec.ts', `const t = '${JWT}';\n`);
-  git(fx2.repo, 'add', '-A'); git(fx2.repo, 'commit', '-q', '-m', 'rename');
+  git(fx2.top, 'mv', 'src/a.spec.ts', 'src/c.spec.ts');
+  put(fx2.top, 'src/c.spec.ts', `const t = '${JWT}';\n`);
+  git(fx2.top, 'add', '-A'); git(fx2.top, 'commit', '-q', '-m', 'rename');
   r = fx2.run('--base', fx2.base);
   assert.equal(r.status, 1, r.stderr);
   assert.ok(fx2.seen().includes('src/c.spec.ts'), 'committed rename new path: ' + fx2.seen());
@@ -115,15 +148,159 @@ test('renamed file is still scanned: staged git mv with an edit, and a committed
 
 test('deleted files are not passed to the scanner', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  unlinkSync(join(fx.repo, 'src/keep.ts'));
-  put(fx.repo, 'src/new.ts', 'x\n');
+  unlinkSync(join(fx.top, 'src/keep.ts'));
+  put(fx.top, 'src/new.ts', 'x\n');
   assert.equal(fx.run().status, 0);
   assert.ok(fx.seen().includes('src/new.ts') && !fx.seen().includes('src/keep.ts'), fx.seen().join(','));
 });
 
-test('a timeout is a FAIL, never a PASS, and the hung scanner is killed (Neg)', (t) => {
+test('B2: --repo is a monorepo SUBDIRECTORY: an edited tracked file with a secret is still scanned and fails', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')], { prefix: 'pkg/' });
+  put(fx.top, 'pkg/src/a.spec.ts', `const t = '${JWT}';\n`);
+  put(fx.top, 'other/x.ts', 'export const x = 1;\n');
+  const r = fx.run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(json(r).result, 'fail');
+  const seen = fx.seen();
+  assert.ok(seen.includes('src/a.spec.ts'), 'tracked file under the subdirectory: ' + seen);
+  assert.ok(seen.includes('../other/x.ts'), 'a change outside --repo is still passed, relative to --repo: ' + seen);
+});
+
+test('B2 sibling: a changed path git lists but disk cannot resolve (non-UTF-8 name) is a FAIL, not a silent drop', (t) => {
+  if (process.platform !== 'linux') return; // only Linux filesystems accept a non-UTF-8 name
+  const fx = fixture(t, (d) => [d('jwt')]);
+  writeFileSync(Buffer.concat([Buffer.from(join(fx.top, 'src') + '/'), Buffer.from([0xff, 0xfe, 0x2e, 0x74, 0x73])]), 'x\n');
+  const r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'unresolvable_path');
+});
+
+test('B1: the declaration is read from BASE: deleting it in the tree is declaration_tampered, never not_declared', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  unlinkSync(join(fx.top, '.ship-ticket/t0.json'));
+  const r = fx.run();
+  assert.equal(r.status, 1);
+  assert.equal(json(r).code, 'declaration_tampered');
+  const msg = join(fx.dir, 'msg.txt'); writeFileSync(msg, fence(BASE));
+  const v = fx.cli('verify', ['--base', fx.base, '--report-file', msg]);
+  assert.equal(v.status, 1); assert.equal(json(v).code, 'declaration_tampered');
+});
+
+test('B1: weakening a check in the tree (cmd -> node -e 0), or adding a check, is declaration_tampered', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  fx.declare([{ name: 'secrets', kind: 'secrets', cmd: [process.execPath, '-e', '0'] }]);
+  let r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'declaration_tampered');
+  fx.declare([fx.decl('jwt'), { name: 'extra', kind: 'lint', cmd: [process.execPath, '-e', '0'] }]);
+  r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'declaration_tampered');
+});
+
+test('B1: a declaration only the branch has is ignored (not_declared); a symlink in its place is tampered', (t) => {
+  const fx = fixture(t);
+  fx.declare([fx.decl('jwt')]);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  const r = fx.run();
+  assert.equal(r.status, 0); assert.equal(json(r).code, 'not_declared');
+  assert.deepEqual(fx.seen(), [], 'the branch declaration is never executed');
+  if (process.platform === 'win32') return;
+  const fx2 = fixture(t, (d) => [d('jwt')]);
+  unlinkSync(join(fx2.top, '.ship-ticket/t0.json'));
+  symlinkSync(join(fx2.dir, 'nowhere.json'), join(fx2.top, '.ship-ticket/t0.json'));
+  assert.equal(json(fx2.run()).code, 'declaration_tampered');
+});
+
+test('sibling: a check whose own command path is a changed file fails (checker_modified)', (t) => {
+  const fx = fixture(t);
+  put(fx.top, 'tools/scan.mjs', 'process.exit(0)\n');
+  fx.declare([{ name: 'own', kind: 'lint', cmd: [process.execPath, 'tools/scan.mjs', '{files}'], files: true }]);
+  git(fx.top, 'add', '-A'); git(fx.top, 'commit', '-q', '-m', 'tool');
+  const base = git(fx.top, 'rev-parse', 'HEAD');
+  put(fx.top, 'src/new.ts', 'x\n');
+  assert.equal(fx.run('--base', base).status, 0, 'unchanged checker runs and passes');
+  put(fx.top, 'tools/scan.mjs', 'process.exit(0) // weakened\n');
+  const r = fx.run('--base', base);
+  assert.equal(r.status, 1);
+  assert.equal(json(r).checks[0].code, 'checker_modified');
+});
+
+test('sibling: assume-unchanged / skip-worktree bits hide edits and are a FAIL (index_flags_hidden)', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  git(fx.top, 'update-index', '--assume-unchanged', 'src/keep.ts');
+  put(fx.top, 'src/keep.ts', `const t = '${JWT}';\n`);
+  let r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'index_flags_hidden');
+  git(fx.top, 'update-index', '--no-assume-unchanged', 'src/keep.ts');
+  git(fx.top, 'update-index', '--skip-worktree', 'src/keep.ts');
+  r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'index_flags_hidden');
+});
+
+test('sibling: inherited GIT_DIR / GIT_INDEX_FILE cannot redirect the scan', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  const other = mkdtempSync(join(tmpdir(), 'fastchk-o-')); t.after(() => rmSync(other, { recursive: true, force: true }));
+  git(other, 'init', '-q', '-b', 'main');
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  const r = fx.cli('run', ['--base', fx.base], { env: { ...process.env, GIT_DIR: join(other, '.git'), GIT_INDEX_FILE: join(other, 'idx') } });
+  assert.equal(r.status, 1, r.stderr); assert.ok(fx.seen().includes('src/new.spec.ts'));
+});
+
+test('M3: nothing changed since base: the check is reported skipped (not pass); verify refuses a skipped check when files changed', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  const r = fx.run();
+  assert.equal(r.status, 0);
+  assert.deepEqual(json(r).report, { result: 'pass', checks: [{ name: 'secrets', result: 'skipped' }] });
+  assert.equal(json(r).checks[0].result, 'skipped');
+  put(fx.top, 'src/new.ts', 'x\n');
+  const msg = join(fx.dir, 'msg.txt');
+  writeFileSync(msg, fence({ ...BASE, t0: { result: 'pass', checks: [{ name: 'secrets', result: 'skipped' }] } }));
+  const v = fx.cli('verify', ['--base', fx.base, '--report-file', msg]);
+  assert.equal(v.status, 1); assert.equal(json(v).code, 'fast_check_skipped');
+});
+
+test('Codex 1: a changed submodule, a nested repository and a symlink are a FAIL, never a silent drop', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  const sub = join(fx.dir, 'subrepo'); mkdirSync(sub); git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', '1\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
+  git(fx.top, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
+  git(fx.top, 'add', '-A'); git(fx.top, 'commit', '-q', '-m', 'add sub');
+  const base = git(fx.top, 'rev-parse', 'HEAD');
+  put(fx.top, 'vendor/sub/leak.txt', `const t = '${JWT}';\n`);
+  let r = fx.run('--base', base);
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'unsupported_changed_surface');
+  rmSync(join(fx.top, 'vendor/sub/leak.txt'));
+  put(fx.top, 'nested/inner.ts', 'x\n'); git(join(fx.top, 'nested'), 'init', '-q');
+  r = fx.run('--base', base);
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'unsupported_changed_surface');
+  if (process.platform === 'win32') return;
+  rmSync(join(fx.top, 'nested'), { recursive: true });
+  symlinkSync(join(fx.dir, 'elsewhere'), join(fx.top, 'link.ts'));
+  r = fx.run('--base', base);
+  assert.equal(r.status, 1); assert.equal(json(r).code, 'unsupported_changed_surface');
+});
+
+test('AC3 replica: a REAL checker catches D9 (JWT literal) and D15 (prefer-const, flagged comment word) in dirty and renamed files', (t) => {
+  const fx = fixture(t, (d, x) => [
+    { name: 'lint', kind: 'lint', cmd: [process.execPath, x.replica, '{files}'], files: true },
+    { name: 'nn-guard', kind: 'nn-guard', cmd: [process.execPath, x.replica, '{files}'], files: true }]);
+  put(fx.top, 'src/ok.ts', 'let n = 0;\nn += 1;\nexport const v = n;\n');
+  assert.equal(fx.run().status, 0, 'clean dirty file passes');
+  put(fx.top, 'src/d15a.spec.ts', 'let done = false;\nexport const x = done;\n');
+  let r = fx.run();
+  assert.equal(r.status, 1); assert.deepEqual(json(r).report.checks.map((c) => c.result), ['fail', 'fail']);
+  unlinkSync(join(fx.top, 'src/d15a.spec.ts'));
+  put(fx.top, 'src/d15b.ts', '// accepts any value here\nexport const y = 1;\n');
+  assert.equal(fx.run().status, 1, 'D15 comment word');
+  unlinkSync(join(fx.top, 'src/d15b.ts'));
+  git(fx.top, 'mv', 'src/a.spec.ts', 'src/renamed.spec.ts');
+  put(fx.top, 'src/renamed.spec.ts', `export const tok = '${JWT}';\n`);
+  r = fx.run();
+  assert.equal(r.status, 1, 'D9 in a renamed file'); assert.ok(r.stderr.includes('D9'), r.stderr);
+});
+
+test('a timeout is a FAIL, never a PASS (Neg)', (t) => {
   const fx = fixture(t, (d) => [d('sleep', { timeout_ms: 400 })]);
-  put(fx.repo, 'src/new.ts', 'x\n');
+  put(fx.top, 'src/new.ts', 'x\n');
   const started = Date.now();
   const r = fx.run();
   assert.equal(r.status, 1, r.stderr);
@@ -134,26 +311,45 @@ test('a timeout is a FAIL, never a PASS, and the hung scanner is killed (Neg)', 
   assert.ok(Date.now() - started < 20000, 'returned promptly');
 });
 
-test('spawn error, empty list, malformed declaration and unreadable file set are FAIL, never PASS', (t) => {
+test('Codex 3: on timeout the whole process tree is killed, including a descendant', async (t) => {
+  const fx = fixture(t, (d, x) => {
+    const spawner = join(x.tools, 'spawner.mjs');
+    writeFileSync(spawner, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
+const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { stdio: 'ignore' });
+writeFileSync(process.argv[2], String(c.pid)); setTimeout(()=>{},60000);`);
+    return [{ name: 'tree', kind: 'other', cmd: [process.execPath, spawner, join(x.tools, 'child.pid')], timeout_ms: 1500 }];
+  });
+  const r = fx.run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(json(r).checks[0].timed_out, true);
+  const pid = Number(readFileSync(join(fx.tools, 'child.pid'), 'utf8'));
+  assert.ok(pid > 0);
+  let alive = true;
+  for (let i = 0; i < 30 && alive; i++) { try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 100)); } catch { alive = false; } }
+  assert.equal(alive, false, 'the descendant is gone');
+});
+
+test('spawn error, empty list, malformed declaration at base are FAIL, never PASS', (t) => {
   const fx = fixture(t, () => [{ name: 'lint', kind: 'lint', cmd: ['definitely-not-a-real-binary-t0'] }]);
+  put(fx.top, 'src/new.ts', 'x\n');
   let r = fx.run();
   assert.equal(r.status, 1); assert.equal(json(r).result, 'fail');
   for (const bad of [{ checks: [] }, { checks: [{ name: 'x', cmd: 'node a.js' }] }, { checks: [{ name: 'x', kind: 'lint', cmd: ['node'], files: true }] }, 'not json', { checks: [{ name: 'x', kind: 'lint', cmd: ['node'], timeout_ms: 5 }] }]) {
-    put(fx.repo, '.ship-ticket/t0.json', typeof bad === 'string' ? bad : JSON.stringify(bad));
-    r = fx.run();
+    const f2 = fixture(t);
+    put(f2.top, '.ship-ticket/t0.json', typeof bad === 'string' ? bad : JSON.stringify(bad));
+    git(f2.top, 'add', '-A'); git(f2.top, 'commit', '-q', '-m', 'decl');
+    r = f2.run('--base', git(f2.top, 'rev-parse', 'HEAD'));
     assert.equal(r.status, 1, JSON.stringify(bad));
-    assert.equal(json(r).result, 'fail');
     assert.equal(json(r).code, 't0_config_invalid');
   }
   const bare = mkdtempSync(join(tmpdir(), 'fastchk-nogit-')); t.after(() => rmSync(bare, { recursive: true, force: true }));
-  put(bare, '.ship-ticket/t0.json', JSON.stringify({ checks: [{ name: 'x', kind: 'lint', cmd: [process.execPath, '-e', '0'] }] }));
-  r = spawnSync(process.execPath, [CLI, 'run', '--repo', bare], { encoding: 'utf8' });
+  r = spawnSync(process.execPath, [CLI, 'run', '--repo', bare, '--base', 'HEAD'], { encoding: 'utf8' });
   assert.equal(r.status, 1); assert.equal(json(r).code, 'file_set_unavailable');
 });
 
 test('scanner stdout (a secret echo) is never in the verdict JSON', (t) => {
   const fx = fixture(t, (d) => [d('echo')]);
-  put(fx.repo, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
   const r = fx.run();
   assert.equal(r.status, 1);
   assert.ok(!r.stdout.includes(JWT));
@@ -161,21 +357,21 @@ test('scanner stdout (a secret echo) is never in the verdict JSON', (t) => {
 
 test('run-log: --ticket/--run-id writes a t0_check activity row with outcome and numeric metrics only', (t) => {
   const fx = fixture(t, (d) => [d('echo')]);
-  put(fx.repo, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
   const r = fx.run('--ticket', 'T1', '--run-id', 'run-1');
   assert.equal(r.status, 1, r.stderr);
-  const log = join(fx.repo, '.git', 'ai-skills', 'ship-ticket', 'T1.jsonl');
+  const log = join(fx.top, '.git', 'ai-skills', 'ship-ticket', 'T1.jsonl');
   const rows = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(rows.map((x) => [x.event, x.kind, x.name]), [['start', 'activity', 't0_check'], ['end', 'activity', 't0_check']]);
   assert.equal(rows[1].outcome, 'fail');
   assert.ok(!readFileSync(log, 'utf8').includes(JWT));
-  const s = spawnSync(process.execPath, [RUN_LOG, 'summary', '--repo', fx.repo, '--ticket', 'T1'], { encoding: 'utf8' });
+  const s = spawnSync(process.execPath, [RUN_LOG, 'summary', '--repo', fx.top, '--ticket', 'T1'], { encoding: 'utf8' });
   assert.equal(s.status, 0, s.stderr);
 });
 
 test('run-log failure never changes the verdict', (t) => {
   const fx = fixture(t, (d) => [d('jwt')]);
-  put(fx.repo, 'src/new.ts', 'x\n');
+  put(fx.top, 'src/new.ts', 'x\n');
   const r = fx.run('--ticket', 'bad ticket!', '--run-id', 'run-1');
   assert.equal(r.status, 0, r.stderr);
   assert.equal(json(r).result, 'pass');
@@ -187,7 +383,9 @@ const fence = (o) => 'Done.\n```ship-ticket-report\n' + JSON.stringify(o) + '\n`
 
 test('parseWorkerReport: default behaviour and failure strings are unchanged (AC8)', () => {
   assert.equal(parseWorkerReport(fence(BASE)).status, 'structured');
-  assert.equal(parseWorkerReport(fence({ ...BASE, t0: T0_OK })).failure, 'report keys: missing [] unexpected [t0]');
+  assert.equal(parseWorkerReport(fence({ ...BASE, t0: T0_OK })).status, 'structured', 'a compliant five-key report is never downgraded');
+  assert.equal(parseWorkerReport(fence({ ...BASE, t0: 'pass' })).failure.split(':')[0], 'fast_check_invalid');
+  assert.equal(parseWorkerReport(fence({ ...BASE, other: 1 })).failure, 'report keys: missing [] unexpected [other]');
   assert.equal(parseWorkerReport(fence(BASE), { t0Declared: false }).status, 'structured');
 });
 
@@ -206,7 +404,7 @@ test('parseWorkerReport: declared T0 and no t0 key is refused as fast_check_miss
 test('verify: declared repo refuses a report with no t0, a failed t0, or one missing a declared check', (t) => {
   const fx = fixture(t, (d) => [d('jwt'), { name: 'lint', kind: 'lint', cmd: [process.execPath, '-e', '0'] }]);
   const msg = join(fx.dir, 'msg.txt');
-  const verify = (o) => { writeFileSync(msg, fence(o)); return spawnSync(process.execPath, [CLI, 'verify', '--repo', fx.repo, '--report-file', msg], { encoding: 'utf8' }); };
+  const verify = (o) => { writeFileSync(msg, fence(o)); return fx.cli('verify', ['--base', fx.base, '--report-file', msg]); };
   const both = { result: 'pass', checks: [{ name: 'secrets', result: 'pass' }, { name: 'lint', result: 'pass' }] };
   let r = verify(BASE); assert.equal(r.status, 1); assert.equal(json(r).code, 'fast_check_missing');
   r = verify({ ...BASE, t0: { result: 'fail', checks: [{ name: 'secrets', result: 'fail' }, { name: 'lint', result: 'pass' }] } });
@@ -215,9 +413,12 @@ test('verify: declared repo refuses a report with no t0, a failed t0, or one mis
   r = verify({ ...BASE, t0: { ...both, result: 'pass', checks: [{ name: 'secrets', result: 'pass' }, { name: 'lint', result: 'fail' }] } });
   assert.equal(r.status, 1); assert.equal(json(r).code, 'fast_check_failed', 'a pass verdict over a failing check is not trusted');
   r = verify({ ...BASE, t0: both }); assert.equal(r.status, 0, r.stdout); assert.equal(json(r).code, 'ok');
-  // undeclared repo: nothing demanded
-  rmSync(join(fx.repo, '.ship-ticket'), { recursive: true });
-  r = verify(BASE); assert.equal(r.status, 0); assert.equal(json(r).code, 'not_declared');
+  r = verify({ ...BASE, t0: { ...both, checks: [{ name: 'secrets"; x', result: 'pass' }, { name: 'lint', result: 'pass' }] } });
+  assert.equal(r.status, 1); assert.ok(!r.stdout.includes('secrets"'), 'worker text is not echoed');
+  // undeclared at base: nothing demanded
+  const fx2 = fixture(t);
+  writeFileSync(msg, fence(BASE));
+  r = fx2.cli('verify', ['--base', fx2.base, '--report-file', msg]); assert.equal(r.status, 0); assert.equal(json(r).code, 'not_declared');
 });
 
 const DAG = { schema: 'ship-ticket-engine-dag-v1', nodes: [{ id: 'api', deps: [], writes: ['src/api.js'], othersOwned: [], promptFile: 'p.md' }] };
@@ -231,4 +432,20 @@ test('brief: byte-identical when T0 is not declared; declared adds the t0 instru
   assert.match(withT0, /fast-checks\.mjs run/);
   assert.match(withT0, /"t0"/);
   assert.equal(lintBrief(withT0).ok, true, lintBrief(withT0).problems.join(';'));
+});
+
+test('Codex 2: brief --t0 <file> --out <same file> (and a hard link to it) is refused and the declaration survives', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fastchk-brief-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const w = (n, c) => { writeFileSync(join(dir, n), c); return join(dir, n); };
+  const dag = w('dag.json', JSON.stringify(DAG)); const plan = w('plan.md', PLAN);
+  const t0Text = JSON.stringify({ checks: [{ name: 'secrets', kind: 'secrets', cmd: ['x'] }] });
+  const t0 = w('t0.json', t0Text);
+  const brief = fileURLToPath(new URL('./brief.mjs', import.meta.url));
+  let r = spawnSync(process.execPath, [brief, 'build', '--dag', dag, '--node', 'api', '--plan', plan, '--t0', t0, '--out', t0], { encoding: 'utf8' });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(readFileSync(t0, 'utf8'), t0Text);
+  const hard = join(dir, 'hard.json'); linkSync(t0, hard);
+  r = spawnSync(process.execPath, [brief, 'build', '--dag', dag, '--node', 'api', '--plan', plan, '--t0', t0, '--out', hard], { encoding: 'utf8' });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(readFileSync(t0, 'utf8'), t0Text);
 });
