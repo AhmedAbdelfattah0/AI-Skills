@@ -94,7 +94,7 @@ function normalizer(root) {
 }
 
 /** A fixed v1 run with no unit fields: build, stale rebuild, FAIL review, repair, confirmation, ship-ready, resume. */
-function goldenRun(t) {
+function goldenRun(t, { legacy = false } = {}) {
   const fx = fixture(t, { commit: true,
     config: { width: 1, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } } },
     nodes: [{ id: 'a', reads: ['docs/in.txt'], writes: ['src/a.txt'] }, { id: 'b', deps: ['a'], reads: ['src/a.txt'], writes: ['src/b.txt'] },
@@ -104,6 +104,8 @@ function goldenRun(t) {
   const outs = [];
   const step = (name, r) => { outs.push({ name, status: r.status, out: r.out }); return r; };
   step('init', fx.cli('init', { dag: fx.dagFile }));
+  // S-27-min legacy: a state written before the policy fields existed (both keys absent from the first command on).
+  if (legacy) fx.editState((st) => { delete st.policy_version; delete st.skill_commit; });
   step('drive-1', fx.cli('drive'));
   step('status-1', fx.cli('status'));
   writeFileSync(`${fx.repo}/docs/in.txt`, 'input v2');
@@ -130,6 +132,15 @@ test('golden: a v1 DAG without unit fields yields the pre-Wave-2a state, events 
   const want = JSON.parse(readFileSync(GOLDEN, 'utf8'));
   assert.equal(J(got, null, 1), J(want, null, 1), 'byte-identical after normalization');
   assert.equal(J(got).includes('unit'), false, 'no unit vocabulary leaks into a unit-less run');
+});
+
+test('golden (S-27-min legacy): a state WITHOUT policy_version/skill_commit runs the whole scenario exactly as the pre-S-27 golden, and is never back-filled', { skip: WIN_SKIP }, (t) => {
+  const { fx, record } = goldenRun(t, { legacy: true });
+  assert.equal(Object.hasOwn(record.state, 'policy_version'), false, 'policy_version is not back-filled');
+  assert.equal(Object.hasOwn(record.state, 'skill_commit'), false, 'skill_commit is not back-filled');
+  const got = normalizer(fx.root)(record); // nothing stripped: the legacy run must equal the golden as it stands
+  const want = JSON.parse(readFileSync(GOLDEN, 'utf8'));
+  assert.equal(J(got, null, 1), J(want, null, 1), 'every output, state key, event, engine log line and RUN-STATE event as the golden');
 });
 
 // ------------------------------------------------------------------ helpers

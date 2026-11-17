@@ -86,6 +86,30 @@ test('[AC3] skillCommit: a git checkout tracking the engine gives its HEAD; a pl
   assert.equal(skillCommit(join(fx.root, 'does-not-exist')), 'unknown');
 });
 
+test('[AC3] skillCommit ignores an inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE: never a foreign repository\'s HEAD', async (t) => {
+  const { skillCommit } = await policy();
+  const fx = fixture(t, { commit: true });
+  const expected = head(SCRIPTS);
+  // A foreign repository whose root index tracks a file named run-engine.mjs.
+  const foreign = join(fx.root, 'foreign');
+  mkdirSync(foreign);
+  spawnSync('git', ['init', '-q'], { cwd: foreign });
+  writeFileSync(join(foreign, 'run-engine.mjs'), '// not the engine\n');
+  spawnSync('git', ['add', 'run-engine.mjs'], { cwd: foreign });
+  const c = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'foreign'], { cwd: foreign, encoding: 'utf8' });
+  assert.equal(c.status, 0, c.stderr);
+  const foreignHead = head(foreign);
+  const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE };
+  Object.assign(process.env, { GIT_DIR: join(foreign, '.git'), GIT_WORK_TREE: foreign, GIT_INDEX_FILE: join(foreign, '.git', 'index') });
+  let got;
+  try { got = [skillCommit(fx.root), skillCommit(SCRIPTS)]; } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+  assert.notEqual(got[0], foreignHead, 'a plain directory never reports the redirected repository\'s HEAD');
+  assert.equal(got[0], 'unknown');
+  assert.equal(got[1], expected, 'the installed checkout\'s own HEAD, not the redirected one');
+});
+
 // ------------------------------------------------------------------ the semantics seam
 
 test('[seam] policySemantics maps supported versions to frozen capability flags; v1 is today\'s (no flags); anything else is policy_version_unsupported', async () => {
@@ -149,7 +173,14 @@ const ENTRY = [
   ['gate ship-ready', (fx) => fx.gate('ship-ready', {}), 2],
   ['gate unit-review', (fx) => fx.gate('unit-review', { unit: 'u1', approved_plan_digest: 'x', dag_digest: 'x', base_commit: 'x' }), 2],
   ['gate reassess', (fx) => fx.gate('reassess', {}), 2],
+  ['eval report', (fx) => evalReport(fx), 1],
 ];
+
+/** `eval.mjs report --ticket T-1`: the read-only report also interprets the run's state. */
+function evalReport(fx) {
+  const r = spawnSync(process.execPath, [join(SCRIPTS, 'eval.mjs'), 'report', '--repo', fx.repo, '--ticket', 'T-1'], { encoding: 'utf8', env: fx.env, timeout: 60000 });
+  return { status: r.status, out: null, stderr: r.stderr, stdout: r.stdout };
+}
 
 test('[AC2] a v1-only engine refuses a v2 run at EVERY entry command with policy_version_unsupported naming both versions, writing nothing', async (t) => {
   // The v2 run is created by an injected v2 engine (a real upgrade), then every command runs through the installed v1 CLI (the downgrade).
@@ -174,9 +205,10 @@ test('[AC2] a present but malformed policy_version is refused, never read as leg
   const fx = initialised(t);
   for (const v of [null, '1', 0, 1.5, -1, 99]) {
     fx.editState((s) => { s.policy_version = v; });
-    const r = fx.cli('resume');
-    assert.equal(r.status, 1, `${JSON.stringify(v)}: ${r.stdout}${r.stderr}`);
-    assert.match(r.stderr, /policy_version_unsupported/, JSON.stringify(v));
+    for (const r of [fx.cli('resume'), evalReport(fx)]) {
+      assert.equal(r.status, 1, `${JSON.stringify(v)}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /policy_version_unsupported/, JSON.stringify(v));
+    }
   }
 });
 

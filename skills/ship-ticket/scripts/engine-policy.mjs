@@ -47,10 +47,14 @@ export function runPolicy(S, engine = null) {
 /**
  * HEAD of the git checkout that TRACKS `dir/run-engine.mjs`, else 'unknown' (not a work tree, a copy
  * nested untracked in another repository, no git, a timeout). The commit names HEAD only: an
- * uncommitted edit of the installed scripts is not reflected in it.
+ * uncommitted edit of the installed scripts is not reflected in it. The repository is found from
+ * `dir` alone: inherited GIT_* variables are not passed to git.
  */
 export function skillCommit(dir) {
-  const git = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+  // Every inherited GIT_* variable is dropped: GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the like would
+  // otherwise point both calls at another repository, whatever `cwd` is, and record that repository's HEAD.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+  const git = (args) => spawnSync('git', args, { cwd: dir, env, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
   try {
     if (git(['ls-files', '--error-unmatch', '--', 'run-engine.mjs']).status !== 0) return 'unknown';
     const r = git(['rev-parse', '--verify', 'HEAD']);

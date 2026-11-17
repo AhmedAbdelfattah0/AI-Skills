@@ -283,13 +283,22 @@ mutates nothing.
 the engine's semantics version; today it is `1`, which means the engine as it was before the field
 existed. `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
 is the literal `unknown` for a copy install, for a copy nested untracked in another repository, and
-when git fails. It names HEAD only, not uncommitted edits to the installed scripts.
+when git fails. It names HEAD only, not uncommitted edits to the installed scripts. The repository
+is found from the script's own directory: inherited `GIT_*` variables such as `GIT_DIR` are not
+passed to git. The roadmap's S-27 AC3 says the commit is recorded in START, but it is recorded at
+`init`, in engine state. START is an orchestrator-written RUN-STATE line, and the engine does not
+write it.
+
+This `policy_version` is the engine-state semantics version. It is unrelated to the
+`policy_version: 2` of a `SECURITY_WAIVER` and to `config.securityPolicy` (see [ship.md](ship.md)).
+Only the name is shared.
 
 Every command that loads the state checks the run's version before anything else, using
 `scripts/engine-policy.mjs` (`policySemantics`). Those commands are `status`, `resume`, `drive`,
-`mark`, `clear-unit`, `rebind` and every `gate`, and the carrier's REPAIR authorization does the same
-check. A version this engine does not support is refused with `policy_version_unsupported` and
-nothing is written. A `gate` reports the refusal as exit 2 and every other command exits 1. A
+`mark`, `clear-unit`, `rebind` and every `gate`. The carrier's REPAIR authorization and
+`eval.mjs report` make the same check. A version this engine does not support is refused with
+`policy_version_unsupported` and nothing is written. A `gate` reports the refusal as exit 2, and
+every other command exits 1. `eval.mjs report` refuses the whole report, naming the ticket. A
 present but malformed value is also refused. A state without the key is version 1 and is never
 back-filled, so existing runs behave exactly as before. `archive` stays open, so a run that no
 installed engine can resume can still be copied out.
@@ -307,6 +316,16 @@ the older engine lacks are then refused, not resumed.
 Reverting this change itself removes the check, and the extra fields become inert. Before a later
 slice adds version 2, that revert is safe. After it, the revert would let an engine that knows
 nothing of version 2 resume a version 2 run. Never revert a version table that is already in use.
+
+Limits:
+- A same-user edit of `policy_version` in `state.json` is neither detected nor prevented. The state
+  file is the trust anchor, and any process of the user can rewrite it.
+- The resolved semantics (`E.policy`) have no consumer yet. Today's tests prove that the version is
+  recorded, preserved and enforced, not that a command behaves differently by version. The first
+  slice that adds version 2 must add the test that a version 1 run still takes the version 1 path.
+- The R0-S candidate (`ais-p0` `a890b0d`) will conflict with this change mechanically: three hunks
+  in `run-engine.mjs` and one in `run-engine-record.test.mjs`. Resolve each by keeping both sides.
+  The candidate's `skill_revision`, recorded at enrollment, duplicates `skill_commit`.
 
 **Lock and persistence.** Every mutating command takes one lock file created
 with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and

@@ -49,6 +49,7 @@ import { aggregateUsage, attachUsage, buildRun, engineResources, truncatedOutput
 import { unitProjection, unitStates } from './engine-units.mjs';
 import { withReviews } from './engine-unit-review.mjs';
 import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } from './review-intervals.mjs';
+import { runPolicy } from './engine-policy.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -405,6 +406,8 @@ function report(options) {
     for (const [runId, rows] of byRun) runs.push(buildRun(ticket, runId, rows));
     const statePath = join(dir, `${ticket}.state.json`);
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }
+    // S-27-min: a run this install cannot interpret refuses the whole report (fail closed, like every engine command).
+    if (states[ticket] !== undefined) { try { runPolicy(states[ticket]); } catch (e) { fail(`${ticket}: ${e.message}`); } }
     const stateRun = states[ticket]?.run_id;
     if (typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
   }
