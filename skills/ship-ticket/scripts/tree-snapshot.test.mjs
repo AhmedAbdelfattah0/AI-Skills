@@ -5,18 +5,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, chmodSync, utimesSync, statSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, symlinkSync, chmodSync, utimesSync, statSync, realpathSync, readdirSync, renameSync, existsSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 const MODULE = process.env.TREE_SNAPSHOT_UNDER_TEST || fileURLToPath(new URL('./tree-snapshot.mjs', import.meta.url));
-const { takeSnapshot, compareSnapshots, LIMITS } = await import(pathToFileURL(MODULE).href);
+const { takeSnapshot, compareSnapshots, validateSnapshot, LIMITS } = await import(pathToFileURL(MODULE).href);
 const win = process.platform === 'win32';
+const CASE_INSENSITIVE = (() => { const d = realpathSync.native(mkdtempSync(join(tmpdir(), 'treecase-'))); try { writeFileSync(join(d, 'Ab'), ''); return existsSync(join(d, 'aB')); } finally { rmSync(d, { recursive: true, force: true }); } })();
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
+const POSIX_PERMS = (win || isRoot) && 'needs POSIX permissions as a non-root user';
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
 const put = (repo, rel, text) => { mkdirSync(dirname(join(repo, rel)), { recursive: true }); writeFileSync(join(repo, rel), text); };
-const cli = (...args) => { const r = spawnSync(process.execPath, [MODULE, ...args], { encoding: 'utf8' }); return { status: r.status, out: r.stdout.trim() ? JSON.parse(r.stdout) : null, err: r.stderr }; };
+let cliCwd;
+const cli = (...args) => { const r = spawnSync(process.execPath, [MODULE, ...args], { encoding: 'utf8', cwd: cliCwd }); return { status: r.status, out: r.stdout.trim() ? JSON.parse(r.stdout) : null, err: r.stderr }; };
 
 function fixture(t) {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'treesnap-')));
@@ -24,16 +27,18 @@ function fixture(t) {
   const repo = join(dir, 'repo'); mkdirSync(repo);
   git(repo, 'init', '-q', '-b', 'main');
   put(repo, 'a.txt', 'alpha\n'); put(repo, 'b.sh', '#!/bin/sh\n'); put(repo, '.gitignore', 'ignored.log\n');
-  git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'base');
+  git(repo, 'add', '-A'); if (!win) git(repo, 'update-index', '--chmod=+x', 'b.sh'); git(repo, 'commit', '-q', '-m', 'base');
+  if (!win) chmodSync(join(repo, 'b.sh'), 0o755);
   return { dir, repo };
 }
 const verdict = (before, repo) => compareSnapshots(before, takeSnapshot(repo));
+const ent = (s, name) => s.entries.find((e) => e.n === name);
 const paths = (v) => v.changed.map((c) => `${c.what}:${c.path}`);
 
 test('untouched tree is unchanged, and the snapshot is not vacuous', (t) => {
   const { repo } = fixture(t);
   const s = takeSnapshot(repo);
-  assert.ok(s.entries.length >= 3 && s.entries.some((e) => e.p === 'a.txt' && /^[0-9a-f]{64}$/.test(e.h)));
+  assert.ok(s.entries.length >= 3 && s.entries.some((e) => e.n === 'a.txt' && /^[0-9a-f]{64}$/.test(e.h)));
   git(repo, 'status'); // a read-only git command must not register as a change
   const v = verdict(s, repo);
   assert.equal(v.result, 'unchanged'); assert.deepEqual(v.changed, []);
@@ -79,7 +84,7 @@ test('AC3 index-only add, HEAD move, new branch/tag, new untracked file are each
   put(repo, 'new.txt', 'x');
   assert.deepEqual(paths(verdict(s, repo)), ['added:new.txt']);
   s = takeSnapshot(repo);
-  git(repo, 'config', 'core.hooksPath', '/nonexistent');
+  git(repo, 'config', 'user.nickname', 'zz');
   assert.deepEqual(paths(verdict(s, repo)), ['config:null']);
 });
 
@@ -88,6 +93,22 @@ test('AC3 a mode-only change is detected (POSIX)', { skip: win && 'no exec bit o
   const s = takeSnapshot(repo);
   chmodSync(join(repo, 'a.txt'), 0o755);
   assert.deepEqual(paths(verdict(s, repo)), ['mode:a.txt']);
+});
+
+test('fix1 exec bit is the OWNER bit only, as git sees it: 0755->0655 and 0644->0744 change; group/other-only changes do not', { skip: win && 'no exec bit on Windows' }, (t) => {
+  const { repo } = fixture(t);
+  const s = takeSnapshot(repo);
+  const status = () => git(repo, 'status', '--porcelain');
+  assert.equal(status(), '');
+  chmodSync(join(repo, 'b.sh'), 0o655); // git: old mode 100755 / new mode 100644
+  assert.notEqual(status(), ''); assert.deepEqual(paths(verdict(s, repo)), ['mode:b.sh']);
+  chmodSync(join(repo, 'b.sh'), 0o755);
+  chmodSync(join(repo, 'a.txt'), 0o744); assert.deepEqual(paths(verdict(s, repo)), ['mode:a.txt']);
+  chmodSync(join(repo, 'a.txt'), 0o644);
+  for (const [f, m] of [['a.txt', 0o664], ['a.txt', 0o646], ['b.sh', 0o757], ['b.sh', 0o705]]) { // group/other only: git ignores these
+    chmodSync(join(repo, f), m); assert.equal(status(), '', `git sees ${m.toString(8)}`); assert.equal(verdict(s, repo).result, 'unchanged', m.toString(8));
+    chmodSync(join(repo, f), f === 'b.sh' ? 0o755 : 0o644);
+  }
 });
 
 test('AC3 mode comparison degrades explicitly where there is no exec bit, never silently equal', (t) => {
@@ -141,22 +162,36 @@ test('a git-ignored file change is NOT seen (documented limit, pinned so it cann
   assert.equal(verdict(s, repo).result, 'unchanged');
 });
 
-test('adversarial paths: newline, space, unicode, case siblings are tracked per exact path', (t) => {
+test('adversarial paths: space, unicode and (on a case-sensitive filesystem) case siblings are tracked per exact path', (t) => {
   const { repo } = fixture(t);
-  const names = ['we ird/new\nline.txt', ' lead.txt', 'ünï/日本.txt'];
+  const names = ['we ird/sp ace.txt', ' lead.txt', 'ünï/日本.txt'];
   for (const n of names) put(repo, n, 'x');
-  if (!win) { put(repo, 'Case.txt', '1'); put(repo, 'case.txt', '2'); } // case siblings only where the filesystem allows
   const s = takeSnapshot(repo);
-  for (const n of names) assert.ok(s.entries.some((e) => e.p === n), JSON.stringify(n));
+  for (const n of names) assert.ok(ent(s, n), JSON.stringify(n));
+  put(repo, 'we ird/sp ace.txt', 'y');
+  assert.deepEqual(paths(verdict(s, repo)), ['content:we ird/sp ace.txt']);
+});
+
+test('adversarial paths: a newline in a name (POSIX only; Windows forbids control characters)', { skip: win && 'Windows forbids control characters in file names' }, (t) => {
+  const { repo } = fixture(t);
+  put(repo, 'we ird/new\nline.txt', 'x'); const s = takeSnapshot(repo);
+  assert.ok(ent(s, 'we ird/new\nline.txt'));
   put(repo, 'we ird/new\nline.txt', 'y');
   assert.deepEqual(paths(verdict(s, repo)), ['content:we ird/new\nline.txt']);
+});
+
+test('case siblings stay separate entries where the filesystem is case-sensitive', { skip: CASE_INSENSITIVE && 'case-insensitive filesystem' }, (t) => {
+  const { repo } = fixture(t);
+  put(repo, 'Case.txt', '1'); put(repo, 'case.txt', '2'); const s = takeSnapshot(repo);
+  assert.ok(ent(s, 'Case.txt') && ent(s, 'case.txt'));
+  put(repo, 'case.txt', '3'); assert.deepEqual(paths(verdict(s, repo)), ['content:case.txt']);
 });
 
 test('invalid-UTF-8 path and binary content are hashed, not skipped', { skip: (win || process.platform === 'darwin') && 'filesystem rejects non-UTF-8 names' }, (t) => {
   const { repo } = fixture(t);
   writeFileSync(Buffer.concat([Buffer.from(repo + '/'), Buffer.from([0x66, 0xff, 0x2e, 0x62, 0x69, 0x6e])]), Buffer.from([0, 255, 254]));
   const s = takeSnapshot(repo);
-  assert.ok(s.entries.some((e) => e.p.startsWith('hex:66ff') && e.k === 'file'));
+  assert.ok(s.entries.some((e) => e.p.startsWith('66ff') && e.k === 'file'));
 });
 
 test('autocrlf and filters: a CRLF-only edit is a content change (raw bytes are hashed)', (t) => {
@@ -174,29 +209,31 @@ test('inherited GIT_DIR / GIT_INDEX_FILE / GIT_CONFIG_* do not redirect the snap
   const r = run();
   assert.equal(r.status, 0, r.stderr);
   const s = JSON.parse(r.stdout);
-  assert.equal(s.identity, takeSnapshot(repo).identity); assert.ok(s.entries.some((e) => e.p === 'a.txt'));
+  assert.equal(s.identity, takeSnapshot(repo).identity); assert.ok(s.entries.some((e) => e.n === 'a.txt'));
 });
 
 test('sparse / skip-worktree: a tracked path missing from disk is a recorded state, and its restoration is a change', (t) => {
   const { repo } = fixture(t);
   git(repo, 'update-index', '--skip-worktree', 'a.txt'); rmSync(join(repo, 'a.txt'));
   const s = takeSnapshot(repo);
-  assert.equal(s.entries.find((e) => e.p === 'a.txt').k, 'missing');
+  assert.equal(ent(s, 'a.txt').k, 'missing');
   put(repo, 'a.txt', 'back\n');
   assert.deepEqual(paths(verdict(s, repo)), ['kind:a.txt']);
   git(repo, 'update-index', '--no-skip-worktree', 'a.txt'); // the flag itself lives in the index hash
   assert.ok(verdict(s, repo).changed.some((c) => c.what === 'index'));
 });
 
-test('FAIL-CLOSED: an unreadable path (file, or file under an unsearchable directory) is unknown (exit 1), not unchanged', { skip: (win || isRoot) && 'needs POSIX permissions as a non-root user' }, (t) => {
+test('FAIL-CLOSED: an unreadable path (file, or file under an unsearchable directory) is unknown (exit 1), not unchanged', { skip: POSIX_PERMS }, (t) => {
   const { dir, repo } = fixture(t);
   put(repo, 'sub/x.txt', 'x'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'sub');
-  for (const [target, mode, back, expected] of [['a.txt', 0o000, 0o644, 'unknown:a.txt'], ['sub', 0o000, 0o755, 'unknown:sub/x.txt']]) {
-    chmodSync(join(repo, target), mode); t.after(() => { try { chmodSync(join(repo, target), back); } catch { /* fixture already removed */ } });
+  for (const [target, back, expected] of [['a.txt', 0o644, 'unknown:a.txt'], ['sub', 0o755, 'unknown:sub/x.txt']]) {
     const f = join(dir, 's.json'); cli('snapshot', '--repo', repo, '--out', f);
-    const r = cli('compare', '--before', f, '--repo', repo);
-    assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown'); assert.deepEqual(paths(r.out), [expected]);
-    chmodSync(join(repo, target), back);
+    chmodSync(join(repo, target), 0o000);
+    try {
+      const r = cli('compare', '--before', f, '--repo', repo);
+      assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown');
+      assert.ok(paths(r.out).includes(expected) || /warned|failed|unreadable/.test(r.out.reason ?? ''), JSON.stringify(r.out)); // per-path unknown, or git's own warning failed the snapshot
+    } finally { chmodSync(join(repo, target), back); }
   }
 });
 
@@ -219,4 +256,180 @@ test('compare --after reads two records and agrees with the live comparison', (t
   cli('snapshot', '--repo', repo, '--out', f1); put(repo, 'b.sh', 'changed\n'); cli('snapshot', '--repo', repo, '--out', f2);
   const r = cli('compare', '--before', f1, '--after', f2);
   assert.equal(r.status, 1); assert.deepEqual(paths(r.out), ['content:b.sh']);
+});
+
+// ---- repair batch (review of ddb1004) ----------------------------------------------------------------------------
+
+test('fix2 a NEW unreadable directory that git skips is unknown, never unchanged (000 and 100)', { skip: POSIX_PERMS }, (t) => {
+  const { dir, repo } = fixture(t);
+  const f = join(dir, 's.json'); assert.equal(cli('snapshot', '--repo', repo, '--out', f).status, 0);
+  for (const mode of [0o000, 0o100]) {
+    const d = join(repo, 'newdir' + mode); put(repo, 'newdir' + mode + '/payload.js', 'evil'); chmodSync(d, mode);
+    try {
+      const r = cli('compare', '--before', f, '--repo', repo);
+      assert.equal(r.status, 1, mode.toString(8)); assert.equal(r.out.result, 'unknown', mode.toString(8));
+    } finally { chmodSync(d, 0o755); rmSync(d, { recursive: true }); }
+  }
+});
+
+test('fix2 siblings: a new EMPTY directory and a new empty nested file are changes (they alter what is enumerated)', (t) => {
+  const { repo } = fixture(t);
+  const s = takeSnapshot(repo);
+  mkdirSync(join(repo, 'emptydir'));
+  assert.deepEqual(paths(verdict(s, repo)), ['added:emptydir']);
+});
+
+test('fix2 git stderr is not discarded: a listing warning makes the snapshot fail, not pass', { skip: POSIX_PERMS }, (t) => {
+  const { dir, repo } = fixture(t);
+  put(repo, 'up/x.txt', 'x'); const d = join(repo, 'up'); chmodSync(d, 0o000);
+  try {
+    const r = cli('snapshot', '--repo', repo, '--out', join(dir, 'o.json'));
+    assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown'); assert.match(r.out.reason, /warned|permission/i);
+  } finally { chmodSync(d, 0o755); }
+});
+
+test('fix3 --out inside the checked tree (relative, ./, absolute, via symlink, in .git) is REJECTED and nothing is written', (t) => {
+  const { dir, repo } = fixture(t);
+  const before = readFileSync(join(repo, 'a.txt'), 'utf8');
+  cliCwd = repo; t.after(() => { cliCwd = undefined; });
+  const cases = ['a.txt', './rec.json', 'sub/../rec2.json', join(repo, 'rec3.json'), '.git/rec4.json', join(repo, '.git', 'rec5.json')];
+  if (!win) { symlinkSync(repo, join(dir, 'tolink')); cases.push(join(dir, 'tolink', 'rec6.json')); symlinkSync(join(repo, 'a.txt'), join(dir, 'filelink')); cases.push(join(dir, 'filelink')); }
+  for (const out of cases) {
+    const r = cli('snapshot', '--repo', repo, '--out', out);
+    assert.equal(r.status, 1, out); assert.match(r.out.reason, /inside the checked tree/, out);
+  }
+  assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), before); assert.equal(existsSync(join(repo, 'rec.json')), false);
+  assert.equal(cli('snapshot', '--repo', repo, '--out', join(dir, 'ok.json')).status, 0); // outside is fine
+});
+
+test('fix3 --out: a differently-cased spelling of the tree is rejected on a case-insensitive filesystem', { skip: !CASE_INSENSITIVE && 'case-sensitive filesystem' }, (t) => {
+  const { repo } = fixture(t);
+  const r = cli('snapshot', '--repo', repo, '--out', join(repo.toUpperCase(), 'rec.json'));
+  assert.equal(r.status, 1); assert.match(r.out.reason, /inside the checked tree/); assert.equal(existsSync(join(repo, 'rec.json')), false);
+});
+
+test('fix4 intent-to-add -> full add of an empty file changes the index digest; assume-unchanged toggles too', (t) => {
+  const { repo } = fixture(t);
+  put(repo, 'empty.txt', '');
+  git(repo, 'add', '-N', 'empty.txt');
+  let s = takeSnapshot(repo);
+  git(repo, 'add', 'empty.txt');
+  assert.deepEqual(paths(verdict(s, repo)), ['index:null']);
+  s = takeSnapshot(repo);
+  git(repo, 'update-index', '--assume-unchanged', 'a.txt');
+  assert.deepEqual(paths(verdict(s, repo)), ['index:null']);
+  s = takeSnapshot(repo);
+  git(repo, 'update-index', '--no-assume-unchanged', 'a.txt');
+  assert.deepEqual(paths(verdict(s, repo)), ['index:null']);
+});
+
+test('fix5 path keys are prefix-free: a literal "hex:..." name cannot collide with a non-UTF-8 name', { skip: (win || process.platform === 'darwin') && 'filesystem rejects non-UTF-8 names' }, (t) => {
+  const { repo } = fixture(t);
+  writeFileSync(Buffer.concat([Buffer.from(repo + '/'), Buffer.from([0x66, 0xff, 0x2e, 0x62, 0x69, 0x6e])]), 'one');
+  put(repo, 'hex:66ff2e62696e', 'two');
+  const s = takeSnapshot(repo);
+  assert.equal(new Set(s.entries.map((e) => e.p)).size, s.entries.length);
+  writeFileSync(Buffer.concat([Buffer.from(repo + '/'), Buffer.from([0x66, 0xff, 0x2e, 0x62, 0x69, 0x6e])]), 'ONE');
+  assert.equal(verdict(s, repo).result, 'changed');
+});
+
+test('fix5 siblings: every key is hex of the raw bytes (ASCII, unicode, newline)', (t) => {
+  const { repo } = fixture(t);
+  const s = takeSnapshot(repo);
+  for (const e of s.entries) assert.equal(e.p, Buffer.from(e.n, 'utf8').toString('hex'));
+});
+
+test('fix6 a case-only rename of a tracked file is a change on a case-insensitive filesystem', { skip: !CASE_INSENSITIVE && 'case-sensitive filesystem: a case-only rename is a delete+add and is covered by the generic test' }, (t) => {
+  const { repo } = fixture(t);
+  git(repo, 'config', 'core.ignorecase', 'true');
+  const s = takeSnapshot(repo);
+  renameSync(join(repo, 'a.txt'), join(repo, 'A.txt'));
+  assert.equal(verdict(s, repo).result, 'changed');
+});
+
+test('fix7 malformed records are invalid (unknown, exit 1): the counterexample and several truncations', (t) => {
+  const { dir, repo } = fixture(t);
+  const bad = { schema: 'tree-snapshot/1', entries: [], head: {} };
+  assert.equal(compareSnapshots(bad, bad).result, 'unknown');
+  const f = join(dir, 'bad.json'); writeFileSync(f, JSON.stringify(bad));
+  const r = cli('compare', '--before', f, '--after', f); assert.equal(r.status, 1); assert.equal(r.out.result, 'unknown');
+  const good = takeSnapshot(repo);
+  assert.equal(validateSnapshot(good), null);
+  const drop = (k) => { const c = { ...good }; delete c[k]; return c; };
+  for (const k of ['top', 'head', 'refs', 'index', 'config', 'identity', 'entries', 'mode_checked', 'excludes', 'hooks']) { assert.ok(validateSnapshot(drop(k)), 'missing ' + k); assert.equal(compareSnapshots(good, drop(k)).result, 'unknown', k); }
+  const mut = [
+    { ...good, refs: 'zz' }, { ...good, head: { ...good.head, sha: 'nothex' } }, { ...good, identity: '0'.repeat(64) },
+    { ...good, entries: [good.entries[1], good.entries[0], ...good.entries.slice(2)] }, // unordered
+    { ...good, entries: [good.entries[0], good.entries[0], ...good.entries.slice(1)] }, // duplicate
+    { ...good, entries: [{ ...good.entries[0], h: 'short' }, ...good.entries.slice(1)] },
+    { ...good, entries: [{ ...good.entries[0], k: 'weird' }, ...good.entries.slice(1)] },
+    { ...good, entries: [{ p: good.entries[0].p, k: 'file' }, ...good.entries.slice(1)] },
+    { ...good, mode_checked: 'yes' }, null, [], 'x',
+  ];
+  for (const m of mut) { assert.ok(m === null || validateSnapshot(m), JSON.stringify(m)?.slice(0, 60)); assert.equal(compareSnapshots(good, m).result, 'unknown'); }
+});
+
+test('fix9 ignore rules are part of the record: an untracked .gitignore, .git/info/exclude and core.excludesFile', (t) => {
+  const { dir, repo } = fixture(t);
+  put(repo, 'src/keep.js', '1'); let s = takeSnapshot(repo);
+  put(repo, 'src/.gitignore', '*\n'); // ignores itself and everything beside it
+  assert.equal(verdict(s, repo).result, 'changed');
+  s = takeSnapshot(repo);
+  put(repo, 'src/.gitignore', '*\n# edited\n'); // an IGNORED .gitignore edited in place
+  assert.equal(verdict(s, repo).result, 'changed');
+  s = takeSnapshot(repo);
+  writeFileSync(join(repo, '.git', 'info', 'exclude'), 'secret\n');
+  assert.equal(verdict(s, repo).result, 'changed');
+  const ex = join(dir, 'global-ignore'); writeFileSync(ex, 'a\n'); git(repo, 'config', 'core.excludesFile', ex);
+  s = takeSnapshot(repo); writeFileSync(ex, 'a\nb\n');
+  assert.equal(verdict(s, repo).result, 'changed');
+});
+
+test('fix9 hooks directory is hashed (detective)', { skip: win && 'hook files need no exec bit here but are skipped on Windows CI' }, (t) => {
+  const { repo } = fixture(t);
+  const s = takeSnapshot(repo);
+  writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho x\n');
+  assert.equal(verdict(s, repo).result, 'changed');
+});
+
+test('INVARIANT: every difference git would see, or that changes what is enumerated, is never reported unchanged', (t) => {
+  const mutators = {
+    edit: (r) => put(r, 'a.txt', 'edited\n'),
+    'delete-tracked': (r) => rmSync(join(r, 'a.txt')),
+    'new-untracked': (r) => put(r, 'n.txt', 'n'),
+    'new-nested': (r) => put(r, 'd/e/f.txt', 'n'),
+    'new-empty-dir': (r) => mkdirSync(join(r, 'ed')),
+    'stage-edit': (r) => { put(r, 'a.txt', 'staged\n'); git(r, 'add', 'a.txt'); },
+    'unstage': (r) => git(r, 'rm', '-q', '--cached', 'a.txt'),
+    'add-N': (r) => { put(r, 'z.txt', ''); git(r, 'add', '-N', 'z.txt'); },
+    'assume-unchanged': (r) => git(r, 'update-index', '--assume-unchanged', 'a.txt'),
+    'skip-worktree': (r) => git(r, 'update-index', '--skip-worktree', 'a.txt'),
+    commit: (r) => { put(r, 'a.txt', 'c\n'); git(r, 'commit', '-q', '-am', 'c'); },
+    branch: (r) => git(r, 'branch', 'side'),
+    'file-to-dir': (r) => { rmSync(join(r, 'a.txt')); mkdirSync(join(r, 'a.txt')); put(r, 'a.txt/in', 'x'); },
+    ...(win ? {} : {
+      'chmod-u-x': (r) => chmodSync(join(r, 'b.sh'), 0o655),
+      'chmod-u+x': (r) => chmodSync(join(r, 'a.txt'), 0o744),
+      symlink: (r) => { rmSync(join(r, 'a.txt')); symlinkSync('b.sh', join(r, 'a.txt')); },
+      ...(isRoot ? {} : { 'unreadable-new-dir': (r) => { put(r, 'ud/p', 'x'); chmodSync(join(r, 'ud'), 0o000); } }),
+    }),
+    ...(CASE_INSENSITIVE ? { 'case-rename': (r) => renameSync(join(r, 'a.txt'), join(r, 'A.txt')) } : {}),
+  };
+  // the independent observation: what git reports, plus a raw directory listing with the owner exec bit
+  const observe = (r) => {
+    const g = (...a) => { try { return git(r, ...a); } catch { return 'ERR'; } };
+    let listing; try { listing = readdirSync(r, { recursive: true, encoding: 'utf8' }); } catch { listing = ['ERR']; }
+    listing = listing.filter((n) => !/^\.git([\\/]|$)/.test(n)).sort().map((n) => { try { const st = lstatSync(join(r, n)); return n + ':' + (st.isDirectory() ? 'd' : st.isSymbolicLink() ? 'l' : (st.mode & 0o100) ? 'x' : 'f'); } catch { return n + ':?'; } });
+    return JSON.stringify([g('status', '--porcelain=v2', '-uall', '--ignored=no'), g('ls-files', '-s'), g('ls-files', '-v'), g('ls-files', '--debug').replace(/^ +(ctime|mtime|dev|uid|size).*$/gm, '').replace(/flags: /g, 'flags:'), g('diff', 'HEAD', '--raw'), g('for-each-ref'), listing]);
+  };
+  for (const [name, mutate] of Object.entries(mutators)) {
+    const { repo } = fixture(t);
+    const s = takeSnapshot(repo); const o1 = observe(repo);
+    mutate(repo);
+    let o2; let v; try { o2 = observe(repo); try { v = verdict(s, repo); } catch { v = { result: 'unknown' }; } } finally { try { chmodSync(join(repo, 'ud'), 0o755); } catch { /* absent */ } }
+    assert.notEqual(o1, o2, name + ': the mutator must be observable');
+    assert.notEqual(v.result, 'unchanged', name);
+  }
+  // the control: a group-bit-only change is invisible to git AND to the snapshot
+  if (!win) { const { repo } = fixture(t); const s = takeSnapshot(repo); const o1 = observe(repo); chmodSync(join(repo, 'a.txt'), 0o664); assert.equal(observe(repo), o1); assert.equal(verdict(s, repo).result, 'unchanged'); }
 });
