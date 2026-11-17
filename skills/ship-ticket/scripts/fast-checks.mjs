@@ -76,67 +76,106 @@ export function validateDeclaration(decl) {
 }
 
 const GIT_ENV_DROP = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE'];
-const gitEnv = () => { const e = { ...process.env }; for (const k of GIT_ENV_DROP) delete e[k]; return e; };
-const gitRaw = (cwd, args) => execFileSync('git', args, { cwd, env: gitEnv(), maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-const git = (cwd, args) => gitRaw(cwd, args).toString('utf8');
-const zList = (out) => out.split('\0').filter(Boolean);
+// No replacement objects (`git replace` is writable by the worker and rewrites what a pinned base reads), literal
+// pathspecs (a directory name with glob characters), and no fsmonitor hook.
+const gitEnv = () => { const e = { ...process.env }; for (const k of GIT_ENV_DROP) delete e[k]; e.GIT_NO_REPLACE_OBJECTS = '1'; e.GIT_LITERAL_PATHSPECS = '1'; return e; };
+const gitRaw = (cwd, args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const noNl = (b) => b.toString('utf8').replace(/\r?\n$/, ''); // strip ONLY the trailing newline: a leading space is part of a name
+const git = (cwd, args) => noNl(gitRaw(cwd, args));
+const zRaw = (buf) => { const out = []; let at = 0; for (let i = 0; i < buf.length; i++) if (buf[i] === 0) { if (i > at) out.push(buf.subarray(at, i)); at = i + 1; } if (at < buf.length) out.push(buf.subarray(at)); return out; };
 const stop = (code, reason) => ({ stop: { code, reason } });
+/** The path as a string only when it survives a UTF-8 round trip (argv cannot carry other bytes); null otherwise. */
+export function utf8Path(raw) { const p = raw.toString('utf8'); return Buffer.from(p, 'utf8').equals(raw) ? p : null; }
+const caseFold = process.platform === 'win32' || process.platform === 'darwin';
+const norm = (p) => (caseFold ? p.toLowerCase() : p);
+const realOr = (p) => { try { return realpathSync(p); } catch { return null; } };
 
 /**
  * Everything T0 needs before running a command, all read from git, none of it trusted from the tree under test:
- *  - the declaration comes from `--base` (the trusted commit). The working-tree copy must be byte-identical to it
- *    (deleted, edited, replaced by a link: `declaration_tampered`); a declaration only the branch has is ignored
- *    (`not_declared`), since the branch is the thing being checked;
+ *  - the declaration is `.ship-ticket/t0.json` at the git TOP LEVEL (one place, whatever `--repo` subdirectory is
+ *    given; a copy inside a subdirectory is not a declaration), read from the `--base` commit with replacement
+ *    objects off. The working-tree copy must be byte-identical (deleted, edited, replaced: `declaration_tampered`); a
+ *    declaration only the branch has is ignored (`not_declared`), since the branch is the thing being checked.
+ *    With no declaration at base nothing else is examined: not_declared, exit 0;
  *  - the scan set is every path whose working-tree state differs from base (committed, staged, unstaged) plus every
- *    untracked non-ignored file, resolved against the git top level so `--repo` may be a subdirectory.
- * Anything git lists that cannot be scanned as a regular file (submodule, nested repository, symlink, a path that
- * cannot be resolved) or that git is told to ignore (assume-unchanged / skip-worktree bits) is a stop, never a drop.
+ *    untracked non-ignored file. Paths stay raw bytes until they are proven to round-trip through UTF-8 (argv cannot
+ *    carry anything else); one that does not is `unresolvable_path`.
+ * Anything git lists that cannot be scanned as a regular file (submodule, nested repository, symlink, unresolvable
+ * path) or that git is told to ignore (assume-unchanged / skip-worktree bits) is a stop, never a drop.
  * Returns `{stop:{code,reason}}` or `{top, repoReal, decl|null, changed:[top-relative], files:[repo-relative args]}`.
  */
 export function prepare(repo, base) {
   if (typeof base !== 'string' || !base || base.startsWith('-')) return stop('base_invalid', '--base must be a commit-ish that does not start with "-"');
-  let top; let prefix; let sha; let repoReal;
+  let top; let sha; let repoReal;
   try {
     repoReal = realpathSync(repo);
-    top = realpathSync(git(repoReal, ['rev-parse', '--show-toplevel']).trim());
-    prefix = git(repoReal, ['rev-parse', '--show-prefix']).trim();
-    sha = git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}']).trim();
-  } catch { return stop(top ? 'base_invalid' : 'file_set_unavailable', 'git could not resolve the repository or --base'); }
-  const declPath = prefix + DECLARATION_PATH;
+    top = realpathSync(git(repoReal, ['rev-parse', '--show-toplevel']));
+  } catch { return stop('file_set_unavailable', 'git could not resolve the repository'); }
+  try { sha = git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', base + '^{commit}']); } catch { return stop('base_invalid', 'git could not resolve --base to a commit'); }
   let decl = null;
   try {
-    const entry = git(top, ['ls-tree', '-z', sha, '--', declPath]);
+    const entry = git(top, ['ls-tree', '-z', sha, '--', DECLARATION_PATH]);
     if (entry) {
       const m = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(entry);
       if (!m || m[2] !== 'blob' || !/^100(644|755)$/.test(m[1])) return stop('t0_config_invalid', 'the base declaration is not a regular file');
       const baseBytes = gitRaw(top, ['cat-file', 'blob', m[3]]);
       let treeBytes = null;
-      try { if (lstatSync(join(repoReal, DECLARATION_PATH)).isFile()) treeBytes = readFileSync(join(repoReal, DECLARATION_PATH)); } catch { /* missing */ }
+      try { if (lstatSync(join(top, DECLARATION_PATH)).isFile()) treeBytes = readFileSync(join(top, DECLARATION_PATH)); } catch { /* missing */ }
       if (!treeBytes || !treeBytes.equals(baseBytes)) return stop('declaration_tampered', `${DECLARATION_PATH} differs from its content at --base (deleted, edited or replaced); the declaration is only read from base`);
       try { decl = validateDeclaration(JSON.parse(baseBytes.toString('utf8'))); } catch (e) { return stop('t0_config_invalid', e.t0Config ? e.message : `${DECLARATION_PATH} at base is not valid JSON`); }
     }
   } catch { return stop('file_set_unavailable', 'git could not read the declaration at --base'); }
-  let changed;
+  if (!decl) return { top, repoReal, decl: null, changed: [], files: [] };
+  let found;
   try {
-    for (const rec of zList(git(top, ['ls-files', '-v', '-z']))) if (/^[a-zS] /.test(rec)) return stop('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit, which hides edits from git');
-    const found = new Set(zList(git(top, ['diff', '-z', '--name-only', '--no-renames', '--ignore-submodules=none', '--diff-filter=d', sha, '--'])));
-    for (const p of zList(git(top, ['ls-files', '-z', '--others', '--exclude-standard']))) found.add(p);
-    changed = [...found].sort();
+    for (const rec of zRaw(gitRaw(top, ['ls-files', '-v', '-z']))) if (/^[a-zS] /.test(rec.subarray(0, 2).toString('latin1'))) return stop('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit, which hides edits from git');
+    found = [...zRaw(gitRaw(top, ['diff', '-z', '--name-only', '--no-renames', '--ignore-submodules=none', '--diff-filter=d', sha, '--'])),
+      ...zRaw(gitRaw(top, ['ls-files', '-z', '--others', '--exclude-standard']))];
   } catch { return stop('file_set_unavailable', 'git could not list the changed files'); }
-  for (const p of changed) {
+  const seen = new Set(); const changed = []; const topBuf = Buffer.from(top + sep);
+  for (const raw of found.sort(Buffer.compare)) {
+    const key = raw.toString('hex'); if (seen.has(key)) continue; seen.add(key);
+    const p = utf8Path(raw);
+    if (p === null) return stop('unresolvable_path', 'a changed path is not valid UTF-8 and cannot be passed to a scanner (not silently dropped)');
     let st;
-    try { st = lstatSync(join(top, p)); } catch { return stop('unresolvable_path', 'a changed path could not be resolved on disk (not silently dropped)'); }
+    try { st = lstatSync(Buffer.concat([topBuf, raw])); } catch { return stop('unresolvable_path', 'a changed path could not be resolved on disk (not silently dropped)'); }
     if (!st.isFile()) return stop('unsupported_changed_surface', 'a changed path is a submodule, nested repository, directory or symlink, which T0 cannot scan');
+    changed.push(p);
   }
   const files = changed.map((p) => { const r = relative(repoReal, join(top, p)).split(sep).join('/'); return r.startsWith('-') ? `./${r}` : r; });
-  return { top, repoReal, decl, changed, files };
+  const changedReal = new Set(changed.map((p) => norm(realOr(join(top, p)) ?? join(top, p))));
+  return { top, repoReal, decl, changed, files, changedReal };
 }
 
-/** Kill `child`'s whole tree: POSIX process group, Windows `taskkill /T /F` (the limit: the tree is not observable afterwards). */
-function killTree(child) {
-  if (!child.pid) return;
-  if (process.platform === 'win32') { spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); return; }
-  try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ }
+/**
+ * Kill `child`'s whole tree: POSIX process group; Windows `taskkill /T /F`, falling back to the direct child when taskkill
+ * is unavailable or fails. Returns true when the kill was DEGRADED (fallback used). A descendant that left the group
+ * (setsid, daemonizing) is not killed: a documented limit. The handle is unref'd so the CLI can exit.
+ */
+export function killTree(child, { platform = process.platform, run = spawnSync } = {}) {
+  let degraded = false;
+  if (child.pid) {
+    if (platform === 'win32') {
+      const r = run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      if (r.error || r.status !== 0) { degraded = true; try { child.kill('SIGKILL'); } catch { /* gone */ } }
+    } else { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ } }
+  }
+  try { child.unref(); } catch { /* no handle */ }
+  return degraded;
+}
+
+/** Real path of a declared command entry (and of the value after `--opt=`), when it names something on disk. */
+function commandPaths(cwd, cmd) {
+  const out = [];
+  for (const arg of cmd) {
+    if (arg === '{files}') continue;
+    for (const part of [arg, ...(arg.startsWith('--') && arg.includes('=') ? [arg.slice(arg.indexOf('=') + 1)] : [])]) {
+      if (!part) continue;
+      const abs = resolve(cwd, part);
+      out.push(abs); const real = realOr(abs); if (real) out.push(real);
+    }
+  }
+  return out;
 }
 
 /** Run one declared check in its own process group. Output goes to a temp FILE; the group is killed on timeout and after exit. */
@@ -148,24 +187,22 @@ function runOne(cwd, check, prep) {
     args = args.flatMap((a) => (a === '{files}' ? prep.files : [a]));
     base.files = prep.files.length;
   }
-  const touched = check.cmd.filter((a) => a !== '{files}').some((a) => {
-    const abs = resolve(cwd, a);
-    const rel = relative(prep.top, abs).split(sep).join('/');
-    return !rel.startsWith('..') && prep.changed.includes(rel);
-  });
+  const touched = commandPaths(cwd, check.cmd).some((p) => prep.changedReal.has(norm(p)));
   if (touched) return Promise.resolve({ ...base, code: 'checker_modified' });
   const dir = mkdtempSync(join(tmpdir(), 't0-'));
   const fd = openSync(join(dir, 'out'), 'w+');
   const started = Date.now();
   return new Promise((done) => {
     let settled = false;
+    let degraded = false;
     let child;
     const finish = (extra) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (child) killTree(child);
+      if (child && (process.platform !== 'win32' || extra.timed_out)) { if (killTree(child)) degraded = true; }
       const out = { ...base, duration_ms: Date.now() - started, ...extra };
+      if (degraded) out.kill_degraded = true;
       if (out.result === 'fail') { try { out.output_tail = tail(fd); } catch { /* no tail */ } }
       try { closeSync(fd); } catch { /* closed */ }
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may hold the file briefly */ }
@@ -218,7 +255,9 @@ export function verifyReport({ repo, base, text }) {
   const reportedNames = t0.checks.map((c) => c.name).sort();
   if (JSON.stringify(declaredNames) !== JSON.stringify(reportedNames)) return { ok: false, code: 'fast_check_incomplete' };
   if (t0.result !== 'pass' || t0.checks.some((c) => c.result === 'fail')) return { ok: false, code: 'fast_check_failed' };
-  if (prep.files.length > 0 && t0.checks.some((c) => c.result === 'skipped')) return { ok: false, code: 'fast_check_skipped' };
+  const fileScoped = new Set(prep.decl.checks.filter((c) => c.files).map((c) => c.name));
+  // `skipped` is only ever produced for a file-scoped check with no changed files.
+  if (t0.checks.some((c) => c.result === 'skipped' && (!fileScoped.has(c.name) || prep.files.length > 0))) return { ok: false, code: 'fast_check_skipped' };
   return { ok: true, code: 'ok' };
 }
 
@@ -252,6 +291,7 @@ export async function main(argv) {
       logActivity(repo, f.ticket, f['run-id'], 'end', { eventId, args: ['--outcome', r.result, '--metric', `checks=${r.checks.length}`, '--metric', `failed=${failedCount}`, '--metric', `files=${r.files}`, '--metric', `timed_out=${r.checks.filter((c) => c.timed_out).length}`] });
     } else if (f.ticket) logActivity(repo, f.ticket, f['run-id'], 'end', { eventId, args: ['--outcome', 'not_declared'] });
     for (const c of r.checks) if (c.result === 'fail' && c.output_tail) process.stderr.write(`--- t0 ${c.name} (exit ${c.exit}${c.timed_out ? ', TIMED OUT' : ''}) output tail ---\n${c.output_tail}\n`);
+    for (const c of r.checks) if (c.kill_degraded) process.stderr.write(`fast-checks: ${c.name}: process-tree kill DEGRADED (direct child only); a descendant may still run\n`);
     if (r.reason) process.stderr.write(`fast-checks: ${r.reason}\n`);
     const verdict = { ...r, checks: r.checks.map(({ output_tail, ...c }) => c) };
     process.stdout.write(JSON.stringify(verdict) + '\n');

@@ -114,9 +114,15 @@ whatever the repository has). It exists because a JWT-shaped literal in an uncom
 `prefer-const` finding were each found by a full gate run late, at a cost of one whole gate run. T0 is fast
 feedback. It does not prove semantic correctness; REVIEW and the tests still do that.
 
+**T0 is DETECTED-class, advisory feedback. It is not an enforced or anti-tamper boundary.** It catches honest
+mistakes and clumsy shortcuts early and cheaply. The authority is the orchestrator's own independent re-run of
+`run`, the reviewers, and the final full gates; a worker acting in the same repository as the same user can still
+defeat T0, and nothing here claims otherwise (see "Limits" below).
+
 ### The declaration and who may author it
 
-Opt in by committing `.ship-ticket/t0.json` **to the base branch**:
+Opt in by committing `.ship-ticket/t0.json` **at the git top level of the base branch** (one place, whatever
+`--repo` subdirectory is given; a copy inside a subdirectory is not a declaration):
 
 ```json
 {"checks":[{"name":"secrets","kind":"secrets","cmd":["gitleaks","dir","--no-banner","{files}"],"files":true,"timeout_ms":120000}]}
@@ -130,12 +136,29 @@ this skill ships none (a StoreCraft `local-gates.sh --fast` is a separate ticket
 stops shell interpolation of file names; it does not make a declaration trusted. So:
 - the declaration is authored and reviewed like CI configuration, by someone with authority over the repository,
   and lands on the base before any ticket relies on it;
-- it is read **from `--base`**, never from the branch being checked. A worker that deletes, edits or replaces it
+- it is read **from `--base`** (git replacement objects are ignored), never from the branch being checked. A worker that deletes, edits or replaces it
   gets `declaration_tampered`; a declaration that exists only on the branch is ignored (`not_declared`) and never
   executed. A ticket that must change it is changed on the base first, by the repository owner;
-- a check whose own command path is among the changed files fails (`checker_modified`), so use installed tools,
-  not scripts the ticket is editing;
+- a check fails (`checker_modified`) when its command path, or any argument (or the value after `--opt=`), or the
+  real path behind a symlink among them, is a changed file. So list **every config, rules and ignore file the check
+  depends on as its own argument or file input of the declared command**, and use installed tools, not scripts the
+  ticket is editing. Anything not named in the command (a config found by search, inline suppression comments,
+  imported modules, `node_modules`) is not covered: that is REVIEW's and the final gate's job;
 - the declared command must itself exit non-zero on a finding (eslint warnings, `gitleaks --exit-code 0` pass).
+
+### Limits (stated, not built)
+
+- `--base` is a commit the caller supplies; T0 does not check who pinned it. The orchestrator passes the base SHA
+  it recorded at init; use a full SHA, not a movable ref.
+- `verify` trusts the worker's `t0` claim unless the orchestrator also re-runs `run` itself.
+- Not scanned: a secret that was staged and then cleaned from the working copy, and intermediate commits between
+  base and HEAD (declare a history-mode scanner such as `gitleaks git <base>..HEAD` as its own check if wanted).
+- A descendant that leaves the process group (`setsid`, daemonizing) is not killed on timeout (Windows: `taskkill
+  /T`, with a direct-child fallback reported as a degraded kill). The verdict is still a failure.
+- On Windows an executable planted in the repository folder can shadow a PATH tool. A changed config the declared
+  command does not name, as above.
+- The declared commands, a fake binary earlier on PATH, or edits to the skill install by the same user are outside
+  what T0 can see.
 
 ### Running it
 

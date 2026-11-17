@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { parseWorkerReport } from './worker-report.mjs';
 import { buildBrief, lintBrief } from './brief.mjs';
+import { killTree, utf8Path } from './fast-checks.mjs';
 
 const CLI = fileURLToPath(new URL('./fast-checks.mjs', import.meta.url));
 const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
@@ -64,7 +65,7 @@ function fixture(t, checks, { prefix = '' } = {}) {
   const replica = join(tools, 'replica.mjs'); writeFileSync(replica, REPLICA);
   const record = join(tools, 'record.txt');
   const decl = (mode, extra = {}) => ({ name: 'secrets', kind: 'secrets', cmd: [process.execPath, scanner, record, mode, '{files}'], files: true, ...extra });
-  const declare = (c) => { put(top, prefix + '.ship-ticket/t0.json', JSON.stringify({ checks: c })); };
+  const declare = (c) => { put(top, '.ship-ticket/t0.json', JSON.stringify({ checks: c })); };
   if (checks) declare(checks(decl, { scanner, replica, record, tools }));
   git(top, 'add', '-A'); git(top, 'commit', '-q', '-m', 'base');
   const base = git(top, 'rev-parse', 'HEAD');
@@ -311,22 +312,24 @@ test('a timeout is a FAIL, never a PASS (Neg)', (t) => {
   assert.ok(Date.now() - started < 20000, 'returned promptly');
 });
 
-test('Codex 3: on timeout the whole process tree is killed, including a descendant', async (t) => {
+test('Codex 3: on timeout the whole process tree is killed: a descendant heartbeat STOPS', async (t) => {
   const fx = fixture(t, (d, x) => {
     const spawner = join(x.tools, 'spawner.mjs');
-    writeFileSync(spawner, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
-const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { stdio: 'ignore' });
-writeFileSync(process.argv[2], String(c.pid)); setTimeout(()=>{},60000);`);
-    return [{ name: 'tree', kind: 'other', cmd: [process.execPath, spawner, join(x.tools, 'child.pid')], timeout_ms: 1500 }];
+    writeFileSync(spawner, `import { spawn } from 'node:child_process';
+const hb = process.argv[2];
+spawn(process.execPath, ['-e', "const fs=require('fs');setInterval(()=>fs.appendFileSync(" + JSON.stringify(hb) + ",'x'),100)"], { stdio: 'ignore' });
+setTimeout(()=>{},60000);`);
+    return [{ name: 'tree', kind: 'other', cmd: [process.execPath, spawner, join(x.tools, 'hb.txt')], timeout_ms: 1500 }];
   });
   const r = fx.run();
   assert.equal(r.status, 1, r.stderr);
   assert.equal(json(r).checks[0].timed_out, true);
-  const pid = Number(readFileSync(join(fx.tools, 'child.pid'), 'utf8'));
-  assert.ok(pid > 0);
-  let alive = true;
-  for (let i = 0; i < 30 && alive; i++) { try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 100)); } catch { alive = false; } }
-  assert.equal(alive, false, 'the descendant is gone');
+  const hb = join(fx.tools, 'hb.txt');
+  assert.ok(existsSync(hb) && readFileSync(hb).length > 0, 'the descendant was alive and beating');
+  await new Promise((res) => setTimeout(res, 400));
+  const before = readFileSync(hb).length;
+  await new Promise((res) => setTimeout(res, 700));
+  assert.equal(readFileSync(hb).length, before, 'no heartbeat after the verdict: the descendant is not running');
 });
 
 test('spawn error, empty list, malformed declaration at base are FAIL, never PASS', (t) => {
@@ -448,4 +451,95 @@ test('Codex 2: brief --t0 <file> --out <same file> (and a hard link to it) is re
   r = spawnSync(process.execPath, [brief, 'build', '--dag', dag, '--node', 'api', '--plan', plan, '--t0', t0, '--out', hard], { encoding: 'utf8' });
   assert.equal(r.status, 1, r.stderr);
   assert.equal(readFileSync(t0, 'utf8'), t0Text);
+});
+
+test('A1: a git replace of the base commit cannot hide the scan or swap the declaration', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')]);
+  put(fx.top, 'src/new.spec.ts', `const token = '${JWT}';\n`);
+  // replace base with an empty-tree commit whose declaration is harmless: replace refs would rewrite what --base reads
+  const empty = git(fx.top, 'hash-object', '-t', 'tree', '/dev/null');
+  const fake = git(fx.top, 'commit-tree', empty, '-m', 'fake');
+  git(fx.top, 'replace', '-f', fx.base, fake);
+  const r = fx.run();
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(fx.seen().includes('src/new.spec.ts'), 'the real base is used: ' + fx.seen());
+});
+
+test('A2: a non-UTF-8 path with a lossy alias is a FAIL; a repo directory with a leading space works', (t) => {
+  if (process.platform === 'linux') {
+    const fx = fixture(t, (d) => [d('jwt')]);
+    put(fx.top, 'src/\ufffd.ts', 'clean\n'); // the alias a lossy decode would resolve to
+    writeFileSync(Buffer.concat([Buffer.from(join(fx.top, 'src') + '/'), Buffer.from([0xff, 0x2e, 0x74, 0x73])]), 'x\n');
+    git(fx.top, 'rm', '-q', '--cached', '-r', '.', '--ignore-unmatch');
+    const r = fx.run();
+    assert.equal(r.status, 1); assert.equal(json(r).code, 'unresolvable_path');
+  }
+  if (process.platform === 'win32') return;
+  const fx2 = fixture(t, (d) => [d('jwt')], { prefix: ' pkg/' });
+  put(fx2.top, ' pkg/src/new.spec.ts', `const t = '${JWT}';\n`);
+  const r2 = fx2.run();
+  assert.equal(r2.status, 1, r2.stdout + r2.stderr);
+  assert.ok(fx2.seen().includes('src/new.spec.ts'), fx2.seen().join(','));
+});
+
+test('A3: the declaration is looked up at the TOP LEVEL; --repo <subdir> cannot bypass it, and a subdir copy is ignored', (t) => {
+  const fx = fixture(t, (d) => [d('jwt')], { prefix: 'pkg/' });
+  put(fx.top, 'pkg/src/new.spec.ts', `const t = '${JWT}';\n`);
+  const r = fx.run();
+  assert.equal(r.status, 1); assert.equal(json(r).result, 'fail');
+  assert.ok(fx.seen().length > 0, 'the top-level declaration ran for a subdirectory --repo');
+  // a declaration that exists only inside the subdirectory is not a declaration
+  const fx2 = fixture(t, null, { prefix: 'pkg/' });
+  put(fx2.top, 'pkg/.ship-ticket/t0.json', JSON.stringify({ checks: [fx2.decl('jwt')] }));
+  git(fx2.top, 'add', '-A'); git(fx2.top, 'commit', '-q', '-m', 'sub decl');
+  assert.equal(json(fx2.run('--base', git(fx2.top, 'rev-parse', 'HEAD'))).code, 'not_declared');
+});
+
+test('A4: no declaration at base returns not_declared BEFORE any changed-surface check (AC8)', (t) => {
+  if (process.platform === 'win32') return;
+  const fx = fixture(t);
+  symlinkSync(join(fx.dir, 'elsewhere'), join(fx.top, 'link.ts'));
+  git(fx.top, 'update-index', '--assume-unchanged', 'src/keep.ts');
+  const r = fx.run();
+  assert.equal(r.status, 0, r.stdout); assert.equal(json(r).code, 'not_declared');
+});
+
+test('A5: killTree falls back to the direct child when taskkill fails, and reports it', () => {
+  const calls = [];
+  const child = { pid: 123, killed: false, kill() { this.killed = true; return true; }, unref() { calls.push('unref'); } };
+  const degraded = killTree(child, { platform: 'win32', run: () => ({ status: 1 }) });
+  assert.equal(child.killed, true); assert.equal(degraded, true); assert.ok(calls.includes('unref'));
+  const ok = { pid: 1, kill() { throw new Error('must not be called'); }, unref() {} };
+  assert.equal(killTree(ok, { platform: 'win32', run: () => ({ status: 0 }) }), false);
+  const missing = { pid: 2, killed: false, kill() { this.killed = true; }, unref() {} };
+  assert.equal(killTree(missing, { platform: 'win32', run: () => ({ error: new Error('ENOENT') }) }), true);
+});
+
+test('A6: verify rejects `skipped` for a check that is not file-scoped', (t) => {
+  const fx = fixture(t, (d) => [d('jwt'), { name: 'lint', kind: 'lint', cmd: [process.execPath, '-e', '0'] }]);
+  const msg = join(fx.dir, 'msg.txt');
+  writeFileSync(msg, fence({ ...BASE, t0: { result: 'pass', checks: [{ name: 'secrets', result: 'skipped' }, { name: 'lint', result: 'skipped' }] } }));
+  const v = fx.cli('verify', ['--base', fx.base, '--report-file', msg]);
+  assert.equal(v.status, 1); assert.equal(json(v).code, 'fast_check_skipped', 'lint is files:false, so it can never be skipped');
+});
+
+test('A7: checker_modified compares real paths (symlink target), splits --opt=path, and covers a config argument', (t) => {
+  if (process.platform === 'win32') return;
+  const fx = fixture(t);
+  put(fx.top, 'cfg/rules.json', '{}\n'); put(fx.top, 'tools/scan.mjs', 'process.exit(0)\n');
+  symlinkSync(join(fx.top, 'cfg/rules.json'), join(fx.top, 'cfg/alias.json'));
+  fx.declare([{ name: 'own', kind: 'lint', cmd: [process.execPath, 'tools/scan.mjs', '--config=cfg/alias.json', '{files}'], files: true }]);
+  git(fx.top, 'add', '-A'); git(fx.top, 'commit', '-q', '-m', 'tool');
+  const base = git(fx.top, 'rev-parse', 'HEAD');
+  put(fx.top, 'src/new.ts', 'x\n');
+  assert.equal(fx.run('--base', base).status, 0);
+  put(fx.top, 'cfg/rules.json', '{"weak":true}\n'); // the alias target changed, not the argument path itself
+  const r = fx.run('--base', base);
+  assert.equal(r.status, 1); assert.equal(json(r).checks[0].code, 'checker_modified');
+});
+
+test('A2 unit: utf8Path refuses bytes that only a lossy decode would alias (runs on every OS)', () => {
+  assert.equal(utf8Path(Buffer.from('src/ok.ts')), 'src/ok.ts');
+  assert.equal(utf8Path(Buffer.from([0x73, 0xff, 0x2e, 0x74, 0x73])), null);
+  assert.equal(utf8Path(Buffer.from(' lead space.ts')), ' lead space.ts');
 });
