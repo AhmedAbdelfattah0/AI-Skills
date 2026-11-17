@@ -255,8 +255,8 @@ sensitive paths in `.ship-ticket/risk-paths.json` (read from the base commit; se
 everything below a match). `node scripts/risk-floor.mjs check --base <c> --planned-paths <json>
 --claimed <profile> --ai <profile>` computes the floor from the planned paths, and `reassess
 --base <c> --head <c|WORKTREE> --recorded-line <file|-> ...` recomputes it from the ACTUAL changed
-paths (base to HEAD, staged, unstaged, untracked, and git-ignored files that match a declared path)
-before release. `--recorded-line` is a file or stdin holding the plan's `risk_floor:` record line
+paths (base to HEAD, staged, unstaged and untracked; git-ignored untracked files are outside release
+scope, and a force-added one appears in the index/HEAD diffs) before release. `--recorded-line` is a file or stdin holding the plan's `risk_floor:` record line
 (the `check` line; paste it from the plan header; `risk_reassess:` lines are ignored). Pin `--base`
 from the plan/run state: `reassess` refuses a base different from the recorded line, and the
 recorded claim, assessment and final also count, so it can never return less than the plan said.

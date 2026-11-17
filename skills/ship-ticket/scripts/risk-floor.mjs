@@ -12,22 +12,24 @@
  * The orchestrator MUST pin --base from the plan/run state (the merge-base recorded at START): the record line carries `base=<sha12>`, and
  * `reassess` fails (`base_mismatch`) when --base differs from the base in the recorded line or the recorded base is not an ancestor of the
  * head. `reassess` recomputes the floor from the ACTUAL changed paths: `--head <commit>` is `git diff base head`; WORKTREE is the UNION of
- * base->working tree, base->index (staged), untracked files, and git-IGNORED untracked files that match a declared glob (git does not list
- * ignored files, so a second pass lists them and keeps only declared matches). Renames count both paths; deletions, mode-only changes and
- * submodule bumps (the gitlink path only: a glob under a submodule does not match its bump) count.
+ * base->HEAD (committed), base->index (staged), base->working tree and untracked files. git-IGNORED untracked files are outside release scope
+ * (git never commits them unless force-added, and a force-added file appears in the index/HEAD diffs above), so they are not enumerated and there
+ * is no second matching engine. Renames count both paths; deletions, mode-only changes and submodule bumps (the gitlink path only: a glob
+ * under a submodule does not match its bump) count.
  * Exit codes: 0 = `claimed` already meets the final; 2 = final is HIGHER than `claimed` (raise the classification before release);
  * 1 = unusable or untrustworthy input (malformed or oversized paths/declaration, tampered declaration, unknown profile, base_mismatch,
  * usage error). An exit-1 output still carries final=ELEVATED. Flags take `--flag value` or `--flag=value`; a missing value, unknown or
  * repeated flag, positional argument or unknown command is an error. Files are read as strict UTF-8 (UTF-16/32 BOMs, NUL, invalid bytes rejected).
- * REUSE: real tree paths are enumerated and filtered by git itself (diff/ls-files and its `:(glob,icase)` pathspec magic for the ignored pass). The
- * custom matcher below exists ONLY for PLANNED paths and declared patterns, which are in no tree. Evaluated and rejected: node:path.matchesGlob and
- * fs.glob (Node >= 22 only; CI runs Node 18), picomatch/minimatch (would need vendoring: skills install without npm install).
+ * REUSE: real tree paths are enumerated by git itself (diff, ls-files). Matching is ONE custom engine that serves PLANNED and ACTUAL paths alike
+ * (so `check` and `reassess` can never disagree). Evaluated and rejected: git pathspec magic (`:(glob,icase)`: a second engine whose trailing `/**`,
+ * ASCII-only icase and raw-name matching disagree with the normalised matcher), node:path.matchesGlob and fs.glob (Node >= 22 only; CI runs
+ * Node 18), picomatch/minimatch (would need vendoring: skills install without npm install).
  * Glob grammar (deliberately small): literal characters, `*` (any run inside ONE path segment), a WHOLE-segment `**`, a trailing `/`.
  * EVERY other metacharacter (`? [ ] { } ! \ ( )`), a `**` that is not a whole segment, and leading/trailing whitespace in a segment make the
  * declaration invalid (fail closed), never a silent non-match. Directory semantics (git-style): a pattern matches a path if it matches the
  * path OR ANY ANCESTOR of it, so `db/migrations`, `db/migrations/` and `db/migrations/**` all cover `db/migrations/1.sql`; a pattern without
  * an inner `/` matches at any depth. Only the PATTERN's `*` is a wildcard: a filename containing `*`, `?` or `[` is plain text. Matching is
- * case-INSENSITIVE, NFC-normalised, ignores default-ignorable (Cf) characters; in a PATH `\` counts as `/`, `./` and `.` segments are dropped,
+ * case-INSENSITIVE (Unicode full case folding: sigma, sharp s, dotted I), NFC-normalised, ignores default-ignorable (Cf) characters; in a PATH `\` counts as `/`, `./` and `.` segments are dropped,
  * and a `..` segment or an absolute path is malformed (over-classifying is accepted, under-classifying is not).
  * Planned entries that may denote a directory or a set (end with `/`, contain `*`, or have no `.` in the last segment) are conservative: they
  * floor ELEVATED if a declared glob matches them or may match anything below them.
@@ -64,7 +66,7 @@ const bad = (code, reason) => Object.assign(new Error(reason), { code });
 const wellFormed = (x) => typeof x === 'string' && x !== '' && !/[\u0000�]|[\uD800-\uDFFF]/u.test(x);
 function segmentsOf(p, what, maxChars = MAX_PATH_CHARS, maxSegs = MAX_PATH_SEGS) {
   if (!wellFormed(p) || p.length > maxChars) throw bad('malformed_input', `${what} is not a well-formed string within the budget`);
-  const s = p.replace(/\p{Cf}/gu, '').normalize('NFC').toLowerCase().normalize('NFC').replace(/\\/g, '/');
+  const s = p.replace(/\p{Cf}/gu, '').normalize('NFC').toUpperCase().toLowerCase().replace(/\u0307/g, '').normalize('NFC').replace(/\\/g, '/');
   if (s.startsWith('/') || /^[a-z]:\//.test(s)) throw bad('malformed_input', `${what} is absolute`);
   const segs = [];
   for (const seg of s.split('/')) { if (seg === '' || seg === '.') continue; if (seg === '..') throw bad('malformed_input', `${what} has a ".." segment`); segs.push(seg); }
@@ -197,12 +199,27 @@ const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys
 const LIST_CAP = 64 * 1024 * 1024; // bytes git may print for ONE enumeration; excess aborts the child (ENOBUFS) before anything is sorted or hashed
 const gitRaw = (cwd, args, { env = gitEnv(), maxBuffer = 256 * 1024 * 1024 } = {}) => execFileSync('git', ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', ...args], { cwd, env, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 const git = (cwd, args) => gitRaw(cwd, args).toString('utf8').replace(/\n$/, '');
-const zSplit = (buf) => { const out = []; let at = 0; for (let i = 0; i < buf.length; i++) if (buf[i] === 0) { if (i > at) out.push(buf.subarray(at, i)); at = i + 1; } if (at < buf.length) out.push(buf.subarray(at)); return out; };
 const utf8Path = (raw) => { const p = raw.toString('utf8'); return Buffer.from(p, 'utf8').equals(raw) ? p : null; };
-/** One bounded enumeration (byte cap in git, count cap here). Excess or failure is malformed_input, never a truncated list. */
-function listZ(top, args, env) {
-  let buf; try { buf = gitRaw(top, args, { env, maxBuffer: LIST_CAP }); } catch { throw bad('malformed_input', 'git listing failed or exceeded the byte cap'); }
-  const parts = zSplit(buf); if (parts.length > MAX_PATHS) throw bad('malformed_input', 'too many changed paths'); return parts;
+/** One enumeration with a byte cap enforced by git (ENOBUFS kills the child). Excess or failure is malformed_input, never a truncated list. */
+function listBuf(top, args) {
+  try { return gitRaw(top, args, { maxBuffer: LIST_CAP }); } catch { throw bad('malformed_input', 'git listing failed or exceeded the byte cap'); }
+}
+/** Streams NUL-separated entries into `map` (key = raw bytes as latin1): duplicates across union components are collapsed BEFORE counting and the cap aborts the scan itself. */
+export function addEntries(map, buf, max = MAX_PATHS) {
+  for (let at = 0; at < buf.length;) {
+    let end = buf.indexOf(0, at); if (end < 0) end = buf.length;
+    if (end > at) { const k = buf.toString('latin1', at, end); if (!map.has(k)) { if (map.size >= max) throw bad('malformed_input', 'too many changed paths'); map.set(k, Buffer.from(buf.subarray(at, end))); } }
+    at = end + 1;
+  }
+}
+/** `ls-files -v -z` records start with a status letter and a space; a lower-case letter or S means assume-unchanged / skip-worktree (hidden edits). No allocation. */
+export function hiddenFlagged(buf) {
+  for (let at = 0; at < buf.length;) {
+    const c = buf[at];
+    if (buf[at + 1] === 0x20 && ((c >= 0x61 && c <= 0x7a) || c === 0x53)) return true;
+    const end = buf.indexOf(0, at); if (end < 0) break; at = end + 1;
+  }
+  return false;
 }
 const commitOf = (top, ref, code) => { if (typeof ref !== 'string' || !ref || ref.startsWith('-')) throw bad(code, 'a commit-ish must not be empty or start with "-"'); try { return git(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]); } catch { throw bad(code, 'git could not resolve the commit-ish'); } };
 
@@ -231,8 +248,15 @@ function readDeclaration(top, sha, { headSha = null, worktree = false } = {}) {
       const st = lstatSync(full, { throwIfNoEntry: false });
       if (st) {
         if (!st.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file');
-        const fd = openSync(full, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
-        try { const fs2 = fstatSync(fd); if (!fs2.isFile()) throw bad('declaration_tampered', 'the working-tree declaration is not a regular file'); if (fs2.size > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large'); wt = readFd(fd, MAX_DECLARATION); if (wt.length > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large'); if (process.platform !== 'win32' && base && ((fs2.mode & 0o111) !== 0) !== (base.mode === '100755')) throw bad('declaration_tampered', 'mode differs from base'); } finally { closeSync(fd); }
+        const fd = openSync(full, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0)); // never blocks on a FIFO, never follows a symlink
+        try {
+          const f2 = fstatSync(fd); // BEFORE any read: must still be the same regular file that lstat saw
+          if (!f2.isFile() || f2.ino !== st.ino || f2.dev !== st.dev) throw bad('declaration_tampered', 'the working-tree declaration changed while being opened');
+          if (f2.size > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large');
+          wt = readFd(fd, MAX_DECLARATION); if (wt.length > MAX_DECLARATION) throw bad('malformed_input', 'declaration too large');
+          if (process.platform !== 'win32' && base && ((f2.mode & 0o111) !== 0) !== (base.mode === '100755')) throw bad('declaration_tampered', 'mode differs from base');
+          const st2 = lstatSync(full); if (st2.ino !== st.ino || st2.dev !== st.dev || !st2.isFile()) throw bad('declaration_tampered', 'the working-tree declaration was replaced while being read'); // also covers Windows (no O_NOFOLLOW)
+        } finally { closeSync(fd); }
       }
     } catch (e) { if (e.code && /^[a-z_]+$/.test(e.code)) throw e; throw bad('declaration_tampered', 'the working-tree declaration is unreadable'); }
     const idx = gitRaw(top, ['ls-files', '-s', '-z', '--', DECLARATION_PATH]).toString('utf8').replace(/\0$/, '');
@@ -255,21 +279,16 @@ export function check({ repo = '.', base, plannedPaths, claimed, ai }) {
   } catch (e) { return failed(e, claimed, ai); }
 }
 
-export function changedPaths(top, sha, head, declaration = null) {
+export function changedPaths(top, sha, head) {
   const D = ['-z', '--name-only', '--no-renames', '--ignore-submodules=none'];
-  let raws;
+  const map = new Map();
   if (head === 'WORKTREE') {
-    for (const rec of zSplit(gitRaw(top, ['ls-files', '-v', '-z']))) if (/^[a-zS] /.test(rec.subarray(0, 2).toString('latin1'))) throw bad('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit');
-    // union: base->HEAD (committed), base->index (staged), base->working tree, untracked, and git-ignored files that match a declared glob
-    raws = [...listZ(top, ['diff', ...D, sha, 'HEAD', '--']), ...listZ(top, ['diff', '--cached', ...D, sha, '--']), ...listZ(top, ['diff', ...D, sha, '--']), ...listZ(top, ['ls-files', '-z', '--others', '--exclude-standard'])];
-    // The ignored pass REUSES git's own pathspec engine (:(glob,icase)); ignored files are never matched in JS. .ship-ticket/** always counts.
-    const specs = new Set(['.ship-ticket/**']); for (const cl of declaration ?? []) for (const g of cl.globs) specs.add(g.join('/'));
-    raws.push(...listZ(top, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--', ...[...specs].map((x) => `:(glob,icase)${x}`)], { ...gitEnv(), GIT_LITERAL_PATHSPECS: '0' }));
-  } else raws = listZ(top, ['diff', ...D, sha, commitOf(top, head, 'head_invalid'), '--']);
-  if (raws.length > MAX_PATHS) throw bad('malformed_input', 'too many changed paths');
-  const seen = new Set(), out = [];
-  for (const raw of raws.sort(Buffer.compare)) {
-    const k = raw.toString('hex'); if (seen.has(k)) continue; seen.add(k);
+    if (hiddenFlagged(listBuf(top, ['ls-files', '-v', '-z']))) throw bad('index_flags_hidden', 'a tracked file carries an assume-unchanged or skip-worktree bit');
+    // union: base->HEAD (committed), base->index (staged), base->working tree, untracked. Ignored files are outside release scope (force-added ones show in the index/HEAD diffs).
+    for (const args of [['diff', ...D, sha, 'HEAD', '--'], ['diff', '--cached', ...D, sha, '--'], ['diff', ...D, sha, '--'], ['ls-files', '-z', '--others', '--exclude-standard']]) addEntries(map, listBuf(top, args));
+  } else addEntries(map, listBuf(top, ['diff', ...D, sha, commitOf(top, head, 'head_invalid'), '--']));
+  const out = [];
+  for (const raw of [...map.values()].sort(Buffer.compare)) {
     const p = utf8Path(raw); if (p === null) throw bad('unclassifiable_path', 'a changed path is not valid UTF-8');
     try { segmentsOf(p, 'a path'); } catch { throw bad('unclassifiable_path', 'a changed path exceeds the path budget'); }
     out.push(p);
@@ -295,7 +314,7 @@ export function reassess({ repo = '.', base, head, recordedLine, claimed, ai }) 
     // base must be an ancestor of the head, so base..head (two-dot) equals merge-base..head and nothing outside the branch is counted
     try { gitRaw(top, ['merge-base', '--is-ancestor', sha, headSha]); } catch { throw bad('base_mismatch', 'the recorded base is not an ancestor of the head'); }
     const d = readDeclaration(top, sha, { headSha, worktree: head === 'WORKTREE' });
-    return assess({ paths: changedPaths(top, sha, head, d.declaration), declaration: d.declaration, declSha: d.declSha, declChanged: d.changed, claimed, ai, also: [rec.claimed, rec.ai, rec.final], baseSha: sha.slice(0, 12), headLabel: head === 'WORKTREE' ? 'worktree' : headSha.slice(0, 12) });
+    return assess({ paths: changedPaths(top, sha, head), declaration: d.declaration, declSha: d.declSha, declChanged: d.changed, claimed, ai, also: [rec.claimed, rec.ai, rec.final], baseSha: sha.slice(0, 12), headLabel: head === 'WORKTREE' ? 'worktree' : headSha.slice(0, 12) });
   } catch (e) { return failed(e, claimed, ai); }
 }
 
