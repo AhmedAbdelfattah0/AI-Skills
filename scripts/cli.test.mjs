@@ -190,6 +190,71 @@ test('update leaves an unrecorded same-name directory alone and --adopt takes it
   assert.equal(readManifest(w.claudeDir()).skills.alpha.mode, 'copy');
 });
 
+// ---- retired aliases: update installs the successor (O-6, one release) --------
+
+const aliasWorld = (t) => world(t, {
+  alpha: ['Alpha body.'],
+  'angular-code-quality': ['Deprecated alias. Holds no rules.'],
+  'code-quality': ['The rules.'],
+});
+const SUCCESSOR_ADDED = /\+ code-quality {2}\(successor of angular-code-quality — installed\)/;
+const COLLISION = /code-quality {2}needed by the angular-code-quality alias, which holds no rules — resolve this collision/;
+
+test('update installs the successor of a selectively linked alias', (t) => {
+  const w = aliasWorld(t);
+  assert.equal(w.run(['install', '--link', 'angular-code-quality']).status, 0);
+  assert.ok(!existsSync(w.claudeDir('code-quality')), 'the selective install did not bring the successor');
+  const r = w.update();
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, SUCCESSOR_ADDED);
+  assert.ok(lstatSync(w.claudeDir('code-quality')).isSymbolicLink(), 'linked like the alias');
+  assert.equal(realpathSync(w.claudeDir('code-quality')), realpathSync(w.file('code-quality')));
+  assert.equal(readManifest(w.claudeDir()).skills['code-quality'].mode, 'link');
+  assert.ok(!existsSync(w.claudeDir('alpha')), 'nothing else was adopted');
+});
+
+test('update installs the successor of a selectively copied alias', (t) => {
+  const w = aliasWorld(t);
+  assert.equal(w.run(['install', '--copy', 'angular-code-quality']).status, 0);
+  const r = w.update();
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, SUCCESSOR_ADDED);
+  assert.ok(!lstatSync(w.claudeDir('code-quality')).isSymbolicLink());
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+  assert.ok(readManifest(w.claudeDir()).skills['code-quality'].hash, 'the successor copy is recorded');
+});
+
+test('a selective install with no alias does not gain the successor', (t) => {
+  const w = aliasWorld(t);
+  w.run(['install', '--copy', 'alpha']);
+  const r = w.update();
+  assert.equal(r.status, 0, r.out);
+  assert.doesNotMatch(r.out, /code-quality/);
+  assert.ok(!existsSync(w.claudeDir('code-quality')));
+});
+
+test('a foreign successor directory is a collision and is left alone', (t) => {
+  const w = aliasWorld(t);
+  w.run(['install', '--copy', 'angular-code-quality']);
+  put(w.claudeDir('code-quality', 'SKILL.md'), 'somebody else owns this\n');
+  const r = w.update();
+  assert.match(r.out, /code-quality {2}present but not installed by us — left alone/);
+  assert.match(r.out, COLLISION);
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'somebody else owns this\n');
+  assert.equal(readManifest(w.claudeDir()).skills['code-quality'], undefined);
+});
+
+test('an edited successor is a collision and keeps its edits', (t) => {
+  const w = aliasWorld(t);
+  w.run(['install', '--copy', 'angular-code-quality', 'code-quality']);
+  writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
+  w.writeSkill('code-quality', ['The rules, revised.']);
+  const r = w.update();
+  assert.match(r.out, /code-quality {2}edited after install — left alone/);
+  assert.match(r.out, COLLISION);
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'my own edit\n');
+});
+
 test('update does not trust the records of a manifest from another library', (t) => {
   const w = world(t);
   w.run(['install', '--copy', 'alpha']);
@@ -387,6 +452,16 @@ test('validate rejects retired vocabulary in a skill', (t) => {
   assert.match(r.out, /❌ beta: .*SKILL\.md:\d+ uses retired 'GATE 1' — there was never a GATE 1 or GATE 2/);
 });
 
+// code-quality owns the NG/BE rule rows, so the old row header is retired there too.
+test('validate rejects the retired rule-row header in a code-quality stack reference', (t) => {
+  const w = validWorld(t);
+  w.writeSkill('code-quality', ['Angular: [stack](references/stack-angular.md).'],
+    { 'references/stack-angular.md': 'Rows.\n\n| Rule | Status | Evidence |\n|---|---|---|\n' });
+  const r = w.validate();
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /❌ code-quality: code-quality\/references\/stack-angular\.md:3 uses retired '\| Rule \| Status \| Evidence \|' — routed rule rows use the canonical Subject ID \| Outcome \| Evidence shape/);
+});
+
 test('validate rejects retired vocabulary in a repo guidance file', (t) => {
   const w = validWorld(t);
   put(join(w.lib, 'AGENTS.md'), 'Pass the GATE 1 first.\n');
@@ -433,7 +508,7 @@ test('validate rejects an outcome vocabulary that omits a token', (t) => {
 // Owners with the IDs they define. `alpha` cites; it also owns the vocabulary.
 function citingWorld(t, citations, owners = {}) {
   const defaults = {
-    'backend-code-quality': ['Rules: BE-SEC-01, BE-SEC-02, BE-AUTH-01, BE-AUTH-02.'],
+    'code-quality': ['Rules: BE-SEC-01, BE-SEC-02, BE-AUTH-01, BE-AUTH-02.'],
     'test-quality': ['Rules: TEST-01.'],
   };
   const w = validWorld(t, {});
@@ -448,9 +523,16 @@ function assertCited(w, id, needle = id) {
   const r = w.validate();
   const text = read(w.file('alpha', 'SKILL.md'));
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, new RegExp(`❌ alpha: alpha/SKILL\\.md:${lineOf(text, needle)} cites '${id}', which backend-code-quality does not define\\.`));
+  assert.match(r.out, new RegExp(`❌ alpha: alpha/SKILL\\.md:${lineOf(text, needle)} cites '${id}', which code-quality does not define\\.`));
   return r;
 }
+
+// The retired specialists are aliases now: a BE-* rule they still carried would
+// not count, because only code-quality may define the NG/BE families.
+test('a BE-* ID defined only in a retired specialist is still undefined', (t) => {
+  const w = citingWorld(t, ['This follows BE-SEC-09.'], { 'backend-code-quality': ['Rules: BE-SEC-09.'] });
+  assertCited(w, 'BE-SEC-09');
+});
 
 test('an undefined direct rule ID fails with its file and line', (t) => {
   const w = citingWorld(t, ['Intro.', 'This follows BE-SEC-09.']);
@@ -478,7 +560,7 @@ test('an undefined member of a comma list fails', (t) => {
 });
 
 test('an ID defined only inside a range in its owner is still undefined', (t) => {
-  const w = citingWorld(t, ['See BE-AUTH-02.'], { 'backend-code-quality': ['Rules: BE-AUTH-01…03.'] });
+  const w = citingWorld(t, ['See BE-AUTH-02.'], { 'code-quality': ['Rules: BE-AUTH-01…03.'] });
   assertCited(w, 'BE-AUTH-02');
 });
 
@@ -491,13 +573,13 @@ test('a range end with a different family is checked as its own citation', (t) =
 
 test('a range end with the same family as its head expands', (t) => {
   const w = citingWorld(t, ['Read BE-AUTH-01…BE-AUTH-03.'],
-    { 'backend-code-quality': ['Rules: BE-AUTH-01, BE-AUTH-03.'] });
+    { 'code-quality': ['Rules: BE-AUTH-01, BE-AUTH-03.'] });
   assertCited(w, 'BE-AUTH-02', 'BE-AUTH-01');
 });
 
 test('a reversed range checks every ID between its ends', (t) => {
   const w = citingWorld(t, ['Read BE-AUTH-03…01.'],
-    { 'backend-code-quality': ['Rules: BE-AUTH-01, BE-AUTH-03.'] });
+    { 'code-quality': ['Rules: BE-AUTH-01, BE-AUTH-03.'] });
   assertCited(w, 'BE-AUTH-02', 'BE-AUTH-03');
 });
 
@@ -517,7 +599,7 @@ for (const sep of ['…', '..']) {
 
 test('a range end naming only the family passes when every member is defined', (t) => {
   const w = citingWorld(t, ['Read BE-AUTH-01…AUTH-03 together.'],
-    { 'backend-code-quality': ['Rules: BE-AUTH-01, BE-AUTH-02, BE-AUTH-03.'] });
+    { 'code-quality': ['Rules: BE-AUTH-01, BE-AUTH-02, BE-AUTH-03.'] });
   const r = w.validate();
   assert.equal(r.status, 0, r.out);
 });

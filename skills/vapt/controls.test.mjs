@@ -171,7 +171,7 @@ export function validateCatalog(cat, ctx) {
     if (c.family === 'ABUSE' && !(Array.isArray(c.static_mirror) && c.static_mirror.length === 0)) bad('abuse-mirror', `${id}: ABUSE controls have no BE-* mirror (static_mirror must be [])`);
     if (!Array.isArray(c.static_mirror)) bad('mirror', `${id}: static_mirror must be an explicit array ([] = deliberately none)`);
     for (const be of Array.isArray(c.static_mirror) ? c.static_mirror : []) {
-      if (!ctx.beIds.has(be)) bad('mirror', `${id}: static_mirror '${be}' not found in backend-code-quality`);
+      if (!ctx.beIds.has(be)) bad('mirror', `${id}: static_mirror '${be}' not found in code-quality's stack-backend.md`);
     }
     if (Array.isArray(c.static_mirror) && ctx.skillMirror) {
       const want = [...(ctx.skillMirror.get(c.id) ?? [])].sort().join(',');
@@ -328,7 +328,7 @@ const skillMirror = new Map();
     for (const v of right.match(/VAPT-[A-Z]+-\d\d/g) ?? []) skillMirror.set(v, new Set([...(skillMirror.get(v) ?? []), ...bes]));
   }
 }
-const beIds = new Set(read('skills/backend-code-quality/SKILL.md').match(/BE-[A-Z]+-\d\d/g));
+const beIds = new Set(read('skills/code-quality/references/stack-backend.md').match(/BE-[A-Z]+-\d\d/g));
 const ctx = { skillTiers, boundaryKinds, beIds, skillTitles, skillRows, skillMirror };
 const catalog = JSON.parse(read('skills/vapt/controls.json'));
 const real = validateCatalog(catalog, ctx);
@@ -354,7 +354,7 @@ test('every control has all fields with allowed values', () => expectClean('fiel
 test('every control has a non-empty verify.pattern', () => expectClean('pattern'));
 test('every ABUSE control has a deterministic verify.pattern', () => expectClean('abuse-pattern'));
 test('ABUSE controls declare no BE-* mirror', () => expectClean('abuse-mirror'));
-test('static_mirror is an explicit array and its ids exist in backend-code-quality', () => expectClean('mirror'));
+test('static_mirror is an explicit array and its ids exist in code-quality stack-backend.md', () => expectClean('mirror'));
 test('static_mirror agrees with the SKILL.md mapping table in both directions', () => expectClean('mirror-drift'));
 test('verify.pattern is substantive (assertion, refusal word, positive control for ABUSE)', () => expectClean('verify-pattern'));
 test('validated notes are honest and cite only sourced findings', () => expectClean('validated'));

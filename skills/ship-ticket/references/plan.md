@@ -214,7 +214,7 @@ needed; or none>. Model agreement is advice, not approval.
 |---|---|---|
 | parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
 | attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
-| rule coverage | <frontend/backend/shared families and specialist selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
+| rule coverage | <frontend/backend/shared families and stack references selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
 | second opinion (mandatory) | every ticket | host counterpart (CodeRabbit fallback), concurrent with the primary workflow when possible |
 
 **Ship threshold:** <which residual findings ship with a follow-up ticket instead of another round. Default: display-only stale-state or cosmetic issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. Reconciliation applies this without asking the human.>
@@ -380,18 +380,18 @@ code. It is distinct from the Integration Contract: the Integration Contract
 governs behavior exchanged across a producer/consumer seam; the Design Contract
 governs file ownership and rules. Branch first, then:
 
-1. **Confirm the routing** still selects the same family member now the plan is
-   final.
-2. **Invoke that skill by name** — load it, do not recall it.
-3. **Run its Design Contract gate**, deriving the file list from the approved
-   execution DAG.
+1. **Confirm the routing** still selects the same stack references now the plan
+   is final.
+2. **Load `code-quality` and those references** — load them, do not recall them.
+3. **Run its Design Contract gate** (STEP 0B), deriving the file list from the
+   approved execution DAG.
 
-### When the routed skill has no contract gate of its own
+### Contract shapes
 
-`angular-code-quality` and `backend-code-quality` each define one. **The
-`code-quality` hub does not** — so every stack that routes to the hub (React, Vue,
-Svelte, Go, Rust, Java, C#) uses the workflow-owned shape below. This is not a
-degradation; it is the contract for those stacks.
+`code-quality` STEP 0B owns every shape: `stack-angular.md` (file, MVVM role),
+`stack-backend.md` (unit, layer, security tier), and, for code with no stack
+reference (React, Vue, Svelte, Go, Rust, Java, C#), the shape below. That last
+shape is not a degradation; it is the contract for those stacks.
 
 ```
 file path | why it exists (the build-sequence step) | its role in this repo's
@@ -399,22 +399,22 @@ own architecture | the rules in force for that role
 ```
 
 Roles come from the repo's actual layout, not from a framework this skill
-prefers. The rules in force are every `[NN]` rule, plus the hub's universal core,
+prefers. The rules in force are every `[NN]` rule, plus the universal core,
 plus whatever the repo's own conventions document requires.
 
-### Full-stack: one contract, two specialists
+### Full-stack: one contract, both stack references
 
-A full-stack ticket invokes two specialists and produces **one** contract and
+A full-stack ticket loads both stack references and produces **one** contract and
 **one** rule pass — never two uncoordinated halves. Their schemas differ, so
 compose rather than concatenate: **one table, one row per file, each row carrying
 the role vocabulary of the side that owns it.** A file appears exactly once. Two
 tables mean two half-reviews, and a rule that fell between them is invisible.
 
-Invoke the frontend and backend specialists concurrently as read-only row
-proposals against the approved execution DAG. The orchestrator owns shared seam
-files, resolves duplicate ownership, and composes their proposals into the one
-Design Contract before any implementation worker starts. A specialist may flag a
-missing path; it may not expand the approved plan or write candidate files.
+Run the frontend and backend row proposals concurrently, each read-only against
+the approved execution DAG with its own stack reference. The orchestrator owns
+shared seam files, resolves duplicate ownership, and composes the proposals into
+the one Design Contract before any implementation worker starts. A proposal may
+flag a missing path; it may not expand the approved plan or write candidate files.
 
 ### The parity metadata
 

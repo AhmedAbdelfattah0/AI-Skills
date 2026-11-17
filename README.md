@@ -214,10 +214,10 @@ Claude-only.
 
 | Skill | Extras |
 |---|---|
-| angular-code-quality | `references/` |
+| angular-code-quality | deprecated alias for one release: load `code-quality` (stack: angular) |
 | docs-accuracy | `references/` (claim verification, code samples, docstrings) |
-| backend-code-quality | `references/` |
-| code-quality | `references/` (per-stack rule sets) |
+| backend-code-quality | deprecated alias for one release: load `code-quality` (stack: backend) |
+| code-quality | `references/` (entry + `stack-angular.md` `NG-*`, `stack-backend.md` `BE-*`, constitution, guard, per-stack summaries) |
 | cost-reducer | — |
 | design-prompts | `references/` (core contract with the two gates and the binding, tool adapters for the Claude canvas and code generators, design-system template, motion and finish catalogue, part-2 split, codebase inventory, writer brief, depth standard, verification protocol) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |

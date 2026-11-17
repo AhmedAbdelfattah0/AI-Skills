@@ -601,6 +601,14 @@ function cmdInstall(args) {
 // an early error, or a throw. process.exit() inside the body skipped stampRun(),
 // which meant a failing run left the throttle unset and every following session
 // pulled again.
+// Retired skills kept as rule-less aliases for one release (O-6). A selective
+// install that tracks only the alias would otherwise keep a skill with no rules,
+// so update installs the successor beside it in the same run.
+const RETIRED_SKILLS = {
+  'angular-code-quality': 'code-quality',
+  'backend-code-quality': 'code-quality',
+};
+
 function cmdUpdate(args) {
   try { runUpdate(args); }
   catch (err) {
@@ -773,9 +781,20 @@ function runUpdate(args) {
     // A tracked-all install adopts skills added upstream since the last update.
     if (manifest.all) for (const n of available) scope.add(n);
     for (const n of Object.keys(manifest.skills)) if (available.includes(n)) scope.add(n);
+    // successor -> the tracked alias that needs it
+    const successorOf = new Map();
+    for (const [alias, successor] of Object.entries(RETIRED_SKILLS)) {
+      if (!manifest.skills[alias] || !available.includes(successor)) continue;
+      if (names.length && !names.includes(alias)) continue;
+      scope.add(successor);
+      if (!successorOf.has(successor)) successorOf.set(successor, alias);
+    }
+    const collision = (name) => {
+      if (successorOf.has(name)) say(`   ! ${name}  needed by the ${successorOf.get(name)} alias, which holds no rules — resolve this collision, then update again`);
+    };
 
     for (const name of [...scope].sort()) {
-      if (names.length && !names.includes(name)) continue;
+      if (names.length && !names.includes(name) && !successorOf.has(name)) continue;
       const src = join(SKILLS_DIR, name);
       const dst = join(dir, name);
       const record = manifest.skills[name];
@@ -787,14 +806,15 @@ function runUpdate(args) {
       //     library, or the user named it explicitly.
       if (!st) {
         if (!available.includes(name)) continue;
-        if (!manifest.all && !names.includes(name)) continue;
-        if (check) { say(`   + ${name}  (new upstream — would install)`); tally.added++; anyChange = true; continue; }
+        if (!manifest.all && !names.includes(name) && !successorOf.has(name)) continue;
+        const why = successorOf.has(name) ? `successor of ${successorOf.get(name)}` : 'new upstream';
+        if (check) { say(`   + ${name}  (${why} — would install)`); tally.added++; anyChange = true; continue; }
         // Ephemeral beats the recorded mode, exactly as in install: a clone-mode
         // manifest + an `npx … update` would otherwise symlink the new skill
         // into the npx cache, and dangle the moment that cache is cleaned.
         const mode = sourceIsEphemeral() ? 'copy' : (record?.mode || manifest.mode || 'link');
         if (applySkill(src, dst, mode, manifest, name)) {
-          say(`   + ${name}  (new upstream — installed)`);
+          say(`   + ${name}  (${why} — installed)`);
           tally.added++; anyChange = true;
         } else tally.failed++;
         continue;
@@ -810,6 +830,7 @@ function runUpdate(args) {
         // wrong. Only the exact expected target is ours.
         if (target && isUnder(SKILLS_DIR, target) && normalizeTarget(target) !== normalizeTarget(src)) {
           say(`   ~ ${name}  aliases ${relative(SKILLS_DIR, normalizeTarget(target))} in this library — left alone`);
+          collision(name);
           tally.skipped++;
           continue;
         }
@@ -844,6 +865,7 @@ function runUpdate(args) {
         // different collection; reporting each of those is pure noise.
         if (available.includes(name) || record) {
           say(`   ~ ${name}  symlink to ${target || 'an unreadable path'} — not ours, left alone`);
+          collision(name);
           tally.skipped++;
         } else tally.foreign++;
         continue;
@@ -895,6 +917,7 @@ function runUpdate(args) {
       if (!allowed) {
         if (ours) { say(`   ! ${name}  edited after install — left alone (--force to overwrite)`); hints.add('--force'); }
         else { say(`   ! ${name}  present but not installed by us — left alone (--adopt to take it over)`); hints.add('--adopt'); }
+        collision(name);
         tally.skipped++;
         continue;
       }
@@ -1139,8 +1162,8 @@ function originalLineForRetiredHit(source, originalOffsets, normalizedOffset) {
 //
 // Each rule-ID prefix belongs to one skill, which alone may define it.
 const RULE_ID_OWNERS = {
-  BE: 'backend-code-quality',
-  NG: 'angular-code-quality',
+  BE: 'code-quality',
+  NG: 'code-quality',
   TEST: 'test-quality',
   DOC: 'docs-accuracy',
   VAPT: 'vapt',
@@ -1472,7 +1495,7 @@ const RETIRED_VOCABULARY = [
   [/\bN-A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'code-quality']],
   [/\bN\/A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'vapt', 'angular-code-quality', 'backend-code-quality', 'code-quality', 'pr-review']],
   [/\bFIXED\b/g, 'a fixed finding has outcome PASS and records fixed as disposition evidence', ['vapt']],
-  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality', 'pr-review']],
+  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality', 'code-quality', 'pr-review']],
   [/\| Rule \| Surface \| Verdict \| Evidence \|/g, 'VAPT rows use the canonical Subject ID | Outcome | Evidence shape', ['vapt']],
   [/\bBoth halves are load-bearing, and REVIEW compares the pair\b/g, 'test coverage matches body digests first so a name-only rename remains equivalent', ['ship-ticket']],
   [/\beach test ID being PROVE's name-plus-body-digest pair\b/g, 'coverage vectors use body-digest multisets; test names are locators and rename evidence', ['ship-ticket']],

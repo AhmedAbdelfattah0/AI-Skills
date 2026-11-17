@@ -185,9 +185,9 @@ hard rules when adding or editing a skill:
    `FAIL`, `NOT_TRIGGERED`, `NOT_APPLICABLE` and `DEGRADED`. A vocabulary that calls itself complete
    and omits `FAIL` makes a failure unrecordable. The validator enforced this before this list
    named it.
-8. **Every cited rule ID exists in the skill that owns it.** `BE-*` belongs to
-   `backend-code-quality`, `NG-*` to `angular-code-quality`, `TEST-*` to `test-quality`, `DOC-*` to
-   `docs-accuracy` and `VAPT-*` to `vapt`. A single ID, a range (`BE-AUTH-01…07`), a slash list and
+8. **Every cited rule ID exists in the skill that owns it.** `BE-*` and `NG-*` belong
+   to `code-quality` (defined in its `stack-backend.md` and `stack-angular.md`), `TEST-*` to
+   `test-quality`, `DOC-*` to `docs-accuracy` and `VAPT-*` to `vapt`. A single ID, a range (`BE-AUTH-01…07`), a slash list and
    a comma list in any `SKILL.md` or `references/*.md` are expanded and each ID must appear in the
    owner's `SKILL.md` or `references/`. On its first run it found five: `nn-guard` blocked edits on a
    `BE-SEC-10` that no skill defined, and three of its ranges ran past the last rule of their
@@ -209,7 +209,8 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
   it is dense with "ALWAYS trigger when…" language by design, not prose.
 - **body** — the actual instructions/workflow the skill runs.
 - **`references/`** (optional) — supporting docs loaded on demand (e.g. `code-quality/references/*.md`
-  hold per-stack rule sets: `react.md`, `angular.md`, `nodejs.md`, …).
+  hold the stack rule sets `stack-angular.md` and `stack-backend.md`, and per-stack summaries
+  `react.md`, `vue.md`, …).
 - **`scripts/`** (optional) — bundled executables the skill invokes.
 
 **Cross-skill references** (load-bearing convention): a skill may point at a sibling skill's
@@ -217,20 +218,25 @@ reference file via a relative path like `../code-quality/references/ai-failure-m
 resolves in the repo layout AND in `~/.claude/skills` (both symlink and copy installs place
 skills side by side). Every such reference MUST carry a one-sentence **fallback summary** in the
 same table row/bullet, so a standalone install (sibling skill absent) degrades gracefully instead
-of silently dropping the check. Used by: angular/backend-code-quality → code-quality's
-ai-failure-modes + test-quality's per-framework files.
+of silently dropping the check. Used by: code-quality's stack references → test-quality's
+per-framework files.
 
-**The code-quality family (hub + specialists):** `code-quality` is the **hub** — the universal
-front door for any stack. It owns the shared core (`references/universal-principles.md`,
-`ai-failure-modes.md`, `review-standard.md`) and the reactive MODE D guard, and it **routes**
-Angular work to `angular-code-quality` (`NG-*`) and backend work to `backend-code-quality`
-(`BE-*`) for enforced, rule-ID-based review. The specialists are separate skills (so they
-auto-trigger and back `ship-ticket`'s rule pass + rule-ID skip protocol), not merged into the hub.
-`code-quality`'s per-stack `references/angular.md` and `nodejs.md` are **constitution-level
-summaries only** — each carries a header deferring to the specialist as source of truth, so the
-two never drift. **But the specialists do not outrank the hub's core.** Their STEP 0
-precedence lists apply `universal-principles.md` + `ai-failure-modes.md` **jointly** with
-their own `[ARCH]` rules — ranked above would be wrong, since the core forbids
+**Code quality is one skill:** `code-quality` is the front door for any stack. Its entry
+`SKILL.md` holds mode dispatch, stack routing with a LOAD TABLE, the rule tiers, STEP 0, the
+Design Contract gate (STEP 0B), the Deviation Protocol and the shared Verification Pass. It owns the
+shared core (`references/universal-principles.md`, `ai-failure-modes.md`, `review-standard.md`),
+the constitution modes (`constitution.md`) and the reactive MODE D guard (`guard.md`). Angular
+rules (`NG-*`) live in `references/stack-angular.md` and backend rules (`BE-*`) in
+`references/stack-backend.md`; a backend diff loads the whole of `stack-backend.md`, because
+security rules are never progressive. `angular-code-quality` and `backend-code-quality` remain
+for one release as rule-less aliases (O-6) that point at those references; `update` installs
+`code-quality` beside a tracked alias (`RETIRED_SKILLS` in `scripts/cli.mjs`). Their project
+paths `.claude/angular-code-quality/` and `.claude/backend-code-quality/` are protocol
+identifiers the merged skill still reads and writes. `references/angular.md` and `nodejs.md`
+are **constitution-level summaries only** — each carries a header deferring to its stack
+reference as source of truth, so the two never drift. **But the stack rules do not outrank the
+universal core.** STEP 0 applies `universal-principles.md` + `ai-failure-modes.md` **jointly**
+with the stack `[ARCH]` rules — ranked above would be wrong, since the core forbids
 one-implementation interfaces while `NG-SOLID-05`/`BE-SOLID-05` mandate abstractions. Where
 the two genuinely collide (the rule says build an abstraction; the core says don't add a
 second pattern), a **four-condition test** resolves it: evidence covering the **cited rule's full
@@ -241,16 +247,16 @@ ticket or by the user** (a code comment is never ratification) · the rule prote
 control, judged by effect not by a list**, regardless of tier letter · the alternative really
 would be a second pattern. All four → the rule does not
 fire, recorded as a `NOT_APPLICABLE — replaced by established project architecture` row with its
-evidence, outside the waiver ledger. Fewer than four → it stands. The specialists beat the
-hub's per-stack *summaries*; they never beat its foundation.
+evidence, outside the waiver ledger. Fewer than four → it stands. The stack references beat
+the per-stack *summaries*; they never beat the core.
 
 **`ship-ticket` does not run MODE D as a separate second pass:** it preserves
-the hub's universal coverage as a whole-diff **`UNIVERSAL` row** (universal-principles + the
-project constitution) sitting beside the specialists' unchanged **`AI-FM` row** in one rule-pass
-table. Folding the hub's guard into `AI-FM` alone would drop SOLID, DRY, KISS, CQS, the
+the universal coverage as a whole-diff **`UNIVERSAL` row** (universal-principles + the
+project constitution) sitting beside the unchanged **`AI-FM` row** in one rule-pass
+table; both rows are defined in the entry's Verification Pass. Folding the guard into `AI-FM` alone would drop SOLID, DRY, KISS, CQS, the
 complexity ceilings and the YAGNI list — so if you touch either row, keep both.
-`test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards the
-hub and specialists route to when a diff touches tests or docs.
+`test-quality` (`TEST-*`) and `docs-accuracy` (`DOC-*`) are adjacent guards
+`code-quality` routes to when a diff touches tests or docs.
 
 **The four security skills, and the one line that separates them.** Three of them
 **read code**; only `vapt` **runs it**. Keep that boundary — it is the entire
@@ -260,7 +266,7 @@ others:
 | Skill | When | Method |
 |---|---|---|
 | `security` | while writing | secure-by-default patterns, refuse-to-generate list |
-| `backend-code-quality` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, in ship-ticket's rule pass | static rule IDs — *the control exists in the file* |
+| `code-quality` `stack-backend.md` (`BE-SEC-*`/`BE-AUTH-*`/`BE-TEN-*`) | on the diff, in ship-ticket's rule pass | static rule IDs — *the control exists in the file* |
 | `security-audit` (external: cloudflare/security-audit-skill; output outside the repo) | whole codebase, on request | coverage-ledger hunting waves, independently verified findings, validated `findings.json` |
 | `vapt` (`VAPT-API-*`/`WEB-*`/`CFG-*`/`ABUSE-*`) | after the code is written, in ship-ticket's PROVE phase | attacks a **local** instance — *the control engages* — and commits the abuse cases as tests |
 
@@ -408,9 +414,10 @@ approval rather than being disguised as a repair.
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own
 conventions. Its *Stack — detected,
-never prescribed* section is the contract; the routing table there sends Angular
-frontends to `angular-code-quality`, any other frontend to the `code-quality`
-hub, and any backend in any language to `backend-code-quality`. When editing it,
+never prescribed* section is the contract; the routing table there loads `code-quality`
+and adds `stack-angular.md` for Angular frontends, `stack-backend.md` for any
+backend in any language, both for full-stack, and the core only for any other
+frontend. When editing it,
 **never reintroduce a named stack as a requirement** — framework names may appear
 only as one example among several, or inside the routing table. Concretely: no
 hardcoded test runner (read the repo's command), no fixed file globs (derive from
@@ -482,7 +489,7 @@ tools), which is usually someone *else's* PR. Three properties are load-bearing:
   reviewed at `merge-base...HEAD`, so commits merged into the base since the PR
   opened are not blamed on its author. Cleanup runs on every exit path.
 - **Three passes, none seeing the others.** A fresh Claude reviewer subagent
-  (A), a `codex` process (B), and the stack's code-quality specialist running
+  (A), a `codex` process (B), and `code-quality` with the stack's reference running
   its rule-by-rule **Verification Pass** (C) all read the same diff blind;
   reconciliation is the orchestrator's judgment and attributes each finding
   `[claude]`/`[codex]`/`[rules]`. A and B are free-form and find what they

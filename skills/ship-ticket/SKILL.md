@@ -277,13 +277,14 @@ the profile, routing and labels above stay as written here.
 
 ## Rules and deviations
 
-Load the routed code-quality skill rather than recalling it. A rule claim cites a
+Load `code-quality` and the routed stack reference (`stack-angular.md`,
+`stack-backend.md`, or both) rather than recalling them. A rule claim cites a
 stable rule ID.
 
 | Tier | Override |
 |---|---|
 | **[NN]** | only an explicit recorded user waiver |
-| **[ARCH]** | a project-wide instruction or the owning specialist's established-architecture test |
+| **[ARCH]** | a project-wide instruction or `code-quality`'s established-architecture test (STEP 0) |
 | **[D]** | a project instruction or demonstrated repository convention |
 
 Parity is not a code rule. A deviation from a pinned UI reference needs a named
@@ -327,7 +328,7 @@ critical.
 
 | Missing | Behavior |
 |---|---|
-| routed code-quality specialist | use the hub; if the family is absent, apply repository conventions and universal principles, mark the rules check degraded, and do not invent rule IDs |
+| `code-quality` or its routed stack reference | a retired alias is not a rule source; apply repository conventions and universal principles, mark the rules check degraded, and do not invent rule IDs |
 | vapt | run the family-appropriate reduced attacks from [references/prove.md](references/prove.md), commit them as tests, and name omitted families |
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
