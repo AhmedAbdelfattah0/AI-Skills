@@ -15,7 +15,8 @@
  *   (fail closed). Before, such a record was probed as a dead PID (or as a process group) and
  *   recovered; only a hand-edited or corrupted record can carry one.
  * - acquireLock takes an opt-in second argument `{ waitMs, signal, now, sleep }`. Without it a
- *   call is one attempt, exactly as before.
+ *   call is one attempt, exactly as before. Cancellation follows invariants I1-I4 (see acquireLock);
+ *   the `TEST_SEAM` option key is test-only and engine-io.mjs does not re-export it.
  *
  * Opt-in bounded wait: derived from deepseek-harness@39163dd30f703a79079e2d2446545cff3c453738
  * packages/util/atomic-write/src/index.ts `withFileLock` (retry loop, exponential back-off
@@ -26,7 +27,8 @@
  * not Date.now), so a wall-clock jump neither extends nor cuts the wait; each sleep is clamped to
  * the deadline, so a timeout lands within `waitMs` plus one attempt; the signal is also re-checked
  * after every await inside an attempt, before any state change; an abort rejects with
- * `signal.reason`; it returns a release handle instead of running an operation; no default wait.
+ * `signal.reason` (or, when releasing a lock it took fails, with `lock_cancel_leaked` carrying that
+ * reason); it returns a release handle instead of running an operation; no default wait.
  *
  *   Permission is hereby granted, free of charge, to any person obtaining a copy of this
  *   software and associated documentation files (the "Software"), to deal in the Software
@@ -110,6 +112,20 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
 const RECOVER = 'stop every engine command for this ticket, confirm no engine process is running, then remove';
 
 /**
+ * Test-only seam key of acquireLock's options (never re-exported by engine-io.mjs; no production
+ * caller passes it). `options[TEST_SEAM] = { step(name), readLock(path), unlinkLock(path) }`:
+ * - `step(name)` is called synchronously at each named point of the call: `enter`, `attempt`,
+ *   `acquired` (our exclusive create succeeded), `hook`/`hooked` (around the lock-stale-observed
+ *   await), `sleep`/`slept` (around each back-off sleep) and `commit` (immediately before the one
+ *   success return; nothing is awaited between it and the return). A test aborts the signal from
+ *   it, synchronously or after N microtasks, to reach every await and microtask boundary.
+ * - `readLock`/`unlinkLock` replace readFileSync/unlinkSync in the cancellation release only
+ *   (fault injection for the leak report). The normal `handle.release()` and the stale-lock
+ *   recovery never use them.
+ */
+export const TEST_SEAM = Symbol('durable-io acquireLock test seam');
+
+/**
  * Take the per-ticket engine lock (`O_EXCL` file holding {pid, process_start_time,
  * host, run_id, nonce}). A same-host lock whose PID is dead, or alive with a
  * different start time, is recovered; concurrent recoverers race on an `O_EXCL`
@@ -125,32 +141,76 @@ const RECOVER = 'stop every engine command for this ticket, confirm no engine pr
  * rethrown as they are. Any other error (`lock_foreign_host`, `not_a_repo`, EISDIR, ...) is thrown
  * at once.
  *
- * Cancellation rule (one place, `cancelFirst`): once `signal` is aborted the call rejects with
- * exactly `signal.reason`, whatever value it is (null, a string, an object carrying a `code`, ...;
- * it is never wrapped or classified), owning no lock and leaving no recovery marker. It is applied
- * before every attempt, after the `lock-stale-observed` hook (the only await inside an attempt)
- * before any state change, before an attempt's error is classified, after every sleep, and when an
- * attempt returns a handle (which is then released). Once the call has resolved, the caller owns
- * cancellation.
+ * Cancellation (invariants; every decision is the one function `cancelFirst`):
+ * - I4 An already-aborted signal rejects with `signal.reason` before any work: before argument
+ *   validation, the lock-path lookup (`not_a_repo`), the directory create and any probe, so no
+ *   setup error can win over it and nothing is created.
+ * - I2 The signal is checked before every attempt, after the lock-stale-observed await before any
+ *   state change, before an attempt's error is classified (so the reason is never classified,
+ *   wrapped or turned into lock_timeout), and after every sleep. An aborted call rejects with
+ *   exactly `signal.reason`, whatever value it is (null, a string, an object carrying a `code`);
+ *   the one exception is I3.
+ * - I1 There is one success exit. After the last await, in the same synchronous turn as the
+ *   `return`, the signal is checked; if it is aborted the lock we just took is released and the
+ *   call rejects. So a handle is returned only if the signal was not aborted when the call
+ *   resolved. An abort after that belongs to the caller (re-check `signal.aborted` after `await`
+ *   if that matters).
+ * - I3 If releasing the lock we took fails during cancellation (anything but "already gone" or
+ *   "now someone else's"), the failure is never silent: the call rejects with an AggregateError,
+ *   `code: 'lock_cancel_leaked'`, `errors: [signal.reason, failure]`, `reason: signal.reason`,
+ *   `cause: failure`, and `leakedLock: { lockFile, nonce, pid, release }`; `release()` (synchronous)
+ *   retries the removal and throws if it fails again. The normal `handle.release()` keeps its documented
+ *   behaviour (nonce-checked, best effort, never throws).
  */
-export async function acquireLock(ctx, { waitMs, signal, now = () => performance.now(), sleep = (ms, sig) => timerSleep(ms, undefined, { signal: sig }) } = {}) {
-  const lockFile = ctx.lockFile ?? gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.lock`);
+export async function acquireLock(ctx, options = {}) {
+  const { waitMs, signal, now = () => performance.now(), sleep = (ms, sig) => timerSleep(ms, undefined, { signal: sig }) } = options;
+  const seam = options[TEST_SEAM];
+  const step = seam?.step ?? (() => {});
+  let lockFile = null, mine = null, owned = false;
+  /** Cancellation release: removes our lock; "gone" or "someone else's" is fine, anything else throws. */
+  const releaseOwned = () => {
+    let current;
+    try { current = JSON.parse((seam?.readLock ?? readFileSync)(lockFile, 'utf8')); }
+    catch (e) { if (e?.code === 'ENOENT') return; throw e; }
+    if (current?.nonce !== mine.nonce) return;
+    try { (seam?.unlinkLock ?? unlinkSync)(lockFile); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+  };
+  /** The single cancellation decision (I2); when we own the lock it is released first (I1, I3). */
+  const cancelFirst = () => {
+    if (!signal?.aborted) return;
+    const reason = signal.reason;
+    if (owned) {
+      try { releaseOwned(); } catch (failure) {
+        throw Object.assign(new AggregateError([reason, failure], `acquireLock was cancelled after taking ${lockFile}, and releasing it failed (${failure?.code ?? failure}); `
+          + `this process still holds it: call leakedLock.release(), or ${RECOVER} it`),
+        { code: 'lock_cancel_leaked', reason, cause: failure, leakedLock: { lockFile, nonce: mine.nonce, pid: mine.pid, release: releaseOwned } });
+      }
+    }
+    throw reason;
+  };
+  step('enter');
+  cancelFirst(); // I4: before any work
+  const wait = waitMs !== undefined;
+  if (wait && (!Number.isFinite(waitMs) || waitMs < 0)) throw new TypeError(`waitMs must be a finite number >= 0, got ${waitMs}`);
+  lockFile = ctx.lockFile ?? gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.lock`);
   const info = ctx.processInfo ?? processInfo;
   const pid = ctx.pid ?? process.pid;
   const host = ctx.host ?? hostname();
-  const mine = { pid, process_start_time: info(pid)?.startTime ?? null, host, run_id: ctx.runId, nonce: randomUUID() };
+  mine = { pid, process_start_time: info(pid)?.startTime ?? null, host, run_id: ctx.runId, nonce: randomUUID() };
   mkdirSync(dirname(lockFile), { recursive: true });
   const create = () => {
-    try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); return true; }
+    try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); }
     catch (e) { if (e.code === 'EEXIST') return false; throw e; }
+    owned = true;
+    step('acquired');
+    return true;
   };
   const handle = { lockFile, release: async () => {
     try { if (JSON.parse(readFileSync(lockFile, 'utf8')).nonce === mine.nonce) unlinkSync(lockFile); } catch { /* already gone */ }
   } };
-  /** The single cancellation rule (see above). */
-  const cancelFirst = () => { if (signal?.aborted) throw signal.reason; };
+  /** One protocol attempt: true when we now hold the lock; a refusal throws. Its only await is the hook. */
   const attempt = async () => {
-    if (create()) return handle;
+    if (create()) return true;
     let raw;
     // ENOENT here means the holder released between our create and this read (retryable when waiting).
     try { raw = readFileSync(lockFile, 'utf8'); } catch (e) { if (e.code === 'ENOENT') e.lockVanished = true; throw e; }
@@ -168,7 +228,9 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
     // holder whose start time is unknown on either side is treated as the holder, never broken.
     const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
     if (other.alive && !reused) throw coded('lock_held', `pid ${held.pid} holds ${lockFile}`);
+    step('hook');
     await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
+    step('hooked');
     cancelFirst(); // after the await, before any state change
     const marker = lockFile + '.recovery';
     try { writeFileSync(marker, JSON.stringify({ pid, nonce: mine.nonce }), { flag: 'wx', mode: 0o600 }); }
@@ -179,32 +241,30 @@ export async function acquireLock(ctx, { waitMs, signal, now = () => performance
       if (current?.nonce !== held.nonce) throw coded('lock_held', `${lockFile} was recovered by another process`);
       unlinkSync(lockFile);
       if (!create()) throw coded('lock_held', `${lockFile} was taken during recovery`);
-      return handle;
+      return true;
     } finally { try { unlinkSync(marker); } catch { /* gone */ } }
   };
-  /** One attempt under the rule: cancellation before classification; a handle won while aborted is released. */
-  const guarded = async () => {
-    let got;
-    try { got = await attempt(); } catch (e) { cancelFirst(); throw e; }
-    if (signal?.aborted) { await got.release(); throw signal.reason; }
-    return got;
-  };
-  if (waitMs === undefined) { cancelFirst(); return guarded(); }
-  if (!Number.isFinite(waitMs) || waitMs < 0) throw new TypeError(`waitMs must be a finite number >= 0, got ${waitMs}`);
   const platform = ctx.platform ?? process.platform;
   const transient = (e) => ['lock_held', 'lock_malformed'].includes(e?.code) || e?.lockVanished === true || (platform === 'win32' && e?.code === 'EPERM');
-  const deadline = now() + waitMs;
+  const deadline = wait ? now() + waitMs : 0;
   for (let backoff = 20; ; backoff = Math.min(backoff * 2, 200)) {
-    cancelFirst();
-    try { return await guarded(); } catch (e) {
+    step('attempt');
+    cancelFirst(); // before every attempt
+    try { await attempt(); break; } catch (e) {
       cancelFirst(); // decided before any classification of `e`
-      if (!transient(e)) throw e;
+      if (!wait || !transient(e)) throw e;
       if (now() >= deadline) {
         if (e.code === 'lock_held' || e.lockVanished) throw coded('lock_timeout', `waited ${waitMs} ms for ${lockFile} (${e.message})`);
         throw e;
       }
     }
+    step('sleep');
     try { await sleep(Math.min(backoff, Math.max(0, deadline - now())), signal); }
     catch (e) { cancelFirst(); throw e; }
+    step('slept');
   }
+  // I1, the one success exit: nothing is awaited between this check and the return.
+  cancelFirst();
+  step('commit');
+  return handle;
 }

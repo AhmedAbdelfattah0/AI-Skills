@@ -46,7 +46,15 @@
  * | 35 | :475 runs when its claim cannot be removed afterwards            | unsupported | no fault seam on the marker unlink (it is swallowed) |
  * | 36 | :485 waits for the caller-stated limit                           | adapted     | there is no default wait: no waitMs is one attempt (AC1) |
  *
- * Totals: 8 applicable, 20 adapted, 8 unsupported.
+ * Totals: 8 applicable, 20 adapted, 8 unsupported. (Row 24 was "divergent" until 4e487d9 refused
+ * out-of-range PIDs.) Rows 29, 34 and 35 stay unsupported: TEST_SEAM's read/unlink faults reach
+ * only the cancellation release (I3), not the recovery unlink or the marker.
+ *
+ * POSIX-only assertions (skipped or weakened on win32): W4 (symlink), the 0o600 mode checks in W2
+ * and W3, AC4 (directory fsync is skipped on win32), L16 (a real exited child), L30's EISDIR code
+ * and empty-sleep check, AC4/S1d's reuse recovery (win32 has no start time: lock_held only) and
+ * AC6/S1b (6 processes). The cancellation sweep and the I1-I4 tests are platform-neutral (injected
+ * fs faults, no real timers, no signals), but have not been run on Windows.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -57,7 +65,7 @@ import { fsyncSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
   writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { acquireLock, writeStateAtomic } from './durable-io.mjs';
+import { acquireLock, writeStateAtomic, TEST_SEAM } from './durable-io.mjs';
 import { processInfo } from '../engine-quiesce.mjs';
 
 const WIN = process.platform === 'win32';
@@ -505,6 +513,8 @@ async function cancelRun(dir, setup, waitMs, abortAt, defer, reason, at = null) 
   const before = existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : null;
   const controller = new AbortController();
   let ticks = 0, t = 0, fired = false;
+  const log = []; // added for I1/I2 (see the I1-I5 sweep below, which supersedes this one): abort, a1, commit, settled
+  controller.signal.addEventListener('abort', () => { log.push('abort'); queueMicrotask(() => log.push('a1')); });
   const fire = () => { fired = true; controller.abort(reason()); };
   const tick = () => {
     if (++ticks !== abortAt) return;
@@ -516,12 +526,12 @@ async function cancelRun(dir, setup, waitMs, abortAt, defer, reason, at = null) 
   const processInfoTicked = (pid) => { tick(); return pid === EXITED_PID ? { alive: false, startTime: null } : { alive: true, startTime: null }; };
   const hooks = { boundary: async () => { tick(); await Promise.resolve(); tick(); } };
   const sleep = async (ms) => { tick(); t += ms; await Promise.resolve(); tick(); };
-  const outcome = await acquireLock(ctxIn(dir, { processInfo: processInfoTicked, hooks }), { waitMs, signal: controller.signal, now: () => t, sleep })
-    .then((handle) => ({ handle }), (error) => ({ error }));
+  const outcome = await acquireLock(ctxIn(dir, { processInfo: processInfoTicked, hooks }), { waitMs, signal: controller.signal, now: () => t, sleep, [TEST_SEAM]: { step: (n) => { if (n === 'commit') log.push(n); } } })
+    .then((handle) => { log.push('settled'); return { handle }; }, (error) => { log.push('settled'); return { error }; });
   // Let a deferred abort that has not fired yet fire now, so `fired` is final.
   for (let i = 0; i <= defer; i++) await Promise.resolve();
   const after = existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : null;
-  return { outcome, ticks, fired, signal: controller.signal, entries: readdirSync(dir), lockFile, unchanged: before === after };
+  return { outcome, ticks, fired, log, signal: controller.signal, entries: readdirSync(dir), lockFile, unchanged: before === after, removed: after === null };
 }
 
 test('AC3 cancellation invariant: an abort at any boundary rejects with exactly signal.reason, owning nothing', async (t) => {
@@ -544,8 +554,12 @@ test('AC3 cancellation invariant: an abort at any boundary rejects with exactly 
               if (ours) violations.push(`${where}: rejected while owning the lock`);
               if (r.fired && !Object.is(r.outcome.error, r.signal.reason) && defer === 0) violations.push(`${where}: rejected with ${String(r.outcome.error?.code ?? r.outcome.error)}, not the signal's reason`);
               if (r.fired && defer === 0 && !r.unchanged) violations.push(`${where}: the lock file changed after the abort`);
+              if (!r.unchanged && !r.removed) violations.push(`${where}: rejected and the lock file is neither as it was nor removed`);
+              const beforeSettle = r.log.includes('a1') && r.log.indexOf('a1') < r.log.indexOf('settled');
+              if (beforeSettle && !Object.is(r.outcome.error, r.signal.reason)) violations.push(`${where}: an abort before the rejection did not win (${String(r.outcome.error?.code ?? r.outcome.error)})`);
             } else {
               if (r.fired && defer === 0) violations.push(`${where}: resolved although aborted at a boundary inside the call`);
+              if (r.fired && r.log.indexOf('abort') < r.log.indexOf('commit')) violations.push(`${where}: resolved although the abort came before the success exit`);
               if (!ours) violations.push(`${where}: resolved without owning the lock`);
               await r.outcome.handle.release();
             }
@@ -588,6 +602,254 @@ test('AC3 a deferred abort that lands before the call settles still rejects with
       assert.deepEqual(r.entries, ['document.lock'], `${label} +${defer}: nothing owned or left`);
     }
   }
+});
+
+// ---------------------------------------------------------------- cancellation invariants I1-I5 (generic sweep)
+
+/**
+ * The invariant sweep drives acquireLock through the test seam (TEST_SEAM): `step(name)` is called
+ * synchronously at every named point (enter, attempt, acquired, hook, hooked, sleep, slept, commit).
+ * Each run aborts the signal at step `at` (0: before the call, a pre-aborted signal), either
+ * synchronously (`defer` 0) or after `defer` microtasks, which walks the abort across every await
+ * and microtask boundary between two steps, including the continuation after the last await.
+ * Everything is in-process and microtask-driven: fake clock, fake sleep, async hook. No timer.
+ *
+ * Scenarios: a free lock, a stale holder (recovery), a live holder that releases during the second
+ * sleep (deferred successful returns), the same with a sleep that rejects with its own error on an
+ * abort (as the real timer does), release faults (unlink or read of our lock fails once during the
+ * cancellation release), and setup errors (bad waitMs, not a repo, a parent that is a file).
+ */
+const SWEEP_REASONS = HOSTILE_REASONS;
+/** A fresh fault per run: the first call throws `code`, later calls go to `real`. */
+const failOnce = (code) => (real) => { let left = 1; return (...a) => { if (left-- > 0) throw Object.assign(new Error(`${code}: injected`), { code }); return real(...a); }; };
+const SWEEP_SCENARIOS = [
+  { name: 'free lock', waits: [undefined, 1000] },
+  { name: 'stale holder', waits: [undefined, 1000], setup: (f) => writeFileSync(f, record(EXITED_PID)) },
+  { name: 'live holder released at sleep 2', waits: [1000], setup: (f) => writeFileSync(f, record(4242)), releaseAtSleep: 2 },
+  { name: 'live holder released at sleep 2, rejecting sleep', waits: [1000], setup: (f) => writeFileSync(f, record(4242)), releaseAtSleep: 2, rejectingSleep: true },
+  { name: 'live holder that never releases (lock_held, then lock_timeout at the deadline)', waits: [undefined, 100], setup: (f) => writeFileSync(f, record(4242)), fails: true },
+  { name: 'free lock, cancellation unlink fails once', waits: [undefined, 1000], unlinkFault: failOnce('EPERM') },
+  { name: 'free lock, cancellation read fails once', waits: [undefined, 1000], readFault: failOnce('EACCES') },
+  { name: 'stale holder, cancellation unlink fails once', waits: [undefined, 1000], setup: (f) => writeFileSync(f, record(EXITED_PID)), unlinkFault: failOnce('EBUSY') },
+  { name: 'free lock replaced by a successor right after our create', waits: [undefined, 1000], successor: true },
+  { name: 'setup error: bad waitMs', waits: [-1] },
+  { name: 'setup error: not a git work tree', waits: [undefined, 1000], ctx: (dir) => ({ repoRoot: dir, ticket: 'T', runId: 'r' }) },
+  { name: 'setup error: lock parent is a file', waits: [undefined, 1000], ctx: (dir) => { writeFileSync(join(dir, 'occupied'), 'x'); return { lockFile: join(dir, 'occupied', 'document.lock'), runId: 'r' }; } },
+];
+/** No work starts after an abort: `attempt` is the marker just before the pre-attempt check, so it may follow the abort; these may not. */
+const FORBIDDEN_AFTER_ABORT = ['acquired', 'hook', 'sleep', 'commit'];
+
+const DEFERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+const MAX_DEFER = DEFERS[DEFERS.length - 1];
+/** `probe`: at every step k, queue MAX_DEFER chained microtasks ending in `probe:k` (boundary coverage). */
+async function sweepRun(dir, sc, waitMs, at, defer, reasonFn, probe = false) {
+  rmSync(dir, { recursive: true, force: true }); mkdirSync(dir);
+  const lockFile = join(dir, 'document.lock');
+  sc.setup?.(lockFile);
+  const ctx = sc.ctx ? sc.ctx(dir) : ctxIn(dir, { processInfo: (pid) => (pid === EXITED_PID ? { alive: false, startTime: null } : { alive: true, startTime: null }) });
+  ctx.hooks = { boundary: async () => { await Promise.resolve(); } };
+  const read = () => (existsLock(lockFile) ? readFileSync(lockFile, 'utf8') : null);
+  let external = read(); // what the lock file must hold if this call never took the lock
+  const controller = new AbortController(), log = [];
+  let reason, steps = 0, sleeps = 0, t = 0;
+  // a1: one microtask after the abort. A rejection reacts (`settled`) before a1 only if it came first.
+  controller.signal.addEventListener('abort', () => { log.push('abort'); queueMicrotask(() => log.push('a1')); });
+  const fire = () => { reason = reasonFn(); controller.abort(reason); };
+  const schedule = () => {
+    if (defer === 0) return fire();
+    let p = Promise.resolve();
+    for (let i = 1; i < defer; i++) p = p.then(() => {});
+    p.then(fire);
+  };
+  const seam = {
+    step: (name) => {
+      log.push(name);
+      // I1 oracle: the success return must resolve the call before a microtask queued here twice runs.
+      if (name === 'commit') queueMicrotask(() => queueMicrotask(() => log.push('m2')));
+      // Someone broke our lock and took it (a hand removal plus a new engine): ours is gone, theirs must survive.
+      if (name === 'acquired' && sc.successor) { unlinkSync(lockFile); writeFileSync(lockFile, record(4242, { nonce: 'successor' })); external = readFileSync(lockFile, 'utf8'); }
+      if (++steps === at) schedule();
+      if (probe) { const k = steps; let q = Promise.resolve(); for (let i = 1; i < MAX_DEFER; i++) q = q.then(() => {}); q.then(() => log.push(`probe:${k}`)); }
+    },
+    ...(sc.unlinkFault && { unlinkLock: sc.unlinkFault(unlinkSync) }),
+    ...(sc.readFault && { readLock: sc.readFault(readFileSync) }),
+  };
+  const sleep = async (ms, sig) => {
+    if (sc.rejectingSleep && sig?.aborted) throw new Error('sleep refused: already aborted');
+    t += ms;
+    if (++sleeps === sc.releaseAtSleep) { unlinkSync(lockFile); external = null; }
+    await Promise.resolve();
+    if (sc.rejectingSleep && sig?.aborted) throw new Error('sleep interrupted');
+  };
+  if (at === 0) fire();
+  const call = acquireLock(ctx, { waitMs, signal: controller.signal, now: () => t, sleep, [TEST_SEAM]: seam });
+  const outcome = await call.then((handle) => { log.push('settled'); return { handle }; }, (error) => { log.push('settled'); return { error }; });
+  for (let i = 0; i <= Math.max(defer, probe ? MAX_DEFER : 0) + 2; i++) await Promise.resolve(); // let late aborts, probes and m2 land
+  return { outcome, log, steps, reason, signal: controller.signal, lockFile, after: read(), external, successor: sc.successor === true, entries: readdirSync(dir) };
+}
+
+/** Every violated postcondition of one run (empty when it satisfies I1-I4). */
+function sweepViolations(r, base, defer) {
+  const v = [], { outcome, log } = r;
+  const ab = log.indexOf('abort'), fired = ab >= 0;
+  const acquired = log.includes('acquired');
+  const ours = (s) => { try { const j = JSON.parse(s); return j.run_id === 'r' && j.pid === process.pid; } catch { return false; } };
+  if (r.entries.some((e) => e.endsWith('.recovery'))) v.push('a recovery marker was left');
+  if (fired) for (const name of FORBIDDEN_AFTER_ABORT) if (log.indexOf(name, ab) > ab) v.push(`step ${name} ran after the abort`);
+  if ('handle' in outcome) {
+    if (!('handle' in base)) v.push('resolved where the unaborted call rejects');
+    if (fired && ab < log.indexOf('commit')) v.push('I1: resolved with a handle although the abort came before the success exit');
+    if (!(log.indexOf('settled') < log.indexOf('m2'))) v.push('I1: the success exit did not resolve the call in the same turn as its check');
+    if (r.successor ? r.after !== r.external : !ours(r.after)) v.push(r.successor ? 'the successor lock was touched' : 'resolved without owning the lock');
+    return v;
+  }
+  const e = outcome.error;
+  if (fired && Object.is(e, r.signal.reason)) {
+    if (acquired && !r.successor ? r.after !== null : r.after !== r.external) v.push(`rejected with the reason but the lock file is ${acquired ? 'still present after we took it' : 'not as the holder left it'}`);
+    return v;
+  }
+  if (e?.code === 'lock_cancel_leaked') {
+    if (!fired) v.push('leak reported without an abort');
+    if (!(e instanceof AggregateError) || !Object.is(e.errors[0], r.signal.reason) || !Object.is(e.reason, r.signal.reason) || e.errors[1] !== e.cause || e.cause?.code === undefined) v.push('I3: the leak error does not carry the reason and the failure');
+    if (!acquired) v.push('I3: leak reported for a lock this call never took');
+    if (e.leakedLock?.lockFile !== r.lockFile || !ours(r.after) || JSON.parse(r.after).nonce !== e.leakedLock?.nonce) v.push('I3: leakedLock does not describe the lock left on disk');
+    return v;
+  }
+  // Neither the reason nor a leak: it must be the unaborted call's own error, with no abort before it.
+  if (!('error' in base) || e?.code !== base.error?.code || e?.name !== base.error?.name) v.push(`rejected with ${String(e?.code ?? e?.message ?? e)}, which is neither the reason nor the unaborted outcome`);
+  if (fired && !(log.indexOf('settled') < log.indexOf('a1'))) v.push('I2/I4: an abort that came before the failure did not win over it');
+  if (r.after !== r.external) v.push('the lock file changed on a refused call');
+  return v;
+}
+
+test('I1-I5 cancellation sweep: every boundary x scenario x hostile reason ends in a handle taken before the abort, or the reason, never an owned lock', async (t) => {
+  const dir = scratch(t);
+  const violations = [], classes = { 'deferred success': 0, 'plain reject': 0, 'won then released': 0, leak: 0, 'pre-aborted': 0, 'late abort after a refusal': 0 };
+  let cases = 0;
+  for (const sc of SWEEP_SCENARIOS) {
+    for (const waitMs of sc.waits) {
+      const base = await sweepRun(dir, sc, waitMs, -1, 0, () => null, true);
+      if (base.outcome.handle) await base.outcome.handle.release();
+      // Every boundary is visited: from each step, the longest deferral lands at or past the next
+      // step (or after the call settled), so deferrals 0..MAX_DEFER cover each gap between steps.
+      const stepIdx = base.log.map((e, i) => [e, i]).filter(([e]) => !['settled', 'm2'].includes(e) && !e.startsWith('probe:')).map(([, i]) => i);
+      for (let k = 1; k <= base.steps; k++) {
+        const landed = base.log.indexOf(`probe:${k}`), next = k < base.steps ? stepIdx[k] : base.log.indexOf('settled');
+        assert.ok(landed > next, `${sc.name}, waitMs ${waitMs}: ${MAX_DEFER} microtasks from step ${k} (${base.log[stepIdx[k - 1]]}) reach the next boundary (${base.log.join(' ')})`);
+      }
+      const expectSuccess = !sc.name.startsWith('setup error') && !sc.fails;
+      assert.equal('handle' in base.outcome, expectSuccess, `${sc.name}: the unaborted baseline ${expectSuccess ? 'acquires' : 'fails'}`);
+      for (let at = 0; at <= base.steps; at++) {
+        for (const defer of at === 0 ? [0] : DEFERS) {
+          for (const [label, reason] of SWEEP_REASONS) {
+            cases++;
+            const r = await sweepRun(dir, sc, waitMs, at, defer, reason);
+            const where = `${sc.name}, waitMs ${waitMs}, abort at step ${at}/${base.steps} (${r.log[r.log.indexOf('abort') - 1] ?? 'before the call'}) +${defer} microtasks, reason ${label}`;
+            for (const m of sweepViolations(r, base.outcome, defer)) violations.push(`${where}: ${m}`);
+            const fired = r.log.includes('abort');
+            if ('handle' in r.outcome) { if (fired) classes['deferred success']++; await r.outcome.handle.release(); }
+            else if (r.outcome.error?.code === 'lock_cancel_leaked') {
+              classes.leak++;
+              if (typeof r.outcome.error.leakedLock?.release !== 'function') continue; // already a violation above
+              await r.outcome.error.leakedLock.release();
+              if (existsLock(r.lockFile)) violations.push(`${where}: leakedLock.release() did not remove the leaked lock`);
+            }
+            else if (at === 0) classes['pre-aborted']++;
+            else if (fired && Object.is(r.outcome.error, r.signal.reason)) classes[r.log.includes('acquired') ? 'won then released' : 'plain reject']++;
+            else if (fired) classes['late abort after a refusal']++;
+          }
+        }
+      }
+    }
+  }
+  t.diagnostic(`sweep cases: ${cases}; ${JSON.stringify(classes)}`);
+  assert.deepEqual(violations.slice(0, 20), [], `${violations.length} violations`);
+  for (const [k, n] of Object.entries(classes)) assert.ok(n > 0, `the sweep produced at least one '${k}' outcome (non-vacuity)`);
+  assert.ok(cases > 7000, `the sweep ran (${cases} cases)`);
+});
+
+test('I1 regression (Codex round 3): an abort queued in the microtasks after the call never leaves an owned handle with a cancelled caller', async (t) => {
+  // Codex's repro on 4e487d9: free lock, waitMs set, queueMicrotask(abort): the call resolved with an
+  // owned handle after the abort. Here the abort is queued 1..10 microtasks after the call returns.
+  const dir = scratch(t), lockFile = join(dir, 'document.lock');
+  const seen = { resolved: 0, rejected: 0 };
+  for (const [lock, stale] of [['free', false], ['stale (async hook)', true]]) for (const waitMs of [undefined, 1000]) {
+    for (let d = 1; d <= 10; d++) {
+      if (stale) writeFileSync(lockFile, record(EXITED_PID));
+      const controller = new AbortController(), reason = { code: 'lock_held', why: 'hostile' }, log = [];
+      controller.signal.addEventListener('abort', () => log.push('abort'));
+      const ctx = ctxIn(dir, { processInfo: deadFor(EXITED_PID), hooks: { boundary: async () => { await Promise.resolve(); } } });
+      const call = acquireLock(ctx, { waitMs, signal: controller.signal, [TEST_SEAM]: { step: (n) => log.push(n) } });
+      let p = Promise.resolve();
+      for (let i = 1; i < d; i++) p = p.then(() => {});
+      p.then(() => controller.abort(reason));
+      const r = await call.then((handle) => ({ handle }), (error) => ({ error }));
+      for (let i = 0; i <= d; i++) await Promise.resolve();
+      assert.ok(log.includes('abort'), `${lock}, waitMs ${waitMs} +${d}: the abort fired`);
+      if (r.handle) {
+        seen.resolved++;
+        assert.ok(log.indexOf('commit') < log.indexOf('abort'), `${lock}, waitMs ${waitMs} +${d}: a handle is returned only when the abort came after the success exit (${log.join(' ')})`);
+        assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).pid, process.pid);
+        await r.handle.release();
+      } else {
+        seen.rejected++;
+        assert.ok(Object.is(r.error, reason), `${lock}, waitMs ${waitMs} +${d}: rejected with exactly the reason`);
+        assert.ok(!log.includes('commit'), `${lock}, waitMs ${waitMs} +${d}: no success exit after the abort`);
+        if (stale && !log.includes('acquired')) assert.equal(readFileSync(lockFile, 'utf8'), record(EXITED_PID), `${lock} +${d}: an abort before the recovery leaves the record`);
+        if (existsLock(lockFile)) unlinkSync(lockFile);
+      }
+      assert.deepEqual(readdirSync(dir), [], `${lock}, waitMs ${waitMs} +${d}: nothing owned or left after the caller released`);
+    }
+  }
+  assert.ok(seen.rejected > 0 && seen.resolved > 0, `both sides of the boundary were reached: ${JSON.stringify(seen)}`);
+});
+
+test('I4 a pre-aborted signal beats every setup error and does no work: no probe, no directory, no git call', async (t) => {
+  const dir = scratch(t);
+  for (const [label, reasonFn] of HOSTILE_REASONS) {
+    const signal = AbortSignal.abort(reasonFn());
+    const probes = [];
+    const nested = join(dir, 'missing', 'document.lock');
+    const cases = [
+      [{ lockFile: nested, runId: 'r', processInfo: (pid) => { probes.push(pid); return null; } }, { waitMs: -1 }],
+      [{ repoRoot: join(dir, 'no-such-dir'), ticket: 'T', runId: 'r' }, {}],
+      [{ lockFile: nested, runId: 'r', processInfo: (pid) => { probes.push(pid); return null; } }, { waitMs: 1000 }],
+    ];
+    for (const [ctx, opts] of cases) await assert.rejects(acquireLock(ctx, { ...opts, signal }), (e) => Object.is(e, signal.reason), label);
+    assert.deepEqual(probes, [], `${label}: no processInfo probe`);
+    assert.deepEqual(readdirSync(dir), [], `${label}: the lock directory was not created`);
+  }
+});
+
+test('I3 a failed release during cancellation is reported with the reason and a recoverable leakedLock; the normal release stays best effort', async (t) => {
+  const dir = scratch(t), lockFile = join(dir, 'document.lock');
+  for (const [fault, code] of [['unlinkLock', 'EPERM'], ['readLock', 'EACCES']]) {
+    const controller = new AbortController(), reason = new Error(`stop (${fault})`);
+    const failure = Object.assign(new Error(`${code}: injected`), { code });
+    let failing = true;
+    const seam = { step: (name) => { if (name === 'acquired') controller.abort(reason); },
+      [fault]: (...a) => { if (failing) { failing = false; throw failure; } return (fault === 'unlinkLock' ? unlinkSync : readFileSync)(...a); } };
+    const err = await acquireLock(ctxIn(dir), { signal: controller.signal, [TEST_SEAM]: seam }).then(() => assert.fail('resolved'), (e) => e);
+    assert.ok(err instanceof AggregateError, fault);
+    assert.equal(err.code, 'lock_cancel_leaked');
+    assert.deepEqual([err.errors[0], err.errors[1], err.reason, err.cause], [reason, failure, reason, failure]);
+    assert.equal(err.leakedLock.lockFile, lockFile);
+    assert.equal(err.leakedLock.pid, process.pid);
+    assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).nonce, err.leakedLock.nonce, `${fault}: the leaked lock is on disk, ours`);
+    await err.leakedLock.release();
+    assert.deepEqual(readdirSync(dir), [], `${fault}: leakedLock.release() recovers it`);
+  }
+  // A lock that is no longer ours (or gone) is not a leak: the plain reason.
+  const controller = new AbortController(), reason = new Error('stop');
+  const seam = { step: (name) => { if (name === 'acquired') { controller.abort(reason); writeFileSync(lockFile, record(4242, { nonce: 'successor' })); } } };
+  await assert.rejects(acquireLock(ctxIn(dir), { signal: controller.signal, [TEST_SEAM]: seam }), (e) => e === reason);
+  assert.equal(JSON.parse(readFileSync(lockFile, 'utf8')).nonce, 'successor', 'a successor lock is never removed');
+  // handle.release() keeps its documented behaviour: it never throws (here: the lock is a directory).
+  unlinkSync(lockFile);
+  const h = await must(acquireLock(ctxIn(dir)));
+  unlinkSync(lockFile); mkdirSync(lockFile);
+  await h.release();
+  assert.ok(statSync(lockFile).isDirectory());
 });
 
 // ---------------------------------------------------------------- regressions from the spike (Z)
