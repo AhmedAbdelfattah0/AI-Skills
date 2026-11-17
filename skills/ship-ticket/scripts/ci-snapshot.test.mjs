@@ -435,11 +435,12 @@ for (const root of ['check_run', 'job', 'annotation', 'page']) (function walk(ki
   else if (spec.arrayOf && typeof spec.arrayOf === 'object') walk(`${kind}[]`, spec.arrayOf);
 })(root, SHAPES[root]);
 // Read but not a consumed value: the line-kind discriminators of a paginated page (`name` / `id` tell an item from a total_count line).
-const UNCONSUMED_BUT_PRESERVED = { page: ['name', 'id'] };
+// A line that is neither an item nor a page (a stray object) is also asked for `total_count` by the same discriminator.
+const UNCONSUMED_BUT_PRESERVED = { page: ['name', 'id'], check_run: ['total_count'], job: ['total_count'] };
 
 const ARRAY_BUILTINS = ['length', 'map', 'slice', 'every', 'some', 'filter', 'forEach', 'includes', 'indexOf', 'join', 'find', 'findLast', 'at', 'entries', 'keys', 'values', 'flat', 'reduce', 'concat', 'constructor']; // constructor: read by Array.prototype.map (species lookup)
 /** Run the module over `texts` with every raw object wrapped in a recording Proxy. reads = every read; biz = reads made by the business code (not by the shape validator or the traversal helpers). */
-function recordReads(texts, reads, biz) {
+function recordReads(texts, reads, biz, enums) {
   const tag = new Map(), orig = JSON.parse;
   const kindOf = (line, itemKind) => { let o; try { o = orig(line); } catch { return itemKind; } if (!o || typeof o !== 'object') return itemKind; return Object.hasOwn(o, 'total_count') && !Object.hasOwn(o, 'name') ? 'page' : itemKind; };
   const add = (text, itemKind) => { for (const l of text.split('\n')) if (l.trim()) tag.set(l, kindOf(l, itemKind)); };
@@ -453,34 +454,41 @@ function recordReads(texts, reads, biz) {
     (reads.get(kind) ?? reads.set(kind, new Set()).get(kind)).add(k);
     if (!/at shapeProblem\b/.test(stack)) (biz.get(kind) ?? biz.set(kind, new Set()).get(kind)).add(k);
   };
-  const wrap = (v, kind) => {
-    let enumerated = new Set(); // keys listed by an ownKeys call whose descriptors are being fetched (Object.keys): enumeration is not a read
-    return new Proxy(v, {
-      get(t, k, r) {
-        const x = Reflect.get(t, k, r);
-        rec(kind, k, Array.isArray(t));
-        if (x && typeof x === 'object') return Array.isArray(t) ? (/^\d+$/.test(String(k)) ? wrap(x, `${kind}[]`) : x) : (typeof k === 'string' ? wrap(x, `${kind}.${k}`) : x);
-        return x;
-      },
-      has(t, k) { rec(kind, k, Array.isArray(t)); return Reflect.has(t, k); },
-      ownKeys(t) { const ks = Reflect.ownKeys(t); enumerated = new Set(ks.filter((k) => typeof k === 'string')); return ks; },
-      getOwnPropertyDescriptor(t, k) { if (enumerated.has(k)) enumerated.delete(k); else rec(kind, k, Array.isArray(t)); return Reflect.getOwnPropertyDescriptor(t, k); },
-    });
-  };
+  const ENUM_FRAME = /at Function\.(keys|values|entries|assign)\b/;
+  const wrap = (v, kind) => new Proxy(v, {
+    get(t, k, r) {
+      const x = Reflect.get(t, k, r);
+      rec(kind, k, Array.isArray(t));
+      if (x && typeof x === 'object') return Array.isArray(t) ? (/^\d+$/.test(String(k)) ? wrap(x, `${kind}[]`) : x) : (typeof k === 'string' ? wrap(x, `${kind}.${k}`) : x);
+      return x;
+    },
+    has(t, k) { rec(kind, k, Array.isArray(t)); return Reflect.has(t, k); },
+    // Key ENUMERATION is not a read of a named field; it is recorded separately, and business-code enumeration (not the validator, not the traversal helpers) is what the test forbids.
+    ownKeys(t) { const stack = new Error().stack; if (!/at (depthOf|canon|sha256|shapeProblem)\b/.test(stack)) enums.add(kind); return Reflect.ownKeys(t); },
+    getOwnPropertyDescriptor(t, k) { if (!ENUM_FRAME.test(new Error().stack)) rec(kind, k, Array.isArray(t)); return Reflect.getOwnPropertyDescriptor(t, k); },
+  });
   JSON.parse = (text, ...rest) => { const v = orig(text, ...rest); const kind = tag.get(text); return kind && v && typeof v === 'object' ? wrap(v, kind) : v; };
   try { return buildSnapshot({ texts, repo: REPO, sha: SHA, origin: ORIGIN }); } finally { JSON.parse = orig; }
 }
+// Each run keeps the (possibly mutated) TEXTS it will be recorded with; a mutated case must differ from the baseline text, or it silently became a baseline run.
 const allRuns = () => {
-  const runs = [rich(), base()];
-  for (const list of Object.values(CASES)) for (const c of list) if (!c.root && !c.args) { const s = base(); c.s?.(s); const x = texts(s); c.t?.(x); runs.push(s); }
+  const baseText = JSON.stringify(texts(base()));
+  const runs = [{ label: 'rich', x: texts(rich()) }, { label: 'base', x: texts(base()) }];
+  for (const [pred, list] of Object.entries(CASES)) list.forEach((c, i) => {
+    if (c.root || c.args) return;
+    const s = base(); c.s?.(s); const x = texts(s); c.t?.(x);
+    assert.notEqual(JSON.stringify(x), baseText, `${pred}[${i}] ${c.reason} is identical to the baseline text: the mutation was lost`);
+    runs.push({ label: `${pred}[${i}]`, x });
+  });
   return runs;
 };
 // Declared but only VALIDATED (typed, never read by a business function): the checks of their type is all this module does with them.
 const VALIDATED_ONLY = { 'job.steps[]': ['started_at', 'completed_at'], annotation: ['path', 'start_line', 'end_line', 'start_column', 'end_column', 'annotation_level', 'title', 'raw_details', 'blob_href'] };
 
-test('invariant: every property READ from a raw object is declared in SHAPES; business code reads every declared field except the explicit validated-only list', () => {
-  const reads = new Map(), biz = new Map();
-  for (const s of allRuns()) recordReads(texts(s), reads, biz);
+test('invariant: every property READ (get/has/descriptor lookup) by business code or the validator is declared in SHAPES, and business code never enumerates raw keys; business code reads every declared field except the explicit validated-only list', () => {
+  const reads = new Map(), biz = new Map(), enums = new Set();
+  for (const r of allRuns()) recordReads(r.x, reads, biz, enums);
+  assert.deepEqual([...enums], [], 'business code enumerates the keys of a raw object (only the validator and traversal helpers may)');
   const undeclared = [];
   for (const [kind, keys] of reads) for (const k of keys) if (!DECLARED.get(kind)?.has(k) && !UNCONSUMED_BUT_PRESERVED[kind]?.includes(k)) undeclared.push(`${kind}.${k}`);
   assert.deepEqual(undeclared, []);
