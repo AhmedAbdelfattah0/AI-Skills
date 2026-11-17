@@ -4,13 +4,16 @@
  * model choice: the approved plan's trigger tags, its recorded risk-floor classes (risk-floor.mjs) and its verified security
  * surfaces (security-plan.mjs) select rows of the table below; each row names the required test kinds (a)-(g).
  *
- *   test-kinds.mjs require --repo <dir> --base <commit> --plan <plan.md>
- *   test-kinds.mjs check   --repo <dir> --base <commit> --plan <plan.md> (--titles <json array|file> | --report-file <final message>)
+ *   test-kinds.mjs require --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <sha256:..>]
+ *   test-kinds.mjs check   --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <sha256:..>] (--titles <json array|file> | --report-file <final message>)
  *
  * Opt-in: nothing is required (`not_declared`, exit 0) unless the plan has a `test-triggers:` line or the repository commits
  * `.ship-ticket/test-triggers.json`, read from the BASE commit only (never the tree under check). Plan lines, all from the plan
  * narrative (RUN-STATE excluded): exactly one `test-triggers: <tag>[, <tag>...]` (or `none`); `lifecycle-item: <id> <text>`;
- * `test-waiver: <kind|item id> <reason>` (an owner disposition; the plan is owner-approved). Tag convention for test titles:
+ * `test-waiver: <kind|item id> <reason>` (an owner disposition). A waiver removes a requirement ONLY when the plan is bound to its
+ * approval (`--approved-digest` equals the plan's narrative digest AND a RUN-STATE START event records that digest); otherwise
+ * it is reported in `unbound_waivers` and removes nothing. The `risk_floor:` record line is TRUSTED advisory input as recorded
+ * in the approved plan (its base must equal --base; it is not recomputed here; absent = `risk_floor_missing`). Tag convention for test titles:
  * `[kind:<kind id>]` and `[plan:<item id>]`, exact and case-sensitive; one title may carry several.
  * Fail closed: an unknown tag, an unmapped risk class, an unmapped or unverifiable security surface, a malformed line or
  * declaration is a refusal, never an empty required set. Output: one JSON object, enums, ids and numbers only.
@@ -23,7 +26,8 @@
 import { execFileSync } from 'node:child_process';
 import { realpathSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { parseRecordedLine, decodeStrict, CHANGED } from './risk-floor.mjs';
+import { parseRecordedLine, decodeStrict, CHANGED, CLASS_NAME } from './risk-floor.mjs';
+import { planNarrativeDigest } from './engine-dag.mjs';
 import { parsePlanSecurityBlock } from './security-plan.mjs';
 import { parseWorkerReport } from './worker-report.mjs';
 import { isEntrypoint } from './harness.mjs';
@@ -55,7 +59,7 @@ export const TAGS = f({
   concurrency: f(['race']),
   money: f(['negative', 'race']),
   tenancy: f(['negative', 'ownership']),
-  auth: f(['negative']),
+  auth: f(['negative', 'ownership']),
   'input-path': f(['negative']),
   'shared-contract': f(['contract-producer', 'contract-consumer']),
   entrypoint: f(['real-entrypoint']),
@@ -81,7 +85,7 @@ export function validateDeclaration(d) {
   for (const [k, field, out] of [['tags', d.tags, tags], ['classes', d.classes, classes]]) {
     if (field === undefined) continue;
     if (!isMap(field) || Object.keys(field).length > 64) throw inv(`${k} must be an object of at most 64 entries`);
-    for (const name of Object.keys(field)) if (!NAME.test(name) || name === 'none') throw inv(`${k} name ${JSON.stringify(name)} is not a lower-case identifier (none is reserved)`);
+    for (const name of Object.keys(field)) if (!(k === 'classes' ? CLASS_NAME : NAME).test(name) || name === 'none') throw inv(`${k} name ${JSON.stringify(name)} is not a lower-case identifier (none is reserved)`);
     Object.assign(out, field);
   }
   for (const t of Object.keys(tags)) tags[t] = list(tags[t], (x) => Object.hasOwn(KINDS, x), `tags.${t}`);
@@ -97,9 +101,17 @@ const linesOf = (text, key) => text.split(/\r?\n/).map((l) => new RegExp(`^\\s*$
 const LOOSE = /test-triggers|lifecycle-item|test-waiver/i;
 const nearMiss = (text) => text.split(/\r?\n/).filter((l) => LOOSE.test(l)).length !== ['test-triggers', 'lifecycle-item', 'test-waiver'].reduce((n, k) => n + linesOf(text, k).length, 0);
 
+/** True only when the plan is the approved one: its narrative digest equals `approvedDigest` and a START event records it. */
+export function approvalBound(planText, approvedDigest) {
+  if (typeof approvedDigest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(approvedDigest)) return false;
+  try { if (planNarrativeDigest(planText) !== approvedDigest) return false; } catch { return false; }
+  const b = planText.indexOf(RS_BEGIN), e = planText.indexOf(RS_END);
+  return planText.slice(b, e).split(/\r?\n/).some((l) => { try { const x = JSON.parse(l); return x?.event === 'START' && x.approved_plan_digest === approvedDigest; } catch { return false; } });
+}
+
 /** The required kinds and items for a plan, under an optional validated declaration. Pure; never throws. */
-export function requiredFor({ planText, declaration = null }) {
-  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waived: [], tags: [], errors: uniq(errors), ...o });
+export function requiredFor({ planText, declaration = null, baseSha = null, approvedDigest = null }) {
+  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waived: [], unbound_waivers: [], tags: [], errors: uniq(errors), ...o });
   if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
   const text = narrative(planText);
   const trig = linesOf(text, 'test-triggers');
@@ -111,16 +123,24 @@ export function requiredFor({ planText, declaration = null }) {
   if (!trig.length) errors.push('plan_tags_missing');
   else if (trig.length > 1 || !trig[0]) errors.push('plan_line_invalid');
   else if (trig[0] !== 'none') for (const t of trig[0].split(',').map((x) => x.trim())) { if (Object.hasOwn(table, t)) tags.add(t); else errors.push('unknown_tag'); }
-  // risk floor classes: exactly one strict record line (risk-floor.mjs), or none at all
+  // risk floor classes: exactly one strict record line as risk-floor.mjs writes it (trusted as recorded in the plan, not recomputed)
   const floorLines = text.split(/\r?\n/).filter((l) => /^\s*(?:risk_floor:[ \t]*)?risk-floor:/.test(l));
-  if (floorLines.length) {
+  if (!floorLines.length) errors.push('risk_floor_missing');
+  else {
     let classes = null; // parseRecordedLine validates the one line strictly; the classes are read from that same line
-    try { parseRecordedLine(text); classes = /; classes=([a-z0-9_,-]*);/.exec(floorLines[0])[1].split(',').filter(Boolean); } catch { errors.push('risk_floor_invalid'); }
-    for (const c of classes ?? []) {
-      const mapped = declaration && c in declaration.classes ? declaration.classes[c] : c in table ? [c] : c === CHANGED ? [] : null;
-      if (mapped) mapped.forEach((t) => tags.add(t)); else errors.push('risk_class_unmapped');
+    try {
+      const rec = parseRecordedLine(text);
+      if (baseSha !== null && rec.base !== String(baseSha).slice(0, 12)) errors.push('risk_floor_base_mismatch');
+      const raw = /; classes=([^;]*);/.exec(floorLines[0])[1];
+      classes = raw === 'none' ? [] : raw.split(','); // `none` is the producer's empty-set sentinel
+      if (!classes.every((c) => CLASS_NAME.test(c) && c !== 'none')) throw new Error('bad class');
+    } catch { classes = null; errors.push('risk_floor_invalid'); }
+    for (const c of classes ?? []) { // add-only: the built-in reading of a class and the declared mapping are UNITED
+      const declared = declaration && c in declaration.classes ? declaration.classes[c] : null;
+      const builtin = c in table ? [c] : c === CHANGED ? [] : null;
+      if (!declared && !builtin) errors.push('risk_class_unmapped'); else [...(declared ?? []), ...(builtin ?? [])].forEach((t) => tags.add(t));
     }
-  } else if (Object.keys(declaration?.classes ?? {}).length) errors.push('risk_floor_missing');
+  }
   // security surfaces: a verified block, or none at all
   if (/<!-- security-plan: /.test(text)) {
     const block = parsePlanSecurityBlock(planText);
@@ -133,8 +153,10 @@ export function requiredFor({ planText, declaration = null }) {
   for (const l of linesOf(text, 'test-waiver')) { const m = /^(\S+)\s+\S/.exec(l); if (!m || !(Object.hasOwn(KINDS, m[1]) || items.includes(m[1]))) errors.push('waiver_invalid'); else waivers.add(m[1]); }
   if (errors.length) return out('refused');
   const kinds = uniq([...tags].flatMap((t) => table[t]));
-  return out('required', { tags: uniq([...tags]), kinds: kinds.filter((k) => !waivers.has(k)), items: items.filter((i) => !waivers.has(i)).sort(),
-    waived: uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w))) });
+  const relevant = uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w)));
+  const bound = approvalBound(planText, approvedDigest) ? new Set(relevant) : new Set(); // unbound waivers are reported, never applied
+  return out('required', { tags: uniq([...tags]), kinds: kinds.filter((k) => !bound.has(k)), items: items.filter((i) => !bound.has(i)).sort(),
+    waived: [...bound].sort(), unbound_waivers: relevant.filter((w) => !bound.has(w)) });
 }
 
 /** The `[kind:..]` and `[plan:..]` markers in test titles. `unknown`: well-formed kind markers naming no kind. */
@@ -153,40 +175,44 @@ export function checkTitles(req, titles) {
   const missing = req.kinds.filter((k) => !m.kinds.includes(k)), unmapped = req.items.filter((i) => !m.items.includes(i));
   const reasons = [...(missing.length ? ['missing_test_kinds'] : []), ...(unmapped.length ? ['unmapped_lifecycle_item'] : [])];
   const status = reasons.length ? 'freeze_refused' : 'pass';
-  const counts = { required: req.kinds.length, present: req.kinds.length - missing.length, missing: missing.length, waived: req.waived.length, items: req.items.length, unmapped: unmapped.length, unknown_markers: m.unknown.length };
-  return { status, reasons, missing_kinds: missing, unmapped_items: unmapped, unknown_markers: m.unknown, waived: req.waived, counts,
+  const counts = { required: req.kinds.length, present: req.kinds.length - missing.length, missing: missing.length, waived: req.waived.length, unbound_waivers: req.unbound_waivers.length, items: req.items.length, unmapped: unmapped.length, unknown_markers: m.unknown.length };
+  return { status, reasons, missing_kinds: missing, unmapped_items: unmapped, unknown_markers: m.unknown, waived: req.waived, unbound_waivers: req.unbound_waivers, counts,
     record_line: `test-kinds: status=${status}; ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join('; ')}; reasons=${reasons.join(',') || 'none'}` };
 }
 
-// ---- the declaration at BASE (hardened git as in risk-floor.mjs: no inherited GIT_*, no replace objects, literal pathspecs) ----
+// ---- the declaration at BASE ----
+// TEMPORARY third copy of the hardened-git helper (also in fast-checks.mjs and risk-floor.mjs): no inherited GIT_*, no replace
+// objects, literal pathspecs. TODO(S-02a0b): replace with lib/git-capability.mjs (git-exec) when it lands; do not extend this copy.
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 const git = (cwd, args) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 const gitText = (cwd, args) => git(cwd, args).toString('utf8').replace(/\n$/, '');
+/** `{declaration|null, baseSha}` from the BASE commit. */
 export function readDeclaration(repo, base) {
   if (typeof base !== 'string' || !base || base.startsWith('-')) throw bad('base_invalid');
   let top, sha;
   try { top = realpathSync.native(gitText(realpathSync.native(repo), ['rev-parse', '--show-toplevel'])); } catch { throw bad('repo_unavailable'); }
   try { sha = gitText(top, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${base}^{commit}`]); } catch { throw bad('base_invalid'); }
   const entry = gitText(top, ['ls-tree', '-z', sha, '--', DECLARATION_PATH]).replace(/\0$/, '');
-  if (!entry) return null;
+  if (!entry) return { declaration: null, baseSha: sha };
   const m = /^(100644|100755) blob ([0-9a-f]+)\t/.exec(entry);
   if (!m || Number(gitText(top, ['cat-file', '-s', m[2]])) > MAX_DECLARATION) throw bad('declaration_invalid', 'not a regular file within the size limit');
-  try { return validateDeclaration(JSON.parse(decodeStrict(git(top, ['cat-file', 'blob', m[2]])))); } catch (e) { throw e.code === 'declaration_invalid' ? e : bad('declaration_invalid'); }
+  try { return { declaration: validateDeclaration(JSON.parse(decodeStrict(git(top, ['cat-file', 'blob', m[2]])))), baseSha: sha }; } catch (e) { throw e.code === 'declaration_invalid' ? e : bad('declaration_invalid'); }
 }
 
 // ---- CLI ----
-const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waived: [], tags: [], errors: [code] });
+const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waived: [], unbound_waivers: [], tags: [], errors: [code] });
 export function main(argv) {
-  const usage = { code: 2, out: { status: 'refused', errors: ['bad_usage'], usage: 'test-kinds.mjs require|check --repo <dir> --base <commit> --plan <plan.md> [--titles <json|file> | --report-file <file>]' } };
+  const usage = { code: 2, out: { status: 'refused', errors: ['bad_usage'], usage: 'test-kinds.mjs require|check --repo <dir> --base <commit> --plan <plan.md> [--approved-digest <d>] [--titles <json|file> | --report-file <file>]' } };
   const [cmd, ...rest] = argv;
   let v;
-  try { ({ values: v } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: { repo: { type: 'string' }, base: { type: 'string' }, plan: { type: 'string' }, titles: { type: 'string' }, 'report-file': { type: 'string' } } })); } catch { return usage; }
+  try { ({ values: v } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: { repo: { type: 'string' }, base: { type: 'string' }, plan: { type: 'string' }, titles: { type: 'string' }, 'report-file': { type: 'string' }, 'approved-digest': { type: 'string' } } })); } catch { return usage; }
   if (!['require', 'check'].includes(cmd) || !v.repo || !v.base || !v.plan || rest.filter((a) => a.startsWith('--')).length !== Object.keys(v).length) return usage;
   if (cmd === 'require' ? (v.titles || v['report-file']) : !v.titles === !v['report-file']) return usage;
   let r;
   try {
     const planText = decodeStrict(readFileSync(v.plan));
-    r = requiredFor({ planText, declaration: readDeclaration(v.repo, v.base) });
+    const { declaration, baseSha } = readDeclaration(v.repo, v.base);
+    r = requiredFor({ planText, declaration, baseSha, approvedDigest: v['approved-digest'] ?? null });
   } catch (e) { r = refusedOut(e.code && /^[a-z_]+$/.test(e.code) ? e.code : 'plan_unreadable'); }
   if (cmd === 'check' && r.status === 'required') {
     let titles = null;

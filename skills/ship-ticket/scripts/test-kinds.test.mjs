@@ -10,6 +10,8 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as TK from './test-kinds.mjs';
 import * as SP from './security-plan.mjs';
+import * as RF from './risk-floor.mjs';
+import { planNarrativeDigest } from './engine-dag.mjs';
 import { buildBrief, lintBrief } from './brief.mjs';
 import { parseWorkerReport } from './worker-report.mjs';
 
@@ -20,10 +22,24 @@ const G = (dir, ...a) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'use
 const tmp = (p) => realpathSync.native(mkdtempSync(join(tmpdir(), p)));
 const cli = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
 const RS = '\n<!-- RUN-STATE:BEGIN -->\n{"event":"START"}\n<!-- RUN-STATE:END -->\n';
-const plan = (...lines) => `# Plan\n\n${lines.join('\n')}\n${RS}`;
-const req = (planText, declaration = null) => TK.requiredFor({ planText, declaration });
+const FB = '0123456789ab';
+/** The REAL producer's record line (risk-floor.mjs assess), never a hand-built one: classless is `classes=none`. */
+function realFloor(classes = [], { base = FB, changed = false } = {}) {
+  const declaration = classes.length ? RF.validateDeclaration({ version: 1, classes: classes.map((name) => ({ name, floor: 'ELEVATED', globs: ['src/**'] })) }) : null;
+  const r = RF.assess({ paths: ['src/x.ts'], declaration, declChanged: changed, claimed: 'ELEVATED', ai: 'ELEVATED', planned: true, baseSha: base, headLabel: 'planned' });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  return `risk_floor: ${r.record_line}`;
+}
+const planRaw = (...lines) => `# Plan\n\n${lines.join('\n')}\n${RS}`;
+// Every plan carries a risk-floor record as plan.md requires; a classless one by default.
+const plan = (...lines) => planRaw(...lines, ...(lines.some((l) => l.includes('risk-floor:')) ? [] : [realFloor()]));
+const req = (planText, declaration = null, extra = {}) => TK.requiredFor({ planText, declaration, ...extra });
+/** The plan as approved: its narrative digest recorded in a RUN-STATE START event. */
+const approve = (p) => { const d = planNarrativeDigest(p); return { planText: p.replace('{"event":"START"}', JSON.stringify({ event: 'START', run_id: 'r1', approved_plan_digest: d })), approvedDigest: d }; };
+const reqA = (p, declaration = null) => { const a = approve(p); return req(a.planText, declaration, { approvedDigest: a.approvedDigest }); };
 const title = (t, ...kinds) => `${t}${kinds.map((k) => ` [kind:${k}]`).join('')}`;
 const LETTERS = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+const uniqSorted = (xs) => [...new Set(xs)].sort();
 
 // ---- invariants over the whole table (generic: every row, every tag, every kind) ----
 test('invariant: every tag row resolves to defined kinds, and every kind a-g is reachable from some tag', () => {
@@ -76,6 +92,16 @@ test('AC4: an async-state + ui-lifecycle plan requires stale-N2, error-twin, lif
   assert.deepEqual(TK.checkTitles(r, [title('one test proves all', ...AC4)]).status, 'pass', 'one title may carry several markers');
 });
 
+test('AC4 on a plan shaped like the plan.md template (header, DAG table, real risk-floor record, START event)', () => {
+  const p = ['# Plan: checkout price and stock banners', '', '## Context', 'The cart adopts a re-validated price; stale responses must be ignored.', '',
+    '| ID | Owner | Step | Files touched | Depends on |', '|---|---|---|---|---|', '| `web-state` | builder 1 | Visit-scoped validation state | `src/cart.state.ts` | none |', '',
+    '## Risk', realFloor(), '', 'test-triggers: async-state, ui-lifecycle', '', RS.trim(), ''].join('\n');
+  const { planText, approvedDigest } = approve(p);
+  const r = req(planText, null, { approvedDigest });
+  assert.equal(r.status, 'required', JSON.stringify(r.errors)); assert.deepEqual([...r.kinds].sort(), [...AC4].sort());
+  assert.deepEqual(TK.checkTitles(r, [title('t', 'stale-N2', 'error-twin', 'negative')]).missing_kinds, ['lifecycle-destroy']);
+});
+
 // ---- AC7: plan lifecycle items ----
 test('AC7: an unmapped plan lifecycle item refuses freeze unless the plan dispositions it', () => {
   const p = plan('test-triggers: none', 'lifecycle-item: L1 dismissing one banner keeps the other', 'lifecycle-item: L2 leaving the page drops pending results');
@@ -84,16 +110,27 @@ test('AC7: an unmapped plan lifecycle item refuses freeze unless the plan dispos
   const c = TK.checkTitles(r, ['keeps banner [plan:L1]']);
   assert.equal(c.status, 'freeze_refused'); assert.deepEqual(c.reasons, ['unmapped_lifecycle_item']); assert.deepEqual(c.unmapped_items, ['L2']);
   assert.equal(TK.checkTitles(r, ['a [plan:L1]', 'b [plan:L2]']).status, 'pass');
-  const waived = req(p.replace('# Plan', '# Plan\n\ntest-waiver: L2 owner: covered by the existing e2e suite'));
-  assert.deepEqual(waived.items, ['L1']); assert.deepEqual(waived.waived, ['L2']);
+  const withWaiver = p.replace('# Plan', '# Plan\n\ntest-waiver: L2 owner: covered by the existing e2e suite');
+  const waived = reqA(withWaiver);
+  assert.deepEqual(waived.items, ['L1']); assert.deepEqual(waived.waived, ['L2']); assert.deepEqual(waived.unbound_waivers, []);
   assert.equal(TK.checkTitles(waived, ['a [plan:L1]']).status, 'pass');
+  // no approval binding: the waiver is reported, never applied
+  const unbound = req(withWaiver);
+  assert.deepEqual(unbound.items, ['L1', 'L2']); assert.deepEqual(unbound.waived, []); assert.deepEqual(unbound.unbound_waivers, ['L2']);
+  assert.equal(TK.checkTitles(unbound, ['a [plan:L1]']).status, 'freeze_refused');
+  // a waiver added to the plan AFTER approval changes the narrative digest: not applied
+  const a = approve(p);
+  const tampered = a.planText.replace('# Plan', '# Plan\n\ntest-waiver: L2 builder says unnecessary');
+  assert.deepEqual(req(tampered, null, { approvedDigest: a.approvedDigest }).items, ['L1', 'L2']);
+  // the right digest but no START event recording it: not applied
+  assert.deepEqual(req(withWaiver, null, { approvedDigest: planNarrativeDigest(withWaiver) }).unbound_waivers, ['L2']);
   // both reasons together, in a fixed order
   const both = TK.checkTitles(req(plan('test-triggers: ui-lifecycle', 'lifecycle-item: L1 x')), []);
   assert.deepEqual(both.reasons, ['missing_test_kinds', 'unmapped_lifecycle_item']);
 });
 
 test('AC7: a kind can be dispositioned in the plan; malformed dispositions and item ids are refusals', () => {
-  const r = req(plan('test-triggers: async-state', 'test-waiver: error-twin owner: no error path exists in this change'));
+  const r = reqA(plan('test-triggers: async-state', 'test-waiver: error-twin owner: no error path exists in this change'));
   assert.deepEqual(r.kinds.sort(), ['negative', 'stale-N2']); assert.deepEqual(r.waived, ['error-twin']);
   for (const [lines, code] of [
     [['test-triggers: none', 'test-waiver: L9 reason'], 'waiver_invalid'],
@@ -123,7 +160,7 @@ test('AC10: cross-module contract fixture: a changed producer without a consumer
 });
 
 // ---- trigger sources: plan tags, risk floor classes, security surfaces; fail closed ----
-const floorLine = (classes) => `risk_floor: risk-floor: floor=ELEVATED; classes=${classes}; claimed=ELEVATED; ai=ELEVATED; final=ELEVATED; paths=2; matched=1; base=0123456789ab; head=planned; declaration=none`;
+const floorLine = (classes) => (classes === TK.CHANGED ? realFloor([], { changed: true }) : realFloor(classes.split(',')));
 test('risk floor classes: a class named like a tag maps to it; a repo declaration maps others; an unmapped class is a refusal', () => {
   assert.deepEqual(req(plan('test-triggers: none', floorLine('tenancy'))).kinds.sort(), [...TK.TAGS.tenancy].sort());
   assert.deepEqual(req(plan('test-triggers: none', floorLine(TK.CHANGED))).kinds, [], 'a declaration change adds no surface');
@@ -131,9 +168,29 @@ test('risk floor classes: a class named like a tag maps to it; a repo declaratio
   assert.equal(un.status, 'refused'); assert.deepEqual(un.errors, ['risk_class_unmapped']);
   const decl = TK.validateDeclaration({ version: 1, classes: { 'billing-core': ['money', 'repair'] } });
   assert.deepEqual(req(plan('test-triggers: none', floorLine('billing-core')), decl).kinds.sort(), [...new Set([...TK.TAGS.money, ...TK.TAGS.repair])].sort());
-  assert.deepEqual(req(plan('test-triggers: none', floorLine('bad; classes=x'))).errors, ['risk_floor_invalid']);
+  assert.deepEqual(req(plan('test-triggers: none', realFloor().replace('classes=none', 'classes=bad; classes=x'))).errors, ['risk_floor_invalid']);
   assert.deepEqual(req(plan('test-triggers: none', floorLine('tenancy'), floorLine('tenancy'))).errors, ['risk_floor_invalid'], 'exactly one record line');
-  assert.deepEqual(req(plan('test-triggers: none'), decl).errors, ['risk_floor_missing'], 'declared class mapping with no floor record: unavailable, not zero');
+  assert.deepEqual(req(planRaw('test-triggers: none'), decl).errors, ['risk_floor_missing'], 'no floor record: unavailable, not zero');
+  assert.deepEqual(req(planRaw('test-triggers: async-state')).errors, ['risk_floor_missing'], 'an opted-in plan always needs the record');
+});
+
+test('risk floor from the REAL producer: classless (none), single, multi-class, underscore and declaration-changed records', () => {
+  assert.match(realFloor(), /; classes=none;/);
+  assert.deepEqual(req(plan('test-triggers: async-state', realFloor())).kinds.sort(), [...TK.TAGS['async-state']].sort(), 'none is the empty set');
+  assert.deepEqual(req(plan('test-triggers: none', realFloor(['tenancy']))).kinds.sort(), [...TK.TAGS.tenancy].sort());
+  assert.doesNotThrow(() => TK.validateDeclaration({ version: 1, classes: { billing_core: ['money'] } }), 'the producer grammar allows underscores');
+  const d = TK.validateDeclaration({ version: 1, classes: { billing_core: ['money'] } });
+  assert.deepEqual(req(plan('test-triggers: none', realFloor(['billing_core', 'tenancy'])), d).kinds.sort(), uniqSorted([...TK.TAGS.money, ...TK.TAGS.tenancy]));
+  assert.deepEqual(req(plan('test-triggers: none', realFloor(['billing_core']))).errors, ['risk_class_unmapped']);
+  assert.deepEqual(req(plan('test-triggers: none', realFloor([], { changed: true }))).kinds, []);
+  for (const odd of ['tenancy,,auth', 'tenancy,none', ',tenancy']) assert.deepEqual(req(plan('test-triggers: none', realFloor().replace('classes=none', `classes=${odd}`))).errors, ['risk_floor_invalid'], odd);
+  assert.deepEqual(req(plan('test-triggers: none', realFloor(['tenancy'])), null, { baseSha: 'fedcba9876543210' }).errors, ['risk_floor_base_mismatch']);
+  assert.equal(req(plan('test-triggers: none', realFloor(['tenancy'])), null, { baseSha: `${FB}aaaa` }).status, 'required');
+});
+
+test('add-only: a declared class mapping is united with the built-in reading, never replacing it', () => {
+  const d = TK.validateDeclaration({ version: 1, classes: { tenancy: ['repair'] } });
+  assert.deepEqual(req(plan('test-triggers: none', realFloor(['tenancy'])), d).kinds.sort(), uniqSorted([...TK.TAGS.tenancy, ...TK.TAGS.repair]));
 });
 
 test('security-plan surfaces: a verified block adds the mapped tags; a present but unverifiable block is a refusal', () => {
@@ -144,7 +201,7 @@ test('security-plan surfaces: a verified block adds the mapped tags; a present b
   const sel = SP.selectControls(cat, { security_policy: 2, surfaces, facts: { ...facts, boundaries: ['request-handler'], principals: ['anonymous'] },
     evidence: Object.fromEntries(Object.keys(facts).map((k) => [k, 'src/a.ts:handler'])) });
   assert.equal(sel.ok, true, JSON.stringify(sel));
-  const p = `# Plan\n\ntest-triggers: none\n\n${SP.renderSection3a(sel)}\n${RS}`;
+  const p = `# Plan\n\ntest-triggers: none\n${realFloor()}\n\n${SP.renderSection3a(sel)}\n${RS}`;
   const r = req(p);
   const want = ['negative', 'real-entrypoint']; // pinned: a route is an input path reached through the production entrypoint
   assert.equal(r.status, 'required', JSON.stringify(r.errors)); assert.deepEqual([...r.kinds].sort(), want);
@@ -160,7 +217,7 @@ test('plan tags: unknown tag, duplicate or empty trigger lines are refusals; RUN
   const inRunState = `# Plan\n\n<!-- RUN-STATE:BEGIN -->\ntest-triggers: money\ntest-waiver: negative x\n<!-- RUN-STATE:END -->\n`;
   assert.equal(req(inRunState).status, 'not_declared');
   const waiverInRunState = plan('test-triggers: money').replace('{"event":"START"}', 'test-waiver: negative appended by a worker');
-  assert.deepEqual(req(waiverInRunState).waived, [], 'a disposition appended to RUN-STATE is not an owner disposition');
+  assert.deepEqual(reqA(waiverInRunState).waived, [], 'a disposition appended to RUN-STATE is not an owner disposition');
   const d = TK.validateDeclaration({ version: 1, tags: { 'feature-flags': ['negative', 'lifecycle-destroy'] } });
   assert.deepEqual(req(plan('test-triggers: feature-flags'), d).kinds.sort(), ['lifecycle-destroy', 'negative']);
   assert.deepEqual(req(plan('test-triggers: money'), TK.validateDeclaration({ version: 1, tags: { money: ['regression'] } })).kinds.sort(), [...TK.TAGS.money, 'regression'].sort(), 'a declaration only adds kinds');
@@ -211,7 +268,8 @@ const json = (r) => JSON.parse(r.stdout);
 
 test('CLI: the declaration comes from BASE; working-tree edits and branch-only declarations do not change it', () => {
   const r = repo({ version: 1, classes: { 'billing-core': ['money'] } });
-  const p = file(plan('test-triggers: none', floorLine('billing-core')), 'plan.md');
+  const pf = (x) => file(plan('test-triggers: none', realFloor(['billing-core'], { base: x.base.slice(0, 12) })), 'plan.md');
+  const p = pf(r);
   const a = cli(['require', '--repo', r.dir, '--base', r.base, '--plan', p]);
   assert.equal(a.status, 0, a.stderr); assert.deepEqual(json(a).kinds.sort(), [...TK.TAGS.money].sort());
   writeFileSync(join(r.dir, TK.DECLARATION_PATH), JSON.stringify({ version: 1, classes: { 'billing-core': ['repair'] } }));
@@ -219,26 +277,34 @@ test('CLI: the declaration comes from BASE; working-tree edits and branch-only d
   const n = repo(null);
   mkdirSync(join(n.dir, '.ship-ticket'), { recursive: true }); writeFileSync(join(n.dir, TK.DECLARATION_PATH), JSON.stringify({ version: 1, classes: { 'billing-core': ['money'] } }));
   G(n.dir, 'add', '-A'); G(n.dir, 'commit', '-q', '-m', 'branch adds a declaration');
-  const b = cli(['require', '--repo', n.dir, '--base', n.base, '--plan', p]);
+  const b = cli(['require', '--repo', n.dir, '--base', n.base, '--plan', pf(n)]);
   assert.equal(b.status, 1); assert.deepEqual(json(b).errors, ['risk_class_unmapped'], 'branch-only declaration is not read');
   const inv = repo({ version: 1, tags: { x: ['telepathy'] } });
-  assert.deepEqual(json(cli(['require', '--repo', inv.dir, '--base', inv.base, '--plan', p])).errors, ['declaration_invalid']);
+  assert.deepEqual(json(cli(['require', '--repo', inv.dir, '--base', inv.base, '--plan', pf(inv)])).errors, ['declaration_invalid']);
+  const other = repo(null);
+  assert.deepEqual(json(cli(['require', '--repo', other.dir, '--base', other.base, '--plan', p])).errors.includes('risk_floor_base_mismatch'), true, 'the record base must equal --base');
   assert.deepEqual(json(cli(['require', '--repo', r.dir, '--base=-x', '--plan', p])).errors, ['base_invalid']);
 });
 
 test('CLI check: worker report titles, record line with numbers and enums only, exit codes', () => {
   const r = repo(null);
-  const p = file(ASYNC_UI, 'plan.md');
+  const p = file(plan('test-triggers: async-state, ui-lifecycle', realFloor([], { base: r.base.slice(0, 12) })), 'plan.md');
   const msg = (titles) => file(`done\n\n\`\`\`ship-ticket-report\n${JSON.stringify({ tests: [], red_seen: [], blockers: [], needs_outside_ownership: [], test_titles: titles })}\n\`\`\`\n`);
   const bad = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--report-file', msg([title('a', 'negative')])]);
   assert.equal(bad.status, 1); const o = json(bad);
   assert.equal(o.status, 'freeze_refused'); assert.deepEqual(o.reasons, ['missing_test_kinds']);
-  assert.equal(o.record_line, 'test-kinds: status=freeze_refused; required=4; present=1; missing=3; waived=0; items=0; unmapped=0; unknown_markers=0; reasons=missing_test_kinds');
+  assert.equal(o.record_line, 'test-kinds: status=freeze_refused; required=4; present=1; missing=3; waived=0; unbound_waivers=0; items=0; unmapped=0; unknown_markers=0; reasons=missing_test_kinds');
   const good = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--titles', JSON.stringify([title('a', ...AC4)])]);
   assert.equal(good.status, 0, good.stdout); assert.equal(json(good).status, 'pass');
   const noKey = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', p, '--report-file', file('```ship-ticket-report\n{"tests":[],"red_seen":[],"blockers":[],"needs_outside_ownership":[]}\n```\n')]);
   assert.equal(noKey.status, 1); assert.deepEqual(json(noKey).errors, ['test_titles_missing']);
   const nd = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(plan('x'), 'p.md'), '--titles', '[]']);
+  const withW = plan('test-triggers: async-state, ui-lifecycle', 'test-waiver: negative owner: n/a', realFloor([], { base: r.base.slice(0, 12) }));
+  const ap = approve(withW);
+  const bound = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(ap.planText, 'a.md'), '--approved-digest', ap.approvedDigest, '--titles', JSON.stringify([title('a', 'stale-N2', 'error-twin', 'lifecycle-destroy')])]);
+  assert.equal(bound.status, 0, bound.stdout); assert.deepEqual(json(bound).waived, ['negative']);
+  const unb = cli(['check', '--repo', r.dir, '--base', r.base, '--plan', file(ap.planText, 'a.md'), '--titles', JSON.stringify([title('a', 'stale-N2', 'error-twin', 'lifecycle-destroy')])]);
+  assert.equal(unb.status, 1); assert.deepEqual(json(unb).unbound_waivers, ['negative']); assert.deepEqual(json(unb).missing_kinds, ['negative']);
   assert.equal(nd.status, 0); assert.equal(json(nd).status, 'not_declared');
   assert.equal(cli(['check', '--plan', p]).status, 2, 'usage');
   assert.equal(cli(['require', '--repo', r.dir, '--base', r.base, '--plan', p, '--plan', p]).status, 2, 'repeated flag');
@@ -262,6 +328,7 @@ test('brief lists the required kinds, items and the report key; a refused or mal
   for (const k of AC4) assert.ok(b.includes(`\`[kind:${k}]\``), k);
   assert.ok(b.includes('`[plan:L1]`'));
   assert.ok(b.includes('"test_titles"'));
+  assert.ok(b.includes('ADVISORY') && b.includes('exit 1 is never a freeze permission'), 'the brief does not claim engine enforcement');
   const both = brief({ testKinds: r, t0: { checks: [{ name: 'lint' }] } });
   const lastExample = both.split('```ship-ticket-report\n').pop().split('\n')[0];
   assert.equal(parseWorkerReport(`\`\`\`ship-ticket-report\n${lastExample}\n\`\`\``, { t0Declared: true, testKindsDeclared: true }).status, 'structured', 'the last example satisfies both');

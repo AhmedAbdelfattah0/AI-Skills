@@ -224,7 +224,8 @@ The kinds (`KINDS` in the script, with their definitions) follow the classes (a)
 | `concurrency` | `race` |
 | `money` | `negative`, `race` |
 | `tenancy` | `negative`, `ownership` |
-| `auth`, `input-path` | `negative` |
+| `auth` | `negative`, `ownership` |
+| `input-path` | `negative` |
 | `shared-contract` | `contract-producer`, `contract-consumer` |
 | `entrypoint` | `real-entrypoint` |
 | `repair` | `regression` |
@@ -232,17 +233,27 @@ The kinds (`KINDS` in the script, with their definitions) follow the classes (a)
 Tags come from three places, all in the plan narrative (the RUN-STATE block never counts):
 
 - exactly one line `test-triggers: <tag>, <tag>` (or `test-triggers: none`);
-- the plan's `risk_floor:` record line (`scripts/risk-floor.mjs`): a class named like a tag is that tag,
-  `risk_declaration_changed` adds nothing, and any other class must be mapped by the repository;
+- the plan's `risk_floor:` record line (`scripts/risk-floor.mjs`), required in every opted-in plan (absent:
+  `risk_floor_missing`; more than one or malformed: `risk_floor_invalid`; its `base=` differs from `--base`:
+  `risk_floor_base_mismatch`). `classes=none` is the empty set. A class named like a tag is that tag;
+  `risk_declaration_changed` adds nothing (a declaration change is reviewed as a declaration, not a code surface); any
+  other class must be mapped by the repository, else `risk_class_unmapped`. The line is **trusted advisory input as
+  recorded in the approved plan**: this script does not recompute the floor (`risk-floor.mjs reassess` does, and
+  feeding its classes here is S-01b2);
 - the verified security block (`scripts/security-plan.mjs`): each surface kind maps to tags (`SURFACE_TAGS`).
 
 A repository extends the table in `.ship-ticket/test-triggers.json`, read from the base commit only:
 `{"version":1,"tags":{"<tag>":["<kind>"]},"classes":{"<risk class>":["<tag>"]}}`. It can add tags and kinds, never
-remove one. When the file exists, every plan needs the `test-triggers:` line.
+remove one: a declared class mapping is united with the built-in reading of that class (`"tenancy":["repair"]` adds
+`regression` to the `tenancy` kinds). Class names use the risk-floor grammar (`CLASS_NAME`, underscores allowed). When
+the file exists, every plan needs the `test-triggers:` line.
 
 Two more plan lines: `lifecycle-item: <id> <text>` makes the item a required entry of its own, covered by a test whose
-title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` is the owner's disposition that removes one
-requirement. The plan is owner-approved, so a waiver anywhere else does not count. Every line that mentions one of
+title carries `[plan:<id>]`; `test-waiver: <kind or item id> <reason>` is the owner's disposition of one requirement.
+A waiver removes the requirement **only when the plan is bound to its approval**: pass `--approved-digest <digest>`
+(the run's `approved_plan_digest`), and the plan's narrative digest must equal it and a RUN-STATE `START` event must
+record it. A waiver added after approval changes the digest. Without that binding a waiver is listed in
+`unbound_waivers` and removes nothing; a waiver in RUN-STATE never counts. Every line that mentions one of
 the three keys must be exactly one of these lines: a bulleted, bold or differently cased key is `plan_line_invalid`,
 and a plan that uses items or waivers without the `test-triggers:` line is `plan_tags_missing`, never `not_declared`.
 
@@ -252,21 +263,25 @@ it covers, exact and case-sensitive (`[kind:negative]`; `non-negative` or `[kind
 ```text
 node scripts/test-kinds.mjs require --repo <repo> --base <base sha> --plan <plan.md> > require.json
 node scripts/brief.mjs build ... --test-kinds require.json --out <brief>
-node scripts/test-kinds.mjs check --repo <repo> --base <base sha> --plan <plan.md> --report-file <final message file>
+node scripts/test-kinds.mjs check --repo <repo> --base <base sha> --plan <plan.md> --approved-digest <digest> --report-file <final message file>
 ```
 
 `brief.mjs build --test-kinds` lists the kinds, their definitions and the items in Required tests and asks for a
 report key `test_titles` (the worker report parser accepts it; a malformed one is `test_titles_invalid`). `check`
 recomputes the requirement from the plan and exits 1 with `freeze_refused` and the reasons `missing_test_kinds`
 and/or `unmapped_lifecycle_item`, or `refused` with an error code (`unknown_tag`, `risk_class_unmapped`,
-`risk_floor_invalid`, `risk_floor_missing`, `security_block_invalid`, `surface_kind_unmapped`, `plan_tags_missing`,
+`risk_floor_invalid`, `risk_floor_missing`, `risk_floor_base_mismatch`, `security_block_invalid`, `surface_kind_unmapped`, `plan_tags_missing`,
 `plan_line_invalid`, `waiver_invalid`, `declaration_invalid`, `test_titles_missing`). Record its `record_line`
-(numbers and enums only) in RUN-STATE.
+(numbers and enums only) in RUN-STATE. **Exit 1 is never a freeze permission:** do not freeze a candidate while
+`check` exits 1, as with T0's `verify`.
 
-**Status: advisory.** No engine step runs `check` at freeze yet (S-01b2). A title marker is the worker's claim and
+**Status: advisory.** No engine step runs `check` at freeze yet (S-01b2); the rule above is the orchestrator's. A title marker is the worker's claim and
 does not prove that the test exercises the property; mutation (S-01c) and the reviewers cover that. Only the
 `async-state`, `ui-lifecycle`, `entrypoint` and `shared-contract` rows are pinned by acceptance tests; the other
-rows and `SURFACE_TAGS` are provisional.
+rows and `SURFACE_TAGS` are provisional. `async-state` and `ui-lifecycle` stay exactly as the acceptance test pins
+them: add `concurrency` for overlapping or out-of-order requests (`race`) and `tenancy` or `auth` for cross-visit or
+cross-user ownership. The script's declaration read is a temporary copy of the hardened git helper, to be replaced by
+the shared git library (S-02a0).
 
 ## The static proof
 
