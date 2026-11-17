@@ -369,3 +369,12 @@ test('docs: debate rule is consistent, the unrelated preflight paragraph is inta
   assert.doesNotMatch(ref('SKILL.md') + ref('scripts/risk-floor.mjs'), /never under-classify|is final: it forces/);
   assert.doesNotThrow(() => RF.validateDeclaration(JSON.parse(readFileSync(new URL('references/risk-paths.example.json', root), 'utf8'))));
 });
+
+test('fold expansion cannot exceed the matched-text budget (ﬃ expands 3x): post-fold length is enforced, fail closed', () => {
+  // 4096 raw characters pass the raw limit but fold to 12288: must be malformed_input, never matched with an oversized text.
+  assert.throws(() => RF.globMatches('a', 'ﬃ'.repeat(4096)), (e) => e.code === 'malformed_input');
+  assert.throws(() => RF.compileGlob('ﬃ'.repeat(256)), (e) => e.code === 'malformed_input');
+  // within the budget after folding it still matches (fold works): 1365 ligatures fold to 4095 characters
+  assert.equal(RF.globMatches('ffi*', 'ﬃ'.repeat(1365)), true);
+  assert.doesNotThrow(() => RF.compileGlob('ﬃ'.repeat(85)));
+});

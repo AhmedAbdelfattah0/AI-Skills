@@ -71,6 +71,8 @@ const fold = (x) => { let o = ''; for (const c of x) o += c.toLowerCase().toUppe
 function segmentsOf(p, what, maxChars = MAX_PATH_CHARS, maxSegs = MAX_PATH_SEGS) {
   if (!wellFormed(p) || p.length > maxChars) throw bad('malformed_input', `${what} is not a well-formed string within the budget`);
   const s = fold(p.replace(/\p{Cf}/gu, '').normalize('NFC')).normalize('NFC').replace(/\\/g, '/');
+  // Folding can EXPAND text (a ligature becomes up to 3 characters): the budget applies to the text that is actually MATCHED, so STEP_BOUND_PER_PAIR holds.
+  if (s.length > maxChars) throw bad('malformed_input', `${what} exceeds the budget after case folding`);
   if (s.startsWith('/') || /^[a-z]:\//.test(s)) throw bad('malformed_input', `${what} is absolute`);
   const segs = [];
   for (const seg of s.split('/')) { if (seg === '' || seg === '.') continue; if (seg === '..') throw bad('malformed_input', `${what} has a ".." segment`); segs.push(seg); }
