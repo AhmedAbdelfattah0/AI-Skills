@@ -186,7 +186,8 @@ hard rules when adding or editing a skill:
    and omits `FAIL` makes a failure unrecordable. The validator enforced this before this list
    named it.
 8. **Every cited rule ID exists in the skill that owns it.** `BE-*` and `NG-*` belong
-   to `code-quality` (defined in its `stack-backend.md` and `stack-angular.md`), `TEST-*` to
+   to `code-quality` and are defined only in its `stack-backend.md` and `stack-angular.md`
+   (`RULE_ID_DEFINING_FILES`; a citation elsewhere in `code-quality` is checked, never defines), `TEST-*` to
    `test-quality`, `DOC-*` to `docs-accuracy` and `VAPT-*` to `vapt`. A single ID, a range (`BE-AUTH-01…07`), a slash list and
    a comma list in any `SKILL.md` or `references/*.md` are expanded and each ID must appear in the
    owner's `SKILL.md` or `references/`. On its first run it found five: `nn-guard` blocked edits on a
@@ -229,8 +230,9 @@ the constitution modes (`constitution.md`) and the reactive MODE D guard (`guard
 rules (`NG-*`) live in `references/stack-angular.md` and backend rules (`BE-*`) in
 `references/stack-backend.md`; a backend diff loads the whole of `stack-backend.md`, because
 security rules are never progressive. `angular-code-quality` and `backend-code-quality` remain
-for one release as rule-less aliases (O-6) that point at those references; `update` installs
-`code-quality` beside a tracked alias (`RETIRED_SKILLS` in `scripts/cli.mjs`). Their project
+for one release as rule-less aliases (O-6; CQ-4 removes them) that point at those references;
+`install` and `update` put `code-quality` beside an alias (`RETIRED_SKILLS` in `scripts/cli.mjs`)
+and never overwrite a foreign or edited `code-quality`. Their project
 paths `.claude/angular-code-quality/` and `.claude/backend-code-quality/` are protocol
 identifiers the merged skill still reads and writes. `references/angular.md` and `nodejs.md`
 are **constitution-level summaries only** — each carries a header deferring to its stack

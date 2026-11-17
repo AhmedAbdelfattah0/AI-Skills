@@ -183,7 +183,7 @@ universal core its LOAD TABLE names); the row adds the stack reference.
 | **Angular** frontend | + `references/stack-angular.md` | `NG-*` |
 | **Any other frontend** — React, Vue, Svelte, Next/Nuxt, plain TS | the entry and core only | the universal core; per-stack summaries via `references/constitution.md` |
 | **Any backend**, any language | + the whole of `references/stack-backend.md` | `BE-*` — it detects the runtime itself |
-| **Full-stack** | + both stack references | `NG-*` and `BE-*`, one Design Contract |
+| **Full-stack** | + `references/stack-backend.md`, and + `references/stack-angular.md` only when the frontend is Angular (any other frontend keeps the core) | `BE-*`, plus `NG-*` for Angular; one Design Contract |
 | **A stack with no reference file** — Go, Rust, Java, C# | the entry and core only | the universal principles applied to that language |
 
 A retired alias of `code-quality` holds no rules; never route to one.

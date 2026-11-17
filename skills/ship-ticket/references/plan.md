@@ -402,16 +402,18 @@ Roles come from the repo's actual layout, not from a framework this skill
 prefers. The rules in force are every `[NN]` rule, plus the universal core,
 plus whatever the repo's own conventions document requires.
 
-### Full-stack: one contract, both stack references
+### Full-stack: one contract, composed coverage
 
-A full-stack ticket loads both stack references and produces **one** contract and
+A full-stack ticket composes the frontend's coverage (`stack-angular.md` only when
+the frontend is Angular; otherwise the core and the no-stack-reference shape above)
+with the backend's `stack-backend.md`, and produces **one** contract and
 **one** rule pass — never two uncoordinated halves. Their schemas differ, so
 compose rather than concatenate: **one table, one row per file, each row carrying
 the role vocabulary of the side that owns it.** A file appears exactly once. Two
 tables mean two half-reviews, and a rule that fell between them is invisible.
 
 Run the frontend and backend row proposals concurrently, each read-only against
-the approved execution DAG with its own stack reference. The orchestrator owns
+the approved execution DAG with its own coverage. The orchestrator owns
 shared seam files, resolves duplicate ownership, and composes the proposals into
 the one Design Contract before any implementation worker starts. A proposal may
 flag a missing path; it may not expand the approved plan or write candidate files.

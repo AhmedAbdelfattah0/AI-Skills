@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  realpathSync, rmSync, writeFileSync,
+  realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -190,38 +190,113 @@ test('update leaves an unrecorded same-name directory alone and --adopt takes it
   assert.equal(readManifest(w.claudeDir()).skills.alpha.mode, 'copy');
 });
 
-// ---- retired aliases: update installs the successor (O-6, one release) --------
+// ---- retired aliases: install and update bring the successor (O-6, one release) --
 
 const aliasWorld = (t) => world(t, {
   alpha: ['Alpha body.'],
   'angular-code-quality': ['Deprecated alias. Holds no rules.'],
+  'backend-code-quality': ['Deprecated alias. Holds no rules.'],
   'code-quality': ['The rules.'],
 });
 const SUCCESSOR_ADDED = /\+ code-quality {2}\(successor of angular-code-quality — installed\)/;
 const COLLISION = /code-quality {2}needed by the angular-code-quality alias, which holds no rules — resolve this collision/;
+const installCollision = (alias, why) => new RegExp(`! code-quality {2}needed by the ${alias} alias, which holds no rules — ${why}, left alone`);
 
-test('update installs the successor of a selectively linked alias', (t) => {
+// An install made before the successor existed: the alias alone, recorded.
+function aliasOnlyInstall(w, mode, alias = 'angular-code-quality') {
+  assert.equal(w.run(['install', mode, alias]).status, 0);
+  rmSync(w.claudeDir('code-quality'), { recursive: true, force: true });
+  const manifestPath = join(w.claudeDir(), MANIFEST);
+  const m = readManifest(w.claudeDir());
+  delete m.skills['code-quality'];
+  writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+  assert.ok(!existsSync(w.claudeDir('code-quality')));
+}
+
+for (const [mode, alias] of [['--link', 'angular-code-quality'], ['--copy', 'angular-code-quality'],
+  ['--link', 'backend-code-quality'], ['--copy', 'backend-code-quality']]) {
+  test(`a selective ${mode} install of ${alias} also installs code-quality, with no update`, (t) => {
+    const w = aliasWorld(t);
+    const r = w.run(['install', mode, alias]);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, new RegExp(`code-quality {2}→ claude {2}\\(successor of ${alias}\\)`));
+    assert.match(r.out, /installed 2\/2 skill/);
+    const dst = w.claudeDir('code-quality');
+    assert.equal(lstatSync(dst).isSymbolicLink(), mode === '--link');
+    assert.equal(read(join(dst, 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
+    assert.equal(readManifest(w.claudeDir()).skills['code-quality'].mode, mode.slice(2));
+    assert.ok(!existsSync(w.claudeDir('alpha')), 'nothing else was installed');
+  });
+}
+
+test('installing both aliases installs code-quality once', (t) => {
   const w = aliasWorld(t);
-  assert.equal(w.run(['install', '--link', 'angular-code-quality']).status, 0);
-  assert.ok(!existsSync(w.claudeDir('code-quality')), 'the selective install did not bring the successor');
+  const r = w.run(['install', '--copy', 'angular-code-quality', 'backend-code-quality']);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /installed 3\/3 skill/);
+  assert.equal(r.out.match(/successor of/g).length, 1);
+});
+
+test('install leaves a foreign successor directory alone and reports the collision', (t) => {
+  const w = aliasWorld(t);
+  put(w.claudeDir('code-quality', 'SKILL.md'), 'somebody else owns this\n');
+  const r = w.run(['install', '--copy', 'backend-code-quality']);
+  assert.match(r.out, installCollision('backend-code-quality', 'present but not installed by us'));
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'somebody else owns this\n');
+  assert.equal(readManifest(w.claudeDir()).skills['code-quality'], undefined);
+});
+
+test('install leaves an edited successor alone and reports the collision', (t) => {
+  const w = aliasWorld(t);
+  w.run(['install', '--copy', 'angular-code-quality']);
+  writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
+  const r = w.run(['install', '--copy', 'angular-code-quality']);
+  assert.match(r.out, installCollision('angular-code-quality', 'edited after install'));
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'my own edit\n');
+});
+
+test('install leaves a successor symlink that is not ours alone', (t) => {
+  const w = aliasWorld(t);
+  const elsewhere = join(w.root, 'elsewhere-cq');
+  put(join(elsewhere, 'SKILL.md'), 'another collection\n');
+  mkdirSync(w.claudeDir(), { recursive: true });
+  try { symlinkSync(elsewhere, w.claudeDir('code-quality'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch { t.skip('symlinks not permitted here'); return; }
+  const r = w.run(['install', '--copy', 'angular-code-quality']);
+  assert.match(r.out, installCollision('angular-code-quality', 'a symlink that is not ours'));
+  assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), 'another collection\n');
+});
+
+test('update installs the successor of an older alias-only link install', (t) => {
+  const w = aliasWorld(t);
+  aliasOnlyInstall(w, '--link');
   const r = w.update();
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, SUCCESSOR_ADDED);
   assert.ok(lstatSync(w.claudeDir('code-quality')).isSymbolicLink(), 'linked like the alias');
   assert.equal(realpathSync(w.claudeDir('code-quality')), realpathSync(w.file('code-quality')));
-  assert.equal(readManifest(w.claudeDir()).skills['code-quality'].mode, 'link');
   assert.ok(!existsSync(w.claudeDir('alpha')), 'nothing else was adopted');
 });
 
-test('update installs the successor of a selectively copied alias', (t) => {
+test('update installs the successor of an older alias-only copy install', (t) => {
   const w = aliasWorld(t);
-  assert.equal(w.run(['install', '--copy', 'angular-code-quality']).status, 0);
+  aliasOnlyInstall(w, '--copy');
   const r = w.update();
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, SUCCESSOR_ADDED);
   assert.ok(!lstatSync(w.claudeDir('code-quality')).isSymbolicLink());
   assert.equal(read(w.claudeDir('code-quality', 'SKILL.md')), read(w.file('code-quality', 'SKILL.md')));
   assert.ok(readManifest(w.claudeDir()).skills['code-quality'].hash, 'the successor copy is recorded');
+});
+
+test('update gives the successor the alias install mode, not the directory default', (t) => {
+  const w = aliasWorld(t);
+  aliasOnlyInstall(w, '--link');
+  w.run(['install', '--copy', 'alpha']);               // the directory default is now copy
+  assert.equal(readManifest(w.claudeDir()).mode, 'copy');
+  const r = w.update();
+  assert.match(r.out, SUCCESSOR_ADDED);
+  assert.ok(lstatSync(w.claudeDir('code-quality')).isSymbolicLink(), 'linked like the alias');
 });
 
 test('a selective install with no alias does not gain the successor', (t) => {
@@ -233,9 +308,9 @@ test('a selective install with no alias does not gain the successor', (t) => {
   assert.ok(!existsSync(w.claudeDir('code-quality')));
 });
 
-test('a foreign successor directory is a collision and is left alone', (t) => {
+test('update treats a foreign successor directory as a collision and leaves it alone', (t) => {
   const w = aliasWorld(t);
-  w.run(['install', '--copy', 'angular-code-quality']);
+  aliasOnlyInstall(w, '--copy');
   put(w.claudeDir('code-quality', 'SKILL.md'), 'somebody else owns this\n');
   const r = w.update();
   assert.match(r.out, /code-quality {2}present but not installed by us — left alone/);
@@ -244,9 +319,9 @@ test('a foreign successor directory is a collision and is left alone', (t) => {
   assert.equal(readManifest(w.claudeDir()).skills['code-quality'], undefined);
 });
 
-test('an edited successor is a collision and keeps its edits', (t) => {
+test('update treats an edited successor as a collision and keeps its edits', (t) => {
   const w = aliasWorld(t);
-  w.run(['install', '--copy', 'angular-code-quality', 'code-quality']);
+  w.run(['install', '--copy', 'angular-code-quality']);
   writeFileSync(w.claudeDir('code-quality', 'SKILL.md'), 'my own edit\n');
   w.writeSkill('code-quality', ['The rules, revised.']);
   const r = w.update();
@@ -513,11 +588,30 @@ function citingWorld(t, citations, owners = {}) {
   };
   const w = validWorld(t, {});
   for (const [name, body] of Object.entries({ ...defaults, ...owners })) {
-    if (body) w.writeSkill(name, body);
+    if (!body) continue;
+    // code-quality defines NG/BE only in its stack references.
+    if (name === 'code-quality') writeStackBackend(w, body);
+    else w.writeSkill(name, body);
   }
   w.writeSkill('alpha', [...citations, '', ...VOCABULARY]);
   return w;
 }
+
+function writeStackBackend(w, rules, entry = []) {
+  w.writeSkill('code-quality', ['Backend: [stack](references/stack-backend.md).', ...entry],
+    { 'references/stack-backend.md': `${rules.join('\n')}\n` });
+}
+
+// Only the stack references define NG/BE; a citation anywhere else in
+// code-quality is checked against them, never defines itself.
+test('an NG/BE ID cited outside the code-quality stack references must be defined in them', (t) => {
+  const w = citingWorld(t, ['Intro.']);
+  writeStackBackend(w, ['Rules: BE-SEC-01.'], ['', 'Cites BE-SEC-99 here.']);
+  const r = w.validate();
+  assert.equal(r.status, 1, r.out);
+  const line = lineOf(read(w.file('code-quality', 'SKILL.md')), 'BE-SEC-99');
+  assert.match(r.out, new RegExp(`❌ code-quality: code-quality/SKILL\\.md:${line} cites 'BE-SEC-99', which code-quality does not define\\.`));
+});
 
 function assertCited(w, id, needle = id) {
   const r = w.validate();

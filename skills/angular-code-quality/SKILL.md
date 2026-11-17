@@ -16,8 +16,8 @@ which defines every `NG-*` rule. Its LOAD TABLE names the other files a task nee
 The project paths `.claude/angular-code-quality/{profile,deviations}.md` are
 unchanged; `code-quality` reads and writes them.
 
-If `code-quality` is not installed beside this alias, `update` installs it. If
-`update` reported it as a collision (a foreign or locally edited `code-quality`
-directory), resolve that directory first. Until then no rule source is
-available: say so, mark the rules check degraded, and do not cite or invent
-`NG-*` rule IDs.
+`install` and `update` put `code-quality` beside this alias unless a foreign or
+locally edited `code-quality` directory is in the way. **Check the file, not the
+install log:** if `../code-quality/references/stack-angular.md` does not exist, no rule
+source is available (an older or foreign `code-quality` has none). Say so, mark
+the rules check degraded, and do not cite or invent `NG-*` rule IDs.

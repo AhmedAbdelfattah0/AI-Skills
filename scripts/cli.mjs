@@ -500,6 +500,28 @@ function cmdList() {
   }
 }
 
+// Retired skills kept as rule-less aliases for one release (O-6; CQ-4 removes the
+// aliases and this map at the next release). An install that holds only the alias
+// holds no rules, so `install` and `update` both put the successor beside it.
+const RETIRED_SKILLS = {
+  'angular-code-quality': 'code-quality',
+  'backend-code-quality': 'code-quality',
+};
+
+// Why an existing successor directory must not be replaced, or null when it is
+// absent or ours and untouched. Never overwrites what somebody else made or edited.
+function successorCollision(dst, src, record) {
+  let st = null;
+  try { st = lstatSync(dst); } catch { return null; }
+  if (st.isSymbolicLink()) {
+    let target = null;
+    try { target = resolve(dirname(dst), readlinkSync(dst)); } catch { /* unreadable */ }
+    return target && normalizeTarget(target) === normalizeTarget(src) ? null : 'a symlink that is not ours';
+  }
+  if (!record?.hash) return 'present but not installed by us';
+  return record.hash === hashSkill(dst) ? null : 'edited after install';
+}
+
 function cmdInstall(args) {
   const wantCopy = args.includes('--copy') || args.includes('-c');
   const wantLink = args.includes('--link') || args.includes('-l');
@@ -525,6 +547,14 @@ function cmdInstall(args) {
       process.exit(1);
     }
     targets = names;
+  }
+  // successor -> the requested alias that needs it (a bare install has them all)
+  const successorOf = new Map();
+  for (const n of targets) {
+    const successor = RETIRED_SKILLS[n];
+    if (successor && available.includes(successor) && !targets.includes(successor) && !successorOf.has(successor)) {
+      successorOf.set(successor, n);
+    }
   }
 
   // Mode: explicit flag wins; otherwise copy from an ephemeral source, else link.
@@ -575,8 +605,23 @@ function cmdInstall(args) {
         console.error('   symlink failed — retry with --copy');
       }
     }
+    for (const [name, alias] of successorOf) {
+      const src = join(SKILLS_DIR, name);
+      const dst = join(dir, name);
+      const why = successorCollision(dst, src, manifest.skills[name]);
+      if (why) {
+        console.log(`   ! ${name}  needed by the ${alias} alias, which holds no rules — ${why}, left alone; resolve this collision`);
+        continue;
+      }
+      if (applySkill(src, dst, mode, manifest, name)) {
+        console.log(`${mode === 'link' ? '🔗 linked ' : '📄 copied '} ${name}  → ${label}  (successor of ${alias})`);
+        ok++;
+      } else if (mode === 'link') {
+        console.error('   symlink failed — retry with --copy');
+      }
+    }
     if (ok) writeManifest(dir, manifest);
-    console.log(`\n✅ [${label}] installed ${ok}/${targets.length} skill(s) into ${dir}  (mode: ${mode})\n`);
+    console.log(`\n✅ [${label}] installed ${ok}/${targets.length + successorOf.size} skill(s) into ${dir}  (mode: ${mode})\n`);
   }
   if (mode === 'link') console.log(`   edits in ${SKILLS_DIR} are live everywhere they're linked.`);
   console.log(`   run "update" later to bring them up to date.`);
@@ -601,14 +646,6 @@ function cmdInstall(args) {
 // an early error, or a throw. process.exit() inside the body skipped stampRun(),
 // which meant a failing run left the throttle unset and every following session
 // pulled again.
-// Retired skills kept as rule-less aliases for one release (O-6). A selective
-// install that tracks only the alias would otherwise keep a skill with no rules,
-// so update installs the successor beside it in the same run.
-const RETIRED_SKILLS = {
-  'angular-code-quality': 'code-quality',
-  'backend-code-quality': 'code-quality',
-};
-
 function cmdUpdate(args) {
   try { runUpdate(args); }
   catch (err) {
@@ -812,7 +849,7 @@ function runUpdate(args) {
         // Ephemeral beats the recorded mode, exactly as in install: a clone-mode
         // manifest + an `npx … update` would otherwise symlink the new skill
         // into the npx cache, and dangle the moment that cache is cleaned.
-        const mode = sourceIsEphemeral() ? 'copy' : (record?.mode || manifest.mode || 'link');
+        const mode = sourceIsEphemeral() ? 'copy' : (record?.mode || manifest.skills[successorOf.get(name)]?.mode || manifest.mode || 'link');
         if (applySkill(src, dst, mode, manifest, name)) {
           say(`   + ${name}  (${why} — installed)`);
           tally.added++; anyChange = true;
@@ -1169,6 +1206,15 @@ const RULE_ID_OWNERS = {
   VAPT: 'vapt',
 };
 
+// Where a prefix may be defined, when not anywhere in its owner: the files under
+// the owner's directory. code-quality's other files only cite NG/BE IDs, so a
+// citation there (or a typo) is checked against the stack references instead
+// of defining itself.
+const RULE_ID_DEFINING_FILES = {
+  BE: ['references/stack-backend.md'],
+  NG: ['references/stack-angular.md'],
+};
+
 // An ID is PREFIX-NN or PREFIX-FAMILY-NN with exactly two digits. After the first
 // ID a citation may continue as a range (BE-AUTH-01…07, also `..`, `...`, an en
 // dash), a slash list (BE-SEC-01/02) or a comma list (NG-ARCH-03,05). A range or
@@ -1243,7 +1289,8 @@ function collectRuleDefinitions() {
   for (const [prefix, owner] of Object.entries(RULE_ID_OWNERS)) {
     if (!existsSync(join(SKILLS_DIR, owner))) { defs[prefix] = null; continue; }
     defs[prefix] = new Set();
-    for (const doc of skillDocs(owner).filter(existsSync)) {
+    const files = RULE_ID_DEFINING_FILES[prefix]?.map((f) => join(SKILLS_DIR, owner, f)) ?? skillDocs(owner);
+    for (const doc of files.filter(existsSync)) {
       for (const id of definedRuleIds(readFileSync(doc, 'utf8'))) defs[prefix].add(id);
     }
   }
