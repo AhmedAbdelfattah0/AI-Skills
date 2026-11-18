@@ -16,6 +16,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { POSIX } from './engine-test-fixture.mjs';
 import { Driver, explore, twoUnitWorld, twoUnitRoots, PASS_CMD } from './engine-explore.test-helper.mjs';
 import { drive } from './run-engine.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown (known limit D4)';
 const BUDGET = Number(process.env.ENGINE_EXPLORE_BUDGET ?? 50);
@@ -245,10 +246,13 @@ test('P12 (PR #38 4505924540): a proof command that changes the tree every run n
 });
 
 test('P11 (PR #38 4505924571): a failed final-review repair is a judgment, never drive outcome done', { skip: WIN_SKIP }, async (t) => {
-  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, timeoutMs: 2000 });
+  // Builders, unit checks and the proof run under the failure bound; only the drive whose one worker hangs gets 1 s.
+  const d = await Driver.create(t, twoUnitWorld('pass'), { unitRecheckCeiling: 4, timeoutMs: WORKER_FAILURE_BOUND_MS });
   await steps(d, [{ kind: 'drive' }, { kind: 'upass', unit: 'uA' }, { kind: 'upass', unit: 'uB' }, { kind: 'finalFail' }]);
   d.setBehaviour('ffix', { hang: true }); // the repair worker times out without writing: a timeout is never retried
+  d.fx.setRunTimeout(1000);
   const [last] = await steps(d, [{ kind: 'drive' }]); // the oracle's P11 check fails a drive reporting done here
+  d.fx.setRunTimeout(WORKER_FAILURE_BOUND_MS);
   assert.equal(last.out.repairs[0].state, 'failed', last.stdout);
   assert.equal(last.status, 2, last.stdout);
   assert.equal(last.out.outcome, 'judgment');
