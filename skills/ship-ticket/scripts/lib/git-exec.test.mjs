@@ -609,6 +609,15 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
   assert.throws(() => gitRunner({ envLimit: 10 }).run(ok), code('git_env_too_large'), 'the bound is fixed at construction, not per call');
 });
 
+test('classify reads only own data: an inherited error code is not a row, and a status getter is never invoked', () => {
+  const facts = { signal: null, stderr: Buffer.alloc(0), stdout: Buffer.from('x') };
+  for (const c of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) assert.throws(() => classify({ ...facts, error: { code: c } }, {}), code('git_launch_failed'), c);
+  let called = 0;
+  const status = Object.defineProperty({}, '0', { get() { called++; return 'ok'; }, enumerable: true });
+  assert.equal(classify({ ...facts, error: null, status: 0 }, { status }).outcome, undefined);
+  assert.equal(called, 0, 'the getter is not run');
+});
+
 // ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
 
 // HOW. The SCANNED modules (the git-output path of the lib: git-exec.mjs and git-capability.mjs; every other non-test
@@ -752,10 +761,12 @@ const OUT_OF_SCOPE = {
  */
 function resolveSpecifier(spec, file, scanned) {
   if (MODULES[spec]) return { mod: MODULES[spec] };
-  if (!/^(?:\.{0,2}\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(spec)) return null;
+  const relativeSpec = /^\.{0,2}\//.test(spec);
+  if (!relativeSpec && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) return null;
   let target;
   try {
-    const u = new URL(spec, pathToFileURL(join(here, file)));
+    // Only `/`, `./` and `../` use the importer as base; a scheme specifier is parsed alone (`file:x.mjs` is /x.mjs, MEASURED).
+    const u = relativeSpec ? new URL(spec, pathToFileURL(join(here, file))) : new URL(spec);
     if (u.protocol !== 'file:') return null;
     u.search = ''; u.hash = '';
     target = relative(here, fileURLToPath(u)).split(sep).join('/');
@@ -1258,6 +1269,7 @@ const RESOLVE = [
   ["import { r } from './sub%2fx.mjs';", U], ["import { r } from 'file:///etc/x.mjs';", U], ["import { r } from '#internal';", U],
   ["import r from 'data:text/javascript,export default 1';", U], ["import { r } from './GIT-EXEC.mjs';", U], ["import { r } from 'node:fs?x';", U],
   ["import { r } from './sub/';", U], ["import { r } from './m.test.mjs';", U],
+  ["import { r } from 'file:git-exec.mjs';", U], ["import { r } from 'file:./git-exec.mjs';", U], ["export * from 'file:sub/x.mjs';", U],
 ];
 const RESOLVE_FINE = ["import { decodeStrict } from './sub/%2e%2e/git-exec.mjs';", "import { decodeStrict } from './git%2Dexec.mjs';",
   "import { decodeStrict } from './git-exec.mjs?v=1#f';", "export * from './sub/../sub/x.mjs';",
@@ -1486,13 +1498,12 @@ test('T4a property: each listed form and reviewer escape injected at seeded rand
 // one or more mutants per round-5 rule). Each run gets a copy of the whole skill folder (the runtime-module scan needs
 // it); anchors are LF-normalised and must match exactly once. A mutant counts as KILLED only when the baseline test
 // count ran and a failing test reports ERR_ASSERTION; a load failure, changed test count or timeout is INVALID.
-// Round 5 (Node 22.23.1): ONE full run (mutants-round5.log, 176 mutants: 63 git-exec + 5 git-capability + 106 checker
-// + 2 vendor) gave 170 killed, 0 invalid, 6 survived. Four survivors were test gaps, closed by fixtures (Buffer.of,
-// a non-Object descriptor receiver, an unfrozen Object.assign table, a synthetic unlisted lib module) and re-run on
-// this file (mutants-round5-retarget.log): killed. Final: 174 killed, 0 invalid, 2 EQUIVALENT survivors: the
-// round-trip check (a fatal decoder already refuses every non-UTF-8 input) and the file:-protocol check in
-// resolveSpecifier (fileURLToPath already throws ERR_INVALID_URL_SCHEME on any other scheme). This paragraph was
-// filled in after the runs (comment only; the pre-fill copy is kept beside the logs).
+// Round 5 (Node 22.23.1), final: ONE full run on this file (mutants-round5-final.log; an earlier full run found four
+// test gaps, since closed by fixtures): 177 mutants (63 git-exec + 5 git-capability + 107 checker + 2 vendor), 174
+// killed, 0 invalid, 3 EQUIVALENT survivors: the round-trip check (a fatal decoder already refuses every non-UTF-8
+// input); in resolveSpecifier the file:-protocol check (fileURLToPath already throws ERR_INVALID_URL_SCHEME) and the
+// bare/# guard (such a specifier then reaches new URL(spec) without a base, which throws). This paragraph was filled
+// in after the run (comment only; the pre-fill copy is kept beside the log).
 // Round 5 adds: resolution (string check instead of URL resolution, any file, bare/# specifiers URL-resolved,
 // percent-encoding not decoded, re-export from a builtin); reflection (Proxy, prototype, descriptors, reflective
 // strings, + and template folding, own-value production, defineProperty shape, object-literal __proto__, Object as a
@@ -1526,8 +1537,8 @@ test('T4a property: each listed form and reviewer escape injected at seeded rand
 // | T4a on the real lib  | toString / toLocaleString / String(bytes) / process.cwd() site added; spawn args   |
 // |                      | passed as a variable; spawn options from a variable; git-capability: latin1 map    |
 // |                      | swapped for utf8 at its allowlisted site; a second toString in parseGitVersion     |
-// | T4a checker (test    | parse error passes; walker skips arrays; bindings ignored; alias bound under the   |
-// | file, 70)            | imported name; namespace/default not bound; unclassified module, ../ and non-.mjs  |
+// | T4a checker (round 4| parse error passes; walker skips arrays; bindings ignored; alias bound under the   |
+// | set, 70; round 5 adds| imported name; namespace/default not bound; unclassified module, ../ and non-.mjs  |
 // |                      | imports pass; buffer accepted at any later argument; name options read at index 0;|
 // |                      | __proto__ / computed / accessor options accepted; options encoding value          |
 // |                      | unchecked; spread passes; dynamic cp args pass; string cp options accepted; cp     |
