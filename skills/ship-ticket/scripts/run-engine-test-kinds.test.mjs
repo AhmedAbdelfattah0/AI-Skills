@@ -276,7 +276,7 @@ test('[R1-2/R1-4] RESUME: a persisted state declaring a second evidence entry (w
   }
 });
 
-test('[R1-3 seam] P4r tkVerdict alone refuses two RECORDS but not two declared entries with one record; the engine feeds it one entry and its own record only', { skip: NOT_DARWIN }, async (t) => {
+test('[R1-3 seam] P4r tkVerdict refuses two declared entries whatever records are present (P4r round 8, D3); the engine feeds it one entry and its own record only', { skip: NOT_DARWIN }, async (t) => {
   // the producer's guard, through its REAL export: two records refused, one record of two declared entries NOT refused
   const r = seamRepo(t);
   const { entry, command, result } = await sealedRun(t, r);
@@ -288,7 +288,13 @@ test('[R1-3 seam] P4r tkVerdict alone refuses two RECORDS but not two declared e
     bound: { tags: ['input-path'], items: [], kinds: { negative: ['tag:input-path'] }, protected: [] }, declaration: null, reassessed: [], S: { run_id: 'run-1', plan_digest: 'sha256:x' } });
   const two = TKR.tkVerdict(E({ unit: rec, unit2: { ...rec, entry: 'unit2' } }), 'F1');
   assert.deepEqual([two.code, two.detail], ['evidence_unavailable', 'multi_entry_unsupported_v0']);
-  assert.equal(TKR.tkVerdict(E({ unit: rec }), 'F1').status, 'pass', 'two DECLARED entries with ONE record pass P4r: the engine must enforce the invariant itself');
+  // P4r round 8 (D3) closed FND-003-1 on the producer side too: two DECLARED entries are refused with one record or none.
+  // The engine's own init and load guard ([R1-1], [R1-2]) stays: the invariant holds even if a producer regresses.
+  for (const records of [{ unit: rec }, { unit2: { ...rec, entry: 'unit2' } }, {}]) {
+    const v = TKR.tkVerdict(E(records), 'F1');
+    assert.deepEqual([v.code, v.detail], ['evidence_unavailable', 'multi_entry_unsupported_v0'], `records ${Object.keys(records)}`);
+  }
+  assert.equal(TKR.tkVerdict(E({ unit: rec }, [entry]), 'F1').status, 'pass', 'one declared entry with its record passes (the guard is not vacuous)');
   // the engine: a stray record under another name in state is never passed on (records reported: the bound entry only)
   const fx = ready(tkFx(t, { behaviour: { a: { write: { 'test/a.test.ts': PLAIN } } } }));
   refused(refreshThen(fx, 'review', passReview('rx-1', fx.candidate()), 'F1'), 'missing_test_kinds');
