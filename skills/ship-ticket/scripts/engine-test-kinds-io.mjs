@@ -1,65 +1,89 @@
 /**
- * S-01b2 P4r: runner evidence I/O (design rev 6, sections 1, 3, 4, 5.2 row P4r; owner decision OD-2).
+ * S-01b2 P4r: runner evidence I/O, the RECORD side (design rev 6, sections 1, 3, 4, 5.2 row P4r; owner decision OD-2).
+ * The reuse rule and the verdict live in `engine-test-kinds-reuse.mjs`; both share the readers and the R-3 census below.
  *
- * CLAIM (L-ran, and nothing stronger; L5/L12): a record built here says the runner EXECUTED a test whose own title
- * carries a marker and recorded it as passed. It does NOT say the test is meaningful (a vacuous or assertion-free test passes;
- * mutation testing and independent review cover that), and it does not cover Angular/nx tests, `threads` pools or tampering
- * with installed dependencies. This module never runs a runner: it consumes a report PROVIDED BY THE CALLER (P5r, from the
- * sealed runner result of FX) together with provenance, and decides what that report may be believed for.
+ * CLAIM (L-ran, and nothing stronger; L5/L12): a record built here says the runner EXECUTED a test whose own title carries a
+ * marker and recorded it as passed. It does NOT say the test is meaningful (a vacuous or assertion-free test passes; mutation
+ * testing and independent review cover that), and it does not cover Angular/nx tests, `threads` pools or tampering with
+ * installed dependencies. This module never runs a runner: it consumes a report PROVIDED BY THE CALLER (P5r, from the sealed
+ * runner result of FX) with provenance, and decides what that report may be believed for. `channel_unsupported` (win32) and
+ * `evidence_unquiet` (another attempt is live) are design section 1 refusals OWNED BY P5r/FX: they are decided before a run.
  *
- * SUPPORTED GRAMMAR (L11): everything not listed here is a typed refusal or no evidence, never a guess.
- *   runner      format `vitest-json`, runner `vitest`, args holding exactly `--pool=forks` and `--reporter=json` and no other
- *               `--pool*` / `--reporter*`. ANY other runner, format or pool is `runner_unsupported` (OD-2; never bypassed).
- *   report      ONE JSON document (no duplicate keys in any object, depth <= 64) of at most 32 MiB, with at most 100000
- *               results, read through the existing `parseRunnerOutput('vitest-json', text)`. The fields read are
- *               `testResults[].{name, status, assertionResults[].{ancestorTitles, title, status}}`; nothing else is read.
- *   result      counts only when `status === 'pass'` (skip, todo, `.only`-sibling skips, `ctx.skip()` are `skip`; a failure or a
- *               load error makes the WHOLE record `evidence_run_failed`, so a RED run never satisfies a kind).
- *   marker      `[kind:<id>]` / `[plan:<id>]` read from the test's OWN (leaf) title only, through P3 `markers`.
- *   file        realpath inside the repo, in P, a regular non-symlink file matching the test globs and the entry's `covers`,
- *               and holding MORE of that marker than the file at `base_sha` (R-3, no base run).
+ * SUPPORTED GRAMMAR (L11): an allowlist. Everything not listed is a typed refusal or no evidence, never a guess.
+ *   entry   format `vitest-json`; cmd EXACTLY `node_modules/.bin/vitest` (repo-relative; the launcher runs it from the repo top);
+ *           args EXACTLY `run --pool=forks --reporter=json --outputFile={report}`, optionally followed by ONE `{files}`. Any
+ *           other runner, format, flag, order or `--` terminator is `runner_unsupported` (OD-2; never bypassed).
+ *   command the args that RAN: the template with `{report}` -> `/dev/fd/3` and `{files}` -> 1..N repo-relative paths, none
+ *           starting with `-`. The record's `command_digest` hashes exactly these args; the verdict hashes the same.
+ *   report  at most 32 MiB of UTF-8 BYTES; ONE JSON document (no duplicate keys after escape decoding, depth <= 64);
+ *           `success === true`, `numFailedTestSuites === 0`, `numFailedTests === 0`, every suite `status === 'passed'`
+ *           (vitest 4 writes only `passed`/`failed`); at most 100000 results, counted BEFORE the parser materialises them.
+ *           Fields read: those, plus `testResults[].{name, assertionResults[].{ancestorTitles, title, status}}`.
+ *   result  counts only when `status === 'passed'`; a `failed` result or suite, or `success:false`, makes the WHOLE record
+ *           `evidence_run_failed` even with exit 0. Any status outside vitest's six is `evidence_unavailable`.
+ *   marker  `[kind:<id>]` / `[plan:<id>]` read from the test's OWN (leaf) title only, through P3 `markers`.
+ *   file    the report name, realpath-resolved (the nearest existing ancestor for a missing file), inside the repo, in P, an
+ *           lstat-regular file (a symlink is resolved first, so the TARGET is what counts), matching the test globs and the
+ *           entry's `covers`, at most 4 MiB. Otherwise a typed FILE void that never credits.
  *
- * PROVENANCE (supplied by the caller, per design section 1): `runner_id`, `runner_version`, `attempt_id`, `exit_code`,
- * `report_sha256` (the sealed digest; checked against the text), `report_eof`, `sealed`, `quiesced`, `binding_verified` (all
- * `true`), `evidence_id_before` (the identity before the run). The command and config digests are computed here.
+ * R-3, WHAT IS ENFORCED (section 4 rule 5, no base run). Marker m is credited from file f only when BOTH hold:
+ *   (per file)  count_cand(f, m) - count_base(f, m) - skipped(f, m) > 0
+ *   (over P)    sum_P count_cand(m) - sum_P count_base(m) - sum_P skipped(m) > 0  (deleted and renamed-away paths included)
+ * where `count` is the number of `[kind:x]`/`[plan:x]` occurrences in the bytes and `skipped(f, m)` is the number of NON-passed
+ * results in f whose own title carries m. So a pure rename or move credits nothing, nor does a skipped or todo test added
+ * beside an old passing one (a skipped `.each` over-subtracts, failing closed); `preflight` has already refused any failed result.
+ * NOT ENFORCED: a marker added in a comment or in dead code that never registers a test is indistinguishable from an added
+ * title and CAN credit a passing test that already carried m, in f itself or (for a moved test) anywhere in P: the accepted
+ * L-ran limit "gameable only by a visible added marker" (design section 4). A skip that is never reported is the same case.
+ *
+ * PROVENANCE (supplied by the caller, section 1): `runner_id`, `runner_version`, `attempt_id`, `exit_code`, `report_sha256`
+ * (checked against the text), `report_eof`, `sealed`, `quiesced`, `binding_verified` (all `true`), `evidence_id_before`.
+ * Refusal order in buildRecord: input shape, runner, report size, identity, `runner_config_changed`, tamper, survivor,
+ * quiescence, exit, `candidate_moved`, report content (rev 6 section 1 orders the VERDICT codes; this is the build order).
  *
  * State and output carry ids, codes, counts and repo-relative file names only: NEVER a test title (AC6).
- * Hostile input (L3, L6): own data descriptors only, no proxy, every visit charged to LIMITS.maxWork or a named cap, nothing throws.
+ * Hostile input (L3, L6): caller objects are read through own DATA descriptors only (no getter or proxy trap runs); work is
+ * charged to per-call budgets and the named LIMITS. The exported entry points return refusals instead of throwing, except
+ * `readEntry`/`commandFor`, which THROW a `Refusal` (they are the validators the entry points call).
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep, basename } from 'node:path';
 import { types } from 'node:util';
 import { changedPaths, compileGlob, matchSegments } from './risk-floor.mjs';
-import { markers, kindsForClasses, PROTECTED_TAGS, ITEM_ID } from './test-kinds.mjs';
-import { testKindsVerdict } from './engine-test-kinds.mjs';
-import { testKindWaivers } from './engine-authority.mjs';
+import { markers, ITEM_ID, KINDS } from './test-kinds.mjs';
 import { parseRunnerOutput } from './gate.mjs';
 
 export const LIMITS = Object.freeze({ maxReportBytes: 32 * 1024 * 1024, maxResults: 100_000, maxPaths: 20_000, maxIdentityBytes: 256 * 1024 * 1024,
-  maxFileBytes: 4 * 1024 * 1024, maxMarkerFiles: 2_000, maxScanTokens: 8_000_000, maxDepth: 64, maxList: 64, maxPathChars: 512 });
+  maxFileBytes: 4 * 1024 * 1024, maxMarkerFiles: 2_000, maxScanTokens: 8_000_000, maxDepth: 64, maxList: 64, maxPathChars: 512, maxTitleChars: 2048, maxIds: 512 });
 export const REFUSALS = Object.freeze(['runner_unsupported', 'runner_config_changed', 'runner_output_tampered', 'runner_survivor', 'evidence_run_failed', 'evidence_unavailable', 'candidate_moved', 'quiescence_unknown', 'evidence_budget_exceeded', 'test_kinds_error']);
 export const FILE_VOIDS = Object.freeze(['runner_uncovered', 'result_outside_repo', 'not_in_P', 'not_regular', 'not_test_file', 'file_too_large']);
 export const CLAIM = 'L-ran';
 export const BUILTIN_TEST_GLOBS = Object.freeze(['**/*.test.*', '**/*.spec.*']);
-const INTEGRITY = ['sealed', 'report_eof', 'quiesced', 'binding_verified', 'identity_stable'];
-const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, HEX64 = /^[0-9a-f]{64}$/;
+export const RUNNER = Object.freeze({ id: 'vitest', format: 'vitest-json', cmd: 'node_modules/.bin/vitest', args: Object.freeze(['run', '--pool=forks', '--reporter=json', '--outputFile={report}']), files: '{files}', report: '/dev/fd/3' });
+export const INTEGRITY = Object.freeze(['sealed', 'report_eof', 'quiesced', 'binding_verified', 'identity_stable']);
+export const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, HEX64 = /^[0-9a-f]{64}$/, EVIDENCE_ID = /^e1:[0-9a-f]{64}$/, ENTRY_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/;
+/** A marker id as the bytes spell it, and a CREDITABLE id (a known kind or a lifecycle item id). */
+export const MARKER_ID = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const creditable = (m) => typeof m === 'string' && (m.startsWith('kind:') ? Object.hasOwn(KINDS, m.slice(5)) : m.startsWith('plan:') && ITEM_ID.test(m.slice(5)));
 
-class Refusal extends Error { constructor(code) { super(code); this.code = code; } }
-const refuse = (code) => { throw new Refusal(code); };
-const charge = (ctx, n = 1) => { ctx.work += n; if (ctx.work > ctx.max) refuse('evidence_budget_exceeded'); };
+export class Refusal extends Error { constructor(code) { super(code); this.code = code; } }
+export const refuse = (code) => { throw new Refusal(code); };
+export const codeOf = (e, dflt) => (e instanceof Refusal ? e.code : dflt);
+export const charge = (ctx, n = 1) => { ctx.work += n; if (ctx.work > ctx.max) refuse('evidence_budget_exceeded'); };
 const sha256 = (...parts) => { const h = createHash('sha256'); for (const p of parts) h.update(p); return h.digest('hex'); };
 
 // ---- hostile-input readers (L6): own DATA descriptors only, never a trap or a getter ----
-const plain = (v) => v !== null && typeof v === 'object' && !types.isProxy(v) && [Object.prototype, null].includes(Reflect.getPrototypeOf(v));
-function own(o, k) {
+export const plain = (v) => v !== null && typeof v === 'object' && !types.isProxy(v) && [Object.prototype, null].includes(Reflect.getPrototypeOf(v));
+export function own(o, k) {
   if (!plain(o) && !(Array.isArray(o) && !types.isProxy(o))) refuse('test_kinds_error');
   const d = Reflect.getOwnPropertyDescriptor(o, k);
   if (!d || !('value' in d)) refuse('test_kinds_error');
   return d.value;
 }
-function arr(v, max, ok, ctx) {
+export const ownOr = (o, k, dflt) => { if (!plain(o)) refuse('test_kinds_error'); return Reflect.getOwnPropertyDescriptor(o, k) ? own(o, k) : dflt; };
+export function arr(v, max, ok, ctx) {
   if (!Array.isArray(v) || types.isProxy(v) || Reflect.getPrototypeOf(v) !== Array.prototype) refuse('test_kinds_error');
   const n = Reflect.getOwnPropertyDescriptor(v, 'length')?.value;
   if (!Number.isSafeInteger(n) || n < 0) refuse('test_kinds_error');
@@ -69,31 +93,67 @@ function arr(v, max, ok, ctx) {
   for (let i = 0; i < n; i++) { const x = own(v, String(i)); if (!ok(x)) refuse('test_kinds_error'); out.push(x); }
   return out;
 }
-const isStr = (max) => (v) => typeof v === 'string' && v.length <= max;
+/** The object's own keys when they are exactly `keys` (a plain object, string keys only), else null. */
+export function exactKeys(o, keys) {
+  if (!plain(o)) return null;
+  const ks = Reflect.ownKeys(o);
+  return ks.length === keys.length && ks.every((k) => typeof k === 'string' && keys.includes(k)) ? ks : null;
+}
+export const isStr = (max) => (v) => typeof v === 'string' && v.length <= max;
 /** A repo-relative POSIX path: no absolute, backslash, NUL, empty, `.` or `..` segment. */
-const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length <= LIMITS.maxPathChars && !/[\\\0]/.test(p) && !p.startsWith('/') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+export const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length <= LIMITS.maxPathChars && !/[\\\0]/.test(p) && !p.startsWith('/') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
 const isGlob = (g) => { try { compileGlob(g); return typeof g === 'string' && g.length <= LIMITS.maxPathChars; } catch { return false; } };
+export const globList = (v, ctx) => arr(v, LIMITS.maxList, isGlob, ctx);
+export const matcher = (globs) => globs.map((g) => compileGlob(g));
+export const matches = (compiled, rel, ctx) => {
+  charge(ctx);
+  try { const segs = rel.split('/'); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
+};
 
 // ---- git (TEMPORARY fourth copy of the hardened-git helper, as in test-kinds.mjs: TODO(S-02a0b) replace with lib/git-capability.mjs) ----
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
-const git = (cwd, args, max = 1 << 20) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: max, stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (cwd, args, max = 1 << 20, input = undefined) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: max, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
 const topOf = (repo) => realpathSync.native(git(realpathSync.native(repo), ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, ''));
+
+// ---- marker counting (R-3) ----
+const MARKER = /\[(kind|plan):([A-Za-z0-9][A-Za-z0-9_-]{0,63})\]/g;
+/** Occurrences of every `[kind:x]` / `[plan:x]` marker (latin1 view: markers are ASCII, line endings do not matter). */
+function countMarkers(text, out = new Map()) {
+  for (const m of text.matchAll(MARKER)) out.set(`${m[1]}:${m[2]}`, (out.get(`${m[1]}:${m[2]}`) ?? 0) + 1);
+  return out;
+}
+const bufMarkers = (buf) => countMarkers(buf.toString('latin1'));
+const sumInto = (total, m) => { for (const [k, n] of m) total.set(k, (total.get(k) ?? 0) + n); return total; };
 
 // ---- the evidence identity (design rev 5 section 1a): the candidate-id encoding over P, from the worktree ----
 /** `e1:` + sha256 over base_sha and every changed path (byte order): path, kind, mode, length, bytes. Never throws. */
 export function evidenceIdentity({ repo, baseSha, exclusions = [] } = {}) {
-  try { return { ok: true, ...identity(repo, baseSha, exclusions) }; } catch (e) { return { ok: false, code: e instanceof Refusal ? e.code : 'evidence_unavailable' }; }
+  try { const c = candidate(repo, baseSha, exclusions); return { ok: true, evidence_id: c.evidence_id, paths: c.paths }; } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
 }
-function identity(repo, baseSha, exclusions) {
+/** A directory in P is a submodule only when it is the top of its own clean work tree; a dirty one is refused (I4). */
+function submoduleHead(abs) {
+  let top;
+  try { top = realpathSync.native(git(abs, ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, '')); } catch { return refuse('evidence_unavailable'); }
+  if (top !== realpathSync.native(abs)) return null; // a plain directory (its files are paths of P themselves)
+  let status;
+  try { status = git(abs, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']); } catch { return refuse('evidence_unavailable'); }
+  if (status.length) refuse('evidence_unavailable'); // a dirty submodule cannot be identified by its HEAD
+  try { return Buffer.from(git(abs, ['rev-parse', '--verify', 'HEAD^{commit}']).toString('utf8').trim()); } catch { return refuse('evidence_unavailable'); }
+}
+/**
+ * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
+ * and the candidate marker counts of every regular file in P (`cand`). Throws a Refusal.
+ */
+export function candidate(repo, baseSha, exclusions) {
   if (typeof baseSha !== 'string' || !SHA.test(baseSha)) refuse('test_kinds_error');
   const ex = arr(exclusions, LIMITS.maxList, safeRel, { work: 0, max: 1e6 });
   const top = topOf(repo);
   let all;
   try { all = changedPaths(top, baseSha, 'WORKTREE'); } catch { refuse('evidence_unavailable'); }
+  if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const excluded = (p) => p.startsWith('.ship-ticket/') || ex.some((e) => p === e || p.startsWith(`${e.replace(/\/$/, '')}/`));
   const paths = all.filter((p) => !excluded(p));
-  if (paths.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
-  const h = createHash('sha256'), abs = (p) => join(top, p);
+  const h = createHash('sha256'), abs = (p) => join(top, p), cand = new Map();
   h.update(`ship-ticket-tk-evidence-v1\0${baseSha}\0`);
   let bytes = 0;
   for (const p of paths) {
@@ -101,32 +161,83 @@ function identity(repo, baseSha, exclusions) {
     let st = null;
     try { st = lstatSync(abs(p)); } catch (e) { if (e?.code !== 'ENOENT') refuse('evidence_unavailable'); }
     if (st) {
-      if (st.isSymbolicLink()) { kind = 'symlink'; mode = '120000'; content = Buffer.from(readlinkSync(abs(p))); }
+      if (st.isSymbolicLink()) { kind = 'symlink'; mode = '120000'; content = readlinkSync(abs(p), { encoding: 'buffer' }); }
       else if (st.isFile()) {
         bytes += st.size; if (bytes > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
         kind = 'file'; mode = (st.mode & 0o111) === 0 ? '100644' : '100755'; content = readFileSync(abs(p));
-      } else if (st.isDirectory()) { kind = 'submodule'; mode = '160000'; try { content = Buffer.from(git(abs(p), ['rev-parse', 'HEAD']).toString('utf8').trim()); } catch { refuse('evidence_unavailable'); } }
-      else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)
+        cand.set(p, bufMarkers(content));
+      } else if (st.isDirectory()) {
+        const head = submoduleHead(abs(p));
+        if (head) { kind = 'submodule'; mode = '160000'; content = head; } else { kind = 'directory'; mode = '40000'; content = Buffer.alloc(0); }
+      } else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)
     }
     h.update(Buffer.from(p, 'utf8')); h.update(`\0${kind}\0${mode}\0${content.length}\0`); h.update(content); h.update('\0');
   }
-  return { evidence_id: `e1:${h.digest('hex')}`, paths, top };
+  return { evidence_id: `e1:${h.digest('hex')}`, paths, all, top, cand, base_sha: baseSha, census: null };
+}
+/**
+ * The R-3 census over P: candidate and base marker counts per path and summed over P. Base blobs come from ONE `ls-tree` and
+ * ONE `cat-file --batch`; an unreadable or oversized base refuses (never skipped). Memoised on the candidate. Throws a Refusal.
+ */
+export function census(c) {
+  if (c.census) return c.census;
+  const want = new Set(c.paths), base = new Map(), oids = [];
+  let ls;
+  try { ls = git(c.top, ['ls-tree', '-r', '-z', '--full-tree', c.base_sha], 64 << 20).toString('utf8'); } catch (e) { refuse(e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable'); }
+  for (const line of ls.split('\0')) {
+    const m = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.*)$/s.exec(line);
+    if (m && want.has(m[3])) oids.push([m[3], m[2]]);
+  }
+  if (oids.length) {
+    let out;
+    try { out = git(c.top, ['cat-file', '--batch'], LIMITS.maxIdentityBytes + oids.length * 128, oids.map((o) => o[1]).join('\n') + '\n'); } catch (e) { refuse(e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable'); }
+    let at = 0;
+    for (const [p, oid] of oids) {
+      const nl = out.indexOf(10, at), head = /^([0-9a-f]+) blob (\d+)$/.exec(out.subarray(at, nl).toString('latin1'));
+      if (nl < 0 || !head || head[1] !== oid) refuse('evidence_unavailable');
+      const size = Number(head[2]);
+      base.set(p, bufMarkers(out.subarray(nl + 1, nl + 1 + size)));
+      at = nl + 1 + size + 1;
+    }
+  }
+  const total = { cand: new Map(), base: new Map() };
+  for (const m of c.cand.values()) sumInto(total.cand, m);
+  for (const m of base.values()) sumInto(total.base, m);
+  c.census = { cand: c.cand, base, total };
+  return c.census;
+}
+/** R-3 (header): may id `m` be credited from `rel`, given the non-passed carriers per file (`skipped`: path -> Map)? */
+export function r3(cs, rel, m, skipped) {
+  const n = (map, k) => map?.get(k) ?? 0;
+  let skipTotal = 0;
+  for (const s of skipped.values()) skipTotal += n(s, m);
+  return n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0 && n(cs.total.cand, m) - n(cs.total.base, m) - skipTotal > 0;
 }
 
-// ---- the declared entry (config.testCommands.<name>) and the supported-runner rule (OD-2) ----
-/** Validate an entry; `runner_unsupported` for any runner, format or pool outside the supported grammar. Returns a plain copy. */
+// ---- the declared entry (config.testCommands.<name>) and the exact-argv rule (OD-2, I2) ----
+const hasFiles = (args) => args.length === RUNNER.args.length + 1;
+/** Validate an entry against the allowlisted grammar. Returns a plain copy. THROWS a Refusal (`runner_unsupported` for any other runner). */
 export function readEntry(entry) {
   const ctx = { work: 0, max: 1e6 };
   const name = own(entry, 'name'), format = own(entry, 'format'), cmd = own(entry, 'cmd');
-  if (!isStr(80)(name) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name) || !isStr(512)(cmd)) refuse('test_kinds_error');
-  if (format !== 'vitest-json') refuse('runner_unsupported');
+  if (typeof name !== 'string' || !ENTRY_NAME.test(name) || !isStr(512)(cmd)) refuse('test_kinds_error');
+  if (format !== RUNNER.format || cmd !== RUNNER.cmd) refuse('runner_unsupported');
   const args = arr(own(entry, 'args'), 256, isStr(1024), ctx);
-  const covers = arr(own(entry, 'covers'), LIMITS.maxList, isGlob, ctx), configPaths = arr(own(entry, 'config_paths'), LIMITS.maxList, safeRel, ctx);
+  if (!RUNNER.args.every((a, i) => args[i] === a) || !(args.length === RUNNER.args.length || (hasFiles(args) && args[RUNNER.args.length] === RUNNER.files))) refuse('runner_unsupported');
+  const covers = globList(own(entry, 'covers'), ctx), configPaths = arr(own(entry, 'config_paths'), LIMITS.maxList, safeRel, ctx);
   if (!covers.length) refuse('test_kinds_error');
-  if (basename(cmd).replace(/\.(?:cmd|exe)$/i, '') !== 'vitest') refuse('runner_unsupported');
-  if (args.filter((a) => a === '--pool=forks').length !== 1 || args.some((a) => /^--pool/.test(a) && a !== '--pool=forks')) refuse('runner_unsupported');
-  if (args.filter((a) => a === '--reporter=json').length !== 1 || args.some((a) => /^--reporter/.test(a) && a !== '--reporter=json')) refuse('runner_unsupported');
   return { name, format, cmd, args, covers, config_paths: configPaths };
+}
+/** The command that RAN for a validated entry: `{report}` and `{files}` substituted, nothing else. Returns `{cmd, args}`. THROWS a Refusal. */
+export function commandFor(entry, cmd, args) {
+  if (cmd !== entry.cmd) refuse('runner_unsupported');
+  const list = arr(args, RUNNER.args.length + LIMITS.maxMarkerFiles, isStr(LIMITS.maxPathChars + 32), { work: 0, max: 1e6 });
+  const fixed = RUNNER.args.map((a) => a.replace('{report}', RUNNER.report));
+  if (!fixed.every((a, i) => list[i] === a)) refuse('runner_unsupported');
+  const files = list.slice(fixed.length);
+  if (hasFiles(entry.args) ? !files.length : files.length) refuse('runner_unsupported');
+  if (!files.every((f) => safeRel(f) && !f.startsWith('-'))) refuse('runner_unsupported'); // a name that parses as a flag is a flag
+  return { cmd, args: list };
 }
 /** The digest of the command after substitution. */
 export const commandDigest = (cmd, args) => sha256(JSON.stringify([cmd, args]));
@@ -141,10 +252,10 @@ export function configDigest(repo, paths) {
       h.update(`${p}\0`); h.update(st ? readFileSync(join(top, p)) : 'absent'); h.update('\0');
     }
     return { ok: true, digest: h.digest('hex') };
-  } catch (e) { return { ok: false, code: e instanceof Refusal ? e.code : 'evidence_unavailable' }; }
+  } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
 }
 
-// ---- the report: a strict JSON shape scan (duplicate keys, depth, work) before the existing parser reads it ----
+// ---- the report: a strict JSON shape scan (duplicate keys, depth, work), then the whole-run pre-pass ----
 /** Throws a Refusal: evidence_unavailable for malformed/duplicate-key/too-deep JSON, evidence_budget_exceeded past the token cap. */
 function scanJson(text) {
   let i = 0, tokens = 0;
@@ -183,28 +294,36 @@ function scanJson(text) {
   val(0); ws();
   if (i !== n) bad();
 }
+const STATUSES = new Set(['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']); // vitest's StatusMap image plus jest's `disabled`
+const field = (o, k) => (Object.hasOwn(o, k) ? o[k] : undefined);
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** The whole-run checks (I8), on the parsed document, BEFORE the parser materialises any result. Throws a Refusal. */
+function preflight(doc, ctx) {
+  const unavailable = () => refuse('evidence_unavailable'), failed = () => refuse('evidence_run_failed');
+  if (!isObj(doc)) unavailable();
+  const success = field(doc, 'success'), suites = field(doc, 'testResults');
+  for (const k of ['numFailedTestSuites', 'numFailedTests']) { const v = field(doc, k); if (!Number.isSafeInteger(v) || v < 0) unavailable(); if (v > 0) failed(); }
+  if (typeof success !== 'boolean') unavailable();
+  if (!success) failed();
+  if (!Array.isArray(suites)) unavailable();
+  let results = 0;
+  for (const s of suites) {
+    charge(ctx);
+    if (!isObj(s) || typeof field(s, 'name') !== 'string' || !Array.isArray(field(s, 'assertionResults'))) unavailable();
+    if (field(s, 'status') === 'failed') failed();
+    if (field(s, 'status') !== 'passed') unavailable();
+    const cases = field(s, 'assertionResults');
+    results += cases.length;
+    if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');
+    for (const c of cases) {
+      charge(ctx);
+      if (!isObj(c) || !STATUSES.has(field(c, 'status')) || typeof field(c, 'title') !== 'string') unavailable();
+      if (field(c, 'status') === 'failed') failed();
+    }
+  }
+}
 
-// ---- file classification and marker counting ----
-const matcher = (globs) => globs.map((g) => compileGlob(g));
-const matches = (compiled, rel, ctx) => {
-  charge(ctx);
-  try { const segs = rel.split('/'); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
-};
-const MARKER = /\[(kind|plan):([A-Za-z0-9][A-Za-z0-9_-]{0,63})\]/g;
-/** Occurrences of every `[kind:x]` / `[plan:x]` marker in a file's bytes (latin1 view: markers are ASCII, line endings do not matter). */
-function countMarkers(buf) {
-  const out = new Map();
-  for (const m of buf.toString('latin1').matchAll(MARKER)) out.set(`${m[1]}:${m[2]}`, (out.get(`${m[1]}:${m[2]}`) ?? 0) + 1);
-  return out;
-}
-/** The file's blob at the base commit, or null when it does not exist there. */
-function baseBlob(top, sha, rel) {
-  let entry;
-  try { entry = git(top, ['ls-tree', '-z', sha, '--', rel]).toString('utf8').replace(/\0$/, ''); } catch { refuse('evidence_unavailable'); }
-  const m = /^\d+ blob ([0-9a-f]+)\t/.exec(entry);
-  if (!m) return null;
-  try { return git(top, ['cat-file', 'blob', m[1]], LIMITS.maxFileBytes + 1); } catch (e) { return refuse(e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable'); }
-}
+// ---- file classification ----
 /** A report file name to a POSIX repo-relative path, or null when it escapes `root` (`P` is the platform path module: win32 in tests). */
 export function toRepoRel(root, file, P = { relative, isAbsolute, sep }) {
   if (typeof file !== 'string' || !P.isAbsolute(file)) return null;
@@ -212,173 +331,122 @@ export function toRepoRel(root, file, P = { relative, isAbsolute, sep }) {
   if (rel === '' || rel === '..' || rel.startsWith(`..${P.sep}`) || P.isAbsolute(rel)) return null;
   return rel.split(P.sep).join('/');
 }
+/** The native realpath of `file`; for a missing file, the realpath of its nearest existing ancestor plus the missing tail (I7). */
+function realOrAncestor(file, ctx) {
+  try { return realpathSync.native(file); } catch (e) { if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return null; }
+  const tail = [];
+  for (let at = file; ; at = dirname(at)) {
+    charge(ctx);
+    if (dirname(at) === at || tail.length > 256) return null;
+    tail.unshift(basename(at));
+    try { return join(realpathSync.native(dirname(at)), ...tail); } catch (e) { if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') return null; }
+  }
+}
+/** Applicability of a repo-relative file to an entry (section 4 rule 3 after the repo/P steps): a FILE void code, or null. */
+export function applicable(top, rel, testGlobs, covers, ctx) {
+  let st;
+  try { st = lstatSync(join(top, rel)); } catch { return 'not_regular'; }
+  if (!st.isFile()) return 'not_regular';
+  try { if (realpathSync.native(join(top, rel)) !== join(top, rel)) return 'not_regular'; } catch { return 'not_regular'; } // no symlinked directory on the way
+  if (!matches(testGlobs, rel, ctx)) return 'not_test_file';
+  if (!matches(covers, rel, ctx)) return 'runner_uncovered';
+  if (st.size > LIMITS.maxFileBytes) return 'file_too_large';
+  return null;
+}
+/** One report file name: `{ outcome, rel }` (rel null when outside the repo). */
+function classify(c, inP, file, testGlobs, covers, ctx) {
+  if (!isAbsolute(file)) return { outcome: 'result_outside_repo', rel: null }; // a relative name would resolve against the cwd, never the repo
+  const real = realOrAncestor(file, ctx), rel = real === null ? null : toRepoRel(c.top, real);
+  if (rel === null) return { outcome: 'result_outside_repo', rel: null };
+  if (!inP.has(rel)) return { outcome: 'not_in_P', rel };
+  return { outcome: applicable(c.top, rel, testGlobs, covers, ctx) ?? 'counted', rel };
+}
 
 // ---- building a record from a provided report (section 1 output; sections 3-4 counting) ----
 /**
- * buildRecord({ repo, baseSha, entry, tests:{globs}, dagDigest, commandArgs?, report:{text, ...provenance} })
+ * buildRecord({ repo, baseSha, entry, commandArgs, tests:{globs}, dagDigest, exclusions?, report:{text, ...provenance} })
  *   -> { ok:true, record, voids } | { ok:false, code }
- * `report` is `{ text, runner_id, runner_version, attempt_id, exit_code, report_sha256, report_eof, sealed, quiesced, binding_verified, evidence_id_before }`.
- * The record holds ids, codes, counts and repo-relative file names only. Never throws.
+ * `commandArgs` are the args that RAN (`commandFor`); `report` is `{ text, runner_id, runner_version, attempt_id, exit_code,
+ * report_sha256, report_eof, sealed, quiesced, binding_verified, evidence_id_before }`. Never throws.
  */
 export function buildRecord(input) {
-  try { return { ok: true, ...build(input) }; } catch (e) { return { ok: false, code: e instanceof Refusal ? e.code : 'test_kinds_error' }; }
+  try { return { ok: true, ...build(input) }; } catch (e) { return { ok: false, code: codeOf(e, 'test_kinds_error') }; }
 }
 function build(input) {
   const ctx = { work: 0, max: 5_000_000, glob: { steps: 0 } };
-  const entry = readEntry(own(input, 'entry')), repo = own(input, 'repo'), baseSha = own(input, 'baseSha'), dagDigest = own(input, 'dagDigest');
+  const entry = readEntry(own(input, 'entry')), command = commandFor(entry, entry.cmd, own(input, 'commandArgs'));
+  const repo = own(input, 'repo'), baseSha = own(input, 'baseSha'), dagDigest = own(input, 'dagDigest');
   const R = own(input, 'report'), text = own(R, 'text');
-  const tests = own(input, 'tests'), globs = arr(own(tests, 'globs'), LIMITS.maxList, isGlob, ctx);
+  const globs = globList(own(own(input, 'tests'), 'globs'), ctx);
   const prov = {};
-  for (const k of ['runner_id', 'runner_version', 'attempt_id', 'report_sha256', 'evidence_id_before']) prov[k] = own(R, k);
-  for (const k of ['report_eof', 'sealed', 'quiesced', 'binding_verified']) prov[k] = own(R, k);
-  const exit = own(R, 'exit_code');
-  if (typeof text !== 'string' || !isStr(80)(prov.attempt_id) || !isStr(64)(prov.runner_version) || !HEX64.test(dagDigest) || typeof prov.evidence_id_before !== 'string') refuse('test_kinds_error');
-  if (prov.runner_id !== 'vitest') refuse('runner_unsupported');
-  if (text.length > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded');
-  const id = evidenceIdentity({ repo, baseSha, exclusions: ownOr(input, 'exclusions', []) });
-  if (!id.ok) refuse(id.code);
-  const inP = new Set(id.paths);
-  if (entry.config_paths.some((p) => inP.has(p))) refuse('runner_config_changed');
+  for (const k of ['runner_id', 'runner_version', 'attempt_id', 'report_sha256', 'evidence_id_before', 'report_eof', 'sealed', 'quiesced', 'binding_verified', 'exit_code']) prov[k] = own(R, k);
+  if (typeof text !== 'string' || !isStr(80)(prov.attempt_id) || !prov.attempt_id || !isStr(64)(prov.runner_version) || typeof dagDigest !== 'string' || !HEX64.test(dagDigest) || typeof prov.evidence_id_before !== 'string') refuse('test_kinds_error');
+  if (prov.runner_id !== RUNNER.id) refuse('runner_unsupported');
+  if (text.length > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded'); // cheap first: a UTF-16 unit is at least one byte
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded');
+  const c = candidate(repo, baseSha, ownOr(input, 'exclusions', []));
+  const all = new Set(c.all), inP = new Set(c.paths);
+  if (entry.config_paths.some((p) => all.has(p))) refuse('runner_config_changed'); // before ANY exclusion (I6)
   const digest = sha256(text);
   if (prov.sealed !== true || prov.binding_verified !== true || typeof prov.report_sha256 !== 'string' || prov.report_sha256 !== digest) refuse('runner_output_tampered');
   if (prov.report_eof !== true) refuse('runner_survivor');
   if (prov.quiesced !== true) refuse('quiescence_unknown');
-  if (exit !== 0) refuse('evidence_run_failed'); // non-zero, a timeout (null) or anything else: a RED run is never evidence
-  if (prov.evidence_id_before !== id.evidence_id) refuse('candidate_moved');
+  if (prov.exit_code !== 0) refuse('evidence_run_failed'); // non-zero, a timeout (null) or anything else: a RED run is never evidence
+  if (prov.evidence_id_before !== c.evidence_id) refuse('candidate_moved');
   scanJson(text);
+  preflight(JSON.parse(text), ctx);
   const parsed = parseRunnerOutput(entry.format, text);
   if (!parsed.supported) refuse('evidence_unavailable');
   const results = parsed.results;
   if (results.length > LIMITS.maxResults) refuse('evidence_budget_exceeded');
-  if (results.some((r) => r.status === 'fail')) refuse('evidence_run_failed');
 
-  // group the passing results that carry a marker in their own title, by file
+  // per file: the creditable ids of PASSED results, unknown markers, and the non-passed carriers (R-3 subtracts them)
   const byFile = new Map();
   let passed = 0;
   for (const r of results) {
     charge(ctx);
-    if (r.status !== 'pass') continue;
-    passed++;
-    if (typeof r.title !== 'string' || r.title.length > 2048 || typeof r.file !== 'string') continue;
+    if (r.status === 'pass') passed++;
+    if (typeof r.title !== 'string' || r.title.length > LIMITS.maxTitleChars || typeof r.file !== 'string') continue;
     const m = markers([r.title]);
     if (!m.kinds.length && !m.items.length && !m.unknown.length) continue;
-    const slot = byFile.get(r.file) ?? { ids: new Set(), unknown: new Set() };
+    if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');
+    const slot = byFile.get(r.file) ?? { ids: new Set(), unknown: new Set(), skipped: new Map() };
+    byFile.set(r.file, slot);
+    if (r.status !== 'pass') { countMarkers(r.title, slot.skipped); if (slot.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded'); continue; }
     for (const k of m.kinds) slot.ids.add(`kind:${k}`);
     for (const i of m.items) (ITEM_ID.test(i) ? slot.ids : slot.unknown).add(`plan:${i}`);
     for (const u of m.unknown) slot.unknown.add(u);
-    byFile.set(r.file, slot);
+    if (slot.ids.size > LIMITS.maxIds || slot.unknown.size > LIMITS.maxIds) refuse('evidence_budget_exceeded');
   }
-  if (byFile.size > LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');
   const testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globs]), covers = matcher(entry.covers);
-  const files = [], voids = {};
-  let unknownMarkers = 0, credited = 0;
+  // classify each report name; names resolving to the same repo file (a symlink and its target) merge into ONE row
+  const rows = [], byRel = new Map(), skipped = new Map(), voids = {};
   for (const [file, slot] of [...byFile].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    const v = fileVoid(id, inP, file, testGlobs, covers, ctx);
-    if (v.void) { voids[v.void] = (voids[v.void] ?? 0) + 1; files.push({ file: v.rel ?? null, outcome: v.void, credited: [] }); continue; }
-    const cand = countMarkers(v.buf), blob = baseBlob(id.top, baseSha, v.rel), base = blob ? countMarkers(blob) : new Map();
-    const ids = [...slot.ids].filter((m) => (cand.get(m) ?? 0) > (base.get(m) ?? 0)).sort(); // R-3
+    const v = classify(c, inP, file, testGlobs, covers, ctx), prev = v.rel === null ? null : byRel.get(v.rel);
+    if (prev) { for (const k of slot.ids) prev.slot.ids.add(k); for (const k of slot.unknown) prev.slot.unknown.add(k); sumInto(prev.slot.skipped, slot.skipped); continue; }
+    const row = { v, slot };
+    rows.push(row);
+    if (v.rel !== null) byRel.set(v.rel, row);
+  }
+  for (const { v, slot } of rows) if (v.rel !== null && inP.has(v.rel)) skipped.set(v.rel, slot.skipped);
+  const cs = rows.some((x) => x.v.outcome === 'counted') ? census(c) : null;
+  const files = [];
+  let unknownMarkers = 0, credited = 0;
+  for (const { v, slot } of rows) {
+    const skip = skipped.has(v.rel) ? Object.fromEntries([...slot.skipped].sort((a, b) => (a[0] < b[0] ? -1 : 1))) : {};
+    if (v.outcome !== 'counted') { voids[v.outcome] = (voids[v.outcome] ?? 0) + 1; files.push({ file: v.rel, outcome: v.outcome, credited: [], skipped: skip }); continue; }
+    const ids = [...slot.ids].filter((m) => r3(cs, v.rel, m, skipped)).sort();
     unknownMarkers += slot.unknown.size; credited += ids.length;
-    files.push({ file: v.rel, outcome: 'counted', credited: ids });
+    files.push({ file: v.rel, outcome: 'counted', credited: ids, skipped: skip });
   }
-  files.sort((a, b) => (a.file ?? '') < (b.file ?? '') ? -1 : 1);
-  const record = { evidence_id: id.evidence_id, base_sha: baseSha, entry: entry.name, dag_digest: dagDigest, command_digest: commandDigest(entry.cmd, entry.args),
-    config_digest: cfg(repo, entry), attempt_id: prov.attempt_id, exit_code: 0, report_sha256: digest, report_len: text.length,
-    runner: { id: prov.runner_id, version: prov.runner_version }, claim: CLAIM,
+  files.sort((a, b) => ((a.file ?? '') < (b.file ?? '') ? -1 : (a.file ?? '') > (b.file ?? '') ? 1 : 0));
+  const cfg = configDigest(repo, entry.config_paths);
+  if (!cfg.ok) refuse(cfg.code);
+  const record = { evidence_id: c.evidence_id, base_sha: baseSha, entry: entry.name, dag_digest: dagDigest, command_digest: commandDigest(command.cmd, command.args),
+    config_digest: cfg.digest, attempt_id: prov.attempt_id, exit_code: 0, report_sha256: digest, report_len: bytes,
+    runner: { id: prov.runner_id, version: prov.runner_version, format: entry.format }, claim: CLAIM,
     integrity: Object.fromEntries(INTEGRITY.map((k) => [k, true])), files,
-    counts: { results: results.length, passed, marker_files: byFile.size, credited, unknown_markers: unknownMarkers } };
+    counts: { results: results.length, passed, marker_files: files.length, credited, unknown_markers: unknownMarkers } };
   return { record, voids };
-}
-const ownOr = (o, k, dflt) => (Reflect.getOwnPropertyDescriptor(o, k) ? own(o, k) : dflt);
-function cfg(repo, entry) { const c = configDigest(repo, entry.config_paths); if (!c.ok) refuse(c.code); return c.digest; }
-/** One result file: `{void, rel?}` or `{rel, buf}` (the candidate bytes, read once). */
-function fileVoid(id, inP, file, testGlobs, covers, ctx) {
-  if (!isAbsolute(file)) return { void: 'result_outside_repo' }; // a relative name would resolve against the cwd, never the repo
-  let real;
-  try { real = realpathSync.native(file); } catch (e) { return { void: e?.code === 'ENOENT' ? 'not_regular' : 'result_outside_repo' }; }
-  const rel = toRepoRel(id.top, real);
-  if (rel === null) return { void: 'result_outside_repo' };
-  if (!inP.has(rel)) return { void: 'not_in_P', rel };
-  let st;
-  try { st = lstatSync(join(id.top, rel)); } catch { return { void: 'not_regular', rel }; }
-  if (!st.isFile()) return { void: 'not_regular', rel };
-  if (!matches(testGlobs, rel, ctx)) return { void: 'not_test_file', rel };
-  if (!matches(covers, rel, ctx)) return { void: 'runner_uncovered', rel };
-  if (st.size > LIMITS.maxFileBytes) return { void: 'file_too_large', rel };
-  return { rel, buf: readFileSync(join(id.top, rel)) };
-}
-
-// ---- reuse (section 3): four conditions, each of which alone invalidates a stored record ----
-/**
- * recordUsable(R, cur) -> { ok:true } | { ok:false, reason: 'identity'|'integrity'|'applicability'|'freshness'|'malformed' }
- * cur = { evidence_id, base_sha, entry (a readEntry copy), dag_digest, command_digest, config_digest }.
- */
-export function recordUsable(R, cur) {
-  try {
-    const ctx = { work: 0, max: 1e6, glob: { steps: 0 } };
-    const g = (k) => own(R, k), c = (k) => own(cur, k);
-    const entry = c('entry'), integ = g('integrity'), files = arr(g('files'), LIMITS.maxMarkerFiles, plain, ctx);
-    const ID = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-    for (const f of files) if (own(f, 'outcome') === 'counted') { if (!safeRel(own(f, 'file'))) return { ok: false, reason: 'malformed' }; arr(own(f, 'credited'), 512, (m) => typeof m === 'string' && ID.test(m), ctx); }
-    if (!Number.isSafeInteger(own(own(R, 'counts'), 'unknown_markers')) || own(own(R, 'counts'), 'unknown_markers') < 0) return { ok: false, reason: 'malformed' };
-    if (g('evidence_id') !== c('evidence_id') || g('base_sha') !== c('base_sha')) return { ok: false, reason: 'identity' };
-    if (!INTEGRITY.every((k) => own(integ, k) === true)) return { ok: false, reason: 'integrity' };
-    const covers = matcher(own(entry, 'covers'));
-    const covered = files.every((f) => own(f, 'outcome') !== 'counted' || matches(covers, own(f, 'file'), ctx));
-    if (g('entry') !== own(entry, 'name') || g('exit_code') !== 0 || own(entry, 'format') !== 'vitest-json' || !covered) return { ok: false, reason: 'applicability' };
-    if (g('dag_digest') !== c('dag_digest') || g('command_digest') !== c('command_digest') || g('config_digest') !== c('config_digest')) return { ok: false, reason: 'freshness' };
-    return { ok: true };
-  } catch { return { ok: false, reason: 'malformed' }; }
-}
-
-// ---- the verdict (P2 input + P6 waivers; P4r never runs anything) ----
-const refusedVerdict = (code, evidence_id = null) => ({ status: 'refused', code, codes: [code], required_kinds: [], required_items: [], protected_kinds: [], missing_kinds: [], unmapped_items: [], waived: [], counts: {}, evidence_id, claim: CLAIM, records: {}, voids: {} });
-/**
- * tkVerdict(E, point) -> the P2 verdict plus { evidence_id, claim:'L-ran', records:{<entry>: 'current'|'absent'|'stale:<reason>'}, voids:{runner_uncovered:n} }.
- * E = { repo, baseSha, exclusions?, dagDigest, entries:[entry], commands:{<name>:{cmd,args}} (the CURRENT substituted commands),
- *       records:{<name>: R}, tests:{globs}, bound, declaration, reassessed:[class], S (the engine state for waivers), retryAuthorised? }.
- * P2 is called through its REAL interface (the real `kindsForClasses`, called by P2 with ONE object); held and open repairs are 0 (inert in V0).
- * Never throws.
- */
-export function tkVerdict(E, point) {
-  try { return verdict(E, point); } catch (e) { return refusedVerdict(e instanceof Refusal ? e.code : 'test_kinds_error'); }
-}
-function verdict(E, point) {
-  const ctx = { work: 0, max: 5_000_000, glob: { steps: 0 } };
-  const repo = own(E, 'repo'), baseSha = own(E, 'baseSha'), dagDigest = own(E, 'dagDigest');
-  const entries = arr(own(E, 'entries'), LIMITS.maxList, plain, ctx).map(readEntry); // runner_unsupported is raised, never skipped
-  const id = evidenceIdentity({ repo, baseSha, exclusions: ownOr(E, 'exclusions', []) });
-  if (!id.ok) refuse(id.code);
-  const inP = new Set(id.paths);
-  if (entries.some((en) => en.config_paths.some((p) => inP.has(p)))) refuse('runner_config_changed');
-  const globs = arr(own(own(E, 'tests'), 'globs'), LIMITS.maxList, isGlob, ctx), testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globs]);
-  const commands = own(E, 'commands'), records = own(E, 'records');
-  if (!plain(commands) || !plain(records)) refuse('test_kinds_error');
-  const coverSets = entries.map((en) => matcher(en.covers));
-  const kinds = new Set(), items = new Set(), states = {};
-  let unknown = 0;
-  for (const en of entries) {
-    const R = Reflect.getOwnPropertyDescriptor(records, en.name);
-    if (!R) { states[en.name] = 'absent'; continue; }
-    if (!('value' in R)) refuse('test_kinds_error');
-    const cmd = own(commands, en.name), cd = configDigest(repo, en.config_paths);
-    if (!cd.ok) refuse(cd.code);
-    const u = recordUsable(R.value, { evidence_id: id.evidence_id, base_sha: baseSha, entry: en, dag_digest: dagDigest, command_digest: commandDigest(own(cmd, 'cmd'), arr(own(cmd, 'args'), 256, isStr(1024), ctx)), config_digest: cd.digest });
-    states[en.name] = u.ok ? 'current' : `stale:${u.reason}`;
-    if (!u.ok) continue;
-    for (const f of own(R.value, 'files')) for (const m of own(f, 'credited')) (m.startsWith('kind:') ? kinds : items).add(m.slice(m.indexOf(':') + 1));
-    unknown += own(own(R.value, 'counts'), 'unknown_markers');
-  }
-  let uncovered = 0;
-  for (const p of id.paths) if (matches(testGlobs, p, ctx) && !coverSets.some((c) => matches(c, p, ctx))) uncovered++;
-  const S = own(E, 'S');
-  const base = { bound: own(E, 'bound'), declaration: own(E, 'declaration'), reassessed: own(E, 'reassessed'), evidence: { kinds: [...kinds].sort(), items: [...items].sort(), unknown_markers: unknown } };
-  const deps = { kindsForClasses, protectedTags: [...PROTECTED_TAGS] };
-  const run = (w) => testKindsVerdict({ ...base, waivers: w, state: { point, retry_authorised: ownOr(E, 'retryAuthorised', false) === true, held: 0, open_repairs: 0 } }, deps);
-  const v0 = run({ trusted: [], untrusted: [] });
-  const done = (v) => ({ ...v, evidence_id: id.evidence_id, claim: CLAIM, records: states, voids: { runner_uncovered: uncovered } });
-  if (['test_kinds_error', 'evidence_budget_exceeded'].includes(v0.code)) return done(v0);
-  // P6 owns waiver matching and trust: it needs the REQUIRED and PROTECTED sets P2 just recomputed, and the evidence identity as the candidate
-  const w = testKindWaivers(S, id.evidence_id, { required: [...v0.required_kinds.map((k) => `kind:${k}`), ...v0.required_items.map((i) => `plan:${i}`)], protected: v0.protected_kinds.map((k) => `kind:${k}`) });
-  if (!w.ok) return done({ ...v0, status: 'refused', code: w.code, codes: [w.code] });
-  return done(run({ trusted: w.waived, untrusted: w.unauthorized }));
 }
