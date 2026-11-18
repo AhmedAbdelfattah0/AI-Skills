@@ -129,14 +129,20 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * checks; design S-01b2 rev 6 §2.3). Workers and the carrier never use it. argv[1] is JSON
  * `{file, args, shell, outFile, envelopeFile, attemptId}` plus optional `report: true` / `sample: false`.
  * Same release protocol and process group as LAUNCHER; the runner's stdin is empty. Its own fd 1
- * is a pipe the engine holds. Once the runner finishes (stdout and the report channel closed, or a
- * DRAIN_MS drain after its exit) it writes ONE length-framed result to fd 1, before any file:
- * a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own child `exit`,
- * spawn_error, out_len, truncated, stdout_bytes, out_eof, report, report_len, report_truncated,
- * report_bytes, report_eof), then the stdout bytes, then the report bytes. The write loops over
- * EAGAIN; fd 1 is then closed and the launcher exits 0 iff exit_code is 0.
+ * is a pipe the engine holds (its absence from the runner and descendants is probed on darwin and
+ * Linux, reasoned on win32). The boundary is the launcher's observed child `exit`: there it reads
+ * what is already in each channel synchronously (non-blocking, to EAGAIN or EOF) and LATCHES each
+ * channel's EOF state; nothing read after the boundary is kept, and no drain follows (POSIX;
+ * `boundary: 'exit'`). On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
+ * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
+ * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
+ * child `exit`, spawn_error, boundary, out_len, truncated, stdout_bytes, out_eof, report,
+ * report_len, report_truncated, report_bytes, report_eof), then the stdout bytes, then the report
+ * bytes. The write loops over EAGAIN; fd 1 is then closed and the launcher exits 0 iff exit_code is 0.
+ * - `out_eof` / `report_eof` are true only when that channel was at EOF at the boundary, i.e. no
+ *   process other than the dead runner still held it. The engine refuses either being false.
  * - `report: true`: the runner gets a pathless pipe at fd 3 (reached as /dev/fd/3), collected up to
- *   STDOUT_CAP; `report_eof` is true only when it reached EOF before the result was framed.
+ *   STDOUT_CAP.
  * - `.out` and the envelope are forensic copies, written after the frame and never read for a
  *   decision: each goes to a fresh `<file>.tmp` (O_EXCL, no-follow) renamed over the name, so a
  *   planted FIFO, symlink or file there is skipped and can never block the launcher.
@@ -154,7 +160,7 @@ process.stdin.once('data', (chunk) => {
   started = true;
   process.stdin.pause();
   const out = [], rep = [];
-  let size = 0, rsize = 0, outEof = false, repEof = false;
+  let size = 0, rsize = 0, outEof = false, repEof = false, latched = false, boundary = null;
 ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   const writeAll = (fd, buf) => {
     for (let off = 0; off < buf.length;) {
@@ -174,7 +180,7 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     stopSampler();
     const stdout = Buffer.concat(out), report = Buffer.concat(rep);
     const head = { schema: '${SEALED_SCHEMA}', attempt_id: spec.attemptId, exit_code: code, signal: signal || null, spawn_error: error || null,
-      out_len: stdout.length, truncated: size > ${STDOUT_CAP}, stdout_bytes: size, out_eof: outEof,
+      boundary, out_len: stdout.length, truncated: size > ${STDOUT_CAP}, stdout_bytes: size, out_eof: outEof,
       report: spec.report === true, report_len: report.length, report_truncated: rsize > ${STDOUT_CAP}, report_bytes: rsize, report_eof: repEof };
     try { writeAll(1, Buffer.concat([Buffer.from(JSON.stringify(head) + '\\n'), stdout, report])); } catch {}
     try { fs.closeSync(1); } catch {}
@@ -194,17 +200,47 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
     first.unref(); every.unref(); sm.timers.push(first, every);
   }
-  cli.stdout.on('data', (c) => { size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); });
-  cli.stdout.on('end', () => { outEof = true; });
-  if (spec.report === true) {
-    const r = cli.stdio[3];
-    r.on('data', (c) => { rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); });
-    r.on('end', () => { repEof = true; });
+  // Decision bytes are only those present when the launcher observes the runner's exit (the
+  // boundary): each channel's EOF state is latched there and nothing read later is kept.
+  const takeOut = (c) => { if (latched) return; size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); };
+  const takeRep = (c) => { if (latched) return; rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); };
+  cli.stdout.on('data', takeOut);
+  cli.stdout.on('end', () => { if (!latched) outEof = true; });
+  cli.stdout.on('error', () => {});
+  const r = spec.report === true ? cli.stdio[3] : null;
+  if (r) {
+    r.on('data', takeRep);
+    r.on('end', () => { if (!latched) repEof = true; });
     r.on('error', () => {});
   }
-  let exited = null;
-  cli.on('exit', (code, signal) => { exited = [code, signal]; setTimeout(() => finish(code, signal, null), ${DRAIN_MS}); });
-  cli.on('close', (code, signal) => finish(exited ? exited[0] : code, exited ? exited[1] : signal, null));
+  // The runner is dead: its own descriptors closed before its exit was reported, so whatever it wrote
+  // is already in the socket. Read that synchronously (non-blocking) up to EAGAIN or EOF. EOF means
+  // no other process holds the channel; EAGAIN means one does (a survivor): not at EOF, refused.
+  const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
+  const drain = (s, take) => {
+    const fd = fdOf(s);
+    if (fd < 0) return false;
+    const b = Buffer.allocUnsafe(65536);
+    for (;;) {
+      let n;
+      try { n = fs.readSync(fd, b, 0, b.length, null); } catch (e) { if (e.code === 'EINTR') continue; return false; }
+      if (n === 0) return true;
+      take(Buffer.from(b.subarray(0, n)));
+    }
+  };
+  const latch = () => {
+    if (!outEof) outEof = drain(cli.stdout, takeOut);
+    if (r && !repEof) repEof = drain(r, takeRep);
+    latched = true;
+  };
+  cli.on('exit', (code, signal) => {
+    if (process.platform !== 'win32') { boundary = 'exit'; latch(); return finish(code, signal, null); }
+    // win32 has no descriptor to read synchronously: the weaker 'drain' boundary (EOF within DRAIN_MS of the exit).
+    boundary = 'drain';
+    const settle = () => { latched = true; finish(code, signal, null); };
+    const t = setTimeout(settle, ${DRAIN_MS});
+    cli.on('close', () => { clearTimeout(t); settle(); });
+  });
   cli.stdin.end();
 });
 `;

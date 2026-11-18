@@ -184,6 +184,9 @@ export function gateRedDeps({ commit, alive, platform, repoRoot, verifyBinding, 
 export const artifactDigests = (repoRoot, artifacts = {}) =>
   Object.fromEntries(Object.entries(artifacts).map(([k, p]) => [k, repoFileDigest(repoRoot, p)]));
 
+/** The typed refusals gateRunner rejects with: callers keep the code and never retry them automatically. */
+export const RUNNER_REFUSALS = new Set(['runner_output_tampered', 'runner_survivor', 'channel_unsupported']);
+
 /** Upper bound on a sealed result frame: its header plus the capped stdout and the capped report. */
 const FRAME_CAP = 2 * STDOUT_CAP + 1024 * 1024;
 /** How long the result pipe may stay open after the launcher exited (it closes it right after the frame). */
@@ -213,23 +216,30 @@ export function decodeSealedFrame(buf, attemptId) {
 /**
  * `gateRed` deps.spawnRunner (also the ship-ready proof runner and unit checks): the command
  * through the sealed launcher (own process group, blocked on the release byte). Every byte and
- * exit status `done` returns arrives over the launcher's stdout pipe, which only the engine holds:
- * one result frame (decodeSealedFrame) whose exit_code must agree with the launcher's own exit
- * status (0 iff 0), read to EOF. No file is read: the `.out` and envelope files are forensic only.
+ * exit status `done` returns arrives over the launcher's stdout pipe, which only the engine and
+ * the launcher hold (probed on darwin and Linux, reasoned on win32): one result frame
+ * (decodeSealedFrame) whose exit_code must agree with the launcher's own exit status (0 iff 0),
+ * read to EOF. No file is read: the `.out` and envelope files are forensic only.
  * `done` reports `quiescent: true` only when the group is proven gone (false: survived or
  * unknowable). It rejects with `runner_output_tampered` (no well-formed frame for this attempt,
- * a disagreeing or abnormal launcher exit, an oversized frame, or a result pipe still open
- * `frameCloseMs` after the launcher exited) unless the run timed out, which returns a result with
- * `timedOut: true` and no exit code, as before. `stdout_eof: false` flags that a process still
- * held the runner's stdout when the launcher finished (after a drain): its bytes until then are
- * in `stdout`. Recorded, not refused (the drain is kept for runners that leave a descendant).
- * `report: true` adds the report channel (the runner's fd 3, reached as /dev/fd/3; measured on
- * darwin only, so any other platform rejects `channel_unsupported` before anything starts): the
- * result then carries `report` (bytes) and `report_eof: true`, and a channel still open when the
- * launcher finished (a process outlived the runner holding it) rejects `runner_survivor`.
+ * a disagreeing or abnormal launcher exit, an oversized frame, a frame not latched at the
+ * runner's exit (POSIX), or a result pipe still open `frameCloseMs` after the launcher exited)
+ * unless the run timed out, which returns a result with `timedOut: true` and no exit code.
+ * It rejects with `runner_survivor` when stdout (or, with `report`, the report channel) was not
+ * at EOF when the launcher observed the runner's exit: another process still held it, so bytes
+ * there are not the runner's alone. Only bytes present at that boundary are ever returned. A
+ * process that held the channel during the run can still write before the boundary (in-run
+ * injection, design §6.1 R-T2), including in the instants between the runner's death and the
+ * launcher observing it: a survivor that writes AND closes in that window is accepted (a race,
+ * measured in PR #94; the boundary narrows the old 1 s drain to it, it does not close it).
+ * `report` must be a boolean (anything else rejects `bad_input`). `report: true` adds the report
+ * channel (the runner's fd 3, reached as /dev/fd/3; measured on darwin only, so any other
+ * platform rejects `channel_unsupported` before anything starts): the result then carries
+ * `report` (bytes) and `report_eof: true`.
  */
 export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnFn, frameCloseMs = FRAME_CLOSE_MS }) {
   return async ({ attempt_id: id, command, timeoutMs, report = false }) => {
+    if (typeof report !== 'boolean') throw coded('bad_input', `report must be true or false, not ${JSON.stringify(report)}`);
     if (report === true && platform !== 'darwin') {
       throw coded('channel_unsupported', `the runner report channel (/dev/fd/3) is unsupported on ${platform} (Linux: /dev/fd/N on a socketpair is ENXIO; win32: no /dev/fd)`);
     }
@@ -275,10 +285,17 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         throw Object.assign(coded('runner_output_tampered', `runner result refused: ${why}`), { quiescent });
       }
       if (quiescent && h.spawn_error) throw Object.assign(new Error(`command failed to start (${h.spawn_error})`), { quiescent });
-      if (report === true && !h.report_eof) {
-        throw Object.assign(coded('runner_survivor', 'the report channel was still open when the runner finished: a process outlived it holding the channel'), { quiescent });
+      if (!h.spawn_error) {
+        // The boundary is the launcher's observed runner exit (win32: the weaker drain, see launcher.mjs).
+        if (h.boundary !== 'exit' && !(platform === 'win32' && h.boundary === 'drain')) {
+          throw Object.assign(coded('runner_output_tampered', `runner result refused: boundary ${JSON.stringify(h.boundary)} on ${platform}`), { quiescent });
+        }
+        const open = [!h.out_eof && 'stdout', report === true && !h.report_eof && 'the report channel'].filter(Boolean);
+        if (open.length) {
+          throw Object.assign(coded('runner_survivor', `${open.join(' and ')} still open when the runner exited: another process held it, so its bytes are not the runner's alone`), { quiescent });
+        }
       }
-      return { exitCode: h.exit_code, stdout: frame.stdout.toString('utf8'), stderr: '', timedOut, quiescent, stdout_eof: h.out_eof,
+      return { exitCode: h.exit_code, stdout: frame.stdout.toString('utf8'), stderr: '', timedOut, quiescent,
         ...(h.truncated ? { truncated: true, stdout_bytes: h.stdout_bytes } : {}),
         ...(report === true ? { report: frame.report, report_eof: true, ...(h.report_truncated ? { report_truncated: true, report_bytes: h.report_bytes } : {}) } : {}) };
     })();

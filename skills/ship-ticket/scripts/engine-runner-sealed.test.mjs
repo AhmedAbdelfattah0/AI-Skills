@@ -9,15 +9,22 @@
  * "driver" process so a synchronous engine hang (the pre-FX FIFO read) is observable and killable
  * from this process: a hang is an assertion failure here, never a stuck suite.
  *
- * Rows (design §2.4 and §5.2 FX ACs):
+ * Rows (design §2.4 and §5.2 FX ACs, plus the exit-boundary latch of the PR #94 repair):
  * - S1   (POSIX)  FIFO forger, both write orders: fired, never accepted, no hang.
  * - S1w  (all)    1 ms path-overwrite forger of `.out` and the envelope: result equals the genuine run.
  * - S2a  (darwin) a survivor rewriting the argv report path (/dev/fd/3) has no effect.
  * - S2b  (darwin) a survivor holding the report channel past the runner's exit: `runner_survivor`.
- * - S3            positive: exit code, stdout and report bytes exactly as the runner wrote them.
+ * - (a)-(d)       a survivor writing to the report channel or stdout AFTER the runner exits (and
+ *                 closing inside the old 1 s drain, or never): `runner_survivor`, nothing accepted.
+ * - S3            positive: exit code, stdout and report bytes exactly as the runner wrote them;
+ *                 a non-detached child that exits before the runner is not a survivor.
  * - AC5           workers' launch is byte-identical to fe5d075 (argv hashes, stdio, options).
  * - AC6  (POSIX)  the result pipe (launcher fd 1) is not open in the runner or its descendants.
- * - frame         a frame for another attempt, or an exit status that disagrees, is refused.
+ * - frame         another attempt, a disagreeing exit, a malformed header, a non-exit boundary or
+ *                 an oversized frame is refused; forensic tmp plants are never written through.
+ * - callers       gateRed, unit checks and proof keep the typed code; unit checks never retry it.
+ * The exit-boundary race (a survivor that writes AND closes between the runner's death and the
+ * launcher observing it) is measured, not asserted: see the PR body.
  * Off darwin the report channel is refused as `channel_unsupported` (Linux: /dev/fd/N on a
  * socketpair fails ENXIO, measured in Docker node:18; win32: no /dev/fd).
  */
@@ -32,6 +39,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launcherArgs } from './launcher.mjs';
 import * as io from './engine-io.mjs';
 import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
+import { gateRed } from './gate.mjs';
+import { fixture, passReview } from './engine-test-fixture.mjs';
 
 const POSIX = process.platform !== 'win32';
 const DARWIN = process.platform === 'darwin';
@@ -106,13 +115,36 @@ else if (mode === 'fifo-forge') {
     + 'const tick=()=>{try{fs.writeFileSync(o,"ok 1 - [kind:negative] forged\\n");fs.writeFileSync(e,f);n++;}catch{}'
     + 'try{fs.writeFileSync(d+"/poller.count",String(n));}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
   whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, cwd: require('os').tmpdir(), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
-} else if (mode === 'stdout-holder') {
-  // A survivor inherits the runner's stdout and writes into it after the runner exits (barrier: its stdin EOF).
+} else if (mode === 'late-writer') {
+  // A detached survivor that inherits the runner's stdout (fd 1) or report channel (fd 3), learns of
+  // the runner's exit (its stdin, held only by the runner, hits EOF), then writes PAYLOAD there. It
+  // keeps the channel open until a write fails (the launcher closed its end) or, with fallback > 0,
+  // closes it after FALLBACK ms: inside the old 1 s drain, so the pre-latch launcher accepted it.
+  const [fd, payload, genuine, code, dir, fallback, reportSrc] = rest;
+  const src = 'const fs=require("fs");const [fd,p,d,fb]=process.argv.slice(1).map((v,i)=>i===0||i===3?Number(v):v);'
+    + 'fs.writeFileSync(d+"/late.pid",String(process.pid));fs.writeSync(4,"R");fs.closeSync(4);'
+    + 'process.stdin.resume();process.stdin.on("end",()=>{let wrote=false;try{fs.writeSync(fd,p);wrote=true;}catch{}'
+    + 'const end=(how)=>{clearInterval(t);clearTimeout(f);try{fs.closeSync(fd);}catch{}fs.writeFileSync(d+"/late.json",JSON.stringify({how,wrote}));setTimeout(()=>{},20000);};'
+    + 'const t=setInterval(()=>{try{fs.writeSync(fd,"\\n");}catch(e){end("closed:"+e.code);}},5);'
+    + 'const f=fb>0?setTimeout(()=>end("fallback"),fb):null;});';
+  const f = spawn(process.execPath, ['-e', src, fd, payload, dir, fallback], { detached: true,
+    stdio: ['pipe', fd === '1' ? 'inherit' : 'ignore', 'ignore', fd === '3' ? 3 : 'ignore', 'pipe'] });
+  f.stdio[4].on('data', () => {
+    f.stdio[4].destroy(); f.unref();
+    if (reportSrc) fs.writeFileSync('/dev/fd/3', fs.readFileSync(reportSrc));
+    exitWith(genuine, Number(code));
+  });
+} else if (mode === 'tmp-plant') {
+  // A regular file at the .out tmp name and a symlink (to a victim file) at the envelope tmp name.
   const [dir] = rest;
-  const src = 'const fs=require("fs");const d=process.argv[1];fs.writeFileSync(d+"/stdoutholder.pid",String(process.pid));fs.writeSync(3,"R");fs.closeSync(3);'
-    + 'process.stdin.resume();process.stdin.on("end",()=>{try{fs.writeSync(1,"INJECTED-AFTER-EXIT\\n");}catch{}setTimeout(()=>{},20000);});';
-  const f = spawn(process.execPath, ['-e', src, dir], { detached: true, stdio: ['pipe', 'inherit', 'ignore', 'pipe'] });
-  f.stdio[3].on('data', () => { f.stdio[3].destroy(); f.unref(); exitWith('ok 1 - real\n', 0); });
+  const L = launcherArgv();
+  fs.writeFileSync(L.out + '.tmp', 'PLANTED-OUT');
+  fs.symlinkSync(dir + '/victim.txt', L.env + '.tmp');
+  exitWith('not ok 1 - real\n', 1);
+} else if (mode === 'child-then-exit') {
+  // Legitimate: a non-detached child inherits stdout, writes, and exits before the runner does.
+  const c = spawn(process.execPath, ['-e', 'process.stdout.write("child line\\n")'], { stdio: ['ignore', 'inherit', 'ignore'] });
+  c.on('exit', () => exitWith('ok 1 - parent\n', 0));
 } else if (mode === 'report') {
   // Write the report THROUGH THE PATH (as vitest --outputFile=/dev/fd/3 does), then stdout, then exit.
   const [reportSrc, stdoutSrc, code, reportPath] = rest;
@@ -152,12 +184,13 @@ else if (mode === 'fifo-forge') {
     spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'inherit' }),
     spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'pipe' }),
     spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'inherit', detached: true }),
-    spawn('sh', ['-c', 'sleep 30'], { stdio: 'inherit' }),
+    spawn('sh', ['-c', 'exec sleep 30'], { stdio: 'inherit' }),
   ];
   Promise.all(kids.map((k) => new Promise((r) => k.once('spawn', r)))).then(() => {
     const result = { launcherFd1: ids(process.ppid, [1]), runnerFd1: ids(process.pid, [1]), runner: ids(process.pid), kids: kids.map((k) => ids(k.pid)) };
-    for (const k of kids) { try { k.kill('SIGKILL'); } catch {} }
-    exitWith(JSON.stringify(result) + '\n', 0);
+    // Every descendant must be gone before the runner exits: one still holding stdout is a survivor.
+    Promise.all(kids.map((k) => new Promise((r) => { k.once('exit', r); try { k.kill('SIGKILL'); } catch {} })))
+      .then(() => exitWith(JSON.stringify(result) + '\n', 0));
   });
 } else { process.stderr.write('unknown mode ' + mode); process.exit(98); }
 `;
@@ -169,7 +202,7 @@ function world(t) {
   writeFileSync(join(dir, 'fixture.cjs'), FIXTURE);
   t.after(async () => {
     const killed = [];
-    for (const f of ['forger.pid', 'poller.pid', 'pathforger.pid', 'holder.pid', 'stdoutholder.pid', 'pipeholder.pid']) {
+    for (const f of ['forger.pid', 'poller.pid', 'pathforger.pid', 'holder.pid', 'late.pid', 'pipeholder.pid']) {
       if (!existsSync(join(dir, f))) continue;
       const pid = Number(readFileSync(join(dir, f), 'utf8').trim());
       if (!pid) continue;
@@ -353,7 +386,7 @@ test('AC5 workers launch byte-identical to fe5d075: launcher argv (worker and ca
   }
 });
 
-test('AC6 the result pipe (launcher fd 1) is open in no runner process or descendant', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('AC6 the result pipe (launcher fd 1) is open in no runner process or descendant', { skip: POSIX ? false : 'win32: no lsof or /proc to list a process\'s descriptors, so isolation there is reasoned (libuv opens every non-stdio handle non-inheritable), not probed', timeout: 60000 }, async (t) => {
   if (process.platform !== 'linux' && spawnSync('lsof', ['-v']).error) return t.skip('lsof is not installed (darwin probe needs it)');
   const w = world(t);
   const r = await drive(w, { args: ['probe'] });
@@ -381,8 +414,8 @@ function fakeLauncherRun(w, script, id, opts = {}) {
 
 /** Launcher stand-in: waits for the release byte, writes `frame(spec)` to fd 1, exits with `code`. */
 const fakeLauncher = (frameExpr, code) => `const fs=require('fs');const spec=JSON.parse(process.argv[1]);process.stdin.once('data',()=>{
-  const head=(o)=>Buffer.from(JSON.stringify(Object.assign({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,out_len:0,truncated:false,stdout_bytes:0,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false},o))+'\\n');
-  fs.writeSync(1, ${frameExpr});process.exit(${code});});`;
+  const head=(o)=>Buffer.from(JSON.stringify(Object.assign({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,boundary:'exit',out_len:0,truncated:false,stdout_bytes:0,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false},o))+'\\n');
+  const all=${frameExpr};for(let o=0;o<all.length;){try{o+=fs.writeSync(1,all,o,all.length-o);}catch(e){if(e.code!=='EAGAIN')throw e;}}process.exit(${code});});`;
 
 test('frame: a frame for another attempt, a disagreeing exit status, two frames or trailing bytes are refused (runner_output_tampered)', { timeout: 60000 }, async (t) => {
   const w = world(t);
@@ -410,7 +443,7 @@ test('frame: a result pipe still open after the launcher exited (fd 1 handed to 
   const script = `const fs=require('fs'),cp=require('child_process');const spec=JSON.parse(process.argv[1]);process.stdin.once('data',()=>{
     const h=cp.spawn(process.execPath,['-e',${J(holder)},${J(join(w.dir, 'pipeholder.pid'))}],{detached:true,cwd:require('os').tmpdir(),stdio:['ignore','inherit','ignore','pipe']});
     h.stdio[3].once('data',()=>{h.stdio[3].destroy();h.unref();
-      const head=Buffer.from(JSON.stringify({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,out_len:3,truncated:false,stdout_bytes:3,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false})+'\\n');
+      const head=Buffer.from(JSON.stringify({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,boundary:'exit',out_len:3,truncated:false,stdout_bytes:3,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false})+'\\n');
       fs.writeSync(1,Buffer.concat([head,Buffer.from('ok\\n')]));process.exit(0);});});`;
   const t0 = Date.now();
   const res = await fakeLauncherRun(w, script, 'att-' + randomUUID(), { frameCloseMs: 300 }).then((r) => ({ resolved: r }), (e) => ({ code: e.code, message: e.message }));
@@ -420,13 +453,170 @@ test('frame: a result pipe still open after the launcher exited (fd 1 handed to 
   assert.ok(Date.now() - t0 < 10000, 'the bound did not apply');
 });
 
-test('stdout held past the runner exit by a detached process: accepted with stdout_eof false (recorded, not sealed)', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+/** A runner whose detached survivor writes PAYLOAD to fd `fd` once the runner exits (fixture `late-writer`). */
+async function lateWriter(t, { fd, payload, genuine, code, fallback, report = false }) {
   const w = world(t);
-  const r = await drive(w, { args: ['stdout-holder', w.dir] });
-  assert.ok(existsSync(join(w.dir, 'stdoutholder.pid')), 'the holder never started (the row would prove nothing)');
-  t.diagnostic(`result: ${J(r)}`);
+  const args = ['late-writer', fd, payload, genuine, String(code), w.dir, String(fallback)];
+  if (report) { writeFileSync(join(w.dir, 'report.json'), vitestReport(4096)); args.push(join(w.dir, 'report.json')); }
+  const r = await drive(w, { args, report });
+  assert.ok(existsSync(join(w.dir, 'late.pid')), 'the survivor never started (the row would prove nothing)');
+  // The survivor fired after the runner exited (its stdin EOF is the barrier) and wrote its payload.
+  assert.ok(await waitFor(() => existsSync(join(w.dir, 'late.json'))), 'the survivor never wrote (the row would prove nothing)');
+  const late = JSON.parse(readFileSync(join(w.dir, 'late.json'), 'utf8'));
+  t.diagnostic(`result: ${J(r).slice(0, 300)} survivor: ${J(late)}`);
+  assert.equal(late.wrote, true, J(late));
+  return { r, late };
+}
+
+/**
+ * The survivor rows below are RED on the pre-latch launcher (a writer that closed inside its 1 s
+ * drain was accepted: report `{"genuine":true}INJECTED` with report_eof true; stdout with the
+ * injected TAP). The survivor only closes once a write fails (the launcher closed its end) or at
+ * `fallback`: on the latched launcher `late.how` proves the channel was still held at the boundary,
+ * so no exit race decides these rows.
+ */
+test('(a) report writer injects after the runner exits and closes inside the old drain: runner_survivor, nothing accepted', { skip: DARWIN ? false : 'report channel is darwin-only (see S2a)', timeout: 60000 }, async (t) => {
+  const { r, late } = await lateWriter(t, { fd: '3', payload: '{"forged":true}', genuine: 'ok 1 - real\n', code: 0, fallback: 700, report: true });
+  assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
+  assert.equal(r.code, 'runner_survivor', J(r));
+  assert.match(r.message, /report channel/);
+  assert.doesNotMatch(r.message, /stdout/, 'stdout was not held: only the report channel may be named');
+  assert.doesNotMatch(J(r), /forged/);
+  assert.match(late.how, /^closed:/, `the survivor closed by its fallback, not because the launcher had already latched: ${J(late)}`);
+});
+
+test('(b) stdout writer injects after the runner exits and closes inside the old drain: runner_survivor, nothing accepted', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const { r, late } = await lateWriter(t, { fd: '1', payload: 'INJECTED-AFTER-EXIT\n', genuine: 'ok 1 - real\n', code: 0, fallback: 700 });
+  assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
+  assert.equal(r.code, 'runner_survivor', J(r));
+  assert.match(r.message, /stdout/);
+  assert.doesNotMatch(J(r), /INJECTED/);
+  assert.match(late.how, /^closed:/, J(late));
+});
+
+test('(c) Codex: a silent failing runner whose survivor writes a TAP failure after it exits: runner_survivor, no forged RED', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n';
+  const { r, late } = await lateWriter(t, { fd: '1', payload: tap, genuine: '', code: 1, fallback: 700 });
+  assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
+  assert.equal(r.code, 'runner_survivor', J(r));
+  assert.doesNotMatch(J(r), /ERR_ASSERTION|not ok/);
+  assert.match(late.how, /^closed:/, J(late));
+});
+
+test('(d) stdout held past the runner exit by a detached process that never closes it: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const { r, late } = await lateWriter(t, { fd: '1', payload: 'HELD\n', genuine: 'ok 1 - real\n', code: 0, fallback: 0 });
+  assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
+  assert.equal(r.code, 'runner_survivor', J(r));
+  assert.doesNotMatch(J(r), /HELD/);
+  assert.match(late.how, /^closed:/, J(late));
+});
+
+test('positive: a non-detached child that writes to the inherited stdout and exits before the runner is not a survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const r = await drive(w, { args: ['child-then-exit'] });
   assert.equal(r.settled, 'resolved', J(r));
-  assert.equal(r.exitCode, 0);
-  assert.equal(r.stdout_eof, false, 'a held stdout must be flagged');
-  assert.ok(r.stdout.startsWith('ok 1 - real\n'), J(r));
+  assert.deepEqual([r.exitCode, r.stdout], [0, 'child line\nok 1 - parent\n']);
+});
+
+test('forensic writes: a regular file or a symlink planted at the tmp names is never written into or through', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  writeFileSync(join(w.dir, 'victim.txt'), 'VICTIM');
+  const r = await drive(w, { args: ['tmp-plant', w.dir] });
+  assert.ok(lstatSync(join(w.attempts, r.id + '.envelope.json.tmp')).isSymbolicLink(), 'the plant never happened (the row would prove nothing)');
+  assert.equal(r.settled, 'resolved', J(r));
+  assert.deepEqual([r.exitCode, r.stdout], [1, GENUINE_FAIL]);
+  // O_EXCL: the existing tmp file is skipped, not opened and renamed over `.out`.
+  assert.equal(readFileSync(join(w.attempts, r.id + '.out.tmp'), 'utf8'), 'PLANTED-OUT');
+  assert.equal(existsSync(join(w.attempts, r.id + '.out')), false);
+  // O_EXCL (O_NOFOLLOW alone would also refuse it): nothing is written through the symlink.
+  assert.equal(readFileSync(join(w.dir, 'victim.txt'), 'utf8'), 'VICTIM');
+});
+
+test('frame: a malformed header (wrong schema, field types, an unknown or non-exit boundary) is refused (runner_output_tampered)', { timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const bad = {
+    schema: `{schema:'ship-ticket-sealed-result-v0'}`,
+    signal: `{signal:5}`,
+    exit_code: `{exit_code:1.5}`,
+    flag: `{out_eof:'yes'}`,
+    length: `{stdout_bytes:-1}`,
+    boundary_unknown: `{boundary:'later'}`,
+    ...(POSIX ? { boundary_drain: `{boundary:'drain'}`, boundary_none: `{boundary:null}` } : {}),
+  };
+  for (const [name, o] of Object.entries(bad)) {
+    const script = fakeLauncher(`Buffer.concat([head(Object.assign({out_len:3},${o})),Buffer.from('ok\\n')])`, 0);
+    const res = await fakeLauncherRun(w, script, 'att-' + randomUUID()).then((r) => ({ resolved: r }), (e) => ({ code: e.code, message: e.message }));
+    assert.equal(res.code, 'runner_output_tampered', `${name}: ${J(res)}`);
+  }
+});
+
+test('frame: a frame larger than the cap is refused for its size (runner_output_tampered)', { timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const n = 65 * 1024 * 1024 + 1; // FRAME_CAP (2 x 32 MiB + 1 MiB) is exceeded by the payload alone
+  const script = fakeLauncher(`Buffer.concat([head({out_len:${n},stdout_bytes:${n}}),Buffer.alloc(${n},120)])`, 0);
+  const res = await fakeLauncherRun(w, script, 'att-' + randomUUID()).then((r) => ({ resolved: r.stdout.length }), (e) => ({ code: e.code, message: e.message }));
+  assert.equal(res.code, 'runner_output_tampered', J(res));
+  assert.match(res.message, /exceeds/);
+});
+
+test('report must be a boolean: 1, "true" or null is refused (bad_input) before anything starts', async (t) => {
+  const w = world(t);
+  const spawned = [];
+  const run = io.gateRunner({ repoRoot: w.dir, dir: w.attempts, platform: process.platform, env: process.env,
+    toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: () => false, spawnFn: (...a) => { spawned.push(a); throw new Error('spawned'); } });
+  for (const report of [1, 'true', null]) {
+    await assert.rejects(run({ attempt_id: 'att-x', command: { cmd: process.execPath, args: [] }, timeoutMs: WORKER_FAILURE_BOUND_MS, report }), (e) => e.code === 'bad_input');
+  }
+  assert.equal(spawned.length, 0);
+  assert.equal(existsSync(w.attempts), false);
+});
+
+// ------------------------------------------------------------------ callers keep the typed code (no flattening, no retry)
+
+/** A check/proof command that exits at once and leaves a (non-detached) child holding its stdout: a survivor. */
+const SURVIVOR_CMD = { cmd: process.execPath, args: ['-e', "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:['ignore','inherit','ignore']}).unref()"] };
+const ENGINE_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so engine attempts end in quiescence_unknown first';
+
+test('gateRed through the real runner: a survivor-forged TAP failure is refused as runner_survivor (a judgment point), never runner_failed or RED', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const deps = io.gateRedDeps({ commit: async () => {}, alive: (g) => io.groupAlive(g), platform: process.platform, repoRoot: w.dir,
+    verifyBinding: async () => [], dir: w.attempts, env: process.env, toSpec: (c, a) => ({ file: c, args: a, shell: false }) });
+  const state = { run_id: 'run-1', seq: 2, nodes: { 'red-gate': { deps: [], phase: 'BUILD', role: 'builder' } },
+    events: [{ seq: 1, type: 'DISPATCH', node: 'red-gate' }, { seq: 2, type: 'COMPLETE', node: 'red-gate' }], attempts: [], locks: {}, gates: { red: {} } };
+  const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n1..1\n';
+  const r = await gateRed({ state, node: 'red-gate', command: { cmd: process.execPath, args: [w.fixture, 'late-writer', '1', tap, '', '1', w.dir, '700'] },
+    format: 'tap', specs: [{ file: 'a.test.mjs', name: 'target' }], baselineCandidate: 'sha256:base', timeoutMs: WORKER_FAILURE_BOUND_MS, resources: [] }, deps);
+  assert.ok(await waitFor(() => existsSync(join(w.dir, 'late.json'))), 'the survivor never wrote (the row would prove nothing)');
+  assert.equal(r.ok, false, J(r).slice(0, 300));
+  assert.equal(r.code, 'runner_survivor', J(r.reasons));
+  assert.equal(r.judgment_point, true);
+  assert.deepEqual(state.gates.red, {}, 'no RED evidence recorded');
+});
+
+test('unit check: a typed runner refusal is a recorded fail keeping its code, never retried (no UNIT_CHECK_RETRY)', { skip: ENGINE_SKIP, timeout: 120000 }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { surv: SURVIVOR_CMD } }, nodes: [{ id: 'a', writes: ['src/a.txt'], unit: 'api', checks: ['surv'] }] });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  const r = fx.cli('drive');
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const s = fx.readState();
+  const runs = s.attempts.filter(a => a.kind === 'unit-check' && a.node === 'api');
+  assert.equal(runs.length, 1, 'a typed refusal is not retried');
+  assert.equal(s.events.filter(e => e.type === 'UNIT_CHECK_RETRY').length, 0);
+  assert.ok(runs.every(a => a.status === 'exited' && a.quiesced === true), J(runs));
+  const ev = s.unit_checks.api.evidence;
+  assert.equal(ev.state, 'failed');
+  assert.deepEqual(ev.results.map(x => [x.name, x.result, x.error_code]), [['surv', 'fail', 'runner_survivor']]);
+  assert.ok(r.out.judgments.some(j => j.code === 'unit_check_failed' && j.node === 'api' && /runner_survivor/.test(j.reason)), J(r.out.judgments));
+});
+
+test('proof: a typed runner refusal is recorded on the LOCAL_PROOF command with its code (a fail)', { skip: ENGINE_SKIP, timeout: 120000 }, (t) => {
+  const fx = fixture(t, { commit: true, config: { testCommands: { surv: SURVIVOR_CMD } } });
+  assert.equal(fx.cli('init', { dag: fx.dagFile }).status, 0);
+  assert.equal(fx.cli('drive').status, 0);
+  assert.equal(fx.gate('review', passReview('rx-1', fx.candidate())).status, 0);
+  const r = fx.gate('ship-ready', {});
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  const cmd = fx.readState().local_proof?.commands?.find(c => c.name === 'surv');
+  assert.ok(cmd, J(fx.readState().local_proof));
+  assert.deepEqual([cmd.result, cmd.exit_code, cmd.error_code], ['fail', null, 'runner_survivor']);
 });
