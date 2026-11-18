@@ -56,9 +56,12 @@
  * refused (`path_alias`), on every platform. A config path must also be its own file: no symlinked directory on the way.
  * ATTRIBUTES (round 4): a `filter`, `ident` or `working-tree-encoding` attribute on any base path is refused (`evidence_unavailable` /
  * detail `filter_attribute_unsupported_v0`): git would compare bytes other than the working tree's. A Git LFS repository is
- * therefore refused in V0. `text`/`eol` are accepted (CRLF pairs only).
+ * therefore refused in V0. `text`/`eol` (and `core.autocrlf`) are accepted (CRLF pairs only).
  * NOT IN P (accepted, design: ignored files are outside release scope): a NEW file that `.gitignore`, `.git/info/exclude` or a
  * global excludes file ignores never enters P, so it is outside the identity even if a test imports it.
+ * HIDDEN BY GIT CONFIG (accepted; neither can help a test pass): with `core.symlinks=false`, a tracked symlink replaced by a regular
+ * file holding the target path is not a change (its bytes are fixed to that path string); with `core.fileMode=false`, a `chmod +x`
+ * is not a change (Vitest ignores the executable bit).
  * SUBMODULES (S3): V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at base or
  * in the index, and any changed path that is a directory holding a `.git` (a repository git does not list file by file), is refused with
  * `evidence_unavailable` / detail `submodule_unsupported_v0`.
