@@ -270,7 +270,7 @@ export function gitRunner({ platform = process.platform, envLimit, ...probeOptio
     let isDir = false;
     try { isDir = statSync(cwd).isDirectory(); } catch { /* refused below */ }
     if (!isDir) return classify({ error: { code: 'ECWD' } }, spec);
-    const r = spawnSync(gi.path, args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer });
+    const r = spawnSync(gi.path, [...args], { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer });
     return classify({ error: r.error ? { code: r.error.code } : null, signal: r.signal, status: r.status, stdout: r.stdout, stderr: r.stderr }, spec);
   };
   return Object.freeze({ info: gi, run });

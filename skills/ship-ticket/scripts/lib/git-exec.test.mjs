@@ -28,12 +28,13 @@
 // SOFTWARE.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { inspect } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as X from './git-exec.mjs';
 
 const {
@@ -601,298 +602,336 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.child' };
   assert.match(decodeStrict(g.run(ok).stdout), /^git version /);
   const other = process.platform === 'win32' ? 'linux' : 'win32';
-  const bad = [{ env: { ...ok.env } }, { env: process.env }, { env: composeEnv({ ambient: {}, platform: other, gitInfo: g.info, hooksDir: absFor(other, 'h') }) }, { cwd: 'rel' }, { args: ['a\0b'] }, { args: 'x' }, { bin: '/bin/sh' }, { spawn: () => ({}) }, { shell: true },
+  const bad = [{ env: { ...ok.env } }, { env: process.env }, { env: composeEnv({ ambient: {}, platform: other, gitInfo: g.info, hooksDir: absFor(other, 'h') }) }, { cwd: 'rel' }, { args: ['a\0b'] }, { args: 'x' }, { args: { encoding: 'utf8' } }, { bin: '/bin/sh' }, { spawn: () => ({}) }, { shell: true },
     { status: { 0: 'OK!' } }, { stderr: 'sometimes' }, { decode: 'git_failed' }, { timeoutMs: 0 }, { maxBuffer: -1 }, { envLimit: 10 }, { platform: 'win32' }];
   for (const o of bad) assert.throws(() => g.run({ ...ok, ...o }), code('git_op_invalid'), JSON.stringify(Object.keys(o)));
   assert.throws(() => gitRunner({ envLimit: 'x' }), code('git_op_invalid'));
   assert.throws(() => gitRunner({ envLimit: 10 }).run(ok), code('git_env_too_large'), 'the bound is fixed at construction, not per call');
 });
 
-// ------------------------------------------------------------------ T4a: decode-site scanner (AC4)
+// ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
 
-// WHAT T4a CHECKS. Every non-test .mjs module under lib/, subdirectories included (a new module is scanned
-// without edits), is tokenised: strings and their escapes, template literals with nested `${}` code,
-// regex literals with character classes, and both comment forms. Rules then run per token and per CALL
-// EXPRESSION, so neither the line a site sits on nor its line breaks matter:
-//  - decoder-api: the names toString, toLocaleString, TextDecoder(Stream), StringDecoder, setEncoding and
-//    Buffer's *Slice decoders, as an identifier, a member, a literal computed member, or any string equal to one;
-//  - string-coercion: `String` anywhere except `String.fromCharCode`, `.fromCodePoint` or `.raw`;
-//  - encoding-literal: a string or template text equal to a text encoding (utf8, utf-8, latin1, binary,
-//    ascii, ucs2, utf16le; any case);
-//  - encoding-option: `encoding` anywhere except as an `encoding: 'buffer'` entry of an object literal;
-//  - name-api-no-buffer: each call of realpath, readdir, readlink, mkdtemp or opendir (Sync, .native, bare
-//    or member; a method of that name counts too) whose OWN argument list holds, from its second argument on,
-//    neither 'buffer' nor an inline object literal with a direct `encoding: 'buffer'` entry;
-//  - cwd: each `.cwd()` call (no exact-bytes form exists);
-//  - read-encoding: readFile(Sync) given a string encoding other than 'buffer'.
-// FAIL CLOSED ('unclassifiable'; never allowlistable): an unterminated string, template, regex or comment;
-// `/` after `)`, `}`, `++`, `--` or `of` (regex or division is undecidable without a parser); an escaped identifier;
-// a name-returning fs, readFile or child_process API referenced other than as a call (alias, destructuring,
-// passed as a value); an aliased import or export of a watched name; a child_process import that is not
-// named; require, dynamic import, eval, Function; `process` used other than as `process.<name>`; a
-// child_process call whose last argument is not an inline object literal; a spread argument to any checked
-// call, or a checked options literal with a spread or computed key; a computed member key built from string pieces (unless only assigned to).
-// NOT CHECKED: anything not named above. In particular (review items, backed behaviourally by T4b): ANY
-// implicit ToString of a Buffer, for example `${buf}`, `buf + ''`, Array#join, RegExp#exec/test(buf), loose
-// equality, use as a property key; a computed key held in a variable (`b[k]()`, Reflect.get); `x.exec(...)`
-// as a member (taken to be RegExp#exec); other name sources (fs.watch, os.homedir/tmpdir, the implicit cwd
-// of path.resolve, process.argv); data flow (which value is a Buffer); anything outside lib/. Evidence: the planted-regression and seeded property
-// tests below, and the scanner mutants in the AC6 table.
+// HOW. Every non-test .mjs module under lib/ (subdirectories included) is PARSED by the vendored acorn 8.19.0
+// (skills/ship-ticket/vendor/acorn, MIT, byte-identical to the registry tarball, hash-checked against
+// UPSTREAM.json before it is imported; test-only, never imported by production code) as an ES module
+// (ecmaVersion latest). A source acorn cannot parse is one `unclassifiable` hit. A tiny walker visits every
+// node that has a `type` (no per-node-type list, so an unforeseen node kind is still walked). Imports of
+// fs, fs/promises and child_process (bare or node:) are resolved through the module's own BINDINGS: named,
+// aliased (`{ readdirSync as rd }`, `{ default as cp }`), default and namespace imports, and `ns.member`,
+// `ns.promises.member` and `ns.default.member` chains. Resolution is by name, not by scope: a local that
+// shadows an import is treated as the import, and a watched API name used as a member keeps its by-name rule
+// unless its root is a checked module's namespace (so a shadowing `path` or `statSync` hides nothing). A
+// watched API name with no import binding (a parameter, a seam object, a local) is treated as the API it
+// names (`seam.realpath(d)`). What a caller outside lib/ passes in is data flow (not checked).
+//
+// WHAT IT CHECKS (one rule each; the allowlist pins rule names):
+//  - decoder-api: a member, a constant computed member (`b['to' + 'String']`, `b['to\x53tring']`), a
+//    destructured key, an import specifier or a string that names toString, toLocaleString, setEncoding, a
+//    Buffer *Slice decoder, TextDecoder(Stream) or StringDecoder; any reference to TextDecoder(Stream),
+//    StringDecoder, Response, Blob, File or atob;
+//  - decoder-lossy: a TextDecoder that is not `new TextDecoder(x, {...})` (no spread) with exactly one
+//    `fatal: true` and exactly one `ignoreBOM: true` (a static literal);
+//  - string-coercion: any reference to the global String other than String.fromCharCode or .fromCodePoint
+//    (String.raw included: it converts its raw elements to strings);
+//  - encoding-literal: a string or template chunk equal to a text encoding (utf8, utf-8, latin1, binary, ascii,
+//    ucs2, utf16le; any case); encoding-option: an `encoding` key, member or variable that is not an object
+//    literal entry `encoding: 'buffer'`;
+//  - name-api-no-buffer: a call of realpath, readdir, readlink, mkdtemp or opendir (Sync, .native,
+//    fs.promises) whose options, at index 1 (the only position Node reads; a later 'buffer' is ignored,
+//    MEASURED), are not 'buffer' or a static literal whose one `encoding` entry is 'buffer' (a callback at
+//    index 1 means no options);
+//  - read-encoding: readFile(Sync) whose index-1 options name an encoding other than 'buffer';
+//  - cp-encoding: spawnSync, execFileSync or execSync with an encoding other than 'buffer', or exec or
+//    execFile (utf8 by default, MEASURED) without encoding 'buffer'. Options are read where Node reads them:
+//    index 1 for exec(Sync); for spawnSync and execFile(Sync), index 2 after an array literal, null or
+//    nothing, else index 1 when that is an object literal or a callback;
+//  - cwd: a process.cwd() call (no exact-bytes form exists).
+// FAIL CLOSED ('unclassifiable'; never allowlisted):
+//  - a parse error;
+//  - an import of any module other than fs, fs/promises, child_process or path, or a scanned lib module
+//    (`./*.mjs`, not a test; so `../`, `.cjs`, `.js` and `.json` fail);
+//  - a re-export from any of those modules; an export of a watched binding or name;
+//  - an fs or child_process name not classified as checked or known not to return text;
+//  - a watched API or namespace used other than as a direct call or `ns.member` (aliased to a variable,
+//    destructured, `.call/.apply/.bind`, `(0, f)()`, `new`, passed or exported as a value);
+//  - a spread argument to a checked call, or options that are not static: an identifier, a call, a spread,
+//    a computed key, `__proto__` or an accessor;
+//  - spawnSync or execFile(Sync) args that are neither an array literal nor an object literal (Node then may
+//    take the args as the options and ignore the literal after them, MEASURED Node 18 and 22), and
+//    child_process options given as a string (exec ignores 'buffer' and returns a string, MEASURED);
+//  - spawn and fork (asynchronous output is not analysed); dynamic import;
+//  - require, module, exports, eval, Function, globalThis, global, self, window, Reflect, WebAssembly,
+//    createRequire and getBuiltinModule as names;
+//  - `process` other than process.env, process.platform or a process.cwd() call (so process.binding,
+//    .getBuiltinModule, .mainModule, .argv), and Buffer other than from, isBuffer, alloc, allocUnsafe,
+//    concat, byteLength and compare;
+//  - any `.constructor` member or destructured `constructor` key;
+//  - a computed key built from string pieces that does not fold to a constant (unless only assigned to);
+//  - a call through a computed member whose key is not a constant (`b[k]()`).
+// NOT CHECKED: anything not named above. In particular (review items; T4b is the behavioural backstop; each
+// example is asserted to give no hit below):
+//  - ANY implicit ToString of a Buffer: `${buf}`, `buf + ''`, Array#join, JSON.parse(buf), RegExp#exec or
+//    #test(buf), loose equality, use as a property key;
+//  - String.fromCharCode and .fromCodePoint in any call form (exempt by design: a latin1 map);
+//  - a READ through a computed key held in a variable (`b[k]`; a CALL through one fails closed);
+//  - `x.exec(...)` as a member (taken to be RegExp#exec);
+//  - process.env values (decoded by the OS and Node; the lib copies them, never compares them with git bytes);
+//  - the implicit cwd of path.resolve; data flow (which value is a Buffer); anything outside lib/.
+// Evidence: the planted, escape, unchecked and fine fixtures and the seeded property test below; the checker
+// mutants in the AC6 table.
+const VENDOR = join(here, '..', '..', 'vendor', 'acorn');
+const UPSTREAM = JSON.parse(readFileSync(join(VENDOR, 'UPSTREAM.json'), 'utf8'));
+const sha256 = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+// Integrity BEFORE load: acorn is imported only when every pinned file hashes to UPSTREAM.json. On a hash mismatch
+// every T4a test fails on an assertion (not at module load), so the suite keeps its test count. A MISSING
+// UPSTREAM.json or pinned file throws at module load instead: the whole suite then fails to start.
+const VENDOR_OK = Object.entries(UPSTREAM.files).every(([f, { sha256: h }]) => sha256(join(VENDOR, f)) === h);
+const acorn = VENDOR_OK ? await import(pathToFileURL(join(VENDOR, 'acorn.mjs')).href) : null;
+
+test('T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing else is in its directory', () => {
+  assert.equal(UPSTREAM.name, 'acorn');
+  assert.equal(UPSTREAM.version, '8.19.0');
+  assert.deepEqual(readdirSync(VENDOR).sort(), [...Object.keys(UPSTREAM.files), 'UPSTREAM.json'].sort());
+  for (const [f, { sha256: h }] of Object.entries(UPSTREAM.files)) assert.equal(sha256(join(VENDOR, f)), h, f);
+  assert.equal(acorn?.version, UPSTREAM.version, 'the loaded parser is the pinned one');
+});
+
 const ENC_NAME = /^(?:utf-?8|latin1|binary|ascii|ucs-?2|utf-?16le)$/i;
-const DECODER_NAME = /^(?:toString|toLocaleString|TextDecoder(?:Stream)?|StringDecoder|setEncoding|(?:utf8|latin1|ascii|ucs2|utf16le|binary|hex|base64|base64url)Slice)$/;
+const DECODER_NAME = /^(?:toString|toLocaleString|setEncoding|(?:utf8|latin1|ascii|ucs2|utf16le|binary|hex|base64|base64url)Slice|TextDecoder(?:Stream)?|StringDecoder)$/;
+const DECODER_GLOBAL = new Set(['TextDecoder', 'TextDecoderStream', 'StringDecoder', 'Response', 'Blob', 'File', 'atob']);
+const OPAQUE_GLOBAL = new Set(['require', 'module', 'exports', 'eval', 'Function', 'globalThis', 'global', 'self', 'window', 'Reflect', 'WebAssembly', 'createRequire', 'getBuiltinModule']);
 const NAME_API = /^(?:realpath|readdir|readlink|mkdtemp|opendir)(?:Sync)?$/;
-const CP_API = /^(?:spawnSync|execFileSync|execSync|spawn|execFile|exec|fork)$/;
 const READ_API = /^readFile(?:Sync)?$/;
-const CP_MODULE = /^(?:node:)?child_process$/;
-const WATCHED = (n) => NAME_API.test(n) || CP_API.test(n) || READ_API.test(n) || DECODER_NAME.test(n) || ['String', 'encoding', 'cwd', 'process'].includes(n);
-// After these keywords a `/` starts a regex; after any other identifier it divides.
-const EXPR_KW = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await', 'extends', 'default']);
-const LT = /[\n\r\u2028\u2029]/;
-const ID_START = /[\p{ID_Start}$_\\]/u;
-const ID_PART = /[\p{ID_Continue}$\u200c\u200d\\]/u;
-const NUM = /0[xXoObB][\da-fA-F_]+n?|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?n?/y;
-const PUNCT = /\.\.\.|\?\.(?!\d)|=>|\+\+|--|[^\s]/y;
-const ESC = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' };
-/** The cooked value of a string or template body, so an escape cannot hide a name (`'to\x53tring'`). */
-const cook = (raw) => raw.replace(/\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|(\r\n|[\n\r\u2028\u2029])|([\s\S]))/g,
-  (m, x, ub, u, lt, ch) => (x || u ? String.fromCharCode(parseInt(x || u, 16)) : ub ? String.fromCodePoint(Math.min(parseInt(ub, 16), 0x10ffff)) : lt ? '' : ESC[ch] ?? ch));
+const CP_API = /^(?:spawnSync|execFileSync|execSync|spawn|execFile|exec|fork)$/;
+const MODULES = { fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/promises': 'fsp', child_process: 'cp', 'node:child_process': 'cp', path: 'path', 'node:path': 'path' };
+// fs names that return no text: anything not here, not checked and not `promises` is unclassifiable. mkdir(Sync)
+// is NOT here: with `recursive` it returns the first directory created as a string (MEASURED, Node 18 and 22).
+const FS_SAFE = new Set(['statSync', 'lstatSync', 'fstatSync', 'stat', 'lstat', 'accessSync', 'access', 'existsSync', 'constants',
+  'rmSync', 'rm', 'rmdirSync', 'unlinkSync', 'unlink', 'writeFileSync', 'writeFile', 'appendFileSync', 'renameSync', 'rename', 'chmodSync', 'chmod',
+  'copyFileSync', 'openSync', 'closeSync', 'writeSync', 'readSync', 'fsyncSync', 'symlinkSync', 'linkSync', 'truncateSync', 'utimesSync']);
+// A lib module the scan itself reads: `./`, no `..`, `.mjs`, not a test (a `.cjs`/`.js` there would go unscanned).
+const isRel = (s) => s.startsWith('./') && !/(?:^|\/)\.\.(?:\/|$)/.test(s) && s.endsWith('.mjs') && !s.endsWith('.test.mjs');
+/** 'name' | 'read' | 'cp' | 'safe' | {ns} | null (unclassified) for a member of a watched module. */
+function apiKind(mod, name) {
+  if (mod === 'path') return 'safe';
+  if (mod === 'cp') return CP_API.test(name) ? 'cp' : null;
+  if (mod === 'fs' && name === 'promises') return { ns: 'fsp' };
+  if (NAME_API.test(name) && (mod === 'fs' || !name.endsWith('Sync'))) return 'name';
+  if (READ_API.test(name) && (mod === 'fs' || !name.endsWith('Sync'))) return 'read';
+  return FS_SAFE.has(name) && (mod === 'fs' || !name.endsWith('Sync')) ? 'safe' : null;
+}
+/** The API a watched name with no import binding is taken to be. */
+const byName = (name) => (NAME_API.test(name) || READ_API.test(name) ? 'fs' : CP_API.test(name) ? 'cp' : null);
 
-/** Tokens {t: id|str|tpl|re|num|p, v, s, e}; `bad` collects what cannot be lexed with certainty. */
-function lexJs(src) {
-  const toks = [];
-  const bad = [];
-  const subs = [];
-  let depth = 0;
-  let i = 0;
-  const n = src.length;
-  const push = (t, v, s, x) => toks.push({ t, v, s, e: i, ...x });
-  const chunk = (s, cont) => { // i is just past the opening ` or the `}` closing a substitution
-    for (let j = i; ;) {
-      if (j >= n) { bad.push({ pos: s, why: 'unterminated template literal' }); i = n; return false; }
-      if (src[j] === '\\') { j += 2; continue; }
-      if (src[j] === '`') { const raw = src.slice(i, j); i = j + 1; push('tpl', cook(raw), s, { cont, close: true }); return true; }
-      if (src[j] === '$' && src[j + 1] === '{') {
-        const raw = src.slice(i, j); i = j + 2; push('tpl', cook(raw), s, { cont, close: false });
-        depth++; subs.push(depth); push('p', '${', j); return true;
-      }
-      j++;
+const NOT_CHILD = new Set(['type', 'start', 'end', 'loc', 'range']);
+/** Depth-first over every child that is a node; `anc` holds {node, key} from the root to the parent. */
+function walk(root, visit) {
+  const anc = [];
+  const go = (node) => {
+    visit(node, anc);
+    for (const key of Object.keys(node)) {
+      if (NOT_CHILD.has(key)) continue;
+      const v = node[key];
+      for (const c of Array.isArray(v) ? v : [v]) if (c && typeof c.type === 'string') { anc.push({ node, key }); go(c); anc.pop(); }
     }
   };
-  const regexOk = (p) => (!p ? true : p.t === 'id' ? (p.member ? false : p.v === 'of' ? null : EXPR_KW.has(p.v)) : p.t === 'p' ? ([')', '}', '++', '--'].includes(p.v) ? null : p.v !== ']') : false);
-  if (src.startsWith('#!')) while (i < n && !LT.test(src[i])) i++;
-  while (i < n) {
-    const c = src[i];
-    const s = i;
-    if (/\s/.test(c)) { i++; continue; }
-    if (c === '/' && src[i + 1] === '/') { while (i < n && !LT.test(src[i])) i++; continue; }
-    if (c === '/' && src[i + 1] === '*') {
-      const j = src.indexOf('*/', i + 2);
-      if (j < 0) { bad.push({ pos: s, why: 'unterminated comment' }); break; }
-      i = j + 2; continue;
-    }
-    if (c === '"' || c === "'") {
-      let j = i + 1;
-      while (j < n && src[j] !== c && !LT.test(src[j])) j += src[j] === '\\' ? (src[j + 1] === '\r' && src[j + 2] === '\n' ? 3 : 2) : 1;
-      if (j >= n || src[j] !== c) { bad.push({ pos: s, why: 'unterminated string' }); break; }
-      i = j + 1; push('str', cook(src.slice(s + 1, j)), s); continue;
-    }
-    if (c === '`') { i++; if (!chunk(s, false)) break; continue; }
-    if (ID_START.test(c) || (c === '#' && ID_START.test(src[i + 1] ?? ''))) {
-      let j = i + 1;
-      while (j < n && ID_PART.test(src[j])) j++;
-      const v = src.slice(i, j);
-      const p = toks[toks.length - 1];
-      i = j;
-      if (v.includes('\\')) bad.push({ pos: s, why: 'escaped identifier' });
-      push('id', v, s, { member: v[0] === '#' || (p?.t === 'p' && (p.v === '.' || p.v === '?.')) });
-      continue;
-    }
-    if (/\d/.test(c) || (c === '.' && /\d/.test(src[i + 1] ?? ''))) { NUM.lastIndex = i; const m = NUM.exec(src); i += m[0].length; push('num', m[0], s); continue; }
-    if (c === '/') {
-      const ok = regexOk(toks[toks.length - 1]);
-      if (ok === null) bad.push({ pos: s, why: 'ambiguous / after ) } ++ -- or of' });
-      if (ok) {
-        let j = i + 1;
-        let cls = false;
-        for (; ; j++) {
-          if (j >= n || LT.test(src[j])) { j = -1; break; }
-          if (src[j] === '\\') j++;
-          else if (src[j] === '[') cls = true;
-          else if (src[j] === ']') cls = false;
-          else if (src[j] === '/' && !cls) break;
-        }
-        if (j < 0) { bad.push({ pos: s, why: 'unterminated regex' }); break; }
-        j++;
-        while (j < n && ID_PART.test(src[j])) j++;
-        i = j; push('re', src.slice(s, j), s); continue;
-      }
-      i += src[i + 1] === '=' ? 2 : 1; push('p', '/', s); continue;
-    }
-    if (c === '{') { depth++; i++; push('p', '{', s); continue; }
-    if (c === '}') {
-      i++;
-      if (subs.length && subs[subs.length - 1] === depth) { subs.pop(); depth--; push('p', '}', s, { sub: true }); if (!chunk(i, true)) break; continue; }
-      depth--; push('p', '}', s); continue;
-    }
-    PUNCT.lastIndex = i;
-    const p = PUNCT.exec(src)[0];
-    i += p.length; push('p', p, s);
-  }
-  if (subs.length && !bad.length) bad.push({ pos: n, why: 'unterminated template substitution' });
-  return { toks, bad };
+  go(root);
 }
+/** The string an expression always evaluates to (string literal, template without substitutions, `+` of those). */
+const staticStr = (n) => (n?.type === 'Literal' && typeof n.value === 'string' ? n.value
+  : n?.type === 'TemplateLiteral' && !n.expressions.length ? n.quasis[0].value.cooked
+    : n?.type === 'BinaryExpression' && n.operator === '+' ? ((a, b) => (a !== null && b !== null ? a + b : null))(staticStr(n.left), staticStr(n.right)) : null);
+/** A member's property name when it is a constant, else null. */
+const staticKey = (m) => (!m.computed ? (m.property.type === 'PrivateIdentifier' ? `#${m.property.name}` : m.property.name)
+  : m.property.type === 'Literal' && typeof m.property.value === 'number' ? String(m.property.value) : staticStr(m.property));
+const propName = (q) => (q.computed ? staticStr(q.key) : q.key.type === 'Identifier' ? q.key.name : String(q.key.value));
+const hasStringPiece = (n) => { let s = false; walk(n, (x) => { if ((x.type === 'Literal' && typeof x.value === 'string') || x.type === 'TemplateLiteral') s = true; }); return s; };
+const isFn = (n) => n?.type === 'FunctionExpression' || n?.type === 'ArrowFunctionExpression';
+/** An options argument: absent | buffer | other (a string, or a literal naming another encoding) | none (a literal without encoding) | nonstatic | dynamic. */
+function optionsOf(n) {
+  if (!n || isFn(n)) return 'absent';
+  const s = staticStr(n);
+  if (s !== null) return s === 'buffer' ? 'buffer' : 'other';
+  if (n.type !== 'ObjectExpression') return 'dynamic';
+  if (!n.properties.every((q) => q.type === 'Property' && q.kind === 'init' && !q.computed && propName(q) !== '__proto__')) return 'nonstatic';
+  const enc = n.properties.filter((q) => propName(q) === 'encoding');
+  if (!enc.length) return 'none';
+  return enc.length === 1 && !enc[0].shorthand && !enc[0].method && staticStr(enc[0].value) === 'buffer' ? 'buffer' : 'other';
+}
+const FN_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+/** The enclosing named functions, objects and classes, e.g. `realFs.realpath`; `<module>` at top level. */
+function fnName(anc) {
+  const names = [];
+  anc.forEach(({ node }, i) => {
+    const up = anc[i - 1]?.node;
+    if (FN_TYPES.has(node.type) || node.type === 'ObjectExpression' || node.type === 'ClassDeclaration' || node.type === 'ClassExpression') {
+      const own = node.id?.name ?? (up?.type === 'VariableDeclarator' && up.id.type === 'Identifier' ? up.id.name
+        : (up?.type === 'Property' || up?.type === 'MethodDefinition') && FN_TYPES.has(node.type) ? propName(up) : null);
+      if (own) names.push(own);
+    }
+  });
+  return names.join('.') || '<module>';
+}
+/** A declared or assigned name (a binding position), not a read. */
+function isBinding(anc) {
+  for (let i = anc.length - 1; i >= 0; i--) {
+    const { node: p, key: k } = anc[i];
+    if ((p.type === 'VariableDeclarator' && k === 'id') || (FN_TYPES.has(p.type) && (k === 'params' || k === 'id')) || (/^Class/.test(p.type) && k === 'id')
+      || (p.type === 'CatchClause' && k === 'param') || (p.type === 'AssignmentExpression' && k === 'left') || (/^For(?:In|Of)Statement$/.test(p.type) && k === 'left')) return true;
+    if (p.type === 'AssignmentPattern' ? k !== 'left' : !(['ArrayPattern', 'ObjectPattern', 'RestElement'].includes(p.type)
+      || (p.type === 'Property' && k === 'value' && anc[i - 1]?.node.type === 'ObjectPattern'))) return false;
+  }
+  return false;
+}
+const NOT_REF_KEY = { MemberExpression: 'property', Property: 'key', MethodDefinition: 'key', PropertyDefinition: 'key' };
 
-const isP = (t, v) => t?.t === 'p' && t.v === v;
-const PAIR = { '(': ')', '[': ']', '{': '}', '${': '}' };
-/** Index of the closer of the opener at k (typed nesting), or -1. */
-function closerOf(toks, k) {
-  const st = [];
-  for (let j = k; j < toks.length; j++) {
-    const t = toks[j];
-    if (t.t !== 'p') continue;
-    if (PAIR[t.v]) st.push(PAIR[t.v]);
-    else if (t.v === ')' || t.v === ']' || t.v === '}') { if (st.pop() !== t.v) return -1; if (!st.length) return j; }
-  }
-  return -1;
-}
-/** Top-level comma-separated [from, to) ranges strictly inside the opener at a and closer at b. */
-function splitTop(toks, a, b) {
-  const out = [];
-  let d = 0;
-  let at = a + 1;
-  for (let j = a + 1; j < b; j++) {
-    const t = toks[j];
-    if (t.t === 'p' && PAIR[t.v]) d++;
-    else if (t.t === 'p' && (t.v === ')' || t.v === ']' || t.v === '}')) d--;
-    else if (d === 0 && isP(t, ',')) { out.push([at, j]); at = j + 1; }
-  }
-  out.push([at, b]);
-  return out.filter(([x, y]) => y > x);
-}
-/** An argument that is exactly an inline object literal: its entries' shape, else null. */
-function objectArg(toks, [a, b]) {
-  if (!isP(toks[a], '{') || closerOf(toks, a) !== b - 1) return null;
-  const entries = splitTop(toks, a, b - 1);
-  const keyIs = (t, v) => (t.t === 'id' || t.t === 'str') && t.v === v;
-  return {
-    spreadOrComputed: entries.some(([x]) => isP(toks[x], '...') || isP(toks[x], '[')),
-    bufferEnc: entries.some(([x, y]) => y - x === 3 && keyIs(toks[x], 'encoding') && isP(toks[x + 1], ':') && toks[x + 2].t === 'str' && toks[x + 2].v === 'buffer'),
-  };
-}
-const exprEnd = (p) => !!p && ((p.t === 'id' && !EXPR_KW.has(p.v)) || p.t === 'num' || p.t === 'str' || p.t === 're' || (p.t === 'tpl' && p.close)
-  || (p.t === 'p' && [')', ']', '?.'].includes(p.v)));
-
-/** Every decode site in one module's source: [{file, line, rule, why, code}]. */
+/** Every decode site in one module's source: [{file, fn, rule, why, line, pos, text (the flagged node's own source)}] in source order. */
 function decodeSites(file, src) {
-  const { toks, bad } = lexJs(src);
-  const hits = bad.map(({ pos, why }) => ({ pos, rule: 'unclassifiable', why }));
-  const hit = (k, rule, why = rule) => hits.push({ pos: toks[k].s, rule, why });
-  const skip = new Set(); // unaliased import specifiers of a watched API
-  const name = toks.map((t) => (t.t === 'id' || t.t === 'str' || t.t === 'tpl' ? t.v : null));
-  const member = toks.map((t) => t.t === 'id' && t.member);
-  // Computed member access: a single literal key is a member name; a key built from string pieces fails closed.
-  toks.forEach((t, k) => {
-    if (!isP(t, '[') || !exprEnd(toks[k - 1])) return;
-    const end = closerOf(toks, k);
-    if (end < 0) return hit(k, 'unclassifiable', 'unbalanced computed member');
-    const key = toks.slice(k + 1, end);
-    if (key.length === 1 && (key[0].t === 'str' || (key[0].t === 'tpl' && !key[0].cont && key[0].close))) { member[k + 1] = true; return; }
-    const assigned = isP(toks[end + 1], '=') && !isP(toks[end + 2], '=');
-    if (key.some((x) => x.t === 'str' || x.t === 'tpl') && !assigned) hit(k, 'unclassifiable', 'computed member key built from string pieces');
+  assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
+  let ast;
+  try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowHashBang: true }); } catch (e) {
+    return [{ file, fn: '<module>', rule: 'unclassifiable', why: `parse error: ${e.message}`, line: e.loc?.line ?? 1, pos: e.pos ?? 0, text: '' }];
+  }
+  const hits = [];
+  let anc = [];
+  const hit = (n, rule, why = rule) => hits.push({ file, fn: fnName(anc), rule, why, line: n.loc.start.line, pos: n.start, text: src.slice(n.start, n.end).replace(/\s+/g, ' ') });
+  // Import bindings of the watched modules: local name -> {mod, name (null for a namespace or default)}.
+  const binds = new Map();
+  for (const d of ast.body) {
+    if (d.type !== 'ImportDeclaration') continue;
+    const mod = MODULES[d.source.value];
+    if (!mod && !isRel(d.source.value)) hit(d, 'unclassifiable', `import of unclassified module ${d.source.value}`);
+    for (const s of d.specifiers) {
+      const imported = s.type === 'ImportSpecifier' ? (s.imported.name ?? s.imported.value) : 'default';
+      if ([imported, s.local.name].some((x) => DECODER_NAME.test(x))) hit(s, 'decoder-api');
+      if (!mod) continue;
+      if (imported === 'default' || s.type === 'ImportNamespaceSpecifier') { binds.set(s.local.name, { mod, name: null }); continue; }
+      const kind = apiKind(mod, imported);
+      if (!kind) hit(s, 'unclassifiable', `${d.source.value} export ${imported} is not classified`);
+      else binds.set(s.local.name, kind.ns ? { mod: kind.ns, name: null } : { mod, name: imported });
+    }
+  }
+  // Only a NAMESPACE of a checked module resolves every member itself; any other root (a safe import such as
+  // statSync or path, which a local may shadow) leaves the by-name rule on its members in force.
+  const rootBound = (n) => { while (n.type === 'MemberExpression') n = n.object; return n.type === 'Identifier' && binds.get(n.name)?.name === null && binds.get(n.name).mod !== 'path'; };
+  const isCallee = (i) => anc[i]?.node.type === 'CallExpression' && anc[i].key === 'callee';
+  /** One checked call: the options at the position Node reads them. */
+  function callRule(kind, name, call, at) {
+    const A = call.arguments;
+    if (A.some((a) => a.type === 'SpreadElement')) return hit(at, 'unclassifiable', `spread argument to ${name}`);
+    const bad = (o) => o === 'dynamic' || o === 'nonstatic';
+    if (kind === 'name') {
+      const o = optionsOf(A[1]);
+      return o === 'buffer' ? undefined : bad(o) ? hit(at, 'unclassifiable', `${name} options are not static`) : hit(at, 'name-api-no-buffer');
+    }
+    if (kind === 'read') {
+      const o = optionsOf(A[1]);
+      return o === 'other' ? hit(at, 'read-encoding') : bad(o) ? hit(at, 'unclassifiable', `${name} options are not static`) : undefined;
+    }
+    if (name === 'spawn' || name === 'fork') return hit(at, 'unclassifiable', `${name}: asynchronous child output is not analysed`);
+    let on;
+    if (name === 'execSync' || name === 'exec') on = A[1];
+    else if (!A[1] || A[1].type === 'ArrayExpression' || (A[1].type === 'Literal' && A[1].value === null)) on = A[2];
+    else if (A[1].type === 'ObjectExpression' || isFn(A[1])) on = A[1];
+    else return hit(at, 'unclassifiable', `${name} args are not an array literal, so Node may take them as the options`);
+    if (staticStr(on) !== null) return hit(at, 'unclassifiable', `${name} options given as a string`);
+    const o = optionsOf(on);
+    if (bad(o)) return hit(at, 'unclassifiable', `${name} options are not static`);
+    if (o === 'buffer' || ((o === 'absent' || o === 'none') && name.endsWith('Sync'))) return undefined;
+    return hit(at, 'cp-encoding');
+  }
+  /** A use of a watched module member `name` (null: the namespace itself) by node n, whose parent is anc[i]. */
+  function useOf(mod, name, n, i) {
+    const { node: p, key: k } = anc[i] ?? {};
+    const member = p?.type === 'MemberExpression' && k === 'object' ? staticKey(p) : null;
+    if (name === null) {
+      if (member === null) return hit(n, 'unclassifiable', `${mod} namespace used other than as ns.member`);
+      if (member === 'default') return useOf(mod, null, p, i - 1);
+      const kind = apiKind(mod, member);
+      if (!kind) return hit(p, 'unclassifiable', `${mod}.${member} is not classified`);
+      return kind.ns ? useOf(kind.ns, null, p, i - 1) : useOf(mod, member, p, i - 1);
+    }
+    const kind = apiKind(mod, name);
+    if (!kind) return hit(n, 'unclassifiable', `${mod}.${name} is not classified`);
+    if (kind === 'safe') return undefined;
+    if (isCallee(i)) return callRule(kind, name, p, n);
+    if (/^realpath/.test(name) && member === 'native' && isCallee(i - 1)) return callRule(kind, name, anc[i - 1].node, n);
+    return hit(n, 'unclassifiable', `${name} used other than as a direct call`);
+  }
+  walk(ast, (n, a) => {
+    anc = a;
+    const { node: p, key: k } = a[a.length - 1] ?? {};
+    const computedKey = (k === 'property' || k === 'key') && p.computed;
+    switch (n.type) {
+      case 'ImportExpression': return hit(n, 'unclassifiable', 'dynamic import');
+      case 'ExportAllDeclaration': case 'ExportNamedDeclaration':
+        if (n.source && !isRel(n.source.value)) hit(n, 'unclassifiable', `re-export from ${n.source.value}`);
+        if (!n.source) for (const s of n.specifiers ?? []) if (binds.has(s.local.name) || byName(s.local.name)) hit(s, 'unclassifiable', `export of ${s.local.name}`);
+        return undefined;
+      case 'Literal': case 'TemplateLiteral': {
+        if (k === 'source') return undefined;
+        const texts = n.type === 'Literal' ? (typeof n.value === 'string' ? [n.value] : []) : n.quasis.map((q) => q.value.cooked ?? '');
+        // A literal computed key is checked as the member or property name it is; only the encoding tripwire runs here.
+        for (const t of texts) { if (ENC_NAME.test(t)) hit(n, 'encoding-literal'); if (!computedKey && DECODER_NAME.test(t)) hit(n, 'decoder-api'); }
+        return undefined;
+      }
+      case 'CallExpression':
+        if (n.callee.type === 'MemberExpression' && n.callee.computed && staticKey(n.callee) === null) hit(n.callee, 'unclassifiable', 'call through a computed member');
+        return undefined;
+      case 'MemberExpression': {
+        const key = staticKey(n);
+        if (key === null) {
+          if (hasStringPiece(n.property) && !(p.type === 'AssignmentExpression' && k === 'left' && p.operator === '=')) hit(n, 'unclassifiable', 'computed key built from string pieces');
+          return undefined;
+        }
+        if (DECODER_NAME.test(key)) hit(n, 'decoder-api');
+        if (key === 'constructor') hit(n, 'unclassifiable', '.constructor reaches Function');
+        if (key === 'encoding') hit(n, 'encoding-option');
+        const mod = byName(key);
+        if (mod && key !== 'exec' && !rootBound(n.object)) useOf(mod, key, n, a.length - 1);
+        return undefined;
+      }
+      case 'Property': {
+        const name = propName(n);
+        if (name === null) { if (hasStringPiece(n.key)) hit(n, 'unclassifiable', 'computed key built from string pieces'); return undefined; }
+        if (p.type === 'ObjectPattern') {
+          if (DECODER_NAME.test(name)) hit(n, 'decoder-api');
+          if (byName(name)) hit(n, 'unclassifiable', `${name} destructured`);
+          if (name === 'constructor') hit(n, 'unclassifiable', 'constructor destructured (reaches Function)');
+        }
+        if (name === 'encoding' && !(p.type === 'ObjectExpression' && n.kind === 'init' && !n.shorthand && staticStr(n.value) === 'buffer')) hit(n, 'encoding-option');
+        return undefined;
+      }
+      case 'Identifier': {
+        if ((NOT_REF_KEY[p?.type] === k && !p.computed) || /Specifier$|^MetaProperty$|^LabeledStatement$|^BreakStatement$|^ContinueStatement$/.test(p?.type ?? '') || isBinding(a)) return undefined;
+        const v = n.name;
+        const member = p?.type === 'MemberExpression' && k === 'object' ? staticKey(p) : null;
+        if (binds.has(v)) return useOf(binds.get(v).mod, binds.get(v).name, n, a.length - 1);
+        if (OPAQUE_GLOBAL.has(v)) return hit(n, 'unclassifiable', `${v} is not analysable`);
+        if (DECODER_GLOBAL.has(v)) {
+          hit(n, 'decoder-api');
+          // Exact only with BOTH flags: fatal refuses invalid bytes, ignoreBOM keeps a leading EF BB BF (stripping it is lossy).
+          const o = p?.type === 'NewExpression' && k === 'callee' && !p.arguments.some((x) => x.type === 'SpreadElement')
+            && p.arguments[1]?.type === 'ObjectExpression' && optionsOf(p.arguments[1]) !== 'nonstatic' ? p.arguments[1] : null;
+          const isTrue = (key) => ((f) => f.length === 1 && !f[0].shorthand && f[0].value.type === 'Literal' && f[0].value.value === true)(o.properties.filter((q) => propName(q) === key));
+          if (v === 'TextDecoder' && !(o && isTrue('fatal') && isTrue('ignoreBOM'))) hit(n, 'decoder-lossy');
+          return undefined;
+        }
+        if (v === 'String') return ['fromCharCode', 'fromCodePoint'].includes(member) ? undefined : hit(n, 'string-coercion');
+        if (v === 'process') {
+          if (member === 'env' || member === 'platform') return undefined;
+          if (member === 'cwd') return isCallee(a.length - 2) ? hit(p, 'cwd') : hit(p, 'unclassifiable', 'process.cwd used as a value');
+          return hit(n, 'unclassifiable', member === null ? 'process used as a value' : `process.${member} is not classified`);
+        }
+        if (v === 'Buffer') return ['from', 'isBuffer', 'alloc', 'allocUnsafe', 'concat', 'byteLength', 'compare'].includes(member) ? undefined : hit(n, 'unclassifiable', `Buffer.${member} is not classified`);
+        if (v === 'encoding' && !(p?.type === 'Property' && p.shorthand)) hit(n, 'encoding-option');
+        const mod = byName(v);
+        return mod ? useOf(mod, v, n, a.length - 1) : undefined;
+      }
+      default: return undefined;
+    }
   });
-  // import / export statements: the specifier tokens of a well-formed one are not references (skip).
-  toks.forEach((t, k) => {
-    if (t.t !== 'id' || t.member || (t.v !== 'import' && t.v !== 'export')) return;
-    if (t.v === 'import' && isP(toks[k + 1], '(')) return hit(k, 'unclassifiable', 'dynamic import');
-    if (t.v === 'import' && isP(toks[k + 1], '.')) return;
-    if (t.v === 'export' && !isP(toks[k + 1], '{') && !isP(toks[k + 1], '*')) return;
-    const specs = [];
-    const mine = [];
-    let ns = false;
-    let dflt = false;
-    let j = k + 1;
-    for (; j < toks.length; j++) {
-      const x = toks[j];
-      if (x.t === 'str' || (x.t === 'id' && x.v === 'from')) break;
-      mine.push(j);
-      if (isP(x, '*')) ns = true;
-      else if (isP(x, '{')) {
-        const end = closerOf(toks, j);
-        if (end < 0) return hit(k, 'unclassifiable', 'malformed import or export');
-        const list = splitTop(toks, j, end);
-        if (!list.every(([a, b]) => toks.slice(a, b).every((y) => y.t === 'id' || y.t === 'str'))) return hit(k, 'unclassifiable', 'malformed import or export');
-        for (const [a, b] of list) specs.push(toks.slice(a, b).map((y, o) => [a + o, y]));
-        for (let y = j + 1; y <= end; y++) mine.push(y);
-        if (!list.length) specs.push([]);
-        j = end;
-        if (t.v === 'export' && toks[end + 1]?.v !== 'from') break; // `export { a };`
-      } else if (x.t === 'id') { if (x.v !== 'as' && !isP(toks[j - 1], '*') && toks[j - 1]?.v !== 'as') dflt = true; } else if (!isP(x, ',')) return hit(k, 'unclassifiable', 'malformed import or export');
-    }
-    const at = toks[j]?.t === 'str' ? j : toks[j]?.v === 'from' && toks[j + 1]?.t === 'str' ? j + 1 : -1;
-    if (t.v === 'import' && at < 0) return hit(k, 'unclassifiable', 'malformed import');
-    if (at >= 0 && CP_MODULE.test(toks[at].v) && (ns || dflt)) return hit(k, 'unclassifiable', 'child_process imported or exported other than by name');
-    for (const r of specs) {
-      if (r.length === 3 && r[1][1].v === 'as' && (WATCHED(r[0][1].v) || WATCHED(r[2][1].v))) hit(r[0][0], 'unclassifiable', `aliased ${t.v} of ${r[0][1].v}`);
-      if (r.length !== 0 && r.length !== 1 && r.length !== 3) return hit(k, 'unclassifiable', 'malformed import or export');
-    }
-    for (const y of mine) skip.add(y);
-  });
-  /** The `(` index of a call of the name at k (`name`, `name.native`, `name?.`), or -1. */
-  const callAt = (k) => {
-    let j = k + (member[k] && toks[k].t === 'str' ? 2 : 1);
-    if (/^realpath/.test(toks[k].v) && isP(toks[j], '.') && toks[j + 1]?.v === 'native') j += 2;
-    if (isP(toks[j], '?.')) j++;
-    return isP(toks[j], '(') ? j : -1;
-  };
-  const args = (open) => { const close = closerOf(toks, open); return close < 0 ? null : { close, list: splitTop(toks, open, close) }; };
-  const single = (r, v) => r[1] - r[0] === 1 && toks[r[0]].t === 'str' && (v === undefined || toks[r[0]].v === v);
-  toks.forEach((t, k) => {
-    const v = name[k];
-    if (v === null) return;
-    const isMember = member[k];
-    const bare = t.t === 'id' && !isMember;
-    if (DECODER_NAME.test(v)) hit(k, 'decoder-api');
-    if (skip.has(k)) return; // an import/export specifier: only the decoder-name rule applies
-    if (t.t !== 'id' && ENC_NAME.test(v)) hit(k, 'encoding-literal');
-    if (v === 'encoding') {
-      const ok = t.t !== 'tpl' && (isP(toks[k - 1], '{') || isP(toks[k - 1], ',')) && isP(toks[k + 1], ':')
-        && toks[k + 2]?.t === 'str' && toks[k + 2].v === 'buffer' && (isP(toks[k + 3], ',') || isP(toks[k + 3], '}'));
-      if (!ok) hit(k, 'encoding-option');
-      return;
-    }
-    if (t.t !== 'id' && !isMember) return; // any other string or template text: only the two literal rules above
-    if (v === 'String' && (bare || isMember) && !(isP(toks[k + 1], '.') && ['fromCharCode', 'fromCodePoint', 'raw'].includes(toks[k + 2]?.v))) hit(k, 'string-coercion');
-    if (bare && ['require', 'eval', 'Function'].includes(v)) hit(k, 'unclassifiable', `${v} is not analysable`);
-    if (bare && v === 'process' && !(((isP(toks[k + 1], '.') || isP(toks[k + 1], '?.')) && toks[k + 2]?.t === 'id') || (isP(toks[k + 1], '[') && member[k + 2]))) {
-      hit(k, 'unclassifiable', 'process used as a value');
-    }
-    if (isMember && v === 'cwd') {
-      if (callAt(k) >= 0) hit(k, 'cwd');
-      else if (toks[k - 2]?.v === 'process') hit(k, 'unclassifiable', 'process.cwd used as a value');
-    }
-    const kind = NAME_API.test(v) ? 'name' : READ_API.test(v) ? 'read' : CP_API.test(v) && !(isMember && v === 'exec') ? 'cp' : null;
-    if (!kind || !(bare || isMember)) return;
-    const open = callAt(k);
-    if (open < 0) return hit(k, 'unclassifiable', `${v} referenced other than as a call`);
-    const a = args(open);
-    if (!a) return hit(k, 'unclassifiable', 'unbalanced call');
-    if (a.list.some(([x]) => isP(toks[x], '...'))) return hit(k, 'unclassifiable', 'spread argument');
-    const objs = a.list.map((r) => objectArg(toks, r));
-    if (objs.some((o) => o?.spreadOrComputed)) return hit(k, 'unclassifiable', 'options literal with a spread or computed key');
-    if (kind === 'name' && !a.list.some((r, x) => x >= 1 && (single(r, 'buffer') || objs[x]?.bufferEnc))) hit(k, 'name-api-no-buffer');
-    if (kind === 'cp' && !objs[a.list.length - 1]) hit(k, 'unclassifiable', `${v} options are not an inline object literal`);
-    if (kind === 'read' && a.list.length >= 2) {
-      const r = a.list[1];
-      if (single(r)) { if (toks[r[0]].v !== 'buffer') hit(k, 'read-encoding'); } else if (!objs[1]) hit(k, 'unclassifiable', `${v} options are not an inline literal`);
-    }
-  });
-  const breaks = [...src.matchAll(/\r\n|[\n\r\u2028\u2029]/g)].map((m) => [m.index, m.index + m[0].length]);
-  return hits.sort((x, y) => x.pos - y.pos).map(({ pos, rule, why }) => {
-    const before = breaks.filter(([b]) => b < pos);
-    const from = before.length ? before[before.length - 1][1] : 0;
-    const to = breaks[before.length]?.[0] ?? src.length;
-    return { file, line: before.length + 1, rule, why, code: src.slice(from, to).trim(), pos };
-  });
+  return hits.sort((x, y) => x.pos - y.pos);
 }
 
 /** lib/ modules (recursive), excluding tests, as paths relative to lib/ with `/` separators. */
@@ -900,101 +939,163 @@ function libModules(dir = here, rel = '') {
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? libModules(join(dir, d.name), `${rel}${d.name}/`)
     : d.name.endsWith('.mjs') && !d.name.endsWith('.test.mjs') ? [`${rel}${d.name}`] : [])).sort();
 }
-// Exact sites allowed, each with its reason: [file, the site's trimmed line, the EXACT rule multiset of that
-// line, reason]. Any extra hit on an allowlisted line fails, and so does a stale entry.
+// Sanctioned sites: [file, enclosing function, rule, ordinal of that rule in that function (source order), the
+// flagged node's own source text (whitespace-normalised), reason]. A hit no entry names exactly fails, and so does
+// an entry no hit matches (stale): a second same-rule site in the function is a new ordinal, and swapping a site
+// for another (`toString('latin1')` -> `toString('utf8')`) changes its text. The LINE is not pinned, so CRLF and
+// reformatting elsewhere do not matter. `unclassifiable` is never allowlisted.
 const ALLOWED_SITES = [
-  ['git-exec.mjs', "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", ['decoder-api', 'encoding-literal'], 'the one strict decoder'],
-  ['git-capability.mjs', "const bytes = Buffer.isBuffer(out) ? out : Buffer.from(String(out), 'utf8');", ['encoding-literal', 'string-coercion'], 'encodes (string to bytes); not a decode'],
-  ['git-capability.mjs', "for (const raw of String(pathVar ?? '').split(win ? ';' : ':')) {", ['string-coercion'], 'coerces the PATH env value (already a string), not bytes'],
-  ['git-capability.mjs', 'realpath(p) { try { return realpathSync.native(p); } catch { return null; } },', ['name-api-no-buffer', 'name-api-no-buffer'], 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'export function resolveGitBinary({ env = process.env, cwd = process.cwd(), exclude = [], platform = process.platform, fs = realFs } = {}) {', ['cwd'], 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'const banned = [cwd, ...exclude].flatMap((d) => [P.resolve(d), fs.realpath(d)]).filter(Boolean);', ['name-api-no-buffer'], 'the resolver seam above: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
-  ['git-capability.mjs', 'const real = fs.realpath(file);', ['name-api-no-buffer'], 'the resolver seam above: the spawn executable, never compared with git output (S-02a0a)'],
-  ['git-capability.mjs', 'const m = VERSION.exec(bytes.toString(\'latin1\'));', ['decoder-api', 'encoding-literal'], 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
+  ['git-exec.mjs', '<module>', 'decoder-api', 0, 'TextDecoder', 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
+  ['git-exec.mjs', '<module>', 'encoding-literal', 0, "'utf-8'", 'its label'],
+  ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'string-coercion', 0, 'String', 'coerces the PATH env value (already a string), not bytes'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 1, 'fs.realpath', 'the resolver seam: the spawn executable, never compared with git output (S-02a0a)'],
+  ['git-capability.mjs', 'parseGitVersion', 'string-coercion', 0, 'String', 'encodes (string to bytes); not a decode'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 0, "'utf8'", 'Buffer.from(string, utf8): string to bytes'],
+  ['git-capability.mjs', 'parseGitVersion', 'decoder-api', 0, 'bytes.toString', 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 1, "'latin1'", 'the encoding of that map'],
 ];
-/** Hits grouped per (file, line text) as sorted rule lists. */
-const byLine = (hits) => {
-  const m = new Map();
-  for (const h of hits) { const k = `${h.file}\0${h.code}`; m.set(k, [...(m.get(k) ?? []), h.rule].sort()); }
-  return m;
-};
-/** unexplained: lines whose rule multiset no entry allows exactly; stale: entries with no exactly-matching line. */
+/** Each hit's site key: file, function, rule, its ordinal among same-(file, function, rule) hits in order, and its text. */
+const siteKeys = (hits) => { const seen = new Map(); return hits.map((h) => { const b = `${h.file}\0${h.fn}\0${h.rule}`; const n = seen.get(b) ?? 0; seen.set(b, n + 1); return `${b}\0${n}\0${h.text}`; }); };
+/** unexplained: hits no entry names; stale: entries no hit matches. */
 function allowVerdict(hits, allowed = ALLOWED_SITES) {
-  const lines = byLine(hits);
-  const unexplained = [...lines].filter(([k, rules]) => !allowed.some(([f, c, r]) => `${f}\0${c}` === k && r.join() === rules.join()));
-  const stale = allowed.filter(([f, c, r]) => lines.get(`${f}\0${c}`)?.join() !== [...r].sort().join());
-  return { unexplained, stale };
+  const keys = siteKeys(hits);
+  const want = allowed.map(([f, fn, r, n, text]) => `${f}\0${fn}\0${r}\0${n}\0${text}`);
+  return { unexplained: keys.filter((x) => !want.includes(x)), stale: want.filter((x) => !keys.includes(x)) };
 }
 
 test('T4a: no listed lossy decode form appears in lib/ outside the strict decoder or an allowlisted, reasoned site', () => {
   const files = libModules();
   assert.ok(files.includes('git-exec.mjs') && files.includes('git-capability.mjs'), `scanned: ${files}`);
   const hits = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8')));
-  assert.deepEqual(hits.filter((h) => h.rule === 'unclassifiable'), [], 'no site the scanner cannot classify (fail closed; never allowlisted)');
+  assert.deepEqual(hits.filter((h) => h.rule === 'unclassifiable'), [], 'no site the checker cannot classify (fail closed; never allowlisted)');
   const { unexplained, stale } = allowVerdict(hits);
   assert.deepEqual(unexplained, []);
-  assert.deepEqual(stale, [], 'every allowlist entry matches a real line with exactly its rules');
-  // An allowlisted line with one extra hit is unexplained (Codex: one site must not cover a second on its line).
-  const line = "const real = fs.realpath(file);";
-  const extra = allowVerdict([{ file: 'git-capability.mjs', code: line, rule: 'name-api-no-buffer' }, { file: 'git-capability.mjs', code: line, rule: 'decoder-api' }]);
-  assert.deepEqual(extra.unexplained, [[`git-capability.mjs\0${line}`, ['decoder-api', 'name-api-no-buffer']]]);
-  assert.ok(hits.some((h) => h.file === 'git-exec.mjs' && h.rule === 'decoder-api' && /TextDecoder/.test(h.code)), 'positive control: the decoder site itself was seen');
-  // L10: a CRLF checkout (Windows) must give the same verdict.
+  assert.deepEqual(stale, [], 'every allowlist entry matches a real site');
+  assert.ok(!ALLOWED_SITES.some(([, , r]) => r === 'unclassifiable'));
+  // One more site of an allowlisted rule in the same function is a new ordinal, so it is unexplained.
+  const extra = allowVerdict([...hits, { ...hits.find((h) => h.fn === 'parseGitVersion' && h.rule === 'decoder-api'), pos: Infinity }]);
+  assert.deepEqual(extra.unexplained, ['git-capability.mjs\0parseGitVersion\0decoder-api\x001\0bytes.toString']);
+  // Swapping an allowlisted site for another of the same rule in the same function changes its text, so it fails.
+  const swapped = allowVerdict(hits.map((h) => (h.text === "'latin1'" ? { ...h, text: "'utf8'" } : h)));
+  assert.deepEqual([swapped.unexplained, swapped.stale], [["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0'utf8'"], ["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0'latin1'"]]);
+  assert.ok(hits.some((h) => h.file === 'git-exec.mjs' && h.rule === 'decoder-api' && h.fn === '<module>'), 'positive control: the decoder site itself was seen');
+  // L10: a CRLF checkout (Windows) gives the same verdict.
   const crlf = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, '\r\n')));
-  assert.deepEqual(crlf.map((h) => [h.file, h.line, h.rule, h.code]), hits.map((h) => [h.file, h.line, h.rule, h.code]));
+  assert.deepEqual(crlf.map((h) => [h.file, h.line, h.fn, h.rule, h.text]), hits.map((h) => [h.file, h.line, h.fn, h.rule, h.text]));
 });
 
 const rulesOf = (src) => decodeSites('m.mjs', src).map((h) => h.rule).sort();
-test('T4a scanner flags each planted lossy form with exactly its rules (the scan is not vacuous)', () => {
-  const D = ['decoder-api'];
-  const N = ['name-api-no-buffer'];
-  const planted = [
-    ['const s = r.stdout.toString();', D], ["const s = buf.toString('utf8');", ['decoder-api', 'encoding-literal']],
-    ["spawnSync(b, a, { encoding: 'utf8' })", ['encoding-literal', 'encoding-option']], ['spawnSync(b, a, { encoding: "latin1" })', ['encoding-literal', 'encoding-option']],
-    ['const d = new TextDecoder();', D], ["readFileSync(p, 'utf-8')", ['encoding-literal', 'read-encoding']], ['x.utf8Slice(0)', D], ["child.stdout.setEncoding('x')", D],
-    ['const z = buf.toString("latin1")', ['decoder-api', 'encoding-literal']], ['const t = String(r.stdout);', ['string-coercion']], ['const u = Buffer.prototype.toString.call(b);', D],
-    ['const l = buf.toLocaleString();', D], ["const m = buf['toString']();", D], ['const n = buf[ "toLocaleString" ]();', D], ['const d = new globalThis.TextDecoder();', D],
-    ['const D = TextDecoder; const d = new D();', D], ['const r = realpathSync.native(dir);', N], ['const r = realpathSync(dir, {});', N], ['const l = readdirSync(dir);', N],
-    ['const t = readlinkSync(p);', N], ['const m = mkdtempSync(prefix);', N], ['const c = process.cwd();', ['cwd']], ['const r = fs.realpath (p, cb);', N],
-    // Codex confirm round: an unrelated `encoding: 'buffer'` on the same line no longer exempts a call.
-    ["const cwd = process.cwd(); const names = readdirSync(dir, { encoding: 'buffer' });", ['cwd']],
-    ["const names = readdirSync(dir); const o = { encoding: 'buffer' };", N], ["const names = readdirSync(dir, f({ encoding: 'buffer' }));", N],
-    ["const a = readdirSync(d, { encoding: 'buffer' }), b = readlinkSync(p);", N],
-    // `//` and `/*` inside strings, templates and regexes no longer hide what follows; comments are exact.
-    ["const u = 'a//b', s = buf.toString();", D], ['const u = "a//b", s = buf.toString();', D], ['const u = `a//b`, s = buf.toString();', D],
-    ['const u = "/*", s = buf.toString(); // */', D], ['/* x */ buf.toString()', D], ['const re = /\\/\\//; const s = buf.toString();', D],
-    ['const re = /[/]/; buf.toString()', D], ['* buf.toString()', D], ['const t = `${buf.toString()}`;', D], ['const t = `${ { a: 1 }.a }${String(b)}`;', ['string-coercion']],
-    ['const t = `a${`b${b.toString()}`}`;', D],
-    // multi-line calls and members
-    ['readdirSync(\n  dir,\n  {}\n)', N], ['const s = buf\n  .toString();', D], ["readdirSync(\r\n  dir,\r\n  { encoding:\r\n 'buffer' }\r\n)", []],
-    // escapes, computed and aliased names, values
-    ["buf['to\\x53tring']()", D], ["const e = 'utf\\x38';", ['encoding-literal']], ["buf[k + 'String']()", ['unclassifiable']], ['buf.\\u0074oString()', ['unclassifiable']],
-    ["import { readdirSync as rd } from 'node:fs';\nrd(dir);", ['unclassifiable']], ['const { readdirSync: rd } = fs;', ['unclassifiable']],
-    ['const f = readdirSync; f(dir);', ['unclassifiable']], ['[a].map(realpathSync)', ['unclassifiable']], ["import * as cp from 'node:child_process';", ['unclassifiable']],
-    ["import cp from 'child_process';", ['unclassifiable']], ["const fs = require('node:fs');", ['unclassifiable']], ["const fs = await import('node:fs');", ['unclassifiable']],
-    ["export { realpathSync as rp } from 'node:fs';", ['unclassifiable']], ["import { TextDecoder } from 'node:util';", D],
-    ['spawnSync(b, a, opts)', ['unclassifiable']], ['spawnSync(b, a, { ...opts })', ['unclassifiable']], ['spawnSync(b, a, { encoding })', ['encoding-option']],
-    ['readFileSync(p, enc)', ['unclassifiable']], ["readFileSync(p, { encoding: 'utf8' })", ['encoding-literal', 'encoding-option']], ["const o = { encoding: 'buffer' + x };", ['encoding-option']],
-    ["x.encoding = 'buffer';", ['encoding-option']], ["const o = { ['encoding']: 'utf8' };", ['encoding-literal', 'encoding-option']], ['arr.map(String)', ['string-coercion']],
-    ["process['cwd']()", ['cwd']], ['const { cwd } = process;', ['unclassifiable']], ['const g = process.cwd;', ['unclassifiable']], ['eval(s)', ['unclassifiable']],
-    // what cannot be classified fails closed
-    ['const x = (a) / 2; buf.toString();', ['decoder-api', 'unclassifiable']], ["const s = 'it\\'s', t = buf.toString();", D],
-    ["function f() { return /'/.test(x) && buf.toString(); }", D],
-    // Opus advisor round: forms the per-call rules must not let through.
-    ['const l = fs.readdirSync(dir)\n{ x() }', N], ['realpath(p) { return p; }', N], ['const of = 2, q = of / 2, s = buf.toString(), r = 4 / 2;', ['decoder-api', 'unclassifiable']],
-    ["export default /'/.test(buf.toString()) || /'/.test(x);", D], ["mkdtempSync('buffer')", N], ["readdirSync('buffer')", N], ['String.call(null, buf)', ['string-coercion']],
-    ['String.apply(null, [buf])', ['string-coercion']], ['readFileSync(...a)', ['unclassifiable']], ["readdirSync(...a, { encoding: 'buffer' })", ['unclassifiable']], ["const s = 'open", ['unclassifiable']], ['/* open', ['unclassifiable']],
-    ['const t = `open', ['unclassifiable']], ['const t = `${open', ['unclassifiable']], ['const r = /open', ['unclassifiable']], ['i++ / 2', ['unclassifiable']],
-  ];
-  for (const [p, want] of planted) assert.deepEqual(rulesOf(p), [...want].sort(), p);
-  assert.deepEqual(decodeSites('m.mjs', 'const a = 1;\nconst s = buf\n  .toString();').map((h) => h.line), [3], 'a site reports its own line');
-  for (const fine of ["spawnSync(b, a, { encoding: 'buffer' })", '// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
-    "const r = realpathSync.native(dir, { encoding: 'buffer' });", "const l = readdirSync(dir, { encoding: 'buffer' });", 'const s = statSync(cwd);',
-    "const l = readdirSync(dir, 'buffer');", "const r = await fs.promises.readlink(p, { encoding: 'buffer' });", "import { readdirSync, spawnSync } from 'node:fs';",
-'const m = /utf8/.exec(s);', 'const s = `utf8 is ${n} bytes`;', 'const n = String.fromCharCode(b);', 'const s = "it\'s // not a comment";',
-    "env[`GIT_CONFIG_KEY_${i}`] = k;", 'x = a / b;', "readFileSync(p)", "spawnSync(b, ['--version'], { cwd, env })", 'const o = { cwd: process.env.HOME };']) {
-    assert.deepEqual(rulesOf(fine), [], fine);
-  }
+const D = ['decoder-api'];
+const N = ['name-api-no-buffer'];
+const U = ['unclassifiable'];
+// Every input of the replaced token scanner's planted table (head 4ffb444), verbatim, with the AST checker's
+// exact rules. Changes from that table: a parse error is `unclassifiable`; `/`-ambiguity cases now parse and
+// report only their real site; an escaped `toString` is resolved to toString; a child_process namespace
+// or default import is resolved through its binding, so the import alone (no use) has nothing to report.
+const PLANTED = [
+  ['const s = r.stdout.toString();', D], ["const s = buf.toString('utf8');", ['decoder-api', 'encoding-literal']],
+  ["spawnSync(b, a, { encoding: 'utf8' })", ['encoding-literal', 'encoding-option', 'unclassifiable']],
+  ['spawnSync(b, a, { encoding: "latin1" })', ['encoding-literal', 'encoding-option', 'unclassifiable']],
+  ['const d = new TextDecoder();', ['decoder-api', 'decoder-lossy']], ["readFileSync(p, 'utf-8')", ['encoding-literal', 'read-encoding']],
+  ['x.utf8Slice(0)', D], ["child.stdout.setEncoding('x')", D], ['const z = buf.toString("latin1")', ['decoder-api', 'encoding-literal']],
+  ['const t = String(r.stdout);', ['string-coercion']], ['const u = Buffer.prototype.toString.call(b);', ['decoder-api', 'unclassifiable']],
+  ['const l = buf.toLocaleString();', D], ["const m = buf['toString']();", D], ['const n = buf[ "toLocaleString" ]();', D],
+  ['const d = new globalThis.TextDecoder();', ['decoder-api', 'unclassifiable']], ['const D = TextDecoder; const d = new D();', ['decoder-api', 'decoder-lossy']],
+  ['const r = realpathSync.native(dir);', N], ['const r = realpathSync(dir, {});', N], ['const l = readdirSync(dir);', N],
+  ['const t = readlinkSync(p);', N], ['const m = mkdtempSync(prefix);', N], ['const c = process.cwd();', ['cwd']], ['const r = fs.realpath (p, cb);', U],
+  ["const cwd = process.cwd(); const names = readdirSync(dir, { encoding: 'buffer' });", ['cwd']],
+  ["const names = readdirSync(dir); const o = { encoding: 'buffer' };", N], ["const names = readdirSync(dir, f({ encoding: 'buffer' }));", U],
+  ["const a = readdirSync(d, { encoding: 'buffer' }), b = readlinkSync(p);", N],
+  ["const u = 'a//b', s = buf.toString();", D], ['const u = "a//b", s = buf.toString();', D], ['const u = `a//b`, s = buf.toString();', D],
+  ['const u = "/*", s = buf.toString(); // */', D], ['/* x */ buf.toString()', D], ['const re = /\\/\\//; const s = buf.toString();', D],
+  ['const re = /[/]/; buf.toString()', D], ['* buf.toString()', U], ['const t = `${buf.toString()}`;', D], ['const t = `${ { a: 1 }.a }${String(b)}`;', ['string-coercion']],
+  ['const t = `a${`b${b.toString()}`}`;', D],
+  ['readdirSync(\n  dir,\n  {}\n)', N], ['const s = buf\n  .toString();', D], ["readdirSync(\r\n  dir,\r\n  { encoding:\r\n 'buffer' }\r\n)", []],
+  ["buf['to\\x53tring']()", D], ["const e = 'utf\\x38';", ['encoding-literal']], ["buf[k + 'String']()", ['unclassifiable', 'unclassifiable']], ['buf.\\u0074oString()', D],
+  ["import { readdirSync as rd } from 'node:fs';\nrd(dir);", N], ['const { readdirSync: rd } = fs;', U],
+  ['const f = readdirSync; f(dir);', U], ['[a].map(realpathSync)', U], ["import * as cp from 'node:child_process';", []],
+  ["import cp from 'child_process';", []], ["const fs = require('node:fs');", U], ["const fs = await import('node:fs');", U],
+  ["export { realpathSync as rp } from 'node:fs';", U], ["import { TextDecoder } from 'node:util';", ['decoder-api', 'unclassifiable']],
+  ['spawnSync(b, a, opts)', U], ['spawnSync(b, a, { ...opts })', U],
+  ['spawnSync(b, a, { encoding })', ['encoding-option', 'unclassifiable']],
+  ['readFileSync(p, enc)', U], ["readFileSync(p, { encoding: 'utf8' })", ['encoding-literal', 'encoding-option', 'read-encoding']], ["const o = { encoding: 'buffer' + x };", ['encoding-option']],
+  ["x.encoding = 'buffer';", ['encoding-option']], ["const o = { ['encoding']: 'utf8' };", ['encoding-literal', 'encoding-option']], ['arr.map(String)', ['string-coercion']],
+  ["process['cwd']()", ['cwd']], ['const { cwd } = process;', U], ['const g = process.cwd;', U], ['eval(s)', U],
+  ['const x = (a) / 2; buf.toString();', D], ["const s = 'it\\'s', t = buf.toString();", D],
+  ["function f() { return /'/.test(x) && buf.toString(); }", D],
+  ['const l = fs.readdirSync(dir)\n{ x() }', N], ['realpath(p) { return p; }', U], ['const of = 2, q = of / 2, s = buf.toString(), r = 4 / 2;', D],
+  ["export default /'/.test(buf.toString()) || /'/.test(x);", D], ["mkdtempSync('buffer')", N], ["readdirSync('buffer')", N], ['String.call(null, buf)', ['string-coercion']],
+  ['String.apply(null, [buf])', ['string-coercion']], ['readFileSync(...a)', U], ["readdirSync(...a, { encoding: 'buffer' })", U], ["const s = 'open", U], ['/* open', U],
+  ['const t = `open', U], ['const t = `${open', U], ['const r = /open', U], ['i++ / 2', []],
+  // two of the replaced scanner's FINE inputs that the AST checker rightly rejects
+  ["spawnSync(b, a, { encoding: 'buffer' })", U], ["import { readdirSync, spawnSync } from 'node:fs';", U],
+];
+// Every escape the three review rounds reported against the token scanner, plus the forms they named.
+const ESCAPES = [
+  ['const q = 𝑥 / 2, s = buf.toString(), r = 4 / 2;', D], ['𝑥["to" + "String"]()', D], ['const of = buf; of["to" + "String"]();', D],
+  ["while (false) { break\n/'/; } buf.toString(); /'/;", D], ["while (false) { break\r\n/'/; } buf.toString(); /'/;", D],
+  ["readdirSync(dir, {}, 'buffer');", N], ['readdirSync(dir, opts, "buffer");', U], ["globalThis.eval('buf.toString()');", U],
+  ["import { default as cp } from 'node:child_process';\ncp.exec(c);", ['cp-encoding']],
+  ["process.getBuiltinModule('node:child_process').execSync(c, { encoding: 'utf8' });", ['cp-encoding', 'encoding-literal', 'encoding-option', 'unclassifiable']],
+  ["import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)('node:child_process');", U.concat(U)],
+  ["spawnSync(b, [], { __proto__: o });", U], ["spawnSync(b, [], { get encoding() { return 'utf8'; } });", ['encoding-literal', 'encoding-option', 'unclassifiable']],
+  ['const { ["to" + "String"]: f } = buf;', D], ['(function () {}).constructor("return b.toString()");', U],
+  ["import readline from 'node:readline';", U], ["import { text } from 'node:stream/consumers';", U], ['new Blob([buf]).text();', D], ['new Response(buf).text();', D],
+  ["import * as fs from 'node:fs';\nfs.globSync('*');", U], ["import * as fs from 'node:fs';\nfs.mkdtempDisposableSync(p);", U], ["process.binding('fs');", U],
+  ["Reflect.get(buf, 'to' + 'String');", U], ["const k = 'toString'; buf[k]();", ['decoder-api', 'unclassifiable']],
+  ["import { readdirSync as rd } from 'node:fs';\nconst x = rd;", U], ["import * as fs from 'node:fs';\nfs.readdirSync(d);", N],
+  ["import fs from 'node:fs';\nfs.promises.readdir(d);", N], ["import { promises as P } from 'node:fs';\nP.readlink(d);", N], ["import fs from 'node:fs';\nfs.default.readdirSync(d);", N],
+  ["import * as fs from 'node:fs';\nconst f = fs;", U], ["import * as fs from 'node:fs';\nfs.readdirSync.call(null, d);", U],
+  ["import * as fs from 'node:fs';\n(0, fs.readdirSync)(d);", U], ["import { readdirSync } from 'node:fs';\nnew readdirSync(d);", U],
+  ["import { readdirSync } from 'node:fs';\nexport { readdirSync };", U], ['export { readdirSync };', U], ["export * from 'node:fs';", U],
+  ['execFile(f, [], (e, out) => out);', ['cp-encoding']], ['execFile(f, [], cb);', U], ['spawn(b, []);', U], ["import cp from 'node:child_process';\ncp.fork(m);", U],
+  ["new TextDecoder('utf-8', { fatal: false });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
+  ["new TextDecoder('utf-8', { fatal: true, fatal: false });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
+  ["new TextDecoder('utf-8', { fatal: true });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
+  ["new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
+  ["new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", ['decoder-api', 'encoding-literal']],
+  ["spawnSync(b, [], { [k]: 'utf8' });", ['encoding-literal', 'unclassifiable']], ["readdirSync(d, { [k]: 'x', encoding: 'buffer' });", U],
+  ["import * as os from 'node:os';", U], ["import { mkdirSync } from 'node:fs';", U], ["import * as fs from 'node:fs';\nfs.mkdir(d, cb);", U],
+  ["new TextDecoder(...['utf-8', {}], { fatal: true, ignoreBOM: true });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
+  ['const { constructor: F } = () => {};', U],
+  // one literal case per deny-list member (deleting a member must turn one red)
+  ['Function("x");', U], ['module.exports = 1;', U], ['exports.x = 1;', U], ['WebAssembly.compile(b);', U], ['self.x;', U], ['window.x;', U],
+  ['global.x;', U], ['require.resolve(x);', U], ['createRequire;', U], ['getBuiltinModule;', U], ['process.mainModule;', U],
+  ['const d = new StringDecoder();', D], ['new TextDecoderStream();', D], ['atob(s);', D], ['new File([b], "n").text();', D],
+  ['b.base64Slice(); b.base64urlSlice(); b.hexSlice(); b.latin1Slice(); b.asciiSlice(); b.ucs2Slice(); b.utf16leSlice(); b.binarySlice();', Array(8).fill('decoder-api')],
+  ["const e = ['ascii', 'binary', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le', 'UTF8', 'Latin1'];", Array(8).fill('encoding-literal')],
+  ['opendirSync(d);', N], ['opendir(d, (e, x) => x);', N], ['mkdtemp(p, (e, x) => x);', N], ['readlink(p, (e, x) => x);', N], ['realpath(p, (e, x) => x);', N],
+  ['readdir(d, (e, x) => x);', N], ["import { readdir } from 'fs/promises';\nreaddir(d);", N], ["import { opendir } from 'node:fs/promises';\nopendir(d);", N],
+  ["readFile(p, 'utf8', cb);", ['encoding-literal', 'read-encoding']], ["import { readFile } from 'node:fs/promises';\nawait readFile(p, 'latin1');", ['encoding-literal', 'read-encoding']],
+  ["import { execSync } from 'child_process';\nexecSync(c, { encoding: 'utf8' });", ['cp-encoding', 'encoding-literal', 'encoding-option']],
+  ["execFileSync(f, [], { encoding: 'ascii' });", ['cp-encoding', 'encoding-literal', 'encoding-option']], ['exec(c, (e, out) => out);', ['cp-encoding']], ["exec(c, 'buffer', cb);", U], ["execSync(c, 'buffer');", U], ["spawnSync(b, [...a], { encoding: 'utf8' })", ['cp-encoding', 'encoding-literal', 'encoding-option']],
+  ["import path from 'node:path';\nexport const f = (path) => path.readdirSync('.');", N], ["import { statSync } from 'node:fs';\nfunction f(statSync) { return statSync.readdirSync(d); }", N], ["import { x } from './x.cjs';", U], ["import { x } from './x.test.mjs';", U], ['String.raw({ raw: [buf] });', ['string-coercion']], ['buf[`to${s}`]();', U.concat(U)], ['const e = `latin1`;', ['encoding-literal']], ["const v = x['utf8'];", ['encoding-literal']], ["import { x } from '../outside.mjs';", U], ['process.argv;', U], ['typeof process;', U],
+];
+// What the coverage statement declares NOT CHECKED: asserted to give no hit, so the statement stays true.
+const UNCHECKED = ['const s = `${buf}`;', "const s = buf + '';", 'const s = [buf].join();', 'const o = JSON.parse(buf);', 'const s = String.fromCharCode(...buf);',
+  'const v = buf[k];', 'const m = buf[k]; m.call(buf);', 'const m = re.exec(buf);', "import path from 'node:path';\nconst r = path.resolve('x');"];
+const FINE = ['// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
+  "const r = realpathSync.native(dir, { encoding: 'buffer' });", "const l = readdirSync(dir, { encoding: 'buffer' });", 'const s = statSync(cwd);',
+  "const l = readdirSync(dir, 'buffer');", "const r = await fs.promises.readlink(p, { encoding: 'buffer' });",
+  'const m = /utf8/.exec(s);', 'const s = `utf8 is ${n} bytes`;', 'const n = String.fromCharCode(b);', 'const s = "it\'s // not a comment";',
+  'env[`GIT_CONFIG_KEY_${i}`] = k;', 'x = a / b;', 'readFileSync(p)', "spawnSync(b, ['--version'], { cwd, env })", 'const o = { cwd: process.env.HOME };',
+  "spawnSync(b, ['x'], { encoding: 'buffer' })", "spawnSync(b, [...args], { cwd, env });", "import { readdirSync } from 'node:fs';\nimport { spawnSync } from 'node:child_process';",
+  "exec(c, { encoding: 'buffer' }, cb);", "execFileSync(f, ['-v']);", "spawnSync(b, null, { encoding: 'buffer' });", 'spawnSync(b, { cwd });',
+  "import cp from 'node:child_process';\ncp.spawnSync(b, ['x'], { encoding: 'buffer' });", "import * as fs from 'node:fs';\nfs.readdirSync(d, { encoding: 'buffer' });",
+  "import { readFile } from 'node:fs/promises';\nawait readFile(p);", 'readFileSync(p, (e, b) => b);', 'decodeStrict(b);',
+  'const x = 4 / 2, y = (a) / 2, z = i++ / 2;', 'const o = { toJSON() { return 1; } };', 'function f(readdirSync, exec) { return 1; }', "import { decodeStrict } from './git-exec.mjs';\nexport * from './sub/x.mjs';", "import { statSync, constants } from 'node:fs';\nstatSync(p, constants);"];
+
+test('T4a checker flags every planted form and reviewer escape with exactly its rules, and only what it claims', () => {
+  const cases = [...PLANTED, ...ESCAPES, ...[...UNCHECKED, ...FINE].map((p) => [p, []])];
+  assert.ok(cases.length > 150, 'every fixture list is present');
+  const wrong = cases.map(([p, want]) => [p, rulesOf(p), [...want].sort()]).filter(([, got, want]) => got.join() !== want.join());
+  assert.deepEqual(wrong, [], 'each case: [source, rules found, rules expected]');
+  assert.deepEqual(decodeSites('m.mjs', 'const a = 1;\nconst s = buf\n  .toString();').map((h) => h.line), [2], 'a site reports its own line');
+  const fns = decodeSites('m.mjs', 'const o = { f(x) { return x.toString(); } };\nfunction g() { const h = () => String(1); }\nclass C { m() { return process.cwd(); } }');
+  assert.deepEqual(fns.map((h) => h.fn), ['o.f', 'g.h', 'C.m'], 'sites are keyed by their enclosing named functions');
 });
 
 test('T4a scans lib/ recursively and skips only *.test.mjs', (t) => {
@@ -1006,47 +1107,68 @@ test('T4a scans lib/ recursively and skips only *.test.mjs', (t) => {
 
 /** Deterministic PRNG (mulberry32) for the seeded property test. */
 const prng = (seed) => () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const PARSE = { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true };
+// [form, the rule it must raise in place, top level only (an import)]: the listed forms and the reviewer escapes.
 const INJECT = [
-  ['b.toString()', 'decoder-api'], ["b['toLocaleString']()", 'decoder-api'], ['new TextDecoder()', 'decoder-api'], ['b\n  .toString()', 'decoder-api'],
-  ['String(b)', 'string-coercion'], ["readFileSync(p, 'utf8')", 'encoding-literal'], ["spawnSync(g, a, { encoding: 'latin1' })", 'encoding-option'],
-  ['readdirSync(d)', 'name-api-no-buffer'], ['realpathSync.native(\n  d)', 'name-api-no-buffer'], ["readdirSync(d); const o = { encoding: 'buffer' }", 'name-api-no-buffer'],
-  ['readlinkSync(p, {})', 'name-api-no-buffer'], ['process.cwd()', 'cwd'], ['execFileSync(g, a)', 'unclassifiable'], ['const f = readdirSync', 'unclassifiable'],
+  ['b.toString()', 'decoder-api'], ["b['toLocaleString']()", 'decoder-api'], ['new TextDecoder()', 'decoder-lossy'], ['b\n  .toString()', 'decoder-api'],
+  ['String(b)', 'string-coercion'], ["readFileSync(p, 'utf8')", 'read-encoding'], ["spawnSync(g, [], { encoding: 'latin1' })", 'cp-encoding'],
+  ['readdirSync(d)', 'name-api-no-buffer'], ['realpathSync.native(\n  d)', 'name-api-no-buffer'], ["readdirSync(d); const __t4a = { encoding: 'buffer' }", 'name-api-no-buffer'],
+  ['readlinkSync(p, {})', 'name-api-no-buffer'], ['process.cwd()', 'cwd'], ['execFileSync(g, a)', 'unclassifiable'], ['const __t4a = readdirSync', 'unclassifiable'],
+  ["exec(c, 'buffer', f)", 'unclassifiable'],
+  ['const 𝑥 = 1, __t4a = 𝑥 / 2 + b.toString()', 'decoder-api'], ["b['to' + 'String']()", 'decoder-api'], ["while (false) { break\n/'/; } b.toString(); /'/", 'decoder-api'],
+  ["readdirSync(d, {}, 'buffer')", 'name-api-no-buffer'], ["globalThis.eval('b.toString()')", 'unclassifiable'],
+  ["(function () {}).constructor('return b.toString()')", 'unclassifiable'], ["process.getBuiltinModule('node:child_process')", 'unclassifiable'],
+  ["spawnSync(g, [], { __proto__: o })", 'unclassifiable'],
+  ["import { default as __t4a } from 'node:child_process';\n__t4a.exec(c)", 'cp-encoding', true], ["import { createRequire as __t4a } from 'node:module'", 'unclassifiable', true],
+  ["import * as __t4a from 'node:fs';\n__t4a.readdirSync(d)", 'name-api-no-buffer', true],
 ];
-test('T4a property: each listed form injected at seeded random code-token boundaries of the real lib sources is flagged in place', () => {
+test('T4a property: each listed form and reviewer escape injected at seeded random statement boundaries of the real lib sources is flagged in place', () => {
+  assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
   const SEED = 0x5021b;
   const rnd = prng(SEED);
+  const RUNS = 8;
   let checked = 0;
   for (const f of libModules()) {
     for (const nl of ['\n', '\r\n']) {
       const src = readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, nl);
-      const bounds = lexJs(src).toks.filter((t) => !(t.t === 'tpl' && t.cont) && !isP(t, '${')).map((t) => t.s);
-      assert.ok(bounds.length > 100, `${f}: tokenised`);
-      for (const [form, rule] of INJECT) {
-        for (let n = 0; n < 12; n++) {
-          const at = bounds[Math.floor(rnd() * bounds.length)];
-          const text = ` ;${form.replace(/\n/g, nl)}; `;
-          const span = (h) => h.pos >= at && h.pos < at + text.length;
-          const out = decodeSites(f, src.slice(0, at) + text + src.slice(at));
-          assert.ok(out.some((h) => span(h) && h.rule === rule), `seed ${SEED}: ${JSON.stringify(form)} at ${f}:${at} (${nl === '\n' ? 'LF' : 'CRLF'}) not flagged as ${rule}`);
+      const top = [];
+      const all = [];
+      walk(acorn.parse(src, PARSE), (n) => {
+        const list = n.type === 'SwitchCase' ? n.consequent : ['Program', 'BlockStatement', 'StaticBlock'].includes(n.type) ? n.body : [];
+        for (const s of list) (n.type === 'Program' ? top : all).push(s.start);
+      });
+      all.push(...top);
+      assert.ok(top.length > 10 && all.length > 50, `${f}: statement boundaries found`);
+      for (const [form, rule, topOnly] of INJECT) {
+        for (let r = 0; r < RUNS; r++) {
+          const pool = topOnly ? top : all;
+          const at = pool[Math.floor(rnd() * pool.length)];
+          const where = `seed ${SEED}: ${JSON.stringify(form)} at ${f}:${at} (${nl === '\n' ? 'LF' : 'CRLF'})`;
+          const put = (text) => src.slice(0, at) + text + src.slice(at);
+          const text = `;${form.replace(/\n/g, nl)};${nl}`;
+          assert.doesNotThrow(() => acorn.parse(put(text), PARSE), `${where}: the injected source must parse (a parse error would make the check vacuous)`);
+          assert.ok(decodeSites(f, put(text)).some((h) => h.pos >= at && h.pos < at + text.length && h.rule === rule), `${where} not flagged as ${rule}`);
           // controls: the same text as a comment, string or template text, or neutral code, adds no hit in place.
           const tplText = form.replace(/[\\`$]/g, '\\$&');
-          for (const ctl of [` /* ${form} */ `, ` // ${form.replace(/\n/g, ' ')}${nl}`, ` ;${JSON.stringify(form)}; `, ` ;\`${tplText}\`; `, ' ;void 0; ']) {
-            const o = decodeSites(f, src.slice(0, at) + ctl + src.slice(at));
-            assert.deepEqual(o.filter((h) => h.pos >= at && h.pos < at + ctl.length), [], `seed ${SEED}: control ${JSON.stringify(ctl)} at ${f}:${at}`);
+          for (const ctl of [`/* ${form} */ `, `// ${form.replace(/\n/g, ' ')}${nl}`, `;${JSON.stringify(form)};${nl}`, `;\`${tplText}\`;${nl}`, `;void 0;${nl}`]) {
+            assert.doesNotThrow(() => acorn.parse(put(ctl), PARSE), `${where}: control parses`);
+            assert.deepEqual(decodeSites(f, put(ctl)).filter((h) => h.pos >= at && h.pos < at + ctl.length), [], `${where}: control ${JSON.stringify(ctl)}`);
           }
           checked++;
         }
       }
     }
   }
-  assert.equal(checked, libModules().length * 2 * INJECT.length * 12, 'every injection ran');
+  assert.equal(checked, libModules().length * 2 * INJECT.length * RUNS, 'every injection ran');
 });
 
 // ------------------------------------------------------------------ mutation evidence (AC6)
-// Harness: scratchpad mut-a0b/mutate3.py (copies all of lib/, LF-normalised anchors, each anchor must match
-// exactly once). A mutant counts as KILLED only when the baseline test count ran and a failing test reports
-// ERR_ASSERTION; a load failure, changed test count or timeout is INVALID. Round 3, ONE run against this final
-// file (log mutants-round3.log): 99 mutants (the 56 lib mutants below + 43 scanner mutants), 98 killed,
+// Harness: session scratchpad review-s02b/acorn-evidence/mutation-round4/mutate4.py (+ lib_mutants.py). Each run gets
+// a mirrored tree <tmp>/scripts/lib + <tmp>/vendor/acorn, so the vendored parser and every imported lib module come
+// along; anchors are LF-normalised and must match exactly once. A mutant counts as KILLED only when the baseline
+// test count ran and a failing test reports ERR_ASSERTION; a load failure, changed test count or timeout is
+// INVALID. Round 4, ONE run against this file (log mutants-round4.log, Node 22.23.1; this table's counts were filled
+// in afterwards, comment only): 133 mutants (59 git-exec + 2 git-capability + 70 checker + 2 vendor), 132 killed,
 // 0 invalid, 1 survived = the EQUIVALENT round-trip mutant.
 // | Area                 | Mutants (each killed by a named assertion)                                          |
 // |----------------------|-------------------------------------------------------------------------------------|
@@ -1060,27 +1182,38 @@ test('T4a property: each listed form injected at seeded random code-token bounda
 // | filter discovery     | drops clean / smudge / process / required (each alone); accepts any attribute;     |
 // |                      | required neutralised to ''; upstream `>` bound (empty driver)                       |
 // | prototype keys       | Object.prototype accumulator (__proto__ shrinks the env size); getter-read values  |
-// | decoding             | fatal:false (killed by the T4a source scan only: with the round-trip present it is |
-// |                      | behaviourally equivalent); BOM stripped; zSplit drops empties; strings accepted;   |
-// |                      | label backslash. EQUIVALENT: round-trip removed (a fatal decoder already refuses   |
-// |                      | every non-UTF-8 input; kept as defence in depth)                                    |
+// | decoding             | fatal:false and BOM stripped (both killed by the T4a decoder-lossy rule; with the  |
+// |                      | round-trip present they are behaviourally equivalent or throw a typed error);     |
+// |                      | zSplit drops empties; strings accepted; label backslash. EQUIVALENT: round-trip    |
+// |                      | removed (a fatal decoder already refuses every non-UTF-8 input; defence in depth)  |
 // | outcomes             | signal before error rows; stderr before status; swallowed decode error; ENOBUFS /  |
 // |                      | ETIMEDOUT unmapped; killSignal SIGTERM; Windows bound off; size +1 per entry;      |
 // |                      | bound `>=`; missing cwd not pre-checked; env platform not matched; non-composed    |
-// |                      | env accepted; unknown run keys accepted                                             |
+// |                      | env accepted; unknown run keys accepted; args array check removed                  |
 // | serialisation        | stderr stored on the object; stderr not capped; toJSON carries stderr; inspect     |
 // |                      | redaction removed; op not validated                                                  |
-// | T4a scan             | toString / toLocaleString / String(bytes) / process.cwd() site added               |
-// | T4a scanner (test    | line comment to EOF; block comment to line end; string escapes ignored; strings    |
-// | file, 43)            | not cooked; \x not cooked; `${}` not code; regex class ignored; `/` after ) } ++ -- |
-// |                      | not ambiguous; no regex after keywords; unterminated string / substitution and     |
-// |                      | escaped identifier pass; 'buffer' anywhere in the call or the file accepted;        |
-// |                      | .native not followed; method-definition skip; literal computed key not a member;  |
-// |                      | string-built key passes; assignment target not exempt; aliased import,    |
-// |                      | child_process namespace import, require/eval, dynamic import pass; specifiers not |
-// |                      | skipped; decoder names skipped in imports; encoding value unchecked; String as a   |
-// |                      | value; process as a value; cwd call; non-call API reference; child_process options|
-// |                      | unchecked; spread options; readFile encoding; utf-8 spelling; toLocaleString;      |
-// |                      | CRLF as two lines; allowlist by line only (rules ignored); subdirectories skipped; |
-// |                      | `/` after `of` not ambiguous; no regex after default; 'buffer' as first argument; |
-// |                      | String.call/apply exempt; spread argument passes                                   |
+// | T4a on the real lib  | toString / toLocaleString / String(bytes) / process.cwd() site added; spawn args   |
+// |                      | passed as a variable; spawn options from a variable; git-capability: latin1 map    |
+// |                      | swapped for utf8 at its allowlisted site; a second toString in parseGitVersion     |
+// | T4a checker (test    | parse error passes; walker skips arrays; bindings ignored; alias bound under the   |
+// | file, 70)            | imported name; namespace/default not bound; unclassified module, ../ and non-.mjs  |
+// |                      | imports pass; buffer accepted at any later argument; name options read at index 0;|
+// |                      | __proto__ / computed / accessor options accepted; options encoding value          |
+// |                      | unchecked; spread passes; dynamic cp args pass; string cp options accepted; cp     |
+// |                      | array args not recognised; exec/execFile default taken as buffer; cp encoding     |
+// |                      | never reported; spawn/fork pass; read encoding unchecked; non-call API use passes;|
+// |                      | .native not followed; namespace as a value passes; unclassified fs member passes; |
+// |                      | dynamic import, re-export, export of a binding pass; opaque / decoder globals pass;|
+// |                      | decoder-lossy never raised; any fatal value; ignoreBOM not required; String member|
+// |                      | calls exempt; String.raw exempt; process any member; cwd call not flagged; Buffer |
+// |                      | any member; .constructor passes; no constant folding; string-built key passes;    |
+// |                      | assignment target not exempt; template pieces not string pieces; computed call    |
+// |                      | passes; member decoder names missed; unbound names and unknown receivers ignored;  |
+// |                      | bound receivers double-checked; any bound root silences the by-name rule;         |
+// |                      | destructured API / decoder pass; binding positions read as uses; encoding entry   |
+// |                      | value unchecked; encoding member passes; encoding-literal removed; template chunks|
+// |                      | ignored; utf-8 spelling; toLocaleString; import specifier tripwire; allowlist     |
+// |                      | ignores ordinal / node text; fnName ignores object names; subdirectories skipped;  |
+// |                      | mkdirSync classified safe; spread TextDecoder args; constructor destructuring;    |
+// |                      | Function / atob / opendir dropped from their lists                                 |
+// | vendored acorn       | one byte of acorn.mjs changed; an extra file in vendor/acorn                        |
