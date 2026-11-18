@@ -33,7 +33,7 @@ import { inspect } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as X from './git-exec.mjs';
 
@@ -611,30 +611,33 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
 
 // ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
 
-// HOW. Every non-test .mjs module under lib/ (subdirectories included) is PARSED by the vendored acorn 8.19.0
-// (skills/ship-ticket/vendor/acorn, MIT, byte-identical to the registry tarball, hash-checked against
-// UPSTREAM.json before it is imported; test-only, never imported by production code) as an ES module
-// (ecmaVersion latest). A source acorn cannot parse is one `unclassifiable` hit. A tiny walker visits every
-// node that has a `type` (no per-node-type list, so an unforeseen node kind is still walked). Imports of
-// fs, fs/promises and child_process (bare or node:) are resolved through the module's own BINDINGS: named,
-// aliased (`{ readdirSync as rd }`, `{ default as cp }`), default and namespace imports, and `ns.member`,
-// `ns.promises.member` and `ns.default.member` chains. Resolution is by name, not by scope: a local that
-// shadows an import is treated as the import, and a watched API name used as a member keeps its by-name rule
-// unless its root is a checked module's namespace (so a shadowing `path` or `statSync` hides nothing). A
-// watched API name with no import binding (a parameter, a seam object, a local) is treated as the API it
-// names (`seam.realpath(d)`). What a caller outside lib/ passes in is data flow (not checked).
+// HOW. The SCANNED modules (the git-output path of the lib: git-exec.mjs and git-capability.mjs; every other non-test
+// module under lib/ must be named in OUT_OF_SCOPE with a reason, or the partition test fails) are PARSED by the
+// vendored acorn 8.19.0 (skills/ship-ticket/vendor/acorn, MIT, byte-identical to the registry tarball, hash-checked
+// against UPSTREAM.json before it is imported; test-only, never imported by production code) as ES modules
+// (ecmaVersion latest). A source acorn cannot parse is one `unclassifiable` hit. The walker visits every node, and
+// EVERY node type acorn can produce is classified in NODE_RULES (rule, walk or fail); a node type outside that table
+// is `unclassifiable`, and a test derives acorn's own type list from the vendored source and requires the table to
+// equal it (closed over the grammar). Imports of fs, fs/promises and child_process (bare or node:) are resolved
+// through the module's own BINDINGS: named, aliased (`{ readdirSync as rd }`, `{ default as cp }`), default and
+// namespace imports, and `ns.member`, `ns.promises.member` and `ns.default.member` chains. Resolution is by name,
+// not by scope: a local that shadows an import is treated as the import, and a watched API name used as a member
+// keeps its by-name rule unless its root is a checked module's namespace (so a shadowing `path` or `statSync` hides
+// nothing). A watched API name with no import binding (a parameter, a seam object, a local) is treated as the API it
+// names (`seam.realpath(d)`). What a caller outside the scanned set passes in is data flow (not checked).
 //
 // WHAT IT CHECKS (one rule each; the allowlist pins rule names):
 //  - decoder-api: a member, a constant computed member (`b['to' + 'String']`, `b['to\x53tring']`), a
-//    destructured key, an import specifier or a string that names toString, toLocaleString, setEncoding, a
-//    Buffer *Slice decoder, TextDecoder(Stream) or StringDecoder; any reference to TextDecoder(Stream),
-//    StringDecoder, Response, Blob, File or atob;
+//    destructured key, an import specifier or any constant string (a literal, a `+` chain or a template whose
+//    pieces are all constant) that names toString, toLocaleString, setEncoding, a Buffer *Slice decoder,
+//    TextDecoder(Stream) or StringDecoder; any reference to TextDecoder(Stream), StringDecoder, Response, Blob,
+//    File or atob;
 //  - decoder-lossy: a TextDecoder that is not `new TextDecoder(x, {...})` (no spread) with exactly one
 //    `fatal: true` and exactly one `ignoreBOM: true` (a static literal);
 //  - string-coercion: any reference to the global String other than String.fromCharCode or .fromCodePoint
 //    (String.raw included: it converts its raw elements to strings);
-//  - encoding-literal: a string or template chunk equal to a text encoding (utf8, utf-8, latin1, binary, ascii,
-//    ucs2, utf16le; any case); encoding-option: an `encoding` key, member or variable that is not an object
+//  - encoding-literal: a constant string or template chunk equal to a text encoding (utf8, utf-8, latin1, binary,
+//    ascii, ucs2, utf16le; any case); encoding-option: an `encoding` key, member or variable that is not an object
 //    literal entry `encoding: 'buffer'`;
 //  - name-api-no-buffer: a call of realpath, readdir, readlink, mkdtemp or opendir (Sync, .native,
 //    fs.promises) whose options, at index 1 (the only position Node reads; a later 'buffer' is ignored,
@@ -646,11 +649,14 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
 //    index 1 for exec(Sync); for spawnSync and execFile(Sync), index 2 after an array literal, null or
 //    nothing, else index 1 when that is an object literal or a callback;
 //  - cwd: a process.cwd() call (no exact-bytes form exists).
+// An allowlist entry pins the COMPLETE invocation: the source of the call or `new` the flagged node is the callee
+// of, else of the nearest call or `new` that contains it (so an argument change is a different site).
 // FAIL CLOSED ('unclassifiable'; never allowlisted):
-//  - a parse error;
-//  - an import of any module other than fs, fs/promises, child_process or path, or a scanned lib module
-//    (`./*.mjs`, not a test; so `../`, `.cjs`, `.js` and `.json` fail);
-//  - a re-export from any of those modules; an export of a watched binding or name;
+//  - a parse error; a node type not in NODE_RULES, and WithStatement;
+//  - an import or re-export specifier that is not exactly fs, fs/promises, child_process or path (bare or node:)
+//    and does not RESOLVE, as Node resolves it (WHATWG URL against the importer: percent-encoded dot segments,
+//    query and fragment, no extension search; MEASURED Node 18 and 22), to a file of the scanned set;
+//  - an export of a watched binding or name;
 //  - an fs or child_process name not classified as checked or known not to return text;
 //  - a watched API or namespace used other than as a direct call or `ns.member` (aliased to a variable,
 //    destructured, `.call/.apply/.bind`, `(0, f)()`, `new`, passed or exported as a value);
@@ -660,25 +666,36 @@ test('the runner spawns only the probed binary, and refuses an env composeEnv di
 //    take the args as the options and ignore the literal after them, MEASURED Node 18 and 22), and
 //    child_process options given as a string (exec ignores 'buffer' and returns a string, MEASURED);
 //  - spawn and fork (asynchronous output is not analysed); dynamic import;
-//  - require, module, exports, eval, Function, globalThis, global, self, window, Reflect, WebAssembly,
+//  - require, module, exports, eval, Function, globalThis, global, self, window, Reflect, Proxy, WebAssembly,
 //    createRequire and getBuiltinModule as names;
 //  - `process` other than process.env, process.platform or a process.cwd() call (so process.binding,
-//    .getBuiltinModule, .mainModule, .argv), and Buffer other than from, isBuffer, alloc, allocUnsafe,
-//    concat, byteLength and compare;
-//  - any `.constructor` member or destructured `constructor` key;
-//  - a computed key built from string pieces that does not fold to a constant (unless only assigned to);
-//  - a call through a computed member whose key is not a constant (`b[k]()`).
+//    .getBuiltinModule, .mainModule, .argv), Buffer other than from, isBuffer, alloc, allocUnsafe, concat,
+//    byteLength and compare, and the global Object other than its members keys, entries, values, freeze,
+//    isFrozen, create, hasOwn, assign, fromEntries and is (so Object itself as a value fails);
+//  - REFLECTION, by any key form: a member, a destructured key or any constant string naming constructor,
+//    prototype, __proto__, getPrototypeOf, setPrototypeOf, getOwnPropertyDescriptor(s), defineProperty,
+//    defineProperties or __define/lookup{G,S}etter__, and an object-literal `__proto__` other than
+//    `__proto__: null`. Two exact productions are the only reflective forms admitted: the lib's own-data reader
+//    (OWN_VALUE_SRC, matched on the whole function's source) and `Object.defineProperty(this, '<plain name>',
+//    { value|enumerable|writable|configurable: <literal> })`, which defines and never reads;
+//  - a computed key that is not a constant: built from string pieces (unless only assigned to), a CALL through
+//    it (`b[k]()`), a destructured one (`{ [k]: v } = o`), and a READ through it unless the key is provably
+//    numeric (a number literal, unary - + ~, arithmetic or bitwise operators other than +, ++/--), or the
+//    counter of the enclosing `for (let i = <number>; ...; i++)` that nothing else in the loop assigns or
+//    rebinds, or the object is a module's only binding of that name declared
+//    `const T = Object.freeze({ __proto__: null, <plain key>: <literal>, ... })` (a read returns one of those
+//    literals or undefined). A delete through it or an assignment to it is not a read.
 // NOT CHECKED: anything not named above. In particular (review items; T4b is the behavioural backstop; each
 // example is asserted to give no hit below):
 //  - ANY implicit ToString of a Buffer: `${buf}`, `buf + ''`, Array#join, JSON.parse(buf), RegExp#exec or
 //    #test(buf), loose equality, use as a property key;
 //  - String.fromCharCode and .fromCodePoint in any call form (exempt by design: a latin1 map);
-//  - a READ through a computed key held in a variable (`b[k]`; a CALL through one fails closed);
 //  - `x.exec(...)` as a member (taken to be RegExp#exec);
 //  - process.env values (decoded by the OS and Node; the lib copies them, never compares them with git bytes);
-//  - the implicit cwd of path.resolve; data flow (which value is a Buffer); anything outside lib/.
-// Evidence: the planted, escape, unchecked and fine fixtures and the seeded property test below; the checker
-// mutants in the AC6 table.
+//  - the implicit cwd of path.resolve; data flow (which value is a Buffer, which value reaches the own-data
+//    reader or a table read); anything outside the scanned set.
+// Evidence: the planted, escape, unchecked and fine fixtures, the node-type exhaustiveness test and the seeded
+// property test below; the checker mutants in the AC6 table.
 const VENDOR = join(here, '..', '..', 'vendor', 'acorn');
 const UPSTREAM = JSON.parse(readFileSync(join(VENDOR, 'UPSTREAM.json'), 'utf8'));
 const sha256 = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
@@ -699,7 +716,13 @@ test('T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing 
 const ENC_NAME = /^(?:utf-?8|latin1|binary|ascii|ucs-?2|utf-?16le)$/i;
 const DECODER_NAME = /^(?:toString|toLocaleString|setEncoding|(?:utf8|latin1|ascii|ucs2|utf16le|binary|hex|base64|base64url)Slice|TextDecoder(?:Stream)?|StringDecoder)$/;
 const DECODER_GLOBAL = new Set(['TextDecoder', 'TextDecoderStream', 'StringDecoder', 'Response', 'Blob', 'File', 'atob']);
-const OPAQUE_GLOBAL = new Set(['require', 'module', 'exports', 'eval', 'Function', 'globalThis', 'global', 'self', 'window', 'Reflect', 'WebAssembly', 'createRequire', 'getBuiltinModule']);
+const OPAQUE_GLOBAL = new Set(['require', 'module', 'exports', 'eval', 'Function', 'globalThis', 'global', 'self', 'window', 'Reflect', 'Proxy', 'WebAssembly', 'createRequire', 'getBuiltinModule']);
+// Reflective property names: a member, destructured key or constant string naming one fails closed (any key form).
+const REFLECT_NAME = /^(?:constructor|prototype|__proto__|getPrototypeOf|setPrototypeOf|getOwnPropertyDescriptors?|defineProperty|defineProperties|__(?:define|lookup)[GS]etter__)$/;
+// The global Object: only these members (none reads a prototype or a descriptor); Object itself as a value fails.
+const OBJECT_OK = new Set(['keys', 'entries', 'values', 'freeze', 'isFrozen', 'create', 'hasOwn', 'assign', 'fromEntries', 'is']);
+// The one own-data reader production (git-exec.mjs `ownValue`), matched on the whole function's whitespace-normalised source.
+const OWN_VALUE_SRC = "(o, k) => { const d = Object.getOwnPropertyDescriptor(o, k); return d && own(d, 'value') ? d.value : undefined; }";
 const NAME_API = /^(?:realpath|readdir|readlink|mkdtemp|opendir)(?:Sync)?$/;
 const READ_API = /^readFile(?:Sync)?$/;
 const CP_API = /^(?:spawnSync|execFileSync|execSync|spawn|execFile|exec|fork)$/;
@@ -709,8 +732,35 @@ const MODULES = { fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/prom
 const FS_SAFE = new Set(['statSync', 'lstatSync', 'fstatSync', 'stat', 'lstat', 'accessSync', 'access', 'existsSync', 'constants',
   'rmSync', 'rm', 'rmdirSync', 'unlinkSync', 'unlink', 'writeFileSync', 'writeFile', 'appendFileSync', 'renameSync', 'rename', 'chmodSync', 'chmod',
   'copyFileSync', 'openSync', 'closeSync', 'writeSync', 'readSync', 'fsyncSync', 'symlinkSync', 'linkSync', 'truncateSync', 'utimesSync']);
-// A lib module the scan itself reads: `./`, no `..`, `.mjs`, not a test (a `.cjs`/`.js` there would go unscanned).
-const isRel = (s) => s.startsWith('./') && !/(?:^|\/)\.\.(?:\/|$)/.test(s) && s.endsWith('.mjs') && !s.endsWith('.test.mjs');
+// The git-output path of the lib: the modules T4a scans. Every other non-test module under lib/ is named here with
+// the reason it is outside the git-output path (the partition test fails on an unnamed one).
+const SCANNED = ['git-capability.mjs', 'git-exec.mjs'];
+/** lib modules neither scanned nor named out of scope (must be empty). */
+const unpartitioned = (files) => files.filter((f) => !SCANNED.includes(f) && !Object.hasOwn(OUT_OF_SCOPE, f));
+const OUT_OF_SCOPE = {
+  'durable-io.mjs': 'S-30a durable state/lock I/O. FINDING (reported, not adopted): gitPath() spawns `git rev-parse --git-path` with encoding utf8, a lossy git-output decode; no S-30c row adopts it yet (asserted below, so a fix updates this entry)',
+  'shape.mjs': 'S-30b closed-schema validator; no fs, child_process or git output (uses Reflect for own-key reads, which T4a would refuse)',
+};
+/**
+ * Where an import or re-export specifier lands, resolved as Node's ESM resolver does: a watched builtin name is itself;
+ * a `/`, `./` or `../` specifier is a WHATWG URL relative to the importer's file URL, and an absolute URL is itself
+ * (percent-encoded dot segments are dot segments; query and fragment are dropped for the file; no extension search);
+ * it must be a file: URL whose path is exactly one of `scanned` (relative to lib/, `/`-separated). Anything else (a
+ * bare package, a `#` package import, another builtin) is null. Returns {mod} for a watched builtin, {lib} for a
+ * scanned file, or null.
+ */
+function resolveSpecifier(spec, file, scanned) {
+  if (MODULES[spec]) return { mod: MODULES[spec] };
+  if (!/^(?:\.{0,2}\/|[A-Za-z][A-Za-z0-9+.-]*:)/.test(spec)) return null;
+  let target;
+  try {
+    const u = new URL(spec, pathToFileURL(join(here, file)));
+    if (u.protocol !== 'file:') return null;
+    u.search = ''; u.hash = '';
+    target = relative(here, fileURLToPath(u)).split(sep).join('/');
+  } catch { return null; }
+  return scanned.includes(target) ? { lib: target } : null;
+}
 /** 'name' | 'read' | 'cp' | 'safe' | {ns} | null (unclassified) for a member of a watched module. */
 function apiKind(mod, name) {
   if (mod === 'path') return 'safe';
@@ -737,9 +787,10 @@ function walk(root, visit) {
   };
   go(root);
 }
-/** The string an expression always evaluates to (string literal, template without substitutions, `+` of those). */
+/** The string an expression always evaluates to (string literal, template whose substitutions are constant, `+` of those). */
+const staticTpl = (n) => n.expressions.reduce((acc, e, i) => ((x) => (acc === null || x === null || n.quasis[i + 1].value.cooked == null ? null : acc + x + n.quasis[i + 1].value.cooked))(staticStr(e)), n.quasis[0].value.cooked ?? null);
 const staticStr = (n) => (n?.type === 'Literal' && typeof n.value === 'string' ? n.value
-  : n?.type === 'TemplateLiteral' && !n.expressions.length ? n.quasis[0].value.cooked
+  : n?.type === 'TemplateLiteral' ? staticTpl(n)
     : n?.type === 'BinaryExpression' && n.operator === '+' ? ((a, b) => (a !== null && b !== null ? a + b : null))(staticStr(n.left), staticStr(n.right)) : null);
 /** A member's property name when it is a constant, else null. */
 const staticKey = (m) => (!m.computed ? (m.property.type === 'PrivateIdentifier' ? `#${m.property.name}` : m.property.name)
@@ -784,9 +835,56 @@ function isBinding(anc) {
   return false;
 }
 const NOT_REF_KEY = { MemberExpression: 'property', Property: 'key', MethodDefinition: 'key', PropertyDefinition: 'key' };
+// Operators whose result is a number (or BigInt), so a key built with them can never name a property such as constructor.
+const NUM_OPS = new Set(['-', '*', '/', '%', '**', '|', '&', '^', '<<', '>>', '>>>']);
+const numericKey = (n) => (n.type === 'Literal' && (typeof n.value === 'number' || typeof n.value === 'bigint')) || n.type === 'UpdateExpression'
+  || (n.type === 'UnaryExpression' && ['-', '+', '~'].includes(n.operator)) || (n.type === 'BinaryExpression' && NUM_OPS.has(n.operator));
+/** `name` is the counter of the enclosing `for (let name = <number>; ...; name++)` read in its test or body, and nothing else there assigns or rebinds it. */
+function loopCounter(name, a) {
+  for (let i = a.length - 1; i >= 0; i--) {
+    const { node: f, key } = a[i];
+    const d = f.type === 'ForStatement' ? f.init : null;
+    if (!(d?.type === 'VariableDeclaration' && d.declarations.some((x) => x.id.type === 'Identifier' && x.id.name === name))) continue;
+    const u = f.update;
+    const step = (u?.type === 'UpdateExpression' && u.argument.type === 'Identifier' && u.argument.name === name)
+      || (u?.type === 'AssignmentExpression' && ['+=', '-='].includes(u.operator) && u.left.type === 'Identifier' && u.left.name === name && u.right.type === 'Literal' && typeof u.right.value === 'number');
+    const init = d.declarations.length === 1 ? d.declarations[0].init : null;
+    if (d.kind !== 'let' || !(key === 'body' || key === 'test') || init?.type !== 'Literal' || typeof init.value !== 'number' || !step) return false;
+    let clean = true;
+    for (const part of [f.test, f.body]) if (part) walk(part, (x, xa) => { if (x.type === 'Identifier' && x.name === name && (isBinding(xa) || xa[xa.length - 1]?.node.type === 'UpdateExpression')) clean = false; });
+    return clean;
+  }
+  return false;
+}
+/** `const T = Object.freeze({ __proto__: null, <plain key>: <literal>, ... })`: a read T[k] is one of those literals or undefined. */
+const isFrozenTable = (init) => init?.type === 'CallExpression' && init.callee.type === 'MemberExpression' && !init.callee.computed && init.callee.object.type === 'Identifier'
+  && init.callee.object.name === 'Object' && init.callee.property.name === 'freeze' && init.arguments.length === 1 && init.arguments[0].type === 'ObjectExpression'
+  && ((ps) => ps.filter((q) => q.type === 'Property' && !q.computed && !q.shorthand && propName(q) === '__proto__' && q.value.type === 'Literal' && q.value.value === null).length === 1
+    && ps.every((q) => q.type === 'Property' && q.kind === 'init' && !q.computed && !q.shorthand && !q.method && q.value.type === 'Literal'
+      && (propName(q) !== '__proto__' || q.value.value === null)))(init.arguments[0].properties);
+// Every node type the vendored acorn can produce (derived from its source by the exhaustiveness test): 'rule' has a case
+// in the walker, 'walk' only has its children visited, 'fail' is refused. Any other type is unclassifiable.
+const NODE_RULES = {
+  ImportExpression: 'rule', ImportDeclaration: 'rule', ExportAllDeclaration: 'rule', ExportNamedDeclaration: 'rule', Literal: 'rule', TemplateLiteral: 'rule',
+  BinaryExpression: 'rule', CallExpression: 'rule', MemberExpression: 'rule', Property: 'rule', Identifier: 'rule',
+  WithStatement: 'fail',
+  ...Object.fromEntries(['ArrayExpression', 'ArrayPattern', 'ArrowFunctionExpression', 'AssignmentExpression', 'AssignmentPattern', 'AwaitExpression', 'BlockStatement',
+    'BreakStatement', 'CatchClause', 'ChainExpression', 'ClassBody', 'ClassDeclaration', 'ClassExpression', 'ConditionalExpression', 'ContinueStatement', 'DebuggerStatement',
+    'DoWhileStatement', 'EmptyStatement', 'ExportDefaultDeclaration', 'ExportSpecifier', 'ExpressionStatement', 'ForInStatement', 'ForOfStatement', 'ForStatement',
+    'FunctionDeclaration', 'FunctionExpression', 'IfStatement', 'ImportAttribute', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier', 'ImportSpecifier', 'LabeledStatement',
+    'LogicalExpression', 'MetaProperty', 'MethodDefinition', 'NewExpression', 'ObjectExpression', 'ObjectPattern', 'ParenthesizedExpression', 'PrivateIdentifier', 'Program',
+    'PropertyDefinition', 'RestElement', 'ReturnStatement', 'SequenceExpression', 'SpreadElement', 'StaticBlock', 'Super', 'SwitchCase', 'SwitchStatement',
+    'TaggedTemplateExpression', 'TemplateElement', 'ThisExpression', 'ThrowStatement', 'TryStatement', 'UnaryExpression', 'UpdateExpression', 'VariableDeclaration',
+    'VariableDeclarator', 'WhileStatement', 'YieldExpression'].map((t) => [t, 'walk'])),
+};
+// Fixture modules are checked as lib/m.mjs inside this synthetic scanned set.
+const FIXTURE_SET = ['m.mjs', 'git-exec.mjs', 'sub/x.mjs'];
 
-/** Every decode site in one module's source: [{file, fn, rule, why, line, pos, text (the flagged node's own source)}] in source order. */
-function decodeSites(file, src) {
+/**
+ * Every decode site in one module's source (lib/<file>, checked against the `scanned` set): [{file, fn, rule, why, line,
+ * pos, text (the flagged node's own source), site (the complete invocation it belongs to)}] in source order.
+ */
+function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
   assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
   let ast;
   try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowHashBang: true }); } catch (e) {
@@ -794,13 +892,62 @@ function decodeSites(file, src) {
   }
   const hits = [];
   let anc = [];
-  const hit = (n, rule, why = rule) => hits.push({ file, fn: fnName(anc), rule, why, line: n.loc.start.line, pos: n.start, text: src.slice(n.start, n.end).replace(/\s+/g, ' ') });
+  // Parents, the module's binding count per name, and its frozen null-prototype literal tables.
+  const parent = new Map();
+  const bindCount = new Map();
+  const tables = new Set();
+  walk(ast, (n, a) => {
+    const up = a[a.length - 1];
+    parent.set(n, up);
+    if (n.type === 'Identifier' && (isBinding(a) || (/Specifier$/.test(up?.node.type ?? '') && up.key === 'local'))) bindCount.set(n.name, (bindCount.get(n.name) ?? 0) + 1);
+    if (n.type === 'VariableDeclarator' && up.node.kind === 'const' && n.id.type === 'Identifier' && isFrozenTable(n.init)) tables.add(n.id.name);
+  });
+  const text = (n) => src.slice(n.start, n.end).replace(/\s+/g, ' ');
+  const isCall = (x) => x?.type === 'CallExpression' || x?.type === 'NewExpression';
+  /** The complete invocation a node belongs to: the call it is the callee (chain) of, else the nearest enclosing call. */
+  const siteOf = (n) => {
+    let s = n;
+    let up = parent.get(s);
+    while (up?.node.type === 'MemberExpression' && up.key === 'object') { s = up.node; up = parent.get(s); }
+    if (isCall(up?.node) && up.key === 'callee') return up.node;
+    for (let q = parent.get(n); q; q = parent.get(q.node)) if (isCall(q.node)) return q.node;
+    return n;
+  };
+  const hit = (n, rule, why = rule) => hits.push({ file, fn: fnName(anc), rule, why, line: n.loc.start.line, pos: n.start, text: text(n), site: text(siteOf(n)) });
+  const objectFree = !bindCount.has('Object');
+  /** The two admitted reflective productions: the own-data reader (whole function source) and a defining defineProperty. */
+  function admittedReflect(m, a) {
+    const c = a[a.length - 1];
+    if (!(objectFree && m.object.type === 'Identifier' && m.object.name === 'Object' && !m.computed && c?.node.type === 'CallExpression' && c.key === 'callee')) return false;
+    if (m.property.name === 'getOwnPropertyDescriptor') {
+      const f = [...a].reverse().find(({ node }) => FN_TYPES.has(node.type))?.node;
+      return !!f && text(f) === OWN_VALUE_SRC;
+    }
+    const [o, k, d, ...rest] = c.node.arguments;
+    return m.property.name === 'defineProperty' && !rest.length && o?.type === 'ThisExpression' && k?.type === 'Literal' && typeof k.value === 'string'
+      && !REFLECT_NAME.test(k.value) && !DECODER_NAME.test(k.value) && d?.type === 'ObjectExpression' && d.properties.every((q) => q.type === 'Property' && q.kind === 'init'
+        && !q.computed && !q.shorthand && !q.method && ['value', 'enumerable', 'writable', 'configurable'].includes(propName(q)) && q.value.type === 'Literal');
+  }
+  /** A read through a non-constant computed key that provably cannot name a reflective or decoder property. */
+  function safeRead(m, a) {
+    const { node: p, key: k } = a[a.length - 1];
+    if ((p.type === 'AssignmentExpression' && k === 'left' && p.operator === '=') || (p.type === 'UnaryExpression' && p.operator === 'delete')) return true;
+    if (numericKey(m.property) || (m.property.type === 'Identifier' && loopCounter(m.property.name, a))) return true;
+    return m.object.type === 'Identifier' && tables.has(m.object.name) && bindCount.get(m.object.name) === 1 && objectFree;
+  }
+  /** The checks on a constant string (a literal, a folded `+` chain or a folded template). */
+  const strRules = (n, t, asKey) => {
+    if (ENC_NAME.test(t)) hit(n, 'encoding-literal');
+    if (!asKey && DECODER_NAME.test(t)) hit(n, 'decoder-api');
+    if (!asKey && REFLECT_NAME.test(t)) hit(n, 'unclassifiable', `the string '${t}' names a reflective property`);
+  };
   // Import bindings of the watched modules: local name -> {mod, name (null for a namespace or default)}.
   const binds = new Map();
   for (const d of ast.body) {
     if (d.type !== 'ImportDeclaration') continue;
-    const mod = MODULES[d.source.value];
-    if (!mod && !isRel(d.source.value)) hit(d, 'unclassifiable', `import of unclassified module ${d.source.value}`);
+    const to = resolveSpecifier(d.source.value, file, scanned);
+    if (!to) hit(d, 'unclassifiable', `import of ${d.source.value}: not a watched builtin or a file of the scanned set`);
+    const mod = to?.mod;
     for (const s of d.specifiers) {
       const imported = s.type === 'ImportSpecifier' ? (s.imported.name ?? s.imported.value) : 'default';
       if ([imported, s.local.name].some((x) => DECODER_NAME.test(x))) hit(s, 'decoder-api');
@@ -864,17 +1011,24 @@ function decodeSites(file, src) {
     const computedKey = (k === 'property' || k === 'key') && p.computed;
     switch (n.type) {
       case 'ImportExpression': return hit(n, 'unclassifiable', 'dynamic import');
+      case 'ImportDeclaration': return undefined; // resolved and bound above
       case 'ExportAllDeclaration': case 'ExportNamedDeclaration':
-        if (n.source && !isRel(n.source.value)) hit(n, 'unclassifiable', `re-export from ${n.source.value}`);
+        if (n.source && !resolveSpecifier(n.source.value, file, scanned)?.lib) hit(n, 'unclassifiable', `re-export from ${n.source.value}`);
         if (!n.source) for (const s of n.specifiers ?? []) if (binds.has(s.local.name) || byName(s.local.name)) hit(s, 'unclassifiable', `export of ${s.local.name}`);
         return undefined;
       case 'Literal': case 'TemplateLiteral': {
         if (k === 'source') return undefined;
         const texts = n.type === 'Literal' ? (typeof n.value === 'string' ? [n.value] : []) : n.quasis.map((q) => q.value.cooked ?? '');
         // A literal computed key is checked as the member or property name it is; only the encoding tripwire runs here.
-        for (const t of texts) { if (ENC_NAME.test(t)) hit(n, 'encoding-literal'); if (!computedKey && DECODER_NAME.test(t)) hit(n, 'decoder-api'); }
+        for (const t of texts) strRules(n, t, computedKey);
+        // A template whose substitutions are all constant is also checked as the one string it folds to.
+        if (n.type === 'TemplateLiteral' && n.expressions.length && staticStr(n) !== null) strRules(n, staticStr(n), computedKey);
         return undefined;
       }
+      case 'BinaryExpression':
+        // A maximal constant `+` chain is checked as the one string it folds to.
+        if (n.operator === '+' && !(p?.type === 'BinaryExpression' && p.operator === '+') && staticStr(n) !== null) strRules(n, staticStr(n), computedKey);
+        return undefined;
       case 'CallExpression':
         if (n.callee.type === 'MemberExpression' && n.callee.computed && staticKey(n.callee) === null) hit(n.callee, 'unclassifiable', 'call through a computed member');
         return undefined;
@@ -882,10 +1036,11 @@ function decodeSites(file, src) {
         const key = staticKey(n);
         if (key === null) {
           if (hasStringPiece(n.property) && !(p.type === 'AssignmentExpression' && k === 'left' && p.operator === '=')) hit(n, 'unclassifiable', 'computed key built from string pieces');
+          else if (!(p.type === 'CallExpression' && k === 'callee') && !safeRead(n, a)) hit(n, 'unclassifiable', 'read through a computed key that is not provably safe');
           return undefined;
         }
         if (DECODER_NAME.test(key)) hit(n, 'decoder-api');
-        if (key === 'constructor') hit(n, 'unclassifiable', '.constructor reaches Function');
+        if (REFLECT_NAME.test(key) && !admittedReflect(n, a)) hit(n, 'unclassifiable', `.${key} is reflective (reaches Function or a prototype)`);
         if (key === 'encoding') hit(n, 'encoding-option');
         const mod = byName(key);
         if (mod && key !== 'exec' && !rootBound(n.object)) useOf(mod, key, n, a.length - 1);
@@ -893,12 +1048,17 @@ function decodeSites(file, src) {
       }
       case 'Property': {
         const name = propName(n);
-        if (name === null) { if (hasStringPiece(n.key)) hit(n, 'unclassifiable', 'computed key built from string pieces'); return undefined; }
+        if (name === null) {
+          if (hasStringPiece(n.key)) hit(n, 'unclassifiable', 'computed key built from string pieces');
+          else if (p.type === 'ObjectPattern') hit(n, 'unclassifiable', 'destructuring through a computed key that is not a constant');
+          return undefined;
+        }
         if (p.type === 'ObjectPattern') {
           if (DECODER_NAME.test(name)) hit(n, 'decoder-api');
           if (byName(name)) hit(n, 'unclassifiable', `${name} destructured`);
-          if (name === 'constructor') hit(n, 'unclassifiable', 'constructor destructured (reaches Function)');
+          if (REFLECT_NAME.test(name)) hit(n, 'unclassifiable', `${name} destructured (reflective)`);
         }
+        if (p.type === 'ObjectExpression' && name === '__proto__' && !n.computed && !n.shorthand && !(n.value.type === 'Literal' && n.value.value === null)) hit(n, 'unclassifiable', '__proto__ in an object literal sets a prototype');
         if (name === 'encoding' && !(p.type === 'ObjectExpression' && n.kind === 'init' && !n.shorthand && staticStr(n.value) === 'buffer')) hit(n, 'encoding-option');
         return undefined;
       }
@@ -921,14 +1081,20 @@ function decodeSites(file, src) {
         if (v === 'process') {
           if (member === 'env' || member === 'platform') return undefined;
           if (member === 'cwd') return isCallee(a.length - 2) ? hit(p, 'cwd') : hit(p, 'unclassifiable', 'process.cwd used as a value');
-          return hit(n, 'unclassifiable', member === null ? 'process used as a value' : `process.${member} is not classified`);
+          return REFLECT_NAME.test(member ?? '') ? undefined : hit(n, 'unclassifiable', member === null ? 'process used as a value' : `process.${member} is not classified`);
         }
-        if (v === 'Buffer') return ['from', 'isBuffer', 'alloc', 'allocUnsafe', 'concat', 'byteLength', 'compare'].includes(member) ? undefined : hit(n, 'unclassifiable', `Buffer.${member} is not classified`);
+        // A reflective member of Buffer, process or Object is reported (or admitted) once, by the member rule.
+        if (v === 'Buffer') return ['from', 'isBuffer', 'alloc', 'allocUnsafe', 'concat', 'byteLength', 'compare'].includes(member) || REFLECT_NAME.test(member ?? '') ? undefined : hit(n, 'unclassifiable', `Buffer.${member} is not classified`);
+        if (v === 'Object' && objectFree) {
+          if (REFLECT_NAME.test(member ?? '') || OBJECT_OK.has(member)) return undefined;
+          return hit(n, 'unclassifiable', member === null ? 'Object used as a value' : `Object.${member} is not classified`);
+        }
         if (v === 'encoding' && !(p?.type === 'Property' && p.shorthand)) hit(n, 'encoding-option');
         const mod = byName(v);
         return mod ? useOf(mod, v, n, a.length - 1) : undefined;
       }
-      default: return undefined;
+      default:
+        return rules[n.type] === 'walk' ? undefined : hit(n, 'unclassifiable', rules[n.type] === 'fail' ? `${n.type} is refused` : `node type ${n.type} is not classified`);
     }
   });
   return hits.sort((x, y) => x.pos - y.pos);
@@ -940,25 +1106,26 @@ function libModules(dir = here, rel = '') {
     : d.name.endsWith('.mjs') && !d.name.endsWith('.test.mjs') ? [`${rel}${d.name}`] : [])).sort();
 }
 // Sanctioned sites: [file, enclosing function, rule, ordinal of that rule in that function (source order), the
-// flagged node's own source text (whitespace-normalised), reason]. A hit no entry names exactly fails, and so does
-// an entry no hit matches (stale): a second same-rule site in the function is a new ordinal, and swapping a site
-// for another (`toString('latin1')` -> `toString('utf8')`) changes its text. The LINE is not pinned, so CRLF and
-// reformatting elsewhere do not matter. `unclassifiable` is never allowlisted.
+// COMPLETE invocation's source (whitespace-normalised: callee and every argument), reason]. A hit no entry names
+// exactly fails, and so does an entry no hit matches (stale): a second same-rule site in the function is a new
+// ordinal, and any change to the call (`toString('latin1')` -> `toString('utf8')`, or `toString() || 'latin1'`)
+// changes its invocation text. The LINE is not pinned, so CRLF and reformatting elsewhere do not matter.
+// `unclassifiable` is never allowlisted.
 const ALLOWED_SITES = [
-  ['git-exec.mjs', '<module>', 'decoder-api', 0, 'TextDecoder', 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
-  ['git-exec.mjs', '<module>', 'encoding-literal', 0, "'utf-8'", 'its label'],
-  ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'string-coercion', 0, 'String', 'coerces the PATH env value (already a string), not bytes'],
-  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 1, 'fs.realpath', 'the resolver seam: the spawn executable, never compared with git output (S-02a0a)'],
-  ['git-capability.mjs', 'parseGitVersion', 'string-coercion', 0, 'String', 'encodes (string to bytes); not a decode'],
-  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 0, "'utf8'", 'Buffer.from(string, utf8): string to bytes'],
-  ['git-capability.mjs', 'parseGitVersion', 'decoder-api', 0, 'bytes.toString', 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 1, "'latin1'", 'the encoding of that map'],
+  ['git-exec.mjs', '<module>', 'decoder-api', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
+  ['git-exec.mjs', '<module>', 'encoding-literal', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", 'its label'],
+  ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync.native(p)', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd()', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath(d)', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'string-coercion', 0, "String(pathVar ?? '')", 'coerces the PATH env value (already a string), not bytes'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 1, 'fs.realpath(file)', 'the resolver seam: the spawn executable, never compared with git output (S-02a0a)'],
+  ['git-capability.mjs', 'parseGitVersion', 'string-coercion', 0, 'String(out)', 'encodes (string to bytes); not a decode'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 0, "Buffer.from(String(out), 'utf8')", 'Buffer.from(string, utf8): string to bytes'],
+  ['git-capability.mjs', 'parseGitVersion', 'decoder-api', 0, "bytes.toString('latin1')", 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 1, "bytes.toString('latin1')", 'the encoding of that map'],
 ];
-/** Each hit's site key: file, function, rule, its ordinal among same-(file, function, rule) hits in order, and its text. */
-const siteKeys = (hits) => { const seen = new Map(); return hits.map((h) => { const b = `${h.file}\0${h.fn}\0${h.rule}`; const n = seen.get(b) ?? 0; seen.set(b, n + 1); return `${b}\0${n}\0${h.text}`; }); };
+/** Each hit's site key: file, function, rule, its ordinal among same-(file, function, rule) hits in order, and its complete invocation. */
+const siteKeys = (hits) => { const seen = new Map(); return hits.map((h) => { const b = `${h.file}\0${h.fn}\0${h.rule}`; const n = seen.get(b) ?? 0; seen.set(b, n + 1); return `${b}\0${n}\0${h.site}`; }); };
 /** unexplained: hits no entry names; stale: entries no hit matches. */
 function allowVerdict(hits, allowed = ALLOWED_SITES) {
   const keys = siteKeys(hits);
@@ -966,10 +1133,9 @@ function allowVerdict(hits, allowed = ALLOWED_SITES) {
   return { unexplained: keys.filter((x) => !want.includes(x)), stale: want.filter((x) => !keys.includes(x)) };
 }
 
-test('T4a: no listed lossy decode form appears in lib/ outside the strict decoder or an allowlisted, reasoned site', () => {
-  const files = libModules();
-  assert.ok(files.includes('git-exec.mjs') && files.includes('git-capability.mjs'), `scanned: ${files}`);
-  const hits = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8')));
+test('T4a: no listed lossy decode form appears in the scanned lib outside the strict decoder or an allowlisted, reasoned site', () => {
+  const files = SCANNED;
+  const hits = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8'), SCANNED));
   assert.deepEqual(hits.filter((h) => h.rule === 'unclassifiable'), [], 'no site the checker cannot classify (fail closed; never allowlisted)');
   const { unexplained, stale } = allowVerdict(hits);
   assert.deepEqual(unexplained, []);
@@ -977,14 +1143,23 @@ test('T4a: no listed lossy decode form appears in lib/ outside the strict decode
   assert.ok(!ALLOWED_SITES.some(([, , r]) => r === 'unclassifiable'));
   // One more site of an allowlisted rule in the same function is a new ordinal, so it is unexplained.
   const extra = allowVerdict([...hits, { ...hits.find((h) => h.fn === 'parseGitVersion' && h.rule === 'decoder-api'), pos: Infinity }]);
-  assert.deepEqual(extra.unexplained, ['git-capability.mjs\0parseGitVersion\0decoder-api\x001\0bytes.toString']);
-  // Swapping an allowlisted site for another of the same rule in the same function changes its text, so it fails.
-  const swapped = allowVerdict(hits.map((h) => (h.text === "'latin1'" ? { ...h, text: "'utf8'" } : h)));
-  assert.deepEqual([swapped.unexplained, swapped.stale], [["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0'utf8'"], ["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0'latin1'"]]);
+  assert.deepEqual(extra.unexplained, ["git-capability.mjs\0parseGitVersion\0decoder-api\x001\0bytes.toString('latin1')"]);
+  // Swapping an allowlisted site for another of the same rule in the same function changes its invocation, so it fails.
+  const swapped = allowVerdict(hits.map((h) => (h.text === "'latin1'" ? { ...h, site: "bytes.toString('utf8')" } : h)));
+  assert.deepEqual([swapped.unexplained, swapped.stale], [["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('utf8')"], ["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('latin1')"]]);
+  // The complete invocation is pinned, not just the member: dropping the decode's argument (the review's
+  // `bytes.toString() || 'latin1'`) leaves both literal and member in parseGitVersion, but no allowlisted invocation.
+  const capSrc = readFileSync(join(here, 'git-capability.mjs'), 'utf8');
+  assert.equal(capSrc.split("bytes.toString('latin1')").length, 2, 'the allowlisted decode site is in git-capability.mjs once');
+  const argless = decodeSites('git-capability.mjs', capSrc.replace("bytes.toString('latin1')", "bytes.toString() || 'latin1'"), SCANNED);
+  assert.deepEqual(allowVerdict([...hits.filter((h) => h.file !== 'git-capability.mjs'), ...argless]).unexplained, [
+    'git-capability.mjs\0parseGitVersion\0decoder-api\x000\0bytes.toString()',
+    "git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0VERSION.exec(bytes.toString() || 'latin1')",
+  ]);
   assert.ok(hits.some((h) => h.file === 'git-exec.mjs' && h.rule === 'decoder-api' && h.fn === '<module>'), 'positive control: the decoder site itself was seen');
   // L10: a CRLF checkout (Windows) gives the same verdict.
-  const crlf = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, '\r\n')));
-  assert.deepEqual(crlf.map((h) => [h.file, h.line, h.fn, h.rule, h.text]), hits.map((h) => [h.file, h.line, h.fn, h.rule, h.text]));
+  const crlf = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, '\r\n'), SCANNED));
+  assert.deepEqual(crlf.map((h) => [h.file, h.line, h.fn, h.rule, h.text, h.site]), hits.map((h) => [h.file, h.line, h.fn, h.rule, h.text, h.site]));
 });
 
 const rulesOf = (src) => decodeSites('m.mjs', src).map((h) => h.rule).sort();
@@ -1041,11 +1216,11 @@ const ESCAPES = [
   ["import { default as cp } from 'node:child_process';\ncp.exec(c);", ['cp-encoding']],
   ["process.getBuiltinModule('node:child_process').execSync(c, { encoding: 'utf8' });", ['cp-encoding', 'encoding-literal', 'encoding-option', 'unclassifiable']],
   ["import { createRequire } from 'node:module';\ncreateRequire(import.meta.url)('node:child_process');", U.concat(U)],
-  ["spawnSync(b, [], { __proto__: o });", U], ["spawnSync(b, [], { get encoding() { return 'utf8'; } });", ['encoding-literal', 'encoding-option', 'unclassifiable']],
+  ["spawnSync(b, [], { __proto__: o });", U.concat(U)], ["spawnSync(b, [], { get encoding() { return 'utf8'; } });", ['encoding-literal', 'encoding-option', 'unclassifiable']],
   ['const { ["to" + "String"]: f } = buf;', D], ['(function () {}).constructor("return b.toString()");', U],
   ["import readline from 'node:readline';", U], ["import { text } from 'node:stream/consumers';", U], ['new Blob([buf]).text();', D], ['new Response(buf).text();', D],
   ["import * as fs from 'node:fs';\nfs.globSync('*');", U], ["import * as fs from 'node:fs';\nfs.mkdtempDisposableSync(p);", U], ["process.binding('fs');", U],
-  ["Reflect.get(buf, 'to' + 'String');", U], ["const k = 'toString'; buf[k]();", ['decoder-api', 'unclassifiable']],
+  ["Reflect.get(buf, 'to' + 'String');", ['decoder-api', 'unclassifiable']], ["const k = 'toString'; buf[k]();", ['decoder-api', 'unclassifiable']],
   ["import { readdirSync as rd } from 'node:fs';\nconst x = rd;", U], ["import * as fs from 'node:fs';\nfs.readdirSync(d);", N],
   ["import fs from 'node:fs';\nfs.promises.readdir(d);", N], ["import { promises as P } from 'node:fs';\nP.readlink(d);", N], ["import fs from 'node:fs';\nfs.default.readdirSync(d);", N],
   ["import * as fs from 'node:fs';\nconst f = fs;", U], ["import * as fs from 'node:fs';\nfs.readdirSync.call(null, d);", U],
@@ -1074,10 +1249,57 @@ const ESCAPES = [
   ["execFileSync(f, [], { encoding: 'ascii' });", ['cp-encoding', 'encoding-literal', 'encoding-option']], ['exec(c, (e, out) => out);', ['cp-encoding']], ["exec(c, 'buffer', cb);", U], ["execSync(c, 'buffer');", U], ["spawnSync(b, [...a], { encoding: 'utf8' })", ['cp-encoding', 'encoding-literal', 'encoding-option']],
   ["import path from 'node:path';\nexport const f = (path) => path.readdirSync('.');", N], ["import { statSync } from 'node:fs';\nfunction f(statSync) { return statSync.readdirSync(d); }", N], ["import { x } from './x.cjs';", U], ["import { x } from './x.test.mjs';", U], ['String.raw({ raw: [buf] });', ['string-coercion']], ['buf[`to${s}`]();', U.concat(U)], ['const e = `latin1`;', ['encoding-literal']], ["const v = x['utf8'];", ['encoding-literal']], ["import { x } from '../outside.mjs';", U], ['process.argv;', U], ['typeof process;', U],
 ];
+// Round 5 (invariant level). Import and re-export specifiers resolve as Node resolves them (MEASURED, Node 18 and 22)
+// and must land on a file of the scanned set (fixtures: lib/m.mjs in FIXTURE_SET).
+const RESOLVE = [
+  ["import { r } from './%2e%2e/bridge.mjs';\nr(dir);", U], ["import { r } from './%2E%2E/bridge.mjs';", U], ["import { r } from './.%2e/bridge.mjs';", U],
+  ["export { r } from './%2e%2e/bridge.mjs';", U], ["export * from './sub/%2e%2e/%2e%2e/x.mjs';", U], ["import { r } from './git-exec';", U],
+  ["import { r } from './sub%2fx.mjs';", U], ["import { r } from 'file:///etc/x.mjs';", U], ["import { r } from '#internal';", U],
+  ["import r from 'data:text/javascript,export default 1';", U], ["import { r } from './GIT-EXEC.mjs';", U], ["import { r } from 'node:fs?x';", U],
+  ["import { r } from './sub/';", U], ["import { r } from './m.test.mjs';", U],
+];
+const RESOLVE_FINE = ["import { decodeStrict } from './sub/%2e%2e/git-exec.mjs';", "import { decodeStrict } from './git%2Dexec.mjs';",
+  "import { decodeStrict } from './git-exec.mjs?v=1#f';", "export * from './sub/../sub/x.mjs';",
+  `import { decodeStrict } from ${JSON.stringify(pathToFileURL(join(here, 'git-exec.mjs')).href)};`];
+// Reflection by any key form fails closed (never allowlisted); the reviews' descriptor escapes verbatim first.
+const REFLECT = [
+  ["const s = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}), 'constructor').value('b', 'return b.toString()')(buf);", U.concat(U, U)],
+  ["Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}), 'constructor').value('return b.toString()')();", U.concat(U, U)],
+  ["Object.getOwnPropertyDescriptor(Object.getPrototypeOf(buf), 'to' + 'String').value.call(buf);", ['decoder-api', 'unclassifiable', 'unclassifiable']],
+  ['Object.values(Object.getOwnPropertyDescriptors(Object.getPrototypeOf(buf))).find((d) => d).value.call(buf);', U.concat(U)],
+  ["x['constructor'];", U], ['x[`constructor`];', U], ["x['con' + 'structor'];", U], ['x.prototype;', U], ['x.__proto__;', U], ["x['__proto__'];", U],
+  ['const { prototype: p } = F;', U], ["const { ['__pro' + 'to__']: p } = o;", U], ["const k = 'constructor';", U], ["const k = 'con' + 'structor';", U],
+  ["const k = `con${'structor'}`;", U], ["const k = `to${'String'}`;", D], ['new Proxy(o, {});', U], ['Object.setPrototypeOf(a, b);', U], ['Object.defineProperties(a, {});', U],
+  ["x.__lookupGetter__('a');", U], ['const o = { __proto__: p };', U], ['const O = Object;', U], ['Object.getOwnPropertyNames(o);', U], ['[o].map(Object);', U],
+  ['class A extends B { m() { return super.constructor; } }', U], ["Object.defineProperty(o, 'x', { value: 1 });", U], ["Object.defineProperty(this, 'x', { get() { return 1; } });", U],
+  ["Object.defineProperty(this, 'toString', { value: 1 });", ['decoder-api', 'unclassifiable']], ["Object.defineProperty(this, 'x', { value: v });", U],
+  ["Object.defineProperty(this, 'x', { value: 1 }, 2);", U], ['const Object = o; Object.getPrototypeOf(x);', U],
+  // the same names on a receiver other than Object, and Buffer members outside its list
+  ['o.getOwnPropertyDescriptors(x);', U], ['o.getOwnPropertyDescriptor(x, k);', U], ['o.setPrototypeOf(x, y);', U], ['Buffer.of(1);', U], ['Buffer.poolSize;', U],
+];
+// The one own-data reader production, and each one-step deviation from it.
+const OWN_VALUE = `const ownValue = ${OWN_VALUE_SRC};`;
+const OWN_VALUE_BAD = [['Object.getOwnPropertyDescriptor(o, k)', 'Object.getOwnPropertyDescriptor(f(o), k)'], ['Object.getOwnPropertyDescriptor(o, k)', "Object.getOwnPropertyDescriptor(o, 'x')"],
+  ['? d.value :', '? d.value() :'], ['(o, k) =>', '(o, k, j) =>'], ["own(d, 'value')", "own(d, 'get')"], ['const d = ', 'let d = ']].map(([a, b]) => OWN_VALUE.replace(a, b));
+// A read through a computed key: only a provably numeric key, a for-let counter, or a frozen null-prototype literal table.
+const COMPUTED = [
+  ['const v = buf[k];', U], ['const m = buf[k]; m.call(buf);', U], ['const { [k]: f } = buf;', U], ['buf[k] += 1;', U], ['x[n + 1];', U], ['x[i];', U],
+  ['for (var i = 0; i < n; i++) x[i];', U], ['for (let i = 0; i < n; i++) { i = j; x[i]; }', U], ['for (let i = 0; i < n; i++) { const f = (i) => x[i]; }', U],
+  ['for (let i = 0; i < n; i++) { [i] = a; x[i]; }', U], ['for (let i = 0; i < n; i += 1) x[i += 2];', U], ['for (let i = j; i < n; i++) x[i];', U],
+  ['for (let i = 0; i < n; i = k) x[i];', U], ['for (let i = 0, j = 0; i < n; i++) x[i];', U],
+  ["const o = { __proto__: null, A: 'a' }; o[k];", U], ['const o = Object.freeze({ __proto__: null, A: f }); o[k];', U],
+  ["let o = Object.freeze({ __proto__: null, A: 'a' }); o[k];", U], ["const o = Object.freeze({ __proto__: null, A: 'a' }); function g(o) { return o[k]; }", U],
+  ["const o = Object.freeze({ A: 'a' }); o[k];", U], ['const o = Object.freeze({ __proto__: null, ...p }); o[k];', U],
+  ["const o = Object.freeze({ __proto__: null, A: 'a' }); const Object = q; o[k];", U],
+  ["const o = Object.assign({ __proto__: null, A: 'a' }); o[k];", U], ["const o = f({ __proto__: null, A: 'a' }); o[k];", U],
+];
+const COMPUTED_FINE = ['for (let i = 0; i < n; i++) x[i];', 'for (let i = 0; x[i]; i++);', 'for (let i = 0; i < 3; i++) if (a[i] !== b[i]) f(a[i] > b[i]);',
+  'x[b >> 4]; x[b & 15]; x[-1]; x[n - 1]; x[i++]; x[~i]; x[+k]; x[2n];', 'delete o[k];', 'o[k] = v;', "const o = Object.freeze({ __proto__: null, A: 'a', B: 1 }); const v = o[k] ?? 'z';",
+  OWN_VALUE, "Object.defineProperty(this, 'name', { value: 'n', enumerable: false });", 'class C { constructor(a) { this.a = a; } }', 'const o = Object.freeze(Object.keys(p).map(Object.freeze));'];
 // What the coverage statement declares NOT CHECKED: asserted to give no hit, so the statement stays true.
 const UNCHECKED = ['const s = `${buf}`;', "const s = buf + '';", 'const s = [buf].join();', 'const o = JSON.parse(buf);', 'const s = String.fromCharCode(...buf);',
-  'const v = buf[k];', 'const m = buf[k]; m.call(buf);', 'const m = re.exec(buf);', "import path from 'node:path';\nconst r = path.resolve('x');"];
-const FINE = ['// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
+  'const m = re.exec(buf);', "import path from 'node:path';\nconst r = path.resolve('x');"];
+const FINE = [...RESOLVE_FINE, ...COMPUTED_FINE, '// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
   "const r = realpathSync.native(dir, { encoding: 'buffer' });", "const l = readdirSync(dir, { encoding: 'buffer' });", 'const s = statSync(cwd);',
   "const l = readdirSync(dir, 'buffer');", "const r = await fs.promises.readlink(p, { encoding: 'buffer' });",
   'const m = /utf8/.exec(s);', 'const s = `utf8 is ${n} bytes`;', 'const n = String.fromCharCode(b);', 'const s = "it\'s // not a comment";',
@@ -1089,8 +1311,8 @@ const FINE = ['// buf.toString() in a comment', "const n = decodeStrict(buf, 'pa
   'const x = 4 / 2, y = (a) / 2, z = i++ / 2;', 'const o = { toJSON() { return 1; } };', 'function f(readdirSync, exec) { return 1; }', "import { decodeStrict } from './git-exec.mjs';\nexport * from './sub/x.mjs';", "import { statSync, constants } from 'node:fs';\nstatSync(p, constants);"];
 
 test('T4a checker flags every planted form and reviewer escape with exactly its rules, and only what it claims', () => {
-  const cases = [...PLANTED, ...ESCAPES, ...[...UNCHECKED, ...FINE].map((p) => [p, []])];
-  assert.ok(cases.length > 150, 'every fixture list is present');
+  const cases = [...PLANTED, ...ESCAPES, ...RESOLVE, ...REFLECT, ...COMPUTED, ...OWN_VALUE_BAD.map((p) => [p, U]), ...[...UNCHECKED, ...FINE].map((p) => [p, []])];
+  assert.ok(cases.length > 250, 'every fixture list is present');
   const wrong = cases.map(([p, want]) => [p, rulesOf(p), [...want].sort()]).filter(([, got, want]) => got.join() !== want.join());
   assert.deepEqual(wrong, [], 'each case: [source, rules found, rules expected]');
   assert.deepEqual(decodeSites('m.mjs', 'const a = 1;\nconst s = buf\n  .toString();').map((h) => h.line), [2], 'a site reports its own line');
@@ -1103,6 +1325,98 @@ test('T4a scans lib/ recursively and skips only *.test.mjs', (t) => {
   mkdirSync(join(d, 'sub', 'deeper'), { recursive: true });
   for (const f of ['a.mjs', 'a.test.mjs', 'n.js', 'sub/b.mjs', 'sub/deeper/c.mjs', 'sub/b.test.mjs']) writeFileSync(join(d, f), '');
   assert.deepEqual(libModules(d), ['a.mjs', 'sub/b.mjs', 'sub/deeper/c.mjs']);
+});
+
+test('T4a: every non-test lib/ module is either scanned or named out of scope with a reason, and the out-of-scope git-output finding is real', () => {
+  assert.deepEqual(libModules(), [...SCANNED, ...Object.keys(OUT_OF_SCOPE)].sort(), 'a new lib module must be scanned or named in OUT_OF_SCOPE');
+  assert.deepEqual(unpartitioned(libModules()), []);
+  assert.deepEqual(unpartitioned([...libModules(), 'new.mjs', 'sub/x.mjs']), ['new.mjs', 'sub/x.mjs'], 'an unnamed module is caught');
+  assert.ok(SCANNED.every((f) => !(f in OUT_OF_SCOPE)) && Object.values(OUT_OF_SCOPE).every((why) => why.length > 40));
+  // durable-io.mjs is out of scope as a NAMED finding: its gitPath decodes git output with utf8. When that is fixed or
+  // adopted this assertion turns red, and the entry must be revisited (scan it, or restate the reason).
+  const dio = decodeSites('durable-io.mjs', readFileSync(join(here, 'durable-io.mjs'), 'utf8'), [...SCANNED, 'durable-io.mjs']);
+  assert.ok(dio.some((h) => h.fn === 'gitPath' && h.rule === 'cp-encoding'), JSON.stringify(dio.filter((h) => h.fn === 'gitPath')));
+});
+
+// acorn exports no node-type list: derive it from the vendored source (every type passed to finishNode/finishNodeAt,
+// ternary branches included, and every `x.type = '...'` assignment).
+function acornNodeTypes() {
+  const types = new Set();
+  const lits = (n) => (n?.type === 'Literal' && typeof n.value === 'string' ? [n.value] : n?.type === 'ConditionalExpression' ? [...lits(n.consequent), ...lits(n.alternate)] : []);
+  walk(acorn.parse(readFileSync(join(VENDOR, 'acorn.mjs'), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module' }), (n) => {
+    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && /^finishNode(?:At)?$/.test(n.callee.property.name)) {
+      const got = lits(n.arguments[1]);
+      assert.ok(got.length, `a finishNode call with a non-literal type: ${n.start}`);
+      got.forEach((x) => types.add(x));
+    }
+    // (`this.type = ""` is the Node constructor's placeholder before finishNode, not a type.)
+    if (n.type === 'AssignmentExpression' && n.left.type === 'MemberExpression' && !n.left.computed && n.left.property.name === 'type') lits(n.right).filter((x) => x !== '').forEach((x) => types.add(x));
+  });
+  return types;
+}
+// One source per parse mode that together produce every node type acorn has.
+const TYPE_CORPUS = [
+  [`import d, * as ns from './a.mjs'; import { a as b } from './a.json' with { type: 'json' }; export * from './a.mjs'; export { b as c };
+export default class K extends B { static { this.x = 1; } #p = 1; m() { return super.m() ?? this.#p; } }
+label: for (let i = 0; i < 1; i++) { if (i) break label; else continue label; }
+for (const k in o) {} for (const v of o) {} while (0) {} do {} while (0); debugger; ;
+switch (x) { case 1: break; default: }
+try { throw new Error(); } catch (e) {} finally {}
+function* g(a = 1, ...r) { yield a; } async function h() { await import('./a.mjs'); return new.target; }
+const [p1, ...p2] = [1, ...o]; const { q1, ...q2 } = { q1: 1 }; ({ q1 } = o);
+const f = (a) => a, fe = function () {}, ce = class {};
+x = a ? b : c; x = a || b; x = a + b; x = -a; x++; x = (a, b); x = t\`s\${1}\`; x = o?.p; x = import.meta;`, { sourceType: 'module' }],
+  ['(a);', { sourceType: 'module', preserveParens: true }],
+  ['with (o) { x; }', { sourceType: 'script' }],
+];
+
+test('T4a: the walker is closed over acorn\'s grammar: every node type acorn can produce is classified, and nothing else is', () => {
+  assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
+  const types = acornNodeTypes();
+  assert.equal(types.size, 73, `acorn ${UPSTREAM.version} produces 73 node types (re-derive NODE_RULES on any upgrade)`);
+  assert.deepEqual(Object.keys(NODE_RULES).sort(), [...types].sort(), 'NODE_RULES classifies exactly the types acorn produces');
+  assert.ok(Object.values(NODE_RULES).every((r) => ['rule', 'walk', 'fail'].includes(r)));
+  assert.deepEqual(Object.keys(NODE_RULES).filter((t) => NODE_RULES[t] === 'fail'), ['WithStatement'], 'with defeats static name resolution: refused (and a parse error in a module)');
+  // The derivation is not vacuous: a corpus that parses to every listed type, and to nothing outside the list.
+  const seen = new Set();
+  for (const [src, opts] of TYPE_CORPUS) walk(acorn.parse(src, { ecmaVersion: 'latest', ...opts }), (n) => seen.add(n.type));
+  assert.deepEqual([...seen].sort(), [...types].sort());
+  // Fail closed: a type outside the table, or one classified 'fail', is unclassifiable; the same source with the
+  // full table gives no hit.
+  const { ExpressionStatement, ...missing } = NODE_RULES;
+  assert.equal(ExpressionStatement, 'walk');
+  assert.deepEqual(decodeSites('m.mjs', 'x;'), []);
+  assert.deepEqual(decodeSites('m.mjs', 'x;', FIXTURE_SET, missing).map((h) => [h.rule, h.why]), [['unclassifiable', 'node type ExpressionStatement is not classified']]);
+  assert.deepEqual(decodeSites('m.mjs', 'x;', FIXTURE_SET, { ...NODE_RULES, ExpressionStatement: 'fail' }).map((h) => [h.rule, h.why]), [['unclassifiable', 'ExpressionStatement is refused']]);
+});
+
+test('T4a: the vendored acorn is test-only: no runtime module of the skill references or imports vendor/', () => {
+  const skill = join(here, '..', '..');
+  const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? (d.name === 'vendor' || d.name === 'node_modules' ? [] : files(join(dir, d.name)))
+    : /\.(?:mjs|cjs|js)$/.test(d.name) ? [join(dir, d.name)] : []));
+  const runtime = files(skill).filter((f) => !/\.test\.mjs$|\.test-helper\.mjs$/.test(f));
+  /** Every literal specifier (import, export-from, import(), require) resolved to a path, and every string piece. */
+  const refs = (f) => {
+    const src = readFileSync(f, 'utf8');
+    let ast;
+    try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true }); } catch { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true }); }
+    const specs = [];
+    const strings = [];
+    walk(ast, (n) => {
+      if (/^(?:Import|ExportAll|ExportNamed)Declaration$|^ImportExpression$/.test(n.type) && n.source?.type === 'Literal') specs.push(n.source.value);
+      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'require' && n.arguments[0]?.type === 'Literal') specs.push(n.arguments[0].value);
+      if (n.type === 'Literal' && typeof n.value === 'string') strings.push(n.value);
+      if (n.type === 'TemplateElement') strings.push(n.value.cooked ?? '');
+    });
+    const paths = specs.filter((x) => /^\.{0,2}\//.test(x)).map((x) => fileURLToPath(new URL(x, pathToFileURL(f))));
+    return { paths, strings };
+  };
+  const named = (x) => /acorn/i.test(x) || /(?:^|[\\/])vendor(?:[\\/]|$)/.test(x);
+  assert.ok(runtime.length > 30 && runtime.includes(join(here, 'git-exec.mjs')), `runtime modules: ${runtime.length}`);
+  const offenders = runtime.flatMap((f) => ((r) => [...r.paths.filter((p) => !relative(VENDOR, p).startsWith('..')), ...r.strings.filter(named)])(refs(f)).map((x) => [f, x]));
+  assert.deepEqual(offenders, []);
+  // Positive control: the same scan sees this test file's own references to the vendored parser.
+  assert.ok(refs(join(here, 'git-exec.test.mjs')).strings.filter(named).length >= 2);
 });
 
 /** Deterministic PRNG (mulberry32) for the seeded property test. */
@@ -1121,14 +1435,18 @@ const INJECT = [
   ["spawnSync(g, [], { __proto__: o })", 'unclassifiable'],
   ["import { default as __t4a } from 'node:child_process';\n__t4a.exec(c)", 'cp-encoding', true], ["import { createRequire as __t4a } from 'node:module'", 'unclassifiable', true],
   ["import * as __t4a from 'node:fs';\n__t4a.readdirSync(d)", 'name-api-no-buffer', true],
+  // round 5: encoded specifier, descriptor reflection, a dynamic-key read, Object as a value, Proxy
+  ["import { r as __t4a } from './%2e%2e/bridge.mjs'", 'unclassifiable', true], ["export * from './%2e%2e/bridge.mjs'", 'unclassifiable', true],
+  ["Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}), 'constructor')", 'unclassifiable'], ["const __t4a = b['con' + 'structor']", 'unclassifiable'],
+  ['const __t4a = b[k]', 'unclassifiable'], ['const __t4a = Object', 'unclassifiable'], ['new Proxy(b, {})', 'unclassifiable'],
 ];
-test('T4a property: each listed form and reviewer escape injected at seeded random statement boundaries of the real lib sources is flagged in place', () => {
+test('T4a property: each listed form and reviewer escape injected at seeded random statement boundaries of the scanned lib sources is flagged in place', () => {
   assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
   const SEED = 0x5021b;
   const rnd = prng(SEED);
   const RUNS = 8;
   let checked = 0;
-  for (const f of libModules()) {
+  for (const f of SCANNED) {
     for (const nl of ['\n', '\r\n']) {
       const src = readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, nl);
       const top = [];
@@ -1147,29 +1465,41 @@ test('T4a property: each listed form and reviewer escape injected at seeded rand
           const put = (text) => src.slice(0, at) + text + src.slice(at);
           const text = `;${form.replace(/\n/g, nl)};${nl}`;
           assert.doesNotThrow(() => acorn.parse(put(text), PARSE), `${where}: the injected source must parse (a parse error would make the check vacuous)`);
-          assert.ok(decodeSites(f, put(text)).some((h) => h.pos >= at && h.pos < at + text.length && h.rule === rule), `${where} not flagged as ${rule}`);
+          assert.ok(decodeSites(f, put(text), SCANNED).some((h) => h.pos >= at && h.pos < at + text.length && h.rule === rule), `${where} not flagged as ${rule}`);
           // controls: the same text as a comment, string or template text, or neutral code, adds no hit in place.
           const tplText = form.replace(/[\\`$]/g, '\\$&');
           for (const ctl of [`/* ${form} */ `, `// ${form.replace(/\n/g, ' ')}${nl}`, `;${JSON.stringify(form)};${nl}`, `;\`${tplText}\`;${nl}`, `;void 0;${nl}`]) {
             assert.doesNotThrow(() => acorn.parse(put(ctl), PARSE), `${where}: control parses`);
-            assert.deepEqual(decodeSites(f, put(ctl)).filter((h) => h.pos >= at && h.pos < at + ctl.length), [], `${where}: control ${JSON.stringify(ctl)}`);
+            assert.deepEqual(decodeSites(f, put(ctl), SCANNED).filter((h) => h.pos >= at && h.pos < at + ctl.length), [], `${where}: control ${JSON.stringify(ctl)}`);
           }
           checked++;
         }
       }
     }
   }
-  assert.equal(checked, libModules().length * 2 * INJECT.length * RUNS, 'every injection ran');
+  assert.equal(checked, SCANNED.length * 2 * INJECT.length * RUNS, 'every injection ran');
 });
 
 // ------------------------------------------------------------------ mutation evidence (AC6)
-// Harness: session scratchpad review-s02b/acorn-evidence/mutation-round4/mutate4.py (+ lib_mutants.py). Each run gets
-// a mirrored tree <tmp>/scripts/lib + <tmp>/vendor/acorn, so the vendored parser and every imported lib module come
-// along; anchors are LF-normalised and must match exactly once. A mutant counts as KILLED only when the baseline
-// test count ran and a failing test reports ERR_ASSERTION; a load failure, changed test count or timeout is
-// INVALID. Round 4, ONE run against this file (log mutants-round4.log, Node 22.23.1; this table's counts were filled
-// in afterwards, comment only): 133 mutants (59 git-exec + 2 git-capability + 70 checker + 2 vendor), 132 killed,
-// 0 invalid, 1 survived = the EQUIVALENT round-trip mutant.
+// Harness: session scratchpad s02b-repair/mutation-round5/mutate5.py (+ lib_mutants.py; round 4's set re-anchored, plus
+// one or more mutants per round-5 rule). Each run gets a copy of the whole skill folder (the runtime-module scan needs
+// it); anchors are LF-normalised and must match exactly once. A mutant counts as KILLED only when the baseline test
+// count ran and a failing test reports ERR_ASSERTION; a load failure, changed test count or timeout is INVALID.
+// Round 5 (Node 22.23.1): ONE full run (mutants-round5.log, 176 mutants: 63 git-exec + 5 git-capability + 106 checker
+// + 2 vendor) gave 170 killed, 0 invalid, 6 survived. Four survivors were test gaps, closed by fixtures (Buffer.of,
+// a non-Object descriptor receiver, an unfrozen Object.assign table, a synthetic unlisted lib module) and re-run on
+// this file (mutants-round5-retarget.log): killed. Final: 174 killed, 0 invalid, 2 EQUIVALENT survivors: the
+// round-trip check (a fatal decoder already refuses every non-UTF-8 input) and the file:-protocol check in
+// resolveSpecifier (fileURLToPath already throws ERR_INVALID_URL_SCHEME on any other scheme). This paragraph was
+// filled in after the runs (comment only; the pre-fill copy is kept beside the logs).
+// Round 5 adds: resolution (string check instead of URL resolution, any file, bare/# specifiers URL-resolved,
+// percent-encoding not decoded, re-export from a builtin); reflection (Proxy, prototype, descriptors, reflective
+// strings, + and template folding, own-value production, defineProperty shape, object-literal __proto__, Object as a
+// value or any member, Object binding); computed keys (any read, dynamic destructuring, + as numeric, compound
+// assignment as a write, loop counter rebinding / var / non-numeric init / any update, table prototype / freeze /
+// values / rebinding / let); node types (unknown or refused types walked, WithStatement walked); the complete-
+// invocation pin (site = node, arguments detached); the scan partition; lib: the argless decode, unfrozen or
+// prototyped launch and ERROR_ROW tables, ownValue as a plain read, classify reading the status map directly.
 // | Area                 | Mutants (each killed by a named assertion)                                          |
 // |----------------------|-------------------------------------------------------------------------------------|
 // | scrub / compose      | case-sensitive GIT_* scrub; SSH_ASKPASS kept; BASE key dropped; no ambient scrub;   |

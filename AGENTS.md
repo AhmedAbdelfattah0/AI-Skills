@@ -211,6 +211,34 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
 - **`references/`** (optional) — supporting docs loaded on demand (e.g. `code-quality/references/*.md`
   hold per-stack rule sets: `react.md`, `angular.md`, `nodejs.md`, …).
 - **`scripts/`** (optional) — bundled executables the skill invokes.
+- **`vendor/<package>/`** (optional) — third-party source copied in verbatim. See the vendoring rule below.
+
+**Vendoring a third-party package** (first use: `ship-ticket/vendor/acorn`, a test-only parser):
+
+- **Acquire with integrity.** Take the files from the registry tarball. Before copying anything, check
+  the tarball against the registry's `dist.integrity` (sha512). Copy only the files you need, byte for
+  byte, with no edits. Keep the acquisition record (URL, hashes, date) as review evidence.
+- **Pin it in `vendor/<package>/UPSTREAM.json`.** Record:
+  - the name and exact version;
+  - the tarball URL with its sha256, sha1 and sha512;
+  - the sha256 of each copied file;
+  - `modifications: []`.
+
+  A test must check every pinned hash before the code is imported, and must check that the directory
+  listing is exact (as `T4a` does in `ship-ticket/scripts/lib/git-exec.test.mjs`).
+- **Notices.** Ship the package's `LICENSE` verbatim next to the files, and add an entry (licence text and
+  provenance) to the skill's `THIRD_PARTY_NOTICES.md`.
+- **Line endings.** Add `skills/<skill>/vendor/** -text` to `.gitattributes`. A CRLF checkout would
+  otherwise break the hashes.
+- **No scripts.** Never run the package's install, prepare or postinstall scripts. Never vendor a package
+  whose files need a build step.
+- **Test-only by default.** Production code must not import vendored code. A test must prove this by
+  resolving every runtime module's import specifiers and checking its strings (`T4a` does this for
+  ship-ticket). A production dependency needs its own design decision, recorded here.
+- **Install footprint (accepted residual).** `cli.mjs install`/`update` ship `vendor/` along with the
+  `*.test.mjs` files that use it. The default link mode cannot filter files. The copy filter (`isNoise`)
+  matches basenames and is shared with `hashSkill`. A future production `vendor/` would be stripped by
+  it. So vendored files are not excluded. They are inert: no runtime module imports them.
 
 **Cross-skill references** (load-bearing convention): a skill may point at a sibling skill's
 reference file via a relative path like `../code-quality/references/ai-failure-modes.md` — this

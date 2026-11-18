@@ -121,7 +121,7 @@ const isKey = (k) => isStr(k) && k.length > 0 && !k.includes('=');
  * `\x` or `/x`, and a drive-relative `C:x`, are refused.
  */
 const isAbs = (p, platform) => isStr(p) && (platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(p) : p.startsWith('/'));
-const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const own = (o, k) => Object.hasOwn(o, k);
 /** An own data property's value through its descriptor (never a getter or an inherited value), else undefined. */
 const ownValue = (o, k) => { const d = Object.getOwnPropertyDescriptor(o, k); return d && own(d, 'value') ? d.value : undefined; };
 const isScrubbed = (k) => up(k).startsWith('GIT_') || up(k) === 'SSH_ASKPASS';
@@ -219,7 +219,7 @@ export function composeEnv({ ambient, platform = process.platform, gitInfo, hook
 /** Design §2.2 precedence; the first matching row wins. */
 export const OUTCOME_ROWS = Object.freeze(['git_env_too_large', 'git_unavailable', 'git_launch_failed', 'git_timeout', 'git_signal',
   'git_output_truncated', 'git_failed', 'git_stderr', 'decode']);
-const ERROR_ROW = { ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' };
+const ERROR_ROW = Object.freeze({ __proto__: null, ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' });
 
 /**
  * Map the facts of one run to a frozen {outcome, status, stdout} or throw a typed GitError. A spawn error
@@ -231,20 +231,20 @@ export function classify(facts, spec) {
   const { op = null, status: map = { 0: 'ok' }, stderr: mode = 'forbid', decode } = spec;
   const err = (code) => fail(code, op, facts.stderr);
   if (facts.envTooLarge) throw err('git_env_too_large');
-  if (facts.error) throw err(Object.prototype.hasOwnProperty.call(ERROR_ROW, facts.error.code) ? ERROR_ROW[facts.error.code] : 'git_launch_failed');
+  if (facts.error) throw err(own(ERROR_ROW, facts.error.code) ? ERROR_ROW[facts.error.code] : 'git_launch_failed');
   if (facts.signal) throw err('git_signal');
-  if (!Object.prototype.hasOwnProperty.call(map, facts.status)) throw err('git_failed');
+  if (!own(map, facts.status)) throw err('git_failed');
   if (mode !== 'allow' && facts.stderr?.length > 0) throw err('git_stderr');
   if (decode) {
-    try { return Object.freeze({ outcome: map[facts.status], status: facts.status, stdout: decodeStrict(facts.stdout, decode) }); } catch (e) { throw err(e.code); }
+    try { return Object.freeze({ outcome: ownValue(map, facts.status), status: facts.status, stdout: decodeStrict(facts.stdout, decode) }); } catch (e) { throw err(e.code); }
   }
-  return Object.freeze({ outcome: map[facts.status], status: facts.status, stdout: facts.stdout });
+  return Object.freeze({ outcome: ownValue(map, facts.status), status: facts.status, stdout: facts.stdout });
 }
 
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */
 const WIN_ENV_LIMIT = 32767;
 /** UTF-16 units of the block `k=v\0...\0`: own keys and values of a null-prototype env (no inherited reads). */
-const envUnits = (env) => Object.keys(env).reduce((n, k) => n + k.length + env[k].length + 2, 1);
+const envUnits = (env) => Object.entries(env).reduce((n, [k, v]) => n + k.length + v.length + 2, 1);
 
 /**
  * The ONE spawn site. The binary is the one `probeGit` (S-02a0a) resolved and version-checked in this

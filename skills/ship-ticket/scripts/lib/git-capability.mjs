@@ -107,7 +107,7 @@ export function probeGit(opts = {}) {
   for (const k of Object.keys(env)) if (k.toUpperCase().startsWith('GIT_')) delete env[k];
   env.LC_ALL = 'C';
   const r = spawnSync(bin, ['--version'], { env, cwd: path.dirname(bin), shell: false, windowsHide: true, timeout: opts.timeoutMs ?? 10_000, killSignal: 'SIGKILL', maxBuffer: 4096 });
-  const launch = { ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' };
+  const launch = Object.freeze({ __proto__: null, ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' });
   if (r.error) throw new GitCapabilityError(launch[r.error.code] ?? 'git_launch_failed');
   if (r.signal) throw new GitCapabilityError('git_signal');
   if (r.status !== 0) throw new GitCapabilityError('git_failed');
