@@ -8,7 +8,7 @@ not call it and does not read the brief.
 ## Build a brief
 
 ```text
-node scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] --out <file>
+node scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file>
 ```
 
 - `--dag` is the bound execution DAG, `--node` the node id, `--plan` the approved plan file.
@@ -19,6 +19,9 @@ node scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--re
 - `--t0` is optional and only for a repository that declares T0 fast checks (`references/prove.md`). It adds
   the instruction to run `scripts/fast-checks.mjs run` and report the result as a fifth key `t0`. Without it the
   brief is byte-identical to what it was before T0 existed. `--out` may not be the `--t0` file.
+- `--test-kinds` is optional: the output of `scripts/test-kinds.mjs require` for the plan (`references/prove.md`,
+  risk-triggered test kinds). It lists the required kinds and plan lifecycle items under Required tests and asks for
+  a report key `test_titles`. A `not_declared` requirement changes nothing; a refused one refuses the brief.
 - `--out` is the brief file. For an engine node, point the node's `promptFile` at it.
 
 The output is the same every time for the same inputs: no clock, no random value, no absolute path.
@@ -40,8 +43,30 @@ ids, Notes, Worker rules (no commit, no branch switch, no install, no whole-repo
 contract change) and Report block.
 
 The Report block is a fenced `ship-ticket-report` example with exactly the keys `tests`, `red_seen`,
-`blockers` and `needs_outside_ownership`; with `--t0` there is a fifth key `t0` (`{result, checks:[{name, result}]}`).
+`blockers` and `needs_outside_ownership`; with `--t0` there is a fifth key `t0` (`{result, checks:[{name, result}]}`),
+and with `--test-kinds` a key `test_titles` (the titles of the tests added or changed, markers included).
 The format is the one in `references/execution-harness.md`.
+
+## Builder quality rules
+
+Put these in every brief's Notes, or point the worker here. They are first-pass rules, so review has less to find.
+
+- **Watch the size.** Advisory signals, never triggers (`references/plan.md`, Decomposition): about 6
+  production files or 500 lines, 6 acceptance criteria, 1 new semantic mechanism, a contract and its
+  calculation kept apart, output that stands alone. If your node is well past them, say so in the report
+  (`blockers`); the DAG is plan-bound and only a re-approved plan changes it.
+- **Reuse before implementation.** Before building generic infrastructure, evaluate the native API, an
+  in-repo module and a mature library, in that order. Custom code needs a one-line justification in the
+  report and the Reuse inventory.
+- **Verify the invariant, not the instance.** When a defect class could recur (an escape, a path check, an
+  ordering rule), write one generic test over all surfaces plus a mutation check that makes it fail, not a
+  patch for the case a reviewer cited.
+- **Decode strictly.** Never decode on-disk names or git output lossily (no replacement characters); fail
+  on invalid bytes.
+- **Tests do not time.** No wall-clock assertions, no sleeps as synchronisation, no shared temp names, no
+  dependence on scheduler order: use injected clocks, barriers, readiness files written after the guarded
+  state exists, and a unique temp directory per test. See `references/prove.md` (Test reliability and evidence).
+- **Run targeted checks while building** and leave the full suite to final verification.
 
 ## Base drift
 

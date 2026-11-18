@@ -249,6 +249,29 @@ broad cross-subsystem changes, or an explicit repository/user requirement. The
 preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
+A structural path floor runs alongside your own judgement. The repository declares its
+sensitive paths in `.ship-ticket/risk-paths.json` (read from the base commit; see
+[references/risk-paths.example.json](references/risk-paths.example.json); a pattern also covers
+everything below a match). `node scripts/risk-floor.mjs check --base <c> --planned-paths <json>
+--claimed <profile> --ai <profile>` computes the floor from the planned paths, and `reassess
+--base <c> --head <c|WORKTREE> --recorded-line <file|-> ...` recomputes it from the ACTUAL changed
+paths (base to HEAD, staged, unstaged and untracked; git-ignored untracked files are outside release
+scope, and a force-added one appears in the index/HEAD diffs) before release. `--recorded-line` is a file or stdin holding the plan's `risk_floor:` record line
+(the `check` line; paste it from the plan header; `risk_reassess:` lines are ignored). Pin `--base`
+from the plan/run state: `reassess` refuses a base different from the recorded line, and the
+recorded claim, assessment and final also count, so it can never return less than the plan said.
+The recorded line is not authenticated until the driver slice. Planned directories and wildcards are
+treated conservatively (a directory-like entry floors if a declared glob may match below it);
+a dotted directory name without a trailing `/` is read as a file, which `reassess` catches later.
+The final profile is never lower than the floor, the recorded claim or your own
+semantic assessment (your assessment owns business impact, indirect dependencies and architecture).
+A floor only raises, and a path that matches nothing is not evidence of low risk. A repository that
+declares no paths gets no structural protection (`no_risk_paths_declared`); your assessment is then
+the only protection and is still recorded. A change to the declaration itself is ELEVATED. Missing or
+untrustworthy inputs mean ELEVATED. Record the `record_line` in the plan header. Today this is
+advisory, not enforced: no gate or engine step reads it (wiring is the driver slice, S-23/S-24).
+Text/keyword matching was evaluated and dropped; a measured corpus experiment is deferred.
+
 If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
 begins. A missing counterpart falls back to CodeRabbit; if both are missing, use
@@ -548,8 +571,8 @@ dependencies:
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
 - **Survey and planning.** Use one survey agent. Use the cross-model plan debate
-  only for money or auth tickets. Skip it, and record the skip, for UI or
-  low-risk work. The REVIEW second opinion is never skipped (see REVIEW).
+  when the risk floor or your own assessment is ELEVATED, or the ticket is money or auth. Skip it, and
+  record the skip, only when the floor is STANDARD, your own assessment is also STANDARD and the ticket is neither money nor auth. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
