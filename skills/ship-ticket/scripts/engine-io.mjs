@@ -230,13 +230,19 @@ export function decodeSealedFrame(buf, attemptId) {
  * read of up to STDOUT_CAP + 1 bytes, larger than any socket queue, so that single read empties the
  * queue whatever is left unread at exit: it is the channel's latch point (a full read is refused).
  * It is refused when a later read returns any byte (written after the latch point; not kept) or
- * EAGAIN (another process still holds it). That is the whole guarantee. Bytes another process wrote
- * and then closed before a channel's latch point are accepted as the runner's: the instants before
- * the exit was observed, plus, for the report channel, the read of stdout that precedes its own
- * latch point (the kernel closes the runner's descriptors before it reports the exit, so a
- * fast survivor usually wins: measured in PR #94, 99-100/100 on Linux, 7-87/100 on darwin). Any
- * such writer held the channel during the run (in-run injection, design §6.1 R-T2; accepting it
- * is a proposed owner decision, still pending).
+ * EAGAIN (another process still holds it).
+ * Claim (exact): runner stdout (POSIX; plus the report channel on darwin) is refused if any
+ * process still holds the channel at the instant the launcher observes the runner exit. A process
+ * that wrote and closed just before that instant, including one handed the descriptor by an in-run
+ * holder, is accepted; such bytes are the in-run injection risk R-T2 (design §6.1), not a new
+ * route. This is not an atomic snapshot and writers are not authenticated. (For the report
+ * channel the instant is its own latching read, after the read of stdout.) Measured on PR #94
+ * head 4180cbc, a fast write-then-close survivor is accepted: Linux Node 18 100/100, Node 22
+ * 91/100; darwin Node 18 84/100, Node 22 6/100. Accepted with conditions by the owner's delegation
+ * on 2026-11-18 (HANDOVER OD-D4); conditions: macOS harness 18/22 + engine-properties green on the
+ * final head; both independent reviews on the final head; append-after-exit case added to the
+ * adapter-qualification series; sandbox isolation (S-03/S-18) remains the real closure; Linux is
+ * stdout only.
  * `report` must be a boolean (anything else rejects `bad_input`). `report: true` adds the report
  * channel (the runner's fd 3, reached as /dev/fd/3; measured on darwin only, so any other
  * platform rejects `channel_unsupported` before anything starts): the result then carries

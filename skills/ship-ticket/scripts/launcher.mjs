@@ -135,9 +135,12 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * non-blocking. One read of up to STDOUT_CAP + 1 bytes (more than any socket queue holds) empties
  * the channel's queue and is its latch point (a full read is refused); the channel is at EOF only
  * when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is not
- * kept). No drain follows. It is not an atomic snapshot: bytes another process wrote and then
- * closed before a channel's latch point (before the exit was observed, or for the report channel
- * during the read of stdout) are kept.
+ * kept). No drain follows. Claim (exact): runner stdout (POSIX; plus the report channel on darwin)
+ * is refused if any process still holds the channel at the instant the launcher observes the
+ * runner exit. A process that wrote and closed just before that instant, including one handed the
+ * descriptor by an in-run holder, is accepted; such bytes are the in-run injection risk R-T2, not
+ * a new route. This is not an atomic snapshot and writers are not authenticated. (The report
+ * channel's instant is its own latching read, after the read of stdout.)
  * On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
  * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
  * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
@@ -236,8 +239,9 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   // The runner is dead: its own descriptors closed before its exit was reported, so whatever it wrote
   // is already in the socket. Read each channel in turn, synchronously (non-blocking): one read
   // larger than any queue empties it and latches it. Then EOF means no process holds it; EAGAIN or
-  // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot at
-  // exit: bytes another process wrote and closed before a channel's latch point are kept.
+  // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot and
+  // writers are not authenticated: bytes a process wrote and closed before the latch point are kept
+  // (the in-run injection risk R-T2, accepted with conditions: HANDOVER OD-D4).
   const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
   const drain = (s, take) => {
     const fd = fdOf(s);
