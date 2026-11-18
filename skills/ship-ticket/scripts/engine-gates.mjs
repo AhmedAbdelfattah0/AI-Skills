@@ -8,13 +8,13 @@
  */
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
-import { retire, leaderStart } from './engine-quiesce.mjs';
+import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
 import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn } from './engine-dag.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry } from './engine-dag.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
@@ -77,6 +77,7 @@ async function redGate(E, input, candidate) {
   if (!node) return gateNo('unknown_node', [`no node ${input.node} in the bound DAG`]);
   const runner = redRunner(E.S.config, input.command);
   if (!runner) return gateNo('unknown_command', [`no RED runner ${input.command ?? '(unnamed)'} among the formatted config.testCommands`]);
+  if (runner.evidence) return gateNo('runner_unsupported', [`${runner.name} is an evidence runner (its report goes to the report channel, which RED does not open): name a testCommands entry without evidence that prints its report`]);
   // Policy 2: `addendum` names a trusted, effective SECURITY_ADDENDUM; its specs for this node are the pin
   // and the evidence lands in S.gates.red_addendum['<addendum_id>/<node>'] (node RED is untouched).
   let addendumSpecs, slot;
@@ -188,6 +189,8 @@ async function reviewGate(E, input, candidate) {
   if (S.freeze && !retry && candidate !== S.freeze.candidate) {
     return gateNo('stale_candidate', [`the work tree is ${candidate}, frozen is ${S.freeze.candidate}: unexpected drift after the freeze`]);
   }
+  const tk = await ensureEvidence(E, input.kind === 'confirmation' ? 'F4' : 'F1');
+  if (tk && !tk.ok) return tk; // F1/F4 (S-01b2 P5r): before gateReview, so a refusal writes none of the protected fields
   const frozen = retry || !S.freeze ? candidate : S.freeze.candidate;
   const { units_consumed: consumedUnits, ...review } = input;
   // W3-record: only the bound DAG's config.auditRecord sets recordVerdicts (never an input); absent, the policy is as before.
@@ -217,6 +220,7 @@ async function reviewGate(E, input, candidate) {
   }
   S.review_chain.push(v.record);
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
+  if (tk) S.test_kinds.freeze_evidence = tk.evidence_id; // informational: no decision reads it (F4/S1/S2 bind through the record)
   if (v.repair) {
     S.repairs.push({ id: `repair-${v.repair.review_execution}`, kind: 'review', review_execution: v.repair.review_execution,
       writes: [...v.repair.write_set], promptFile: brief, state: 'pending', old_candidate: candidate });
@@ -238,9 +242,11 @@ async function runProof(E) {
     const a = { attempt_id: 'att-' + randomUUID(), kind: 'proof', node: name, status: 'intent', started_at: new Date().toISOString() }; // started_at: telemetry only (eval proof wall)
     E.S.attempts.push(a);
     await E.commit();
+    // an evidence runner proves the full suite: {files} dropped, its report read from the report channel (darwin only, FX)
+    const args = c.evidence ? (c.args ?? []).filter(x => x !== '{files}').map(x => x.replace('{report}', REPORT_FD)) : c.args ?? [];
     let result;
     try {
-      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args: c.args ?? [] }, timeoutMs: clampTimeout(E.S.config.timeoutMs) });
+      const launch = await run({ attempt_id: a.attempt_id, command: { cmd: c.cmd, args }, timeoutMs: clampTimeout(E.S.config.timeoutMs), ...(c.evidence ? { report: true } : {}) });
       Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
       await E.commit();
       launch.release();
@@ -255,8 +261,8 @@ async function runProof(E) {
     }
     a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
     // args: an unlocated pass is the spec's only when the command runs exactly that file (gate.mjs soleFile).
-    if (c.format) runs.push({ format: c.format, stdout: result.stdout ?? '', truncated: result.truncated === true || result.timedOut === true, args: [...(c.args ?? [])] });
-    commands.push({ name, cmd: c.cmd, args: [...(c.args ?? [])], exit_code: result.exitCode,
+    if (c.format) runs.push({ format: c.format, stdout: (c.evidence ? result.report?.toString('utf8') : result.stdout) ?? '', truncated: result.truncated === true || result.timedOut === true || result.report_truncated === true, args: [...args] });
+    commands.push({ name, cmd: c.cmd, args: [...args], exit_code: result.exitCode,
       result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}), ...(result.error_code ? { error_code: result.error_code } : {}) });
   }
   await E.commit();
@@ -306,6 +312,8 @@ async function shipReadyGate(E, input, candidate) {
     const refusal = shipSecurityRefusal(S, sec);
     if (refusal) return refusal;
   }
+  const tk = await ensureEvidence(E, 'S1');
+  if (tk && !tk.ok) return tk;
   const current = { candidate_id: candidate, exclusions: input.exclusions ?? S.pinned_exclusions, artifact_digests: io.artifactDigests(E.ctx.repoRoot, input.artifacts),
     ...(sec ? { control_pairs: controlPairs(E, sec, candidate) } : {}) };
   let v = gateShipReady({ state: S, current });
@@ -346,6 +354,12 @@ async function shipReadyGate(E, input, candidate) {
         return moved;
       }
     }
+    // S2: the proof ran repository code, so the S1 evidence must still be current on the same identity (no run here)
+    const tk2 = tk && await ensureEvidence(E, 'S2', tk.evidence_id);
+    if (tk2 && !tk2.ok) {
+      S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [tk2.code] };
+      return tk2;
+    }
     S.local_proof = { candidate_id: candidate, commands, seq: S.seq, ...(spec_results ? { spec_results } : {}) };
     if (sec) current.control_pairs = controlPairs(E, sec, candidate);
     // Git-ignored artifacts and evidence are outside the candidate id: re-derive them from what the proof left.
@@ -360,6 +374,144 @@ async function shipReadyGate(E, input, candidate) {
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   }
   return { judgment_point: false, ...v };
+}
+
+// ---- S-01b2 P5r: runner-backed test-kind evidence at freeze (design rev 6 sections 3 and 5.1) ----------------
+
+/**
+ * CLAIM: L-ran only. A record says the engine itself ran the declared runner on this evidence identity and received, through
+ * the sealed channel (FX), a report in which a test carrying the marker in its own title executed and passed. It does not say
+ * the test is meaningful (mutation testing and independent review cover that), and RED never counts (only `evidence` attempts
+ * build records). LIMIT (R3): the identity is taken before the launch, after the run (P4r `candidate_moved`) and again by the
+ * re-issued call; a runner that changes a covered file and restores it before the run ends is NOT detected by this bracket.
+ */
+let tkModules = null;
+/** The P4r modules and risk-floor, loaded only by an active run (an inactive run never imports them). */
+export const testKindsModules = async () => (tkModules ??= { io: await import('./engine-test-kinds-io.mjs'), reuse: await import('./engine-test-kinds-reuse.mjs'),
+  rf: await import('./risk-floor.mjs'), tk: await import('./test-kinds.mjs') });
+/** Active run: policy version 2 semantics (run-engine.mjs load refuses a partial combination with test_kinds_state_missing). */
+export const testKindsOn = (E) => E.policy?.semantics?.testKinds === true;
+const REPORT_FD = '/dev/fd/3';
+/** FX's typed refusals (and its `bad_input`): kept with their own code, stored, never retried and never read as a run that failed. */
+export const TYPED_RUNNER_REFUSALS = new Set([...io.RUNNER_REFUSALS, 'bad_input']);
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** The `{cmd, args}` that runs for `entry` on `files`: `{report}` -> /dev/fd/3, `{files}` -> the files; null when `{files}` has none. */
+export function evidenceCommand(entry, files) {
+  const withFiles = entry.args.includes('{files}');
+  if (withFiles && !files.length) return null;
+  return { cmd: entry.cmd, args: [...entry.args.filter(a => a !== '{files}').map(a => a.replace('{report}', REPORT_FD)), ...(withFiles ? files : [])] };
+}
+
+/**
+ * FX's sealed gateRunner result -> P4r's `report` (text + provenance), or `{ code }`. The text is the report bytes decoded
+ * strictly (invalid UTF-8 is evidence_unavailable) and `report_sha256` hashes exactly that text; a truncated report is
+ * evidence_budget_exceeded and a timeout evidence_run_failed. `sealed` holds because gateRunner accepted the frame;
+ * `quiesced` because retire() proved the group gone.
+ */
+export function sealedReport(r, { attempt_id, evidence_id_before, binding_verified, runner_version }) {
+  if (r.timedOut === true) return { code: 'evidence_run_failed' };
+  if (r.report_truncated === true) return { code: 'evidence_budget_exceeded' };
+  let text;
+  try { text = r.report ? UTF8.decode(r.report) : ''; } catch { return { code: 'evidence_unavailable' }; }
+  return { report: { text, runner_id: 'vitest', runner_version, attempt_id, exit_code: r.exitCode, report_sha256: createHash('sha256').update(text).digest('hex'),
+    report_eof: r.report_eof === true, sealed: true, quiesced: true, binding_verified, evidence_id_before } };
+}
+
+/** The version of the runner the repository has installed (`node_modules/vitest/package.json`), or null (refused: never guessed). */
+function runnerVersion(repo) {
+  try { const v = JSON.parse(readFileSync(join(repo, 'node_modules', 'vitest', 'package.json'), 'utf8')).version; return typeof v === 'string' ? v : null; } catch { return null; }
+}
+
+/** Everything a decision derives, from scratch: identity, the {files} to run, the command, reassessed classes, the verdict. */
+function derive(E, M, point) {
+  const S = E.S, T = S.test_kinds, name = T.entry, entry = flatEntry(name, S.config.testCommands[name]), repo = E.ctx.repoRoot;
+  let c;
+  try { c = M.io.candidate(repo, T.base_sha, S.pinned_exclusions); } catch (e) { const r = M.io.refusalOf(e, 'evidence_unavailable'); return { refusal: gateNo(r.code, [`test-kind evidence identity: ${r.detail ?? r.code}`]) }; }
+  const ctx = { work: 0, max: 1e6, glob: { steps: 0 } }, globs = M.io.matcher([...M.io.BUILTIN_TEST_GLOBS, ...T.tests.globs]), covers = M.io.matcher(entry.covers);
+  const command = evidenceCommand(entry, c.paths.filter(p => M.io.applicable(c.top, p, globs, covers, ctx) === null));
+  const rf = M.rf.reassess({ repo, base: T.base_sha, head: 'WORKTREE', recordedLine: T.floor.line, claimed: T.floor.claimed, ai: T.floor.ai });
+  if (!rf.ok) return { refusal: gateNo('risk_floor_unavailable', [`risk-floor reassess: ${rf.errors.join(', ')}`]) };
+  const rec = T.records[name], records = command && rec ? { [name]: rec } : {}; // nothing to run: a stored record cannot be current
+  const v = M.reuse.tkVerdict({ repo, baseSha: T.base_sha, exclusions: S.pinned_exclusions, dagDigest: S.dag_digest.replace(/^sha256:/, ''), entries: [entry],
+    commands: command ? { [name]: command } : {}, records, tests: { globs: T.tests.globs }, bound: T.bound, declaration: T.declaration, reassessed: rf.floor_classes, S }, point);
+  return { c, entry, command, v, classes: rf.floor_classes, digest: command && M.io.commandDigest(command.cmd, command.args) };
+}
+const verdictReasons = (v) => [`test kinds ${v.code}: missing ${[...v.missing_kinds.map(k => `kind:${k}`), ...v.unmapped_items.map(i => `plan:${i}`)].join(', ') || 'none'}`
+  + `; records ${JSON.stringify(v.records)}; withheld ${JSON.stringify(v.withheld)}; runner_uncovered ${v.voids?.runner_uncovered ?? 0}${v.detail ? `; ${v.detail}` : ''} (claim ${v.claim})`];
+
+/**
+ * ensureEvidence(E, point[, expected]) -> null (inactive) | { ok: true, evidence_id } | a gate refusal. Run-then-return: when no
+ * stored record satisfies section 3 and there is a command to run, it runs the runner (sealed, report channel), stores the record
+ * (or the refusal, per evidence identity and command, so the same bytes never run twice) and returns `evidence_refreshed`
+ * WITHOUT deciding: the re-issued identical call re-derives binding, candidate, units and the verdict. `expected` (S2): decide
+ * only, never run, and refuse unless the identity is still `expected`.
+ */
+export async function ensureEvidence(E, point, expected) {
+  if (!testKindsOn(E)) return null;
+  const M = await testKindsModules(), S = E.S, T = S.test_kinds;
+  const d = derive(E, M, point);
+  if (d.refusal) return d.refusal;
+  if (point !== 'S2') note(S, 'RISK_REASSESSED', { point, classes: d.classes });
+  const stored = T.refused && T.refused.evidence_id === d.c.evidence_id && T.refused.command_digest === d.digest ? T.refused : null;
+  if (stored) return gateNo(stored.code, [`the evidence run on this identity was refused (${stored.code}, attempt ${stored.attempt_id}); change the candidate to run again`], { judgment_point: TYPED_RUNNER_REFUSALS.has(stored.code) });
+  const state = d.v.records?.[T.entry];
+  if (expected === undefined && d.command && (state === 'absent' || state?.startsWith('stale:'))) return runEvidence(E, M, d, point);
+  if (expected !== undefined && d.c.evidence_id !== expected) return gateNo('candidate_moved', [`the evidence identity moved from ${expected} to ${d.c.evidence_id} during the proof`]);
+  return d.v.status === 'pass' ? { ok: true, evidence_id: d.c.evidence_id } : gateNo(d.v.code, verdictReasons(d.v), d.v.code === 'waiver_unauthorized' ? { judgment_point: true } : {});
+}
+
+/** V (informational): the verdict over the stored record; never runs, writes or blocks, and is computed only while nothing is live. */
+export async function testKindsStatus(E) {
+  const T = E.S.test_kinds;
+  if (E.S.attempts.some(a => LIVE.includes(a.status))) return { state: 'not_computed', code: null, missing: [], evidence_id: null };
+  const d = derive(E, await testKindsModules(), 'V');
+  if (d.refusal) return { state: 'none', code: d.refusal.code, missing: [], evidence_id: null };
+  const r = d.v.records?.[T.entry];
+  return { state: r === 'current' ? 'current' : T.records[T.entry] ? 'stale' : 'none', code: d.v.code ?? 'pass',
+    missing: [...d.v.missing_kinds.map(k => `kind:${k}`), ...d.v.unmapped_items.map(i => `plan:${i}`)], evidence_id: d.c.evidence_id };
+}
+
+async function runEvidence(E, M, d, point) {
+  const S = E.S, T = S.test_kinds, repo = E.ctx.repoRoot;
+  if (S.attempts.some(a => LIVE.includes(a.status))) return gateNo('evidence_unquiet', ['another attempt is live: the evidence run waits until nothing runs beside it']);
+  const a = { attempt_id: 'att-' + randomUUID(), kind: 'evidence', node: T.entry, status: 'intent', started_at: new Date().toISOString() };
+  S.attempts.push(a);
+  await E.commit();
+  let result, typed = null;
+  try {
+    const launch = await runnerDeps(E).spawnRunner({ attempt_id: a.attempt_id, command: d.command, timeoutMs: clampTimeout(S.config.timeoutMs), report: true });
+    Object.assign(a, { pid: launch.pid, pgid: launch.pgid, leader_start: leaderStart(launch.pgid), status: 'running' });
+    await E.commit();
+    launch.release();
+    result = await launch.done;
+  } catch (e) { typed = TYPED_RUNNER_REFUSALS.has(e?.code) ? e.code : null; result = { exitCode: null, timedOut: false, error: e.message, quiescent: true }; } // retire() decides
+  if (result.quiescent !== true || !(await retire(S, a, E.alive, 'exited'))) {
+    a.status = 'unknown';
+    const reason = `cannot prove evidence runner group ${a.pgid ?? a.pid} (${T.entry}) has exited; no evidence recorded`;
+    if (!S.judgments.some(j => j.code === 'quiescence_unknown' && j.node === T.entry)) S.judgments.push(judgment('quiescence_unknown', T.entry, reason));
+    await E.commit();
+    return gateNo('quiescence_unknown', [reason], { judgment_point: true });
+  }
+  a.envelope = { exitCode: result.exitCode ?? null, timedOut: result.timedOut === true, ...(typed ? { error_code: typed } : {}) };
+  const unbound = E.verifyBinding(); // the runner ran repository code: binding drift is reported, nothing is stored
+  if (unbound.length) { await E.commit(); return gateNo(unbound[0].code, [`the evidence run drifted the approval binding: ${unbound.map(j => j.reason).join('; ')}`], { judgment_point: true }); }
+  const version = runnerVersion(repo);
+  const mapped = typed ? { code: typed } : version === null ? { code: 'evidence_unavailable', detail: 'runner_version_unreadable' }
+    : sealedReport(result, { attempt_id: a.attempt_id, evidence_id_before: d.c.evidence_id, binding_verified: true, runner_version: version });
+  const built = mapped.code ? { ok: false, ...mapped } : M.io.buildRecord({ repo, baseSha: T.base_sha, exclusions: S.pinned_exclusions, entry: d.entry,
+    commandArgs: d.command.args, tests: { globs: T.tests.globs }, dagDigest: S.dag_digest.replace(/^sha256:/, ''), report: mapped.report });
+  if (built.ok) {
+    T.records[T.entry] = built.record;
+    T.refused = null;
+    note(S, 'TEST_KINDS_EVIDENCE', { point, attempt_id: a.attempt_id, evidence_id: built.record.evidence_id, counts: built.record.counts });
+    await E.commit();
+    return gateNo('evidence_refreshed', [`the engine ran ${T.entry} (attempt ${a.attempt_id}) and stored its record; re-issue the identical call to decide on it`]);
+  }
+  T.refused = { evidence_id: d.c.evidence_id, command_digest: d.digest, code: built.code, ...(built.detail ? { detail: built.detail } : {}), attempt_id: a.attempt_id };
+  note(S, 'TEST_KINDS_REFUSED', { point, attempt_id: a.attempt_id, code: built.code });
+  await E.commit();
+  return gateNo(built.code, [`the evidence run ${a.attempt_id} was refused: ${built.code}${built.detail ? ` (${built.detail})` : ''}`], { judgment_point: TYPED_RUNNER_REFUSALS.has(built.code) });
 }
 
 // ---- security policy 2 (AIS-HARNESS-4 Wave B) ----------------------------------------------------

@@ -115,10 +115,11 @@ test('[AC3] skillCommit ignores an inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FIL
 test('[seam] policySemantics maps supported versions to frozen capability flags; v1 is today\'s (no flags); anything else is policy_version_unsupported', async () => {
   const { policySemantics, ENGINE_POLICY_VERSION, POLICY_SEMANTICS } = await policy();
   assert.equal(ENGINE_POLICY_VERSION, 1);
-  assert.deepEqual(Object.keys(POLICY_SEMANTICS), ['1']);
+  assert.deepEqual(Object.keys(POLICY_SEMANTICS), ['1', '2']);
   assert.deepEqual(policySemantics(1), {});
-  assert.ok(Object.isFrozen(policySemantics(1)) && Object.isFrozen(POLICY_SEMANTICS));
-  for (const v of [2, 0, -1, 1.5, '1', null, undefined]) {
+  assert.deepEqual(policySemantics(2), { testKinds: true }, 'v2 (S-01b2 P5r) adds the test-kind freeze gate');
+  assert.ok(Object.isFrozen(policySemantics(1)) && Object.isFrozen(policySemantics(2)) && Object.isFrozen(POLICY_SEMANTICS));
+  for (const v of [3, 0, -1, 1.5, '1', null, undefined]) {
     assert.throws(() => policySemantics(v), (e) => e.code === 'policy_version_unsupported', `version ${JSON.stringify(v)}`);
   }
 });
@@ -130,7 +131,7 @@ test('[seam] runPolicy: a missing key is version 1 (oldest); a present key is ta
   assert.deepEqual(runPolicy({}, newer), { version: 1, semantics: {} }, 'legacy state under a v2 engine keeps v1 semantics');
   assert.deepEqual(runPolicy({ policy_version: 1 }, newer), { version: 1, semantics: {} });
   assert.deepEqual(runPolicy({ policy_version: 2 }, newer), { version: 2, semantics: { strictThing: true } });
-  for (const v of [2, null, '1', 0, 1.5]) {
+  for (const v of [3, null, '1', 0, 1.5]) {
     assert.throws(() => runPolicy({ policy_version: v }), (e) => e.code === 'policy_version_unsupported'
       && e.message.includes(JSON.stringify(v)) && /supports policy_version 1\b/.test(e.message), `state version ${JSON.stringify(v)}`);
   }
@@ -182,18 +183,18 @@ function evalReport(fx) {
   return { status: r.status, out: null, stderr: r.stderr, stdout: r.stdout };
 }
 
-test('[AC2] a v1-only engine refuses a v2 run at EVERY entry command with policy_version_unsupported naming both versions, writing nothing', async (t) => {
-  // The v2 run is created by an injected v2 engine (a real upgrade), then every command runs through the installed v1 CLI (the downgrade).
+test('[AC2] an engine without v3 (it supports 1 and 2) refuses a v3 run at EVERY entry command with policy_version_unsupported naming both versions, writing nothing', async (t) => {
+  // The v3 run is created by an injected v3 engine (a real upgrade), then every command runs through the installed v1/v2 CLI (the downgrade).
   const fx = fixture(t, { commit: true });
-  await engine.init(fx.ctx({ policy: { current: 2, semantics: { 1: {}, 2: {} } } }));
+  await engine.init(fx.ctx({ policy: { current: 3, semantics: { 1: {}, 2: {}, 3: {} } } }));
   const before = readFileSync(fx.stateFile());
-  assert.equal(JSON.parse(before).policy_version, 2);
+  assert.equal(JSON.parse(before).policy_version, 3);
   for (const [name, run, exit] of ENTRY) {
     const r = run(fx);
     assert.equal(r.status, exit, `${name}: exit ${r.status}\n${r.stdout}${r.stderr}`);
     const text = r.stderr + (r.out ? JSON.stringify(r.out) : '');
     assert.match(text, /policy_version_unsupported/, `${name}: coded refusal\n${r.stdout}${r.stderr}`);
-    assert.match(text, /policy_version 2/, `${name}: names the run's version`);
+    assert.match(text, /policy_version 3/, `${name}: names the run's version`);
     assert.match(text, /supports policy_version 1\b/, `${name}: names the engine's version`);
     if (exit === 2) assert.deepEqual([r.out.ok, r.out.code, r.out.judgment_point], [false, 'policy_version_unsupported', true], name);
     assert.deepEqual(readFileSync(fx.stateFile()), before, `${name}: state bytes unchanged`);

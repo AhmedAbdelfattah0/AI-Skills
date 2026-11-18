@@ -27,14 +27,14 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
-import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract } from './engine-gates.mjs';
+import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract, testKindsModules, testKindsOn, testKindsStatus } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, runPolicy, skillCommit } from './engine-policy.mjs';
+import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, runPolicy, skillCommit } from './engine-policy.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -111,6 +111,9 @@ function open(ctx) {
       E.S = JSON.parse(readFileSync(P.state, 'utf8'));
       // S-27-min: before any default or check, the run's policy version must be one this engine supports (fail closed).
       E.policy = runPolicy(E.S, ctx.policy);
+      // S-01b2 P5r: the version 2 flag, S.test_kinds and config.testKinds come together or not at all (rev 5 section 6 row 8)
+      if (new Set([testKindsOn(E), E.S.test_kinds !== undefined, E.S.config?.testKinds !== undefined]).size !== 1)
+        throw coded('test_kinds_state_missing', `policy_version ${E.S.policy_version}, test_kinds state and config.testKinds disagree: a partial activation is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -290,10 +293,39 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx) {
+function newRunPolicy(ctx, active = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
-  return { policy_version: runPolicy({ policy_version: engine.current }, engine).version,
+  return { policy_version: runPolicy({ policy_version: active ? TEST_KINDS_POLICY_VERSION : engine.current }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
+}
+
+/**
+ * S-01b2 P5r activation (design rev 5 section 5, rev 6 INIT rows): null for an inactive run (no plan carrier, no committed
+ * declaration, no config.testKinds: nothing is bound and policy_version stays as before), else the bound S.test_kinds.
+ * Refusals: test_kinds_policy_required, plan_tags_missing, test_kinds_needs_security_policy, requiredFor's first code,
+ * declaration_invalid/base_invalid, test_kinds_runner_missing, multi_entry_unsupported_v0 (V0: kind evidence from exactly
+ * ONE runner entry) and runner_unsupported (P4r readEntry: an unsupported runner is reported, never bypassed; commands
+ * without `evidence` are untouched and still run in the proof). Without config.testKinds an unresolvable base is "no declaration".
+ */
+async function bindTestKinds(ctx, config, text) {
+  const tk = await import('./test-kinds.mjs'); // the opt-in probe only: an inactive run never loads the evidence modules
+  let declaration = null, baseSha = null;
+  try { ({ declaration, baseSha } = tk.readDeclaration(ctx.repoRoot, config.base ?? 'HEAD')); }
+  catch (e) { if (config.testKinds !== undefined || !['base_invalid', 'repo_unavailable'].includes(e.code)) throw coded(e.code ?? 'declaration_invalid', e.message); }
+  const opted = tk.optIn({ planText: text, declaration });
+  if (config.testKinds === undefined) { if (opted) throw coded('test_kinds_policy_required', 'the plan or the base declaration opts in to test kinds, but the DAG has no config.testKinds'); return null; }
+  if (!opted) throw coded('plan_tags_missing', 'config.testKinds needs a plan test-triggers line or a committed .ship-ticket/test-triggers.json');
+  if (config.securityPolicy !== 2) throw coded('test_kinds_needs_security_policy', 'config.testKinds needs config.securityPolicy 2');
+  const M = await testKindsModules(), req = M.tk.requiredFor({ planText: text, declaration, baseSha });
+  if (req.status !== 'required') throw coded(req.errors[0] ?? 'test_kinds_error', `test kinds requirement refused: ${req.errors.join(', ')}`);
+  const entries = evidenceEntries(config);
+  if (!entries.length) throw coded('test_kinds_runner_missing', 'config.testKinds needs one config.testCommands entry with evidence');
+  if (entries.length > 1) throw coded('multi_entry_unsupported_v0', `kind evidence comes from exactly one runner entry in V0, not ${entries.map(([n]) => n).join(', ')}`);
+  try { M.io.readEntry(flatEntry(...entries[0])); } catch (e) { throw coded(M.io.codeOf(e, 'test_kinds_error'), `config.testCommands.${entries[0][0]} is not a supported evidence runner (V0: ${M.io.RUNNER.cmd} ${M.io.RUNNER.args.join(' ')} [{files}])`); }
+  const line = text.slice(0, text.indexOf(BEGIN)).split(/\r?\n/).map(l => l.trimStart()).find(l => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l));
+  const rec = M.rf.parseRecordedLine(line); // requiredFor already validated exactly one strict line
+  return { base_sha: baseSha, policy: 1, entry: entries[0][0], bound: { tags: req.tags, items: req.items, kinds: req.provenance, protected: [] }, declaration,
+    floor: { line, claimed: rec.claimed, ai: rec.ai }, tests: { globs: declaration?.tests?.globs ?? [] }, records: {}, refused: null, freeze_evidence: null };
 }
 
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
@@ -309,6 +341,7 @@ export async function init(ctx) {
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
+    const testKinds = await bindTestKinds(ctx, dag.config, text);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
@@ -323,7 +356,7 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx) };
+      ...newRunPolicy(ctx, testKinds !== null), ...(testKinds ? { test_kinds: testKinds } : {}) };
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -335,8 +368,12 @@ export async function status(ctx) {
   const E = open(ctx);
   E.load();
   reconcileReviews(E); // in memory only: status writes nothing
-  return view(E, drift(E, { mutate: false }));
+  const out = view(E, drift(E, { mutate: false }));
+  if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
+  return out;
 }
+
+
 
 /** Reconcile attempts, the outbox, spent judgments and staleness after a crash or restart (refused when the binding drifted). */
 export async function resume(ctx) {
@@ -532,7 +569,7 @@ export async function archive(ctx) {
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported']);
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
