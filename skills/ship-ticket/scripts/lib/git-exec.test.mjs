@@ -739,6 +739,7 @@ const SCANNED = ['git-capability.mjs', 'git-exec.mjs'];
 const unpartitioned = (files) => files.filter((f) => !SCANNED.includes(f) && !Object.hasOwn(OUT_OF_SCOPE, f));
 const OUT_OF_SCOPE = {
   'durable-io.mjs': 'S-30a durable state/lock I/O. FINDING (reported, not adopted): gitPath() spawns `git rev-parse --git-path` with encoding utf8, a lossy git-output decode; no S-30c row adopts it yet (asserted below, so a fix updates this entry)',
+  'mutation.test-helper.mjs': 'shared mutation harness (test tooling, imported only by tests); spawns node --test, never git, and decodes TAP output only',
   'shape.mjs': 'S-30b closed-schema validator; no fs, child_process or git output (uses Reflect for own-key reads, which T4a would refuse)',
 };
 /**
