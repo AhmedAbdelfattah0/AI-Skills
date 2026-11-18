@@ -46,9 +46,9 @@
  *
  * Hostile input (L3, L6): proxies are refused before any trap can run (util.types.isProxy); only own DATA descriptors
  * are read, so no getter runs; arrays are bounded by their `length` descriptor before any element is read; every record,
- * map and list is size-checked BEFORE any descriptor read or element visit, and all visits are charged to one budget
+ * map and list is size-checked BEFORE any element visit (an array's own `length` descriptor is read first, to size it), and all visits are charged to one budget
  * (LIMITS.maxWork). Own-key enumeration itself is one native Reflect.ownKeys call that JS cannot interrupt, so P2 bounds
- * what it VISITS, not that single native call: callers (P4/P5) build these records from bounded sources. Nothing throws: any failure is the empty `test_kinds_error` verdict. Outputs carry only
+ * what it VISITS, not that single native call: callers (P4/P5) build these records from bounded sources. Nothing throws: malformed input or a fault is the empty `test_kinds_error` verdict, and a cap breach is `evidence_budget_exceeded`. Outputs carry only
  * closed enums, ids validated against the kind table and the id grammars, and counts (never input text).
  */
 import { types } from 'node:util';
