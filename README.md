@@ -37,7 +37,7 @@ npx github:AhmedAbdelfattah0/AI-Skills install
 
 # install ONE skill, or SEVERAL (space-separated)
 npx github:AhmedAbdelfattah0/AI-Skills install security
-npx github:AhmedAbdelfattah0/AI-Skills install security researcher pr-review
+npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
 
 # the ticket workflow — write the backlog, then implement it ticket by ticket
 npx github:AhmedAbdelfattah0/AI-Skills install generate-ticket ship-ticket
@@ -67,7 +67,7 @@ cd AI-Skills
 
 node scripts/cli.mjs list                        # list skills
 node scripts/cli.mjs install                     # install ALL (symlinked)
-node scripts/cli.mjs install security researcher # install only these
+node scripts/cli.mjs install ship-ticket generate-ticket # install only these
 node scripts/cli.mjs install generate-ticket ship-ticket   # the ticket workflow pair
 node scripts/cli.mjs install --copy              # install ALL as real files (no symlink)
 node scripts/cli.mjs install --target all        # also into Codex + Gemini CLI + Antigravity dirs
@@ -83,7 +83,7 @@ Same behaviour as Option C, no Node required:
 
 ```bash
 ./scripts/install.sh                     # all skills, symlinked (Claude Code)
-./scripts/install.sh security researcher # only these
+./scripts/install.sh ship-ticket generate-ticket # only these
 ./scripts/install.sh generate-ticket ship-ticket   # the ticket workflow pair
 ./scripts/install.sh --copy              # all skills, real files
 ./scripts/install.sh --target codex      # → ~/.agents/skills (OpenAI Codex)
@@ -210,23 +210,19 @@ CI half is portable), and `ship-ticket` / `session-logger` reference Claude Code
 `/compact` and subagents. The knowledge in them still applies; those specific steps are
 Claude-only.
 
-## Skills (23)
+## Skills (17)
 
 | Skill | Extras |
 |---|---|
-| angular-code-quality | `references/` |
+| angular-code-quality | deprecated alias for one release: load `code-quality` (stack: angular) |
 | docs-accuracy | `references/` (claim verification, code samples, docstrings) |
-| backend-code-quality | `references/` |
-| code-quality | `references/` (per-stack rule sets) |
-| cost-reducer | — |
+| backend-code-quality | deprecated alias for one release: load `code-quality` (stack: backend) |
+| code-quality | `references/` (entry + `stack-angular.md` `NG-*`, `stack-backend.md` `BE-*`, constitution, guard, per-stack summaries) |
 | design-prompts | `references/` (core contract with the two gates and the binding, tool adapters for the Claude canvas and code generators, design-system template, motion and finish catalogue, part-2 split, codebase inventory, writer brief, depth standard, verification protocol) |
 | generate-ticket | `references/` (ticket template, CSV schemas, worked example) |
-| linkedin-content-coach | — |
 | marketing-video | `references/` + `scripts/` (factual product videos from real captures: claim-gated timeline, local Remotion render, measured QA, independent frame review, shot-preserving revisions; `.specs/marketing-video/`) |
 | nn-guard | `references/` (generates `.claude/hooks/nn-guard.sh` at install) |
-| pr-review | — (three-pass review of an open GitHub/ADO PR; `.specs/pr-review/`) |
 | project-audit | `references/` + `scripts/` (whole-project assessment, historical-finding continuity guard and read-only report comparison, with optional confirmed publishing as ADO/Jira Bugs or Tasks; `.specs/project-audit/`) |
-| researcher | — |
 | security | — |
 | security-audit | vendored from cloudflare/security-audit-skill; auto-synced daily (`scripts/sync-external.mjs`) |
 | self-healing | — |
@@ -234,7 +230,6 @@ Claude-only.
 | session-restore | — |
 | ship-ticket | `references/` + `scripts/` (contract-first parallel delivery, Claude↔Codex planning debate and review, stable candidate identity, and timing telemetry) |
 | test-quality | `references/` (per-framework: jest-vitest, pytest, phpunit, llm-app-testing) |
-| ux-audit | `references/` + `scripts/` (report-only running-interface audit; preserves DESIGN.md identity locks) |
 | vapt | — (runtime abuse tests committed to the repo; `.specs/vapt/`) |
 
 Run `ai-skills list` (or `node scripts/cli.mjs list`) for the one-line description of each.

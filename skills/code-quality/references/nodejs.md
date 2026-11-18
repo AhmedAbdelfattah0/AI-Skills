@@ -3,9 +3,9 @@
 >
 > **Constitution-level summary only.** For *enforced* backend review — the
 > `BE-*` rule IDs, security tiers, tenant isolation, and the Verification Pass —
-> the **`backend-code-quality` skill is the source of truth** (stack-agnostic,
+> **`stack-backend.md` is the source of truth** (stack-agnostic,
 > not just Node). Use this file to seed a `.code-quality.md` constitution; it
-> must not contradict that skill. If the two ever differ, the skill wins.
+> must not contradict that reference. If the two ever differ, the reference wins.
 
 ## Architecture: Layered (Router → Controller → Service → Repository)
 

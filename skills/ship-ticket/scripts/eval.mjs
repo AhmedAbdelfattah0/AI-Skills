@@ -50,6 +50,7 @@ import { unitProjection, unitStates } from './engine-units.mjs';
 import { withReviews } from './engine-unit-review.mjs';
 import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } from './review-intervals.mjs';
 import { runPolicy } from './engine-policy.mjs';
+import { legacyRows, readEvents } from './measure/events.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -386,6 +387,21 @@ function readUsage(path, skipped) {
   try { return text.startsWith('[') ? JSON.parse(text) : readJsonl(path, skipped); } catch { return fail(`usage file is not JSON or JSONL: ${path}`); }
 }
 
+/**
+ * S-04a2 lost signal of one ticket, passed on to the measurement reader and never printed: the R11/strict reader's counts
+ * for the run log (torn bytes, undecodable, malformed, invalid S-04 events, and `log_loss` records of bytes already moved to a
+ * sidecar, so a recovered loss stays visible) and whether a present engine state is unreadable.
+ * A legacy figure never reads it. Lost usage lines are the report-wide `skipped_usage_lines`.
+ */
+export function lostSignal(dir, ticket) {
+  if (typeof ticket !== 'string' || !SAFE_ID.test(ticket)) throw new TypeError('lostSignal: ticket must be a safe id');
+  const log = join(dir, `${ticket}.jsonl`), statePath = join(dir, `${ticket}.state.json`);
+  const lost = readEvents(existsSync(log) ? readFileSync(log) : Buffer.alloc(0)).lost;
+  let stateUnreadable = false;
+  if (existsSync(statePath)) { try { JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(statePath))); } catch { stateUnreadable = true; } }
+  return { ...lost, state_unreadable: stateUnreadable };
+}
+
 function report(options) {
   if (!options.repo) fail('--repo is required');
   if (Boolean(options.all) === Boolean(options.ticket)) fail('report requires exactly one of --ticket or --all');
@@ -407,7 +423,8 @@ function report(options) {
   for (const ticket of tickets) {
     const log = join(dir, `${ticket}.jsonl`);
     const byRun = new Map();
-    for (const row of existsSync(log) ? readJsonl(log) : []) {
+    // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
+    for (const row of existsSync(log) ? legacyRows(readJsonl(log)) : []) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);

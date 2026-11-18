@@ -642,3 +642,326 @@ test('[R5] benign text is not a marker: prose, script names and the reassess rec
   assert.deepEqual(req(noReassess), BASE, 'the reassess line adds and removes nothing');
   assert.deepEqual(req(swapOnce(FULL, 'risk_reassess: ', 'Risk_Reassess: ')).errors, ['risk_floor_invalid'], 'a damaged reassess key is not ignored');
 });
+
+// ---- S-01b2 P3: requirement provenance (optIn, provenance, kindsForClasses, PROTECTED_TAGS, the declaration `tests` key) ----
+// None of these tests is tagged [R#]: test-kinds-mutation.test.mjs runs only the #83 tagged tests against its mutants.
+/** Every plan the #83 tests build (the full fixture, every near-miss mutant, the RUN-STATE split corpus, near-miss lines added to FULL, and small plans). */
+const P3_PLANS = (() => {
+  const fullLines = new Set(FULL.split('\n'));
+  const mutants = TK.MARKERS.flatMap((m) => corpus(m.id).map(([, p]) => p));
+  const nearLines = [...new Set(mutants.flatMap((p) => p.split(/\r?\n/).filter((l) => !fullLines.has(l))))];
+  return [FULL, ...mutants, ...SPLIT_CORPUS.map(([, p]) => p), ...nearLines.map((nl) => swapOnce(FULL, '# Plan: invoice route\n', `# Plan: invoice route\n${nl}\n`)),
+    ...nearLines.map((nl) => `# Plan\n\n${nl}\n${RS}`), plan('x'), plan('test-triggers: none'), plan('test-triggers: async-state, ui-lifecycle', 'lifecycle-item: L1 x', 'test-waiver: race n/a', floorLine('tenancy')),
+    plan('test-triggers: none', realFloor(['billing_core', 'tenancy'])), plan('test-triggers: none', realFloor([], { changed: true })), planRaw('test-triggers: none'), plan('nothing here', floorLine('tenancy'))];
+})();
+const P3_DECLS = [null, TK.validateDeclaration({ version: 1, tags: { 'feature-flags': ['negative', 'lifecycle-destroy'], money: ['regression'] }, classes: { billing_core: ['money', 'feature-flags'], tenancy: ['repair'] } }), TK.validateDeclaration({ version: 1 })];
+const omitProvenance = ({ provenance, ...rest }) => rest;
+const p3Digest = (fn) => {
+  const h = createHash('sha256');
+  for (const p of P3_PLANS) for (const d of P3_DECLS) for (const baseSha of [null, FB]) h.update(`${JSON.stringify(fn({ planText: p, declaration: d, baseSha }))}\n`);
+  return h.digest('hex');
+};
+
+test('P3 AC5/L5 differential: requiredFor without `provenance` equals the #83 output on every corpus plan (golden captured on main 5a29114 before the change)', (t) => {
+  assert.ok(P3_PLANS.length >= 900, `corpus plans ${P3_PLANS.length}`);
+  t.diagnostic(`golden differential: ${P3_PLANS.length} plans x ${P3_DECLS.length} declarations x 2 bases`);
+  const statuses = new Set(P3_PLANS.flatMap((p) => P3_DECLS.map((d) => TK.requiredFor({ planText: p, declaration: d }).status)));
+  assert.deepEqual([...statuses].sort(), ['not_declared', 'refused', 'required'], 'the corpus reaches every status');
+  assert.equal(p3Digest((a) => omitProvenance(TK.requiredFor(a))), '739efb1cfde46022671d680beddc5933c6d3d2768573913af3bb43002e40cbae');
+});
+
+test('P3 AC1: optIn equals the #83 opt-in expression and requiredFor\'s own opt-in on every corpus plan, its CRLF copy, and every declaration', () => {
+  // the #83 predicate, verbatim from main 5a29114 test-kinds.mjs:189, rebuilt from its exports: the oracle optIn must equal
+  const oracle = (p, d) => Boolean(d) || TK.MARKERS.some((m) => m.opt_in && TK.carriers(TK.planNarrative(p) ?? p, m).length);
+  const seen = new Set();
+  for (const p of P3_PLANS) for (const text of [p, p.replace(/\r?\n/g, '\r\n')]) for (const d of P3_DECLS) {
+    const o = TK.optIn({ planText: text, declaration: d });
+    assert.equal(typeof o, 'boolean');
+    assert.equal(o, oracle(text, d), JSON.stringify(text.slice(0, 80)));
+    assert.equal(TK.requiredFor({ planText: text, declaration: d }).status === 'not_declared', !oracle(text, d), JSON.stringify(text.slice(0, 80))); // the oracle, not optIn, is the expected value
+    seen.add(o);
+  }
+  assert.deepEqual([...seen].sort(), [false, true], 'both outcomes occur in the corpus');
+  // total: a plan that is not a string is opted in (requiredFor refuses it, never `not_declared`)
+  for (const planText of [undefined, null, 1, {}, [], new String('# Plan'), Buffer.from('test-triggers: none')]) {
+    assert.equal(TK.optIn({ planText }), true, String(planText)); assert.equal(TK.requiredFor({ planText }).status, 'refused');
+  }
+  assert.equal(TK.optIn(), true, 'no argument at all is not "nothing declared"');
+  let calls = 0;
+  const notDeclared = `# Plan\n\nnothing\n${RS}`;
+  assert.equal(TK.optIn({ planText: notDeclared }), false);
+  const hostile = [null, 1, 'x', new Proxy({ planText: notDeclared }, {}), Object.defineProperty({}, 'planText', { enumerable: true, get() { calls++; return notDeclared; } }),
+    Object.defineProperty({ planText: notDeclared }, 'declaration', { enumerable: true, get() { calls++; return null; } })];
+  hostile.forEach((arg, i) => assert.equal(TK.optIn(arg), true, `hostile argument #${i} is opted in (fail closed)`));
+  assert.equal(calls, 0, 'no accessor was ever called');
+  // every MARKERS opt-in carrier, valid and near miss, opts in alone; prose does not
+  for (const m of TK.MARKERS.filter((x) => x.opt_in)) for (const [, p] of corpus(m.id)) assert.equal(TK.optIn({ planText: p }), true, m.id);
+  assert.equal(TK.optIn({ planText: `# Plan\n\nThis test triggers a reload.\n${RS}` }), false);
+});
+
+const sourcesOk = (r, decl) => {
+  const table = { ...TK.TAGS, ...Object.fromEntries(Object.entries(decl?.tags ?? {}).map(([t, ks]) => [t, uniqSorted([...(TK.TAGS[t] ?? []), ...ks])])) };
+  for (const [k, srcs] of Object.entries(r.provenance)) {
+    assert.ok(srcs.length > 0 && srcs.every((s) => /^(tag|class|surface):[A-Za-z0-9_-]+$/.test(s)), `${k}: ${srcs}`);
+    assert.deepEqual(srcs, uniqSorted(srcs), 'sorted and unique');
+    const viaTags = srcs.filter((s) => s.startsWith('tag:')).map((s) => s.slice(4));
+    assert.ok(viaTags.length > 0 && viaTags.every((t) => r.tags.includes(t) && table[t].includes(k)), `${k}: every tag source is a required tag whose row has the kind`);
+  }
+  for (const t of r.tags) for (const k of table[t]) assert.ok(r.provenance[k].includes(`tag:${t}`), `${t} -> ${k} recorded`);
+};
+test('P3 AC2: provenance keys equal the kinds set on every corpus output (CRLF copy too); each source names a tag whose row requires the kind', () => {
+  let required = 0;
+  for (const p of P3_PLANS) for (const d of P3_DECLS) {
+    const r = TK.requiredFor({ planText: p, declaration: d });
+    assert.deepEqual(Object.keys(r.provenance), r.kinds, 'keys equal the kinds, in the same sorted order');
+    if (r.status !== 'required') { assert.deepEqual(r.provenance, {}); continue; }
+    required++; sourcesOk(r, d);
+    assert.deepEqual(TK.requiredFor({ planText: p.replace(/\r?\n/g, '\r\n'), declaration: d }).provenance, r.provenance, 'CRLF copy (L10)');
+  }
+  assert.ok(required >= 200, `required outputs ${required}`);
+  // pinned on the full fixture (async-state plan tag, tenancy floor class, request-handler surface)
+  assert.deepEqual(BASE.provenance, {
+    'error-twin': ['tag:async-state'], 'stale-N2': ['tag:async-state'],
+    negative: ['class:tenancy', 'surface:request-handler', 'tag:async-state', 'tag:input-path', 'tag:tenancy'],
+    ownership: ['class:tenancy', 'tag:tenancy'], 'real-entrypoint': ['surface:request-handler', 'tag:entrypoint'] });
+  // a declared class reaches a protected tag: the kind carries both the class and the tag
+  const d = P3_DECLS[1];
+  const r = TK.requiredFor({ planText: plan('test-triggers: none', realFloor(['billing_core'])), declaration: d });
+  assert.deepEqual(r.provenance, { 'lifecycle-destroy': ['class:billing_core', 'tag:feature-flags'], negative: ['class:billing_core', 'tag:feature-flags', 'tag:money'], race: ['class:billing_core', 'tag:money'], regression: ['class:billing_core', 'tag:money'] });
+  // the CLI prints it, and a CLI-level refusal carries an empty one
+  const repoDir = repo(null);
+  const a = json(cli(['require', '--repo', repoDir.dir, '--base', repoDir.base, '--plan', file(plan('test-triggers: entrypoint', realFloor([], { base: repoDir.base.slice(0, 12) })), 'plan.md')]));
+  assert.deepEqual(a.provenance, { 'real-entrypoint': ['tag:entrypoint'] });
+  assert.deepEqual(json(cli(['require', '--repo', repoDir.dir, '--base', 'no-such-ref', '--plan', file(plan('x'), 'p.md')])), { status: 'refused', kinds: [], items: [], waiver_requested: [], tags: [], errors: ['base_invalid'], provenance: {} });
+});
+
+test('P3: PROTECTED_TAGS is frozen, names table tags, and with provenance decides protection (tag reached directly, through a class, or a surface)', () => {
+  assert.deepEqual([...TK.PROTECTED_TAGS].sort(), ['auth', 'money', 'tenancy']); assert.ok(Object.isFrozen(TK.PROTECTED_TAGS));
+  for (const t of TK.PROTECTED_TAGS) assert.ok(Object.hasOwn(TK.TAGS, t), t);
+  const isProtected = (srcs) => srcs.some((s) => s.startsWith('surface:') || (s.startsWith('tag:') && TK.PROTECTED_TAGS.includes(s.slice(4))));
+  const prot = (r) => r.kinds.filter((k) => isProtected(r.provenance[k]));
+  assert.deepEqual(prot(BASE), ['negative', 'ownership', 'real-entrypoint'], 'error-twin and stale-N2 come from async-state only');
+  assert.deepEqual(prot(req(plan('test-triggers: money'))), ['negative', 'race'], 'directly');
+  assert.deepEqual(prot(req(plan('test-triggers: none', realFloor(['billing_core'])), P3_DECLS[1])), ['negative', 'race', 'regression'], 'through a declared class mapping');
+  assert.deepEqual(prot(req(plan('test-triggers: async-state'))), []);
+});
+
+const P3_CLASS_SETS = [[], ['tenancy'], ['auth', 'money'], ['billing_core'], ['billing_core', 'tenancy'], [TK.CHANGED], [TK.CHANGED, 'concurrency'], ['constructor'], ['unmapped-x', 'tenancy']];
+/** The REAL producer's record line for a class set (risk-floor.mjs writes `risk_declaration_changed` itself, from declChanged). */
+const floorFor = (classes) => realFloor(classes.filter((c) => c !== TK.CHANGED), { changed: classes.includes(TK.CHANGED) });
+test('P3 AC3: kindsForClasses equals requiredFor\'s class mapping (one code path) for every class set and declaration, also restored from JSON', () => {
+  let ok = 0, refused = 0;
+  for (const classes of P3_CLASS_SETS) for (const d of P3_DECLS) {
+    const r = TK.requiredFor({ planText: plan('test-triggers: none', floorFor(classes)), declaration: d });
+    assert.ok(r.status !== 'not_declared');
+    for (const declaration of [d, d && JSON.parse(JSON.stringify(d))]) {
+      const k = TK.kindsForClasses({ classes, declaration });
+      if (r.status === 'required') { ok++; assert.deepEqual(k, { ok: true, tags: r.tags, kinds: r.kinds, provenance: r.provenance, errors: [] }, `${classes} ${JSON.stringify(d)}`); }
+      else { refused++; assert.deepEqual(r.errors, ['risk_class_unmapped']); assert.deepEqual(k, { ok: false, tags: [], kinds: [], provenance: {}, errors: ['risk_class_unmapped'] }, `${classes}`); }
+    }
+  }
+  assert.ok(ok >= 20 && refused >= 4, `ok ${ok} refused ${refused}`);
+  // one code path, structurally: the class lookup exists once in the module, inside the loop both callers run
+  const src = readFileSync(SCRIPT, 'utf8');
+  assert.equal(src.split('Object.hasOwn(declaration.classes, c)').length, 2); assert.equal(src.split('classTags(').length, 4, 'one definition and two callers');
+  // add-only over classes: a superset of classes never loses a kind (I1 for the reassessed source)
+  for (const a of P3_CLASS_SETS) for (const b of P3_CLASS_SETS) {
+    const x = TK.kindsForClasses({ classes: a, declaration: P3_DECLS[1] }), y = TK.kindsForClasses({ classes: [...new Set([...a, ...b])], declaration: P3_DECLS[1] });
+    if (x.ok && y.ok) for (const kind of x.kinds) assert.ok(y.kinds.includes(kind), `${a} + ${b} keeps ${kind}`);
+    if (!x.ok) assert.equal(y.ok, false, 'an unmapped class stays a refusal when more classes are added');
+  }
+});
+
+test('P3 AC3 / L6: kindsForClasses never throws, never calls an accessor, and refuses hostile classes or declarations with a code', () => {
+  let calls = 0;
+  const getter = (o, k, v) => Object.defineProperty(o, k, { enumerable: true, get() { calls++; return v; } });
+  const sparse = ['tenancy']; sparse.length = 3;
+  const classBad = [undefined, null, 'tenancy', { 0: 'tenancy', length: 1 }, [1], ['Tenancy'], ['none'], [''], ['a b'], sparse, getter([], '0', 'tenancy'),
+    new Proxy(['tenancy'], {}), Array.from({ length: 257 }, (_, i) => `c${i}`), [`x${'a'.repeat(64)}`]];
+  classBad.forEach((classes, i) => assert.deepEqual(TK.kindsForClasses({ classes }), { ok: false, tags: [], kinds: [], provenance: {}, errors: ['risk_floor_invalid'] }, `classes #${i}`));
+  const ok = { tags: { 'feature-flags': ['negative'] }, classes: { billing_core: ['feature-flags'] } };
+  const declBad = ['x', [], new Proxy(ok, {}), getter({}, 'classes', { billing_core: ['money'] }), { classes: getter({}, 'billing_core', ['money']) }, { classes: { billing_core: 'money' } },
+    { classes: { billing_core: ['telepathy'] } }, { tags: { x: ['telepathy'] } }, { tags: { x: [] } }, { classes: { 'Bad Name': ['money'] } }, { classes: { none: ['money'] } },
+    { classes: null }, { classes: ['money'] }, { classes: { [Symbol('s')]: ['money'] } }, { tags: { constructor: ['negative', 'nope'] } }];
+  declBad.forEach((declaration, i) => assert.deepEqual(TK.kindsForClasses({ classes: ['billing_core'], declaration }).errors, ['declaration_invalid'], `declaration #${i}`));
+  assert.equal(calls, 0, 'no accessor was ever called');
+  assert.deepEqual(TK.kindsForClasses().errors, ['risk_floor_invalid']);
+  // the argument itself: not plain data refuses with a code, and its accessors are never called
+  for (const arg of [null, 7, 'tenancy', [['tenancy']], new Proxy({ classes: ['tenancy'] }, {}), getter({}, 'classes', ['tenancy'])]) assert.deepEqual(TK.kindsForClasses(arg).errors, ['risk_floor_invalid']);
+  assert.deepEqual(TK.kindsForClasses(getter({ classes: ['tenancy'] }, 'declaration', null)).errors, ['declaration_invalid']);
+  // the producer's largest record: risk-floor.mjs allows 200 declared classes plus risk_declaration_changed (201 <= the 256 cap)
+  const most = [...Array.from({ length: 200 }, (_, i) => `c${i}`), TK.CHANGED];
+  const big = TK.requiredFor({ planText: plan('test-triggers: none', floorFor(most)) });
+  assert.deepEqual(big.errors, ['risk_class_unmapped'], 'the producer accepted the set; the table does not map it');
+  assert.deepEqual(TK.kindsForClasses({ classes: most }).errors, ['risk_class_unmapped'], 'the same answer, not a size refusal');
+  assert.equal(TK.kindsForClasses({ classes: ['billing_core'], declaration: ok }).ok, true);
+  // a JSON-restored (normal-prototype) declaration never resolves an inherited name
+  assert.deepEqual(TK.kindsForClasses({ classes: ['constructor'], declaration: JSON.parse(JSON.stringify(P3_DECLS[1])) }).errors, ['risk_class_unmapped']);
+  assert.deepEqual(TK.kindsForClasses({ classes: ['constructor'] }).errors, ['risk_class_unmapped']);
+  for (const c of ['__proto__', 'toString', 'hasOwnProperty']) assert.deepEqual(TK.kindsForClasses({ classes: [c] }).errors, ['risk_floor_invalid'], `${c} is not a class name`);
+});
+
+test('P3 AC4: the declaration key `tests` is validated (globs by the #72 grammar, runner modules by RUNNER_MODULE) and fails closed', () => {
+  const v = TK.validateDeclaration({ version: 1, tests: { globs: ['e2e/**/*.ts', 'src/**/*.it.ts', 'e2e/**/*.ts'], runner_modules: ['uvu', '@acme/test-kit', 'node:test', 'bun:test', 'mocha/lib/interfaces'] } });
+  assert.deepEqual(v.tests, { globs: ['e2e/**/*.ts', 'src/**/*.it.ts'], runner_modules: ['@acme/test-kit', 'bun:test', 'mocha/lib/interfaces', 'node:test', 'uvu'] });
+  assert.deepEqual(TK.validateDeclaration({ version: 1, tests: { globs: ['t/**'] } }).tests, { globs: ['t/**'], runner_modules: [] });
+  assert.deepEqual(TK.validateDeclaration({ version: 1 }).tests, { globs: [], runner_modules: [] }, 'absent: both lists empty');
+  for (const m of ['node:test', 'vitest', '@jest/globals', 'bun:test', '@playwright/test']) assert.match(m, TK.RUNNER_MODULE, `the built-in runner ${m} is in the grammar`);
+  let calls = 0;
+  const getter = (o, k, val) => Object.defineProperty(o, k, { enumerable: true, get() { calls++; return val; } });
+  const bad = [null, [], {}, 'e2e/**', { globs: [] }, { globs: 'x' }, { globs: [1] }, { globs: ['a?b'] }, { globs: ['src/**x'] }, { globs: ['[ab]'] }, { globs: ['a\\b'] }, { globs: [''] },
+    { globs: Array.from({ length: 65 }, (_, i) => `t${i}/**`) }, { extra: ['x'] }, { globs: ['t/**'], extra: 1 }, { [Symbol('s')]: ['x'] }, { runner_modules: [] },
+    ...['./local', '../x', '/abs', 'vitest?x', 'vitest#f', '%76itest', 'Vitest', 'vi test', 'node:', 'node:Test', '@scope', '@scope/', 'a//b', 'a/./b', 'a/../b', 'http://x', 'vitest\n', 'é', 'file:x', 'a'.repeat(65)].map((m) => ({ runner_modules: [m] })),
+    { runner_modules: Array.from({ length: 17 }, (_, i) => `r${i}`) }, { runner_modules: [null] }, new Proxy({ globs: ['t/**'] }, {}), { globs: new Proxy(['t/**'], {}) }, getter({}, 'globs', ['t/**']), { globs: getter([], '0', 't/**') }];
+  bad.forEach((tests, i) => assert.throws(() => TK.validateDeclaration({ version: 1, tests }), (e) => e.code === 'declaration_invalid', `tests #${i}`));
+  assert.throws(() => TK.validateDeclaration(getter({ version: 1 }, 'tests', { globs: ['t/**'] })), (e) => e.code === 'declaration_invalid');
+  assert.throws(() => TK.validateDeclaration(new Proxy({ version: 1 }, {})), (e) => e.code === 'declaration_invalid');
+  assert.throws(() => TK.validateDeclaration(getter({}, 'version', 1)), (e) => e.code === 'declaration_invalid', 'a top-level accessor is refused before any read');
+  assert.equal(calls, 0, 'no accessor was ever called');
+});
+
+test('P3 AC4: `tests` never changes a requirement: every corpus plan reads the same with and without it', () => {
+  const tests = { globs: ['e2e/**/*.ts'], runner_modules: ['uvu'] };
+  const pairs = [[{ version: 1 }, { version: 1, tests }], [{ version: 1, tags: { 'feature-flags': ['negative'] }, classes: { billing_core: ['money'] } }, { version: 1, tags: { 'feature-flags': ['negative'] }, classes: { billing_core: ['money'] }, tests }]];
+  for (const [a, b] of pairs) {
+    const da = TK.validateDeclaration(a), db = TK.validateDeclaration(b);
+    for (const p of P3_PLANS) assert.deepEqual(TK.requiredFor({ planText: p, declaration: db }), TK.requiredFor({ planText: p, declaration: da }));
+  }
+});
+
+test('P3 AC4: `tests` is read from BASE only: working-tree edits and a branch-added declaration are not read; malformed at base refuses', () => {
+  const tests = { globs: ['e2e/**/*.ts'], runner_modules: ['uvu'] };
+  const r = repo({ version: 1, tests });
+  assert.deepEqual(TK.readDeclaration(r.dir, r.base).declaration.tests, tests);
+  writeFileSync(join(r.dir, TK.DECLARATION_PATH), JSON.stringify({ version: 1, tests: { globs: ['**'], runner_modules: ['evil'] } }));
+  assert.deepEqual(TK.readDeclaration(r.dir, r.base).declaration.tests, tests, 'working tree ignored');
+  G(r.dir, 'add', '-A'); G(r.dir, 'commit', '-q', '-m', 'branch widens the evidence scope');
+  assert.deepEqual(TK.readDeclaration(r.dir, r.base).declaration.tests, tests, 'a branch commit is not the base');
+  const n = repo(null);
+  mkdirSync(join(n.dir, '.ship-ticket'), { recursive: true }); writeFileSync(join(n.dir, TK.DECLARATION_PATH), JSON.stringify({ version: 1, tests }));
+  G(n.dir, 'add', '-A'); G(n.dir, 'commit', '-q', '-m', 'branch adds a declaration');
+  assert.equal(TK.readDeclaration(n.dir, n.base).declaration, null, 'a branch-added declaration is not read');
+  assert.equal(json(cli(['require', '--repo', n.dir, '--base', n.base, '--plan', file(plan('x'), 'p.md')])).status, 'not_declared', 'so it does not opt the run in either');
+  for (const t of [{ globs: ['a?b'] }, { runner_modules: ['./x'] }, {}]) {
+    const m = repo({ version: 1, tests: t });
+    assert.throws(() => TK.readDeclaration(m.dir, m.base), (e) => e.code === 'declaration_invalid');
+    const pf = file(plan('test-triggers: none', realFloor([], { base: m.base.slice(0, 12) })), 'plan.md');
+    const c = cli(['require', '--repo', m.dir, '--base', m.base, '--plan', pf]);
+    assert.equal(c.status, 1); assert.deepEqual(json(c).errors, ['declaration_invalid']);
+  }
+});
+
+test('P3 declared deltas (L5): the only #83 behaviour changes, each pinned', () => {
+  // 1. every requiredFor and CLI output carries `provenance` (pinned by AC2 and the golden differential above)
+  for (const p of [plan('x'), plan('test-triggers: telepathy'), plan('test-triggers: money')]) assert.ok(Object.hasOwn(req(p), 'provenance'));
+  // 2. validateDeclaration returns `tests` (empty lists when absent); 3. a `tests` key was declaration_invalid in #83 and is accepted now
+  assert.deepEqual(Object.keys(TK.validateDeclaration({ version: 1 })).sort(), ['classes', 'tags', 'tests']);
+  // 4. an UNVALIDATED plain-object declaration no longer resolves an inherited class name (#83 threw a TypeError for `constructor`)
+  const plainDecl = { tags: {}, classes: {} };
+  let r4;
+  assert.doesNotThrow(() => { r4 = req(plan('test-triggers: none', realFloor(['constructor'])), plainDecl); });
+  assert.deepEqual(r4.errors, ['risk_class_unmapped']);
+  // 5. validateDeclaration refuses a Proxy, or a TOP-LEVEL or `tests` accessor, instead of evaluating it (nested tags/classes are #83's reads, unchanged)
+  assert.throws(() => TK.validateDeclaration(Object.defineProperty({ version: 1 }, 'tags', { enumerable: true, get: () => ({}) })), (e) => e.code === 'declaration_invalid');
+});
+
+// ---- S-01b2 P3 repair: own-data reads, one input reader for optIn and requiredFor, and the origin table ----
+test('P3 L6: validateDeclaration reads only own data: a non-plain prototype is refused with the typed code, and no inherited getter runs', () => {
+  let calls = 0;
+  const trap = (k) => ({ get [k]() { calls++; throw new Error(`inherited ${k} ran`); } });
+  const inherits = (proto, own = { version: 1 }) => Object.assign(Object.create(proto), own);
+  const hostile = [inherits(trap('tags')), inherits(trap('tests')), inherits(trap('classes')), inherits(trap('version'), {}), inherits({ tests: { globs: ['**'], runner_modules: ['evil'] } }),
+    inherits(Object.create(null)), new (class Declared { constructor() { this.version = 1; } })()];
+  hostile.forEach((d, i) => assert.throws(() => TK.validateDeclaration(d), (e) => e.code === 'declaration_invalid', `hostile prototype #${i}`));
+  assert.equal(calls, 0, 'no inherited getter was ever called');
+  assert.deepEqual(Object.keys(TK.validateDeclaration(Object.assign(Object.create(null), { version: 1 }))).sort(), ['classes', 'tags', 'tests'], 'a null prototype is plain data');
+  // a polluted Object.prototype is not read either: the four keys come from own data descriptors only
+  const evil = { globs: ['**'], runner_modules: ['evil'] };
+  for (const key of ['tests', 'tags', 'classes']) {
+    try {
+      Object.prototype[key] = key === 'tests' ? evil : { polluted: key === 'tags' ? ['negative'] : ['money'] };
+      const v = TK.validateDeclaration({ version: 1 });
+      assert.deepEqual(v.tests, { globs: [], runner_modules: [] }, `polluted ${key}: tests stay empty`);
+      assert.deepEqual([Object.keys(v.tags), Object.keys(v.classes)], [[], []], `polluted ${key}: nothing inherited is accepted`);
+      assert.throws(() => TK.validateDeclaration({}), (e) => e.code === 'declaration_invalid', 'an inherited version is not a version');
+    } finally { delete Object.prototype[key]; }
+  }
+  assert.ok(!('tests' in {}) && !('tags' in {}) && !('classes' in {}), 'Object.prototype is clean again');
+});
+
+test('P3 optIn and requiredFor read the SAME own-data fields: they agree on inherited, accessor and non-plain arguments', () => {
+  let calls = 0;
+  const notDeclared = '# Plan\nnothing\n';
+  const decl = TK.validateDeclaration({ version: 1 });
+  const getter = (o, k, v) => Object.defineProperty(o, k, { enumerable: true, get() { calls++; return v; } });
+  const cases = [
+    ['inherited declaration, own plan text', Object.assign(Object.create({ declaration: decl }), { planText: notDeclared }), false, 'not_declared'],
+    ['inherited plan text', Object.create({ planText: notDeclared }), true, 'refused'],
+    ['accessor declaration', getter({ planText: notDeclared }, 'declaration', decl), true, 'refused'],
+    ['accessor plan text', getter({}, 'planText', notDeclared), true, 'refused'],
+    ['own data only', { planText: notDeclared, declaration: null }, false, 'not_declared'],
+    ['own declaration', { planText: notDeclared, declaration: decl }, true, 'refused'],
+    ['proxy', new Proxy({ planText: notDeclared }, {}), true, 'refused'],
+    ['null', null, true, 'refused'], ['undefined', undefined, true, 'refused'], ['a string', 'x', true, 'refused'],
+  ];
+  for (const [label, arg, opted, status] of cases) {
+    const o = TK.optIn(arg), r = TK.requiredFor(arg);
+    assert.equal(o, opted, `${label}: optIn`); assert.equal(r.status === 'not_declared', !opted, `${label}: requiredFor`);
+    if (status === 'not_declared') assert.equal(r.status, status, label); else assert.notEqual(r.status, 'not_declared', label);
+  }
+  assert.equal(TK.requiredFor(null).status, 'refused'); assert.deepEqual(TK.requiredFor(undefined).errors, ['plan_invalid']);
+  assert.equal(calls, 0, 'no accessor was ever called');
+});
+
+test('P3 L1: kindsForClasses refuses a declaration map over 64 entries, a proxied tags or classes map, and a proxied empty class list', () => {
+  const many = (n, v) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`t${i}`, v]));
+  const at64 = TK.kindsForClasses({ classes: ['money'], declaration: { tags: many(64, ['negative']), classes: {} } });
+  assert.equal(at64.ok, true, 'exactly 64 entries is within the cap');
+  for (const field of ['tags', 'classes']) {
+    const decl = { tags: field === 'classes' ? { x: ['negative'] } : many(65, ['negative']), classes: field === 'classes' ? many(65, ['money']) : {} };
+    assert.deepEqual(TK.kindsForClasses({ classes: ['money'], declaration: decl }).errors, ['declaration_invalid'], `65 ${field} entries`);
+  }
+  let traps = 0;
+  const spy = (target) => new Proxy(target, { ownKeys(t) { traps++; return Reflect.ownKeys(t); }, getOwnPropertyDescriptor(t, k) { traps++; return Reflect.getOwnPropertyDescriptor(t, k); } });
+  assert.deepEqual(TK.kindsForClasses({ classes: ['money'], declaration: { tags: spy({ x: ['negative'] }) } }).errors, ['declaration_invalid'], 'a proxied tags map');
+  assert.deepEqual(TK.kindsForClasses({ classes: ['money'], declaration: { classes: spy({ billing_core: ['money'] }) } }).errors, ['declaration_invalid'], 'a proxied classes map');
+  assert.equal(traps, 0, 'a proxy is refused before any trap runs');
+  assert.deepEqual(TK.kindsForClasses({ classes: new Proxy([], {}) }), { ok: false, tags: [], kinds: [], provenance: {}, errors: ['risk_floor_invalid'] }, 'a proxied empty class list');
+  assert.deepEqual(TK.kindsForClasses({ classes: [] }), { ok: true, tags: [], kinds: [], provenance: {}, errors: [] }, 'the real empty set stays accepted');
+});
+
+// The origin table, written from references/prove.md (the ten tags and their kinds) and SURFACE_TAGS (the eleven boundary kinds), not
+// derived from the implementation: a class named like a tag is that tag, and a surface adds its tags; each carries its own origin.
+const TAG_KINDS = { 'async-state': ['stale-N2', 'error-twin', 'negative'], 'ui-lifecycle': ['lifecycle-destroy'], concurrency: ['race'], money: ['negative', 'race'], tenancy: ['negative', 'ownership'],
+  auth: ['negative', 'ownership'], 'input-path': ['negative'], 'shared-contract': ['contract-producer', 'contract-consumer'], entrypoint: ['real-entrypoint'], repair: ['regression'] };
+const SURFACE_TAG_LIST = { 'request-handler': ['input-path', 'entrypoint'], 'auth-lifecycle': ['auth'], 'external-input-operation': ['input-path'], 'rendering-sink': ['input-path'], 'server-input': ['input-path'],
+  'file-path': ['input-path'], 'client-storage': ['input-path'], 'outbound-data': ['input-path'], 'async-consumer': ['concurrency', 'input-path'], 'security-config': ['entrypoint'], 'business-invariant': ['money'] };
+/** kind -> sorted sources, for tags (each with the one origin that reached it) computed from the literal tables only. */
+const expectedProvenance = (reached) => {
+  const by = {};
+  for (const [tag, origin] of reached) for (const k of TAG_KINDS[tag]) (by[k] ??= new Set()).add(`tag:${tag}`).add(origin);
+  return Object.fromEntries(Object.keys(by).sort().map((k) => [k, [...by[k]].sort()]));
+};
+const surfacePlan = (kind) => {
+  const facts = Object.fromEntries(Object.entries(VAPT.fact_vocabulary).filter(([, v]) => v.type === 'bool').map(([k]) => [k, false]));
+  const sel = SP.selectControls(SP.loadCatalog(), { security_policy: 2, surfaces: [{ boundary_id: 'GET /a/:id', kind, path: 'src/a.ts', principals: ['anonymous'] }],
+    facts: { ...facts, boundaries: [kind], principals: ['anonymous'] }, evidence: Object.fromEntries(Object.keys(facts).map((k) => [k, 'src/a.ts:handler'])) });
+  assert.equal(sel.ok, true, `${kind}: ${JSON.stringify(sel)}`);
+  return `# Plan\n\ntest-triggers: none\n${realFloor()}\n\n${SP.renderSection3a(sel)}\n${RS}`;
+};
+test('P3 L1/L12: provenance records the class origin of every built-in class and the surface origin of every boundary kind (independent table)', () => {
+  assert.deepEqual(Object.keys(TK.TAGS).sort(), Object.keys(TAG_KINDS).sort(), 'the table covers all ten built-in classes');
+  assert.deepEqual(Object.keys(TK.SURFACE_TAGS).sort(), Object.keys(SURFACE_TAG_LIST).sort(), 'the table covers all eleven surface mappings');
+  assert.equal(Object.keys(TAG_KINDS).length, 10); assert.equal(Object.keys(SURFACE_TAG_LIST).length, 11);
+  for (const c of Object.keys(TAG_KINDS)) {
+    const want = expectedProvenance([[c, `class:${c}`]]);
+    assert.deepEqual(TK.kindsForClasses({ classes: [c] }).provenance, want, `kindsForClasses class:${c}`);
+    const r = req(plan('test-triggers: none', realFloor([c])));
+    assert.equal(r.status, 'required', c); assert.deepEqual(r.provenance, want, `requiredFor class:${c}`);
+  }
+  for (const [s, tags] of Object.entries(SURFACE_TAG_LIST)) {
+    const r = req(surfacePlan(s));
+    assert.equal(r.status, 'required', `${s}: ${r.errors}`);
+    assert.deepEqual(r.provenance, expectedProvenance(tags.map((t) => [t, `surface:${s}`])), `surface:${s}`);
+  }
+});

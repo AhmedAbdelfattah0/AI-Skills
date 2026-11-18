@@ -1,6 +1,7 @@
 /**
  * Durable I/O shared by every writer of engine state: the atomic JSON state write and the
- * per-ticket engine lock, moved verbatim from engine-io.mjs (S-30a), which re-exports them.
+ * per-ticket engine lock, moved verbatim from engine-io.mjs (S-30a), which re-exports them. S-04a2 adds `renameRetrying`
+ * (the win32 rename retry, extracted from writeStateAtomic and also used by run-log-io's quarantine replace).
  * Node built-ins plus engine-quiesce.mjs (itself free of local imports), so any script can
  * import this module without a cycle.
  *
@@ -74,6 +75,23 @@ export function gitPath(repoRoot, rel) {
 }
 
 /**
+ * Replace `to` with `from` by rename. On win32 a rename EPERM/EBUSY/EACCES (antivirus, indexers) is retried up to 10 attempts,
+ * waiting `wait(10 * attempt)` between them; elsewhere, and for any other error, it is thrown at once. The caller must not
+ * hold `to` open: win32 refuses to replace an open file, and no retry fixes a handle the caller itself keeps.
+ * It is async: even when the first rename succeeds, awaiting it yields to the microtask queue before the caller's next step.
+ * The caller is suspended meanwhile, so for writeStateAtomic the order rename -> `dir-fsync` hook -> directory fsync is unchanged
+ * (pinned by durable-io.test.mjs "writeStateAtomic order").
+ */
+export async function renameRetrying(from, to, { rename = renameSync, platform = process.platform, wait = delay } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try { rename(from, to); return; } catch (e) {
+      if (platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code) || attempt >= 10) throw e;
+      await wait(10 * attempt);
+    }
+  }
+}
+
+/**
  * Atomically persist `state` as JSON: temp write, fsync, rename, directory fsync,
  * each preceded by its hook boundary. On win32 a rename EPERM/EBUSY/EACCES is retried
  * up to 10 attempts; elsewhere it is thrown at once. A short write, or any failure before the
@@ -94,12 +112,7 @@ export async function writeStateAtomic(file, state, { hooks, fs = {}, platform =
     fsync(fd);
     closeSync(fd); fd = null;
     await boundary(hooks, 'rename', { file });
-    for (let attempt = 1; ; attempt++) {
-      try { rename(tmp, file); break; } catch (e) {
-        if (platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code) || attempt >= 10) throw e;
-        await delay(10 * attempt);
-      }
-    }
+    await renameRetrying(tmp, file, { rename, platform });
     renamed = true;
     await boundary(hooks, 'dir-fsync', { file });
     if (platform !== 'win32') {

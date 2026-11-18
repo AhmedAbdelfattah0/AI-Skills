@@ -13,7 +13,7 @@
 #   all          claude + agents + gemini + antigravity
 #
 #   ./scripts/install.sh                          # all skills → Claude Code, symlinked
-#   ./scripts/install.sh security researcher      # only the named skills
+#   ./scripts/install.sh ship-ticket generate-ticket     # only the named skills
 #   ./scripts/install.sh --copy                   # real files instead of symlinks
 #   ./scripts/install.sh --target codex           # all skills → OpenAI Codex
 #   ./scripts/install.sh --target all security    # one skill → every tool
@@ -94,6 +94,14 @@ fi
 TARGETS=()
 if [ "${#NAMES[@]}" -gt 0 ]; then
   for name in "${NAMES[@]}"; do
+    # Retired aliases hold no rules (O-6; CQ-4 removes them). This script writes no
+    # manifest, so `update` could never add the successor: refuse instead.
+    case "$name" in
+      angular-code-quality|backend-code-quality)
+        echo "❌ $name is a deprecated alias with no rules: install code-quality instead," >&2
+        echo "   or run 'node scripts/cli.mjs install $name', which installs code-quality beside it." >&2
+        exit 1 ;;
+    esac
     if [ ! -f "$REPO_SKILLS/$name/SKILL.md" ]; then
       echo "❌ unknown skill: $name (run 'node scripts/cli.mjs list' or ls skills/)" >&2
       exit 1
