@@ -1,16 +1,17 @@
 /**
  * S-01b2 P2: the test-kind verdict core (engine-test-kinds.mjs), a pure function of
- * requirement x evidence x trusted waivers x reassessed classes. Design: S-01b2-design.md rev 3, section 8 (P2) and the
- * section 6 outcome table rows 14, 19, 20, 21, 22 and 22a.
+ * requirement x evidence x trusted waivers x reassessed classes. Design: S-01b2-design.md rev 5, section 8 (P2) and the
+ * section 6 outcome table rows 16 (a P2 work cap), 17 (an exception), 19 (an unmapped reassessed class), 20a-20c (waiver and
+ * missing subjects), 29 (an unknown marker) and 30 (waiver outcomes).
  *
  * Claim level: these tests prove properties of the PURE verdict over the inputs it is given (requirement records,
  * already-counted evidence ids, already-matched waivers). They do not prove that the scanner counts a marker (P1), that the
  * evidence is bound to a candidate (P4), that a waiver is trusted (P6) or that any freeze point calls the verdict (P5a/P5b).
  *
- * `kindsForClasses` and the protected tag set are INJECTED (P3 owns them in test-kinds.mjs; neither is on main at
- * 5a29114). Unit tests inject a table-driven stub. The [R12] integration tests inject an adapter that calls main's REAL
- * `requiredFor` (the only class loop on main) and compare the verdict with `requiredFor` and `checkTitles`: they prove
- * agreement with main's requirement code, not with P3's future function.
+ * `kindsForClasses` and the protected tag set are INJECTED, and P3 owns both in test-kinds.mjs (on main since #91). Unit tests
+ * inject a table-driven stub that returns P3's REAL result shape `{ ok, tags, kinds, provenance, errors }`. [R12] and [R14]
+ * inject the REAL imported `kindsForClasses` and `PROTECTED_TAGS`: [R12] compares the verdict with `requiredFor` and
+ * `checkTitles`; [R14] is the seam test that fails if P3's output shape (or P2's reading of it) changes.
  *
  * Tests tagged [R#] are the ones the mutation check (the last test) runs against each mutant.
  */
@@ -22,11 +23,11 @@ import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { testKindsVerdict, CODES, POINTS, LIMITS } from './engine-test-kinds.mjs';
-import { KINDS, TAGS, SURFACE_TAGS, ITEM_ID, requiredFor, checkTitles, validateDeclaration, CHANGED } from './test-kinds.mjs';
+import { KINDS, TAGS, SURFACE_TAGS, ITEM_ID, PROTECTED_TAGS, requiredFor, checkTitles, validateDeclaration, kindsForClasses, CHANGED } from './test-kinds.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILLS = join(HERE, '..', '..');
-const PROTECTED = ['money', 'tenancy', 'auth'];
+const PROTECTED = [...PROTECTED_TAGS];
 const uniq = (xs) => [...new Set(xs)].sort();
 
 // ---- the injected stub: class -> tags, then the REAL TAGS table for tag -> kinds ----
@@ -34,19 +35,20 @@ const CLASS_TAGS = { payments: ['money'], ui: ['ui-lifecycle'], data: ['tenancy'
 function addSources(kinds, tag, extra) {
   for (const k of TAGS[tag]) kinds[k] = uniq([...(kinds[k] ?? []), ...extra, `tag:${tag}`]);
 }
-function stubKfc(classes) {
-  const kinds = {};
+/** P3's real shape: `{ ok, tags, kinds:[kind], provenance:{<kind>:[source]}, errors }`, called with ONE object. */
+function stubKfc({ classes }) {
+  const provenance = {}, tags = [];
   for (const c of classes) {
-    if (!Object.hasOwn(CLASS_TAGS, c)) return { ok: false, code: 'risk_class_unmapped' };
-    for (const t of CLASS_TAGS[c]) addSources(kinds, t, [`class:${c}`]);
+    if (!Object.hasOwn(CLASS_TAGS, c)) return { ok: false, tags: [], kinds: [], provenance: {}, errors: ['risk_class_unmapped'] };
+    for (const t of CLASS_TAGS[c]) { tags.push(t); addSources(provenance, t, [`class:${c}`]); }
   }
-  return { ok: true, kinds };
+  return { ok: true, tags: uniq(tags), kinds: Object.keys(provenance).sort(), provenance, errors: [] };
 }
 /** A bound record as P3 provenance is specified to produce it (sources are path elements). */
 function boundFrom({ tags = [], classes = [], surfaces = [], items = [], protectedKinds = null } = {}) {
   const kinds = {};
   for (const t of tags) addSources(kinds, t, []);
-  for (const [k, s] of Object.entries(stubKfc(classes).kinds)) kinds[k] = uniq([...(kinds[k] ?? []), ...s]);
+  for (const [k, s] of Object.entries(stubKfc({ classes }).provenance)) kinds[k] = uniq([...(kinds[k] ?? []), ...s]);
   for (const s of surfaces) for (const t of SURFACE_TAGS[s]) addSources(kinds, t, [`surface:${s}`]);
   const prot = protectedKinds ?? Object.keys(kinds).filter((k) => kinds[k].some((x) => x.startsWith('surface:') || PROTECTED.some((p) => x === `tag:${p}`)));
   return { tags: uniq([...tags, ...classes.flatMap((c) => CLASS_TAGS[c] ?? []), ...surfaces.flatMap((s) => SURFACE_TAGS[s])]), items: uniq(items), kinds, protected: uniq(prot) };
@@ -63,7 +65,9 @@ function input(o = {}) {
   };
 }
 const verdict = (o, deps = DEPS) => testKindsVerdict(input(o), deps);
-const ERROR_ONLY = (v) => { assert.equal(v.status, 'refused'); assert.equal(v.code, 'test_kinds_error'); assert.deepEqual(v.codes, ['test_kinds_error']); };
+const ERROR_ONLY = (v, why) => { assert.equal(v.status, 'refused', why); assert.equal(v.code, 'test_kinds_error', why); assert.deepEqual(v.codes, ['test_kinds_error'], why); };
+/** Row 16: a cap (maxItems, maxKeys or the maxWork budget) was exceeded. */
+const BUDGET_ONLY = (v, why) => { assert.equal(v.status, 'refused', why); assert.equal(v.code, 'evidence_budget_exceeded', why); assert.deepEqual(v.codes, ['evidence_budget_exceeded'], why); };
 
 test('[R1] all required kinds and items present: pass, no code, ids and counts reported', () => {
   const bound = boundFrom({ tags: ['async-state'], items: ['Item1'] });
@@ -77,7 +81,7 @@ test('[R1] all required kinds and items present: pass, no code, ids and counts r
   assert.deepEqual(v.unmapped_items, []);
   assert.equal(v.counts.present_kinds, 3);
   assert.equal(v.counts.present_items, 1);
-  assert.equal(v.counts.unknown_markers, 4, 'row 31: a well-formed unknown kind id in the evidence is counted, once');
+  assert.equal(v.counts.unknown_markers, 4, 'row 29: a well-formed unknown kind id in the evidence is counted, once');
   // nothing required at all also passes (an active run whose plan says `test-triggers: none`)
   assert.equal(verdict({}).status, 'pass');
 });
@@ -205,15 +209,15 @@ test('[R5] AC4: a trusted waiver removes exactly one non-protected required subj
   // subjects that are not required: no effect, counted; a waiver for a present kind changes nothing
   const vn = verdict({ bound, kinds: present, items: bound.items, trusted: ['kind:regression', 'plan:Nope', 'kind:race', 'kind:no-such-kind'] });
   assert.deepEqual(vn.missing_kinds, ['real-entrypoint']);
-  assert.equal(vn.counts.waiver_not_required, 3, 'row 32: a subject that is not required (an unknown kind too) has no effect and is counted');
-  // an untrusted matching waiver refuses (row 21), even when it names a present kind, and never removes anything
+  assert.equal(vn.counts.waiver_not_required, 3, 'row 30: a subject that is not required (an unknown kind too) has no effect and is counted');
+  // an untrusted matching waiver refuses (row 20a, the deferred interim behaviour), even when it names a present kind, and never removes anything
   const vu = verdict({ bound, kinds: [...present, ...all], items: bound.items, untrusted: ['kind:race'] });
   assert.equal(vu.code, 'waiver_unauthorized');
   assert.equal(vu.counts.waiver_untrusted, 1);
   const vu2 = verdict({ bound, kinds: present, items: bound.items, untrusted: ['kind:race', 'kind:real-entrypoint'] });
   assert.deepEqual(vu2.missing_kinds, all);
   assert.deepEqual(vu2.codes, ['waiver_unauthorized', 'missing_test_kinds']);
-  // coordinator precedence (pending rev 4, Codex finding 8 on rows 21/32): an EFFECTIVE trusted waiver (required, not
+  // interim precedence (kept; rev 5 row 30 'untrusted under trusted cover' is the same rule): an EFFECTIVE trusted waiver (required, not
   // protected) for the same subject suppresses the untrusted one; an ineffective trusted waiver does not
   const vs = verdict({ bound, kinds: present, items: bound.items, trusted: ['kind:race', 'kind:real-entrypoint'], untrusted: ['kind:race'] });
   assert.equal(vs.status, 'pass');
@@ -230,32 +234,41 @@ test('[R5] AC4: a trusted waiver removes exactly one non-protected required subj
   for (const bad of ['race', 'kind:', 'kind:Race!', 'plan:9x', 'tag:money', 'kind:race ', ' kind:race']) ERROR_ONLY(verdict({ bound, trusted: [bad] }));
 });
 
-test('[R6] row 14 and row 19: an unmapped reassessed class refuses; a broken kindsForClasses is test_kinds_error, never a pass', () => {
+test('[R6] row 19 and row 17: an unmapped reassessed class refuses; a broken kindsForClasses is test_kinds_error, never a pass', () => {
   const bound = boundFrom({ tags: ['entrypoint'] });
   const v = verdict({ bound, kinds: ['real-entrypoint'], reassessed: ['mystery'] });
   assert.equal(v.status, 'refused');
   assert.deepEqual(v.codes, ['risk_class_unmapped']);
   // the changed-declaration class maps to nothing and is NOT unmapped
   assert.equal(verdict({ bound, kinds: ['real-entrypoint'], reassessed: [CHANGED] }).status, 'pass');
+  const ok = (o = {}) => ({ ok: true, tags: [], kinds: [], provenance: {}, errors: [], ...o });
+  const bad = (o = {}) => ({ ok: false, tags: [], kinds: [], provenance: {}, errors: ['risk_class_unmapped'], ...o });
   const broken = [
     () => { throw new Error('boom /secret/path'); },
-    () => undefined, () => null, () => 'ok', () => ({ ok: true }), () => ({ ok: false }), () => ({ ok: false, code: 'something_else' }),
-    () => ({ ok: true, kinds: { 'not-a-kind': ['tag:money'] } }), () => ({ ok: true, kinds: { race: 'tag:money' } }),
-    () => ({ ok: true, kinds: { race: ['money'] } }), () => ({ ok: true, kinds: { race: ['class:misc'] } }), // no tag on the class path
- () => ({ ok: true, kinds: { race: [] } }), () => ({ ok: true, kinds: [] }),
-    () => ({ ok: true, kinds: {}, extra: 1 }), () => Promise.resolve({ ok: true, kinds: {} }),
-    () => new Proxy({ ok: true, kinds: {} }, {}),
+    () => undefined, () => null, () => 'ok', () => ({ ok: true }), () => ({ ok: false }), () => bad({ errors: ['something_else'] }),
+    () => bad({ errors: [] }), () => bad({ errors: ['risk_class_unmapped', 'declaration_invalid'] }), () => bad({ kinds: ['race'] }), () => bad({ provenance: { race: ['tag:concurrency'] } }),
+    () => ok({ provenance: { 'not-a-kind': ['tag:money'] }, kinds: ['not-a-kind'] }), () => ok({ provenance: { race: 'tag:money' }, kinds: ['race'] }),
+    () => ok({ provenance: { race: ['money'] }, kinds: ['race'] }), () => ok({ provenance: { race: ['class:misc'] }, kinds: ['race'] }), // no tag on the class path
+    () => ok({ provenance: { race: [] }, kinds: ['race'] }), () => ok({ provenance: [] }),
+    () => ok({ provenance: { race: ['tag:concurrency'] }, kinds: [] }), () => ok({ provenance: {}, kinds: ['race'] }), // `kinds` and `provenance` must agree
+    () => ok({ errors: ['risk_floor_invalid'] }), () => ok({ tags: ['Bad Tag'] }),
+    () => ({ ...ok(), extra: 1 }), () => { const r = ok(); delete r.provenance; return r; },
+    () => ({ ok: true, kinds: { race: ['tag:concurrency'] } }), // main's OLD documented shape (kinds as the provenance map) is refused
+    () => Promise.resolve(ok()),
+    () => new Proxy(ok(), {}),
   ];
   for (const [i, f] of broken.entries()) ERROR_ONLY(verdict({ bound, kinds: ['real-entrypoint'], reassessed: ['misc'] }, { ...DEPS, kindsForClasses: f }), `broken kindsForClasses #${i}`);
-  // kindsForClasses is called once, synchronously, with the union of bound and reassessed classes and the declaration
+  // kindsForClasses is called once, synchronously, with ONE object { classes, declaration }: the union of bound and reassessed classes
   const calls = [], decl = { tags: {}, classes: {} };
-  verdict({ bound: boundFrom({ classes: ['ui'] }), reassessed: ['misc', 'ui'], declaration: decl }, { ...DEPS, kindsForClasses: (c, d) => (calls.push([c, d]), stubKfc(c)) });
+  verdict({ bound: boundFrom({ classes: ['ui'] }), reassessed: ['misc', 'ui'], declaration: decl }, { ...DEPS, kindsForClasses: (...a) => (calls.push(a), stubKfc(a[0])) });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0][0], ['misc', 'ui']);
-  assert.equal(calls[0][1], decl);
+  assert.equal(calls[0].length, 1, 'called with a single object argument');
+  assert.deepEqual(Object.keys(calls[0][0]).sort(), ['classes', 'declaration']);
+  assert.deepEqual(calls[0][0].classes, ['misc', 'ui']);
+  assert.equal(calls[0][0].declaration, decl);
 });
 
-test('[R7] rows 22 and 22a: a held repair refuses at F1 (without an authorised RETRY), F4, S1 and V; an open repair refuses only `gate test-kinds`', () => {
+test('[R7] held and open-repair gates (inert in V0, rev 6 s5.2: P4r passes held:0, open_repairs:0; kept and tested): a held repair refuses at F1 (without an authorised RETRY), F4, S1 and V; an open repair refuses only `gate test-kinds`', () => {
   const held = new Set(['F1', 'F4', 'S1', 'V']);
   for (const point of POINTS) {
     for (const retry of [false, true]) {
@@ -272,7 +285,7 @@ test('[R7] rows 22 and 22a: a held repair refuses at F1 (without an authorised R
 });
 
 test('[R8] codes are reported in one fixed precedence; `code` is the first', () => {
-  assert.deepEqual([...CODES], ['test_kinds_error', 'test_kinds_held', 'test_kinds_repair_open', 'risk_class_unmapped', 'waiver_unauthorized', 'missing_test_kinds', 'unmapped_lifecycle_item']);
+  assert.deepEqual([...CODES], ['test_kinds_error', 'evidence_budget_exceeded', 'test_kinds_held', 'test_kinds_repair_open', 'risk_class_unmapped', 'waiver_unauthorized', 'missing_test_kinds', 'unmapped_lifecycle_item']);
   const v = verdict({ point: 'V', held: 1, bound: boundFrom({ tags: ['concurrency'], items: ['X1'] }), reassessed: ['mystery'], untrusted: ['kind:race'] });
   assert.deepEqual(v.codes, ['test_kinds_held', 'risk_class_unmapped', 'waiver_unauthorized', 'missing_test_kinds', 'unmapped_lifecycle_item']);
   assert.equal(v.code, 'test_kinds_held');
@@ -281,7 +294,7 @@ test('[R8] codes are reported in one fixed precedence; `code` is the first', () 
 });
 
 const OUT_KEYS = ['status', 'code', 'codes', 'required_kinds', 'required_items', 'protected_kinds', 'missing_kinds', 'unmapped_items', 'waived', 'counts'];
-const COUNT_KEYS = ['required_kinds', 'required_items', 'added_kinds', 'protected_kinds', 'present_kinds', 'present_items', 'missing_kinds', 'unmapped_items', 'waived', 'waiver_protected', 'waiver_not_required', 'waiver_untrusted', 'unknown_markers', 'reassessed_classes'];
+const COUNT_KEYS = ['required_kinds', 'required_items', 'added_kinds', 'protected_kinds', 'present_kinds', 'present_items', 'missing_kinds', 'unmapped_items', 'waived', 'waiver_protected', 'waiver_not_required', 'waiver_evidenced', 'waiver_untrusted', 'unknown_markers', 'reassessed_classes'];
 function assertIdsOnly(v, where) {
   assert.deepEqual(Object.keys(v).sort(), [...OUT_KEYS].sort(), where);
   assert.ok(['pass', 'refused'].includes(v.status), where);
@@ -362,10 +375,11 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
     'declaration array': { ...base, declaration: [] },
     'deps proxy': null,
   };
+  const CAPS = new Set(['huge array', 'wide kinds map', 'work budget']); // row 16: a cap, not a malformed value
   for (const [name, inp] of Object.entries(cases)) {
     let v;
     assert.doesNotThrow(() => { v = name === 'deps proxy' ? testKindsVerdict(input(), P(DEPS)) : testKindsVerdict(inp, DEPS); }, name);
-    ERROR_ONLY(v, name);
+    (CAPS.has(name) ? BUDGET_ONLY : ERROR_ONLY)(v, name);
   }
   assert.equal(touched, 0, 'no proxy trap and no getter ever ran');
   // a shared (DAG) reference is fine when it is valid data: the same array object used twice
@@ -374,7 +388,7 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
   // the caps are exactly at their limits: maxItems elements pass, one more refuses
   const many = Array.from({ length: LIMITS.maxItems }, () => 'race');
   assert.equal(verdict({ bound: boundFrom({ tags: ['concurrency'] }), kinds: many }).status, 'pass');
-  ERROR_ONLY(verdict({ bound: boundFrom({ tags: ['concurrency'] }), kinds: [...many, 'race'] }));
+  BUDGET_ONLY(verdict({ bound: boundFrom({ tags: ['concurrency'] }), kinds: [...many, 'race'] }));
   // the work budget is charged across lists: each list within maxItems, the total over maxWork, refuses (the case above);
   // one full list stays within it
   assert.ok(Object.keys(KINDS).length * 451 > LIMITS.maxWork && LIMITS.maxItems < LIMITS.maxWork / 2, 'the budget case really exceeds only the total');
@@ -400,31 +414,18 @@ function req(tags, classes, declaration = null, extra = '') {
   const r = requiredFor({ planText: plan(tags, classes, extra), declaration });
   return r;
 }
-/** kindsForClasses built ONLY from requiredFor calls: class -> tags (one call per class), tag -> kinds (one call per tag). */
-function realKfc(classes, declaration) {
-  const kinds = {};
-  for (const c of classes) {
-    const rc = req([], [c], declaration);
-    if (rc.status !== 'required') return { ok: false, code: rc.errors[0] };
-    for (const t of rc.tags) {
-      const rt = req([t], [], declaration);
-      assert.equal(rt.status, 'required', `tag ${t} resolves through requiredFor`);
-      for (const k of rt.kinds) kinds[k] = uniq([...(kinds[k] ?? []), `class:${c}`, `tag:${t}`]);
-    }
-  }
-  return { ok: true, kinds };
-}
+/** A bound record whose class provenance comes from the REAL kindsForClasses (tags via requiredFor, one call per tag). */
 function realBound(tags, classes, declaration = null, items = []) {
   const kinds = {};
   for (const t of tags) { const rt = req([t], [], declaration); assert.equal(rt.status, 'required'); for (const k of rt.kinds) kinds[k] = uniq([...(kinds[k] ?? []), `tag:${t}`]); }
-  const fromClasses = realKfc(classes, declaration);
-  assert.equal(fromClasses.ok, true);
-  for (const [k, s] of Object.entries(fromClasses.kinds)) kinds[k] = uniq([...(kinds[k] ?? []), ...s]);
+  const fromClasses = kindsForClasses({ classes, declaration });
+  assert.equal(fromClasses.ok, true, JSON.stringify(fromClasses.errors));
+  for (const [k, s] of Object.entries(fromClasses.provenance)) kinds[k] = uniq([...(kinds[k] ?? []), ...s]);
   return { tags: uniq(tags), items, kinds, protected: [] };
 }
-const REAL = { kindsForClasses: realKfc, protectedTags: PROTECTED };
+const REAL = { kindsForClasses, protectedTags: PROTECTED_TAGS };
 
-test('[R12] integration: the verdict agrees with main\'s requiredFor and checkTitles (same requirement code path)', () => {
+test('[R12] integration (REAL kindsForClasses and PROTECTED_TAGS from test-kinds.mjs): the verdict agrees with main\'s requiredFor and checkTitles (same requirement code path)', () => {
   assert.ok(PROTECTED.every((t) => Object.hasOwn(TAGS, t)), 'every protected tag is a real TAGS row');
   const declaration = validateDeclaration({ version: 1, classes: { payments: ['money'], auth: ['concurrency'] }, tags: { money: ['regression'] } });
   const cases = [
@@ -438,7 +439,7 @@ test('[R12] integration: the verdict agrees with main\'s requiredFor and checkTi
     const full = req(c.tags, c.classes, c.declaration ?? null, (c.items ?? []).map((i) => `lifecycle-item: ${i} the item text\n`).join(''));
     assert.equal(full.status, 'required', JSON.stringify(full.errors));
     const bound = realBound(c.tags, c.classes, c.declaration ?? null, full.items);
-    assert.deepEqual(Object.keys(bound.kinds).sort(), full.kinds, 'the adapter reproduces requiredFor\'s kinds');
+    assert.deepEqual(Object.keys(bound.kinds).sort(), full.kinds, 'the real class mapping reproduces requiredFor\'s kinds');
     // differential against checkTitles over every title subset of the required kinds (no waivers, nothing reassessed)
     const ks = full.kinds;
     for (let mask = 0; mask < 1 << ks.length; mask++) {
@@ -463,6 +464,126 @@ test('[R12] integration: the verdict agrees with main\'s requiredFor and checkTi
   const um = testKindsVerdict(input({ bound, reassessed: ['mystery'] }), REAL);
   assert.equal(um.code, req([], ['mystery']).errors[0]);
   assert.equal(um.code, 'risk_class_unmapped');
+});
+
+test('[R14] seam with P3: P2 reads the REAL kindsForClasses result shape; any change of that shape fails closed', () => {
+  // the real producer's exact shape (a change here is the signal that P2's reading must change with it)
+  const real = kindsForClasses({ classes: ['auth'], declaration: null });
+  assert.deepEqual(Object.keys(real).sort(), ['errors', 'kinds', 'ok', 'provenance', 'tags']);
+  assert.equal(real.ok, true);
+  assert.deepEqual(Object.keys(real.provenance).sort(), [...real.kinds].sort());
+  assert.ok(Object.values(real.provenance).every((srcs) => srcs.some((x) => x.startsWith('tag:')) && srcs.some((x) => x === 'class:auth')), 'class sources carry the class and a tag');
+  const refused = kindsForClasses({ classes: ['mystery'], declaration: null });
+  assert.deepEqual([refused.ok, refused.errors, refused.kinds, refused.tags, Object.keys(refused.provenance)], [false, ['risk_class_unmapped'], [], [], []]);
+  // the three outcomes the review named, through the real function, with otherwise empty valid inputs
+  const none = testKindsVerdict(input({ bound: boundFrom() }), REAL);
+  assert.equal(none.status, 'pass', 'classes [] -> pass');
+  assert.equal(none.code, null);
+  const auth = testKindsVerdict(input({ bound: boundFrom(), reassessed: ['auth'] }), REAL);
+  assert.equal(auth.code, 'missing_test_kinds', 'classes [auth] -> missing_test_kinds');
+  assert.deepEqual(auth.required_kinds, ['negative', 'ownership']);
+  assert.deepEqual(auth.protected_kinds, ['negative', 'ownership'], 'auth is a protected tag, read from the real provenance');
+  const mystery = testKindsVerdict(input({ bound: boundFrom(), reassessed: ['mystery'] }), REAL);
+  assert.deepEqual(mystery.codes, ['risk_class_unmapped'], 'classes [mystery] -> risk_class_unmapped');
+  // a shape change in P3 refuses test_kinds_error, never a pass and never an accidental unmapped
+  const wrap = (f) => ({ ...REAL, kindsForClasses: (a) => f(kindsForClasses(a)) });
+  const shapes = {
+    'provenance dropped': (r) => { const { provenance: _p, ...rest } = r; return rest; },
+    'provenance renamed': (r) => { const { provenance, ...rest } = r; return { ...rest, sources: provenance }; },
+    'extra key': (r) => ({ ...r, note: 1 }),
+    'kinds as the map (the old documented shape)': (r) => ({ ok: r.ok, kinds: r.provenance }),
+    'errors dropped': (r) => { const { errors: _e, ...rest } = r; return rest; },
+    'old positional shape': () => ({ ok: false, code: 'risk_class_unmapped' }),
+  };
+  for (const [name, f] of Object.entries(shapes)) ERROR_ONLY(testKindsVerdict(input({ bound: boundFrom(), reassessed: ['auth'] }), wrap(f)), name);
+  // the function receives one object, so a P2 still calling (classes, declaration) would pass an array and get risk_floor_invalid
+  const seen = [];
+  testKindsVerdict(input({ bound: boundFrom(), reassessed: ['auth'] }), { ...REAL, kindsForClasses: (...a) => (seen.push(a), kindsForClasses(...a)) });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].length, 1);
+});
+
+test('[R15] row 16: a cap breach is evidence_budget_exceeded, and an oversized own-key set is refused before any property is visited', () => {
+  const wide = (n) => { const o = {}; for (let i = 0; i < n; i++) o[`k${i}`] = 1; return o; };
+  const base = input();
+  let calls = 0;
+  const deps = { ...DEPS, kindsForClasses: (a) => { calls++; return stubKfc(a); } };
+  const origGet = Reflect.getOwnPropertyDescriptor;
+  let visits = 0;
+  Reflect.getOwnPropertyDescriptor = (...a) => { visits++; return origGet(...a); };
+  const N = 250000;
+  const cases = {
+    'root record with 250,000 own properties': { ...base, ...wide(N) },
+    'bound.kinds with 250,000 own properties': { ...base, bound: { ...base.bound, kinds: wide(N) } },
+    'empty evidence array with 250,000 extra own properties': { ...base, evidence: { ...base.evidence, kinds: Object.assign([], wide(N)) } },
+  };
+  const out = {};
+  try {
+    for (const [name, inp] of Object.entries(cases)) { visits = 0; out[name] = { v: testKindsVerdict(inp, deps), visits }; }
+  } finally { Reflect.getOwnPropertyDescriptor = origGet; }
+  for (const [name, { v, visits: n }] of Object.entries(out)) {
+    BUDGET_ONLY(v, name);
+    assert.ok(n <= LIMITS.maxKeys, `${name}: ${n} property reads (the counted-visit budget is ${LIMITS.maxKeys}, not ${N})`);
+  }
+  assert.equal(calls, 0, 'refused before the class mapping ran');
+  assert.ok(out['root record with 250,000 own properties'].visits === 0, 'the root record is refused before any descriptor read');
+  // the total work cap is a budget breach too, and so are the per-list and per-map caps
+  BUDGET_ONLY(verdict({ kinds: Array.from({ length: LIMITS.maxItems + 1 }, () => 'race') }));
+  // a record over maxKeys (but well under the work budget) is a cap breach too, not a shape error; one at the shape size is an error
+  BUDGET_ONLY(testKindsVerdict({ ...base, ...wide(LIMITS.maxKeys) }, DEPS), 'a root record with more than maxKeys own properties');
+  assert.equal(testKindsVerdict({ ...base, bound: { ...base.bound, kinds: wide(LIMITS.maxKeys + 1) } }, DEPS).code, 'evidence_budget_exceeded');
+  // a malformed value that is not a cap breach stays test_kinds_error
+  ERROR_ONLY(verdict({ kinds: ['Not A Kind!'] }));
+  ERROR_ONLY(testKindsVerdict({ ...base, extra: 1 }, DEPS));
+});
+
+test('[R16] unknown_markers: the validated operand plus the unknown-kind count is itself validated', () => {
+  const MAX = Number.MAX_SAFE_INTEGER;
+  ERROR_ONLY(verdict({ unknown: MAX, kinds: ['mystery-kind'] }), 'MAX_SAFE_INTEGER + 1 is 2^53, not a safe integer');
+  ERROR_ONLY(verdict({ unknown: MAX - 1, kinds: ['mystery-kind', 'other-mystery', 'race'] }));
+  const edge = verdict({ unknown: MAX - 1, kinds: ['mystery-kind'] });
+  assert.equal(edge.status, 'pass');
+  assert.equal(edge.counts.unknown_markers, MAX, 'the largest safe sum is accepted exactly');
+  assert.equal(verdict({ unknown: MAX }).counts.unknown_markers, MAX);
+});
+
+test('[R17] row 30: a trusted waiver on an evidenced subject is counted waiver_evidenced; an untrusted waiver is refused unless an effective trusted waiver covers THAT subject', () => {
+  const bound = boundFrom({ tags: ['concurrency', 'entrypoint'], items: ['ItemA'] });
+  const present = ['race', 'real-entrypoint'];
+  const ev = verdict({ bound, kinds: present, items: ['ItemA'], trusted: ['kind:race', 'plan:ItemA'] });
+  assert.equal(ev.status, 'pass');
+  assert.equal(ev.counts.waiver_evidenced, 2, 'both waived subjects already have counting evidence');
+  assert.deepEqual(ev.waived, [], 'an evidenced subject is not "waived": nothing was removed');
+  const miss = verdict({ bound, kinds: ['real-entrypoint'], items: [], trusted: ['kind:race', 'plan:ItemA'] });
+  assert.equal(miss.counts.waiver_evidenced, 0);
+  assert.deepEqual(miss.waived, ['kind:race', 'plan:ItemA']);
+  const mixed = verdict({ bound, kinds: ['race'], items: ['ItemA'], trusted: ['kind:race', 'kind:real-entrypoint'] });
+  assert.equal(mixed.counts.waiver_evidenced, 1);
+  assert.equal(mixed.counts.waived, 1);
+  const prot = verdict({ bound: boundFrom({ tags: ['money'] }), kinds: ['negative'], trusted: ['kind:negative'] });
+  assert.equal(prot.counts.waiver_evidenced, 0, 'a protected subject is waiver_protected, not waiver_evidenced');
+  assert.equal(prot.counts.waiver_protected, 1);
+  // `some`, not `every`: ONE uncovered untrusted waiver refuses even when another untrusted waiver is covered (both subjects evidenced)
+  const one = verdict({ bound, kinds: present, items: ['ItemA'], trusted: ['kind:race'], untrusted: ['kind:race', 'kind:real-entrypoint'] });
+  assert.equal(one.code, 'waiver_unauthorized');
+  assert.equal(one.counts.waiver_untrusted, 2);
+  const all = verdict({ bound, kinds: present, items: ['ItemA'], trusted: ['kind:race', 'kind:real-entrypoint'], untrusted: ['kind:race', 'kind:real-entrypoint'] });
+  assert.equal(all.status, 'pass', 'every untrusted waiver covered by an effective trusted waiver: no refusal');
+});
+
+test('[R18] the ids-only guards: a non-id string in bound.protected is refused whole; a function-Proxy kindsForClasses is refused before any trap runs', () => {
+  const SECRET = 'SECRET-<script>';
+  for (const bad of ['not-a-kind', SECRET, 'Race', '']) {
+    const v = verdict({ bound: { tags: [], items: [], kinds: { race: ['tag:concurrency'] }, protected: [bad] }, kinds: ['race'] });
+    ERROR_ONLY(v, `protected: ${JSON.stringify(bad)}`);
+    assert.ok(!JSON.stringify(v).includes('SECRET'));
+  }
+  assert.equal(verdict({ bound: { tags: [], items: [], kinds: { race: ['tag:concurrency'] }, protected: ['race'] }, kinds: ['race'] }).status, 'pass', 'a real kind id is accepted');
+  let touched = 0;
+  const fnProxy = new Proxy(stubKfc, { apply: (t, th, args) => { touched++; return Reflect.apply(t, th, args); }, get: (t, k, r) => { touched++; return Reflect.get(t, k, r); } });
+  assert.equal(typeof fnProxy, 'function');
+  ERROR_ONLY(verdict({}, { ...DEPS, kindsForClasses: fnProxy }));
+  assert.equal(touched, 0, 'no trap ran');
 });
 
 // ---- module copies: CRLF (L10) and mutation (L1) ----
@@ -518,13 +639,13 @@ const MUTANTS = [
   { name: 'an unmapped class is ignored', from: "if (mapped.unmapped) raised.add('risk_class_unmapped');", to: '' },
   { name: 'a missing item does not refuse', from: "if (unmapped.length) raised.add('unmapped_lifecycle_item');", to: '' },
   { name: 'a missing kind does not refuse', from: "if (missing.length) raised.add('missing_test_kinds');", to: '' },
-  { name: 'any failure code from kindsForClasses reads as unmapped', from: "record(res, ['ok', 'code'], ctx).code === 'risk_class_unmapped'", to: 'true' },
+  { name: 'any failure code from kindsForClasses reads as unmapped', from: "errors.length === 1 && errors[0] === 'risk_class_unmapped'", to: 'true' },
   { name: 'an object proxy is read', from: "if (v === null || typeof v !== 'object' || types.isProxy(v)) return false;", to: "if (v === null || typeof v !== 'object') return false;" },
   { name: 'an array proxy is read', from: '!Array.isArray(v) || types.isProxy(v) ||', to: '!Array.isArray(v) ||' },
   { name: 'a getter is invoked', from: "    if (!d || !('value' in d)) fail();\n    out[k] = d.value;", to: '    out[k] = v[k];' },
-  { name: 'the array length cap is dropped', from: '|| n > LIMITS.maxItems) fail();', to: ') fail();' },
-  { name: 'extra array keys are accepted', from: 'if (Reflect.ownKeys(v).length !== n + 1) fail();', to: '' },
-  { name: 'the work budget is not enforced', from: 'if (ctx.work > LIMITS.maxWork) fail();', to: '' },
+  { name: 'the array length cap is dropped', from: 'if (n > LIMITS.maxItems) over();', to: '' },
+  { name: 'extra array keys are accepted', from: 'if (keyCount !== n + 1) fail();', to: '' },
+  { name: 'the work budget is not enforced', from: 'if (ctx.work > LIMITS.maxWork) over();', to: '' },
   { name: 'an empty source list is accepted', from: 'if (!sources.length) fail();', to: '' },
   { name: 'any string is a source', from: 'const sources = list(d.value, isSource, ctx);', to: "const sources = list(d.value, (x) => typeof x === 'string', ctx);" },
   { name: 'evidence may name any string', from: 'new Set(list(E.kinds, isMarkerName, ctx))', to: "new Set(list(E.kinds, (x) => typeof x === 'string', ctx))" },
@@ -532,7 +653,16 @@ const MUTANTS = [
   { name: 'an unknown evidence kind is not counted', from: ' + (evidenceKinds.size - presentKinds.size)', to: '' },
   { name: 'a class-reached kind without a tag source is accepted', from: "for (const srcs of kinds.values()) if (![...srcs].some((s) => s.startsWith('tag:'))) fail();", to: '' },
   { name: 'an empty protected set is accepted', from: 'if (!protectedTags.size) fail();', to: '' },
-  { name: 'an exception escapes', from: 'try { return compute(input, deps); } catch { return errorVerdict(); }', to: 'return compute(input, deps);' },
+  { name: 'an exception escapes', from: "try { return compute(input, deps); } catch (e) { return e === BUDGET ? errorVerdict('evidence_budget_exceeded') : errorVerdict(); }", to: 'return compute(input, deps);' },
+  { name: 'a protected kind id may be any string', from: 'const boundProtected = list(B.protected, isKindId, ctx);', to: "const boundProtected = list(B.protected, (x) => typeof x === 'string', ctx);" },
+  { name: 'a function Proxy kindsForClasses is called', from: "typeof D.kindsForClasses !== 'function' || types.isProxy(D.kindsForClasses)", to: "typeof D.kindsForClasses !== 'function'" },
+  { name: 'ONE covered untrusted waiver excuses them all (some -> every)', from: 'untrusted.some((w) => !effectiveWaivers.has(w))', to: 'untrusted.length > 0 && untrusted.every((w) => !effectiveWaivers.has(w))' },
+  { name: 'the unknown_markers sum is not validated', from: 'uint(uint(E.unknown_markers) +', to: '(uint(E.unknown_markers) +' },
+  { name: 'a trusted waiver on an evidenced subject is not counted', from: 'waiverEvidenced++', to: '0' },
+  { name: 'a cap breach is reported as test_kinds_error', from: "return e === BUDGET ? errorVerdict('evidence_budget_exceeded') : errorVerdict();", to: 'return errorVerdict();' },
+  { name: 'an oversized record is not refused before its keys are read', from: 'if (own.length > LIMITS.maxKeys) over();\n  if (own.length !== keys.length) fail();', to: 'if (own.length !== keys.length) fail();' },
+  { name: 'the real kindsForClasses `errors` is not required to be exactly the unmapped code', from: "errors.length === 1 && errors[0] === 'risk_class_unmapped'", to: "errors.includes('risk_class_unmapped')" },
+  { name: 'kinds and provenance need not agree', from: 'if (sorted(kindIds).join() !== sorted(kinds.keys()).join()) fail();', to: '' },
 ];
 const RUN_TIMEOUT_MS = 3 * 60 * 1000;
 const run = (args, cwd) => new Promise((resolve) => {
@@ -571,7 +701,7 @@ test('mutation: the control passes every [R#] test; every guard mutant loads and
   for (let i = 0; i < jobs.length; i += 4) results.push(...await Promise.all(jobs.slice(i, i + 4).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   const [control, ...mutants] = results;
   assert.equal(control.code, 0, `the control passes every tagged test:\n${control.tail}`);
-  assert.ok(control.passed >= 13, `the control ran the tagged tests (${control.passed})`);
+  assert.ok(control.passed >= 18, `the control ran the tagged tests (${control.passed})`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.length).map((r) => `${r.m.name} (exit ${r.code})`);
