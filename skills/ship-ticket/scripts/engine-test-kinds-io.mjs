@@ -17,7 +17,8 @@
  *           starting with `-`. The record's `command_digest` hashes exactly these args; the verdict hashes the same.
  *   report  at most 32 MiB of UTF-8 BYTES; ONE JSON document (no duplicate keys after escape decoding, depth <= 64);
  *           `success === true`, `numFailedTestSuites === 0`, `numFailedTests === 0`, every suite `status === 'passed'`
- *           (vitest 4 writes only `passed`/`failed`); at most 100000 results, counted BEFORE the parser materialises them.
+ *           (vitest 4 writes only `passed`/`failed`); at most 100000 results, counted on the parsed document BEFORE the runner
+ *           parser builds its result list (the document itself is bounded by the byte and scan-token caps).
  *           Fields read: those, plus `testResults[].{name, assertionResults[].{ancestorTitles, title, status}}`.
  *   result  counts only when `status === 'passed'`; a `failed` result or suite, or `success:false`, makes the WHOLE record
  *           `evidence_run_failed` even with exit 0. Any status outside vitest's six is `evidence_unavailable`.
@@ -82,7 +83,8 @@ export function own(o, k) {
   if (!d || !('value' in d)) refuse('test_kinds_error');
   return d.value;
 }
-export const ownOr = (o, k, dflt) => { if (!plain(o)) refuse('test_kinds_error'); return Reflect.getOwnPropertyDescriptor(o, k) ? own(o, k) : dflt; };
+/** An optional own data property: absent or `undefined` gives `dflt`. */
+export const ownOr = (o, k, dflt) => { if (!plain(o)) refuse('test_kinds_error'); const v = Reflect.getOwnPropertyDescriptor(o, k) ? own(o, k) : undefined; return v === undefined ? dflt : v; };
 export function arr(v, max, ok, ctx) {
   if (!Array.isArray(v) || types.isProxy(v) || Reflect.getPrototypeOf(v) !== Array.prototype) refuse('test_kinds_error');
   const n = Reflect.getOwnPropertyDescriptor(v, 'length')?.value;
@@ -127,8 +129,8 @@ const sumInto = (total, m) => { for (const [k, n] of m) total.set(k, (total.get(
 
 // ---- the evidence identity (design rev 5 section 1a): the candidate-id encoding over P, from the worktree ----
 /** `e1:` + sha256 over base_sha and every changed path (byte order): path, kind, mode, length, bytes. Never throws. */
-export function evidenceIdentity({ repo, baseSha, exclusions = [] } = {}) {
-  try { const c = candidate(repo, baseSha, exclusions); return { ok: true, evidence_id: c.evidence_id, paths: c.paths }; } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
+export function evidenceIdentity(input) {
+  try { const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', [])); return { ok: true, evidence_id: c.evidence_id, paths: c.paths }; } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
 }
 /** A directory in P is a submodule only when it is the top of its own clean work tree; a dirty one is refused (I4). */
 function submoduleHead(abs) {
@@ -382,14 +384,13 @@ function build(input) {
   for (const k of ['runner_id', 'runner_version', 'attempt_id', 'report_sha256', 'evidence_id_before', 'report_eof', 'sealed', 'quiesced', 'binding_verified', 'exit_code']) prov[k] = own(R, k);
   if (typeof text !== 'string' || !isStr(80)(prov.attempt_id) || !prov.attempt_id || !isStr(64)(prov.runner_version) || typeof dagDigest !== 'string' || !HEX64.test(dagDigest) || typeof prov.evidence_id_before !== 'string') refuse('test_kinds_error');
   if (prov.runner_id !== RUNNER.id) refuse('runner_unsupported');
-  if (text.length > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded'); // cheap first: a UTF-16 unit is at least one byte
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded');
   const c = candidate(repo, baseSha, ownOr(input, 'exclusions', []));
   const all = new Set(c.all), inP = new Set(c.paths);
   if (entry.config_paths.some((p) => all.has(p))) refuse('runner_config_changed'); // before ANY exclusion (I6)
   const digest = sha256(text);
-  if (prov.sealed !== true || prov.binding_verified !== true || typeof prov.report_sha256 !== 'string' || prov.report_sha256 !== digest) refuse('runner_output_tampered');
+  if (prov.sealed !== true || prov.binding_verified !== true || prov.report_sha256 !== digest) refuse('runner_output_tampered');
   if (prov.report_eof !== true) refuse('runner_survivor');
   if (prov.quiesced !== true) refuse('quiescence_unknown');
   if (prov.exit_code !== 0) refuse('evidence_run_failed'); // non-zero, a timeout (null) or anything else: a RED run is never evidence
@@ -398,8 +399,7 @@ function build(input) {
   preflight(JSON.parse(text), ctx);
   const parsed = parseRunnerOutput(entry.format, text);
   if (!parsed.supported) refuse('evidence_unavailable');
-  const results = parsed.results;
-  if (results.length > LIMITS.maxResults) refuse('evidence_budget_exceeded');
+  const results = parsed.results; // at most LIMITS.maxResults: preflight counted them
 
   // per file: the creditable ids of PASSED results, unknown markers, and the non-passed carriers (R-3 subtracts them)
   const byFile = new Map();

@@ -12,7 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path, { dirname, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -336,12 +336,22 @@ test('[P4r-10] AC3 budgets (L3): bytes not characters, too many results or marke
   assert.equal(code(build(r, passing(r.dir).replace('"success":true', '"success":true,"\\u0073uccess":false'))), 'evidence_unavailable');
   for (const bad of ['', '{', 'null', '[]', '{"testResults":5}', '{"testResults":[{"name":5}]}', '{"testResults":[null]}', 'not json', JSON.stringify({ ...top, testResults: [{ name: file, status: 'passed' }] }),
     JSON.stringify({ testResults: [] }), JSON.stringify({ ...top, success: 'yes', testResults: [] }), JSON.stringify({ ...top, numFailedTests: -1, testResults: [] })]) assert.equal(code(build(r, bad)), 'evidence_unavailable', bad);
-  // the verdict: more changed paths than the cap is a typed refusal, never a partial identity
+  // per-row id caps: more distinct creditable or skipped markers in one file than LIMITS.maxIds
+  const ids = Array.from({ length: LIMITS.maxIds + 1 }, (_, i) => `[plan:I${i}]`).join(' ');
+  assert.equal(code(build(r, report([{ file, cases: [{ title: `a ${ids}`.slice(0, LIMITS.maxTitleChars) }, ...Array.from({ length: 4 }, (_, k) => ({ title: Array.from({ length: 140 }, (_, i) => `[plan:J${k}x${i}]`).join('') }))] }]))), 'evidence_budget_exceeded');
+  assert.equal(code(build(r, report([{ file, cases: Array.from({ length: 4 }, (_, k) => ({ title: Array.from({ length: 140 }, (_, i) => `[plan:S${k}x${i}]`).join(''), status: 'skipped' })) }]))), 'evidence_budget_exceeded');
+});
+
+test('[P4r-23] AC3 budgets (L3): the identity refuses more changed paths or more bytes than its caps, in the verdict too', (t) => {
   const r2 = repo(t);
   for (let i = 0; i <= LIMITS.maxPaths; i++) writeFileSync(join(r2.dir, `p${i}.txt`), '');
   const v = verdict(r2, null);
   assert.equal(v.status, 'refused'); assert.equal(v.code, 'evidence_budget_exceeded');
   assert.equal(evidenceIdentity({ repo: r2.dir, baseSha: r2.base }).code, 'evidence_budget_exceeded');
+  // a sparse file larger than the identity byte cap (no real disk use)
+  const r3 = repo(t);
+  writeFileSync(join(r3.dir, 'big.bin'), ''); truncateSync(join(r3.dir, 'big.bin'), LIMITS.maxIdentityBytes + 1);
+  assert.equal(evidenceIdentity({ repo: r3.dir, baseSha: r3.base }).code, 'evidence_budget_exceeded');
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
@@ -367,6 +377,8 @@ test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter
   assert.deepEqual(verdict(r, trap()).records, { unit: 'stale:malformed' });
   assert.equal(ran, 0, 'no getter and no trap was invoked');
   assert.equal(evidenceIdentity({ repo: r.dir, baseSha: 'HEAD' }).code, 'test_kinds_error', 'the base must be a full commit id');
+  const g2 = { repo: r.dir }; Object.defineProperty(g2, 'baseSha', { get() { ran++; return r.base; }, enumerable: true });
+  for (const bad of [null, undefined, 5, g2, trap()]) assert.deepEqual(evidenceIdentity(bad), { ok: false, code: 'test_kinds_error' });
   assert.equal(evidenceIdentity({ repo: join(r.dir, 'nope'), baseSha: r.base }).ok, false);
 });
 
@@ -498,7 +510,9 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
     (c) => { c.files[0].credited = 'kind:negative'; }, (c) => { c.counts.credited = 0; }, (c) => { c.counts.marker_files = 2; }, (c) => { c.counts.unknown_markers = -1; },
     (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = c.counts.results + 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; },
     (c) => { c.files[0].skipped = { 'not a marker': 1 }; }, (c) => { c.files[0].skipped = []; }, (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; },
-    (c) => { c.files[0].file = '../escape.test.ts'; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
+    (c) => { c.files[0].file = '../escape.test.ts'; }, (c) => { c.report_sha256 = 5; }, (c) => { c.report_sha256 = 'x'; }, (c) => { c.runner.version = 5; },
+    (c) => { c.runner.version = ''; }, (c) => { c.dag_digest = 'D'.repeat(64); }, (c) => { c.config_digest = null; }, (c) => { c.base_sha = 'HEAD'; }, (c) => { c.entry = '-x'; },
+    (c) => { c.claim = 5; }, (c) => { c.counts.results = 1e9; }, (c) => { c.report_len = LIMITS.maxReportBytes + 1; }, (c) => { c.files[0].credited = ['kind:race', 'kind:negative']; c.counts.credited = 2; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
     assert.equal(state(mut), 'stale:malformed', mut.toString());
   // re-derived applicability (the record is otherwise well-formed): a file outside P, missing, not a test file, a symlink, a credit R-3 refuses
   const counted = (file, credited) => (c) => { c.files = [{ file, outcome: 'counted', credited, skipped: {} }]; c.counts.marker_files = 1; c.counts.credited = credited.length; };
@@ -665,6 +679,8 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 // ---- mutation check (L1): a mutant counts as killed ONLY by an ERR_ASSERTION failure in the [P4r-n] test it names ----
 // `file`: the patched module (io = the record side, reuse = the verdict side). `tag`: the test expected to kill it; it is the ONLY
 // test run against that mutant, so a kill is attributed. `posix`: the killing test needs a POSIX facility (it is skipped on win32).
+// Documented EQUIVALENT (not listed): `retry_authorised` forced to true. P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads
+// retry_authorised only when held > 0, so no input can observe it (engine-test-kinds.mjs: `held > 0 && HELD_POINTS...`).
 const IO = 'engine-test-kinds-io.mjs', RE = 'engine-test-kinds-reuse.mjs';
 const MUTANTS = [
   // reuse: the four conditions
@@ -769,9 +785,19 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-4', name: 'report: the failed counters are not read', from: 'if (v > 0) failed(); }', to: '}' },
   { file: IO, tag: 'P4r-10', name: 'budget: the report is measured in UTF-16 units', from: 'if (bytes > LIMITS.maxReportBytes) refuse', to: 'if (text.length > LIMITS.maxReportBytes) refuse' },
   { file: IO, tag: 'P4r-10', name: 'budget: report_len is the character count', from: 'report_len: bytes,', to: 'report_len: text.length,' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the result count is not capped before parsing', from: "if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');", to: '', also: [["if (results.length > LIMITS.maxResults) refuse('evidence_budget_exceeded');", '']] },
+  { file: IO, tag: 'P4r-10', name: 'budget: the result count is not capped before parsing', from: "if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-10', name: 'budget: the marker-file count is not capped', from: "if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');", to: '' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the path count is not capped', from: "if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');", to: '' },
+  { file: IO, tag: 'P4r-23', name: 'budget: the path count is not capped', from: "if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');", to: '' },
+  { file: IO, tag: 'P4r-23', name: 'budget: the identity bytes are not capped', from: "bytes += st.size; if (bytes > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');", to: 'bytes += st.size;' },
+  { file: IO, tag: 'P4r-10', name: 'budget: the per-row creditable id cap is dropped', from: 'if (slot.ids.size > LIMITS.maxIds || slot.unknown.size > LIMITS.maxIds) refuse', to: 'if (slot.unknown.size > LIMITS.maxIds) refuse' },
+  { file: IO, tag: 'P4r-10', name: 'budget: the per-row skipped id cap is dropped', from: "countMarkers(r.title, slot.skipped); if (slot.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded'); continue; }", to: 'countMarkers(r.title, slot.skipped); continue; }' },
+  { file: IO, tag: 'P4r-11', name: 'identity: the input is destructured (a getter runs)', from: "try { const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', []));", to: "const { repo, baseSha, exclusions = [] } = input ?? {}; try { const c = candidate(repo, baseSha, exclusions);" },
+  { file: RE, tag: 'P4r-18', name: 'schema: digests are not typed', from: "['dag_digest', 'command_digest', 'config_digest', 'report_sha256'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))", to: "['dag_digest', 'command_digest', 'config_digest'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))" },
+  { file: RE, tag: 'P4r-18', name: 'schema: the runner fields are not typed', from: 'RUNNER_KEYS.every((k) => str(copy.runner[k], 64))', to: "['id', 'format'].every((k) => str(copy.runner[k], 64))" },
+  { file: RE, tag: 'P4r-18', name: 'schema: report_len is not bounded', from: 'uint(copy.report_len, LIMITS.maxReportBytes)', to: 'uint(copy.report_len)' },
+  { file: RE, tag: 'P4r-18', name: 'schema: the result count is not bounded', from: ' && copy.counts.results <= LIMITS.maxResults', to: '' },
+  { file: RE, tag: 'P4r-18', name: 'schema: the entry name is not typed', from: "typeof copy.entry === 'string' && ENTRY_NAME.test(copy.entry) && ", to: '' },
+  { file: RE, tag: 'P4r-18', name: 'schema: the claim is not typed', from: ' && str(copy.claim, 16)', to: '' },
   { file: IO, tag: 'P4r-10', name: 'scan: duplicate keys are accepted', from: 'if (keys.has(key)) bad();', to: '' },
   { file: IO, tag: 'P4r-10', name: 'scan: escaped duplicate keys are not normalised', from: "if (key.includes('\\\\')) { try { key = JSON.parse(raw); } catch { bad(); } }", to: '' },
   { file: IO, tag: 'P4r-10', name: 'scan: depth is not capped', from: 'if (d > LIMITS.maxDepth) bad();', to: '' },
@@ -826,7 +852,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   for (let i = 0; i < jobs.length; i += 3) results.push(...await Promise.all(jobs.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   const [control, ...mutants] = results;
   assert.equal(control.code, 0, `the control passes every tagged test:\n${control.tail}`);
-  assert.ok(control.passed >= 22, `the control ran the tagged tests (${control.passed})`);
+  assert.ok(control.passed >= 23, `the control ran the tagged tests (${control.passed})`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);
