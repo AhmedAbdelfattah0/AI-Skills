@@ -71,7 +71,6 @@ self-containment; this is the canonical statement.)
 | Verification Passes (Angular/backend/ship-ticket rule pass) | canonical `subject_id | outcome | evidence` row; rule outcomes are PASS / FAIL / NOT_APPLICABLE | Gate status, not per-finding severity — orthogonal to bands |
 | ship-ticket design parity | Faithful / Minor / Major / Not-built | A design-parity *grade*, not a defect severity |
 | test-quality | Must fix / Should fix / Sacred / Worth noting | "Sacred" (regression tests) has no Critical/Important/Nit equivalent |
-| cost-reducer | High / Med / Low priority | Savings priority, not defect severity |
 
 When two skills report in one session, each keeps its scale; the summary maps
 everything to "blocks merge / should fix / note" so the reader gets one
