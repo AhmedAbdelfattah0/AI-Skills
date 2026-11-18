@@ -111,7 +111,7 @@ test('[R1] grammar edges: regex/division, angle brackets, callee bindings, skip 
   for (const s of ['const test = () => {};', '[1].map((it) => it);', 'for (const it of xs) {}', 'typeof it;', 'x = a ? it : b;', 'const o = { it: 1 };',
     'import { xtest as it } from "vitest";', 'import { test as t } from "node:test";', "import { it } from './my-wrapper';", "import it from 'vitest';",
     'import { it } from "node:test?x";', "const { it } = require('node:test');", 'class it {}', 'export { it };', 'test.describe("g", () => {});', 'it.beforeEach(() => {});',
-    'test["only"]("x", () => {});', 'if (a) it("x", () => {});', 'x = `${it("x", () => {})}`;'])
+    'test["only"]("x", () => {});', 'if (a) it("x", () => {});', 'x = `${it("x", () => {})}`;', 'x = `${ { it("[kind:a] t", () => {}) } }`;'])
     assert.ok(['ambiguous_callee', 'skip_form'].includes(scan(`${s}\nit('[kind:a] t', ${F});`, 'a.test.ts').reason), s);
   for (const s of ['it.only', 'it.skip', 'test.todo', 'test.skipIf(x)', 'it.runIf(x)', 'test.fixme', 'it.fails', 'test.failing', 'it.each([1])', 'test.concurrent', 'describe.sequential', 'test.extend({})', 'describe?.only', 'suite.skip'])
     assert.deepEqual(sum(scan(`it('[kind:a] t', ${F}); ${s}('x', ${F});`)), UNSUP('skip_form'), s);
@@ -122,6 +122,7 @@ test('[R1] grammar edges: regex/division, angle brackets, callee bindings, skip 
   assert.deepEqual(sum(scan(`import { it } from 'my-runner';\nit('[kind:a] t', ${F});`, 'a.test.js', { runnerModules: ['my-runner'] })), OK(...k('a')), 'a base-declared runner module');
   assert.deepEqual(sum(scan(`it('[plan:B2] [kind:a] [plan:B2]', ${F});`)), OK('plan:B2', 'kind:a'), 'one title reports a marker once');
   assert.deepEqual(sum(scan(`specify('[kind:a] t', ${F}); context('c', ${F});`)), OK(), 'specify/context are not callees');
+  for (const lt of ['\u2028', '\u2029', '\r', '\n', '\r\n']) assert.deepEqual(sum(scan(`// note${lt}it('[kind:a] t', ${F});`)), OK(...k('a')), `a line comment ends at ${JSON.stringify(lt)}`);
 });
 
 test('[R1] the Codex rev-3 challenge examples, verbatim', () => {
