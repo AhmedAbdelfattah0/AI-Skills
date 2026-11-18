@@ -223,6 +223,19 @@ test('[AC5] INIT rows: opt-in without config, config without opt-in, without pol
   initFails(init(tkFx(t, { testCommands: { unit: { ...ENTRY, cmd: 'node_modules/.bin/jest' } } })), 'runner_unsupported'); // R2
 });
 
+test('[AC5] row 2: every opt-in carrier, valid or near-miss, without config.testKinds is test_kinds_policy_required; a risk-floor line alone stays inactive (R8)', (t) => {
+  const carriers = ['test-triggers: input-path', 'TEST-TRIGGERS input-path', 'lifecycle-item: L1 closes the banner', 'Lifecycle-Item: L1',
+    'test-waiver: negative not needed', 'TEST-WAIVER: x'];
+  for (const line of carriers) {
+    const fx = fixture(t, { commit: true, narrativeExtra: `${line}\n` });
+    initFails(fx.cli('init', { dag: fx.dagFile }), 'test_kinds_policy_required');
+  }
+  const fx = fixture(t, { commit: true, narrativeExtra: `${FLOOR('0'.repeat(40))}\n` });
+  ok(fx.cli('init', { dag: fx.dagFile }), 'a risk-floor record line alone does not opt in');
+  const S = fx.readState();
+  assert.deepEqual([S.policy_version, S.test_kinds], [1, undefined]);
+});
+
 test('[AC5] active init binds S.test_kinds with policy_version 2; a partial activation state is test_kinds_state_missing (row 8)', (t) => {
   const fx = tkFx(t);
   ok(fx.cli('init', { dag: fx.dagFile }));
@@ -448,6 +461,19 @@ test('[AC S2] a proof that edits and commits a covered file (config.base=HEAD: t
   assert.deepEqual([S.local_proof.candidate_id, S.local_proof.dropped], [null, ['candidate_moved']]);
   assert.equal(S.ship_ready, undefined);
   void r;
+});
+
+test('[R4 AMD-P5r-1] a live attempt refuses the evidence run (evidence_unquiet, nothing runs); after a crash resume reconciles an evidence attempt as a runner and the gate proceeds', { skip: NOT_DARWIN }, (t) => {
+  const fx = ready(tkFx(t));
+  fx.editState((s) => { s.attempts.push({ attempt_id: 'att-crashed', kind: 'evidence', node: 'unit', status: 'running', pid: 999999, pgid: 999999, quiesced: false }); });
+  const before = protectedOf(fx.readState());
+  refused(fx.gate('review', passReview('rx-1', fx.candidate())), 'evidence_unquiet');
+  assert.equal(fx.runnerRuns().length, 0, 'nothing ran beside a live attempt');
+  assert.equal(protectedOf(fx.readState()), before);
+  ok(fx.cli('resume'), 'resume settles the crashed evidence attempt through the runner path (RUNNER_KINDS)');
+  const a = fx.readState().attempts.find((x) => x.attempt_id === 'att-crashed');
+  assert.deepEqual([a.status, a.quiesced], ['abandoned', true]);
+  ok(refreshThen(fx, 'review', passReview('rx-1', fx.candidate()), 'after resume'));
 });
 
 // ------------------------------------------------------------------ R4/R7: typed refusals are stored and never retried; RED never substitutes
