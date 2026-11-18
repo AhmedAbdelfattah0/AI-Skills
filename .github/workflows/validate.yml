@@ -94,6 +94,7 @@ jobs:
           skills/ship-ticket/scripts/gate-security.test.mjs
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs
+          skills/ship-ticket/scripts/risk-floor.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
