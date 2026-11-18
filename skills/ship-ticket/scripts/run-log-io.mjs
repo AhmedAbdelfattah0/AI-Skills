@@ -8,13 +8,16 @@
  *   same write carries the `log_loss` record `marker(info)` returns. The sidecar is the durable record of the removed bytes;
  *   a refusal before the write changes nothing, and after a failed write restoring the original bytes is best effort.
  * - I3: only the bytes after the last LF are torn (measure/events.mjs `committedLength`).
+ * - Replace (win32): the quarantine reads the log, CLOSES it, and only then renames its temp over it (durable-io `renameRetrying`,
+ *   which also retries a transient win32 EPERM/EBUSY/EACCES). A refused replace removes the temp and leaves the log unchanged;
+ *   the sidecar written before it is then a redundant copy, never the only one.
  * Cancellation (`lockOptions.signal`) applies to the lock wait only: once the lock is held the operation runs to completion.
  * The awaits inside the lock are test fault-injection boundaries (`hooks.boundary`); no other code runs between them.
  */
 import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { acquireLock, boundary, writeStateAtomic } from './lib/durable-io.mjs';
+import { acquireLock, boundary, renameRetrying, writeStateAtomic } from './lib/durable-io.mjs';
 import { committedLength } from './measure/events.mjs';
 
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
@@ -25,24 +28,30 @@ export const LOSS_SCHEMA = 'ship-ticket-run-log-loss-v1';
  *  with equal removed bytes and first offset but different later offsets never share a sidecar (the earlier one is never replaced). */
 export const sidecarPath = (file, { offset, sha256, layout }) => `${file}.lost-${offset}-${sha256.slice(0, 12)}${layout ? `-${layout}` : ''}.json`;
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
-const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fsyncSync ?? fsyncSync, truncate: fs.ftruncateSync ?? ftruncateSync });
+const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fsyncSync ?? fsyncSync, truncate: fs.ftruncateSync ?? ftruncateSync,
+  open: fs.openSync ?? openSync, close: fs.closeSync ?? closeSync, rename: fs.renameSync ?? renameSync });
 const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
 
-/** Lock, open (read-write, never append mode: truncation must work on win32) and read; `body` runs with the file's bytes. */
-async function locked(file, opts, body) {
+/**
+ * Lock, open (read-write, never append mode: truncation must work on win32) and read; `body` runs with the file's bytes. With
+ * `hold` false the log is closed before `body` runs and `body` gets no fd: a replace-by-rename never targets a file this process
+ * holds open (win32 refuses it with EPERM). Mutual exclusion is `<log>.lock`, never the log's own handle.
+ */
+async function locked(file, opts, hold, body) {
   const { waitMs = 10000, lock = acquireLock, lockCtx = {}, lockOptions = {} } = opts;
   const handle = await lock({ lockFile: `${file}.lock`, runId: 'run-log', ...lockCtx }, { waitMs, ...lockOptions });
   try {
-    const created = !existsSync(file);
-    const fd = openSync(file, created ? 'wx+' : 'r+', 0o600);
+    const { open, close } = seams(opts), created = !existsSync(file);
+    let fd = open(file, created ? 'wx+' : 'r+', 0o600);
     try {
       await boundary(opts.hooks, 'append-read', { file });
       const size = fstatSync(fd).size;
       if (size > (opts.maxBytes ?? LOG_BYTES_MAX)) throw coded('log_too_large', `${file} is ${size} bytes`);
       const buf = Buffer.alloc(size);
       for (let at = 0; at < size;) { const n = readSync(fd, buf, at, size - at, at); if (n === 0) throw coded('short_read', file); at += n; }
+      if (!hold) { const f = fd; fd = null; close(f); }
       return await body(fd, buf, created);
-    } finally { closeSync(fd); }
+    } finally { if (fd !== null) close(fd); }
   } finally { await handle.release(); }
 }
 
@@ -62,12 +71,12 @@ const lossInfo = (offset, bytes, cause, pieces) => {
  * Append `text` (whole LF-terminated lines). A torn tail is moved to a sidecar and replaced by `marker(info)` + `text` in one
  * positional write; after a failure once the write has started, restoring the original bytes is best effort (the sidecar is the durable record). Options: `check(after, before)`,
  * `marker(info) -> text` (required when a torn tail exists), `waitMs`, `maxBytes`; test seams `lock`, `lockCtx`, `lockOptions`,
- * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync }), `platform`. Resolves `{ lost: info | null, bytes }`.
+ * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync, openSync, closeSync, renameSync }), `platform`. Resolves `{ lost: info | null, bytes }`.
  */
 export async function appendLocked(file, text, opts = {}) {
   if (typeof text !== 'string' || !text.endsWith('\n')) throw coded('bad_append', 'text must be whole LF-terminated lines');
-  const { write, fsync, truncate } = seams(opts), platform = opts.platform ?? process.platform;
-  return locked(file, opts, async (fd, buf, created) => {
+  const { write, fsync, truncate, open, close } = seams(opts), platform = opts.platform ?? process.platform;
+  return locked(file, opts, true, async (fd, buf, created) => {
     const committed = committedLength(buf), tail = buf.subarray(committed);
     const info = tail.length ? lossInfo(committed, tail, 'torn_tail') : null;
     if (info && !opts.marker) throw coded('loss_unrecorded', `${file} has a torn tail and no loss record was supplied`);
@@ -81,7 +90,7 @@ export async function appendLocked(file, text, opts = {}) {
       if (buf.length > committed + out.length) truncate(fd, committed + out.length);
       await boundary(opts.hooks, 'append-fsync', { file });
       fsync(fd);
-      if (created && platform !== 'win32') { const dfd = openSync(dirname(file), 'r'); try { fsync(dfd); } finally { closeSync(dfd); } }
+      if (created && platform !== 'win32') { const dfd = open(dirname(file), 'r'); try { fsync(dfd); } finally { close(dfd); } }
     } catch (error) {
       try { writeAll(write, fd, tail, committed); truncate(fd, buf.length); } catch { /* the sidecar holds the tail; R11 drops a torn rest */ }
       throw error;
@@ -96,8 +105,8 @@ export async function appendLocked(file, text, opts = {}) {
  * nothing is selected (the log is untouched).
  */
 export async function quarantineLocked(file, { select, marker, check, ...opts }) {
-  const { write, fsync } = seams(opts), platform = opts.platform ?? process.platform;
-  return locked(file, opts, async (fd, buf) => {
+  const { write, fsync, open, close, rename } = seams(opts), platform = opts.platform ?? process.platform;
+  return locked(file, opts, false, async (_closed, buf) => {
     const ranges = select(buf);
     if (!ranges.length) return null;
     const pieces = ranges.map(([from, to]) => [from, buf.subarray(from, to)]);
@@ -112,11 +121,11 @@ export async function quarantineLocked(file, { select, marker, check, ...opts })
     await boundary(opts.hooks, 'append-write', { file });
     const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
     try {
-      const t = openSync(tmp, 'wx', 0o600);
-      try { writeAll(write, t, after, 0); fsync(t); } finally { closeSync(t); }
-      renameSync(tmp, file);
+      const t = open(tmp, 'wx', 0o600);
+      try { writeAll(write, t, after, 0); fsync(t); } finally { close(t); }
+      await renameRetrying(tmp, file, { rename, platform });
     } catch (error) { try { unlinkSync(tmp); } catch { /* never created */ } throw error; }
-    if (platform !== 'win32') { const dfd = openSync(dirname(file), 'r'); try { fsync(dfd); } finally { closeSync(dfd); } }
+    if (platform !== 'win32') { const dfd = open(dirname(file), 'r'); try { fsync(dfd); } finally { close(dfd); } }
     return info;
   });
 }

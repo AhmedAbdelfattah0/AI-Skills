@@ -4,9 +4,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync as realWriteSync, ftruncateSync as realFtruncate } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync as realWriteSync, ftruncateSync as realFtruncate,
+  openSync as realOpen, closeSync as realClose, renameSync as realRename } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ev from './events.mjs';
 import { createHash } from 'node:crypto';
@@ -620,6 +621,69 @@ test('I2 quarantine sidecars: two recoveries with equal removed bytes and first 
   for (const p of paths) assert.ok(existsSync(p), `${p} survived`);
 });
 
+/**
+ * win32 file semantics on every OS: an fs seam that registers every handle it opens and refuses (EPERM, as Windows does) to
+ * rename over a path one of those handles still holds. `transient` refuses the first N renames (antivirus); `alwaysRefuse` refuses
+ * every rename (a foreign holder the retries outlast).
+ */
+const windowsFs = ({ alwaysRefuse = false, transient = 0 } = {}) => {
+  const held = new Map(), opened = [], renamedOver = [];
+  const fs = { fsyncSync: () => {},
+    openSync: (p, flags, mode) => { const fd = realOpen(p, flags, mode); held.set(fd, resolve(p)); opened.push(resolve(p)); return fd; },
+    closeSync: (fd) => { held.delete(fd); realClose(fd); },
+    renameSync: (from, to) => {
+      renamedOver.push(resolve(to));
+      if (alwaysRefuse || renamedOver.length <= transient || [...held.values()].includes(resolve(to))) throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' });
+      realRename(from, to);
+    } };
+  return { fs, held, opened, renamedOver };
+};
+
+test('win32 replace (I4): quarantine never renames over a log this process holds open; a refused replace loses no byte and leaks no handle, temp or lock', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 's04a2-win-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const good = Buffer.from(encodeValid('milestone').text), [s] = encodeValid('finding').text.split('\n');
+  const bad = Buffer.from(`${s}\n`), original = Buffer.concat([good, bad]);
+  const opts = (fs) => ({ lockCtx, fs, platform: 'win32', select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck });
+  const leftovers = (file) => readdirSync(dir).filter((x) => x.startsWith(`${file.split(/[\\/]/).pop()}.`) && (x.endsWith('.tmp') || x.endsWith('.lock')));
+
+  const file = join(dir, 'ok.jsonl');
+  writeFileSync(file, original);
+  const win = windowsFs();
+  const info = await mustResolve(quarantineLocked(file, opts(win.fs)), 'quarantineLocked');
+  assert.ok(win.opened.includes(resolve(file)) && win.renamedOver.includes(resolve(file)), 'the seam saw the log opened and replaced');
+  assert.deepEqual(readFileSync(file), Buffer.concat([good, Buffer.from(marker()(info))]));
+  assert.deepEqual(Buffer.from(readSidecar(sidecarPath(file, info)).pieces[0].base64, 'base64'), bad);
+  assert.deepEqual([...win.held.values()], [], 'no handle left open');
+  assert.deepEqual(leftovers(file), [], 'no temp file or lock left');
+
+  const flaky = join(dir, 'flaky.jsonl'), av = windowsFs({ transient: 2 });
+  writeFileSync(flaky, original);
+  const flakyInfo = await mustResolve(quarantineLocked(flaky, opts(av.fs)), 'quarantineLocked after transient EPERM');
+  assert.equal(av.renamedOver.filter((x) => x === resolve(flaky)).length, 3, 'two transient refusals, then the replace');
+  assert.deepEqual(readFileSync(flaky), Buffer.concat([good, Buffer.from(marker()(flakyInfo))]));
+
+  const refused = join(dir, 'refused.jsonl');
+  writeFileSync(refused, original);
+  const foreign = windowsFs({ alwaysRefuse: true });
+  await assert.rejects(quarantineLocked(refused, opts(foreign.fs)), (e) => e.code === 'EPERM');
+  assert.ok(foreign.renamedOver.includes(resolve(refused)), 'the replace was attempted');
+  assert.deepEqual(readFileSync(refused), original, 'a refused replace leaves every byte of the log');
+  const lost = readdirSync(dir).filter((x) => x.startsWith('refused.jsonl.lost-'));
+  assert.equal(lost.length, 1, 'the sidecar was written before the replace');
+  assert.deepEqual(Buffer.from(readSidecar(join(dir, lost[0])).pieces[0].base64, 'base64'), bad, 'and holds the selected bytes verbatim');
+  assert.deepEqual([...foreign.held.values()], [], 'no handle left open');
+  assert.deepEqual(leftovers(refused), [], 'no temp file or lock left');
+
+  const appended = join(dir, 'append.jsonl');
+  const app = windowsFs();
+  await mustResolve(appendLocked(appended, good.toString(), { lockCtx, fs: app.fs, platform: 'win32' }), 'appendLocked');
+  await mustResolve(appendLocked(appended, encodeValid('finding').text, { lockCtx, fs: app.fs, platform: 'win32', marker: marker(), check: cleanCheck }), 'appendLocked');
+  assert.ok(app.opened.includes(resolve(appended)), 'the seam saw the append open the log');
+  assert.deepEqual([...app.held.values()], [], 'the append leaves no handle open');
+  assert.deepEqual(leftovers(appended), [], 'and no lock');
+});
+
 test('reader: a hand-damaged pair of ANY kind is invalid at read (kind, canonical id, start payload, envelope), never an event', () => {
   for (const name of ev.EVENT_NAMES) {
     const [s, e] = encodeValid(name).text.split('\n').map((l) => (l ? JSON.parse(l) : null));
@@ -855,6 +919,8 @@ const MUTANTS = [
   ['run-log-io.mjs', 'no directory fsync', "if (created && platform !== 'win32') {", "if (false) {"],
   ['run-log-io.mjs', 'directory fsync on every append', "if (created && platform !== 'win32') {", "if (platform !== 'win32') {"],
   ['run-log-io.mjs', 'no size cap', "if (size > (opts.maxBytes ?? LOG_BYTES_MAX)) throw", "if (false) throw"],
+  ['run-log-io.mjs', 'win32: quarantine replaces the log while holding it open', "if (!hold) { const f = fd; fd = null; close(f); }", ""],
+  ['run-log-io.mjs', 'win32: quarantine replace not retried', "await renameRetrying(tmp, file, { rename, platform });", "rename(tmp, file);"],
   ['run-log-io.mjs', 'I4: quarantine check skipped', "if (check) check(after, buf);", ""],
   ['run-log-io.mjs', 'I4: quarantine without sidecar', "await saveLost(file, info, pieces, opts);\n    await boundary(opts.hooks, 'append-write', { file });\n    const tmp", "await boundary(opts.hooks, 'append-write', { file });\n    const tmp"],
   ['run-log.mjs', 'lone --started-at is zero-length', "const endedAt = options['ended-at'] ?? now, startedAt = options['started-at'] ?? endedAt;", "const startedAt = options['started-at'] ?? options['ended-at'] ?? now, endedAt = options['ended-at'] ?? startedAt;"],
