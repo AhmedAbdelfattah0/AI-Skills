@@ -1287,11 +1287,30 @@ const GRAMMAR_MEMBERS = new Set([
  * destructuring key, never as a member expression (round 7). */
 const GRAMMAR_DATA_KEYS = new Set(['decode']);
 /**
- * The one decoder (round 7, opus r6): `const DECODER = <newSrc>` at module top level, unaliasable; the identifier may
- * appear only as `DECODER.decode(bytes)` (exactly that text) in the statement `s = DECODER.decode(bytes);` of the
- * top-level function decodeStrict. Any other `.decode` member is refused, on any value.
+ * The one decoder (round 7, opus r6): the identifier DECODER may appear only as `DECODER.decode(bytes)` in the one
+ * statement `s = DECODER.decode(bytes);` of the top-level function decodeStrict, and any other `.decode` member is
+ * refused on every value. What DECODER and decodeStrict ARE is fixed by GRAMMAR_PINNED_NAMES (round 8): each resolves to
+ * its one pinned top-level declaration in git-exec.mjs, and is refused anywhere else, so the name cannot be rebound.
  */
 const GRAMMAR_DECODER = Object.freeze({ binding: 'DECODER', call: 'DECODER.decode(bytes)', stmt: 's = DECODER.decode(bytes);', fn: 'decodeStrict' });
+/**
+ * Pinned-name resolution (round 8, opus r7: a pin keyed to a NAME must be keyed to a BINDING). Every name a pinned
+ * construct relies on, with the one file that may declare it and its one declaration: 'const' (a top-level `const`
+ * whose initialiser satisfies `init`) or 'function' (a top-level function declaration). In that file the name must be
+ * declared exactly once, as that declaration, and is never assigned or updated; in every other file any declaration
+ * of it is refused (a reference there is a free name, which no global allowlists). So each use resolves to the pin.
+ * Covered: the decoder pin (DECODER, decodeStrict), the own-data reader production (ownValue and the `own` its text
+ * calls), and the enclosing functions ALLOWED_SITES keys its sites by (realFs, resolveGitBinary, parseGitVersion).
+ */
+const GRAMMAR_PINNED_NAMES = new Map([
+  ['DECODER', { file: 'git-exec.mjs', kind: 'const', init: (i, text) => i?.type === 'NewExpression' && text(i) === GRAMMAR_GLOBALS.get('TextDecoder').newSrc }],
+  ['decodeStrict', { file: 'git-exec.mjs', kind: 'function' }],
+  ['ownValue', { file: 'git-exec.mjs', kind: 'const', init: (i, text) => !!i && text(i) === OWN_VALUE_SRC }],
+  ['own', { file: 'git-exec.mjs', kind: 'const', init: (i) => i?.type === 'ArrowFunctionExpression' }],
+  ['realFs', { file: 'git-capability.mjs', kind: 'const', init: (i) => i?.type === 'ObjectExpression' }],
+  ['resolveGitBinary', { file: 'git-capability.mjs', kind: 'function' }],
+  ['parseGitVersion', { file: 'git-capability.mjs', kind: 'function' }],
+]);
 /**
  * Every GRAMMAR_MEMBERS name that a byte holder (Buffer, Uint8Array, ArrayBuffer, TextDecoder prototype chains) defines,
  * with why it does not decode bytes to text. The audit test derives that set at run time and requires it to equal these
@@ -1355,6 +1374,21 @@ function grammarSites(file, src) {
     if (/^Import(?:Default|Namespace)?Specifier$/.test(n.type)) declare(n.local);
   });
   for (const [name, ids] of decl) if (RESERVED_NAME(name)) refuse(ids[0], `declaration of ${name}, a global name (no shadowing)`);
+  // Pinned-name resolution: a pinned name is declared only as its one pinned top-level declaration, in its own file.
+  const topLevel = (n) => /^(?:Program|ExportNamedDeclaration)$/.test(parent.get(n)?.node.type ?? '');
+  const pinnedDecl = (id, pin) => {
+    const up = parent.get(id);
+    if (pin.kind === 'function') return up.node.type === 'FunctionDeclaration' && up.key === 'id' && topLevel(up.node);
+    const v = up.node.type === 'VariableDeclarator' && up.key === 'id' ? parent.get(up.node).node : null;
+    return !!v && v.kind === 'const' && topLevel(v) && pin.init(up.node.init, text);
+  };
+  for (const [name, pin] of GRAMMAR_PINNED_NAMES) {
+    const ids = decl.get(name) ?? [];
+    if (pin.file !== file) { for (const id of ids) refuse(id, `pinned name ${name} declared outside ${pin.file}`); continue; }
+    if (ids.length > 1) { for (const id of ids) refuse(id, `pinned name ${name} declared ${ids.length} times`); continue; }
+    if (ids.length === 1 && !pinnedDecl(ids[0], pin)) { refuse(ids[0], `pinned name ${name} declared other than as its pinned top-level ${pin.kind}`); continue; }
+    if (ids.length === 1) used.add(`pinned-name:${name}`);
+  }
   const isLocal = (name) => decl.has(name);
 
   // Imports: local name -> use.
@@ -1626,7 +1660,11 @@ function grammarSites(file, src) {
       case 'AssignmentExpression': {
         op(n);
         const l = n.left;
-        if (l.type === 'Identifier') { see(l); if (!isLocal(l.name) || imports.has(l.name)) refuse(l, `assignment to ${l.name}, which is not a local binding`); }
+        if (l.type === 'Identifier') {
+          see(l);
+          if (!isLocal(l.name) || imports.has(l.name)) refuse(l, `assignment to ${l.name}, which is not a local binding`);
+          else if (GRAMMAR_PINNED_NAMES.has(l.name)) refuse(l, `assignment to the pinned name ${l.name}`);
+        }
         else if (l.type === 'MemberExpression' && !l.computed && l.object.type === 'ThisExpression' && l.property.type === 'Identifier' && ctx.ctor && GRAMMAR_MEMBERS.has(l.property.name)) {
           [l, l.object, l.property].forEach((x) => seen.add(x));
           used.add(`member:${l.property.name}`).add('assign:this');
@@ -1635,7 +1673,7 @@ function grammarSites(file, src) {
       }
       case 'UpdateExpression':
         op(n);
-        if (n.argument.type === 'Identifier' && isLocal(n.argument.name) && !imports.has(n.argument.name)) see(n.argument);
+        if (n.argument.type === 'Identifier' && isLocal(n.argument.name) && !imports.has(n.argument.name) && !GRAMMAR_PINNED_NAMES.has(n.argument.name)) see(n.argument);
         else refuse(n, 'an update of something other than a local name');
         return undefined;
       case 'UnaryExpression': op(n); return expr(n.argument, 'value', ctx);
@@ -1997,6 +2035,7 @@ function grammarEntries() {
   for (const m of GRAMMAR_SITE_PINNED.keys()) e.add(`pinned:${m}`);
   for (const k of GRAMMAR_DATA_KEYS) e.add(`key:${k}`);
   e.add('pin:decoder-call').add('pin:decoder-binding');
+  for (const n of GRAMMAR_PINNED_NAMES.keys()) e.add(`pinned-name:${n}`);
   for (const k of GRAMMAR_METHOD_KEYS) e.add(`method:${k}`);
   return e;
 }
@@ -2233,6 +2272,46 @@ test('T4a grammar (round 7): the decoder is unaliasable and `.decode` exists onl
   assert.ok(grammarSites('git-exec.mjs', swapped).hits.some((h) => /decode/.test(h.why)), 'the neutralisationPairs swap is refused');
   // The real pinned call passes (control).
   assert.deepEqual(grammarSites('git-exec.mjs', real).hits, []);
+});
+
+// Round 8 (opus r7 Major): a pinned construct named a NAME, not a binding. Every pinned name must resolve to its one
+// pinned top-level declaration in the file that pins it, and is refused anywhere else (any declaration, any file).
+const OPUS_R7 = 'function decodeStrict(bytes, DECODER) { let s = null; s = DECODER.decode(bytes); return s; }\nexport function versionText(out, opts) { return decodeStrict(out, opts.value); }\n';
+const PINNED_NAME_ESCAPES = [
+  ['git-capability.mjs', 'opus r7 repro appended to git-capability.mjs', null],
+  ['git-exec.mjs', 'no decoder site, DECODER a parameter', 'export function decodeStrict(bytes, DECODER) { let s = null; s = DECODER.decode(bytes); return s; }'],
+  ['git-exec.mjs', 'let DECODER set by an exported setter', 'let DECODER = null;\nexport function setDecoder(d) { DECODER = d; }\nexport function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); return s; }'],
+  ['git-exec.mjs', 'DECODER a local inside decodeStrict', 'export function decodeStrict(bytes) { const DECODER = bytes.value; let s = null; s = DECODER.decode(bytes); return s; }'],
+  ['git-exec.mjs', 'DECODER a catch parameter', 'export function decodeStrict(bytes) { let s = null; try { s = 1; } catch (DECODER) { s = DECODER.decode(bytes); } return s; }'],
+  ['git-exec.mjs', 'DECODER destructured', 'export function decodeStrict(bytes, { value: DECODER }) { let s = null; s = DECODER.decode(bytes); return s; }'],
+  ['git-exec.mjs', 'DECODER imported', "import { DECODER } from './git-capability.mjs';"],
+  ['git-exec.mjs', 'decodeStrict a parameter', 'function f(decodeStrict) { return decodeStrict; }'],
+  ['git-exec.mjs', 'decodeStrict reassigned', 'export function decodeStrict(bytes) { return bytes; }\nfunction f() { decodeStrict = null; }'],
+  ['git-exec.mjs', 'decodeStrict a block local', '{ const decodeStrict = 1; }'],
+  ['git-exec.mjs', 'ownValue a parameter', 'function f(ownValue) { return ownValue; }'],
+  ['git-exec.mjs', 'own a parameter', 'function f(own) { return own; }'],
+  ['git-exec.mjs', 'own reassigned', 'let own = (o, k) => Object.hasOwn(o, k);\nown = null;'],
+  ['git-capability.mjs', 'realFs a parameter', 'function f(realFs) { return realFs; }'],
+  ['git-capability.mjs', 'resolveGitBinary a block local', '{ let resolveGitBinary = 1; }'],
+  ['git-capability.mjs', 'parseGitVersion a parameter', 'function f(parseGitVersion) { return parseGitVersion; }'],
+  ['git-capability.mjs', 'DECODER declared in the file that does not pin it', "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });"],
+  ['git-capability.mjs', 'decodeStrict declared in the file that does not pin it', 'export function decodeStrict(bytes) { return bytes; }'],
+  ['git-exec.mjs', 'DECODER a top-level const with another initialiser', 'const DECODER = { decode: (b) => b };\nexport function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); return s; }'],
+  ['git-exec.mjs', 'own a block-level const', '{ const own = (o, k) => Object.hasOwn(o, k); }'],
+  ['git-exec.mjs', 'decodeStrict a const, not a function declaration', 'export const decodeStrict = (bytes) => bytes;'],
+  ['git-exec.mjs', 'decodeStrict updated', 'export function decodeStrict(bytes) { return bytes; }\nfunction f() { decodeStrict++; }'],
+  ['git-exec.mjs', 'ownValue declared twice (top level and a parameter)', `const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue = ${OWN_VALUE_SRC};\nfunction f(ownValue) { return ownValue; }`],
+];
+test('T4a grammar (round 8): every pinned name resolves to its one pinned top-level declaration, in the file that pins it', () => {
+  const cap = readFileSync(join(here, 'git-capability.mjs'), 'utf8');
+  for (const [file, what, src] of PINNED_NAME_ESCAPES) {
+    const code = src ?? `${cap}\n${OPUS_R7}`;
+    assert.ok(grammarSites(file, code).hits.length > 0, `${file}: ${what} is refused`);
+  }
+  // Controls: each pinned name declared as its pin, in its file, is admitted.
+  const ok = [['git-exec.mjs', `${TD}const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue = ${OWN_VALUE_SRC};\nexport function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); return s; }`],
+    ['git-capability.mjs', 'const realFs = { a: 1 };\nexport function resolveGitBinary() { return realFs; }\nexport function parseGitVersion(out) { return out; }']];
+  for (const [file, src] of ok) assert.deepEqual(grammarSites(file, src).hits.map((h) => h.why), [], file);
 });
 
 test('T4a grammar (round 7): every member name is audited: none is a decoder on a byte holder, and each one a byte holder defines has a reason', () => {
