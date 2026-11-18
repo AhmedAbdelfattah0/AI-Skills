@@ -1020,7 +1020,8 @@ const CONVERTED = { ok: false, code: 'evidence_unavailable', detail: 'worktree_c
 function pointerRepo(t) {
   const dir = tmp(t, 'p4r-ptr-');
   git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'config', 'filter.ptr.clean', "sh -c 'cat >/dev/null; echo version-pointer-oid-123'"); git(dir, 'config', 'filter.ptr.smudge', 'cat');
+  // the pointer depends on the content (as an LFS oid does), so a CHANGED test is listed by git and an unchanged one is not
+  git(dir, 'config', 'filter.ptr.clean', "sh -c 'echo version-pointer; git hash-object --stdin'"); git(dir, 'config', 'filter.ptr.smudge', 'cat');
   put(dir, '.gitattributes', 'libs/**/*.test.ts filter=ptr\n'); put(dir, 'vitest.config.ts', 'export default {};\n'); put(dir, 'package-lock.json', '{}\n');
   put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n");
   git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base');
@@ -1039,6 +1040,7 @@ test('[P4r-46] round 8 (D2): a working tree git converts (pointer filters, LFS, 
   { const r = pointerRepo(t);
     put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
     put(r.dir, 'libs/money/other.test.ts', 'x\n'); git(r.dir, 'add', 'libs/money/other.test.ts');
+    assert.ok(git(r.dir, 'diff', '--name-only', r.base).split('\n').includes('libs/money/old.test.ts'), 'the fixture really LISTS the converted file');
     assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'a listed file git converts'); }
 });
 
