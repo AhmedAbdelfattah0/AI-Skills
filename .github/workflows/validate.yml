@@ -95,6 +95,7 @@ jobs:
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs
           skills/ship-ticket/scripts/risk-floor.test.mjs
+          skills/ship-ticket/scripts/test-kinds.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
@@ -140,6 +141,10 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-security-mutation.test.mjs
+      - name: Test-kinds fail-closed recognition mutation check
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/test-kinds-mutation.test.mjs
       - name: Record guard mutation check
         env:
           ENGINE_RECORD_MUTATION: '1'

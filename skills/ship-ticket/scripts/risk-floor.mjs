@@ -60,6 +60,8 @@ export const testHooks = { afterLstat: null }; // test seam: runs between lstat 
 export const CHANGED = 'risk_declaration_changed';
 export const DECLARATION_PATH = '.ship-ticket/risk-paths.json';
 const RANK = { STANDARD: 0, ELEVATED: 1 };
+/** The risk-class name grammar (declaration and record line); test-kinds.mjs reuses it. */
+export const CLASS_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const normProfile = (c) => (typeof c === 'string' && Object.hasOwn(RANK, c.trim().toUpperCase()) ? c.trim().toUpperCase() : null);
 const bad = (code, reason) => Object.assign(new Error(reason), { code });
 
@@ -128,7 +130,7 @@ export function validateDeclaration(d) {
   const names = new Set(), out = []; let total = 0;
   for (const c of d.classes) {
     if (!c || typeof c !== 'object' || Object.keys(c).some((k) => !['name', 'floor', 'globs'].includes(k))) throw inv('a class has unknown keys');
-    if (typeof c.name !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(c.name) || names.has(c.name) || c.name === CHANGED) throw inv('class names are unique [a-z0-9_-] identifiers (one is reserved)');
+    if (typeof c.name !== 'string' || !CLASS_NAME.test(c.name) || names.has(c.name) || c.name === CHANGED || c.name === 'none') throw inv('class names are unique [a-z0-9_-] identifiers (risk_declaration_changed and none are reserved: none is the record\'s empty-set sentinel)');
     if (c.floor !== 'ELEVATED') throw inv('a class floor must be "ELEVATED"');
     if (!Array.isArray(c.globs) || !c.globs.length || (total += c.globs.length) > MAX_GLOBS) throw inv('globs must be non-empty arrays, at most 256 in total');
     names.add(c.name);
