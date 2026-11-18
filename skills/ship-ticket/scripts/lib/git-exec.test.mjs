@@ -1812,6 +1812,8 @@ const COMPUTED = [
 ];
 const COMPUTED_FINE = ['for (let i = 0; i < n; i++) x[i];', 'for (let i = 0; x[i]; i++);', 'for (let i = 0; i < 3; i++) if (a[i] !== b[i]) f(a[i] > b[i]);',
   'x[b >> 4]; x[b & 15]; x[-1]; x[n - 1]; x[i++]; x[~i]; x[+k]; x[2n];', 'delete o[k];', 'o[k] = v;',
+  // layer 2 treats a module-local `Object` as a local (layer 1 refuses the declaration: GRAMMAR_REFUSED)
+  'const Object = q; Object.foo;',
   OWN_VALUE, "Object.defineProperty(this, 'name', { value: 'n', enumerable: false });", 'class C { constructor(a) { this.a = a; } }', 'const o = Object.freeze(Object.keys(p).map(Object.freeze));'];
 // What the coverage statement declares NOT CHECKED: asserted to give no hit, so the statement stays true.
 const UNCHECKED = ['const s = `${buf}`;', "const s = buf + '';", 'const s = [buf].join();', 'const s = [buf].sort();', "const s = 'a'.startsWith(buf);", 'const o = JSON.parse(buf);', 'const s = String.fromCharCode(...buf);',
@@ -2047,7 +2049,7 @@ const GRAMMAR_REFUSED = [
   ['switch (1) { case 1: }', /SwitchStatement/], ['l: for (const x of []) continue l;', /LabeledStatement/], ['for (const x of []) break;', /BreakStatement/], ['debugger;', /DebuggerStatement/],
   [';', /EmptyStatement/], ['let x = 0;\nfor (x of []) { }', /for-of head/], ['await 0;', /AwaitExpression/], ['function* g() { yield 1; }', /async or generator/],
   ["import('node:fs');", /ImportExpression/], ['const u = import.meta;', /MetaProperty/], ['function f() { return new.target; }', /MetaProperty/], ['const C = class { };', /ClassExpression/],
-  ['const a = (1, 2);', /SequenceExpression/], ['with (o) { }', /parse error/], ['function f() { super(); }', /super/],
+  ['const a = (1, 2);', /SequenceExpression/], ['with (o) { }', /parse error/], ['function f() { super(); }', /super/], ['class A extends Error { constructor() { const f = () => super(); f(); } }', /super\(\) outside a constructor/],
 ];
 // Supported forms that must give no grammar refusal (each a complete module, checked as git-exec.mjs).
 const GRAMMAR_FINE = [
@@ -2076,6 +2078,12 @@ test('T4a grammar: each refusal class has counterexamples (every round-5 reviewe
   // outside the guarded set has no imports at all.
   assert.deepEqual(grammarSites('git-capability.mjs', "import path from 'node:path';\npath.sep;").hits, []);
   assert.ok(grammarSites('m.mjs', "import { statSync } from 'node:fs';\nstatSync('/');").hits.some((h) => /not an allowlisted specifier for m\.mjs/.test(h.why)));
+  // A restricted import admits only its one member form.
+  for (const [src, why] of [["import { constants } from 'node:fs';\nconstants.F_OK;", /constants\.F_OK is not allowlisted/],
+    ["import { realpathSync } from 'node:fs';\nconst n = realpathSync.native;", /realpathSync\.native is not allowlisted/],
+    ["import { realpathSync } from 'node:fs';\nrealpathSync.x('/');", /realpathSync\.x is not allowlisted/]]) {
+    assert.ok(grammarSites('git-capability.mjs', src).hits.some((h) => why.test(h.why)), src);
+  }
 });
 
 // One module per acorn node type the grammar refuses, each parsing to that type (or, for `with`, failing to parse).
