@@ -410,6 +410,16 @@ test('[P4r-25] C2 (I-E): a hidden index flag inside a submodule of P is refused 
     assert.notEqual(readFileSync(join(inner, 'f.txt'), 'utf8'), git(inner, 'show', 'HEAD:f.txt') + '\n', 'while its tracked bytes differ from HEAD');
     assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, flag);
   }
+  // the twin OUTSIDE P: a submodule committed at base (so not a changed path) hides an edit behind the same flag
+  { const r = repo(t), sub = tmp(t, 'p4r-sub-');
+    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
+    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub'); git(r.dir, 'commit', '-q', '-m', 'sub');
+    const base = git(r.dir, 'rev-parse', 'HEAD'), inner = join(r.dir, 'vendor/sub');
+    const clean = evidenceIdentity({ repo: r.dir, baseSha: base });
+    assert.equal(clean.ok, true, JSON.stringify(clean)); assert.ok(!clean.paths.includes('vendor/sub'), 'the submodule is not in P');
+    git(inner, 'update-index', '--assume-unchanged', 'f.txt'); put(r.dir, 'vendor/sub/f.txt', 'two\n');
+    assert.ok(!git(r.dir, 'status', '--porcelain').includes('vendor/sub'), 'the parent sees nothing');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: base }), { ok: false, code: 'evidence_unavailable' }, 'outside P'); }
   // one level down the same flags would hide again: a submodule that holds a submodule of its own is refused, even when clean
   const r = repo(t), s2 = tmp(t, 'p4r-s2-'), s1 = tmp(t, 'p4r-s1-');
   git(s2, 'init', '-q', '-b', 'main'); put(s2, 'a.txt', 'a\n'); git(s2, 'add', '-A'); git(s2, 'commit', '-q', '-m', 'a');
@@ -539,7 +549,31 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
     assert.deepEqual([...ru.evidence.kinds.map((k) => `kind:${k}`), ...ru.evidence.items.map((i) => `plan:${i}`)].sort(), b.record.files.flatMap((f) => f.credited).sort(), why);
     assert.equal(ru.evidence.unknown_markers, b.record.counts.unknown_markers, why);
   }
-  // (2) the seven Codex inputs are refused by the builder (C1, C4, C7) or by every interface alike (C2, C3, C5, C6)
+  // (2) the seven Codex inputs. C1: the builder refuses; the record ba7abac emitted for it is CONSISTENT (the report is not stored),
+  // so only the builder can refuse it (the reuse header says so). C4, C5, C7: the builder refuses, and the record ba7abac emitted
+  // is malformed to both reuse interfaces. C2, C3 (in (3)), C6: every interface refuses the candidate with the same code.
+  { const r = repo(t), rec = good(r), file = join(r.dir, 'libs/money/new.test.ts'), long = `${'x'.repeat(LIMITS.maxTitleChars)} [kind:negative]`;
+    assert.equal(code(build(r, report([{ file, cases: [{ title: `${TITLE} [kind:negative]` }, { title: long, status: 'skipped' }] }]))), 'evidence_budget_exceeded', 'C1 builder');
+    assert.equal(code(build(r, passing(r.dir), { prov: { runner_version: '' } })), 'test_kinds_error', 'C7 builder');
+    const ids = Array.from({ length: 600 }, (_, i) => `plan:A${String(i).padStart(3, '0')}`).sort();
+    const emitted = [['C7 as emitted', (c) => { c.runner.version = ''; }, 'stale:malformed'], ['C5 as stored', (c) => { c.counts.passed = 0; }, 'stale:malformed'],
+      ['C4 as emitted: 600 ids in one row', (c) => { c.files[0].credited = ids; c.counts.credited = 600; }, 'refused:evidence_budget_exceeded'],
+      ['C4 as emitted: 600 skipped ids', (c) => { c.files[0].skipped = Object.fromEntries(ids.map((k) => [k, 1])); c.counts.results = 2; }, 'stale:malformed']];
+    for (const [why, m, want] of emitted) { const c = clone(rec); m(c); assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), why), want, why); }
+    const other = { ...ENTRY, name: 'other' };
+    for (const bad of [{ cmd: '/tmp/evil/vitest', args: ARGS }, { cmd: ENTRY.cmd, args: [...ARGS, '--typecheck'] }]) {
+      const v = tkVerdict({ ...view(r, rec), entries: [ENTRY, other], commands: { unit: { cmd: ENTRY.cmd, args: ARGS }, other: bad } }, 'F1');
+      assert.equal(v.code, 'runner_unsupported', 'C6 verdict, absent record');
+      assert.deepEqual(recordUsable(rec, { ...cur(r), command: bad }), { ok: false, reason: 'unavailable', code: 'runner_unsupported' }, 'C6 recordUsable');
+      if (bad.cmd === ENTRY.cmd) assert.equal(code(build(r, passing(r.dir), { args: bad.args })), 'runner_unsupported', 'C6 builder');
+    } }
+  { const r = repo(t), sub = tmp(t, 'p4r-sub-');
+    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
+    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
+    const rec = good(r);
+    git(join(r.dir, 'vendor/sub'), 'update-index', '--skip-worktree', 'f.txt'); put(r.dir, 'vendor/sub/f.txt', 'two\n');
+    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'C2'), 'refused:evidence_unavailable', 'C2 reuse');
+    assert.equal(code(build(r, passing(r.dir))), 'evidence_unavailable', 'C2 builder'); }
   // (3) context perturbations of one good record: recordUsable and the verdict agree; a context refusal is the builder's too
   const contexts = [
     ['nothing moved', () => ({})],
@@ -1095,6 +1129,7 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-20', name: 'identity: a dirty submodule is accepted', from: "if (status.length) refuse('evidence_unavailable');", to: '' },
   { file: IO, tag: 'P4r-25', name: 'C2: hidden index flags in a submodule are not read', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hasGitlink(index))' },
   { file: IO, tag: 'P4r-25', name: 'C2: a submodule holding a submodule is accepted', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hiddenFlagged(index))' },
+  { file: IO, tag: 'P4r-25', name: 'C2 twin: a submodule outside P is not checked', from: '    if (st?.isDirectory()) submoduleCheckout(join(top, m[1]));\n', to: '' },
   { file: IO, tag: 'P4r-12', posix: true, name: 'identity: a fifo is read', from: "else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)", to: "else { kind = 'other'; }" },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)

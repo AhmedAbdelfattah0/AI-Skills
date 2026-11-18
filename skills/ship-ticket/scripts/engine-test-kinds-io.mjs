@@ -92,18 +92,25 @@ export function evidenceIdentity(input) {
 /** An index entry that is a gitlink (`<tag> 160000 ...` in `ls-files -v -s -z` output). */
 const hasGitlink = (buf) => buf.toString('latin1').split('\0').some((l) => /^\S 160000 /.test(l));
 /**
- * A directory in P is a submodule only when it is the top of its own work tree. Its HEAD identifies it only when nothing can
- * differ from HEAD unseen (I4, I-E): it is refused when it is dirty, when a tracked file carries an assume-unchanged or
- * skip-worktree bit (git status would not look at it), or when it contains a submodule of its own (one level down, the same
- * flags would hide again). Returns the HEAD bytes, or null for a plain directory. Throws a Refusal.
+ * Is `abs` a submodule checkout (the top of its own work tree)? When it is, nothing in it may differ from its HEAD unseen (I-E):
+ * a tracked file with an assume-unchanged or skip-worktree bit (git status would not look at it), or a submodule of its own
+ * (one level down the same flags would hide again), is refused. ONE check for a submodule in P and one outside it. Throws a Refusal.
  */
-function submoduleHead(abs) {
-  let top;
+function submoduleCheckout(abs) {
+  let top, index;
   try { top = realpathSync.native(git(abs, ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, '')); } catch { return refuse('evidence_unavailable'); }
-  if (top !== realpathSync.native(abs)) return null; // a plain directory (its files are paths of P themselves)
-  let index, status;
+  if (top !== realpathSync.native(abs)) return false; // a plain directory, or a submodule that is not checked out
   try { index = git(abs, ['ls-files', '-v', '-s', '-z'], 64 << 20); } catch (e) { return refuse(gitRefusal(e)); }
   if (hiddenFlagged(index) || hasGitlink(index)) refuse('evidence_unavailable');
+  return true;
+}
+/**
+ * A directory in P is a submodule only when it is a checkout; its HEAD identifies it only when it is also clean (I4).
+ * Returns the HEAD bytes, or null for a plain directory. Throws a Refusal.
+ */
+function submoduleHead(abs) {
+  if (!submoduleCheckout(abs)) return null; // a plain directory (its files are paths of P themselves)
+  let status;
   try { status = git(abs, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']); } catch (e) { return refuse(gitRefusal(e)); }
   if (status.length) refuse('evidence_unavailable'); // a dirty submodule cannot be identified by its HEAD
   try { return Buffer.from(git(abs, ['rev-parse', '--verify', 'HEAD^{commit}']).toString('utf8').trim()); } catch { return refuse('evidence_unavailable'); }
@@ -124,6 +131,17 @@ export function candidate(repo, baseSha, exclusions) {
   const h = createHash('sha256'), abs = (p) => join(top, p), cand = new Map();
   h.update(`ship-ticket-tk-evidence-v1\0${baseSha}\0`);
   let bytes = 0;
+  // a submodule OUTSIDE P is outside P only because its status is clean: the same hidden-flag check, or its edits are unseen (C2 twin)
+  const inPaths = new Set(paths);
+  let index;
+  try { index = git(top, ['ls-files', '-s', '-z'], 64 << 20).toString('utf8'); } catch (e) { refuse(gitRefusal(e)); }
+  for (const l of index.split('\0')) {
+    const m = /^160000 [0-9a-f]+ \d\t(.*)$/s.exec(l);
+    if (!m || inPaths.has(m[1])) continue;
+    let st = null;
+    try { st = lstatSync(join(top, m[1])); } catch (e) { if (e?.code !== 'ENOENT') refuse('evidence_unavailable'); }
+    if (st?.isDirectory()) submoduleCheckout(join(top, m[1]));
+  }
   for (const p of paths) {
     let kind = 'deleted', mode = '0', content = Buffer.from('tombstone');
     let st = null;
