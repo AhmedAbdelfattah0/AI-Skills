@@ -67,7 +67,7 @@ const ERROR_ONLY = (v) => { assert.equal(v.status, 'refused'); assert.equal(v.co
 
 test('[R1] all required kinds and items present: pass, no code, ids and counts reported', () => {
   const bound = boundFrom({ tags: ['async-state'], items: ['Item1'] });
-  const v = verdict({ bound, kinds: ['stale-N2', 'error-twin', 'negative', 'race'], items: ['Item1', 'Other'], unknown: 3 });
+  const v = verdict({ bound, kinds: ['stale-N2', 'error-twin', 'negative', 'race', 'mystery-kind', 'mystery-kind'], items: ['Item1', 'Other'], unknown: 3 });
   assert.equal(v.status, 'pass');
   assert.equal(v.code, null);
   assert.deepEqual(v.codes, []);
@@ -77,7 +77,7 @@ test('[R1] all required kinds and items present: pass, no code, ids and counts r
   assert.deepEqual(v.unmapped_items, []);
   assert.equal(v.counts.present_kinds, 3);
   assert.equal(v.counts.present_items, 1);
-  assert.equal(v.counts.unknown_markers, 3);
+  assert.equal(v.counts.unknown_markers, 4, 'row 31: a well-formed unknown kind id in the evidence is counted, once');
   // nothing required at all also passes (an active run whose plan says `test-triggers: none`)
   assert.equal(verdict({}).status, 'pass');
 });
@@ -112,7 +112,9 @@ test('[R2] AC2: every missing kind and every missing item refuses, generated ove
   assert.equal(added.counts.reassessed_classes, 1);
 });
 
-test('[R3] AC1 generated monotonicity: adding any source never removes a required kind or item, never unprotects, never turns a refusal into a pass', () => {
+// Scope: TRUSTED waivers only. Untrusted waivers are excluded on purpose: under the interim precedence an added source can
+// make a trusted waiver effective, which suppresses an untrusted one, so a `waiver_unauthorized` refusal can become a pass.
+test('[R3] AC1 generated monotonicity: adding any source never removes a required kind or item, never unprotects, never turns a refusal into a pass (trusted waivers)', () => {
   const U = ['tag:async-state', 'tag:money', 'tag:entrypoint', 'bclass:payments', 'bclass:ui', 'surface:auth-lifecycle', 'rclass:data', 'rclass:misc', 'rclass:payments', 'item:I1'];
   const evidence = ['negative', 'race', 'real-entrypoint'];
   const trusted = [...Object.keys(KINDS).map((k) => `kind:${k}`), 'plan:I1'];
@@ -201,9 +203,9 @@ test('[R5] AC4: a trusted waiver removes exactly one non-protected required subj
   assert.deepEqual(vp.waived, []);
   assert.equal(vp.counts.waiver_protected, 2);
   // subjects that are not required: no effect, counted; a waiver for a present kind changes nothing
-  const vn = verdict({ bound, kinds: present, items: bound.items, trusted: ['kind:regression', 'plan:Nope', 'kind:race'] });
+  const vn = verdict({ bound, kinds: present, items: bound.items, trusted: ['kind:regression', 'plan:Nope', 'kind:race', 'kind:no-such-kind'] });
   assert.deepEqual(vn.missing_kinds, ['real-entrypoint']);
-  assert.equal(vn.counts.waiver_not_required, 2);
+  assert.equal(vn.counts.waiver_not_required, 3, 'row 32: a subject that is not required (an unknown kind too) has no effect and is counted');
   // an untrusted matching waiver refuses (row 21), even when it names a present kind, and never removes anything
   const vu = verdict({ bound, kinds: [...present, ...all], items: bound.items, untrusted: ['kind:race'] });
   assert.equal(vu.code, 'waiver_unauthorized');
@@ -239,7 +241,8 @@ test('[R6] row 14 and row 19: an unmapped reassessed class refuses; a broken kin
     () => { throw new Error('boom /secret/path'); },
     () => undefined, () => null, () => 'ok', () => ({ ok: true }), () => ({ ok: false }), () => ({ ok: false, code: 'something_else' }),
     () => ({ ok: true, kinds: { 'not-a-kind': ['tag:money'] } }), () => ({ ok: true, kinds: { race: 'tag:money' } }),
-    () => ({ ok: true, kinds: { race: ['money'] } }), () => ({ ok: true, kinds: { race: [] } }), () => ({ ok: true, kinds: [] }),
+    () => ({ ok: true, kinds: { race: ['money'] } }), () => ({ ok: true, kinds: { race: ['class:misc'] } }), // no tag on the class path
+ () => ({ ok: true, kinds: { race: [] } }), () => ({ ok: true, kinds: [] }),
     () => ({ ok: true, kinds: {}, extra: 1 }), () => Promise.resolve({ ok: true, kinds: {} }),
     () => new Proxy({ ok: true, kinds: {} }, {}),
   ];
@@ -349,6 +352,7 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
     'oversized id': { ...base, evidence: { ...base.evidence, kinds: ['r'.repeat(1 << 20)] } },
     'unknown kind in bound': { ...base, bound: { ...base.bound, kinds: { racing: ['tag:concurrency'] } } },
     'bad source': { ...base, bound: { ...base.bound, kinds: { race: ['concurrency'] } } },
+    'empty source list': { ...base, bound: { ...base.bound, kinds: { race: [] } } },
     'bad class': { ...base, reassessed: ['Bad Class'] },
     'negative count': { ...base, evidence: { ...base.evidence, unknown_markers: -1 } },
     'fractional count': { ...base, state: { ...base.state, held: 0.5 } },
@@ -523,7 +527,10 @@ const MUTANTS = [
   { name: 'the work budget is not enforced', from: 'if (ctx.work > LIMITS.maxWork) fail();', to: '' },
   { name: 'an empty source list is accepted', from: 'if (!sources.length) fail();', to: '' },
   { name: 'any string is a source', from: 'const sources = list(d.value, isSource, ctx);', to: "const sources = list(d.value, (x) => typeof x === 'string', ctx);" },
-  { name: 'evidence may name an unknown kind', from: 'new Set(list(E.kinds, isKindId, ctx))', to: "new Set(list(E.kinds, (x) => typeof x === 'string', ctx))" },
+  { name: 'evidence may name any string', from: 'new Set(list(E.kinds, isMarkerName, ctx))', to: "new Set(list(E.kinds, (x) => typeof x === 'string', ctx))" },
+  { name: 'an unknown evidence kind counts as present', from: 'new Set([...evidenceKinds].filter(isKind))', to: 'new Set(evidenceKinds)' },
+  { name: 'an unknown evidence kind is not counted', from: ' + (evidenceKinds.size - presentKinds.size)', to: '' },
+  { name: 'a class-reached kind without a tag source is accepted', from: "for (const srcs of kinds.values()) if (![...srcs].some((s) => s.startsWith('tag:'))) fail();", to: '' },
   { name: 'an empty protected set is accepted', from: 'if (!protectedTags.size) fail();', to: '' },
   { name: 'an exception escapes', from: 'try { return compute(input, deps); } catch { return errorVerdict(); }', to: 'return compute(input, deps);' },
 ];

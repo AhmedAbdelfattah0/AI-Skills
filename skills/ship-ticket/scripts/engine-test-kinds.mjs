@@ -11,13 +11,15 @@
  *   declaration  the validated base declaration or null; passed unread to kindsForClasses.
  *   reassessed   [class]: the classes of risk-floor `reassess` on this candidate.
  *   evidence     { kinds:[kind], items:[item], unknown_markers:uint }: ids counted by the scanner (P1/P4), never titles.
+ *                A grammar-valid kind id naming no kind is counted into unknown_markers (row 31), never present.
  *   waivers      { trusted:[subject], untrusted:[subject] }: `kind:<id>` / `plan:<id>` of waivers ALREADY matched to this
  *                run, plan digest and candidate and classified by trust (P6 owns matching and trust).
  *   state        { point: POINTS, retry_authorised:bool, held:uint, open_repairs:uint } supplied by the caller (P5a/P5b).
  * deps (injected; P3 owns both in test-kinds.mjs):
  *   kindsForClasses(classes, declaration) -> { ok:true, kinds:{ <kind>: [<source>...] } } | { ok:false, code:'risk_class_unmapped' }
  *                The sources of a kind reached through a class carry BOTH `class:<c>` and every `tag:<t>` on the path,
- *                so protection through a class mapping is visible. Called once per verdict, synchronously, with the
+ *                so protection through a class mapping is visible; a kind with no `tag:` source is test_kinds_error.
+ *                Called once per verdict, synchronously, with the
  *                sorted union of the bound `class:` sources and the reassessed classes.
  *   protectedTags [tag], non-empty (design: money, tenancy, auth).
  *
@@ -26,7 +28,7 @@
  * - Protection is recomputed on every call BEFORE waivers: a kind is protected when it is in bound.protected, or any of
  *   its effective sources is `surface:*` or `tag:<protected tag>`. Items have no sources and are never protected.
  * - A trusted waiver is EFFECTIVE when its subject is required and not protected; it removes exactly that subject.
- *   A protected subject is counted `waiver_protected`, a subject not required `waiver_not_required`.
+ *   A protected subject is counted `waiver_protected`, a subject not required (an unknown kind included) `waiver_not_required`.
  * - Untrusted waivers (interim rule pending design rev 4, Codex finding 8 on rows 21/32): an untrusted subject refuses
  *   `waiver_unauthorized` unless an effective trusted waiver covers the same subject (the security waiverState precedent).
  * - Row 22: a held repair refuses `test_kinds_held` at F1 (unless a RETRY is authorised), F4, S1 and V.
@@ -57,6 +59,7 @@ const isKind = (s) => Object.hasOwn(KINDS, s);
 const id = (re) => (v) => typeof v === 'string' && v.length <= LIMITS.maxIdLength && re.test(v);
 const isTag = id(NAME), isItem = id(ITEM_ID), isClass = id(CLASS_NAME);
 const isKindId = (v) => typeof v === 'string' && v.length <= LIMITS.maxIdLength && isKind(v);
+const isMarkerName = id(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/); // the `[kind:<name>]` marker grammar (test-kinds.mjs markers)
 function isSource(v) {
   if (typeof v !== 'string' || v.length > LIMITS.maxIdLength) return false;
   const i = v.indexOf(':'), kind = v.slice(0, i), name = v.slice(i + 1);
@@ -64,7 +67,7 @@ function isSource(v) {
 }
 function isSubject(v) {
   if (typeof v !== 'string' || v.length > LIMITS.maxIdLength) return false;
-  if (v.startsWith('kind:')) return isKind(v.slice(5));
+  if (v.startsWith('kind:')) return isMarkerName(v.slice(5)); // an unknown kind is grammar-valid: it is not required (row 32)
   return v.startsWith('plan:') && isItem(v.slice(5));
 }
 
@@ -135,7 +138,12 @@ function classKinds(kfc, classes, declaration, ctx) {
   if (!plainObject(res)) fail();
   const d = Reflect.getOwnPropertyDescriptor(res, 'ok');
   if (!d || !('value' in d)) fail();
-  if (d.value === true) return { unmapped: false, kinds: kindMap(record(res, ['ok', 'kinds'], ctx).kinds, ctx) };
+  if (d.value === true) {
+    const kinds = kindMap(record(res, ['ok', 'kinds'], ctx).kinds, ctx);
+    // a kind reached through a class must name the tag(s) on its path, or protection through the class is invisible (fail closed)
+    for (const srcs of kinds.values()) if (![...srcs].some((s) => s.startsWith('tag:'))) fail();
+    return { unmapped: false, kinds };
+  }
   if (d.value === false && record(res, ['ok', 'code'], ctx).code === 'risk_class_unmapped') return { unmapped: true, kinds: new Map() };
   return fail();
 }
@@ -156,8 +164,10 @@ function compute(input, deps) {
   if (I.declaration !== null && !plainObject(I.declaration)) fail(); // passed through to kindsForClasses, never read here
   const reassessed = sorted(list(I.reassessed, isClass, ctx));
   const E = record(I.evidence, ['kinds', 'items', 'unknown_markers'], ctx);
-  const presentKinds = new Set(list(E.kinds, isKindId, ctx)), presentItems = new Set(list(E.items, isItem, ctx));
-  const unknownMarkers = uint(E.unknown_markers);
+  const evidenceKinds = new Set(list(E.kinds, isMarkerName, ctx)), presentItems = new Set(list(E.items, isItem, ctx));
+  const presentKinds = new Set([...evidenceKinds].filter(isKind));
+  // row 31: a well-formed kind id naming no kind counts as nothing and is reported as a count
+  const unknownMarkers = uint(E.unknown_markers) + (evidenceKinds.size - presentKinds.size);
   const W = record(I.waivers, ['trusted', 'untrusted'], ctx);
   const trusted = sorted(list(W.trusted, isSubject, ctx)), untrusted = sorted(list(W.untrusted, isSubject, ctx));
   const S = record(I.state, ['point', 'retry_authorised', 'held', 'open_repairs'], ctx);
