@@ -27,11 +27,16 @@
  * - frame         another attempt, a disagreeing exit, a malformed header, a non-exit boundary or
  *                 an oversized frame is refused; forensic tmp plants are never written through.
  * - callers       gateRed, unit checks and proof keep the typed code; unit checks never retry it.
- * Not asserted (measured in the PR body): the claim refuses a channel any process still holds at
- * the channel's latching read in the exit callback. A process that wrote and closed just before
- * that read, including one handed the descriptor by an in-run holder, is accepted (R-T2; not an
- * atomic snapshot, writers not authenticated). On 4180cbc: Linux N18 100/100, N22 91/100; darwin
- * N18 84/100, N22 6/100 for a fast write-then-close survivor. RECOMMENDED for temporary risk
+ * Claim (exact): the decision predicate is the OBSERVED EOF/open/read-error state of each
+ * channel at its latching read in the exit callback, per channel, platform and read cap (runner
+ * stdout on POSIX; plus the report channel on darwin, whose latching read comes after stdout's).
+ * A channel still open there (EAGAIN), returning bytes after that read, or failing to read is
+ * refused. Writes made earlier, or during earlier reads before the latch, are accepted, including
+ * those of a process handed the descriptor by an in-run holder; no additional verdict manipulation
+ * has been demonstrated under the current adapters and the tested threat model (see the in-run
+ * injection risk R-T2). This is not an atomic snapshot and writers are not authenticated.
+ * Measured in the PR body, not asserted here: a fast write-then-close survivor is accepted on
+ * 4180cbc in Linux N18 100/100, N22 91/100; darwin N18 84/100, N22 6/100. RECOMMENDED for temporary risk
  * acceptance; the owner's decision is PENDING (HANDOVER OD-D4 reverted on 2026-11-18); FX-R1.
  * Off darwin the report channel is refused as `channel_unsupported` (Linux: /dev/fd/N on a
  * socketpair fails ENXIO, measured in Docker node:18; win32: no /dev/fd).

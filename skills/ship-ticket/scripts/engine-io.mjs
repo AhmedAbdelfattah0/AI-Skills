@@ -231,12 +231,15 @@ export function decodeSealedFrame(buf, attemptId) {
  * queue whatever is left unread at exit: it is the channel's latch point (a full read is refused).
  * It is refused when a later read returns any byte (written after the latch point; not kept) or
  * EAGAIN (another process still holds it).
- * Claim (exact): runner stdout (POSIX; plus the report channel on darwin) is refused if any
- * process still holds the channel at the channel's latching read in the exit callback. A process
- * that wrote and closed just before that read, including one handed the descriptor by an in-run
- * holder, is accepted; such bytes are the in-run injection risk R-T2 (design §6.1), not a new
- * route. This is not an atomic snapshot and writers are not authenticated. (The report channel's
- * latching read comes after the read of stdout.) Measured on PR #94
+ * Claim (exact): the decision predicate is the OBSERVED EOF/open/read-error state of each
+ * channel at its latching read in the exit callback, per channel, platform and read cap (runner
+ * stdout on POSIX; plus the report channel on darwin, whose latching read comes after stdout's).
+ * A channel still open there (EAGAIN), returning bytes after that read, or failing to read is
+ * refused. Writes made earlier, or during earlier reads before the latch, are accepted, including
+ * those of a process handed the descriptor by an in-run holder; no additional verdict manipulation
+ * has been demonstrated under the current adapters and the tested threat model (see the in-run
+ * injection risk R-T2). This is not an atomic snapshot and writers are not authenticated. (R-T2: design §6.1.)
+ * Measured on PR #94
  * head 4180cbc, a fast write-then-close survivor is accepted: Linux Node 18 100/100, Node 22
  * 91/100; darwin Node 18 84/100, Node 22 6/100. RECOMMENDED for temporary risk acceptance; the
  * owner's decision is PENDING (HANDOVER OD-D4 reverted on 2026-11-18). Recommended conditions:
