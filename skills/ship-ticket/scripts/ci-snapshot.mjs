@@ -60,6 +60,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isEntrypoint } from './harness.mjs';
+import { depthOf, idStr, MAX_DEPTH, shapeProblem } from './lib/shape.mjs';
 
 export const SCHEMA = 'ci-snapshot-v1';
 export const NOT_ATTESTED = Object.freeze([
@@ -117,39 +118,10 @@ export const SHAPES = Object.freeze({
     steps: { arrayOf: { object: { name: 'string', status: { enum: STATUSES }, conclusion: { enum: CONCLUSIONS, nullable: true }, number: 'posint', started_at: '?ts|null', completed_at: '?ts|null' } }, nullable: true, optional: true } } },
   page: { open: true, object: { total_count: '?int' } },
 });
-const MAX_DEPTH = 32;
-const TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
-/** Strict ISO-8601 UTC, and a REAL instant: the native Date round trip must reproduce the supplied second (Feb 30, hour 24, second 60 do not survive it). */
-const isTimestamp = (v) => {
-  if (typeof v !== 'string' || !TS.test(v)) return false;
-  const whole = v.replace(/\.\d+Z$/, 'Z'), d = new Date(whole);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 19) === whole.slice(0, 19);
-};
-const scalarOk = (v, tok) => (tok === 'string' ? typeof v === 'string' : tok === 'null' ? v === null : tok === 'int' ? Number.isSafeInteger(v) : tok === 'posint' ? Number.isSafeInteger(v) && v >= 1
-  : tok === 'id' ? idStr(v) !== null : tok === 'ts' ? isTimestamp(v) : false);
-/** null when `v` matches `spec`, else a short problem string built from the path only (never throws, never stringifies a value). */
-export function shapeProblem(v, spec, path = '$') {
-  if (typeof spec === 'string') return spec.replace(/^\?/, '').split('|').some((tok) => scalarOk(v, tok)) ? null : `${path}:bad_type`;
-  if (v === null && spec.nullable) return null;
-  if (spec.enum) return typeof v === 'string' && spec.enum.includes(v) ? null : `${path}:not_in_set`;
-  if (spec.arrayOf) { if (!Array.isArray(v)) return `${path}:not_array`; for (let i = 0; i < v.length; i++) { const p = shapeProblem(v[i], spec.arrayOf, `${path}[${i}]`); if (p) return p; } return null; }
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return `${path}:not_object`;
-  if (!spec.open) for (const k of Object.keys(v)) if (!Object.hasOwn(spec.object, k)) return `${path}.${k.slice(0, 40)}:unknown_key`;
-  for (const [k, s] of Object.entries(spec.object)) {
-    if (!Object.hasOwn(v, k)) { if (typeof s === 'string' ? s.startsWith('?') : s.optional === true) continue; return `${path}.${k}:missing`; }
-    const p = shapeProblem(v[k], s, `${path}.${k}`); if (p) return p;
-  }
-  return null;
-}
-const depthOf = (v) => {
-  let max = 0; const stack = [[v, 0]];
-  while (stack.length) { const [x, d] = stack.pop(); if (x && typeof x === 'object') { max = Math.max(max, d + 1); if (max > MAX_DEPTH) return max; for (const y of Object.values(x)) stack.push([y, d + 1]); } }
-  return max;
-};
+// Validation lives in lib/shape.mjs. shapeProblem keeps NO item/node cap by default (legacy verdicts for any array length); depthOf is called unbounded because JSON.parse output cannot share references.
+export { idStr, shapeProblem };
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** An id as a canonical digit string (no leading zero), or null (numbers must be safe integers). */
-export const idStr = (v) => (typeof v === 'number' ? (Number.isSafeInteger(v) && v >= 0 ? String(v) : null) : typeof v === 'string' && /^(0|[1-9]\d*)$/.test(v) ? v : null);
 const safePos = (v) => Number.isSafeInteger(v) && v >= 1;
 
 /** The normalised origin (scheme+host[:port][/base path], no trailing slash), or null. */
@@ -174,7 +146,7 @@ function objectLines(text) {
     let v;
     try { v = JSON.parse(l); } catch { return null; }
     if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
-    if (depthOf(v) > MAX_DEPTH) return 'too_deep';
+    if (depthOf(v, MAX_DEPTH, Infinity) > MAX_DEPTH) return 'too_deep';
     out.push(v);
   }
   return out;
