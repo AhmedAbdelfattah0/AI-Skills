@@ -68,11 +68,15 @@ export function recordUsable(R, cur) {
 }
 
 // ---- the verdict (P2 input + P6 waivers; P4r never runs anything) ----
+export const MULTI_ENTRY = 'multi_entry_unsupported_v0';
 const refusedVerdict = ({ code, detail }) => ({ status: 'refused', code, ...(detail ? { detail } : {}), codes: [code], required_kinds: [], required_items: [], protected_kinds: [], missing_kinds: [], unmapped_items: [], waived: [], counts: {}, evidence_id: null, claim: CLAIM, records: {}, voids: {}, withheld: {} });
 /**
  * tkVerdict(E, point) -> the P2 verdict plus { evidence_id, claim:'L-ran', records:{<entry>: 'current'|'absent'|'stale:<reason>'}, voids:{runner_uncovered:n},
  *   withheld:{<id>: 'r3_unchanged'|'r3_offset'} (a passed marker R-3 did not credit, and why; an id credited by any record is not listed) }.
- * A refusal carries `detail` when one cause is worth naming (`submodule_unsupported_v0`, `path_alias`).
+ * A refusal carries `detail` when one cause is worth naming (`submodule_unsupported_v0`, `path_alias`, `multi_entry_unsupported_v0`).
+ * ONE ENTRY (round 7): records for more than one declared entry are refused (`evidence_unavailable` / `multi_entry_unsupported_v0`):
+ * R-3 is entry-local (each record's skipped carriers and total are its own), so credits from two entries could borrow each other's
+ * carriers. Candidate-wide skipped provenance (one accounting over every entry's report, no double counting) is a future slice.
  * E = { repo, baseSha, exclusions?, dagDigest, entries:[entry], commands:{<name>:{cmd,args}} (the CURRENT substituted commands;
  *       a name may be missing only when its record is), records:{<name>: R}, tests:{globs}, bound, declaration, reassessed:[class],
  *       S (the engine state for waivers), retryAuthorised? }.
@@ -89,6 +93,9 @@ function verdict(E, point) {
   const ctxt = currentContext({ repo: own(E, 'repo'), baseSha: own(E, 'baseSha'), exclusions: ownOr(E, 'exclusions', []), entries: own(E, 'entries'),
     commandOf: (en) => (has(commands, en.name) ? own(commands, en.name) : undefined), needCommand: (en) => has(records, en.name), globs: own(own(E, 'tests'), 'globs') }, ctx);
   const { c, testGlobs } = ctxt, dagDigest = own(E, 'dagDigest');
+  // round 7 (FND-003-1): R-3's skipped and total accounting is per RECORD, so a second entry's report (its skipped carriers) is not in the
+  // first entry's accounting and could be borrowed. V0 (OD-2: one vitest runner) takes kind evidence from exactly one entry.
+  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse('evidence_unavailable', MULTI_ENTRY);
   const kinds = new Set(), items = new Set(), states = {}, withheld = {};
   let unknown = 0;
   for (const [name] of ctxt.per) {

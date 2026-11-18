@@ -979,6 +979,35 @@ test('[P4r-44] round 5 (CodeRabbit 5): a non-string repo is refused before any f
     assert.equal(ran, 0, 'no getter ran'); }
 });
 
+// ---- round 7: ChatGPT advisory FND-003-1: R-3's skipped/total accounting is per record, the verdict unions credits across entries ----
+const MULTI = { code: 'evidence_unavailable', detail: 'multi_entry_unsupported_v0' };
+test('[P4r-45] round 7: kind evidence comes from exactly ONE entry: a second entry\'s report cannot be borrowed (complementary and overlapping)', (t) => {
+  const two = (r, A, B, recA, recB, cmdA, cmdB) => tkVerdict({ ...view(r, null), entries: [A, B], commands: { [A.name]: cmdA, [B.name]: cmdB }, records: { ...(recA ? { [A.name]: recA } : {}), ...(recB ? { [B.name]: recB } : {}) } }, 'F1');
+  const run = (r, entry, args, suites) => { const b = build(r, report(suites), { entry, args }); assert.equal(b.ok, true, JSON.stringify(b)); return b.record; };
+  // (a) complementary coverage: A runs the moved test, B runs a NEW skipped carrier of the same kind. In A's accounting B's carrier is an
+  // unexplained +1 that offsets the move; only B's report says it is a skip. One accounting over both would give 1 - 1 + 1 - 1 = 0.
+  { const r = repo(t); rmSync(join(r.dir, 'libs/money/new.test.ts'));
+    git(r.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/a.test.ts'); put(r.dir, 'libs/money/s.test.ts', "test.skip('s [kind:negative]', () => {});\n");
+    const A = { ...ENTRY, name: 'a', covers: ['libs/money/a.test.ts'] }, B = { ...ENTRY, name: 'b', covers: ['libs/money/s.test.ts'] };
+    const argsA = [...ARGS.slice(0, 4), 'libs/money/a.test.ts'], argsB = [...ARGS.slice(0, 4), 'libs/money/s.test.ts'];
+    const recA = run(r, A, argsA, [{ file: join(r.dir, 'libs/money/a.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]);
+    const recB = run(r, B, argsB, [{ file: join(r.dir, 'libs/money/s.test.ts'), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]);
+    assert.deepEqual(recA.files.flatMap((f) => f.credited), ['kind:negative'], 'the builder, per entry, credits A by a +1 only B explains (the borrow)');
+    const v = two(r, A, B, recA, recB, { cmd: ENTRY.cmd, args: argsA }, { cmd: ENTRY.cmd, args: argsB });
+    assert.equal(v.status, 'refused', JSON.stringify(v)); assert.deepEqual({ code: v.code, detail: v.detail }, MULTI, 'complementary');
+    assert.equal(two(r, A, B, recA, null, { cmd: ENTRY.cmd, args: argsA }, { cmd: ENTRY.cmd, args: argsB }).records.a, 'current', 'one record alone is not refused'); }
+  // (b) overlapping coverage: both entries run old.test.ts; only B's report carries the new skipped test that A's +1 comes from
+  { const r = repo(t); rmSync(join(r.dir, 'libs/money/new.test.ts'));
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest.skip('n [kind:negative]', () => {});\n");
+    const A = { ...ENTRY, name: 'a' }, B = { ...ENTRY, name: 'b' }, args = [...ARGS.slice(0, 4), 'libs/money/old.test.ts'], file = join(r.dir, 'libs/money/old.test.ts');
+    const recA = run(r, A, args, [{ file, cases: [{ title: 'old [kind:negative]' }] }]);
+    const recB = run(r, B, args, [{ file, cases: [{ title: 'old [kind:negative]' }, { title: 'n [kind:negative]', status: 'skipped' }] }]);
+    assert.deepEqual(recA.files.flatMap((f) => f.credited), ['kind:negative'], 'A alone credits');
+    assert.deepEqual(recB.files.flatMap((f) => f.credited), [], 'B, which saw the skip, does not');
+    const v = two(r, A, B, recA, recB, { cmd: ENTRY.cmd, args }, { cmd: ENTRY.cmd, args });
+    assert.equal(v.status, 'refused', JSON.stringify(v)); assert.deepEqual({ code: v.code, detail: v.detail }, MULTI, 'overlapping'); }
+});
+
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
   const r = repo(t);
   let ran = 0;
@@ -1542,6 +1571,10 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-39', name: 'R6: the file kind is not compared', from: '  if (mode === \'120000\' ? !st.isSymbolicLink() : !st.isFile()) return false;\n', to: '' },
   { file: IO, tag: 'P4r-5', name: 'R6: the blob header is not hashed (every tracked file looks changed)', from: '.update(`blob ${bytes.length}\\0`)', to: '' },
   { file: IO, tag: 'P4r-39', name: 'R6: a sha256 repository is hashed as sha1', from: 'oid.length === 64 ? \'sha256\' : \'sha1\'', to: '\'sha1\'' },
+  // round 7: kind evidence from exactly one entry (FND-003-1)
+  { file: RE, tag: 'P4r-45', name: 'R7: records of two entries are accepted (a cross-entry borrow)', from: '  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);\n', to: '' },
+  { file: RE, tag: 'P4r-45', name: 'R7: a third record is needed before refusing', from: '.filter((name) => has(records, name)).length > 1)', to: '.filter((name) => has(records, name)).length > 2)' },
+  { file: RE, tag: 'P4r-45', name: 'R7: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: 'refuse(\'evidence_unavailable\');' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1594,7 +1627,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run, and a failed control stops here
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 43 : 44), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 44 : 45), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');

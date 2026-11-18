@@ -40,6 +40,9 @@
  *   credited                 when d(f, m) > 0 AND sum over f' in P of d(f', m) > 0 (deleted and renamed-away paths included);
  *   withheld `r3_unchanged`  when d(f, m) <= 0 (the file holds no MORE of m than at base);
  *   withheld `r3_offset`     when d(f, m) > 0 but the total over P is <= 0 (the marker was added here and removed elsewhere).
+ * R-3 IS ENTRY-LOCAL: `skipped` comes from ONE entry's report, so a carrier only another entry reported is not subtracted here. The
+ * verdict therefore takes kind evidence from exactly one entry (reuse header, `multi_entry_unsupported_v0`); candidate-wide skipped
+ * provenance is a future slice.
  * A withheld id is stored on its row (`withheld: {id: reason}`), RE-DERIVED on reuse like a credit, and surfaced by the verdict
  * as `withheld`, so a missing kind is never silent. `count` is the number of `[kind:x]`/`[plan:x]` occurrences in the bytes;
  * `skipped(f, m)` the occurrences in NON-passed result titles of f (a skipped `.each` over-subtracts, failing closed).
@@ -58,8 +61,11 @@
  * raw and hashed as a blob; a mismatch (or a file that is no longer the same kind) is a change of P. So a clean filter of any name,
  * a macro or `core.attributesFile` filter, `ident`, `working-tree-encoding` or `core.symlinks=false` makes the identity MOVE instead
  * of hiding an edit, and no attribute is refused by itself (Git LFS included). Conservative side: a file whose raw bytes differ only
- * by a conversion (a CRLF checkout under `core.autocrlf`) counts as changed (a false positive, never a hidden edit). Cost: one read
- * of every tracked file, bounded by `maxIdentityBytes`; StoreCraft (2209 files, 18.8 MB) takes about 0.4 s. Git's own diff (in
+ * by a conversion counts as changed (a false positive, never a hidden edit): a CRLF checkout under `core.autocrlf` (Windows) and a Git
+ * LFS repository, whose checked-out files differ from the committed pointer files, put EVERY such file into P (fail closed: R-3 then
+ * sees them all as changed). Cost: one read of every tracked file. The raw scan has its OWN `maxIdentityBytes` (256 MiB) budget
+ * beside the identity's, so up to 512 MiB may be read in one call; that budget is UNTESTED (a 256 MiB tracked fixture). StoreCraft
+ * (2209 files, 18.8 MB) takes about 0.4 s. Git's own diff (in
  * risk-floor, outside this module) may still RUN a configured clean filter while listing; that is the local user's git config.
  * IDENTITY BRACKET (P5r/FX requirement, not decidable here): `evidence_id_before` is the identity before the run; a runner reading a
  * mutable checkout could modify a covered file and restore it before the identity is taken again. Binding what the runner reads to
