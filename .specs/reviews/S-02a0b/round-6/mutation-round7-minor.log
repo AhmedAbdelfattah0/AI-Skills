@@ -1,0 +1,11 @@
+269 mutants; bad anchors: 0
+sha256 4c3883cf4dbe16b126446274b9e749c442f08b6608f8506f65300d7b84a16988 skills/ship-ticket/scripts/lib/git-exec.mjs
+sha256 15c9eaa46887720c08b7d551a7a7f1af3cc353e94df6af3c161af602258b08a0 skills/ship-ticket/scripts/lib/git-capability.mjs
+sha256 862e59f3e7f5a46f947e2e9c059c5d81151ba10dd84731c269d02cdaf91fbbed skills/ship-ticket/scripts/lib/git-exec.test.mjs
+sha256 dbd72de0c088016a612a1586cf38e7376f4252cd01953910ea0c36d6a34d1fcd skills/ship-ticket/scripts/lib/git-capability.test.mjs
+sha256 cc391abe53f54d1d50ae4f678a1e2591d99d33cd5d89ece79f6210f899981e1f .specs/reviews/S-02a0b/round-6/mutants6.py
+sha256 d5d18851d7faaa24fa41e178973314aa848bd51c1027fcc21d1ad45a8d62e8c5 .specs/reviews/S-02a0b/round-6/mutate6.py
+head dbec1c84c19daf3c8c9cf60b2c6042081dada1e3; skills/ dirty: no; node v22.23.1
+baseline: 66 tests green (git-exec.test.mjs), 19 (git-capability.test.mjs); a git-capability.mjs mutant runs both files
+KILLED r7: a second pinned decoder call admitted | T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
+TALLY {'KILLED': 1, 'SURVIVED': 0, 'INVALID': 0}
