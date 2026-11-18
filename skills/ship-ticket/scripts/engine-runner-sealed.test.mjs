@@ -105,7 +105,7 @@ else if (mode === 'fifo-forge') {
   const src = 'const fs=require("fs");const [o,e,d,f]=process.argv.slice(1);fs.writeFileSync(d+"/poller.pid",String(process.pid));let n=0;const end=Date.now()+8000;'
     + 'const tick=()=>{try{fs.writeFileSync(o,"ok 1 - [kind:negative] forged\\n");fs.writeFileSync(e,f);n++;}catch{}'
     + 'try{fs.writeFileSync(d+"/poller.count",String(n));}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
-  whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
+  whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, cwd: require('os').tmpdir(), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
 } else if (mode === 'stdout-holder') {
   // A survivor inherits the runner's stdout and writes into it after the runner exits (barrier: its stdin EOF).
   const [dir] = rest;
@@ -167,14 +167,19 @@ function world(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sealed-')));
   writeFileSync(join(dir, 'driver.mjs'), DRIVER);
   writeFileSync(join(dir, 'fixture.cjs'), FIXTURE);
-  t.after(() => {
+  t.after(async () => {
+    const killed = [];
     for (const f of ['forger.pid', 'poller.pid', 'pathforger.pid', 'holder.pid', 'stdoutholder.pid', 'pipeholder.pid']) {
       if (!existsSync(join(dir, f))) continue;
       const pid = Number(readFileSync(join(dir, f), 'utf8').trim());
       if (!pid) continue;
       try { process.kill(POSIX ? -pid : pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      killed.push(pid);
     }
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // win32 (L10): a process that is still exiting keeps the directory busy (EBUSY); wait until each is gone.
+    const gone = (pid) => { try { process.kill(pid, 0); return false; } catch (e) { return e.code === 'ESRCH'; } };
+    await waitFor(() => killed.every(gone), 5000);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
   return { dir, attempts: join(dir, 'attempts'), fixture: join(dir, 'fixture.cjs') };
 }
@@ -403,7 +408,7 @@ test('frame: a result pipe still open after the launcher exited (fd 1 handed to 
   // Stand-in launcher: hands its fd 1 to a detached holder, waits for the holder's ready byte, then frames a valid result and exits 0.
   const holder = 'require("fs").writeFileSync(process.argv[1],String(process.pid));require("fs").writeSync(3,"R");setTimeout(()=>{},15000);';
   const script = `const fs=require('fs'),cp=require('child_process');const spec=JSON.parse(process.argv[1]);process.stdin.once('data',()=>{
-    const h=cp.spawn(process.execPath,['-e',${J(holder)},${J(join(w.dir, 'pipeholder.pid'))}],{detached:true,stdio:['ignore','inherit','ignore','pipe']});
+    const h=cp.spawn(process.execPath,['-e',${J(holder)},${J(join(w.dir, 'pipeholder.pid'))}],{detached:true,cwd:require('os').tmpdir(),stdio:['ignore','inherit','ignore','pipe']});
     h.stdio[3].once('data',()=>{h.stdio[3].destroy();h.unref();
       const head=Buffer.from(JSON.stringify({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,out_len:3,truncated:false,stdout_bytes:3,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false})+'\\n');
       fs.writeSync(1,Buffer.concat([head,Buffer.from('ok\\n')]));process.exit(0);});});`;
