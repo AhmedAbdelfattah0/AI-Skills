@@ -390,3 +390,14 @@ static rows and UI-evidence preparation form a read-only ready set and run
 concurrently when their inputs and tools do not mutate shared output. Collect all
 must-fix results before opening the single repair barrier; do not repair one while
 another reader is still inspecting the old candidate.
+
+### Test reliability and evidence
+
+A test must not depend on wall-clock time, a sleep used as synchronisation, a shared temp name or scheduler
+order. A test that is red in the suite and green alone is a verification-reliability incident: record it.
+Passing alone is diagnostic, not proof. Record the incident in the PROVE record. Do not fix it with a longer timeout, a retry or less parallelism;
+remove the dependency (injected clock, barrier, readiness file published after the guarded state is
+installed, unique temp directory).
+
+Run targeted checks during development and the full suite once for final verification. Bind the evidence
+to the exact `candidate_id`; evidence for another candidate ID is stale. Unavailable hosted CI is never a pass.

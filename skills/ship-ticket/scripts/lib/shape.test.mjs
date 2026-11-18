@@ -1,0 +1,350 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CODES, depthOf, idStr, isTimestamp, LIMITS, shapeProblem, validate } from './shape.mjs';
+import { SHAPES, shapeProblem as ciShapeProblem } from '../ci-snapshot.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const codes = (v, s, o) => validate(v, s, o).problems.map((p) => `${p.path}:${p.code}`);
+const POLLUTED = () => ({}).polluted === undefined && ({}).x === undefined && Object.prototype.polluted === undefined;
+
+test('validate: shape of the result, schema order, unknown keys first, JSON-pointer paths', () => {
+  const S = { object: { a: 'string', b: { arrayOf: { object: { 'c/d': 'int', 'e~f': '?string' } } }, g: { enum: ['x', 'y'], nullable: true } } };
+  assert.deepEqual(validate({ a: 's', b: [{ 'c/d': 1 }], g: null }, S), { ok: true, problems: [], truncated: false });
+  assert.deepEqual(codes({ z: 1, a: 1, b: [{ 'c/d': 'no', 'e~f': 2 }], g: 'q' }, S), ['/z:unknown_key', '/a:bad_type', '/b/0/c~1d:bad_type', '/b/0/e~0f:bad_type', '/g:not_in_set']);
+  assert.deepEqual(codes({}, S), ['/a:missing', '/b:missing', '/g:missing']);
+  assert.deepEqual(codes([], S), [':not_object']);
+  assert.deepEqual(codes({ a: 's', b: {}, g: 'x' }, S), ['/b:not_array']);
+  assert.deepEqual(codes({ a: 's', b: [], g: 'x', k: 1 }, S), ['/k:unknown_key']);
+  assert.deepEqual(codes({ a: 's', b: [], g: 'x' }, { open: true, object: S.object }), []);
+  assert.deepEqual(codes({ a: 's', b: [], g: 'x', extra: 1 }, { open: true, object: S.object }), []);
+  assert.deepEqual(codes(1, { object: {}, nullable: true }), [':not_object']);
+  assert.deepEqual(codes(null, { object: {}, nullable: true }), []);
+  for (const p of validate({ z: 1 }, S).problems) assert.ok(CODES.includes(p.code));
+  assert.equal(validate({ ['k'.repeat(100)]: 1 }, { object: {} }).problems[0].path, `/${'k'.repeat(40)}`);
+});
+
+test('shapeProblem: the legacy first-problem string form', () => {
+  assert.equal(shapeProblem({ a: 1 }, { object: { a: 'int' } }), null);
+  assert.equal(shapeProblem({ a: 'x' }, { object: { a: 'int' } }), '$.a:bad_type');
+  assert.equal(shapeProblem({}, { object: { a: 'int' } }), '$.a:missing');
+  assert.equal(shapeProblem({ l: ['a', 1] }, { object: { l: { arrayOf: 'string' } } }), '$.l[1]:bad_type');
+  assert.equal(shapeProblem({ a: 1, x: 1 }, { object: { a: 'int' } }, 'root'), 'root.x:unknown_key');
+  assert.equal(shapeProblem(1, { object: {} }), '$:not_object');
+});
+
+test('depthOf: a shared-reference DAG is bounded by counted work, not wall clock', () => {
+  let x = {}; for (let i = 0; i < 32; i++) x = { a: x, b: x }; // 32 objects, 2^32 paths
+  let visits = 0; const hook = (o) => new Proxy(o, { ownKeys(t) { visits++; return Reflect.ownKeys(t); } });
+  let y = hook({}); for (let i = 0; i < 32; i++) y = hook({ a: y, b: y });
+  assert.equal(depthOf(y, 1e9, 500), Infinity); assert.ok(visits <= 500, `visits ${visits}`);
+  assert.equal(depthOf(y, 1e9), Infinity); // the default budget (LIMITS.maxNodes) also terminates
+  assert.ok(visits <= 500 + LIMITS.maxNodes);
+  assert.equal(depthOf({ a: { b: 1 } }, 32, Infinity), 2);
+});
+
+test('legacy limits: shapeProblem has no item or node cap by default, validate does; depthOf stays unbounded where the caller says so', () => {
+  const labels = new Array(LIMITS.maxItems + 1).fill('l');
+  assert.equal(ciShapeProblem(labels, SHAPES.labels), null);
+  assert.equal(shapeProblem(labels, { arrayOf: 'string' }), null);
+  assert.equal(shapeProblem(labels, { arrayOf: 'string' }, '$', { maxItems: 10 }), '$:too_large');
+  assert.deepEqual(codes(labels, SHAPES.labels), [':too_large']);
+  const wide = Object.fromEntries(Array.from({ length: LIMITS.maxNodes + 5 }, (_, i) => [`k${i}`, 1]));
+  assert.equal(shapeProblem(wide, { open: true, object: {} }), null);
+  assert.equal(shapeProblem(wide, { object: {} }), '$.k0:unknown_key');
+  assert.deepEqual(validate(wide, { object: {} }, { maxNodes: 10 }).problems.map((p) => p.code), ['unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'unknown_key', 'too_large']);
+  assert.match(readFileSync(join(HERE, '..', 'ci-snapshot.mjs'), 'utf8'), /depthOf\(v, MAX_DEPTH, Infinity\)/);
+});
+
+test('work stops promptly: a wide object under maxNodes 1 or maxProblems 1 is not enumerated to the end', () => {
+  let descriptorReads = 0;
+  const wide = new Proxy(Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, 1])), { getOwnPropertyDescriptor(t, k) { descriptorReads++; return Reflect.getOwnPropertyDescriptor(t, k); } });
+  assert.deepEqual(codes(wide, { object: { a: '?string' } }, { maxNodes: 3 }).map((c) => c.split(':')[1]), ['unknown_key', 'unknown_key', 'too_large']);
+  assert.deepEqual(codes(wide, { object: {} }, { maxProblems: 1 }).length, 1);
+  assert.ok(descriptorReads <= 2, `descriptor reads ${descriptorReads}`);
+  let keysSeen = 0; const probe = new Proxy({}, { ownKeys() { keysSeen++; return []; } });
+  validate(probe, { object: {} }, { maxNodes: 1 }); assert.equal(keysSeen, 1);
+});
+
+test('work is charged for every schema field examined, present or not', () => {
+  const fields = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, '?string']));
+  assert.deepEqual(codes({}, { open: true, object: fields }, { maxNodes: 1 }), [':too_large']);
+  assert.deepEqual(codes({}, { open: true, object: fields }), []);
+});
+
+test('schema modifiers are own properties: a polluted Object.prototype does not loosen a schema', () => {
+  try {
+    for (const k of ['open', 'nullable', 'optional']) Object.prototype[k] = true;
+    assert.deepEqual(codes({ x: 1 }, { object: {} }), ['/x:unknown_key']);
+    assert.deepEqual(codes(null, { object: {} }), [':not_object']);
+    assert.deepEqual(codes({}, { object: { a: 'string' } }), ['/a:missing']);
+  } finally { for (const k of ['open', 'nullable', 'optional']) delete Object.prototype[k]; }
+  assert.ok(POLLUTED());
+});
+
+test('truncation: maxProblems bounds the list and says so', () => {
+  const r = validate(Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`k${i}`, 1])), { object: {} }, { maxProblems: 5 });
+  assert.equal(r.problems.length, 5); assert.equal(r.truncated, true);
+  assert.equal(validate({ k: 1 }, { object: {} }).truncated, false);
+  assert.deepEqual(validate({ a: 1, b: 1 }, { object: {} }, { maxProblems: 2 }).problems.length, 2); // the list reached the cap: more may exist
+});
+
+test('hostile: __proto__ / constructor / prototype keys are unknown keys, and nothing is polluted', () => {
+  const evil = JSON.parse('{"__proto__":{"polluted":1},"constructor":{"prototype":{"x":1}},"prototype":1}');
+  assert.deepEqual(codes(evil, { object: {} }), ['/__proto__:unknown_key', '/constructor:unknown_key', '/prototype:unknown_key']);
+  assert.deepEqual(codes(evil, { open: true, object: { a: '?string' } }), []);
+  assert.ok(POLLUTED());
+  // own-property reads only: an inherited name is never a value
+  assert.deepEqual(codes({}, { object: { constructor: 'string' } }), ['/constructor:missing']);
+  assert.deepEqual(codes({}, { object: { toString: '?string' } }), []);
+  assert.deepEqual(codes(JSON.parse('{"__proto__":"s"}'), { object: { ['__proto__']: 'string' } }), []);
+  assert.ok(POLLUTED());
+});
+
+test('hostile: a getter is reported as accessor and never invoked', () => {
+  let calls = 0;
+  const o = { a: 'x' }; Object.defineProperty(o, 'b', { enumerable: true, get() { calls++; throw new Error('boom'); } });
+  assert.deepEqual(codes(o, { object: { a: 'string', b: 'string' } }), ['/b:accessor']);
+  const arr = ['x']; Object.defineProperty(arr, 1, { enumerable: true, get() { calls++; throw new Error('boom'); } });
+  assert.deepEqual(codes(arr, { arrayOf: 'string' }), ['/1:accessor']);
+  const hidden = { a: 'x' }; Object.defineProperty(hidden, 'h', { enumerable: false, value: 1 });
+  assert.deepEqual(codes(hidden, { object: { a: 'string' } }), ['/h:unknown_key']);
+  assert.equal(calls, 0);
+  assert.equal(depthOf(o), 1); assert.equal(calls, 0);
+});
+
+test('hostile: huge arrays are refused without walking them', () => {
+  assert.deepEqual(codes(new Array(2 ** 32 - 1), { arrayOf: 'string' }), [':too_large']);
+  assert.deepEqual(codes(new Array(LIMITS.maxItems + 1).fill('a'), { arrayOf: 'string' }), [':too_large']);
+  assert.deepEqual(codes(new Array(LIMITS.maxItems).fill('a'), { arrayOf: 'string' }), []);
+  assert.deepEqual(codes(['a', 'b', 'c'], { arrayOf: 'string' }, { maxItems: 2 }), [':too_large']);
+  const nested = Array.from({ length: 2000 }, () => Array.from({ length: 1000 }, () => 1));
+  const r = validate(nested, { arrayOf: { arrayOf: 'int' } }, { maxNodes: 5000 });
+  assert.deepEqual(r.problems.map((p) => p.code), ['too_large']); assert.equal(r.truncated, true);
+});
+
+test('hostile: deep nesting and cycles are bounded, with no stack overflow', () => {
+  const S = { arrayOf: null }; S.arrayOf = S; // a self-referential schema
+  let deep = []; for (let i = 0; i < 200000; i++) deep = [deep];
+  assert.ok(codes(deep, S).includes(`${'/0'.repeat(LIMITS.maxDepth + 1)}:too_deep`));
+  assert.deepEqual(codes(deep, S, { maxDepth: 3 }), ['/0/0/0/0:too_deep']);
+  assert.ok(validate(deep, S, { maxDepth: 1e9 }).problems.length >= 1); // a huge maxDepth overflows the engine stack: reported, never thrown
+  assert.equal(depthOf(deep), LIMITS.maxDepth + 1); assert.equal(depthOf(deep, 5), 6); // stops as soon as the limit is passed
+  const cyc = {}; cyc.self = cyc; assert.ok(depthOf(cyc) > LIMITS.maxDepth);
+  assert.equal(depthOf(null), 0); assert.equal(depthOf([]), 1); assert.equal(depthOf({ a: [{}] }), 3);
+  assert.equal(depthOf(deep, 1e9, 1000), Infinity);
+  const cycArr = []; cycArr.push(cycArr);
+  assert.deepEqual(codes(cycArr, S).at(-1).endsWith(':too_deep'), true);
+});
+
+test('numbers: NaN, Infinity and non-integers fail every numeric token', () => {
+  for (const bad of [NaN, Infinity, -Infinity]) for (const tok of ['number', 'int', 'posint', 'uint', 'id']) assert.deepEqual(codes(bad, tok), [':bad_type'], `${tok} ${bad}`);
+  assert.deepEqual(codes(1.5, 'int'), [':bad_type']); assert.deepEqual(codes(1.5, 'number'), []);
+  assert.deepEqual(codes(2 ** 53, 'int'), [':bad_type']); assert.deepEqual(codes(0, 'posint'), [':bad_type']); assert.deepEqual(codes(-1, 'uint'), [':bad_type']); assert.deepEqual(codes(0, 'uint'), []);
+  assert.equal(idStr(NaN), null); assert.equal(idStr(Infinity), null); assert.equal(idStr('01'), null); assert.equal(idStr(7), '7');
+});
+
+test('hostile: sparse arrays, symbol keys, non-plain objects', () => {
+  assert.deepEqual(codes([, 'a'], { arrayOf: 'string' }), ['/0:sparse']); // eslint-disable-line no-sparse-arrays
+  assert.deepEqual(codes(Array(3), { arrayOf: 'string' }), ['/0:sparse', '/1:sparse', '/2:sparse']);
+  assert.deepEqual(codes({ a: 'x', [Symbol('s')]: 1 }, { object: { a: 'string' } }), ['/<symbol>:unknown_key']);
+  assert.deepEqual(codes({ a: 'x', [Symbol('s')]: 1 }, { open: true, object: { a: 'string' } }), []);
+  for (const v of [new Map(), new Date(), new (class X {})(), Object.create({ a: 1 })]) assert.deepEqual(codes(v, { object: {} }), [':not_object']);
+  assert.deepEqual(codes(Object.create(null), { object: {} }), []);
+});
+
+test('hostile: Proxy objects never throw out of validate or depthOf', () => {
+  const trap = (name) => new Proxy({ a: 'x' }, { [name]: () => { throw new Error(name); } });
+  for (const name of ['ownKeys', 'getOwnPropertyDescriptor', 'getPrototypeOf', 'get', 'has']) {
+    const r = validate(trap(name), { object: { a: 'string' } });
+    assert.ok(Array.isArray(r.problems), name); assert.doesNotThrow(() => depthOf(trap(name)), name);
+    if (name !== 'get' && name !== 'has') assert.deepEqual(r.problems.map((p) => p.code), ['unreadable'], name);
+  }
+  assert.deepEqual(codes({ a: trap('ownKeys'), b: 'ok' }, { object: { a: { object: { x: '?string' } }, b: 'string' } }), ['/a:unreadable']); // the problem is local: siblings are still checked
+  assert.deepEqual(codes({ a: trap('ownKeys'), b: 'no' }, { object: { a: { object: { x: '?string' } }, b: 'int' } }), ['/a:unreadable', '/b:bad_type']);
+  const { proxy, revoke } = Proxy.revocable({ a: 'x' }, {}); revoke();
+  assert.doesNotThrow(() => validate(proxy, { object: { a: 'string' } })); assert.doesNotThrow(() => depthOf(proxy));
+  assert.ok(!validate(proxy, { object: { a: 'string' } }).ok);
+  assert.deepEqual(codes(new Proxy({ a: 'x' }, {}), { object: { a: 'string' } }), []); // a well-behaved proxy is just an object
+  // an array is never read through `get`: a lying or throwing `get` trap is not consulted, and the real element is judged
+  let getCalls = 0;
+  const lying = new Proxy([123], { get(t, k, r) { getCalls++; return k === 'length' ? 0 : Reflect.get(t, k, r); } });
+  assert.deepEqual(codes(lying, { arrayOf: 'string' }), ['/0:bad_type']); assert.equal(getCalls, 0);
+  assert.deepEqual(codes(new Proxy(['x'], { get() { throw new Error('g'); } }), { arrayOf: 'string' }), []);
+  assert.deepEqual(codes(new Proxy([123], { getOwnPropertyDescriptor() { throw new Error('d'); } }), { arrayOf: 'string' }), [':unreadable']);
+  assert.deepEqual(codes(new Proxy([1], { getOwnPropertyDescriptor(t, k) { return k === 'length' ? { value: -1, configurable: false, writable: true } : Reflect.getOwnPropertyDescriptor(t, k); } }), { arrayOf: 'string' }).length, 1);
+  const bad = { object: { a: 'string' } }; Object.defineProperty(bad, 'enum', { get() { throw new Error('schema'); } });
+  assert.doesNotThrow(() => validate({ a: 'x' }, bad)); assert.doesNotThrow(() => shapeProblem({ a: 'x' }, bad));
+});
+
+test('bad schema is a problem, not a throw', () => {
+  for (const s of [undefined, null, 5, {}, { object: 5 }, { object: null }]) assert.deepEqual(validate({}, s).problems.map((p) => p.code), ['bad_schema']);
+  assert.deepEqual(codes('x', 'nonsense'), [':bad_type']);
+});
+
+test('inputs are never mutated and frozen input is fine', () => {
+  const v = Object.freeze({ a: Object.freeze(['x']) }); const before = JSON.stringify(v);
+  assert.equal(validate(v, { object: { a: { arrayOf: 'string' } } }).ok, true); assert.equal(JSON.stringify(v), before);
+  const S = Object.freeze({ object: Object.freeze({ a: 'string' }) });
+  assert.equal(validate({ a: 's' }, S).ok, true);
+});
+
+test('timestamps: strict ISO-8601 UTC and a real instant', () => {
+  for (const ok of ['2024-02-29T23:59:59Z', '2026-11-16T21:28:16.123456789Z']) assert.equal(isTimestamp(ok), true, ok);
+  for (const bad of ['2026-02-30T00:00:00Z', '2025-02-29T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:00:60Z', '2026-01-01T00:00:00+00:00', '2026-01-01 00:00:00Z', '2026-01-01', 5, null, {}, '']) assert.equal(isTimestamp(bad), false, String(bad));
+});
+
+// ---- generic invariant: every schema primitive rejects every wrong-typed value of a shared corpus ----------------------
+const sparse = []; sparse.length = 2;
+const CORPUS = {
+  undefined: undefined, null: null, true: true, false: false, zero: 0, one: 1, negative: -1, float: 1.5, NaN, Infinity, big: 2 ** 60, bigint: 10n, emptyString: '', string: 'abc', digits: '123', leadingZero: '01',
+  ts: '2026-11-16T21:28:16Z', badTs: '2026-02-30T00:00:00Z', symbol: Symbol('s'), fn: () => 1, emptyObject: {}, object: { a: 1 }, nullProto: Object.create(null), emptyArray: [], array: ['a'], sparse,
+  date: new Date(0), map: new Map(), regexp: /x/,
+};
+const ACCEPT = { // for every primitive, the ONLY corpus entries it may accept
+  string: ['emptyString', 'string', 'digits', 'leadingZero', 'ts', 'badTs'], null: ['null'], boolean: ['true', 'false'], number: ['zero', 'one', 'negative', 'float', 'big'],
+  int: ['zero', 'one', 'negative'], posint: ['one'], uint: ['zero', 'one'], id: ['zero', 'one', 'digits'], ts: ['ts'],
+  'string|null': ['null', 'emptyString', 'string', 'digits', 'leadingZero', 'ts', 'badTs'], 'int|null': ['null', 'zero', 'one', 'negative'],
+  '?string': ['emptyString', 'string', 'digits', 'leadingZero', 'ts', 'badTs'],
+  enumAB: ['string'], // { enum: ['abc', 'q'] }
+  arrayOfString: ['emptyArray', 'array'], objectClosedEmpty: ['emptyObject', 'nullProto'], objectOpen: ['emptyObject', 'object', 'nullProto'],
+};
+const SCHEMAS = {
+  string: 'string', null: 'null', boolean: 'boolean', number: 'number', int: 'int', posint: 'posint', uint: 'uint', id: 'id', ts: 'ts', 'string|null': 'string|null', 'int|null': 'int|null', '?string': '?string',
+  enumAB: { enum: ['abc', 'q'] }, arrayOfString: { arrayOf: 'string' }, objectClosedEmpty: { object: {} }, objectOpen: { open: true, object: {} },
+};
+test('invariant: every primitive accepts exactly its own corpus entries and rejects every other value, without throwing', () => {
+  let checked = 0;
+  for (const [name, schema] of Object.entries(SCHEMAS)) for (const [label, value] of Object.entries(CORPUS)) {
+    let r; assert.doesNotThrow(() => { r = validate(value, schema); }, `${name}/${label}`);
+    assert.equal(r.ok, ACCEPT[name].includes(label), `${name} vs ${label}: ${JSON.stringify(r.problems)}`);
+    assert.equal(shapeProblem(value, schema) === null, r.ok, `shapeProblem ${name}/${label}`);
+    for (const p of r.problems) assert.ok(CODES.includes(p.code), p.code);
+    checked++;
+  }
+  assert.equal(checked, Object.keys(SCHEMAS).length * Object.keys(CORPUS).length);
+  for (const label of Object.keys(ACCEPT)) assert.ok(label in SCHEMAS, label); // every ACCEPT row has a schema
+  // nullable and optional modifiers on top of every primitive
+  for (const [name, schema] of Object.entries(SCHEMAS)) {
+    if (typeof schema === 'string') continue;
+    assert.equal(validate(null, { ...schema, nullable: true }).ok, true, `${name} nullable`);
+    assert.equal(validate(null, schema).ok, ACCEPT[name].includes('null'), `${name} null rejected`);
+    assert.deepEqual(codes({}, { object: { k: schema } }), [ '/k:missing' ], `${name} required`);
+    assert.deepEqual(codes({}, { object: { k: { ...schema, optional: true } } }), [], `${name} optional`);
+  }
+  assert.deepEqual(codes({ k: undefined }, { object: { k: '?string' } }), ['/k:bad_type']); // present-but-undefined is not "absent"
+});
+
+// ---- mutation check: each mutant of shape.mjs must be killed by this file --------------------------------------------
+const MUTANTS = [
+  ['unknown keys allowed', "if (mod(spec, 'open') !== true) for (const k of Reflect.ownKeys(v))", "if (false) for (const k of Reflect.ownKeys(v))"],
+  ['own check dropped (inherited values read)', "const d = Reflect.getOwnPropertyDescriptor(v, k);", "const d = k in v ? { value: v[k] } : undefined;"],
+  ['getter invoked', "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    if (!('value' in d)) add(ctx, 'accessor'); else shapeProblem$walk(d.value, s, ctx);", "if (!d) { if (!isOptional(s)) add(ctx, 'missing', k); continue; }\n    ctx.stack.push(k);\n    shapeProblem$walk(v[k], s, ctx);"],
+  ['array hole accepted', "if (!d) add(ctx, 'sparse'); else if", "if (!d) { /* hole accepted */ } else if"],
+  ['array size cap removed', "if (!(n <= ctx.maxItems)) return add(ctx, 'too_large');", ""],
+  ['node budget removed', "  if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; }\n  if (ctx.stack", "  if (ctx.stack"],
+  ['depth cap removed', "if (ctx.stack.length > ctx.maxDepth) { add(ctx, 'too_deep'); return; }", ""],
+  ['throw not caught', "catch { ctx.stack.length = depth; add(ctx, 'unreadable'); }", "catch (e) { throw e; }"],
+  ['NaN is a number', "typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number'"],
+  ['int allows floats', "int: (v) => Number.isSafeInteger(v),", "int: (v) => typeof v === 'number',"],
+  ['posint allows zero', "Number.isSafeInteger(v) && v >= 1, uint", "Number.isSafeInteger(v) && v >= 0, uint"],
+  ['uint allows negatives', "uint: (v) => Number.isSafeInteger(v) && v >= 0", "uint: (v) => Number.isSafeInteger(v)"],
+  ['id allows leading zero', "/^(0|[1-9]\\d*)$/.test(v)", "/^\\d+$/.test(v)"],
+  ['timestamp calendar round trip dropped', "&& d.toISOString().slice(0, 19) === whole.slice(0, 19)", ""],
+  ['enum accepts any string', "typeof v === 'string' && spec.enum.includes(v)", "typeof v === 'string'"],
+  ['null always accepted', "if (v === null && mod(spec, 'nullable') === true) return;", "if (v === null) return;"],
+  ['optional ignored', "if (!isOptional(s)) add(ctx, 'missing', k)", "add(ctx, 'missing', k)"],
+  ['non-plain objects accepted', "|| !plain(v)", ""],
+  ['symbol key named after a string', "typeof k === 'symbol' ? '<symbol>' : k.slice(0, 40)", "String(k)"],
+  ['depthOf ignores limit', "if (max > limit) return max;", ""],
+  ['depthOf invokes getters', "if (p && 'value' in p && p.value && typeof p.value === 'object') stack.push([p.value, d + 1]);", "stack.push([x[k], d + 1]);"],
+  ['problem list unbounded', "if (ctx.problems.length >= ctx.maxProblems) ctx.done = true;", ""],
+  ['unknown-key loop ignores the problem cap', "if (ctx.done) break;\n    if (++ctx.nodes", "if (++ctx.nodes"],
+  ['unknown-key loop ignores the node budget', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; break; }", ""],
+  ['schema-field loop ignores the node budget', "if (++ctx.nodes > ctx.maxNodes) { add(ctx, 'too_large'); ctx.done = true; return; } // every schema field examined", "// every schema field examined"],
+  ['depthOf work budget loosened 1000x', "if (++work > maxNodes) return Infinity;", "if (++work > maxNodes * 1000) return Infinity;"],
+  ['depthOf default budget x4', "maxNodes = LIMITS.maxNodes) {\n  let max = 0, work", "maxNodes = LIMITS.maxNodes * 4) {\n  let max = 0, work"],
+  ['array length read through a trap', "const ld = Reflect.getOwnPropertyDescriptor(v, 'length');", "const ld = { value: v.length };"],
+  ['array length not validated', "|| !Number.isSafeInteger(ld.value) || ld.value < 0", ""],
+  ['schema modifiers read inherited', "const mod = (s, k) => (Object.hasOwn(s, k) ? s[k] : undefined);", "const mod = (s, k) => s[k];"],
+  ['legacy wrapper capped', "{ maxItems: Infinity, maxNodes: Infinity, ...o }", "{ ...o }"],
+  ['pointer escaping dropped', ".replace(/~/g, '~0').replace(/\\//g, '~1')", ""],
+  ['unknown key not cut', "k.slice(0, 40)", "k"],
+];
+const CHILD_ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' };
+/** Run this file against `mutatedSrc` in a temp copy of the whole scripts dir (every module the test imports, e.g. ci-snapshot.mjs) -> raw spawn result. */
+function runMutant(mutatedSrc, { testSrc, env = CHILD_ENV, args = [] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'shape-mut-'));
+  try {
+    mkdirSync(join(dir, 'lib'));
+    for (const f of readdirSync(join(HERE, '..'))) if (f.endsWith('.mjs') && !f.endsWith('.test.mjs')) copyFileSync(join(HERE, '..', f), join(dir, f));
+    writeFileSync(join(dir, 'lib', 'shape.mjs'), mutatedSrc);
+    if (testSrc === undefined) copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs')); else writeFileSync(join(dir, 'lib', 'shape.test.mjs'), testSrc);
+    return spawnSync(process.execPath, ['--test', ...args, join(dir, 'lib', 'shape.test.mjs')], { env, encoding: 'utf8', timeout: 60000 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+/** 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error, a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'. */
+function classify(r) {
+  if (r.error || r.signal || r.status === null) return { verdict: 'invalid', failing: [], why: String(r.error?.code ?? r.signal ?? 'no status') };
+  const blocks = r.stdout.split(/^not ok /m).slice(1);
+  if (r.status === 0 && blocks.length === 0) return { verdict: 'survived', failing: [] };
+  const failing = blocks.map((b) => b.split('\n')[0].replace(/^\d+ - /, '')), nonAssert = blocks.filter((b) => !/code: 'ERR_ASSERTION'/.test(b));
+  if (blocks.length === 0 || nonAssert.length || /ERR_MODULE_NOT_FOUND|SyntaxError/.test(r.stdout + r.stderr)) return { verdict: 'invalid', failing, why: 'non-assertion failure' };
+  return { verdict: 'killed', failing };
+}
+// Anchors are LF text: a Windows checkout (autocrlf) has CRLF, so the source is normalised to LF before matching, and every mutant is written back as LF.
+// ONE loader, used by the mutation harness and by the CRLF test alike.
+const loadMutationSource = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+const LOADER_CHILD = process.env.SHAPE_LOADER_CHILD === '1';
+const SRC = loadMutationSource(join(HERE, 'shape.mjs'));
+test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
+  assert.equal(classify(runMutant(`${SRC}\nexport const = ;`)).verdict, 'invalid'); // syntax error
+  assert.equal(classify(runMutant(`import './does-not-exist.mjs';\n${SRC}`)).verdict, 'invalid'); // module not found
+  assert.equal(classify(runMutant(`${SRC}\nthrow new Error('boom');`)).verdict, 'invalid'); // load-time throw
+  assert.equal(classify(runMutant(SRC)).verdict, 'survived');
+  assert.equal(classify(runMutant(SRC.replace(MUTANTS[0][1], MUTANTS[0][2]))).verdict, 'killed');
+  assert.equal(classify({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }).verdict, 'invalid'); // timeout / crash
+});
+const CRLF_TEST = 'mutation harness is line-ending independent';
+test(`${CRLF_TEST}: the REAL loader over a CRLF copy of shape.mjs (a Windows checkout) anchors and kills the same way`, { skip: process.env.SHAPE_MUTANT_RUN === '1' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shape-crlf-'));
+  try {
+    const crlfFile = join(dir, 'shape.mjs');
+    writeFileSync(crlfFile, SRC.replace(/\n/g, '\r\n'));
+    assert.ok(readFileSync(crlfFile, 'utf8').includes('\r\n'), 'the fixture really has CRLF');
+    const src = loadMutationSource(crlfFile);
+    assert.equal(src, SRC);
+    for (const [name, from] of MUTANTS) assert.equal(src.split(from).length - 1, 1, `${name}: anchor on a CRLF source`);
+    const multi = MUTANTS.filter(([, from]) => from.includes('\n'));
+    assert.ok(multi.length >= 4, 'the multi-line anchors are the ones CRLF breaks');
+    if (LOADER_CHILD) return; // the loader-mutant child needs only the anchor assertions above
+    const bad = [];
+    for (const [name, from, to] of multi) { const c = classify(runMutant(src.replace(from, to))); if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict}`); }
+    assert.deepEqual(bad, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('mutation of the loader itself: without its CRLF normalisation the CRLF test fails by assertion (on every OS)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
+  const self = readFileSync(join(HERE, 'shape.test.mjs'), 'utf8').replace(/\r\n/g, '\n');
+  const from = "readFileSync(path, 'utf8').replace(/\\r\\n/g, '\\n');";
+  assert.equal(self.split(from).length - 1, 1, 'loader anchor');
+  const env = { ...CHILD_ENV, SHAPE_MUTANT_RUN: '0', SHAPE_LOADER_CHILD: '1' };
+  const mutated = classify(runMutant(SRC, { testSrc: self.replace(from, "readFileSync(path, 'utf8');"), env, args: ['--test-name-pattern', CRLF_TEST] }));
+  assert.equal(mutated.verdict, 'killed', JSON.stringify(mutated));
+  assert.ok(mutated.failing.some((n) => n.includes(CRLF_TEST)));
+  const intact = classify(runMutant(SRC, { testSrc: self, env, args: ['--test-name-pattern', CRLF_TEST] })); // control: the unmutated loader passes
+  assert.equal(intact.verdict, 'survived');
+});
+test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
+  const bad = [];
+  for (const [name, from, to] of MUTANTS) {
+    assert.equal(SRC.split(from).length - 1, 1, `mutant "${name}": anchor must occur exactly once`);
+    const c = classify(runMutant(SRC.replace(from, to)));
+    console.log(`# mutant ${c.verdict}: ${name} <- ${c.failing.slice(0, 3).map((n) => n.slice(0, 60)).join(' | ')}`);
+    if (c.verdict !== 'killed') bad.push(`${name}: ${c.verdict} ${c.why ?? ''}`);
+  }
+  assert.deepEqual(bad, [], 'mutants not killed by an assertion');
+});
