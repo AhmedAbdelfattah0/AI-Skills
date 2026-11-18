@@ -1142,7 +1142,7 @@ test('[P4r-51] round 9 (Opus m1-m3): a quoted path name, a sha256 listed edit, a
   // variant exists and the digest's own-file rule refuses it first (evidence_unavailable); where it does not, the variant is absent.
   { const r = repo(t), entry = { ...ENTRY, config_paths: ['VITEST.CONFIG.TS'] }, v = verdict(r, null, { entry });
     if (existsSync(join(r.dir, 'VITEST.CONFIG.TS'))) assert.equal(v.code, 'evidence_unavailable', 'a case-insensitive filesystem');
-    else assert.notEqual(v.status, 'refused', JSON.stringify(v)); }
+    else assert.equal(v.code, 'missing_test_kinds', `a case-sensitive filesystem: the context accepts the absent variant, and with no record P2 reports the missing kind: ${JSON.stringify(v)}`); }
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
