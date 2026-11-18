@@ -95,13 +95,15 @@ const usageRecords = () => {
     r('run-1', 'unattributed', 50, 10), r('run-1', 'builder', 100, 20, { attempt_id: 'att-2', api_ms: 7000 }), r('run-p0', 'orchestrator', 90, 10), r('run-l', 'builder', 5, 5, { reported_cost_usd: 2, cost_basis: 'billed' })];
 };
 
-export async function capture(scriptsDir) {
+// `injectLogs(logs)` (S-04a2 T-C2/T-C3/T-C6 only; the golden capture never passes it) returns the ticket -> rows map written for the
+// CLI paths (eval report --all, run-log summary --all), e.g. with measurement event rows added; the library capture is unaffected.
+export async function capture(scriptsDir, { injectLogs } = {}) {
   const realNow = Date.now;
   Date.now = () => FROZEN_NOW; // frozen clock: ages of open intervals are compared exactly, not masked
-  try { return await captureFrozen(scriptsDir); } finally { Date.now = realNow; }
+  try { return await captureFrozen(scriptsDir, injectLogs); } finally { Date.now = realNow; }
 }
 
-async function captureFrozen(scriptsDir) {
+async function captureFrozen(scriptsDir, injectLogs) {
   const load = (name) => import(pathToFileURL(join(scriptsDir, name)).href);
   const [{ evaluate }, { aggregate, buildRun }] = await Promise.all([load('eval.mjs'), load('run-summary.mjs')]);
   const all = logs();
@@ -128,7 +130,7 @@ async function captureFrozen(scriptsDir) {
   const cli = (script, repo, ...args) => { const r = run(script, repo, ...args); if (r.status !== 0) throw new Error(`${script}: ${r.stderr}`); return JSON.parse(r.stdout); };
   try {
     const { repo, dir } = newRepo();
-    for (const [ticket, rows] of Object.entries(all)) writeFileSync(join(dir, `${ticket}.jsonl`), rows.map((r) => JSON.stringify(r) + '\n').join(''));
+    for (const [ticket, rows] of Object.entries(injectLogs ? injectLogs(all) : all)) writeFileSync(join(dir, `${ticket}.jsonl`), rows.map((r) => (typeof r === 'string' ? r : JSON.stringify(r) + '\n')).join(''));
     // The CLI passes a real repoRoot, which makes unit states depend on the work tree: units are covered by the library capture (repoRoot null).
     writeFileSync(join(dir, 'T1.state.json'), JSON.stringify({ ...state, unit_checks: undefined }));
     const usagePath = join(repo, 'usage.jsonl');

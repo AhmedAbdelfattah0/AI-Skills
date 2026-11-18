@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -13,8 +12,9 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
+import { CLOSABLE, EVENT_NAMES, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
+import { appendLocked } from './run-log-io.mjs';
 
-const SCHEMA = 'ship-ticket-run-log-v1';
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_METRIC = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
@@ -28,9 +28,15 @@ function usage() {
   return `Usage:
   run-log.mjs start --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--metric key=value ...]
   run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>]
+  run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> [--event-id <id>] [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>]
+  run-log.mjs close --repo <path> --ticket <key> --run-id <id> --through <iso> --final true|false --count-source orchestrator_tally|posthoc --count <kind>=<n> ...
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
+Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${EVENT_NAMES.filter((n) => n !== 'closure').join(', ')}.
+start/end refuse these names. event writes one start/end pair in one append; event_id is derived where the event has an identity.
+A fallback or recovery run is recorded by hand: event --name run_mode --metric mode=fallback|recovery --metric label=measured.
+close records an orchestrator closure (label estimated) with explicit counts: <kind> in ${CLOSABLE.filter((k) => k !== 'usage').join(', ')}, or usage.<provider>.
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
 metrics; when absent or invalid they are recorded as unknown, never refused. gap_reason=no_start_stamp|wait|host_sleep|unknown
@@ -48,7 +54,7 @@ function parseArgs(argv) {
   }
 
   const command = argv[0];
-  const options = { metric: [] };
+  const options = { metric: [], count: [] };
   for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === '--all') {
@@ -60,7 +66,7 @@ function parseArgs(argv) {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) fail(`${token} requires a value`);
     index += 1;
-    if (key === 'metric') options.metric.push(value);
+    if (key === 'metric' || key === 'count') options[key].push(value);
     else if (options[key] !== undefined) fail(`${token} may be supplied only once`);
     else options[key] = value;
   }
@@ -169,9 +175,20 @@ function logPath(directory, ticket) {
   return join(directory, `${ticket}.jsonl`);
 }
 
+/**
+ * Legacy rows of a log. A writer (not tolerant) reads the R11 committed prefix: a torn tail or torn record is no longer
+ * history, and the next append truncates it. `summary` (tolerant) reads every byte, as before.
+ */
 function readRows(path, tolerant = false) {
   if (!existsSync(path)) return { rows: [], warnings: [] };
-  const contents = readFileSync(path, 'utf8');
+  const buf = readFileSync(path);
+  const { rows, warnings } = rowsFromText((tolerant ? buf : buf.subarray(0, committedLength(buf))).toString('utf8'), path);
+  if (!tolerant && warnings.length) fail(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
+  return { rows, warnings };
+}
+
+/** The legacy row set of a log text and its warnings. S-04 event rows are not legacy rows: measure/events.mjs readEvents checks them. */
+function rowsFromText(contents, path) {
   const rows = [];
   const warnings = [];
   if (contents && !contents.endsWith('\n')) warnings.push({ code: 'incomplete_tail' });
@@ -179,6 +196,7 @@ function readRows(path, tolerant = false) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
+      if (isEventName(row?.name)) continue;
       if (row?.schema !== SCHEMA) throw new Error('unsupported_schema');
       if (!['start', 'end'].includes(row.event) || !KINDS.has(row.kind)
         || !['ticket', 'run_id', 'event_id', 'name'].every((key) => typeof row[key] === 'string' && SAFE_ID.test(row[key]))
@@ -205,7 +223,6 @@ function readRows(path, tolerant = false) {
     warnings.push(...buildRun('', id, runRows).integrity_warnings
       .map((warning) => ({ ...warning, run_id: id })));
   }
-  if (!tolerant && warnings.length) fail(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
   return { rows, warnings };
 }
 
@@ -262,13 +279,27 @@ function importCarrier(options, started, root, timestamp) {
     duration_ms: end - start, collection_delay_ms: timestamp.getTime() - end };
 }
 
-function appendRow(directory, ticket, row) {
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+/**
+ * The single write path of <ticket>.jsonl: records pass the encodeRecords choke point (an S-04 row only from encodeEvent),
+ * then one locked append. With `check(eventEndRows)`, the committed history is verified under the lock (legacy rules, then every
+ * S-04 record), then `check` runs on the S-04 events; any problem throws and nothing is written.
+ */
+async function appendRows(directory, ticket, records, check) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  appendFileSync(logPath(directory, ticket), `${JSON.stringify(row)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
+  const path = logPath(directory, ticket);
+  const { truncated } = await appendLocked(path, encodeRecords(records), { check: check && ((bytes) => {
+    let text;
+    try { text = strictUtf8.decode(bytes); } catch { throw new Error(`${path}: log is not valid UTF-8; left unchanged`); }
+    const { warnings } = rowsFromText(text, path);
+    if (warnings.length) throw new Error(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
+    const { events, lost } = readEvents(bytes);
+    if (lost.invalid_events) throw new Error(`${path}: unsafe measurement history (${lost.invalid_events} invalid event record(s)); left unchanged`);
+    check(events.map((e) => e.end));
+  }) });
+  if (truncated) process.stderr.write(`run-log: dropped ${truncated} byte(s) of a torn tail (an interrupted earlier write) before appending\n`);
 }
+const failOnError = (promise) => promise.catch((error) => fail(error.message));
 
 function intervalOptions(options) {
   const ticket = validateId('ticket', requireOption(options, 'ticket'));
@@ -276,6 +307,7 @@ function intervalOptions(options) {
   const kind = requireOption(options, 'kind');
   if (!KINDS.has(kind)) fail(`--kind must be one of: ${[...KINDS].join(', ')}`);
   const name = validateId('name', requireOption(options, 'name'));
+  if (isEventName(name)) fail(`${name} is a measurement event: use run-log.mjs event`);
   const eventId = validateId('event id', requireOption(options, 'event-id'));
   return { ticket, runId, kind, name, eventId };
 }
@@ -320,7 +352,7 @@ function missingReviewIntervals(run) {
   return { count: items.length, items };
 }
 
-function start(options) {
+async function start(options) {
   const repo = requireOption(options, 'repo');
   const { directory } = locations(repo);
   const interval = intervalOptions(options);
@@ -345,11 +377,11 @@ function start(options) {
     metrics,
     ...(binding ? { carrier_binding: binding } : {}),
   };
-  appendRow(directory, interval.ticket, row);
+  await failOnError(appendRows(directory, interval.ticket, [row]));
   process.stdout.write(`${JSON.stringify(row)}\n`);
 }
 
-function end(options) {
+async function end(options) {
   const repo = requireOption(options, 'repo');
   const { directory, root } = locations(repo);
   const interval = intervalOptions(options);
@@ -396,9 +428,69 @@ function end(options) {
     metrics,
     ...(timing ? { carrier_timing: timing } : {}),
   };
-  appendRow(directory, interval.ticket, row);
+  await failOnError(appendRows(directory, interval.ticket, [row]));
   process.stdout.write(`${JSON.stringify(row)}\n`);
 }
+/** One measurement event (or a closure from `close`): encoded by encodeEvent, refused on a duplicate (run, event_id). */
+async function writeEvent(options, name, metrics, detail) {
+  const { directory } = locations(requireOption(options, 'repo'));
+  const ticket = validateId('ticket', requireOption(options, 'ticket'));
+  const runId = validateId('run id', requireOption(options, 'run-id'));
+  const now = new Date().toISOString();
+  const endedAt = options['ended-at'] ?? now, startedAt = options['started-at'] ?? endedAt;
+  let encoded;
+  try { encoded = encodeEvent({ ticket, runId, eventId: options['event-id'], name, metrics, detail, startedAt, endedAt }); } catch (error) { fail(error.message); }
+  const id = JSON.parse(encoded.text.slice(0, encoded.text.indexOf('\n'))).event_id;
+  await failOnError(appendRows(directory, ticket, [encoded], (rows) => {
+    if (rows.some((row) => row.run_id === runId && row.event_id === id)) throw new Error(`event ${id} already exists in run ${runId}`);
+  }));
+  process.stdout.write(encoded.text);
+}
+
+const typed = (raw, type) => (type === 'int' && /^-?(?:0|[1-9]\d*)$/.test(raw) ? Number(raw)
+  : type === 'boolean' && (raw === 'true' || raw === 'false') ? raw === 'true' : raw);
+
+async function eventCommand(options) {
+  const name = requireOption(options, 'name');
+  if (!isEventName(name) || name === 'closure') fail(`--name must be one of: ${EVENT_NAMES.filter((n) => n !== 'closure').join(', ')} (closures: run-log.mjs close)`);
+  for (const key of ['through', 'final', 'count-source', 'outcome']) if (options[key] !== undefined) fail(`--${key} is not an event option`);
+  if (options.count.length) fail('--count is not an event option');
+  const metrics = {};
+  for (const item of options.metric) {
+    const at = item.indexOf('=');
+    if (at < 1) fail(`invalid metric ${item}; expected key=value`);
+    const key = item.slice(0, at);
+    if (Object.hasOwn(metrics, key)) fail(`duplicate metric key: ${key}`);
+    metrics[key] = typed(item.slice(at + 1), fieldType(name, key));
+  }
+  let detail;
+  if (options.detail !== undefined) {
+    if (options.detail.length > 65536) fail('--detail is too large');
+    try { detail = JSON.parse(options.detail); } catch { fail('--detail must be valid JSON'); }
+  }
+  await writeEvent(options, name, metrics, detail);
+}
+
+/** `close`: an orchestrator closure with explicit counts (always label estimated). Engine closures are computed from state (S-04a3), never typed in. */
+async function closeCommand(options) {
+  if (options['from-engine-state'] !== undefined) fail('--from-engine-state is not available yet (S-04a3)');
+  for (const key of ['name', 'event-id', 'detail', 'started-at', 'ended-at', 'outcome']) if (options[key] !== undefined) fail(`--${key} is not a close option`);
+  if (options.metric.length) fail('--metric is not a close option');
+  const counts = {};
+  for (const item of options.count) {
+    const [, key, provider, raw] = /^([a-z_]+)(?:\.([a-z_]+))?=(.*)$/.exec(item) ?? [];
+    if (!key) fail(`invalid count ${item}; expected <kind>=<n> or usage.<provider>=<n>`);
+    const value = typed(raw, 'int');
+    if (provider !== undefined && key !== 'usage') fail(`invalid count ${item}`);
+    const slot = provider === undefined ? counts : (counts[key] ??= {});
+    if (Object.hasOwn(slot, provider ?? key)) fail(`duplicate count: ${item}`);
+    slot[provider ?? key] = value;
+  }
+  const final = options.final === 'true' ? true : options.final === 'false' ? false : fail('--final must be true or false');
+  await writeEvent(options, 'closure', { label: 'estimated', through: requireOption(options, 'through'), final,
+    emitter: 'orchestrator', count_source: requireOption(options, 'count-source') }, { counts });
+}
+
 /** No known run: `unknown`. Some unknown runs: only a known sum (a lower bound) next to unknown_runs, never a bare total. */
 function missingTotal(counted, total) {
   const sum = counted.reduce((a, b) => a + b, 0), unknownRuns = total - counted.length;
@@ -450,7 +542,10 @@ function summary(options) {
 }
 
 const { command, options } = parseArgs(process.argv.slice(2));
-if (command === 'start') start(options);
-else if (command === 'end') end(options);
+if (command !== 'close' && command !== 'event' && options.count.length) fail('--count is supported on close only');
+if (command === 'start') await start(options);
+else if (command === 'end') await end(options);
+else if (command === 'event') await eventCommand(options);
+else if (command === 'close') await closeCommand(options);
 else if (command === 'summary') summary(options);
 else fail(`unknown command: ${command}`);
