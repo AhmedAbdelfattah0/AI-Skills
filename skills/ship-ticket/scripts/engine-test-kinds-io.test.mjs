@@ -253,6 +253,7 @@ test('[P4r-6] AC2 rule 3: a result file outside the repo, outside P, not regular
   // (the target gets two added markers: old.test.ts was deleted above, so ONE added marker would be a move and credit nothing)
   put(r.dir, 'libs/money/new.test.ts', "test('x [kind:negative]', () => {});\ntest('y [kind:negative]', () => {});\n");
   const viaLink = build(r, report([{ file: join(r.dir, 'libs/money/link.test.ts'), cases: [{ title: 'x [kind:negative]' }] }, { file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: 'y [kind:negative]' }] }]));
+  assert.equal(viaLink.ok, true, JSON.stringify(viaLink)); // two rows for one file would be a malformed record (a duplicate row)
   assert.deepEqual(viaLink.record.files.map((f) => [f.file, f.outcome, f.credited]), [['libs/money/new.test.ts', 'counted', ['kind:negative']]]);
 });
 
@@ -306,7 +307,7 @@ test('[P4r-8] AC3 and OD-2 (I2): only the EXACT argv and the repo-local cmd qual
     { args: ['run', '--', '--pool=forks', '--reporter=json', '--outputFile={report}'] }, { args: [A[0], A[2], A[1], A[3]] }, { args: A.slice(0, 3) },
     { args: [...A, '--pool=forks'] }, { args: [...A, '--reporter=json'] }, { args: ['--pool=forks', '--reporter=json', '--outputFile={report}'] },
     { args: [A[0], '--pool=threads', A[2], A[3]] }, { args: [A[0], A[1], '--reporter=verbose', A[3]] }, { args: [A[0], A[1], A[2], '--outputFile=/tmp/x'] },
-    { args: [...A, '{files}', '{files}'] }, { args: [...A, '{report}'] }, { args: [...A, 'libs/money/new.test.ts'] },
+    { args: [...A, '{files}', '{files}'] }, { args: [A[0], A[2], A[1], A[3], '{files}'] }, { args: [...A, '{report}'] }, { args: [...A, 'libs/money/new.test.ts'] },
   ];
   // every rejected flag class (Opus M-2 probe): each appended to the valid template
   for (const extra of [['--'], ['--typecheck'], ['--typecheck.only'], ['--browser'], ['--browser.enabled=true'], ['--no-pool'], ['--pool', 'threads'], ['--pool=vmThreads'],
@@ -730,8 +731,9 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
     (c) => { delete c.runner.format; }, (c) => { c.integrity.sealed = 'true'; }, (c) => { c.report_len = -1; }, (c) => { c.exit_code = '0'; }, (c) => { c.attempt_id = ''; },
     (c) => { c.files[0].credited = ['kind:not-a-kind']; }, (c) => { c.files[0].credited = ['plan:9x']; }, (c) => { c.files[0].credited = ['kind:negative', 'kind:negative']; c.counts.credited = 2; },
     (c) => { c.files[0].credited = 'kind:negative'; }, (c) => { c.counts.credited = 0; }, (c) => { c.counts.marker_files = 2; }, (c) => { c.counts.unknown_markers = -1; },
-    (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = c.counts.results + 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; },
-    (c) => { c.files[0].skipped = { 'not a marker': 1 }; }, (c) => { c.files[0].skipped = []; }, (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; },
+    (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = c.counts.results + 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; c.counts.results = 2; },
+    (c) => { c.files[0].skipped = { 'not a marker': 1 }; c.counts.results = 2; }, (c) => { c.files[0].skipped = { 'kind:zzzz': 1 }; c.counts.results = 2; }, (c) => { c.files[0].skipped = []; },
+    (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; c.counts.results = 2; c.counts.passed = 2; },
     (c) => { c.files[0].file = '../escape.test.ts'; }, (c) => { c.report_sha256 = 5; }, (c) => { c.report_sha256 = 'x'; }, (c) => { c.runner.version = 5; },
     (c) => { c.runner.version = ''; }, (c) => { c.runner.id = 5; }, (c) => { c.runner.format = ''; }, (c) => { c.dag_digest = 'D'.repeat(64); }, (c) => { c.config_digest = null; }, (c) => { c.base_sha = 'HEAD'; }, (c) => { c.entry = '-x'; },
     (c) => { c.claim = 5; }, (c) => { c.counts.results = 1e9; }, (c) => { c.report_len = LIMITS.maxReportBytes + 1; }, (c) => { c.files[0].credited = ['kind:race', 'kind:negative']; c.counts.credited = 2; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
@@ -936,6 +938,8 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //   - `if (!parsed.supported) refuse(...)` and `typeof r.title/r.file` in build: preflight has already refused every document the
 //     parser would reject or return a result without a string title or file for (defence in depth only).
 //   - `counted.has(rel) &&` in r3Rule: the rule is only ever asked about rows whose outcome is `counted`, on build and on reuse.
+//   - the early marker-file cap in build: it stops work early; without it `validRecord` refuses the same record with the same
+//     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
 const IO = 'engine-test-kinds-io.mjs', RE = 'engine-test-kinds-reuse.mjs', BA = 'engine-test-kinds-base.mjs';
 const MUTANTS = [
   // reuse: the four conditions
@@ -1073,7 +1077,6 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-10', name: 'budget: the report is measured in UTF-16 units', from: 'if (bytes > LIMITS.maxReportBytes) refuse', to: 'if (text.length > LIMITS.maxReportBytes) refuse' },
   { file: IO, tag: 'P4r-10', name: 'budget: report_len is the character count', from: 'report_len: bytes,', to: 'report_len: text.length,' },
   { file: BA, tag: 'P4r-10', name: 'budget: the result count is not capped before parsing', from: "if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');", to: '' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the marker-file count is not capped', from: "if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-23', name: 'budget: the path count is not capped', from: "if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-23', name: 'budget: the identity bytes are not capped', from: "bytes += st.size; if (bytes > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');", to: 'bytes += st.size;' },
   { file: IO, tag: 'P4r-10', name: 'budget: the per-row creditable id cap is dropped', from: 'if (s.ids.size > LIMITS.maxIds || ', to: 'if (' },
