@@ -725,6 +725,7 @@ test('[P4r-34] S3 (round 3, C): V0 has no submodule support: ANY gitlink, in P o
     ['a hidden index flag inside the submodule', {}, ({ r, inner }) => { git(inner, 'update-index', '--skip-worktree', 'a.txt'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
     ['.gitmodules ignore=all', { atBase: true }, ({ r }) => { git(r.dir, 'config', '-f', '.gitmodules', 'submodule.vendor/s.ignore', 'all'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
     ['a gitlink removed from the index, its checkout still on disk', { atBase: true }, ({ r }) => { git(r.dir, 'rm', '-q', '--cached', 'vendor/s'); }],
+    ['a submodule at base deleted outright in the candidate (only the base tree still has the gitlink)', { atBase: true }, ({ r }) => { git(r.dir, 'rm', '-q', '-f', 'vendor/s'); assert.ok(!existsSync(join(r.dir, 'vendor/s'))); }],
     ['a gitlink committed after base only, then removed from the index', {}, ({ r }) => { git(r.dir, 'commit', '-q', '-m', 'sub'); git(r.dir, 'rm', '-q', '--cached', 'vendor/s'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
   ];
   for (const [why, opts, breakIt] of cases) {
