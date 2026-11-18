@@ -12,7 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path, { dirname, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -1081,6 +1081,69 @@ test('[P4r-49] round 8 (D9): the list, path-length and scan-token caps refuse', 
   assert.equal(code(build(r, tokens)), 'evidence_budget_exceeded', 'maxScanTokens');
 });
 
+// ---- round 9: the Opus review of aacb55f ----
+/** pointerRepo with an AGED, stat-clean index: an mtime bump alone (same bytes) then makes git re-hash the file. */
+function agedPointerRepo(t) {
+  const r = pointerRepo(t), old = new Date(Date.now() - 3600e3);
+  for (const f of ['.gitattributes', 'vitest.config.ts', 'package-lock.json', 'libs/money/old.test.ts']) utimesSync(join(r.dir, f), old, old);
+  git(r.dir, 'update-index', '--refresh');
+  return r;
+}
+const touch = (r, f) => { const now = new Date(); utimesSync(join(r.dir, f), now, now); };
+test('[P4r-50] round 9 (Opus M1): a base blob stored THROUGH a conversion is never a credit base, even when git stops converting', (t) => {
+  const args = [...ARGS.slice(0, 4), 'libs/money/old.test.ts'];
+  const credit = (r) => build(r, report([{ file: join(r.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]), { args, before: 'e1:' + '0'.repeat(64) });
+  // V1: a local `* -filter` and an mtime bump: git now lists the unchanged test, hash-object equals raw, the blob is still a pointer
+  { const r = agedPointerRepo(t);
+    put(r.dir, '.git/info/attributes', '* -filter\n'); touch(r, 'libs/money/old.test.ts');
+    assert.ok(git(r.dir, 'diff', '--name-only', r.base).split('\n').includes('libs/money/old.test.ts'), 'the fixture: git lists the unchanged test');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'V1');
+    assert.deepEqual(credit(r), CONVERTED, 'V1: never credited'); }
+  // V2: no local config at all: the candidate drops the filter line from the TRACKED .gitattributes and touches the test
+  { const r = agedPointerRepo(t);
+    put(r.dir, '.gitattributes', '# no filters\n'); touch(r, 'libs/money/old.test.ts');
+    assert.ok(git(r.dir, 'diff', '--name-only', r.base).split('\n').includes('libs/money/old.test.ts'), 'the fixture: git lists the unchanged test');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'V2');
+    assert.deepEqual(credit(r), CONVERTED, 'V2: never credited'); }
+  // the base's own attributes decide for every listed base path: text/eol/ident/working-tree-encoding at base are refused too,
+  // and attributes that differ between base and now (a filter ADDED by the candidate) are refused
+  for (const [why, line] of [['text=auto at base', '* text=auto\n'], ['eol at base', '*.ts eol=lf\n'], ['ident at base', '*.ts ident\n'], ['an encoding at base', '*.ts working-tree-encoding=UTF-8\n']]) {
+    const r = repo(t); put(r.dir, '.gitattributes', line); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'a'); r.base = git(r.dir, 'rev-parse', 'HEAD');
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, why);
+  }
+  { const r = repo(t); put(r.dir, '.git/info/attributes', '*.ts text\n');
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'an attribute that is not at base'); }
+  // the plain case (no attribute at base or now) is accepted: a legitimate edit of a base file is a change of P
+  { const r = repo(t); put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
+    const id = evidenceIdentity({ repo: r.dir, baseSha: r.base }); assert.equal(id.ok, true, JSON.stringify(id)); assert.ok(id.paths.includes('libs/money/old.test.ts')); }
+});
+
+test('[P4r-51] round 9 (Opus m1-m3): a quoted path name, a sha256 listed edit, and a case-variant config path', (t) => {
+  // m1: `hash-object --stdin-paths` C-unquotes a line starting with `"`: a tracked `"x"` beside `x` must be hashed as itself.
+  // POSIX only: a double quote cannot appear in a Windows file name.
+  if (process.platform !== 'win32') { const r = repo(t);
+    put(r.dir, 'x', '1\n'); put(r.dir, '"x"', '0\n'); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'q'); r.base = git(r.dir, 'rev-parse', 'HEAD');
+    put(r.dir, '"x"', '2\n');
+    const id = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+    assert.equal(id.ok, true, JSON.stringify(id)); assert.ok(id.paths.includes('"x"'), 'the quoted file is a path of P');
+    put(r.dir, '"x"', '1\n'); // its bytes now equal its twin's: hashing the twin would wrongly agree
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).ok, true); }
+  // m2: a sha256 repository with a LEGITIMATELY changed listed base file: the listed check hashes with sha256 too
+  { const dir = tmp(t, 'p4r-s256b-');
+    git(dir, 'init', '-q', '--object-format=sha256', '-b', 'main'); put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n");
+    git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'b'); const base = git(dir, 'rev-parse', 'HEAD');
+    put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
+    const id = evidenceIdentity({ repo: dir, baseSha: base });
+    assert.equal(id.ok, true, JSON.stringify(id)); assert.deepEqual(id.paths, ['libs/money/old.test.ts']); }
+  // m3: a declared config path that is a case variant of a base path: never silently accepted. Where the filesystem folds case the
+  // variant exists and the digest's own-file rule refuses it first (evidence_unavailable); where it does not, the variant is absent.
+  { const r = repo(t), entry = { ...ENTRY, config_paths: ['VITEST.CONFIG.TS'] }, v = verdict(r, null, { entry });
+    if (existsSync(join(r.dir, 'VITEST.CONFIG.TS'))) assert.equal(v.code, 'evidence_unavailable', 'a case-insensitive filesystem');
+    else assert.notEqual(v.status, 'refused', JSON.stringify(v)); }
+});
+
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
   const r = repo(t);
   let ran = 0;
@@ -1437,7 +1500,7 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 // `tag`: the test expected to kill it; it is the ONLY test run against that mutant, so a kill is attributed. `posix`: the killing test
 // needs a POSIX facility (it is skipped on win32): a fifo; EACCES and ELOOP fixtures; ENOTDIR (Windows reports ENOENT below a file, so
 // the mutant is unobservable there: it survived on the bcd7f9e Windows run); a TRACKED symlink (Git for Windows defaults to
-// core.symlinks=false and commits a symlink Node creates as a regular file). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
+// core.symlinks=false and commits a symlink Node creates as a regular file); a file name holding `"` (invalid on Windows). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
 // Documented EQUIVALENT (not listed, no input can observe them):
 //   - `retry_authorised` forced to true: P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads it only when held > 0.
 //   - `typeof r.title/r.file` in build: preflight has already refused every result without a string title or suite name
@@ -1658,6 +1721,17 @@ const MUTANTS = [
   { file: BA, tag: 'P4r-49', name: 'R8: a list over maxList is read (D9)', from: '  if (n > max) refuse(\'evidence_budget_exceeded\');\n', to: '' },
   { file: BA, tag: 'P4r-49', name: 'R8: a path over maxPathChars is repo-relative (D9)', from: 'p.length > 0 && p.length <= LIMITS.maxPathChars && ', to: 'p.length > 0 && ' },
   { file: BA, tag: 'P4r-49', name: 'R8: the scan-token cap is dropped (D9)', from: '    if (++tokens > LIMITS.maxScanTokens) refuse(\'evidence_budget_exceeded\');\n', to: '    ++tokens;\n' },
+  // round 9: the Opus review of aacb55f
+  { file: IO, tag: 'P4r-50', name: 'R9: the base-side attributes are not checked (M1)', from: '  attributesPlain(top, baseSha, base.filter(([p, m]) => m && listed.has(p)).map(([p]) => p)); // deleted ones too: their base count enters the total\n', to: '' },
+  { file: IO, tag: 'P4r-50', name: 'R9: only the current attributes are read (V2 drops the line)', from: 'for (const source of [[\'--source\', baseSha], []])', to: 'for (const source of [[]])' },
+  { file: IO, tag: 'P4r-50', name: 'R9: only the base attributes are read (one added now)', from: 'for (const source of [[\'--source\', baseSha], []])', to: 'for (const source of [[\'--source\', baseSha]])' },
+  { file: IO, tag: 'P4r-50', name: 'R9: filter is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'ident\', \'working-tree-encoding\', \'text\', \'eol\'];' },
+  { file: IO, tag: 'P4r-50', name: 'R9: ident is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'working-tree-encoding\', \'text\', \'eol\'];' },
+  { file: IO, tag: 'P4r-50', name: 'R9: working-tree-encoding is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'text\', \'eol\'];' },
+  { file: IO, tag: 'P4r-50', name: 'R9: text is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'eol\'];' },
+  { file: IO, tag: 'P4r-50', name: 'R9: eol is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\'];' },
+  { file: IO, tag: 'P4r-51', name: 'R9: a name starting with a quote is not quoted for --stdin-paths (m1)', from: 'const line = (p) => (p.startsWith(\'"\') ?', to: 'const line = (p) => (false ?', posix: true },
+  { file: IO, tag: 'P4r-51', name: 'R9: the listed check hashes a sha256 repository as sha1 (m2)', from: 'stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);', to: 'stat(top, p)?.isFile()).map(([p]) => p), false, budget);' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1710,7 +1784,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run, and a failed control stops here
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 48 : 49), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 50 : 51), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');

@@ -62,7 +62,10 @@
  * (a symlink by its link text, and still a symlink); every LISTED base file must hash the same raw as git hashes it with its filters.
  * Otherwise git compares converted bytes (a clean filter of any name, a Git LFS or git-crypt pointer, `ident`, an encoding, autocrlf,
  * `core.symlinks=false`), and the base blob is not the base of the bytes R-3 counts: `evidence_unavailable` / detail
- * `worktree_conversion_unsupported_v0`. The observation decides, never an attribute name, so a Git LFS repository and a Windows
+ * `worktree_conversion_unsupported_v0`. Round 9 adds the BASE side: a listed base path whose attributes, at base or now, include
+ * `filter`, `ident`, `working-tree-encoding`, `text` or `eol` is refused too (a pointer blob is never a credit base, even after the filter
+ * stops applying), so a repository with `* text=auto` is refused whenever a listed path is at base (V0 over-refusal, documented). A
+ * Git LFS repository and a Windows
  * checkout under `core.autocrlf` whose files hold CRLF are REFUSED in V0 (fail closed). Cost: one raw read of every tracked file plus a
  * `git hash-object --stdin-paths` over the listed ones; StoreCraft (2209 files, 18.8 MB) reads in about 0.4 s. The raw reads have their
  * OWN `maxIdentityBytes` (256 MiB) budget beside the identity's, so up to 512 MiB may be read in one call; that budget is UNTESTED (it
@@ -156,13 +159,33 @@ function rawUnchanged(top, p, mode, oid, budget) {
 function gitConverts(top, paths, sha256, budget) {
   if (!paths.length) return;
   if (paths.some((p) => /[\n\r]/.test(p))) refuse('evidence_unavailable'); // --stdin-paths reads lines
+  // a line starting with `"` is C-unquoted by git (Opus m1): quote such a name so git hashes the file it names, not its twin
+  const line = (p) => (p.startsWith('"') ? `"${p.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : p);
   let out;
-  try { out = git(top, ['hash-object', '--stdin-paths'], 64 << 20, Buffer.from(`${paths.join('\n')}\n`, 'utf8')).toString('latin1').split('\n').filter(Boolean); } catch (e) { refuse(gitRefusal(e)); }
+  try { out = git(top, ['hash-object', '--stdin-paths'], 64 << 20, Buffer.from(`${paths.map(line).join('\n')}\n`, 'utf8')).toString('latin1').split('\n').filter(Boolean); } catch (e) { refuse(gitRefusal(e)); }
   if (out.length !== paths.length) refuse('evidence_unavailable');
   paths.forEach((p, i) => {
     if ((budget.bytes += stat(top, p)?.size ?? 0) > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
     if (rawHash(readFileSync(join(top, p)), sha256) !== out[i]) refuse('evidence_unavailable', CONVERTED);
   });
+}
+/**
+ * Round 9 (Opus M1): the BASE side of a credit must not be conversion output either. `gitConverts` sees only today's attributes, so a
+ * base stored through a filter that no longer applies (a local `* -filter`, or the candidate dropping the line from `.gitattributes`)
+ * would count the pointer blob as the base. For every LISTED base path, the attributes git would apply AT BASE (`check-attr --source`)
+ * and NOW must not touch the bytes: any `filter`, `ident`, `working-tree-encoding`, `text` or `eol` present in `--all` (which lists only
+ * attributes that are set, unset or given a value, so no sentinel can hide one) is refused. Throws a Refusal.
+ */
+const CONVERTING = ['filter', 'ident', 'working-tree-encoding', 'text', 'eol'];
+function attributesPlain(top, baseSha, paths) {
+  if (!paths.length) return;
+  const input = Buffer.from(`${paths.join('\0')}\0`, 'utf8');
+  for (const source of [['--source', baseSha], []]) {
+    let out;
+    try { out = records(git(top, ['check-attr', ...source, '--all', '-z', '--stdin'], 64 << 20, input)); } catch (e) { refuse(gitRefusal(e)); }
+    if (out.length % 3) refuse('evidence_unavailable'); // path, attribute, value: a short answer is no answer
+    for (let i = 1; i < out.length; i += 3) if (CONVERTING.includes(out[i].toString('latin1'))) refuse('evidence_unavailable', CONVERTED);
+  }
 }
 /**
  * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
@@ -185,6 +208,7 @@ export function candidate(repo, baseSha, exclusions) {
   const listed = new Set(all), budget = { bytes: 0 };
   if (base.some(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget))) refuse('evidence_unavailable', CONVERTED);
   gitConverts(top, base.filter(([p, m]) => m && m[1] !== '120000' && listed.has(p) && stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);
+  attributesPlain(top, baseSha, base.filter(([p, m]) => m && listed.has(p)).map(([p]) => p)); // deleted ones too: their base count enters the total
   if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
   const exact = new Set(paths), blobs = base.filter(([p, m]) => m && m[1] !== '120000' && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
