@@ -268,4 +268,5 @@ ALL = [
  ('r7: audit entry dropped (join)', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [("  ['join', 'TypedArray#join joins the NUMBERS (`97,98`), never decodes text'],\n", '')]),
  ('r7: data keys not distinguished', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [('          if (GRAMMAR_DATA_KEYS.has(q.key.name)) used.add(`key:${q.key.name}`);\n          else if', '          if')]),
  ('vendor: CommonJS candidates not tried', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [("for (const c of [to, `${to}.js`, `${to}.cjs`, `${to}.mjs`, join(to, 'index.js'), join(to, 'index.cjs')]) {", 'for (const c of [to]) {')]),
+ ('r7: a second pinned decoder call admitted', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [("        if (used.has('pin:decoder-call')) return refuse(id,", '        if (false) return refuse(id,')]),
 ]

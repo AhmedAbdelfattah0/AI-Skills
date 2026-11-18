@@ -1399,7 +1399,11 @@ function grammarSites(file, src) {
     see(id);
     const name = id.name;
     if (isLocal(name) && name === GRAMMAR_DECODER.binding) {
-      if (decoderCall(id)) { used.add('pin:decoder-call'); return true; }
+      if (decoderCall(id)) {
+        if (used.has('pin:decoder-call')) return refuse(id, `a second pinned decoder call (exactly one ${GRAMMAR_DECODER.stmt} is admitted)`);
+        used.add('pin:decoder-call');
+        return true;
+      }
       return refuse(id, `the decoder ${name} used other than as the pinned call ${GRAMMAR_DECODER.call} in ${GRAMMAR_DECODER.fn}`);
     }
     if (isLocal(name)) {
@@ -2216,6 +2220,7 @@ const DECODE_ESCAPES = [
   ['the pinned call text in another statement', `${TD}export function decodeStrict(bytes) { let t = null; t = DECODER.decode(bytes); return t; }`],
   ['the pinned statement in another function', `${TD}export function other(bytes) { let s = null; s = DECODER.decode(bytes); return s; }`],
   ['the pinned statement in a closure inside decodeStrict', `${TD}export function decodeStrict(bytes) { const g = () => { let s = null; s = DECODER.decode(bytes); return s; }; return g(); }`],
+  ['a second pinned statement in decodeStrict', `${TD}export function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); s = DECODER.decode(bytes); return s; }`],
   ['decodeStrict nested in another function', `${TD}function outer() { function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); return s; } return decodeStrict; }`],
 ];
 test('T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict', () => {
@@ -2300,8 +2305,9 @@ test('T4a grammar property: each counterexample injected at seeded random statem
 // test or test helper included; reaching a benign one is allowed): (1) no import/export-from declaration, import() or
 // require() specifier lands in a vendor/ directory (a constant specifier: a literal, a `+` chain or template folded by
 // staticStr, or a top-level `const X = new URL('<literal>', import.meta.url).href`; relative and file: specifiers are
-// resolved by WHATWG URL rules, percent-decoding included; an extensionless one is also tried as CommonJS would, with
-// .js, .cjs, .mjs and index.js/.cjs; containment uses the platform's path rules, so another drive is outside); (2)
+// resolved by WHATWG URL rules, percent-decoding included; an extensionless one is also tried with .js, .cjs, .mjs and
+// a directory's index.js/.cjs (NOT a directory's package.json `main` or `exports`, which CommonJS would also use);
+// containment uses the platform's path rules, so another drive is outside); (2)
 // every import()/require() whose specifier is not such a constant is an offender unless pinned in DYNAMIC_LOADERS;
 // (3) no string piece, percent-decoded, names the package or a vendor/ path. It does NOT cover other ways to run the
 // file: createRequire, module.require, eval or Function, vm, a child process, a Worker, or reading it from disk.
@@ -2393,8 +2399,8 @@ function vendorOffenders(root, P = path, pinned = DYNAMIC_LOADERS) {
         if (!to) continue;
         if (vendors.some((v) => within(to, v, P))) out.push([rel(m), 'vendor', spec + via]);
         else {
-          // ESM needs the exact file; CommonJS also tries extensions and a directory index. Following every candidate
-          // that exists over-approximates both, which only adds files to check.
+          // ESM needs the exact file; CommonJS also tries extensions and a directory index (and a package.json `main`,
+          // which this does NOT follow). Every candidate below that exists is followed, which only adds files to check.
           for (const c of [to, `${to}.js`, `${to}.cjs`, `${to}.mjs`, join(to, 'index.js'), join(to, 'index.cjs')]) {
             if (/\.(?:mjs|cjs|js)$/.test(c) && !reached.has(c) && existsSync(c) && statSync(c).isFile()) { reached.add(c); queue.push(c); }
           }

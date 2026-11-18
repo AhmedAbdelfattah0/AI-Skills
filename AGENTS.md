@@ -236,7 +236,8 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
   runtime module of every skill (`T4a` in `ship-ticket/scripts/lib/git-exec.test.mjs` does). It follows every
   constant `import`/`export … from`, `import()` and `require()` specifier transitively, test files included. It
   resolves relative and `file:` specifiers as URLs, percent-decoding included, and also tries an extensionless one
-  the way CommonJS does (`.js`, `.cjs`, `.mjs`, a directory's `index.js`/`index.cjs`). None may land in a `vendor/`
+  with `.js`, `.cjs`, `.mjs` and a directory's `index.js`/`index.cjs`. It does not follow a package.json `main` or
+  `exports`, which CommonJS would. None may land in a `vendor/`
   directory. Every non-constant `import()`/`require()` must be on a pinned list with a reason. No runtime string may
   name the package or a `vendor/` path. The test does not cover other ways to run the file: `createRequire`,
   `eval`/`Function`, `vm`, a child process, a Worker, or reading it from disk. Review must catch those. A production
