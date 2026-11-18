@@ -836,6 +836,31 @@ test('[P4r-36] R-3 amendment (owner 2026-11-18): the total over P is the plain s
     assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), 'wrong reason'), 'stale:applicability'); }
 });
 
+// ---- round 4: a local attribute that makes git hash bytes other than the working tree's (the Opus confirmation of 4e0cae5) ----
+const FILTERED = { ok: false, code: 'evidence_unavailable', detail: 'filter_attribute_unsupported_v0' };
+test('[P4r-37] round 4: a filter, ident or working-tree-encoding attribute on a tracked path is refused; text/eol and an unset filter are not', (t) => {
+  // the Opus reproduction: a clean filter that answers HEAD's bytes hides an edit of a tracked test from every git diff
+  { const r = repo(t), rec = good(repo(t));
+    put(r.dir, '.git/info/attributes', '*.ts filter=hide\n'); git(r.dir, 'config', 'filter.hide.clean', 'git show HEAD:%f');
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
+    assert.equal(git(r.dir, 'diff', '--name-only', r.base), '', 'the fixture really hides the edit from git');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED);
+    assert.deepEqual(build(r, passing(r.dir), { before: 'e1:' + '0'.repeat(64) }), FILTERED, 'the builder');
+    assert.deepEqual(recordUsable(rec, cur(r)), { ok: false, reason: 'unavailable', ...FILTERED, ok: false }, 'recordUsable');
+    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'filter'), 'refused:evidence_unavailable'); }
+  const attrs = (where, line) => (r) => {
+    if (where === 'info') put(r.dir, '.git/info/attributes', line);
+    else { put(r.dir, '.gitattributes', line); git(r.dir, 'add', '.gitattributes'); git(r.dir, 'commit', '-q', '-m', 'attrs'); r.base = git(r.dir, 'rev-parse', 'HEAD'); }
+  };
+  const refused = [['a .gitattributes in the tree', attrs('tree', '*.ts filter=hide\n')], ['info/attributes', attrs('info', '*.ts filter=hide\n')],
+    ['a pattern matching only one directory', attrs('info', 'libs/money/*.ts filter=x\n')], ['Git LFS (info/attributes: committing it would run a global git-lfs filter in the fixture)', attrs('info', '*.json filter=lfs diff=lfs merge=lfs -text\n')],
+    ['ident (an edit inside $Id: ...$ is collapsed)', attrs('info', '*.ts ident\n')], ['working-tree-encoding', attrs('info', '*.ts working-tree-encoding=UTF-16\n')]];
+  for (const [why, setup] of refused) { const r = repo(t); setup(r); assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED, why); }
+  const accepted = [['no attribute (the control)', () => {}], ['an unset filter', attrs('info', '*.ts -filter\n')], ['an unspecified filter', attrs('info', '*.ts !filter\n')],
+    ['a filter on a pattern no tracked path matches', attrs('info', 'docs/*.md filter=x\n')], ['text and eol (line endings only)', attrs('info', '*.ts text eol=crlf\n')]];
+  for (const [why, setup] of accepted) { const r = repo(t); setup(r); assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).ok, true, why); }
+});
+
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
   const r = repo(t);
   let ran = 0;
@@ -1198,6 +1223,8 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //   - `typeof r.title/r.file` in build: preflight has already refused every result without a string title or suite name
 //     (defence in depth only). Round 3 withdrew the same claim for `if (!parsed.supported)`: a document preflight accepts can
 //     still make the parser reject it (`ancestorTitles: {}`, `failureMessages: {}`), so that guard is a mutant killed by P4r-35.
+//   - the length check on the `check-attr` answer (round 4): git answers every path for every attribute asked; the check only
+//     turns a truncated or garbled answer into a refusal instead of fewer checks (fail closed, defence in depth).
 //   - the early marker-file cap in build: it stops work early; without it `validRecord` refuses the same record with the same
 //     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
 // Removed in round 3 with the code they mutated: the relations over the round 2 result counts (S1: the counts are gone, the
@@ -1286,7 +1313,7 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: 'd(rel, m) <= 0 ? \'r3_unchanged\'', to: 'd(rel, m) < 0 ? \'r3_unchanged\'' },
   { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: 'n(total, m) > 0 ? \'credit\' : \'r3_offset\'', to: 'true ? \'credit\' : \'r3_offset\'' },
   { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction is dropped', from: ' - n(skipped.get(p), m);', to: ';' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'if (m && exact.has(p)) blobs.push([p, m[2]]);', to: 'if (m && exact.has(p) && existsSync(join(top, p))) blobs.push([p, m[2]]);', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
+  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'blobs = base.filter(([p, m]) => m && exact.has(p))', to: 'blobs = base.filter(([p, m]) => m && exact.has(p) && existsSync(join(top, p)))', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
   // record: files (rule 3), names merging
   { file: IO, tag: 'P4r-5', name: 'file: a file outside P is counted', from: '  if (c.inP(rel) === null) return { outcome: \'not_in_P\', rel }; // an alias of a path in P is refused (S2)\n', to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: the test globs are not applied', from: "if (!matches(testGlobs, rel, ctx)) return 'not_test_file';", to: '' },
@@ -1375,6 +1402,14 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-35', name: 'S4: the parser guard is removed (it is reachable)', from: '  if (!parsed.supported) refuse(\'evidence_unavailable\'); // REACHABLE: preflight does not check every field the parser reads (P4r-35)\n', to: '' },
   { file: IO, tag: 'P4r-35', name: 'S4: a too-deep missing report name is "outside the repo"', from: "if (tail.length > 256) refuse('evidence_budget_exceeded');", to: 'if (tail.length > 256) return null;' },
   { file: IO, tag: 'P4r-35', name: 'S4: an unexpected realpath error is "outside the repo"', from: 'const missing = (e) => (e?.code === \'ENOENT\' || e?.code === \'ENOTDIR\' ? null : refuse(\'evidence_unavailable\'));', to: 'const missing = () => null;', posix: true },
+  // round 4: attributes that make git hash bytes other than the working tree's
+  { file: IO, tag: 'P4r-37', name: 'round 4: the base paths\' attributes are not checked', from: '  hashedAsWorktree(top, base.map(([p]) => p));\n', to: '' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: filter is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'ident\', \'working-tree-encoding\'];' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: ident is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'working-tree-encoding\'];' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: working-tree-encoding is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'ident\'];' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: an unset attribute refuses', from: '![\'unspecified\', \'unset\'].includes(', to: '![\'unspecified\'].includes(' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: an unspecified attribute refuses', from: '![\'unspecified\', \'unset\'].includes(', to: '![\'unset\'].includes(' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', FILTERED);', to: 'refuse(\'evidence_unavailable\');' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1428,7 +1463,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 35 : 36), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 36 : 37), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);

@@ -54,6 +54,11 @@
  * PATH IDENTITY (S2): every comparison of a declared, stored or report-derived path with a git path goes through ONE rule
  * (`pathIndex`/`under` in the base module): a spelling that shares a key (NFC, lower case) with a git path without being it is
  * refused (`path_alias`), on every platform. A config path must also be its own file: no symlinked directory on the way.
+ * ATTRIBUTES (round 4): a `filter`, `ident` or `working-tree-encoding` attribute on any base path is refused (`evidence_unavailable` /
+ * detail `filter_attribute_unsupported_v0`): git would compare bytes other than the working tree's. A Git LFS repository is
+ * therefore refused in V0. `text`/`eol` are accepted (CRLF pairs only).
+ * NOT IN P (accepted, design: ignored files are outside release scope): a NEW file that `.gitignore`, `.git/info/exclude` or a
+ * global excludes file ignores never enters P, so it is outside the identity even if a test imports it.
  * SUBMODULES (S3): V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at base or
  * in the index, and any changed path that is a directory holding a `.git` (a repository git does not list file by file), is refused with
  * `evidence_unavailable` / detail `submodule_unsupported_v0`.
@@ -106,6 +111,22 @@ const utf8 = new TextDecoder('utf-8', { fatal: true });
 /** The NUL-terminated records of a `-z` git listing, as bytes (a path is never decoded lossily). */
 const records = (buf) => { const out = []; for (let at = 0; at < buf.length;) { const end = buf.indexOf(0, at) < 0 ? buf.length : buf.indexOf(0, at); out.push(buf.subarray(at, end)); at = end + 1; } return out; };
 const isGitlink = (rec) => rec.subarray(0, 7).toString('latin1') === '160000 ';
+export const FILTERED = 'filter_attribute_unsupported_v0';
+/**
+ * Round 4: git compares a tracked file through its attributes, so a path unchanged since base is outside P only if git hashed the
+ * working-tree bytes. A `filter` (any value, Git LFS included), `ident` (an edit inside `$Id: ...$` is collapsed) or
+ * `working-tree-encoding` (a conversion, not proven injective) on a base path can make git report bytes other than the file's:
+ * refused. `text`/`eol` are not: they only convert CRLF pairs, which no JavaScript or TypeScript source can tell apart. A path not
+ * at base is in P (added, or deleted from the index), and its bytes are hashed from the working tree directly. Throws a Refusal.
+ */
+const ATTRS = ['filter', 'ident', 'working-tree-encoding'];
+function hashedAsWorktree(top, paths) {
+  if (!paths.length) return;
+  let out;
+  try { out = records(git(top, ['check-attr', '--stdin', '-z', ...ATTRS], 64 << 20, Buffer.from(`${paths.join('\0')}\0`, 'utf8'))); } catch (e) { refuse(gitRefusal(e)); }
+  if (out.length !== paths.length * ATTRS.length * 3) refuse('evidence_unavailable'); // path, attribute, value for each: a short answer is no answer
+  for (let i = 2; i < out.length; i += 3) if (!['unspecified', 'unset'].includes(out[i].toString('latin1'))) refuse('evidence_unavailable', FILTERED);
+}
 /**
  * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
  * the path lookups over both (`inP`, `inAll`), the base blob of every path in P and the candidate marker counts of every
@@ -119,16 +140,15 @@ export function candidate(repo, baseSha, exclusions) {
   try { index = git(top, ['ls-files', '-s', '-z'], 64 << 20); tree = git(top, ['ls-tree', '-r', '-z', '--full-tree', baseSha], 64 << 20); } catch (e) { refuse(gitRefusal(e)); }
   const treeRecs = records(tree);
   if (records(index).some(isGitlink) || treeRecs.some(isGitlink)) refuse('evidence_unavailable', SUBMODULE); // S3, before anything else reads it
+  const base = treeRecs.map((rec) => { // ls-tree always writes a tab; a record without one matches no mode below and is skipped
+    const tab = rec.indexOf(9);
+    try { return [utf8.decode(rec.subarray(tab + 1)), /^(100644|100755) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'))]; } catch { return refuse('evidence_unavailable'); } // never decoded lossily
+  });
+  hashedAsWorktree(top, base.map(([p]) => p));
   try { all = changedPaths(top, baseSha, 'WORKTREE'); } catch { refuse('evidence_unavailable'); }
   if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
-  const exact = new Set(paths), blobs = [];
-  for (const rec of treeRecs) { // git spelling against git spelling: exact
-    const tab = rec.indexOf(9); // ls-tree always writes one; a record without it matches no mode below and is skipped
-    let p; try { p = utf8.decode(rec.subarray(tab + 1)); } catch { refuse('evidence_unavailable'); } // a non-UTF-8 path is refused, never approximated
-    const m = /^(100644|100755) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'));
-    if (m && exact.has(p)) blobs.push([p, m[2]]);
-  }
+  const exact = new Set(paths), blobs = base.filter(([p, m]) => m && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
   const h = createHash('sha256'), abs = (p) => join(top, p), cand = new Map();
   h.update(`ship-ticket-tk-evidence-v1\0${baseSha}\0`);
   let bytes = 0;
