@@ -245,7 +245,7 @@ async function runProof(E) {
       await E.commit();
       launch.release();
       result = await launch.done;
-    } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, quiescent: true }; } // retire() decides
+    } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
     if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited'))) {
       a.status = 'unknown';
       const reason = `cannot prove proof runner group ${a.pgid ?? a.pid} (${name}) has exited; no local proof recorded`;
@@ -257,7 +257,7 @@ async function runProof(E) {
     // args: an unlocated pass is the spec's only when the command runs exactly that file (gate.mjs soleFile).
     if (c.format) runs.push({ format: c.format, stdout: result.stdout ?? '', truncated: result.truncated === true || result.timedOut === true, args: [...(c.args ?? [])] });
     commands.push({ name, cmd: c.cmd, args: [...(c.args ?? [])], exit_code: result.exitCode,
-      result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) });
+      result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}), ...(result.error_code ? { error_code: result.error_code } : {}) });
   }
   await E.commit();
   // Policy 2 only: the parsed status of every effective pair spec (only pass proves; legacy proof bytes unchanged).

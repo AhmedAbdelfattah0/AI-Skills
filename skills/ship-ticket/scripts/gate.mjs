@@ -8,6 +8,7 @@
  */
 import { requiredEvidence, controlKind } from './harness.mjs';
 import { retire, leaderStart } from './engine-quiesce.mjs';
+import { RUNNER_REFUSALS } from './engine-io.mjs';
 
 export { requiredEvidence };
 
@@ -294,7 +295,7 @@ export async function gateRed(input, deps) {
   } catch (err) {
     if (!(await finish({ exitCode: null, timedOut: false, error: String(err?.message ?? err) }))) return unquiet();
     await deps.commit(snapshot());
-    return refuse(state, 'runner_failed', [`gate runner failed to launch or complete: ${err?.message ?? err}`], { judgment_point: true });
+    return refuse(state, RUNNER_REFUSALS.has(err?.code) ? err.code : 'runner_failed', [`gate runner failed to launch or complete: ${err?.message ?? err}`], { judgment_point: true });
   }
   if (run?.quiescent !== true || !(await finish({ exitCode: run.exitCode ?? null, timedOut: Boolean(run.timedOut),
     ...(run.truncated === true ? { truncated: true, stdout_bytes: run.stdout_bytes } : {}) }))) return unquiet();
