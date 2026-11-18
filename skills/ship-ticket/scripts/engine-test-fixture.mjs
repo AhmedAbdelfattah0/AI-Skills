@@ -11,6 +11,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSpec } from './provider-env.mjs';
+import { processRegistry } from './process-registry.test-helper.mjs';
 
 export const POSIX = process.platform !== 'win32';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
@@ -119,7 +120,10 @@ export function warmFakeClaude(bin, env) {
 export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], config = {}, bind = 'plan', extraEvents = () => [],
   behaviour = { a: { write: { 'src/a.txt': 'a1' } } }, digestForm = 'colon', commit = false, startAt = '2026-11-05T00:00:00Z', narrativeExtra = '' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-engine-test-')));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const processes = processRegistry();
+  // One teardown for every fixture test, whatever failed: reap every registered process (failing the test loudly if
+  // one survives), then remove the tree. Registered first, so it holds the registry before anything else runs.
+  t.after(async () => { try { await processes.reap(); } finally { processes.dispose(); rmSync(root, { recursive: true, force: true }); } });
   const repo = join(root, 'repo');
   for (const d of ['src', 'docs', join('.specs', 'plans')]) mkdirSync(join(repo, d), { recursive: true });
   writeFileSync(join(repo, 'docs', 'in.txt'), 'input v1');
@@ -133,6 +137,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   const sep = POSIX ? ':' : ';';
   const { NODE_TEST_CONTEXT: _nested, ...base } = process.env; // a nested `node --test` must not report to this runner
   const env = { ...base, PATH: bin + sep + process.env.PATH, Path: bin + sep + (process.env.Path ?? process.env.PATH) };
+  if (POSIX) env.NODE_OPTIONS = processes.nodeOptions(base.NODE_OPTIONS);
   const warmedUp = warmFakeClaude(bin, env);
 
   const promptFor = (id) => { const p = join(root, `prompt-${id}.txt`); writeFileSync(p, `NODE=${id}\n`); return p; };
@@ -166,9 +171,10 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
 
   let inputSeq = 0;
   const fx = {
-    root, repo, dagFile, dagDigest, planFile, env, warmedUp,
+    root, repo, dagFile, dagDigest, planFile, env, warmedUp, processes,
+    /** Engine ctx; its spawn seam always records into the fixture's process registry (composed with `extra.spawn`). */
     ctx: (extra = {}) => ({ repoRoot: repo, ticket: 'T-1', runId: 'run-1', dagFile, env, verifySubscription: () => true,
-      handleSignals: false, ...extra }),
+      handleSignals: false, ...extra, spawn: processes.spawnFn(extra.spawn) }),
     stateFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.state.json'),
     lockFile: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.lock'),
     runLog: () => gitPath(repo, 'ai-skills/ship-ticket/T-1.jsonl'),
@@ -202,7 +208,7 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
       return fx.cli(`gate ${kind}`, { input: file }, opts);
     },
     /** Spawn the engine CLI asynchronously (for crash tests); resolves nothing, returns the child. */
-    spawnCli: (cmd, flags = {}) => spawn(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
+    spawnCli: (cmd, flags = {}) => processes.spawnFn()(process.execPath, [ENGINE_CLI, ...cmd.split(' '), '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1',
       ...Object.entries(flags).flatMap(([k, v]) => [`--${k}`, v])], { env, stdio: 'ignore' }),
     candidate: () => {
       const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', 'HEAD', '--exclude', '.specs/plans/T-1.md', '--exclude', 'session-log.md'],

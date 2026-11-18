@@ -86,7 +86,9 @@ export function groupGone(pgid) {
  * kill it. The worker's process group is recorded at 'after-pid' (before the handshake) and, if the handshake is
  * not seen within `ms` (a failure bound), the group is SIGKILLed and its termination awaited before the hook throws
  * an error naming the handshake. `t.after` also kills a group still alive when the test ends, whatever failed.
- * `.pgid` is the recorded group (null until 'after-pid').
+ * `.pgid` is the recorded group (null until 'after-pid'). This is a fast path for the handshake's own failure only:
+ * the guarantee that no worker outlives its test, including a failure before 'after-pid' (pgid still null), is the
+ * fixture's process registry (engine-test-fixture.mjs processRegistry), which never depends on an engine boundary.
  */
 export function writeBeforeTimer(t, pred, what, { ms = HANDSHAKE_BOUND_MS } = {}) {
   let pgid = null;
