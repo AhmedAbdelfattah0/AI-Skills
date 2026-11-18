@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launcherArgs } from './launcher.mjs';
 import * as io from './engine-io.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const POSIX = process.platform !== 'win32';
 const DARWIN = process.platform === 'darwin';
@@ -50,12 +51,12 @@ const run = io.gateRunner({ repoRoot: cfg.repoRoot, dir: cfg.dir, platform: proc
 const t0 = Date.now();
 let out;
 try {
-  const launch = await run({ attempt_id: cfg.id, command: { cmd: cfg.cmd, args: cfg.args }, timeoutMs: cfg.timeoutMs, ...(cfg.report ? { report: true } : {}) });
+  const launch = await run(cfg.request);
   process.stderr.write('PID ' + launch.pid + '\\n');
   launch.release();
   const r = await launch.done;
   out = { settled: 'resolved', exitCode: r.exitCode, stdout: r.stdout, timedOut: r.timedOut, quiescent: r.quiescent,
-    report: r.report ? Buffer.from(r.report).toString('base64') : null, report_eof: r.report_eof ?? null };
+    stdout_eof: r.stdout_eof ?? null, report: r.report ? Buffer.from(r.report).toString('base64') : null, report_eof: r.report_eof ?? null };
 } catch (e) { out = { settled: 'rejected', code: e.code ?? null, message: String(e.message) }; }
 out.ms = Date.now() - t0;
 process.stdout.write(JSON.stringify(out));
@@ -93,6 +94,11 @@ else if (mode === 'fifo-forge') {
     + 'cat "$1/o.fifo" >/dev/null; cat "$1/e.fifo" >/dev/null; echo swallowed > "$1/forger.swallowed"; '
     + (order === 'eo' ? writeE + '; ' + writeO : writeO + '; ' + writeE) + '; echo fed > "$1/forger.fed"';
   whenReady(spawn('sh', ['-c', sh, 'forger', dir, L.out, L.env, forged], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] }), () => exitWith('not ok 1 - real\n', 1));
+} else if (mode === 'fifo-block') {
+  // A FIFO with no reader at the .out path and the envelope's tmp path: any open of them for write blocks forever.
+  const L = launcherArgv();
+  execFileSync('mkfifo', [L.out, L.env + '.tmp']);
+  exitWith('not ok 1 - real\n', 1);
 } else if (mode === 'poll-forge') {
   // S1w: overwrite .out and the envelope by path every 1 ms for 8 s (paths from argv: works on win32 too).
   const [out, envelope, dir, forged] = rest;
@@ -100,6 +106,13 @@ else if (mode === 'fifo-forge') {
     + 'const tick=()=>{try{fs.writeFileSync(o,"ok 1 - [kind:negative] forged\\n");fs.writeFileSync(e,f);n++;}catch{}'
     + 'try{fs.writeFileSync(d+"/poller.count",String(n));}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
   whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
+} else if (mode === 'stdout-holder') {
+  // A survivor inherits the runner's stdout and writes into it after the runner exits (barrier: its stdin EOF).
+  const [dir] = rest;
+  const src = 'const fs=require("fs");const d=process.argv[1];fs.writeFileSync(d+"/stdoutholder.pid",String(process.pid));fs.writeSync(3,"R");fs.closeSync(3);'
+    + 'process.stdin.resume();process.stdin.on("end",()=>{try{fs.writeSync(1,"INJECTED-AFTER-EXIT\\n");}catch{}setTimeout(()=>{},20000);});';
+  const f = spawn(process.execPath, ['-e', src, dir], { detached: true, stdio: ['pipe', 'inherit', 'ignore', 'pipe'] });
+  f.stdio[3].on('data', () => { f.stdio[3].destroy(); f.unref(); exitWith('ok 1 - real\n', 0); });
 } else if (mode === 'report') {
   // Write the report THROUGH THE PATH (as vitest --outputFile=/dev/fd/3 does), then stdout, then exit.
   const [reportSrc, stdoutSrc, code, reportPath] = rest;
@@ -141,11 +154,11 @@ else if (mode === 'fifo-forge') {
     spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'inherit', detached: true }),
     spawn('sh', ['-c', 'sleep 30'], { stdio: 'inherit' }),
   ];
-  setTimeout(() => {
+  Promise.all(kids.map((k) => new Promise((r) => k.once('spawn', r)))).then(() => {
     const result = { launcherFd1: ids(process.ppid, [1]), runnerFd1: ids(process.pid, [1]), runner: ids(process.pid), kids: kids.map((k) => ids(k.pid)) };
     for (const k of kids) { try { k.kill('SIGKILL'); } catch {} }
     exitWith(JSON.stringify(result) + '\n', 0);
-  }, 300);
+  });
 } else { process.stderr.write('unknown mode ' + mode); process.exit(98); }
 `;
 
@@ -155,7 +168,7 @@ function world(t) {
   writeFileSync(join(dir, 'driver.mjs'), DRIVER);
   writeFileSync(join(dir, 'fixture.cjs'), FIXTURE);
   t.after(() => {
-    for (const f of ['forger.pid', 'poller.pid', 'pathforger.pid', 'holder.pid']) {
+    for (const f of ['forger.pid', 'poller.pid', 'pathforger.pid', 'holder.pid', 'stdoutholder.pid', 'pipeholder.pid']) {
       if (!existsSync(join(dir, f))) continue;
       const pid = Number(readFileSync(join(dir, f), 'utf8').trim());
       if (!pid) continue;
@@ -168,10 +181,12 @@ function world(t) {
 
 /**
  * Run one gateRunner attempt in a driver child; `{ hung: true }` when it has not printed a result
- * within `deadlineMs` (the driver and its launcher group are then SIGKILLed).
+ * within `deadlineMs` (the driver and its launcher group are then SIGKILLed). The engine's own
+ * runner timeout is the long failure bound: "no hang" is this deadline, not the engine's timer.
  */
-function drive(w, { id = 'att-' + randomUUID(), args, timeoutMs = 20000, report = false, deadlineMs = 30000 }) {
-  const cfg = { repoRoot: w.dir, dir: w.attempts, id, cmd: process.execPath, args: [w.fixture, ...args], timeoutMs, report };
+function drive(w, { id = 'att-' + randomUUID(), args, report = false, deadlineMs = 30000 }) {
+  const request = { attempt_id: id, command: { cmd: process.execPath, args: [w.fixture, ...args] }, timeoutMs: WORKER_FAILURE_BOUND_MS, ...(report ? { report: true } : {}) };
+  const cfg = { repoRoot: w.dir, dir: w.attempts, request };
   const child = spawn(process.execPath, [join(w.dir, 'driver.mjs'), J(cfg)], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '', err = '';
   child.stdout.on('data', (d) => { out += d; });
@@ -211,6 +226,17 @@ for (const order of ['eo', 'oe']) {
     } else assert.equal(r.code, 'runner_output_tampered', J(r));
   });
 }
+
+test('S1 reader-less FIFOs planted at .out and the envelope tmp: the launcher never blocks on a forensic file', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const r = await drive(w, { args: ['fifo-block'] });
+  assert.ok(lstatSync(join(w.attempts, r.id + '.envelope.json.tmp')).isFIFO(), 'the plant never happened (the row would prove nothing)');
+  assert.notEqual(r.hung, true, J(r));
+  assert.equal(r.settled, 'resolved', J(r));
+  assert.equal(r.timedOut, false, J(r));
+  assert.ok(r.ms < 20000, `done settled after ${r.ms} ms`);
+  assert.deepEqual([r.exitCode, r.stdout], [1, GENUINE_FAIL]);
+});
 
 test('S1w path-overwrite forger (1 ms poll of .out and the envelope): the result equals the genuine run', { timeout: 60000 }, async (t) => {
   const w = world(t);
@@ -340,11 +366,11 @@ test('AC6 the result pipe (launcher fd 1) is open in no runner process or descen
 });
 
 /** A gateRunner whose launcher is replaced (through spawnFn) by `script`: it emits whatever frame the row wants. */
-function fakeLauncherRun(w, script, id) {
+function fakeLauncherRun(w, script, id, opts = {}) {
   const run = io.gateRunner({ repoRoot: w.dir, dir: w.attempts, platform: process.platform, env: process.env,
-    toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g),
+    toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g), ...opts,
     spawnFn: (file, args, opts) => spawn(file, ['-e', script, args[2]], opts) });
-  return run({ attempt_id: id, command: { cmd: process.execPath, args: ['-e', ''] }, timeoutMs: 20000 })
+  return run({ attempt_id: id, command: { cmd: process.execPath, args: ['-e', ''] }, timeoutMs: WORKER_FAILURE_BOUND_MS })
     .then(async (launch) => { launch.release(); return launch.done; });
 }
 
@@ -370,4 +396,32 @@ test('frame: a frame for another attempt, a disagreeing exit status, two frames 
   // Control: the same stand-in with a well-formed frame for this attempt and an agreeing status is accepted.
   const ok = await fakeLauncherRun(w, fakeLauncher(`Buffer.concat([head({out_len:3}),Buffer.from('ok\\n')])`, 0), 'att-' + randomUUID());
   assert.deepEqual([ok.exitCode, ok.stdout], [0, 'ok\n']);
+});
+
+test('frame: a result pipe still open after the launcher exited (fd 1 handed to a detached process) is refused after frameCloseMs', { timeout: 60000 }, async (t) => {
+  const w = world(t);
+  // Stand-in launcher: hands its fd 1 to a detached holder, waits for the holder's ready byte, then frames a valid result and exits 0.
+  const holder = 'require("fs").writeFileSync(process.argv[1],String(process.pid));require("fs").writeSync(3,"R");setTimeout(()=>{},15000);';
+  const script = `const fs=require('fs'),cp=require('child_process');const spec=JSON.parse(process.argv[1]);process.stdin.once('data',()=>{
+    const h=cp.spawn(process.execPath,['-e',${J(holder)},${J(join(w.dir, 'pipeholder.pid'))}],{detached:true,stdio:['ignore','inherit','ignore','pipe']});
+    h.stdio[3].once('data',()=>{h.stdio[3].destroy();h.unref();
+      const head=Buffer.from(JSON.stringify({schema:'ship-ticket-sealed-result-v1',attempt_id:spec.attemptId,exit_code:0,signal:null,spawn_error:null,out_len:3,truncated:false,stdout_bytes:3,out_eof:true,report:false,report_len:0,report_truncated:false,report_bytes:0,report_eof:false})+'\\n');
+      fs.writeSync(1,Buffer.concat([head,Buffer.from('ok\\n')]));process.exit(0);});});`;
+  const t0 = Date.now();
+  const res = await fakeLauncherRun(w, script, 'att-' + randomUUID(), { frameCloseMs: 300 }).then((r) => ({ resolved: r }), (e) => ({ code: e.code, message: e.message }));
+  assert.ok(existsSync(join(w.dir, 'pipeholder.pid')), 'the pipe holder never started (the row would prove nothing)');
+  assert.equal(res.code, 'runner_output_tampered', J(res));
+  assert.match(res.message, /still open/);
+  assert.ok(Date.now() - t0 < 10000, 'the bound did not apply');
+});
+
+test('stdout held past the runner exit by a detached process: accepted with stdout_eof false (recorded, not sealed)', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const r = await drive(w, { args: ['stdout-holder', w.dir] });
+  assert.ok(existsSync(join(w.dir, 'stdoutholder.pid')), 'the holder never started (the row would prove nothing)');
+  t.diagnostic(`result: ${J(r)}`);
+  assert.equal(r.settled, 'resolved', J(r));
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.stdout_eof, false, 'a held stdout must be flagged');
+  assert.ok(r.stdout.startsWith('ok 1 - real\n'), J(r));
 });

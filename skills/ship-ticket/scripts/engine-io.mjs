@@ -220,7 +220,9 @@ export function decodeSealedFrame(buf, attemptId) {
  * unknowable). It rejects with `runner_output_tampered` (no well-formed frame for this attempt,
  * a disagreeing or abnormal launcher exit, an oversized frame, or a result pipe still open
  * `frameCloseMs` after the launcher exited) unless the run timed out, which returns a result with
- * `timedOut: true` and no exit code, as before.
+ * `timedOut: true` and no exit code, as before. `stdout_eof: false` flags that a process still
+ * held the runner's stdout when the launcher finished (after a drain): its bytes until then are
+ * in `stdout`. Recorded, not refused (the drain is kept for runners that leave a descendant).
  * `report: true` adds the report channel (the runner's fd 3, reached as /dev/fd/3; measured on
  * darwin only, so any other platform rejects `channel_unsupported` before anything starts): the
  * result then carries `report` (bytes) and `report_eof: true`, and a channel still open when the
@@ -276,7 +278,7 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
       if (report === true && !h.report_eof) {
         throw Object.assign(coded('runner_survivor', 'the report channel was still open when the runner finished: a process outlived it holding the channel'), { quiescent });
       }
-      return { exitCode: h.exit_code, stdout: frame.stdout.toString('utf8'), stderr: '', timedOut, quiescent,
+      return { exitCode: h.exit_code, stdout: frame.stdout.toString('utf8'), stderr: '', timedOut, quiescent, stdout_eof: h.out_eof,
         ...(h.truncated ? { truncated: true, stdout_bytes: h.stdout_bytes } : {}),
         ...(report === true ? { report: frame.report, report_eof: true, ...(h.report_truncated ? { report_truncated: true, report_bytes: h.report_bytes } : {}) } : {}) };
     })();
