@@ -354,6 +354,90 @@ test('[P4r-23] AC3 budgets (L3): the identity refuses more changed paths or more
   assert.equal(evidenceIdentity({ repo: r3.dir, baseSha: r3.base }).code, 'evidence_budget_exceeded');
 });
 
+// ---- round 2: the seven Codex confirmation findings at ba7abac, each reproduced RED before its fix ----
+test('[P4r-24] C1 (I-C): a title over the cap is REFUSED, never dropped: an overlong non-passing carrier cannot restore a credit', (t) => {
+  const r = repo(t);
+  rmSync(join(r.dir, 'libs/money/new.test.ts')); // no other added marker in P
+  const old = join(r.dir, 'libs/money/old.test.ts'), long = `${'x'.repeat(LIMITS.maxTitleChars)} [kind:negative]`;
+  put(r.dir, 'libs/money/old.test.ts', `test('old [kind:negative]', () => {});\ntest.skip('${long}', () => {});\n`);
+  // the control: the same added carrier with a short title subtracts, so nothing is credited
+  assert.deepEqual(credits(build(r, report([{ file: old, cases: [{ title: 'old [kind:negative]' }, { title: 'short [kind:negative]', status: 'skipped' }] }]))), []);
+  for (const status of ['skipped', 'todo', 'pending', 'disabled']) {
+    const b = build(r, report([{ file: old, cases: [{ title: 'old [kind:negative]' }, { title: long, status }] }]));
+    assert.equal(code(b), 'evidence_budget_exceeded', status);
+  }
+  // a passing overlong title is refused the same way (no title is ever silently unread)
+  assert.equal(code(build(r, report([{ file: old, cases: [{ title: long }] }]))), 'evidence_budget_exceeded');
+});
+
+test('[P4r-25] C2 (I-E): a hidden index flag inside a submodule of P is refused (assume-unchanged and skip-worktree)', (t) => {
+  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const r = repo(t), sub = tmp(t, 'p4r-sub-');
+    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
+    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
+    const inner = join(r.dir, 'vendor/sub'), clean = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+    assert.equal(clean.ok, true, JSON.stringify(clean));
+    git(inner, 'update-index', flag, 'f.txt');
+    put(r.dir, 'vendor/sub/f.txt', 'two\n');
+    assert.match(git(inner, 'ls-files', '-v'), flag === '--assume-unchanged' ? /^h f\.txt$/m : /^S f\.txt$/m, 'the fixture really hides the flag');
+    assert.equal(git(inner, 'status', '--porcelain'), '', 'and git status really reports the submodule clean');
+    assert.notEqual(readFileSync(join(inner, 'f.txt'), 'utf8'), git(inner, 'show', 'HEAD:f.txt') + '\n', 'while its tracked bytes differ from HEAD');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, flag);
+  }
+});
+
+test('[P4r-26] C3 (I-A): recordUsable refuses runner_config_changed exactly as the verdict does (a config path in the candidate, whatever is excluded)', (t) => {
+  const r = repo(t), exclusions = ['vitest.config.ts'];
+  const rec = build(r, passing(r.dir), { exclusions });
+  assert.equal(rec.ok, true, JSON.stringify(rec));
+  const original = readFileSync(join(r.dir, 'vitest.config.ts'));
+  put(r.dir, 'vitest.config.ts', 'export default { globalSetup: "./evil.ts" };\n');
+  git(r.dir, 'add', 'vitest.config.ts'); // staged differently ...
+  writeFileSync(join(r.dir, 'vitest.config.ts'), original); // ... with the working bytes restored
+  assert.equal(verdict(r, rec.record, { exclusions }).code, 'runner_config_changed', 'the verdict refuses');
+  assert.deepEqual(recordUsable(rec.record, { ...cur(r), exclusions }), { ok: false, reason: 'unavailable', code: 'runner_config_changed' }, 'recordUsable refuses the same candidate');
+});
+
+test('[P4r-27] C4 (I-C): the id caps hold AFTER report names merge into one file (a link and its target)', (t) => {
+  const r = repo(t);
+  symlinkSync(join(r.dir, 'libs/money/new.test.ts'), join(r.dir, 'libs/money/link.test.ts'));
+  const titles = (prefix, n, per = 150) => Array.from({ length: Math.ceil(n / per) }, (_, k) => Array.from({ length: Math.min(per, n - k * per) }, (_, i) => `[${prefix}${k * per + i}]`).join(''));
+  const half = 300, link = join(r.dir, 'libs/money/link.test.ts'), target = join(r.dir, 'libs/money/new.test.ts');
+  put(r.dir, 'libs/money/new.test.ts', [...titles('plan:A', half), ...titles('plan:B', half)].map((x) => `test('${x}', () => {});`).join('\n'));
+  const two = (a, b, status) => build(r, report([{ file: link, cases: titles(a, half).map((title) => ({ title, status })) }, { file: target, cases: titles(b, half).map((title) => ({ title, status })) }]));
+  // the control: each name alone is under the cap
+  assert.equal(credits(build(r, report([{ file: target, cases: titles('plan:A', half).map((title) => ({ title })) }]))).length, half);
+  assert.equal(code(two('plan:A', 'plan:B')), 'evidence_budget_exceeded', 'credited ids');
+  assert.equal(code(two('plan:A', 'plan:B', 'skipped')), 'evidence_budget_exceeded', 'skipped ids');
+  assert.equal(code(two('kind:ua', 'kind:ub')), 'evidence_budget_exceeded', 'unknown ids');
+});
+
+test('[P4r-28] C5 (I-D): a stored record whose provenance contradicts itself is malformed, in recordUsable and in the verdict', (t) => {
+  const r = repo(t), rec = good(r);
+  assert.equal(recordUsable(rec, cur(r)).ok, true, 'the control');
+  for (const [mut, why] of [[(c) => { c.counts.passed = 0; }, 'credited rows with passed:0'], [(c) => { c.counts.passed = 0; c.counts.results = 0; }, 'credited rows with results:0'],
+    [(c) => { c.report_len = 0; }, 'report_len:0']]) {
+    const c = clone(rec); mut(c);
+    assert.deepEqual(recordUsable(c, cur(r)), { ok: false, reason: 'malformed' }, why);
+    assert.deepEqual(verdict(r, c).records, { unit: 'stale:malformed' }, why);
+  }
+});
+
+test('[P4r-29] C6 (I-F): every declared entry\'s CURRENT command is validated before its record is looked up (an absent record too)', (t) => {
+  const r = repo(t), rec = good(r), other = { ...ENTRY, name: 'other' };
+  const two = (cmd) => tkVerdict({ ...view(r, rec), entries: [ENTRY, other], commands: { unit: { cmd: ENTRY.cmd, args: ARGS }, other: cmd } }, 'F1');
+  assert.equal(two({ cmd: ENTRY.cmd, args: ARGS }).status, 'pass', 'the control: a valid command for the absent entry');
+  for (const bad of [{ cmd: '/tmp/evil/vitest', args: ARGS }, { cmd: ENTRY.cmd, args: [...ARGS, '--typecheck'] }]) {
+    const v = two(bad);
+    assert.equal(v.status, 'refused', JSON.stringify(bad)); assert.equal(v.code, 'runner_unsupported', JSON.stringify(bad));
+  }
+});
+
+test('[P4r-30] C7 (I-B): buildRecord refuses provenance that reuse would reject (an empty runner_version)', (t) => {
+  const r = repo(t);
+  assert.equal(code(build(r, passing(r.dir), { prov: { runner_version: '' } })), 'test_kinds_error');
+});
+
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
   const r = repo(t);
   let ran = 0;
