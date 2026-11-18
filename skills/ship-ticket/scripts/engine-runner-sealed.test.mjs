@@ -123,10 +123,12 @@ else if (mode === 'fifo-forge') {
   exitWith('not ok 1 - real\n', 1);
 } else if (mode === 'poll-forge') {
   // S1w: overwrite .out and the envelope by path every 1 ms for 8 s (paths from argv: works on win32 too).
+  // poller.count is published by write-tmp + rename so a reader never sees the truncated, empty file a plain
+  // writeFileSync exposes between its truncate and its write (that read as 0 and tripped the vacuity guard).
   const [out, envelope, dir, forged] = rest;
   const src = 'const fs=require("fs");const [o,e,d,f]=process.argv.slice(1);fs.writeFileSync(d+"/poller.pid",String(process.pid));let n=0;const end=Date.now()+8000;'
     + 'const tick=()=>{try{fs.writeFileSync(o,"ok 1 - [kind:negative] forged\\n");fs.writeFileSync(e,f);n++;}catch{}'
-    + 'try{fs.writeFileSync(d+"/poller.count",String(n));}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
+    + 'try{fs.writeFileSync(d+"/poller.count.tmp",String(n));fs.renameSync(d+"/poller.count.tmp",d+"/poller.count");}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
   whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, cwd: require('os').tmpdir(), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
 } else if (mode === 'late-writer') {
   // A detached survivor that inherits the runner's stdout (fd 1) or report channel (fd 3), learns of
