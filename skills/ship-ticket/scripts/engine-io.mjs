@@ -1,16 +1,15 @@
 /**
- * I/O primitives for the durable run engine (run-engine.mjs): the lock protocol, atomic state
- * persistence with fault-injection boundaries, content fingerprints and work-tree snapshots,
+ * I/O primitives for the durable run engine (run-engine.mjs): the lock protocol and atomic state
+ * persistence (re-exported from lib/durable-io.mjs), content fingerprints and work-tree snapshots,
  * idempotent event sinks, process-group liveness and termination, the launcher start shared with
  * carrier.mjs (one launcher implementation), the gate runner and candidate identity.
  * Node built-ins only. Pure helpers live in engine-dag.mjs.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, statSync,
-  renameSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync,
+  renameSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { launcherArgs, RELEASE_BYTE } from './launcher.mjs';
 import { sha, coded } from './engine-dag.mjs';
@@ -18,17 +17,8 @@ import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs'
 import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
 
 export { sha, killGroup, quiesce, processInfo };
-
-export const delay = (ms) => new Promise(r => setTimeout(r, ms));
-/** Await the `boundary` hook, if any; a throw there aborts the caller at exactly that point. */
-export const boundary = async (hooks, name, info) => { if (hooks?.boundary) await hooks.boundary(name, info); };
-
-/** Absolute `git rev-parse --git-path <rel>` for the work tree at `repoRoot`. */
-export function gitPath(repoRoot, rel) {
-  const r = spawnSync('git', ['rev-parse', '--git-path', rel], { cwd: repoRoot, encoding: 'utf8', timeout: 15000 });
-  if (r.status !== 0) throw coded('not_a_repo', `${repoRoot} is not a git work tree`);
-  return resolve(repoRoot, r.stdout.trim());
-}
+// The lock protocol and the atomic state write live in lib/durable-io.mjs (S-30a); re-exported unchanged.
+export { delay, boundary, gitPath, writeStateAtomic, acquireLock } from './lib/durable-io.mjs';
 
 /** Absolute git common dir of the work tree at `repoRoot`: shared by every linked work tree, so removing one leaves it intact. */
 export function commonGitDir(repoRoot) {
@@ -37,98 +27,12 @@ export function commonGitDir(repoRoot) {
   return resolve(repoRoot, r.stdout.trim());
 }
 
-/**
- * Atomically persist `state` as JSON: temp write, fsync, rename, directory fsync,
- * each preceded by its hook boundary. On win32 a rename EPERM/EBUSY is retried
- * up to 10 attempts; elsewhere it is thrown at once. A short write, or any failure before the
- * rename, removes the temp file, so the old state stays complete.
- */
-export async function writeStateAtomic(file, state, { hooks, fs = {}, platform = process.platform } = {}) {
-  const rename = fs.renameSync ?? renameSync, write = fs.writeSync ?? writeSync;
-  const dir = dirname(file);
-  mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  let renamed = false, fd = null;
-  try {
-    await boundary(hooks, 'temp-write', { file });
-    fd = openSync(tmp, 'wx', 0o600);
-    const data = Buffer.from(JSON.stringify(state, null, 1) + '\n');
-    if (write(fd, data) !== data.length) throw new Error(`short write of ${file}`);
-    await boundary(hooks, 'temp-fsync', { file });
-    fsyncSync(fd);
-    closeSync(fd); fd = null;
-    await boundary(hooks, 'rename', { file });
-    for (let attempt = 1; ; attempt++) {
-      try { rename(tmp, file); break; } catch (e) {
-        if (platform !== 'win32' || !['EPERM', 'EBUSY'].includes(e.code) || attempt >= 10) throw e;
-        await delay(10 * attempt);
-      }
-    }
-    renamed = true;
-    await boundary(hooks, 'dir-fsync', { file });
-    if (platform !== 'win32') {
-      const dfd = openSync(dir, 'r');
-      try { fsyncSync(dfd); } finally { closeSync(dfd); }
-    }
-  } finally {
-    if (fd !== null) closeSync(fd);
-    if (!renamed) try { unlinkSync(tmp); } catch { /* never created */ }
-  }
-}
-
 /** POSIX: whether any process of group `pgid` exists (`kill(-pgid, 0)`); null (unknown) on Windows. */
 export function groupAlive(pgid, platform = process.platform) {
   if (platform === 'win32' || !pgid) return null;
   try { process.kill(-pgid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-
-const RECOVER = 'stop every engine command for this ticket, confirm no engine process is running, then remove';
-
-/**
- * Take the per-ticket engine lock (`O_EXCL` file holding {pid, process_start_time,
- * host, run_id, nonce}). A same-host lock whose PID is dead, or alive with a
- * different start time, is recovered; concurrent recoverers race on an `O_EXCL`
- * recovery marker and re-check the observed nonce, so exactly one wins.
- */
-export async function acquireLock(ctx) {
-  const lockFile = gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.lock`);
-  const info = ctx.processInfo ?? processInfo;
-  const pid = ctx.pid ?? process.pid;
-  const host = ctx.host ?? hostname();
-  const mine = { pid, process_start_time: info(pid)?.startTime ?? null, host, run_id: ctx.runId, nonce: randomUUID() };
-  mkdirSync(dirname(lockFile), { recursive: true });
-  const create = () => {
-    try { writeFileSync(lockFile, JSON.stringify(mine), { flag: 'wx', mode: 0o600 }); return true; }
-    catch (e) { if (e.code === 'EEXIST') return false; throw e; }
-  };
-  const handle = { lockFile, release: async () => {
-    try { if (JSON.parse(readFileSync(lockFile, 'utf8')).nonce === mine.nonce) unlinkSync(lockFile); } catch { /* already gone */ }
-  } };
-  if (create()) return handle;
-  const raw = readFileSync(lockFile, 'utf8');
-  let held;
-  try { held = JSON.parse(raw); if (!held || typeof held.pid !== 'number' || typeof held.host !== 'string') throw new Error(); }
-  catch { throw coded('lock_malformed', `${lockFile} is unreadable; ${RECOVER} it by hand`); }
-  if (held.host !== host) throw coded('lock_foreign_host', `${lockFile} is held by host ${held.host}; on that host ${RECOVER} it`);
-  const other = info(held.pid) ?? { alive: false, startTime: null };
-  // Recovery needs proof: a dead PID, or a live PID whose known start time differs (reuse). A live
-  // holder whose start time is unknown on either side is treated as the holder, never broken.
-  const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
-  if (other.alive && !reused) throw coded('lock_held', `pid ${held.pid} holds ${lockFile}`);
-  await boundary(ctx.hooks, 'lock-stale-observed', { lockFile, held });
-  const marker = lockFile + '.recovery';
-  try { writeFileSync(marker, JSON.stringify({ pid, nonce: mine.nonce }), { flag: 'wx', mode: 0o600 }); }
-  catch (e) { if (e.code === 'EEXIST') throw coded('lock_held', `another recovery is in progress (${marker}); if none is, ${RECOVER} the marker`); throw e; }
-  try {
-    let current = null;
-    try { current = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { /* removed or rewritten */ }
-    if (current?.nonce !== held.nonce) throw coded('lock_held', `${lockFile} was recovered by another process`);
-    unlinkSync(lockFile);
-    if (!create()) throw coded('lock_held', `${lockFile} was taken during recovery`);
-    return handle;
-  } finally { try { unlinkSync(marker); } catch { /* gone */ } }
-}
 
 /** Content fingerprint of a repo-relative path: existence, type, mode and content hash (never mtime). */
 export function fingerprint(root, rel) {

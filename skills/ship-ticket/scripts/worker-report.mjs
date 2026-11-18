@@ -34,6 +34,9 @@ const stringList = (v) => Array.isArray(v) && v.every(x => typeof x === 'string'
  * accepted and validated when present (malformed: `fast_check_invalid`), so a compliant five-key report is never
  * downgraded to unstructured. `opts.t0Declared` (default false) is for a repository that declares T0: the key is then
  * required and its absence is refused as exactly `fast_check_missing`.
+ *
+ * An optional key `test_titles:[string]` (test-kinds.mjs, the T1-S tag convention) is accepted and checked by shape
+ * when present (malformed: `test_titles_invalid`); `opts.testKindsDeclared` makes it required (`test_titles_missing`).
  */
 export function parseWorkerReport(text, opts = {}) {
   const t0Declared = opts !== null && typeof opts === 'object' && opts.t0Declared === true;
@@ -45,7 +48,8 @@ export function parseWorkerReport(text, opts = {}) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return { status: 'unstructured', failure: 'report is not an object' };
   const keys = Object.keys(report);
   if (t0Declared && !keys.includes('t0')) return { status: 'unstructured', failure: 'fast_check_missing' };
-  const allowed = [...REPORT_KEYS, 't0'];
+  if (opts?.testKindsDeclared === true && !keys.includes('test_titles')) return { status: 'unstructured', failure: 'test_titles_missing' };
+  const allowed = [...REPORT_KEYS, 't0', 'test_titles'];
   const extra = keys.filter(k => !allowed.includes(k));
   const missing = REPORT_KEYS.filter(k => !keys.includes(k));
   if (extra.length || missing.length) return { status: 'unstructured', failure: 'report keys: missing [' + missing + '] unexpected [' + extra + ']' };
@@ -61,5 +65,7 @@ export function parseWorkerReport(text, opts = {}) {
       || !t.checks.every(c => c && typeof c === 'object' && !Array.isArray(c) && typeof c.name === 'string' && c.name.length > 0 && checkVerdict(c.result)))
       return { status: 'unstructured', failure: 'fast_check_invalid: t0 must be {result:"pass"|"fail", checks:[{name, result:"pass"|"fail"|"skipped"}]}' };
   }
+  if (keys.includes('test_titles') && !(stringList(report.test_titles) && report.test_titles.every(t => t.length > 0)))
+    return { status: 'unstructured', failure: 'test_titles_invalid' };
   return { status: 'structured', report };
 }
