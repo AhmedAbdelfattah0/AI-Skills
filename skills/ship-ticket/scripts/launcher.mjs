@@ -241,7 +241,8 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   // larger than any queue empties it and latches it. Then EOF means no process holds it; EAGAIN or
   // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot and
   // writers are not authenticated: bytes a process wrote and closed before the latch point are kept
-  // (the in-run injection risk R-T2, accepted with conditions: HANDOVER OD-D4).
+  // (the in-run injection risk R-T2; RECOMMENDED for temporary risk acceptance, the owner's decision
+  // is PENDING: HANDOVER OD-D4 reverted on 2026-11-18; remediation item FX-R1).
   const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
   const drain = (s, take) => {
     const fd = fdOf(s);

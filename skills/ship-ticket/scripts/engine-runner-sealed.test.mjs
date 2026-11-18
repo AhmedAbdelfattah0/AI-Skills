@@ -31,7 +31,8 @@
  * the channel's latching read in the exit callback. A process that wrote and closed just before
  * that read, including one handed the descriptor by an in-run holder, is accepted (R-T2; not an
  * atomic snapshot, writers not authenticated). On 4180cbc: Linux N18 100/100, N22 91/100; darwin
- * N18 84/100, N22 6/100 for a fast write-then-close survivor.
+ * N18 84/100, N22 6/100 for a fast write-then-close survivor. RECOMMENDED for temporary risk
+ * acceptance; the owner's decision is PENDING (HANDOVER OD-D4 reverted on 2026-11-18); FX-R1.
  * Off darwin the report channel is refused as `channel_unsupported` (Linux: /dev/fd/N on a
  * socketpair fails ENXIO, measured in Docker node:18; win32: no /dev/fd).
  */

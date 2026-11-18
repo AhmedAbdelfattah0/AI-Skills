@@ -238,11 +238,12 @@ export function decodeSealedFrame(buf, attemptId) {
  * route. This is not an atomic snapshot and writers are not authenticated. (The report channel's
  * latching read comes after the read of stdout.) Measured on PR #94
  * head 4180cbc, a fast write-then-close survivor is accepted: Linux Node 18 100/100, Node 22
- * 91/100; darwin Node 18 84/100, Node 22 6/100. Accepted with conditions by the owner's delegation
- * on 2026-11-18 (HANDOVER OD-D4); conditions: macOS harness 18/22 + engine-properties green on the
- * final head; both independent reviews on the final head; append-after-exit case added to the
- * adapter-qualification series; sandbox isolation (S-03/S-18) remains the real closure; Linux is
- * stdout only.
+ * 91/100; darwin Node 18 84/100, Node 22 6/100. RECOMMENDED for temporary risk acceptance; the
+ * owner's decision is PENDING (HANDOVER OD-D4 reverted on 2026-11-18). Recommended conditions:
+ * macOS harness 18/22 + engine-properties green on the final head; both independent reviews on the
+ * final head, no waiver; append-after-exit case in the adapter-qualification series; sandbox
+ * isolation (S-03/S-18) remains the real closure, as remediation item FX-R1: runner execution
+ * isolation (sandbox/pid-namespace) to close the post-exit window; Linux is stdout only.
  * `report` must be a boolean (anything else rejects `bad_input`). `report: true` adds the report
  * channel (the runner's fd 3, reached as /dev/fd/3; measured on darwin only, so any other
  * platform rejects `channel_unsupported` before anything starts): the result then carries
