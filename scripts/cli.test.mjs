@@ -623,7 +623,7 @@ test('validate rejects the retired rule-row header in a code-quality stack refer
     { 'references/stack-angular.md': 'Rows.\n\n| Rule | Status | Evidence |\n|---|---|---|\n' });
   const r = w.validate();
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /❌ code-quality: code-quality\/references\/stack-angular\.md:3 uses retired '\| Rule \| Status \| Evidence \|' — routed rule rows use the canonical Subject ID \| Outcome \| Evidence shape/);
+  assert.match(r.out, /❌ code-quality: code-quality[\\/]references[\\/]stack-angular\.md:3 uses retired '\| Rule \| Status \| Evidence \|' — routed rule rows use the canonical Subject ID \| Outcome \| Evidence shape/);
 });
 
 test('validate rejects retired vocabulary in a repo guidance file', (t) => {
