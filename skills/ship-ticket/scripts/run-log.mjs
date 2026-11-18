@@ -38,7 +38,7 @@ Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=meas
 start/end refuse these names. event writes one start/end pair in one append; event_id is derived where the event has an identity.
 A fallback or recovery run is recorded by hand: event --name run_mode --metric mode=fallback|recovery --metric label=measured.
 Every write takes <log>.lock (waits up to 10 s) and validates the whole resulting log; an invalid log refuses every write.
-A torn tail (bytes after the last newline) is moved to <log>.lost-<offset>-<sha>.json and a log_loss record is written in its place.
+A torn tail (bytes after the last newline) is moved to <log>.lost-<offset>-<sha>[-<layout>].json and a log_loss record is written in its place.
 quarantine moves undecodable, malformed and invalid measurement lines (and a torn tail) the same way, so writes can resume.
 close records an orchestrator closure (label estimated) with explicit counts: <kind> in ${CLOSABLE.filter((k) => k !== 'usage').join(', ')}, or usage.<provider>.
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and

@@ -1,4 +1,5 @@
-// Shared mutation harness (L1), extracted unchanged in behaviour from S-30b lib/shape.test.mjs so every slice uses ONE harness.
+// Shared mutation harness (L1), extracted from S-30b lib/shape.test.mjs so every slice uses ONE harness. Verdicts are unchanged except one case: a missing
+// test file now throws ENOENT while the tree is copied (the earlier harness ran a child and classified it 'invalid'); see copyMutantTree and the test 'harness fails closed' in mutation-harness.test.mjs.
 // A mutant is 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error,
 // a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'.
 import { spawn, spawnSync } from 'node:child_process';

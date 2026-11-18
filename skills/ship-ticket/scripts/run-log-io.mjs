@@ -3,18 +3,20 @@
  * per-ticket lock). Sidecars: durable-io `writeStateAtomic`. The append and the quarantine rewrite are custom (durable-io has
  * only a JSON replace). Only run-log.mjs calls these (a structural test pins it). Invariants (measure/events.mjs header):
  * - I1: `check(after, before)` sees the WHOLE file as it will be after the write (committed bytes + loss record + new text)
- *   and throws to refuse; nothing is written, moved or truncated before it passes.
+ *   and throws to refuse; no existing byte is written, moved or truncated before it passes. A log that did not exist is created
+ *   (empty) before `check` runs; when the write is refused and the file is still empty, it is removed again (`locked`).
  * - I2: bytes leave the log only after they are durable in `<log>.lost-<offset>-<sha12>[-<layout8>].json` (verbatim, base64), and the
  *   same write carries the `log_loss` record `marker(info)` returns. The sidecar is the durable record of the removed bytes;
- *   a refusal before the write changes nothing, and after a failed write restoring the original bytes is best effort.
+ *   a refusal before the write leaves every existing byte as it was, and after a failed write restoring the original bytes is best effort.
  * - I3: only the bytes after the last LF are torn (measure/events.mjs `committedLength`).
  * - Replace (win32): the quarantine reads the log, CLOSES it, and only then renames its temp over it (durable-io `renameRetrying`,
  *   which also retries a transient win32 EPERM/EBUSY/EACCES). A refused replace removes the temp and leaves the log unchanged;
  *   the sidecar written before it is then a redundant copy, never the only one.
  * Cancellation (`lockOptions.signal`) applies to the lock wait only: once the lock is held the operation runs to completion.
- * The awaits inside the lock are test fault-injection boundaries (`hooks.boundary`); no other code runs between them.
+ * The awaits inside the lock are the `hooks.boundary` test fault-injection points, the sidecar write (durable-io `writeStateAtomic`)
+ * and, on win32, the rename retry waits (durable-io `renameRetrying`, `opts.wait` seam).
  */
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import { acquireLock, boundary, renameRetrying, writeStateAtomic } from './lib/durable-io.mjs';
@@ -27,10 +29,15 @@ export const LOSS_SCHEMA = 'ship-ticket-run-log-loss-v1';
 /** `info.layout` (non-enumerable, set for a multi-piece quarantine) hashes every piece's offset and length, so two recoveries
  *  with equal removed bytes and first offset but different later offsets never share a sidecar (the earlier one is never replaced). */
 export const sidecarPath = (file, { offset, sha256, layout }) => `${file}.lost-${offset}-${sha256.slice(0, 12)}${layout ? `-${layout}` : ''}.json`;
+/** Add diagnostic fields to a thrown value when it is an object we may write to (a frozen or primitive throw is rethrown as is). */
+const annotate = (error, fields) => { if (error !== null && typeof error === 'object') for (const [k, v] of Object.entries(fields)) { try { Object.defineProperty(error, k, { value: v, enumerable: false, configurable: true, writable: true }); } catch { /* frozen */ } } };
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fsyncSync ?? fsyncSync, truncate: fs.ftruncateSync ?? ftruncateSync,
   open: fs.openSync ?? openSync, close: fs.closeSync ?? closeSync, rename: fs.renameSync ?? renameSync });
 const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
+
+/** Remove `file` when it exists and is empty (best effort: a failure here never hides the error that got us here). */
+function dropIfEmpty(file) { try { if (statSync(file).size === 0) unlinkSync(file); } catch { /* absent, or not removable: leave it */ } }
 
 /**
  * Lock, open (read-write, never append mode: truncation must work on win32) and read; `body` runs with the file's bytes. With
@@ -40,8 +47,10 @@ const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.le
 async function locked(file, opts, hold, body) {
   const { waitMs = 10000, lock = acquireLock, lockCtx = {}, lockOptions = {} } = opts;
   const handle = await lock({ lockFile: `${file}.lock`, runId: 'run-log', ...lockCtx }, { waitMs, ...lockOptions });
+  let created = false;
   try {
-    const { open, close } = seams(opts), created = !existsSync(file);
+    const { open, close } = seams(opts);
+    created = !existsSync(file);
     let fd = open(file, created ? 'wx+' : 'r+', 0o600);
     try {
       await boundary(opts.hooks, 'append-read', { file });
@@ -52,6 +61,9 @@ async function locked(file, opts, hold, body) {
       if (!hold) { const f = fd; fd = null; close(f); }
       return await body(fd, buf, created);
     } finally { if (fd !== null) close(fd); }
+  } catch (error) {
+    if (created) dropIfEmpty(file); // a refused first write must not leave the empty log `open('wx+')` created
+    throw error;
   } finally { await handle.release(); }
 }
 
@@ -71,7 +83,7 @@ const lossInfo = (offset, bytes, cause, pieces) => {
  * Append `text` (whole LF-terminated lines). A torn tail is moved to a sidecar and replaced by `marker(info)` + `text` in one
  * positional write; after a failure once the write has started, restoring the original bytes is best effort (the sidecar is the durable record). Options: `check(after, before)`,
  * `marker(info) -> text` (required when a torn tail exists), `waitMs`, `maxBytes`; test seams `lock`, `lockCtx`, `lockOptions`,
- * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync, openSync, closeSync, renameSync }), `platform`. Resolves `{ lost: info | null, bytes }`.
+ * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync, openSync, closeSync, renameSync }), `platform`, `wait` (win32 rename retry wait). Resolves `{ lost: info | null, bytes }`.
  */
 export async function appendLocked(file, text, opts = {}) {
   if (typeof text !== 'string' || !text.endsWith('\n')) throw coded('bad_append', 'text must be whole LF-terminated lines');
@@ -102,7 +114,10 @@ export async function appendLocked(file, text, opts = {}) {
 /**
  * I4: move the byte ranges `select(buf)` names (sorted, disjoint [from, to)) to a sidecar and atomically replace the log with
  * the remaining bytes + `marker(info)`. `check(after, before)` must accept the result. Resolves the loss info, or null when
- * nothing is selected (the log is untouched).
+ * nothing is selected (the log is untouched). A failure before the replace leaves the log as it was. If only the directory fsync
+ * AFTER a successful replace fails, the quarantine HAS taken effect (log replaced, sidecar written) yet the call rejects; that error
+ * carries `replaced: true` and `loss: info` so a caller can tell it from a refusal. A temp file that could not be removed after a
+ * failure is named on the error as `leaked_tmp`.
  */
 export async function quarantineLocked(file, { select, marker, check, ...opts }) {
   const { write, fsync, open, close, rename } = seams(opts), platform = opts.platform ?? process.platform;
@@ -123,9 +138,14 @@ export async function quarantineLocked(file, { select, marker, check, ...opts })
     try {
       const t = open(tmp, 'wx', 0o600);
       try { writeAll(write, t, after, 0); fsync(t); } finally { close(t); }
-      await renameRetrying(tmp, file, { rename, platform });
-    } catch (error) { try { unlinkSync(tmp); } catch { /* never created */ } throw error; }
-    if (platform !== 'win32') { const dfd = open(dirname(file), 'r'); try { fsync(dfd); } finally { close(dfd); } }
+      await renameRetrying(tmp, file, { rename, platform, wait: opts.wait });
+    } catch (error) {
+      try { unlinkSync(tmp); } catch (gone) { if (gone?.code !== 'ENOENT') annotate(error, { leaked_tmp: tmp }); } // ENOENT: never created
+      throw error;
+    }
+    try {
+      if (platform !== 'win32') { const dfd = open(dirname(file), 'r'); try { fsync(dfd); } finally { close(dfd); } }
+    } catch (error) { annotate(error, { replaced: true, loss: info }); throw error; }
     return info;
   });
 }

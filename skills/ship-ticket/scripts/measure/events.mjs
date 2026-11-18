@@ -70,7 +70,9 @@ export const EVENTS = Object.freeze({
     metrics: { ...LABEL, through: 'ts', final: 'boolean', emitter: E(['engine', 'orchestrator']),
       count_source: E(['engine_state', 'orchestrator_tally', 'posthoc']), state_sha256: '?string', state_seq: '?uint' },
     detail: { counts } },
-  // I2: bytes moved out of the log (to `<log>.lost-<offset>-<sha12>.json`); written only by run-log's writer (cli: false).
+  // I2: bytes moved out of the log (to `<log>.lost-<offset>-<sha12>[-<layout8>].json`; `layout8` only for a multi-piece quarantine); written only by run-log's writer (cli: false).
+  // The id carries no layout: two multi-piece quarantines with equal first offset and equal removed bytes but different layouts share
+  // this id (their sidecars differ). Existing ids must not change, so the layout is not added.
   log_loss: { kind: 'activity', point: true, cli: false, id: (m) => `log_loss-${m.offset}-${m.sha256.slice(0, 12)}`, pattern: { sha256: SHA256 },
     metrics: { label: E(['measured']), cause: E(['torn_tail', 'quarantine']), offset: 'uint', bytes: 'posint', sha256: 'string' } },
 });

@@ -1,6 +1,7 @@
 // S-04a2 measurement event contract: invariant-level tests (generic over EVERY event kind), the R11 torn-tail corpus, injected
 // write faults, the single write choke point, legacy isolation (T-C2, T-C3, T-C6 against the T-C1 golden) and the mutation check.
-// No sleeps and no wall-clock windows: lock waits run on an injected clock; host probes (processInfo) are injected.
+// No wall-clock windows and no real sleeps: lock waits run on an injected clock, the win32 rename retry wait is an injected no-op
+// (`wait`), the CLI child runs on a pinned clock, and host probes (processInfo) are injected.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -334,13 +335,18 @@ test('structural: one module holds the row schema literal, only run-log.mjs impo
 });
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
+/** The CLI child's clock is pinned (a preloaded `Date` whose no-argument constructor and `now()` return FIXED_NOW), so neither a real
+ *  clock before T0 nor one beyond year 2999 can change an outcome. FIXED_NOW is after T1 and before the 2999 "future" the tests use. */
+const FIXED_NOW = '2026-06-01T00:00:00.000Z';
+const PIN_CLOCK = `data:text/javascript,${encodeURIComponent(`const R = Date, F = ${Date.parse(FIXED_NOW)};
+globalThis.Date = class extends R { constructor(...a) { if (a.length) super(...a); else super(F); } static now() { return F; } };`)}`;
 function repo(t) {
   const dir = mkdtempSync(join(tmpdir(), 's04a2-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.equal(spawnSync('git', ['init', '-q', dir]).status, 0);
   const log = join(dir, '.git', 'ai-skills', 'ship-ticket', 'T1.jsonl');
   mkdirSync(dirname(log), { recursive: true });
-  const cli = (...args) => spawnSync(process.execPath, [RUN_LOG, ...args, '--repo', dir, '--ticket', 'T1'], { encoding: 'utf8' });
+  const cli = (...args) => spawnSync(process.execPath, ['--import', PIN_CLOCK, RUN_LOG, ...args, '--repo', dir, '--ticket', 'T1'], { encoding: 'utf8' });
   const bytes = () => (existsSync(log) ? readFileSync(log) : null);
   return { dir, log, cli, bytes };
 }
@@ -377,7 +383,8 @@ test('event: every kind but closure is written through the CLI, typed by the sch
   assert.deepEqual(lost, ZERO_LOST);
   const lone = r.cli('event', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', 'sleep-9', '--metric', 'label=measured', '--started-at', T0);
   assert.equal(lone.status, 0, lone.stderr);
-  assert.ok(Date.parse(JSON.parse(lone.stdout.split('\n')[1]).timestamp) > Date.parse(T0), 'a lone --started-at ends now, not at the start');
+  assert.equal(JSON.parse(lone.stdout.split('\n')[1]).timestamp, FIXED_NOW, 'a lone --started-at ends now (the pinned clock), not at the start');
+  assert.ok(Date.parse(FIXED_NOW) > Date.parse(T0) && Date.parse(FIXED_NOW) < Date.parse('2999-01-01T00:00:00Z'), 'the pinned clock sits between T0 and the "future" used below');
   written.push({ label: 'measured' });
   assert.deepEqual(ev.readEvents(r.bytes()).events.map((e) => e.end.metrics), written);
   const before = r.bytes();
@@ -644,7 +651,7 @@ test('win32 replace (I4): quarantine never renames over a log this process holds
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const good = Buffer.from(encodeValid('milestone').text), [s] = encodeValid('finding').text.split('\n');
   const bad = Buffer.from(`${s}\n`), original = Buffer.concat([good, bad]);
-  const opts = (fs) => ({ lockCtx, fs, platform: 'win32', select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck });
+  const waits = [], opts = (fs) => ({ lockCtx, fs, platform: 'win32', wait: async (ms) => { waits.push(ms); }, select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck });
   const leftovers = (file) => readdirSync(dir).filter((x) => x.startsWith(`${file.split(/[\\/]/).pop()}.`) && (x.endsWith('.tmp') || x.endsWith('.lock')));
 
   const file = join(dir, 'ok.jsonl');
@@ -661,6 +668,7 @@ test('win32 replace (I4): quarantine never renames over a log this process holds
   writeFileSync(flaky, original);
   const flakyInfo = await mustResolve(quarantineLocked(flaky, opts(av.fs)), 'quarantineLocked after transient EPERM');
   assert.equal(av.renamedOver.filter((x) => x === resolve(flaky)).length, 3, 'two transient refusals, then the replace');
+  assert.deepEqual(waits, [10, 20], 'the retry waits went through the injected wait seam (no real sleep)');
   assert.deepEqual(readFileSync(flaky), Buffer.concat([good, Buffer.from(marker()(flakyInfo))]));
 
   const refused = join(dir, 'refused.jsonl');
@@ -668,6 +676,7 @@ test('win32 replace (I4): quarantine never renames over a log this process holds
   const foreign = windowsFs({ alwaysRefuse: true });
   await assert.rejects(quarantineLocked(refused, opts(foreign.fs)), (e) => e.code === 'EPERM');
   assert.ok(foreign.renamedOver.includes(resolve(refused)), 'the replace was attempted');
+  assert.equal(waits.length, 2 + 9, 'ten attempts, nine injected waits, then the refusal');
   assert.deepEqual(readFileSync(refused), original, 'a refused replace leaves every byte of the log');
   const lost = readdirSync(dir).filter((x) => x.startsWith('refused.jsonl.lost-'));
   assert.equal(lost.length, 1, 'the sidecar was written before the replace');
@@ -682,6 +691,45 @@ test('win32 replace (I4): quarantine never renames over a log this process holds
   assert.ok(app.opened.includes(resolve(appended)), 'the seam saw the append open the log');
   assert.deepEqual([...app.held.values()], [], 'the append leaves no handle open');
   assert.deepEqual(leftovers(appended), [], 'and no lock');
+});
+
+test('quarantine diagnostics: a temp that cannot be removed is named on the error (leaked_tmp); a directory-fsync failure after the replace says replaced (the quarantine took effect)', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 's04a2-diag-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const good = Buffer.from(encodeValid('milestone').text), [s] = encodeValid('finding').text.split('\n');
+  const bad = Buffer.from(`${s}\n`), original = Buffer.concat([good, bad]);
+  const base = { lockCtx, platform: 'linux', select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck };
+  const boom = Object.assign(new Error('injected'), { code: 'injected' });
+
+  // The rename fails, and the temp has become a directory, so unlink fails with something other than ENOENT.
+  const leaky = join(dir, 'leaky.jsonl');
+  writeFileSync(leaky, original);
+  let tmpSeen;
+  const err = await quarantineLocked(leaky, { ...base, fs: { renameSync: (from) => { tmpSeen = from; rmSync(from); mkdirSync(from); throw boom; } } }).then(() => null, (e) => e);
+  assert.equal(err, boom, 'the original failure is what is thrown');
+  assert.equal(err.leaked_tmp, tmpSeen, 'the leaked temp is named');
+  assert.deepEqual(readFileSync(leaky), original, 'the log is unchanged');
+  rmSync(tmpSeen, { recursive: true });
+  // An ordinary failure (temp removable) names nothing.
+  writeFileSync(leaky, original);
+  const boom2 = Object.assign(new Error('injected again'), { code: 'injected' });
+  const clean = await quarantineLocked(leaky, { ...base, fs: { renameSync: () => { throw boom2; } } }).then(() => null, (e) => e);
+  assert.equal(clean, boom2);
+  assert.equal(Object.hasOwn(clean, 'leaked_tmp'), false, 'a removed temp is not reported');
+
+  if (process.platform === 'win32') { t.diagnostic('directory fsync does not exist on win32: the replaced-then-failed case is skipped, not asserted'); return; }
+  const dirSync = join(dir, 'dirsync.jsonl');
+  writeFileSync(dirSync, original);
+  const dirs = new Set();
+  const fs = { openSync: (path, flags, mode) => { const fd = realOpen(path, flags, mode); if (path === dir) dirs.add(fd); return fd; },
+    fsyncSync: (fd) => { if (dirs.has(fd) && !readFileSync(dirSync).equals(original) && readdirSync(dir).some((x) => x.startsWith('dirsync.jsonl.lost-'))) throw boom; } };
+  const boom3 = Object.assign(new Error('injected dir fsync'), { code: 'injected' });
+  const late = await quarantineLocked(dirSync, { ...base, fs: { ...fs, fsyncSync: (fd) => { try { fs.fsyncSync(fd); } catch { throw boom3; } } } }).then(() => null, (e) => e);
+  assert.equal(late, boom3);
+  assert.equal(late.replaced, true, 'distinguishable from a refusal');
+  assert.equal(late.loss.cause, 'quarantine');
+  assert.ok(!readFileSync(dirSync).equals(original), 'the replace did take effect');
+  assert.deepEqual(Buffer.from(readSidecar(sidecarPath(dirSync, late.loss)).pieces[0].base64, 'base64'), bad);
 });
 
 test('reader: a hand-damaged pair of ANY kind is invalid at read (kind, canonical id, start payload, envelope), never an event', () => {
@@ -717,8 +765,8 @@ test('strict decoding: an undecodable line mid-file is reported (never replaced)
   assert.deepEqual(mixed.lost, { ...ZERO_LOST, malformed_lines: 1, invalid_events: 2 });
 });
 
-// ---- injected faults: no partial record survives, the lock is always released, no unhandled rejection ----------------
-test('faults (I2): a throw at every boundary, a failed check, a refused lock, a short write and a crash: the torn bytes are never lost, and a rejection restores the original bytes', async (t) => {
+// ---- injected faults: a rejection restores the original bytes (except the injected failed-rollback crash, which leaves visible damage), the lock is always released, no unhandled rejection ----
+test('faults (I2): a throw at every boundary, a failed check, a refused lock, a short write and a crash: the torn bytes are never lost, and a rejection restores the original bytes except in the injected failed-rollback (crash) case, which leaves visible damage and keeps the torn bytes in the sidecar', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 's04a2-fault-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const committed = Buffer.from(encodeValid('milestone').text), torn = Buffer.from('{"sch'), original = Buffer.concat([committed, torn]);
@@ -740,6 +788,13 @@ test('faults (I2): a throw at every boundary, a failed check, a refused lock, a 
   f = join(dir, 'never.jsonl');
   await assert.rejects(appendLocked(f, rec, { lock: async () => { throw boom; } }), boom);
   assert.equal(existsSync(f), false, 'nothing is opened without the lock');
+  f = join(dir, 'new-refused.jsonl');
+  await assert.rejects(appendLocked(f, rec, { lockCtx, check: () => { throw boom; } }), boom);
+  assert.equal(existsSync(f), false, 'a refused first write removes the empty log that open(wx+) created');
+  assert.equal(existsSync(`${f}.lock`), false);
+  f = join(dir, 'new-ok.jsonl');
+  await mustResolve(appendLocked(f, rec, { lockCtx, check: cleanCheck }), 'appendLocked');
+  assert.deepEqual(readFileSync(f), Buffer.from(rec), 'a first write that passes check keeps the log');
   const half = Math.floor(rec.length / 2);
   f = fresh();
   await assert.rejects(appendLocked(f, rec, opts({ fs: { writeSync: (fd, data, off, len, pos) => realWriteSync(fd, data, 0, len > half ? half : len, pos) } })), (e) => e.code === 'short_write');
@@ -777,7 +832,8 @@ test('faults (I2): a throw at every boundary, a failed check, a refused lock, a 
     await mustResolve(appendLocked(fresh2, rec, { lockCtx, platform: 'linux', fs: { fsyncSync: (fd) => dirSyncs.push(fd) } }), 'appendLocked');
     assert.equal(dirSyncs.length, 3, 'an existing file fsyncs only itself');
   } else await appendLocked(fresh2, rec, { lockCtx });
-  assert.equal((statSync(fresh2).mode & 0o777).toString(8), process.platform === 'win32' ? (statSync(fresh2).mode & 0o777).toString(8) : '600');
+  if (process.platform === 'win32') t.diagnostic('file mode 0600 is not verified on win32 (no POSIX permission bits): skipped, not asserted');
+  else assert.equal((statSync(fresh2).mode & 0o777).toString(8), '600');
   const big = join(dir, 'big.jsonl');
   writeFileSync(big, Buffer.alloc(64, 0x0a));
   await assert.rejects(appendLocked(big, rec, { lockCtx, maxBytes: 63 }), (e) => e.code === 'log_too_large');
@@ -921,6 +977,7 @@ const MUTANTS = [
   ['run-log-io.mjs', 'no size cap', "if (size > (opts.maxBytes ?? LOG_BYTES_MAX)) throw", "if (false) throw"],
   ['run-log-io.mjs', 'win32: quarantine replaces the log while holding it open', "if (!hold) { const f = fd; fd = null; close(f); }", ""],
   ['run-log-io.mjs', 'win32: quarantine replace not retried', "await renameRetrying(tmp, file, { rename, platform });", "rename(tmp, file);"],
+  ['run-log-io.mjs', 'a refused first write leaves the empty log', "if (created) dropIfEmpty(file);", ""],
   ['run-log-io.mjs', 'I4: quarantine check skipped', "if (check) check(after, buf);", ""],
   ['run-log-io.mjs', 'I4: quarantine without sidecar', "await saveLost(file, info, pieces, opts);\n    await boundary(opts.hooks, 'append-write', { file });\n    const tmp", "await boundary(opts.hooks, 'append-write', { file });\n    const tmp"],
   ['run-log.mjs', 'lone --started-at is zero-length', "const endedAt = options['ended-at'] ?? now, startedAt = options['started-at'] ?? endedAt;", "const startedAt = options['started-at'] ?? options['ended-at'] ?? now, endedAt = options['ended-at'] ?? startedAt;"],

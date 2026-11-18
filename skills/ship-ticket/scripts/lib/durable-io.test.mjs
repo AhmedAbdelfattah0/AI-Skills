@@ -92,7 +92,7 @@ import { fsyncSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
   writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { acquireLock, writeStateAtomic, TEST_SEAM } from './durable-io.mjs';
+import { acquireLock, renameRetrying, writeStateAtomic, TEST_SEAM } from './durable-io.mjs';
 import { processInfo } from '../engine-quiesce.mjs';
 
 const WIN = process.platform === 'win32';
@@ -221,6 +221,29 @@ test('AC4 the temp file is fsynced before the rename and the directory after it'
   const fs = { fsyncSync: (fd) => { seen.push('fsync'); fsyncSync(fd); } };
   await writeStateAtomic(file, { v: 1 }, { fs, hooks: { boundary: (n) => { seen.push(n); } } });
   assert.deepEqual(seen, ['temp-write', 'temp-fsync', 'fsync', 'rename', 'dir-fsync', 'fsync']);
+});
+
+test('writeStateAtomic order: the successful rename comes before the dir-fsync hook, with the win32 retries (and their waits) before it, never after', async (t) => {
+  // Differential for the renameRetrying extraction: the same step order as the inline loop it replaced.
+  for (const [platform, failures] of [['win32', ['EPERM', 'EBUSY']], ['linux', []]].filter(([p]) => !(WIN && p === 'linux'))) { // a directory cannot be fsynced on win32
+    const file = join(scratch(t), 'state.json'), seen = [];
+    const fs = { renameSync: (a, b) => { const code = failures.shift(); seen.push(code ? `rename:${code}` : 'rename:ok'); if (code) throw Object.assign(new Error(`${code}: injected`), { code }); renameSync(a, b); },
+      fsyncSync: (fd) => { seen.push('fsync'); fsyncSync(fd); } };
+    await writeStateAtomic(file, { v: 1 }, { platform, fs, hooks: { boundary: (n) => { seen.push(`hook:${n}`); } } });
+    const rename = seen.indexOf('rename:ok');
+    assert.ok(rename > seen.indexOf('hook:rename') && seen.indexOf('hook:dir-fsync') === rename + 1, `${platform}: ${seen.join(' ')}`);
+    assert.equal(seen.filter((s) => s === 'hook:rename').length, 1, `${platform}: the rename hook fires once, not per retry`);
+    assert.equal(seen.filter((s) => s.startsWith('rename:')).length, 1 + (platform === 'win32' ? 2 : 0), platform);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { v: 1 });
+  }
+});
+
+test('renameRetrying: waits 10*attempt between win32 refusals through the wait seam (no real sleep), then gives up after 10 attempts', async () => {
+  const waits = [];
+  let calls = 0;
+  await assert.rejects(renameRetrying('a', 'b', { platform: 'win32', wait: async (ms) => { waits.push(ms); }, rename: () => { calls++; throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); } }), { code: 'EBUSY' });
+  assert.equal(calls, 10);
+  assert.deepEqual(waits, [10, 20, 30, 40, 50, 60, 70, 80, 90]);
 });
 
 // ---------------------------------------------------------------- acquireLock
