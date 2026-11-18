@@ -16,7 +16,8 @@
  */
 import { AUTHORITY_EVENTS, parseRunState, blockExtends, malformedReason } from './run-state.mjs';
 import { LIVE } from './engine-quiesce.mjs';
-import { pairProblem, pairKey } from './engine-dag.mjs';
+import { pairProblem, pairKey, normDigest } from './engine-dag.mjs';
+import { isProxy } from 'node:util/types';
 
 /** Events a state from before the authority record may trust (re-checked against bound digests). */
 const BOUND_ON_INIT = ['START', 'DAG_BOUND'];
@@ -140,4 +141,102 @@ export function waiverState(S, sec, candidate) {
   const waived = [...new Set(sec.waivers.filter(match).map(e => `${e.boundary}:${e.control}`))].sort();
   const unauthorized = [...new Set(sec.forged.waivers.filter(match).map(e => `${e.boundary}:${e.control}`))].filter(k => !waived.includes(k)).sort();
   return { waived, unauthorized };
+}
+
+// ---- S-01b2 test-kind waivers: TEST_KIND_WAIVER (design rev 5 §4) -----------------------------------
+
+/** Run caps for {@link testKindWaivers} (L3): authority lines read, the total UTF-8 bytes of the TEST_KIND_WAIVER lines among them, subjects per set. */
+export const TEST_KIND_WAIVER_BUDGET = Object.freeze({ lines: 10000, bytes: 8 * 1024 * 1024, subjects: 1024 });
+/** A waivable subject: the strict marker grammar of the test-title scanner (`kind:` or `plan:` and an ASCII id). */
+const TK_SUBJECT = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const TK_FIELDS = ['run_id', 'candidate', 'plan_digest', 'authorized_by', 'reason'];
+const BAD = Symbol('bad');
+
+/** Own data property `key` of a plain (non-Proxy) object, undefined when absent, BAD otherwise: never a trap or getter (L6). */
+function own(obj, key) {
+  if (obj === null || typeof obj !== 'object' || isProxy(obj)) return BAD;
+  const d = Object.getOwnPropertyDescriptor(obj, key);
+  if (d === undefined) return undefined;
+  return 'value' in d ? d.value : BAD;
+}
+
+/** Elements of a real (non-Proxy) array read through own data descriptors, or BAD (holes, accessors, over `max`). */
+function ownArray(arr, max) {
+  if (!Array.isArray(arr) || isProxy(arr)) return BAD;
+  const n = own(arr, 'length');
+  if (!Number.isSafeInteger(n) || n > max) return n > max ? 'over' : BAD;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const d = Object.getOwnPropertyDescriptor(arr, i);
+    if (!d || !('value' in d)) return BAD;
+    out.push(d.value);
+  }
+  return out;
+}
+
+/**
+ * The test-kind waivers effective for `candidate` (S-01b2 §4, §6 row 30). A TEST_KIND_WAIVER { run_id,
+ * requirement: 'kind:<id>'|'plan:<id>', candidate, plan_digest, authorized_by, reason } removes
+ * `requirement` only when it is trusted (observeAuthority), of this run, for this plan digest
+ * (normDigest on both sides) and exactly this candidate, and the requirement is in `required` and
+ * not in `protected` (the caller's recomputed protection). Its own match, independent of
+ * waiverState's security fields. A matching untrusted waiver (required, protected or not) is
+ * `unauthorized` unless a trusted one waives the same subject. Trusted waivers with no effect are
+ * counted by reason. Ids, enums and counts only; never throws: a hostile, malformed or over-budget
+ * input gives ok: false with a code and nothing waived (fail closed).
+ * -> { ok, code?, waived: [subject], unauthorized: [subject], ignored: { malformed, foreign, not_required, protected } }
+ */
+export function testKindWaivers(S, candidate, sets) {
+  const ignored = { malformed: 0, foreign: 0, not_required: 0, protected: 0 };
+  const refuse = (code) => ({ ok: false, code, waived: [], unauthorized: [], ignored: { malformed: 0, foreign: 0, not_required: 0, protected: 0 } });
+  try {
+    const B = TEST_KIND_WAIVER_BUDGET;
+    if (!nonEmpty(candidate)) return refuse('test_kinds_waiver_input_invalid');
+    const required = ownArray(own(sets, 'required'), B.subjects), prot = ownArray(own(sets, 'protected'), B.subjects);
+    if (required === 'over' || prot === 'over') return refuse('test_kinds_waiver_budget_exceeded');
+    if (required === BAD || prot === BAD || ![...required, ...prot].every(s => typeof s === 'string' && TK_SUBJECT.test(s))) return refuse('test_kinds_waiver_input_invalid');
+    const runId = own(S, 'run_id'), digest = own(S, 'plan_digest');
+    if (!nonEmpty(runId) || !nonEmpty(digest)) return refuse('test_kinds_waiver_state_invalid');
+    // P5 must bind activation at START; see review (an upgrade-taint gap is a P5 design item, not handled here)
+    const authority = own(S, 'authority');
+    if (authority === BAD) return refuse('test_kinds_waiver_state_invalid');
+    // a present authority record must carry both lists: null or missing is a broken state, not an empty list
+    const listOf = (key) => (authority === undefined ? [] : ownArray(own(authority, key), B.lines));
+    const trusted = listOf('trusted'), untrusted = listOf('untrusted');
+    if (trusted === BAD || untrusted === BAD) return refuse('test_kinds_waiver_state_invalid');
+    if (trusted === 'over' || untrusted === 'over' || trusted.length + untrusted.length > B.lines) return refuse('test_kinds_waiver_budget_exceeded');
+    const lines = [];
+    for (const line of trusted) lines.push({ line, trusted: true });
+    for (const u of untrusted) lines.push({ line: own(u, 'line'), trusted: false });
+    // every line must parse to a JSON object; only TEST_KIND_WAIVER lines count toward the byte budget (real bytes)
+    let bytes = 0;
+    for (const l of lines) {
+      if (typeof l.line !== 'string') return refuse('test_kinds_waiver_state_invalid');
+      const e = JSON.parse(l.line);
+      if (e === null || typeof e !== 'object' || Array.isArray(e)) return refuse('test_kinds_waiver_state_invalid');
+      l.e = e;
+      if (own(e, 'event') !== 'TEST_KIND_WAIVER') continue;
+      bytes += Buffer.byteLength(l.line, 'utf8');
+      if (bytes > B.bytes) return refuse('test_kinds_waiver_budget_exceeded');
+    }
+    const req = new Set(required), protectedSet = new Set(prot), wantDigest = normDigest(digest);
+    const waived = new Set(), forged = new Set();
+    for (const l of lines) {
+      const e = l.e;
+      if (own(e, 'event') !== 'TEST_KIND_WAIVER') continue;
+      const subject = own(e, 'requirement');
+      const fields = TK_FIELDS.map(k => own(e, k));
+      if (!(typeof subject === 'string' && TK_SUBJECT.test(subject)) || !fields.every(nonEmpty)) { if (l.trusted) ignored.malformed++; continue; }
+      const [run, cand, dig] = fields;
+      if (run !== runId || cand !== candidate || normDigest(dig) !== wantDigest) { if (l.trusted) ignored.foreign++; continue; }
+      if (!req.has(subject)) { if (l.trusted) ignored.not_required++; continue; }
+      if (!l.trusted) { forged.add(subject); continue; }
+      // design: P2 applies protection first (the caller's recomputed set); a protected subject is never waived by a trusted line
+      if (protectedSet.has(subject)) { ignored.protected++; continue; }
+      waived.add(subject);
+    }
+    return { ok: true, waived: [...waived].sort(), unauthorized: [...forged].filter(s => !waived.has(s)).sort(), ignored };
+  } catch {
+    return refuse('test_kinds_waiver_state_invalid');
+  }
 }
