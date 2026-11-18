@@ -54,17 +54,20 @@
  * PATH IDENTITY (S2): every comparison of a declared, stored or report-derived path with a git path goes through ONE rule
  * (`pathIndex`/`under` in the base module): a spelling that shares a key (NFC, lower case) with a git path without being it is
  * refused (`path_alias`), on every platform. A config path must also be its own file: no symlinked directory on the way.
- * ATTRIBUTES (round 4): a `filter`, `ident` or `working-tree-encoding` attribute on any base path is refused (`evidence_unavailable` /
- * detail `filter_attribute_unsupported_v0`): git would compare bytes other than the working tree's. A Git LFS repository is
- * therefore refused in V0. `text`/`eol` (and `core.autocrlf`) are accepted (CRLF pairs only).
+ * CHANGED MEANS RAW BYTES (round 6; it replaces the round 4-5 attribute refusals): every base path not listed by git's diff is read
+ * raw and hashed as a blob; a mismatch (or a file that is no longer the same kind) is a change of P. So a clean filter of any name,
+ * a macro or `core.attributesFile` filter, `ident`, `working-tree-encoding` or `core.symlinks=false` makes the identity MOVE instead
+ * of hiding an edit, and no attribute is refused by itself (Git LFS included). Conservative side: a file whose raw bytes differ only
+ * by a conversion (a CRLF checkout under `core.autocrlf`) counts as changed (a false positive, never a hidden edit). Cost: one read
+ * of every tracked file, bounded by `maxIdentityBytes`; StoreCraft (2209 files, 18.8 MB) takes about 0.4 s. Git's own diff (in
+ * risk-floor, outside this module) may still RUN a configured clean filter while listing; that is the local user's git config.
  * IDENTITY BRACKET (P5r/FX requirement, not decidable here): `evidence_id_before` is the identity before the run; a runner reading a
  * mutable checkout could modify a covered file and restore it before the identity is taken again. Binding what the runner reads to
  * the recorded identity (R-TC, the launch binding) is P5r's; P4r only checks the bracket it is given.
  * NOT IN P (accepted, design: ignored files are outside release scope): a NEW file that `.gitignore`, `.git/info/exclude` or a
  * global excludes file ignores never enters P, so it is outside the identity even if a test imports it.
- * HIDDEN BY GIT CONFIG (accepted; neither can help a test pass): with `core.symlinks=false`, a tracked symlink replaced by a regular
- * file holding the target path is not a change (its bytes are fixed to that path string); with `core.fileMode=false`, a `chmod +x`
- * is not a change (Vitest ignores the executable bit).
+ * NOT A CHANGE (accepted; it cannot help a test pass): a `chmod +x` with `core.fileMode=false` (the raw comparison reads bytes, not
+ * the executable bit, which Vitest ignores).
  * SUBMODULES (S3): V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at base or
  * in the index, and any changed path that is a directory holding a `.git` (a repository git does not list file by file), is refused with
  * `evidence_unavailable` / detail `submodule_unsupported_v0`.
@@ -89,6 +92,7 @@ import { dirname, isAbsolute, join, relative, sep, basename } from 'node:path';
 import { changedPaths } from './risk-floor.mjs';
 import { markers, ITEM_ID } from './test-kinds.mjs';
 import { parseRunnerOutput } from './gate.mjs';
+import { LIMITS as P2_LIMITS } from './engine-test-kinds.mjs';
 import { LIMITS, FILE_VOIDS, creditable, refuse, refusalOf, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, pathIndex, under, globList, matcher, matches, countMarkers, bufMarkers, parseScanned, preflight } from './engine-test-kinds-base.mjs';
 
 export { LIMITS, REFUSALS, FILE_VOIDS, MARKER_ID, creditable, Refusal, refuse, codeOf, refusalOf, pathKey, pathIndex, under, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, globList, matcher, matches } from './engine-test-kinds-base.mjs';
@@ -117,21 +121,19 @@ const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }); // a fi
 /** The NUL-terminated records of a `-z` git listing, as bytes (a path is never decoded lossily). */
 const records = (buf) => { const out = []; for (let at = 0; at < buf.length;) { const end = buf.indexOf(0, at) < 0 ? buf.length : buf.indexOf(0, at); out.push(buf.subarray(at, end)); at = end + 1; } return out; };
 const isGitlink = (rec) => rec.subarray(0, 7).toString('latin1') === '160000 ';
-export const FILTERED = 'filter_attribute_unsupported_v0';
 /**
- * Round 4: git compares a tracked file through its attributes, so a path unchanged since base is outside P only if git hashed the
- * working-tree bytes. A `filter` (any value, Git LFS included), `ident` (an edit inside `$Id: ...$` is collapsed) or
- * `working-tree-encoding` (a conversion, not proven injective) on a base path can make git report bytes other than the file's:
- * refused, as is an `unset` answer (`-filter` and the driver name `filter=unset` print the same); only `unspecified` passes. `text`/`eol` are not: they only convert CRLF pairs, which no JavaScript or TypeScript source can tell apart. A path not
- * at base is in P (added, or deleted from the index), and its bytes are hashed from the working tree directly. Throws a Refusal.
+ * Round 6, THE invariant for "changed": a base path whose working-tree file, read as RAW bytes, hashes to its base blob id (the same
+ * `blob <len>\0` object hash, sha1 or sha256 by the id's length) is unchanged; anything else is a change of P, whatever git's diff
+ * says. No attribute, filter (of any name), `ident`, `working-tree-encoding`, textconv or autocrlf is consulted, so none can hide an
+ * edit. A symlink compares its link text and must still be a symlink; a regular file must still be one. Throws a Refusal.
  */
-const ATTRS = ['filter', 'ident', 'working-tree-encoding'];
-function hashedAsWorktree(top, paths) {
-  if (!paths.length) return;
-  let out;
-  try { out = records(git(top, ['check-attr', '--stdin', '-z', ...ATTRS], 64 << 20, Buffer.from(`${paths.join('\0')}\0`, 'utf8'))); } catch (e) { refuse(gitRefusal(e)); }
-  if (out.length !== paths.length * ATTRS.length * 3) refuse('evidence_unavailable'); // path, attribute, value for each: a short answer is no answer
-  for (let i = 2; i < out.length; i += 3) { const v = out[i].toString('latin1'); if (v !== 'unspecified') refuse('evidence_unavailable', FILTERED); } // `unset` too: it is also how the VALUE `unset` reads
+function rawUnchanged(top, p, mode, oid, budget) {
+  let st;
+  try { st = lstatSync(join(top, p)); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? false : refuse('evidence_unavailable'); }
+  if (mode === '120000' ? !st.isSymbolicLink() : !st.isFile()) return false;
+  if ((budget.bytes += st.size) > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
+  const bytes = mode === '120000' ? readlinkSync(join(top, p), { encoding: 'buffer' }) : readFileSync(join(top, p));
+  return createHash(oid.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === oid;
 }
 /**
  * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
@@ -148,13 +150,14 @@ export function candidate(repo, baseSha, exclusions) {
   if (records(index).some(isGitlink) || treeRecs.some(isGitlink)) refuse('evidence_unavailable', SUBMODULE); // S3, before anything else reads it
   const base = treeRecs.map((rec) => { // ls-tree always writes a tab; a record without one matches no mode below and is skipped
     const tab = rec.indexOf(9);
-    try { return [utf8.decode(rec.subarray(tab + 1)), /^(100644|100755) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'))]; } catch { return refuse('evidence_unavailable'); } // never decoded lossily
+    try { return [utf8.decode(rec.subarray(tab + 1)), /^(100644|100755|120000) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'))]; } catch { return refuse('evidence_unavailable'); } // never decoded lossily
   });
-  hashedAsWorktree(top, base.map(([p]) => p));
   try { all = changedPaths(top, baseSha, 'WORKTREE'); } catch { refuse('evidence_unavailable'); }
+  const listed = new Set(all), budget = { bytes: 0 }, hidden = base.filter(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget)).map(([p]) => p);
+  if (hidden.length) all = [...all, ...hidden].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))); // changed in raw bytes, whatever git's diff said
   if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
-  const exact = new Set(paths), blobs = base.filter(([p, m]) => m && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
+  const exact = new Set(paths), blobs = base.filter(([p, m]) => m && m[1] !== '120000' && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
   const h = createHash('sha256'), abs = (p) => join(top, p), cand = new Map();
   h.update(`ship-ticket-tk-evidence-v1\0${baseSha}\0`);
   let bytes = 0;
@@ -346,6 +349,8 @@ export function validRecord(R, ctx) {
     sum.marker_files++; sum.credited += ids.length; sum.unknown_markers += unknown;
     copy.files.push({ file, outcome, credited: [...ids], withheld, skipped, unknown });
   }
+  // P2 takes at most this many items: a record that would exceed it is refused (I-B: the builder never emits one), never truncated
+  if (new Set(copy.files.flatMap((f) => f.credited.filter((m) => m.startsWith('plan:')))).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded');
   return COUNTS.every((k) => copy.counts[k] === sum[k]) ? copy : null; // S1: a stored total is the total of its rows, or the record is malformed
 }
 

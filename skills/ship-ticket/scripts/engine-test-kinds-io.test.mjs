@@ -843,33 +843,73 @@ test('[P4r-36] R-3 amendment (owner 2026-11-18): the total over P is the plain s
 });
 
 // ---- round 4: a local attribute that makes git hash bytes other than the working tree's (the Opus confirmation of 4e0cae5) ----
-const FILTERED = { ok: false, code: 'evidence_unavailable', detail: 'filter_attribute_unsupported_v0' };
-test('[P4r-37] round 4: a filter, ident or working-tree-encoding attribute on a tracked path is refused; text/eol and an unset filter are not', (t) => {
-  // the Opus reproduction: a clean filter that answers HEAD's bytes hides an edit of a tracked test from every git diff
-  { const r = repo(t), rec = good(repo(t));
-    put(r.dir, '.git/info/attributes', '*.ts filter=hide\n'); git(r.dir, 'config', 'filter.hide.clean', 'git show HEAD:%f');
-    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
-    assert.equal(git(r.dir, 'diff', '--name-only', r.base), '', 'the fixture really hides the edit from git');
-    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED);
-    assert.deepEqual(build(r, passing(r.dir), { before: 'e1:' + '0'.repeat(64) }), FILTERED, 'the builder');
-    assert.deepEqual(recordUsable(rec, cur(r)), { ok: false, reason: 'unavailable', ...FILTERED, ok: false }, 'recordUsable');
-    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'filter'), 'refused:evidence_unavailable'); }
-  const attrs = (where, line) => (r) => {
-    if (where === 'info') put(r.dir, '.git/info/attributes', line);
-    else { put(r.dir, '.gitattributes', line); git(r.dir, 'add', '.gitattributes'); git(r.dir, 'commit', '-q', '-m', 'attrs'); r.base = git(r.dir, 'rev-parse', 'HEAD'); }
-  };
-  const refused = [['a .gitattributes in the tree', attrs('tree', '*.ts filter=hide\n')], ['info/attributes', attrs('info', '*.ts filter=hide\n')],
-    ['a pattern matching only one directory', attrs('info', 'libs/money/*.ts filter=x\n')], ['Git LFS (info/attributes: committing it would run a global git-lfs filter in the fixture)', attrs('info', '*.json filter=lfs diff=lfs merge=lfs -text\n')],
-    ['ident (an edit inside $Id: ...$ is collapsed)', attrs('info', '*.ts ident\n')], ['working-tree-encoding', attrs('info', '*.ts working-tree-encoding=UTF-16\n')]];
-  for (const [why, setup] of refused) { const r = repo(t); setup(r); assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED, why); }
-  // round 5: `check-attr` prints `unset` for `-filter` AND for the string value `filter=unset` (which can name a configured driver): refused
-  for (const [why, line] of [['an unset filter (indistinguishable from filter=unset)', '*.ts -filter\n'], ['an unset ident', '*.ts -ident\n']]) { const r = repo(t); attrs('info', line)(r); assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED, why); }
-  const accepted = [['no attribute (the control)', () => {}], ['an unspecified filter', attrs('info', '*.ts !filter\n')],
-    ['a filter on a pattern no tracked path matches', attrs('info', 'docs/*.md filter=x\n')], ['text and eol (line endings only)', attrs('info', '*.ts text eol=crlf\n')]];
-  for (const [why, setup] of accepted) { const r = repo(t); setup(r); assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).ok, true, why); }
+// ---- rounds 4-6: a local git setting that makes git report bytes other than the working tree's. Round 6 changed the INVARIANT:
+// "changed" is decided from the RAW working-tree bytes against the base blob id, never from git's attribute or filter machinery, so
+// each of these settings now makes the identity MOVE (the edited file is a path of P) instead of being refused by name ----
+/** A repo whose tracked test is edited under `setup` (which may hide the edit from git); returns the identities before and after. */
+function hiddenEdit(t, setup, edit = "test('old [kind:negative]', () => { process.exit(0); });\n", file = 'libs/money/old.test.ts') {
+  const r = repo(t), before = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+  setup(r);
+  put(r.dir, file, edit);
+  return { r, before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }), gitSees: git(r.dir, 'diff', '--name-only', r.base).split('\n').filter(Boolean) };
+}
+const moves = (h, why, file = 'libs/money/old.test.ts') => {
+  assert.equal(h.before.ok, true, why); assert.equal(h.after.ok, true, `${why}: ${JSON.stringify(h.after)}`);
+  assert.notEqual(h.after.evidence_id, h.before.evidence_id, `${why}: the identity moves`);
+  assert.ok(h.after.paths.includes(file), `${why}: the edited file is a path of P`);
+};
+const hideWith = (attrLine, driver, extra = () => {}) => (r) => { put(r.dir, '.git/info/attributes', attrLine); git(r.dir, 'config', `filter.${driver}.clean`, 'git show HEAD:%f'); extra(r); };
+test('[P4r-37] round 6: an edit hidden from git by a clean filter of ANY name is a change of P (raw bytes vs the base blob)', (t) => {
+  for (const [why, setup] of [['a filter named unspecified (reads like no filter: the Opus repro of bcd7f9e)', hideWith('*.ts filter=unspecified\n', 'unspecified')],
+    ['a filter named hide', hideWith('*.ts filter=hide\n', 'hide')], ['a filter named unset (reads like -filter)', hideWith('*.ts filter=unset\n', 'unset')],
+    ['a filter set through a macro', hideWith('[attr]quiet filter=hide\n*.ts quiet\n', 'hide')],
+    ['a filter set in core.attributesFile', (r) => { const f = join(tmp(t, 'p4r-attrs-'), 'attributes'); writeFileSync(f, '*.ts filter=hide\n'); git(r.dir, 'config', 'core.attributesFile', f); git(r.dir, 'config', 'filter.hide.clean', 'git show HEAD:%f'); }]]) {
+    const h = hiddenEdit(t, setup);
+    assert.deepEqual(h.gitSees, [], `${why}: the fixture really hides the edit from git`);
+    moves(h, why);
+  }
+  // all four interfaces see the change: a record built before the hidden edit is stale (identity), and a fresh build includes the file
+  { const r = repo(t), rec = good(r);
+    hideWith('*.ts filter=unspecified\n', 'unspecified')(r); put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
+    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'hidden edit'), 'stale:identity');
+    const b = build(r, passing(r.dir)); assert.equal(b.ok, true, JSON.stringify(b)); }
+  // the attributes no longer refuse anything by themselves: an undeclared filter, ident, working-tree-encoding, -filter, text/eol give an
+  // identity. (Git LFS is not listed: with a REQUIRED git-lfs filter configured and git-lfs missing, git's own diff fails, so the outcome
+  // is the machine's, not this rule's.)
+  for (const line of ['*.json filter=undeclared\n', '*.ts ident\n', '*.ts working-tree-encoding=UTF-16\n', '*.ts -filter\n', '*.ts !filter\n', '*.ts text eol=crlf\n']) {
+    const r = repo(t); put(r.dir, '.git/info/attributes', line);
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).ok, true, line);
+  }
 });
 
-// ---- round 5: the CodeRabbit review of 848f6dc, each finding verified by its own failing test before any change ----
+test('[P4r-39] round 6: ident, a replaced symlink under core.symlinks=false, and a CRLF-only rewrite are changes too (raw bytes decide)', (t) => {
+  // ident: git collapses `$Id: ...$` back to `$Id$`, so an edit inside it is invisible to git
+  { const r = repo(t);
+    put(r.dir, 'libs/money/id.test.ts', "const v = '$Id$';\n"); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'id'); r.base = git(r.dir, 'rev-parse', 'HEAD');
+    const before = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+    put(r.dir, '.git/info/attributes', '*.ts ident\n'); put(r.dir, 'libs/money/id.test.ts', "const v = '$Id: '; process.exit(0); '$';\n");
+    assert.ok(!git(r.dir, 'diff', '--name-only', r.base).includes('id.test.ts'), 'the fixture really hides the edit from git');
+    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'ident', 'libs/money/id.test.ts'); }
+  // a tracked symlink replaced by a regular file that holds the target path (core.symlinks=false): same bytes, another kind
+  { const r = repo(t);
+    symlinkSync('old.test.ts', join(r.dir, 'libs/money/l.test.ts')); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'l'); r.base = git(r.dir, 'rev-parse', 'HEAD');
+    const before = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+    git(r.dir, 'config', 'core.symlinks', 'false'); rmSync(join(r.dir, 'libs/money/l.test.ts')); writeFileSync(join(r.dir, 'libs/money/l.test.ts'), 'old.test.ts');
+    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'core.symlinks=false', 'libs/money/l.test.ts'); }
+  // a sha256 repository: the raw hash follows the id's length (an unchanged tracked file stays outside P, an edit hidden by a filter moves it)
+  { const dir = tmp(t, 'p4r-s256-');
+    git(dir, 'init', '-q', '--object-format=sha256', '-b', 'main'); put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n"); put(dir, 'libs/money/same.test.ts', 'x\n');
+    git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'b');
+    const r = { dir, base: git(dir, 'rev-parse', 'HEAD') }, before = evidenceIdentity({ repo: dir, baseSha: r.base });
+    assert.equal(r.base.length, 64, 'the fixture really is sha256'); assert.deepEqual(before.paths, [], 'nothing changed');
+    hideWith('*.ts filter=unspecified\n', 'unspecified')(r); put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
+    const after = evidenceIdentity({ repo: dir, baseSha: r.base });
+    moves({ before, after }, 'sha256'); assert.ok(!after.paths.includes('libs/money/same.test.ts'), 'an unchanged file stays outside P'); }
+  // the conservative side, documented: a CRLF-only rewrite under autocrlf is a change of P (a false positive, never a hidden edit)
+  { const h = hiddenEdit(t, (r) => git(r.dir, 'config', 'core.autocrlf', 'true'), "test('old [kind:negative]', () => {});\r\n");
+    moves(h, 'CRLF only'); }
+});
+
 test('[P4r-38] round 5 (CodeRabbit 1): a path below a directory replaced by a symlink is refused; below a file it is deleted', (t) => {
   // (1) a directory replaced by a symlink: lstat of a path BELOW it follows the link, so bytes git does not see would be hashed
   { const r = repo(t), ext = tmp(t, 'p4r-ext-');
@@ -881,16 +921,6 @@ test('[P4r-38] round 5 (CodeRabbit 1): a path below a directory replaced by a sy
     rmSync(join(r.dir, 'libs/money'), { recursive: true }); put(r.dir, 'libs/money', 'now a file\n');
     const id = evidenceIdentity({ repo: r.dir, baseSha: r.base });
     assert.equal(id.ok, true, JSON.stringify(id)); assert.ok(id.paths.includes('libs/money/old.test.ts'), 'the tracked file below it is a deleted path of P'); }
-});
-
-test('[P4r-39] round 5 (CodeRabbit 2): `filter=unset` names a driver and reads exactly like `-filter`: refused', (t) => {
-  // (2) the STRING value `filter=unset` names a driver git runs, and check-attr prints it exactly as it prints `-filter`
-  { const r = repo(t);
-    put(r.dir, '.git/info/attributes', '*.ts filter=unset\n'); git(r.dir, 'config', 'filter.unset.clean', 'git show HEAD:%f');
-    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
-    assert.equal(git(r.dir, 'diff', '--name-only', r.base), '', 'the fixture really hides the edit');
-    assert.match(git(r.dir, 'check-attr', 'filter', '--', 'libs/money/old.test.ts'), /: filter: unset$/, 'and check-attr reports it as unset');
-    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED); }
 });
 
 test('[P4r-40] round 5 (CodeRabbit 3): test globs fold case and Unicode exactly as P3 compileGlob does', (t) => {
@@ -912,8 +942,12 @@ test('[P4r-41] round 5 (CodeRabbit 7): one accepted record never carries more it
     const cases = (k) => [0, 1].map((h) => ({ title: ids(k, 300).slice(h * 150, h * 150 + 150).map((m) => `[${m}]`).join('') }));
     for (const k of ['A', 'B']) put(r.dir, `libs/money/${k}.test.ts`, cases(k).map((c) => `test('${c.title}', () => {});`).join('\n'));
     const b = build(r, report(['A', 'B'].map((k) => ({ file: join(r.dir, `libs/money/${k}.test.ts`), cases: cases(k) }))));
-    assert.equal(credits(b).length, 600, 'the builder credits 600 items over two rows');
-    assert.equal(agree(recordUsable(b.record, cur(r)), verdict(r, b.record), 'over P2'), 'refused:evidence_budget_exceeded'); }
+    assert.equal(code(b), 'evidence_budget_exceeded', 'the builder never emits a record reuse would refuse (I-B, Opus minor at bcd7f9e)');
+    // the same over-full record, as stored: both reuse interfaces refuse it alike
+    const rec = clone(good(r, report([{ file: join(r.dir, 'libs/money/A.test.ts'), cases: cases('A') }])));
+    rec.files = ['A', 'B'].map((k) => ({ file: `libs/money/${k}.test.ts`, outcome: 'counted', credited: ids(k, 300), withheld: {}, skipped: {}, unknown: 0 }));
+    rec.counts = { marker_files: 2, credited: 600, unknown_markers: 0 };
+    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'over P2'), 'refused:evidence_budget_exceeded'); }
 });
 
 test('[P4r-42] round 5 (CodeRabbit 9): the config digest encodes presence and length', (t) => {
@@ -1311,6 +1345,10 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
 //   - round 5: the NFC step BEFORE folding in `segsOf` mirrors risk-floor; the NFC step after folding makes it unobservable for every
 //     input tried (composed and decomposed accents, U+0130, U+212B), so it carries no mutant.
+// Removed in round 6 with the code they mutated: the seven attribute-refusal mutants of rounds 4-5 (`check-attr` is gone; the
+// invariant is now raw bytes vs the base blob). Not mutated, documented: a base path git did NOT list whose file is MISSING is
+// reported as changed, but git always lists a missing tracked file unless an index flag hides it, which `changedPaths` refuses; and
+// the raw scan's byte budget (`maxIdentityBytes`) would need a 256 MiB tracked fixture.
 // Removed in round 5: `file: a symlinked path is counted on reuse` (its check in `applicable` was deleted: `candidate` now refuses
 // any existing path of P reached through a symlinked directory, and `classify` names a file by its realpath, so it was redundant).
 // Removed in round 3 with the code they mutated: the relations over the round 2 result counts (S1: the counts are gone, the
@@ -1399,7 +1437,7 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: 'd(rel, m) <= 0 ? \'r3_unchanged\'', to: 'd(rel, m) < 0 ? \'r3_unchanged\'' },
   { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: 'n(total, m) > 0 ? \'credit\' : \'r3_offset\'', to: 'true ? \'credit\' : \'r3_offset\'' },
   { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction is dropped', from: ' - n(skipped.get(p), m);', to: ';' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'blobs = base.filter(([p, m]) => m && exact.has(p))', to: 'blobs = base.filter(([p, m]) => m && exact.has(p) && existsSync(join(top, p)))', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
+  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'blobs = base.filter(([p, m]) => m && m[1] !== \'120000\' && exact.has(p))', to: 'blobs = base.filter(([p, m]) => m && m[1] !== \'120000\' && exact.has(p) && existsSync(join(top, p)))', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
   // record: files (rule 3), names merging
   { file: IO, tag: 'P4r-5', name: 'file: a file outside P is counted', from: '  if (c.inP(rel) === null) return { outcome: \'not_in_P\', rel }; // an alias of a path in P is refused (S2)\n', to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: the test globs are not applied', from: "if (!matches(testGlobs, rel, ctx)) return 'not_test_file';", to: '' },
@@ -1488,23 +1526,22 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-35', name: 'S4: a too-deep missing report name is "outside the repo"', from: "if (tail.length > 256) refuse('evidence_budget_exceeded');", to: 'if (tail.length > 256) return null;' },
   { file: IO, tag: 'P4r-35', name: 'S4: an unexpected realpath error is "outside the repo"', from: 'const missing = (e) => (e?.code === \'ENOENT\' || e?.code === \'ENOTDIR\' ? null : refuse(\'evidence_unavailable\'));', to: 'const missing = () => null;', posix: true },
   // round 4: attributes that make git hash bytes other than the working tree's
-  { file: IO, tag: 'P4r-37', name: 'round 4: the base paths\' attributes are not checked', from: '  hashedAsWorktree(top, base.map(([p]) => p));\n', to: '' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: filter is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'ident\', \'working-tree-encoding\'];' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: ident is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'working-tree-encoding\'];' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: working-tree-encoding is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'ident\'];' },
-  { file: IO, tag: 'P4r-39', name: 'round 5: an unset answer is accepted (as round 4 did)', from: 'if (v !== \'unspecified\') refuse(\'evidence_unavailable\', FILTERED);', to: 'if (v !== \'unspecified\' && v !== \'unset\') refuse(\'evidence_unavailable\', FILTERED);' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: an unspecified attribute refuses', from: 'if (v !== \'unspecified\') refuse(\'evidence_unavailable\', FILTERED);', to: 'if (v !== \'unspecified-x\') refuse(\'evidence_unavailable\', FILTERED);' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', FILTERED);', to: 'refuse(\'evidence_unavailable\');' },
   // round 5: the CodeRabbit findings at 848f6dc
   { file: IO, tag: 'P4r-38', name: 'CR1: a path below a symlinked directory is hashed through it', from: '    if (st && realOrAncestor(dirname(abs(p)), { work: 0, max: 1e6 }) !== dirname(abs(p))) refuse(\'evidence_unavailable\'); // reached through a symlinked directory: bytes git does not see\n', to: '' },
   { file: IO, tag: 'P4r-38', name: 'CR1: a path below a file refuses (ENOTDIR)', from: 'if (e?.code !== \'ENOENT\' && e?.code !== \'ENOTDIR\') refuse(\'evidence_unavailable\'); } // below a file: deleted', to: 'if (e?.code !== \'ENOENT\') refuse(\'evidence_unavailable\'); } // below a file: deleted' },
   { file: BA, tag: 'P4r-40', name: 'CR3: the path is not folded', from: 'const segs = segsOf(rel);', to: 'const segs = rel.split(\'/\');' },
   { file: BA, tag: 'P4r-40', name: 'CR3: the path is not case folded', from: 'fold(rel.replace(', to: '(rel.replace(' },
   { file: BA, tag: 'P4r-40', name: 'CR3: format characters are kept', from: 'rel.replace(/\\p{Cf}/gu, \'\')', to: 'rel' },
-  { file: RE, tag: 'P4r-41', name: 'CR7: a record may carry more items than P2 takes', from: '  if (new Set(items).size > P2_LIMITS.maxItems) refuse(\'evidence_budget_exceeded\'); // P2 takes at most this many: refused here and in the verdict alike, never truncated\n', to: '' },
+  { file: IO, tag: 'P4r-41', name: 'CR7: a record may carry more items than P2 takes', from: '  if (new Set(copy.files.flatMap((f) => f.credited.filter((m) => m.startsWith(\'plan:\')))).size > P2_LIMITS.maxItems) refuse(\'evidence_budget_exceeded\');\n', to: '' },
   { file: IO, tag: 'P4r-42', name: 'CR9: presence and length are not encoded', from: '${bytes ? `present\\0${bytes.length}\\0` : \'absent\\0\'}', to: '${bytes ? \'\' : \'absent\'}' },
   { file: IO, tag: 'P4r-43', name: 'CR10: a leading U+FEFF is stripped from git file names', from: '{ fatal: true, ignoreBOM: true }', to: '{ fatal: true }' },
   { file: IO, tag: 'P4r-44', name: 'CR5: a non-string repo reaches the filesystem', from: '(typeof repo !== \'string\' ? refuse(\'test_kinds_error\') : realpathSync.native(', to: '(false ? refuse(\'test_kinds_error\') : realpathSync.native(' },
+  // round 6: "changed" is decided from raw bytes against the base blob id
+  { file: IO, tag: 'P4r-37', name: 'R6: a raw change git does not list is not added to P', from: '  if (hidden.length) all =', to: '  if (false) all =' },
+  { file: IO, tag: 'P4r-39', name: 'R6: a symlink base path is not compared', from: '/^(100644|100755|120000) blob', to: '/^(100644|100755) blob' },
+  { file: IO, tag: 'P4r-39', name: 'R6: the file kind is not compared', from: '  if (mode === \'120000\' ? !st.isSymbolicLink() : !st.isFile()) return false;\n', to: '' },
+  { file: IO, tag: 'P4r-5', name: 'R6: the blob header is not hashed (every tracked file looks changed)', from: '.update(`blob ${bytes.length}\\0`)', to: '' },
+  { file: IO, tag: 'P4r-39', name: 'R6: a sha256 repository is hashed as sha1', from: 'oid.length === 64 ? \'sha256\' : \'sha1\'', to: '\'sha1\'' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
