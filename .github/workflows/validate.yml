@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR cancels the superseded run. Non-PR runs (push to main) get a
+# unique group per run, so they are never cancelled or replaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate:
     runs-on: ubuntu-latest
