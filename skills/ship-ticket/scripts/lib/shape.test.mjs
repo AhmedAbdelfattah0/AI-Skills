@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CODES, depthOf, idStr, isTimestamp, LIMITS, shapeProblem, validate } from './shape.mjs';
 import { SHAPES, shapeProblem as ciShapeProblem } from '../ci-snapshot.mjs';
+import { classify, loadMutationSource, runMutant as runTreeMutant } from './mutation.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const codes = (v, s, o) => validate(v, s, o).problems.map((p) => `${p.path}:${p.code}`);
@@ -276,29 +276,10 @@ const MUTANTS = [
   ['unknown key not cut', "k.slice(0, 40)", "k"],
 ];
 const CHILD_ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), SHAPE_MUTANT_RUN: '1' };
-/** Run this file against `mutatedSrc` in a temp copy of the whole scripts dir (every module the test imports, e.g. ci-snapshot.mjs) -> raw spawn result. */
-function runMutant(mutatedSrc, { testSrc, env = CHILD_ENV, args = [] } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'shape-mut-'));
-  try {
-    mkdirSync(join(dir, 'lib'));
-    for (const f of readdirSync(join(HERE, '..'))) if (f.endsWith('.mjs') && !f.endsWith('.test.mjs')) copyFileSync(join(HERE, '..', f), join(dir, f));
-    writeFileSync(join(dir, 'lib', 'shape.mjs'), mutatedSrc);
-    if (testSrc === undefined) copyFileSync(join(HERE, 'shape.test.mjs'), join(dir, 'lib', 'shape.test.mjs')); else writeFileSync(join(dir, 'lib', 'shape.test.mjs'), testSrc);
-    return spawnSync(process.execPath, ['--test', ...args, join(dir, 'lib', 'shape.test.mjs')], { env, encoding: 'utf8', timeout: 60000 });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-}
-/** 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error, a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'. */
-function classify(r) {
-  if (r.error || r.signal || r.status === null) return { verdict: 'invalid', failing: [], why: String(r.error?.code ?? r.signal ?? 'no status') };
-  const blocks = r.stdout.split(/^not ok /m).slice(1);
-  if (r.status === 0 && blocks.length === 0) return { verdict: 'survived', failing: [] };
-  const failing = blocks.map((b) => b.split('\n')[0].replace(/^\d+ - /, '')), nonAssert = blocks.filter((b) => !/code: 'ERR_ASSERTION'/.test(b));
-  if (blocks.length === 0 || nonAssert.length || /ERR_MODULE_NOT_FOUND|SyntaxError/.test(r.stdout + r.stderr)) return { verdict: 'invalid', failing, why: 'non-assertion failure' };
-  return { verdict: 'killed', failing };
-}
-// Anchors are LF text: a Windows checkout (autocrlf) has CRLF, so the source is normalised to LF before matching, and every mutant is written back as LF.
-// ONE loader, used by the mutation harness and by the CRLF test alike.
-const loadMutationSource = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+/** Run this file against `mutatedSrc` in a temp copy of the whole scripts tree (the shared harness, lib/mutation.test-helper.mjs) -> raw spawn result. */
+const runMutant = (mutatedSrc, { testSrc, env = CHILD_ENV, args = [], helperSrc } = {}) => runTreeMutant({ root: join(HERE, '..'), testRel: join('lib', 'shape.test.mjs'), env, args, timeout: 60000,
+  overrides: { [join('lib', 'shape.mjs')]: mutatedSrc, ...(testSrc === undefined ? {} : { [join('lib', 'shape.test.mjs')]: testSrc }), ...(helperSrc === undefined ? {} : { [join('lib', 'mutation.test-helper.mjs')]: helperSrc }) } });
+// The loader (CRLF normalisation) is the shared harness's loadMutationSource: the mutation and CRLF tests use that one.
 const LOADER_CHILD = process.env.SHAPE_LOADER_CHILD === '1';
 const SRC = loadMutationSource(join(HERE, 'shape.mjs'));
 test('mutation harness self-test: broken module loading is INVALID, an equivalent mutant SURVIVES, a real mutant is KILLED', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
@@ -328,14 +309,14 @@ test(`${CRLF_TEST}: the REAL loader over a CRLF copy of shape.mjs (a Windows che
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('mutation of the loader itself: without its CRLF normalisation the CRLF test fails by assertion (on every OS)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {
-  const self = readFileSync(join(HERE, 'shape.test.mjs'), 'utf8').replace(/\r\n/g, '\n');
+  const helper = readFileSync(join(HERE, 'mutation.test-helper.mjs'), 'utf8').replace(/\r\n/g, '\n');
   const from = "readFileSync(path, 'utf8').replace(/\\r\\n/g, '\\n');";
-  assert.equal(self.split(from).length - 1, 1, 'loader anchor');
+  assert.equal(helper.split(from).length - 1, 1, 'loader anchor');
   const env = { ...CHILD_ENV, SHAPE_MUTANT_RUN: '0', SHAPE_LOADER_CHILD: '1' };
-  const mutated = classify(runMutant(SRC, { testSrc: self.replace(from, "readFileSync(path, 'utf8');"), env, args: ['--test-name-pattern', CRLF_TEST] }));
+  const mutated = classify(runMutant(SRC, { helperSrc: helper.replace(from, "readFileSync(path, 'utf8');"), env, args: ['--test-name-pattern', CRLF_TEST] }));
   assert.equal(mutated.verdict, 'killed', JSON.stringify(mutated));
   assert.ok(mutated.failing.some((n) => n.includes(CRLF_TEST)));
-  const intact = classify(runMutant(SRC, { testSrc: self, env, args: ['--test-name-pattern', CRLF_TEST] })); // control: the unmutated loader passes
+  const intact = classify(runMutant(SRC, { env, args: ['--test-name-pattern', CRLF_TEST] })); // control: the unmutated loader passes
   assert.equal(intact.verdict, 'survived');
 });
 test('mutation: every mutant of shape.mjs is killed by a real assertion failure (never by a load error, crash or timeout)', { skip: process.env.SHAPE_MUTANT_RUN === '1' || LOADER_CHILD }, () => {

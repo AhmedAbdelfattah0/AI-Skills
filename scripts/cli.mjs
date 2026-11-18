@@ -1470,9 +1470,9 @@ const RETIRED_VOCABULARY = [
   [/\bNOT_APPLICABLE_NO_SCREEN_REFERENCE\b/g, 'NOT_APPLICABLE is the outcome and NO_SCREEN_REFERENCE is a reason_code', ['ship-ticket']],
   [/\bPASS\s*\/\s*FAIL\s*\/\s*N-A\b/g, 'rule rows use the canonical outcome vocabulary', ['ship-ticket', 'code-quality']],
   [/\bN-A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'code-quality']],
-  [/\bN\/A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'vapt', 'angular-code-quality', 'backend-code-quality', 'code-quality', 'pr-review']],
+  [/\bN\/A\b/g, 'the canonical applicability outcome is NOT_APPLICABLE', ['ship-ticket', 'vapt', 'angular-code-quality', 'backend-code-quality', 'code-quality']],
   [/\bFIXED\b/g, 'a fixed finding has outcome PASS and records fixed as disposition evidence', ['vapt']],
-  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality', 'pr-review']],
+  [/\| Rule \| Status \| Evidence \|/g, 'routed rule rows use the canonical Subject ID | Outcome | Evidence shape', ['angular-code-quality', 'backend-code-quality']],
   [/\| Rule \| Surface \| Verdict \| Evidence \|/g, 'VAPT rows use the canonical Subject ID | Outcome | Evidence shape', ['vapt']],
   [/\bBoth halves are load-bearing, and REVIEW compares the pair\b/g, 'test coverage matches body digests first so a name-only rename remains equivalent', ['ship-ticket']],
   [/\beach test ID being PROVE's name-plus-body-digest pair\b/g, 'coverage vectors use body-digest multisets; test names are locators and rename evidence', ['ship-ticket']],
@@ -1502,7 +1502,7 @@ const RETIRED_VOCABULARY = [
   [/\bregenerate the parity draft\b/gi, 'post-F0 UI changes receive a targeted impact check instead', ['ship-ticket']],
   [/\bstrict mode\b/gi, 'vapt no longer owns a separate review or signing mode', ['vapt']],
   [/\bsigned-off:/gi, 'vapt produces runtime evidence; ship-ticket terminal review owns review attestation', ['vapt']],
-  [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket', 'pr-review']],
+  [/\brun[- ]lanes?\b/gi, 'ship-ticket\'s FAST/STANDARD/HEAVY classifier was deleted; coverage is constant', ['ship-ticket']],
   [/\bREVIEW timing degraded\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
   [/\brun A, B and C serially\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
   [/\bserial round 1\b/gi, 'serial round 1 is a stop, never a declared timing degradation', ['ship-ticket']],
@@ -1543,8 +1543,8 @@ const RETIRED_VOCABULARY = [
   [/\bbudget was read before the first of those write[s]\b/gi, 'the mutation budget is read before the first candidate mutation', ['ship-ticket']],
   [/\bIf it is already 3 and\s+a write is required, end the ru[n]\b/gi, 'the mutation-budget stop concerns a candidate mutation, never a required run-state append', ['ship-ticket']],
   [/\bappend the boundary comparison\s+and rerun evidence to the fix packet, then balance i[t]\b/gi, 'the barrier batch must durably project sealed F0 prose evidence before terminal review or cleanup', ['ship-ticket']],
-  [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket', 'pr-review']],
-  [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket', 'pr-review']],
+  [/\b(?:effective|provisional)[- ]lane\b/gi, 'the run lane was deleted; nothing computes a lane', ['ship-ticket']],
+  [/\b(?:per-lane|lane[- ](?:effort|depth|table|decision))\b/gi, 'the run lane was deleted; reasoning effort is pinned, never scaled', ['ship-ticket']],
   [/\bmutation_round\b/gi, 'ship-ticket now has separate explicit PROVE and REVIEW repair limits', ['ship-ticket']],
   [/\b(?:F0|F1)\b/g, 'ship-ticket review now binds one candidate ID and an optional repaired candidate ID', ['ship-ticket']],
   [/\b(?:fix[_ -]packet|record[_ -]impact)\b/gi, 'ship-ticket review records compact findings and affected closure instead of a byte-level repair ledger', ['ship-ticket']],
@@ -1616,7 +1616,7 @@ Autoupdate flags:
   stdout, which a SessionStart hook would inject into your session.
 
 Examples:
-  npx github:AhmedAbdelfattah0/AI-Skills install security researcher
+  npx github:AhmedAbdelfattah0/AI-Skills install ship-ticket generate-ticket
   npx github:AhmedAbdelfattah0/AI-Skills install --target codex
   node scripts/cli.mjs install --target all
   node scripts/cli.mjs install security --target claude,codex

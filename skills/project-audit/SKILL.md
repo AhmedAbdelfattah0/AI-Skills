@@ -37,7 +37,6 @@ specialist that owns it, component by component.
 | Use instead | When |
 |---|---|
 | `ship-ticket` | You are implementing **one ticket** end to end, including its own bounded review and proof. |
-| `pr-review` | You want **one existing pull request** reviewed against its diff. |
 | `security-audit` | You want a **security-only** static read of the whole codebase. This skill routes its security static lane there. |
 | `vapt` | You want runtime **attacks only**, committed as tests. This skill invokes its AUDIT mode, narrowed, as one lane. |
 | the code-quality family | You want rules applied **while writing** or enforced **on a diff**. |

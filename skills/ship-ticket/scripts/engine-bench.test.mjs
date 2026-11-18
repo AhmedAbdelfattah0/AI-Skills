@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, rmSync, cpSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep, relative } from 'node:path';
+import { join } from 'node:path';
 import { buildNodes } from './engine-bench.mjs';
 import { runScenarios, peakConcurrency } from './engine-bench-scenarios.mjs';
 import { loadRecord, referenceBytes, sections } from './load-record.mjs';
@@ -360,10 +360,32 @@ test('load record: unit text is counted by whole sections (heading level and bol
   assert.equal(found[1].bytes, Buffer.byteLength(['**Units (opt-in).** b', '- item', '', 'still b', '', ''].join('\n')));
 });
 
+/**
+ * cpSync filter for the skill copies below: decides on the entry NAME only. Node 18's fs.cpSync hands Windows filters
+ * toNamespacedPath() spellings (`\\?\D:\...`), for which relative(SKILL_DIR, src) is the whole absolute path, so the old
+ * `relative(...).split(sep).includes('scripts')` dropped EVERY entry once any ancestor directory was named `scripts`.
+ */
+const notScripts = (src) => src.split(/[\\/]/).pop() !== 'scripts';
+
+test('skill-copy filter: by entry name in either spelling, never by an ancestor directory', () => {
+  for (const kept of ['\\\\?\\D:\\scripts\\repo\\skills\\ship-ticket', '\\\\?\\D:\\scripts\\repo\\skills\\ship-ticket\\SKILL.md',
+    'D:\\scripts\\skills\\ship-ticket\\references\\ship.md', '/home/scripts/skills/ship-ticket/SKILL.md', '/x/skills/ship-ticket/scripts.md']) assert.equal(notScripts(kept), true, kept);
+  for (const dropped of ['\\\\?\\D:\\a\\skills\\ship-ticket\\scripts', 'D:\\a\\skills\\ship-ticket\\scripts', '/x/skills/ship-ticket/scripts']) assert.equal(notScripts(dropped), false, dropped);
+  const root = mkdtempSync(join(tmpdir(), 'skill-copy-')), from = join(root, 'scripts', 'skill'), to = join(root, 'out');
+  try {
+    mkdirSync(join(from, 'scripts'), { recursive: true });
+    mkdirSync(join(from, 'references'));
+    for (const f of ['SKILL.md', join('references', 'ship.md'), join('scripts', 'x.mjs')]) writeFileSync(join(from, f), f);
+    cpSync(from, to, { recursive: true, filter: notScripts });
+    assert.deepEqual(readdirSync(to).sort(), ['SKILL.md', 'references'], 'an ancestor named scripts keeps the copy; the scripts dir is left out');
+    assert.equal(readFileSync(join(to, 'references', 'ship.md'), 'utf8'), join('references', 'ship.md'));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('load record: a table row it does not recognise makes it fail, and the CLI names the row', () => {
   const dir = mkdtempSync(join(tmpdir(), 'load-record-test-'));
   try {
-    cpSync(SKILL_DIR, dir, { recursive: true, filter: (src) => !relative(SKILL_DIR, src).split(sep).includes('scripts') });
+    cpSync(SKILL_DIR, dir, { recursive: true, filter: notScripts });
     const skill = join(dir, 'SKILL.md');
     const row = '| PROVE with a new thing | [references/prove.md](references/prove.md) |';
     writeFileSync(skill, readFileSync(skill, 'utf8').replace(/(\| SHIP \|[^\n]*\n)/, `$1${row}\n`));
@@ -378,7 +400,7 @@ test('load record: a table row it does not recognise makes it fail, and the CLI 
 test('load record: a row pointing at a missing reference fails instead of being measured as zero', () => {
   const dir = mkdtempSync(join(tmpdir(), 'load-record-test-'));
   try {
-    cpSync(SKILL_DIR, dir, { recursive: true, filter: (src) => !relative(SKILL_DIR, src).split(sep).includes('scripts') });
+    cpSync(SKILL_DIR, dir, { recursive: true, filter: notScripts });
     rmSync(join(dir, 'references', 'ship.md'));
     assert.throws(() => loadRecord({ skillDir: dir }), /missing file references\/ship\.md/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
