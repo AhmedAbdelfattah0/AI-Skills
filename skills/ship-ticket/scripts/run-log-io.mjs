@@ -4,7 +4,7 @@
  * only a JSON replace). Only run-log.mjs calls these (a structural test pins it). Invariants (measure/events.mjs header):
  * - I1: `check(after, before)` sees the WHOLE file as it will be after the write (committed bytes + loss record + new text)
  *   and throws to refuse; no existing byte is written, moved or truncated before it passes. A log that did not exist is created
- *   (empty) before `check` runs; when the write is refused and the file is still empty, it is removed again (`locked`).
+ *   (empty) before `check` runs; when the write is refused and the path still names that same (device, inode) empty file, it is removed again (`locked`).
  * - I2: bytes leave the log only after they are durable in `<log>.lost-<offset>-<sha12>[-<layout8>].json` (verbatim, base64), and the
  *   same write carries the `log_loss` record `marker(info)` returns. The sidecar is the durable record of the removed bytes;
  *   a refusal before the write leaves every existing byte as it was, and after a failed write restoring the original bytes is best effort.
@@ -36,8 +36,11 @@ const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fs
   open: fs.openSync ?? openSync, close: fs.closeSync ?? closeSync, rename: fs.renameSync ?? renameSync });
 const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
 
-/** Remove `file` when it exists and is empty (best effort: a failure here never hides the error that got us here). */
-function dropIfEmpty(file) { try { if (statSync(file).size === 0) unlinkSync(file); } catch { /* absent, or not removable: leave it */ } }
+/** Remove `file` only when it is still the very file this process created (same device and inode as the handle's) and is empty.
+ *  Best effort: a failure here never hides the error that got us here, and another creator's file is never removed. */
+function dropIfOurs(file, mine) {
+  try { const now = statSync(file); if (now.dev === mine.dev && now.ino === mine.ino && now.size === 0) unlinkSync(file); } catch { /* absent, or not removable: leave it */ }
+}
 
 /**
  * Lock, open (read-write, never append mode: truncation must work on win32) and read; `body` runs with the file's bytes. With
@@ -47,11 +50,12 @@ function dropIfEmpty(file) { try { if (statSync(file).size === 0) unlinkSync(fil
 async function locked(file, opts, hold, body) {
   const { waitMs = 10000, lock = acquireLock, lockCtx = {}, lockOptions = {} } = opts;
   const handle = await lock({ lockFile: `${file}.lock`, runId: 'run-log', ...lockCtx }, { waitMs, ...lockOptions });
-  let created = false;
+  let mine = null; // dev/ino of the log this process created with its own exclusive open
   try {
     const { open, close } = seams(opts);
-    created = !existsSync(file);
+    const created = !existsSync(file);
     let fd = open(file, created ? 'wx+' : 'r+', 0o600);
+    if (created) { const st = fstatSync(fd); mine = { dev: st.dev, ino: st.ino }; }
     try {
       await boundary(opts.hooks, 'append-read', { file });
       const size = fstatSync(fd).size;
@@ -62,7 +66,7 @@ async function locked(file, opts, hold, body) {
       return await body(fd, buf, created);
     } finally { if (fd !== null) close(fd); }
   } catch (error) {
-    if (created) dropIfEmpty(file); // a refused first write must not leave the empty log `open('wx+')` created
+    if (mine) dropIfOurs(file, mine); // a refused first write must not leave the empty log `open('wx+')` created
     throw error;
   } finally { await handle.release(); }
 }

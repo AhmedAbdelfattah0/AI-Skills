@@ -698,7 +698,7 @@ test('quarantine diagnostics: a temp that cannot be removed is named on the erro
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const good = Buffer.from(encodeValid('milestone').text), [s] = encodeValid('finding').text.split('\n');
   const bad = Buffer.from(`${s}\n`), original = Buffer.concat([good, bad]);
-  const base = { lockCtx, platform: 'linux', select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck };
+  const base = { lockCtx, platform: 'win32', select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck };
   const boom = Object.assign(new Error('injected'), { code: 'injected' });
 
   // The rename fails, and the temp has become a directory, so unlink fails with something other than ENOENT.
@@ -717,6 +717,16 @@ test('quarantine diagnostics: a temp that cannot be removed is named on the erro
   assert.equal(clean, boom2);
   assert.equal(Object.hasOwn(clean, 'leaked_tmp'), false, 'a removed temp is not reported');
 
+  // The failure cases above run under win32 semantics on every host: no directory is ever opened for fsync (a real Windows host could not).
+  const opened = [];
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+  try { // the same, through the DEFAULT platform (no `platform` option): process.platform stubbed to win32
+    writeFileSync(leaky, original);
+    const viaDefault = await quarantineLocked(leaky, { ...base, platform: undefined, fs: { openSync: (p, f, m) => { opened.push(p); return realOpen(p, f, m); }, renameSync: () => { throw boom2; } } }).then(() => null, (e) => e);
+    assert.equal(viaDefault, boom2);
+  } finally { Object.defineProperty(process, 'platform', real); }
+  assert.ok(opened.length > 0 && !opened.includes(dir), 'no directory was opened for fsync under win32 semantics');
   if (process.platform === 'win32') { t.diagnostic('directory fsync does not exist on win32: the replaced-then-failed case is skipped, not asserted'); return; }
   const dirSync = join(dir, 'dirsync.jsonl');
   writeFileSync(dirSync, original);
@@ -724,7 +734,7 @@ test('quarantine diagnostics: a temp that cannot be removed is named on the erro
   const fs = { openSync: (path, flags, mode) => { const fd = realOpen(path, flags, mode); if (path === dir) dirs.add(fd); return fd; },
     fsyncSync: (fd) => { if (dirs.has(fd) && !readFileSync(dirSync).equals(original) && readdirSync(dir).some((x) => x.startsWith('dirsync.jsonl.lost-'))) throw boom; } };
   const boom3 = Object.assign(new Error('injected dir fsync'), { code: 'injected' });
-  const late = await quarantineLocked(dirSync, { ...base, fs: { ...fs, fsyncSync: (fd) => { try { fs.fsyncSync(fd); } catch { throw boom3; } } } }).then(() => null, (e) => e);
+  const late = await quarantineLocked(dirSync, { ...base, platform: 'linux', fs: { ...fs, fsyncSync: (fd) => { try { fs.fsyncSync(fd); } catch { throw boom3; } } } }).then(() => null, (e) => e);
   assert.equal(late, boom3);
   assert.equal(late.replaced, true, 'distinguishable from a refusal');
   assert.equal(late.loss.cause, 'quarantine');
@@ -792,6 +802,11 @@ test('faults (I2): a throw at every boundary, a failed check, a refused lock, a 
   await assert.rejects(appendLocked(f, rec, { lockCtx, check: () => { throw boom; } }), boom);
   assert.equal(existsSync(f), false, 'a refused first write removes the empty log that open(wx+) created');
   assert.equal(existsSync(`${f}.lock`), false);
+  if (process.platform !== 'win32') { // another creator's file is never removed: swap a different empty file in during check (rename keeps both inodes alive)
+    f = join(dir, 'new-swapped.jsonl');
+    await assert.rejects(appendLocked(f, rec, { lockCtx, check: () => { writeFileSync(`${f}.other`, ''); realRename(`${f}.other`, f); throw boom; } }), boom);
+    assert.equal(existsSync(f), true, 'an empty file another creator put at the path is not ours and is left alone');
+  } else t.diagnostic('swapping a file over an open log is refused on win32: the not-ours case is skipped, not asserted');
   f = join(dir, 'new-ok.jsonl');
   await mustResolve(appendLocked(f, rec, { lockCtx, check: cleanCheck }), 'appendLocked');
   assert.deepEqual(readFileSync(f), Buffer.from(rec), 'a first write that passes check keeps the log');
@@ -976,8 +991,8 @@ const MUTANTS = [
   ['run-log-io.mjs', 'directory fsync on every append', "if (created && platform !== 'win32') {", "if (platform !== 'win32') {"],
   ['run-log-io.mjs', 'no size cap', "if (size > (opts.maxBytes ?? LOG_BYTES_MAX)) throw", "if (false) throw"],
   ['run-log-io.mjs', 'win32: quarantine replaces the log while holding it open', "if (!hold) { const f = fd; fd = null; close(f); }", ""],
-  ['run-log-io.mjs', 'win32: quarantine replace not retried', "await renameRetrying(tmp, file, { rename, platform });", "rename(tmp, file);"],
-  ['run-log-io.mjs', 'a refused first write leaves the empty log', "if (created) dropIfEmpty(file);", ""],
+  ['run-log-io.mjs', 'win32: quarantine replace not retried', "await renameRetrying(tmp, file, { rename, platform, wait: opts.wait });", "rename(tmp, file);"],
+  ['run-log-io.mjs', 'a refused first write leaves the empty log', "if (mine) dropIfOurs(file, mine);", ""],
   ['run-log-io.mjs', 'I4: quarantine check skipped', "if (check) check(after, buf);", ""],
   ['run-log-io.mjs', 'I4: quarantine without sidecar', "await saveLost(file, info, pieces, opts);\n    await boundary(opts.hooks, 'append-write', { file });\n    const tmp", "await boundary(opts.hooks, 'append-write', { file });\n    const tmp"],
   ['run-log.mjs', 'lone --started-at is zero-length', "const endedAt = options['ended-at'] ?? now, startedAt = options['started-at'] ?? endedAt;", "const startedAt = options['started-at'] ?? options['ended-at'] ?? now, endedAt = options['ended-at'] ?? startedAt;"],
