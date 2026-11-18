@@ -852,7 +852,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= 23, `the control ran the tagged tests (${control.passed})`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 22 : 23), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);
