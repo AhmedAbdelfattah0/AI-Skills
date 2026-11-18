@@ -18,7 +18,7 @@
  *                 and keeps it open through that channel's EOF check in the launcher's exit
  *                 callback (it closes only on EPIPE, or inside the old 1 s drain): `runner_survivor`.
  * - boundary      deterministic through the launcher's testHooks: a survivor that writes and closes
- *                 DURING the exit callback's reads (after the first short read) is refused; output
+ *                 DURING the exit callback's reads (after the one latching read) is refused; output
  *                 still unread when `exit` fires is collected by those reads (not refused).
  * - S3            positive: exit code, stdout and report bytes exactly as the runner wrote them;
  *                 a non-detached child that exits before the runner is not a survivor.
@@ -141,11 +141,11 @@ else if (mode === 'fifo-forge') {
 } else if (mode === 'drain-writer') {
   // A detached survivor holding stdout that writes and closes WHILE the launcher reads stdout in its
   // exit callback (the launcher's testHooks pause it after its first read and publish pauseFile).
-  const [pauseFile, resumeFile, dir] = rest;
+  const [pauseFile, resumeFile, dir, lead] = rest;
   const src = 'const fs=require("fs");const [pf,rf,d]=process.argv.slice(1);fs.writeFileSync(d+"/late.pid",String(process.pid));fs.writeSync(3,"R");fs.closeSync(3);'
     + 'const t=setInterval(()=>{if(!fs.existsSync(pf))return;clearInterval(t);fs.writeSync(1,"AFTER_FIRST_READ\\n");fs.closeSync(1);fs.writeFileSync(rf,"");setTimeout(()=>{},20000);},2);';
   const f = spawn(process.execPath, ['-e', src, pauseFile, resumeFile, dir], { detached: true, stdio: ['ignore', 'inherit', 'ignore', 'pipe'] });
-  f.stdio[3].on('data', () => { f.stdio[3].destroy(); f.unref(); exitWith('BEFORE_DRAIN\n', 0); });
+  f.stdio[3].on('data', () => { f.stdio[3].destroy(); f.unref(); exitWith('x'.repeat(Number(lead || 0)) + 'BEFORE_DRAIN\n', 0); });
 } else if (mode === 'tmp-plant') {
   // A regular file at the .out tmp name and a symlink (to a victim file) at the envelope tmp name.
   const [dir] = rest;
@@ -661,7 +661,7 @@ test('boundary: output still unread when exit fires is collected by the exit cal
   assert.deepEqual([f.head.boundary, f.head.out_eof, f.head.exit_code, f.stdout.toString()], ['exit', true, 0, 'ok 1 - unread at exit\n']);
 });
 
-test('boundary: more unread output than one read takes (Linux: a socket holds over 64 KiB) is collected whole, not refused', { skip: process.platform === 'linux' ? false : 'only Linux socket buffers hold more than one 64 KiB read for a dead runner (darwin: the runner would block)', timeout: 60000 }, async (t) => {
+test('boundary: more than 64 KiB unread at exit (Linux) is collected whole by the one exit read, not refused', { skip: process.platform === 'linux' ? false : 'only Linux socket buffers hold over 64 KiB for a dead runner (darwin: the runner would block)', timeout: 60000 }, async (t) => {
   const w = world(t);
   const text = 'y'.repeat(100000) + '\n';
   const f = await sealedWithHooks(w, ['plain', text, '0'], { stopReads: true });
@@ -677,8 +677,25 @@ test('boundary (Codex, PR #94): a survivor that writes and closes DURING the exi
   const f = await sealedWithHooks(w, ['drain-writer', pauseFile, resumeFile, w.dir], { stopReads: true, pauseFile, resumeFile });
   assert.ok(existsSync(join(w.dir, 'late.pid')) && existsSync(pauseFile) && existsSync(resumeFile), 'the survivor never wrote during the pause (the row would prove nothing)');
   assert.equal(f.reason, undefined, J(f));
-  // The first short read emptied the queue and latched stdout: a byte after it means a writer, so not at EOF.
+  // The one exit read emptied the queue and latched stdout: a byte after it means a writer, so not at EOF.
   assert.deepEqual([f.head.boundary, f.head.out_eof, f.stdout.toString()], ['exit', false, 'BEFORE_DRAIN\n']);
   const doc = readFileSync(fileURLToPath(new URL('./engine-io.mjs', import.meta.url)), 'utf8');
-  assert.match(doc, /first\s+\*?\s*short read/, 'gateRunner\'s JSDoc must state the latch point (the first short read)');
+  assert.match(doc, /ONE\s+\*?\s*read of up to STDOUT_CAP \+ 1 bytes/, 'gateRunner\'s JSDoc must state the latch point (one read larger than any queue)');
+});
+
+test('boundary (Opus, PR #94): with more than 64 KiB unread at exit, a survivor writing after the first read is still refused (one read empties the queue)', { skip: process.platform === 'linux' ? false : 'only Linux socket buffers hold over 64 KiB for a dead runner (darwin: the runner would block)', timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const pauseFile = join(w.dir, 'paused'), resumeFile = join(w.dir, 'resume');
+  const f = await sealedWithHooks(w, ['drain-writer', pauseFile, resumeFile, w.dir, '100000'], { stopReads: true, pauseFile, resumeFile });
+  assert.ok(existsSync(pauseFile) && existsSync(resumeFile), 'the survivor never wrote during the pause (the row would prove nothing)');
+  assert.equal(f.reason, undefined, J(f));
+  assert.deepEqual([f.head.out_eof, f.stdout.length, /AFTER_FIRST_READ/.test(f.stdout.toString())], [false, 100000 + 'BEFORE_DRAIN\n'.length, false]);
+});
+
+test('boundary: a stdout with no descriptor left at the exit fails closed (not at EOF)', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const f = await sealedWithHooks(w, ['plain', '', '0'], { destroyStdout: true });
+  assert.notEqual(f.hung, true);
+  assert.equal(f.reason, undefined, J(f));
+  assert.deepEqual([f.head.boundary, f.head.out_eof], ['exit', false]);
 });

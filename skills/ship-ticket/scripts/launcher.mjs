@@ -132,10 +132,13 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * is a pipe the engine holds (its absence from the runner and descendants is probed on darwin and
  * Linux, reasoned on win32). The boundary is the launcher's observed child `exit` (POSIX;
  * `boundary: 'exit'`): in that callback it reads each channel in turn, synchronously and
- * non-blocking. A channel's first short read empties its queue and is its latch point; it is at
- * EOF only when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is
- * not kept). No drain follows. It is not an atomic snapshot: bytes another process wrote and then
- * closed before a channel's latch point (in practice, before the exit was observed) are kept. On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
+ * non-blocking. One read of up to STDOUT_CAP + 1 bytes (more than any socket queue holds) empties
+ * the channel's queue and is its latch point (a full read is refused); the channel is at EOF only
+ * when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is not
+ * kept). No drain follows. It is not an atomic snapshot: bytes another process wrote and then
+ * closed before a channel's latch point (before the exit was observed, or for the report channel
+ * during the read of stdout) are kept.
+ * On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
  * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
  * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
  * child `exit`, spawn_error, boundary, out_len, truncated, stdout_bytes, out_eof, report,
@@ -212,9 +215,11 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   cli.stdout.on('error', () => {});
   // Test instrumentation only (engine-runner-sealed.test.mjs; gateRunner never sets testHooks):
   // stopReads leaves stdout unread until the exit callback; pauseFile/resumeFile pause after the
-  // first synchronous read of a channel until the test lets it continue (at most 10 s).
+  // first synchronous read of a channel until the test lets it continue (at most 10 s);
+  // destroyStdout drops the stdout handle (no descriptor left to read at the exit: must refuse).
   const hooks = spec.testHooks || {};
   if (hooks.stopReads === true) { try { cli.stdout._handle.readStop(); } catch {} }
+  if (hooks.destroyStdout === true) cli.stdout.destroy();
   let paused = false;
   const pause = () => {
     if (paused || typeof hooks.pauseFile !== 'string') return;
@@ -229,25 +234,26 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     r.on('error', () => {});
   }
   // The runner is dead: its own descriptors closed before its exit was reported, so whatever it wrote
-  // is already in the socket. Read each channel in turn, synchronously (non-blocking): its first
-  // short read empties the queue and latches it. Then EOF means no process holds it; EAGAIN or any
-  // further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot at exit:
-  // bytes another process wrote and closed before a channel's latch point are kept.
+  // is already in the socket. Read each channel in turn, synchronously (non-blocking): one read
+  // larger than any queue empties it and latches it. Then EOF means no process holds it; EAGAIN or
+  // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot at
+  // exit: bytes another process wrote and closed before a channel's latch point are kept.
   const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
   const drain = (s, take) => {
     const fd = fdOf(s);
     if (fd < 0) return false;
-    const b = Buffer.allocUnsafe(65536);
-    // A short read empties the queue: that instant latches the channel. Any byte read after it was
-    // written after it, so the channel is refused (not at EOF) and that byte is not kept.
+    // One read larger than any socket queue (STDOUT_CAP + 1) empties the queue: that instant latches
+    // the channel. A full read (the queue was not emptied) or any byte read after the latch (written
+    // after it) refuses the channel (not at EOF); such bytes are not kept.
+    const b = Buffer.allocUnsafe(${STDOUT_CAP} + 1);
     let emptied = false;
     for (;;) {
       let n;
       try { n = fs.readSync(fd, b, 0, b.length, null); } catch (e) { if (e.code === 'EINTR') continue; return false; }
       if (n === 0) return true;
-      if (emptied) return false;
+      if (emptied || n === b.length) return false;
       take(Buffer.from(b.subarray(0, n)));
-      if (n < b.length) emptied = true;
+      emptied = true;
       pause();
     }
   };
