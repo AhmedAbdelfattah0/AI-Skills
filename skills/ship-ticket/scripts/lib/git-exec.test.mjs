@@ -33,7 +33,7 @@ import { inspect } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, sep } from 'node:path';
+import path, { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as X from './git-exec.mjs';
 
@@ -647,22 +647,46 @@ test('run() normalises the status map before spawn: an accessor entry is refused
 
 // ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
 
-// HOW. The SCANNED modules (the git-output path of the lib: git-exec.mjs and git-capability.mjs; every other non-test
-// module under lib/ must be named in OUT_OF_SCOPE with a reason, or the partition test fails) are PARSED by the
-// vendored acorn 8.19.0 (skills/ship-ticket/vendor/acorn, MIT, byte-identical to the registry tarball, hash-checked
-// against UPSTREAM.json before it is imported; test-only, never imported by production code) as ES modules
-// (ecmaVersion latest). A source acorn cannot parse is one `unclassifiable` hit. The walker visits every node, and
-// EVERY node type acorn can produce is classified in NODE_RULES (rule, walk or fail); a node type outside that table
-// is `unclassifiable`, and a test derives acorn's own type list from the vendored source and requires the table to
-// equal it (closed over the grammar). Imports of fs, fs/promises and child_process (bare or node:) are resolved
-// through the module's own BINDINGS: named, aliased (`{ readdirSync as rd }`, `{ default as cp }`), default and
-// namespace imports, and `ns.member`, `ns.promises.member` and `ns.default.member` chains. Resolution is by name,
-// not by scope: a local that shadows an import is treated as the import, and a watched API name used as a member
-// keeps its by-name rule unless its root is a checked module's namespace (so a shadowing `path` or `statSync` hides
-// nothing). A watched API name with no import binding (a parameter, a seam object, a local) is treated as the API it
-// names (`seam.realpath(d)`). What a caller outside the scanned set passes in is data flow (not checked).
+// DECISION (round 6; reviews r1-r5 each found a gap in a checker that DENIED listed forms). The strict-decode choke
+// point already exists: decodeStrict, with the one fatal, BOM-keeping TextDecoder, is the lib's only decoder. What T4a
+// adds is a static check of the two guarded files in two layers; the verdict needs both:
+//  - LAYER 1, the GRAMMAR (grammarSites, the soundness gate): an ALLOWLIST. The supported subset of JavaScript is
+//    written down as tables (node types, operators, free globals with the exact forms each may take, per-file exact
+//    import specifiers and names with their uses, readable member names, class method keys) plus a handful of pinned
+//    productions (the own-data reader, `Object.defineProperty(this, ...)` in a constructor, spawnSync's shape, the one
+//    `new TextDecoder(...)`, the `[Symbol.for('<literal>')]` method key). Anything else, anywhere, is refused. The tables
+//    equal what the files use (a tightness test fails on an unused entry), so the surface only grows by review.
+//    Scope is resolved by NAME, which is sound here because no declaration may take a name that is a property of
+//    globalThis on the running Node (prototype chain included) or an allowlisted global, and an import's local name is
+//    declared once: so a free name is the global and a declared name is never one. Assignment is `=` to a declared
+//    non-import name or `this.<member> =` in a class constructor; update is `++` on such a name; a computed member is
+//    a READ through a provably numeric key only (no computed write, delete, call, new or destructuring).
+//  - LAYER 2, the legacy RULES (decodeSites, below): named tripwires for every decode-capable form, each hit pinned in
+//    ALLOWED_SITES by file, function, ordinal, complete invocation and context. Layer 1 admits a decode-capable form
+//    (`.toString`, `.realpath`, `realpathSync.native`, `String(x)`, `process.cwd()`, the one TextDecoder) only because
+//    layer 2 flags every use of it (the layer-link test), so only a reviewed ALLOWED_SITES entry admits it.
+// The alternative (a minimal choke point plus a deny list of decode-capable identifiers) is what rounds 1-5 were, and a
+// deny list cannot be complete; replacing layer 2 would re-derive ~250 exact-rule fixtures for no added soundness.
 //
-// WHAT IT CHECKS (one rule each; the allowlist pins rule names):
+// WHAT THE VERDICT ESTABLISHES, for the two guarded files as written (not for their callers): no explicit decoder of
+// bytes runs outside a pinned site, and no path to Function, eval, a prototype or a reflective API exists, because
+// every capability the files can reach is in the tables and none of those leads there. It does NOT establish
+// "git output is never decoded lossily": see NOT CHECKED (implicit ToString in particular).
+//
+// HOW. The SCANNED modules (the git-output path of the lib: git-exec.mjs and git-capability.mjs; every other non-test
+// JS module under lib/ must be named in OUT_OF_SCOPE with a reason, or the partition test fails) are PARSED by the
+// vendored acorn 8.19.0 (skills/ship-ticket/vendor/acorn, MIT, byte-identical to the registry tarball; its mandatory
+// pins are checked before it is imported; test-only, see the vendor test) as ES modules (ecmaVersion latest). A
+// source acorn cannot parse is one `unclassifiable` hit in each layer. Layer 1 refuses a node type outside
+// GRAMMAR_TYPES wherever it appears and, after the descent, any node it did not visit (outside a refused subtree), so a
+// production that forgot a child cannot hide code; a test derives acorn's 73 node types from the vendored source and
+// requires GRAMMAR_TYPES and the refused list to partition them. Layer 2's walker classifies every type in NODE_RULES
+// (rule, walk or fail). Layer 2 resolves imports of fs, fs/promises and child_process (bare or node:) through the
+// module's own BINDINGS: named, aliased (`{ readdirSync as rd }`, `{ default as cp }`), default and namespace imports,
+// and `ns.member`, `ns.promises.member` and `ns.default.member` chains, by name; a watched API name with no import
+// binding (a parameter, a seam object, a local) is treated as the API it names (`seam.realpath(d)`).
+//
+// LAYER 2 RULES (one rule each; ALLOWED_SITES pins rule names):
 //  - decoder-api: a member, a constant computed member (`b['to' + 'String']`, `b['to\x53tring']`), a
 //    destructured key, an import specifier or any constant string (a literal, a `+` chain or a template whose
 //    pieces are all constant) that names toString, toLocaleString, setEncoding, a Buffer *Slice decoder,
@@ -685,11 +709,13 @@ test('run() normalises the status map before spawn: an accessor entry is refused
 //    index 1 for exec(Sync); for spawnSync and execFile(Sync), index 2 after an array literal, null or
 //    nothing, else index 1 when that is an object literal or a callback;
 //  - cwd: a process.cwd() call (no exact-bytes form exists).
-// An allowlist entry pins the COMPLETE invocation: the source of the call or `new` the flagged node is the callee
-// of, else of the nearest call or `new` that contains it (so an argument change is a different site).
-// FAIL CLOSED ('unclassifiable'; never allowlisted):
+// An allowlist entry pins the COMPLETE invocation (the source of the call or `new` the flagged node is the callee
+// of, else of the nearest call or `new` that contains it, so an argument change is a different site) and its
+// CONTEXT (the enclosing statement, its head for a compound one, or the parameter default it sits in).
+// LAYER 2 FAIL CLOSED ('unclassifiable'; never allowlisted; partly redundant with layer 1, kept as diagnostics):
 //  - a parse error; a node type not in NODE_RULES, and WithStatement;
-//  - an import or re-export specifier that is not exactly fs, fs/promises, child_process or path (bare or node:)
+//  - an import or re-export specifier that is not exactly fs, fs/promises, child_process or path (bare or node:,
+//    looked up in a Map, so an inherited name such as `constructor` is not one)
 //    and does not RESOLVE, as Node resolves it (WHATWG URL against the importer: percent-encoded dot segments,
 //    query and fragment, no extension search; MEASURED Node 18 and 22), to a file of the scanned set;
 //  - an export of a watched binding or name;
@@ -716,29 +742,44 @@ test('run() normalises the status map before spawn: an accessor entry is refused
 //    { value|enumerable|writable|configurable: <literal> })`, which defines and never reads;
 //  - a computed key that is not a constant: built from string pieces (unless only assigned to), a CALL through
 //    it (`b[k]()`), a destructured one (`{ [k]: v } = o`), and a READ through it unless the key is provably
-//    numeric (a number literal, unary - + ~, arithmetic or bitwise operators other than +, ++/--), or the
+//    numeric (a number literal, unary - + ~, arithmetic or bitwise operators other than +, ++/--) or the
 //    counter of the enclosing `for (let i = <number>; ...; i++)` that nothing else in the loop assigns or
-//    rebinds, or the object is a module's only binding of that name declared
-//    `const T = Object.freeze({ __proto__: null, <plain key>: <literal>, ... })` (a read returns one of those
-//    literals or undefined). A delete through it or an assignment to it is not a read.
-// NOT CHECKED: anything not named above. In particular (review items; T4b is the behavioural backstop; each
-// example is asserted to give no hit below):
-//  - ANY implicit ToString of a Buffer: `${buf}`, `buf + ''`, Array#join, JSON.parse(buf), RegExp#exec or
-//    #test(buf), loose equality, use as a property key;
+//    rebinds (round 6: the frozen-table exemption is removed). A delete through it or an assignment to it is
+//    not a read here; layer 1 refuses both;
+//  - a compound or logical assignment (`+=`, `||=`, `??=`) to a watched name: it reads the name (round 6).
+// NOT CHECKED by either layer (review items; T4b is the behavioural backstop; each example is asserted to give no
+// layer-2 hit below, and layer 1 admits the forms the files use):
+//  - ANY implicit ToString of a Buffer: `${buf}`, `buf + ''`, Array#join or #sort, JSON.parse(buf), RegExp#exec or
+//    #test(buf), String#startsWith(buf), loose equality, use as a property key. This IS a lossy decode if the value is
+//    a Buffer; which value is a Buffer is data flow, which neither layer models;
 //  - String.fromCharCode and .fromCodePoint in any call form (exempt by design: a latin1 map);
-//  - `x.exec(...)` as a member (taken to be RegExp#exec);
 //  - process.env values (decoded by the OS and Node; the lib copies them, never compares them with git bytes);
-//  - the implicit cwd of path.resolve; data flow (which value is a Buffer, which value reaches the own-data
-//    reader or a table read); anything outside the scanned set.
-// Evidence: the planted, escape, unchecked and fine fixtures, the node-type exhaustiveness test and the seeded
-// property test below; the checker mutants in the AC6 table.
+//  - the implicit cwd of path.resolve; data flow (which value is a Buffer, what a caller passes in: a getter, a Proxy
+//    or an iterator in caller data runs caller code); anything outside the scanned set;
+//  - a global added or replaced at run time by OTHER code (the name rule is checked against this Node's globalThis).
+// Evidence: layer 1's tightness, refusal-corpus (every round-5 finding), node-type partition, layer-link and seeded
+// injection tests; layer 2's planted, escape, unchecked and fine fixtures, node-type table test and seeded property
+// test; the checker mutants (round-6 log under .specs/reviews/S-02a0b/round-6/).
 const VENDOR = join(here, '..', '..', 'vendor', 'acorn');
 const UPSTREAM = JSON.parse(readFileSync(join(VENDOR, 'UPSTREAM.json'), 'utf8'));
 const sha256 = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
-// Integrity BEFORE load: acorn is imported only when every pinned file hashes to UPSTREAM.json. On a hash mismatch
-// every T4a test fails on an assertion (not at module load), so the suite keeps its test count. A MISSING
-// UPSTREAM.json or pinned file throws at module load instead: the whole suite then fails to start.
-const VENDOR_OK = Object.entries(UPSTREAM.files).every(([f, { sha256: h }]) => sha256(join(VENDOR, f)) === h);
+/** The mandatory pin set: both vendored files, exactly. */
+const VENDOR_PINS = ['LICENSE', 'acorn.mjs'];
+/**
+ * Integrity BEFORE load: true only when UPSTREAM.files pins exactly VENDOR_PINS, each with an own 64-hex sha256, and
+ * every pinned file hashes to its pin (round 5: an empty or LICENSE-only map was vacuously true, so acorn.mjs could be
+ * imported unchecked). On any mismatch acorn is not imported and every T4a test fails on an assertion (not at module
+ * load), so the suite keeps its test count. A MISSING UPSTREAM.json or pinned file throws at module load instead.
+ */
+function vendorIntact(upstream, hashOf) {
+  const files = upstream && typeof upstream === 'object' ? upstream.files : null;
+  if (!files || typeof files !== 'object' || Object.keys(files).sort().join('\0') !== VENDOR_PINS.join('\0')) return false;
+  return VENDOR_PINS.every((f) => {
+    const h = Object.getOwnPropertyDescriptor(files, f)?.value?.sha256;
+    return typeof h === 'string' && /^[0-9a-f]{64}$/.test(h) && hashOf(f) === h;
+  });
+}
+const VENDOR_OK = vendorIntact(UPSTREAM, (f) => sha256(join(VENDOR, f)));
 const acorn = VENDOR_OK ? await import(pathToFileURL(join(VENDOR, 'acorn.mjs')).href) : null;
 
 test('T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing else is in its directory', () => {
@@ -747,6 +788,25 @@ test('T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing 
   assert.deepEqual(readdirSync(VENDOR).sort(), [...Object.keys(UPSTREAM.files), 'UPSTREAM.json'].sort());
   for (const [f, { sha256: h }] of Object.entries(UPSTREAM.files)) assert.equal(sha256(join(VENDOR, f)), h, f);
   assert.equal(acorn?.version, UPSTREAM.version, 'the loaded parser is the pinned one');
+});
+
+test('T4a: the pre-import integrity predicate needs the complete pin set and every hash', () => {
+  const real = (f) => sha256(join(VENDOR, f));
+  assert.equal(VENDOR_OK, true);
+  assert.equal(vendorIntact(UPSTREAM, real), true);
+  const pin = (f) => ({ sha256: real(f) });
+  let calls = 0;
+  const counted = (f) => { calls++; return real(f); };
+  for (const [what, files] of [['empty', {}], ['LICENSE only', { LICENSE: pin('LICENSE') }], ['acorn.mjs only', { 'acorn.mjs': pin('acorn.mjs') }],
+    ['an extra pin', { LICENSE: pin('LICENSE'), 'acorn.mjs': pin('acorn.mjs'), 'x.mjs': pin('LICENSE') }]]) {
+    assert.equal(vendorIntact({ files }, counted), false, what);
+  }
+  assert.equal(calls, 0, 'an incomplete pin set is refused before any file is hashed');
+  assert.equal(vendorIntact({ files: { LICENSE: pin('LICENSE'), 'acorn.mjs': { sha256: real('LICENSE') } } }, real), false, 'a wrong hash');
+  assert.equal(vendorIntact({ files: { LICENSE: pin('LICENSE'), 'acorn.mjs': { sha256: 'x' } } }, () => 'x'), false, 'a malformed hash');
+  assert.equal(vendorIntact({ files: { LICENSE: pin('LICENSE'), 'acorn.mjs': {} } }, () => undefined), false, 'a missing hash');
+  assert.equal(vendorIntact(null, real), false);
+  assert.equal(vendorIntact({ files: Object.create({ LICENSE: pin('LICENSE'), 'acorn.mjs': pin('acorn.mjs') }) }, real), false, 'inherited pins');
 });
 
 const ENC_NAME = /^(?:utf-?8|latin1|binary|ascii|ucs-?2|utf-?16le)$/i;
@@ -762,7 +822,8 @@ const OWN_VALUE_SRC = "(o, k) => { const d = Object.getOwnPropertyDescriptor(o, 
 const NAME_API = /^(?:realpath|readdir|readlink|mkdtemp|opendir)(?:Sync)?$/;
 const READ_API = /^readFile(?:Sync)?$/;
 const CP_API = /^(?:spawnSync|execFileSync|execSync|spawn|execFile|exec|fork)$/;
-const MODULES = { fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/promises': 'fsp', child_process: 'cp', 'node:child_process': 'cp', path: 'path', 'node:path': 'path' };
+// A Map, so an inherited name (`import 'constructor'`) is never a watched builtin.
+const MODULES = new Map(Object.entries({ fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/promises': 'fsp', child_process: 'cp', 'node:child_process': 'cp', path: 'path', 'node:path': 'path' }));
 // fs names that return no text: anything not here, not checked and not `promises` is unclassifiable. mkdir(Sync)
 // is NOT here: with `recursive` it returns the first directory created as a string (MEASURED, Node 18 and 22).
 const FS_SAFE = new Set(['statSync', 'lstatSync', 'fstatSync', 'stat', 'lstat', 'accessSync', 'access', 'existsSync', 'constants',
@@ -787,7 +848,7 @@ const OUT_OF_SCOPE = {
  * scanned file, or null.
  */
 function resolveSpecifier(spec, file, scanned) {
-  if (MODULES[spec]) return { mod: MODULES[spec] };
+  if (MODULES.has(spec)) return { mod: MODULES.get(spec) };
   const relativeSpec = /^\.{0,2}\//.test(spec);
   if (!relativeSpec && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) return null;
   let target;
@@ -867,7 +928,7 @@ function isBinding(anc) {
   for (let i = anc.length - 1; i >= 0; i--) {
     const { node: p, key: k } = anc[i];
     if ((p.type === 'VariableDeclarator' && k === 'id') || (FN_TYPES.has(p.type) && (k === 'params' || k === 'id')) || (/^Class/.test(p.type) && k === 'id')
-      || (p.type === 'CatchClause' && k === 'param') || (p.type === 'AssignmentExpression' && k === 'left') || (/^For(?:In|Of)Statement$/.test(p.type) && k === 'left')) return true;
+      || (p.type === 'CatchClause' && k === 'param') || (p.type === 'AssignmentExpression' && k === 'left' && p.operator === '=') || (/^For(?:In|Of)Statement$/.test(p.type) && k === 'left')) return true;
     if (p.type === 'AssignmentPattern' ? k !== 'left' : !(['ArrayPattern', 'ObjectPattern', 'RestElement'].includes(p.type)
       || (p.type === 'Property' && k === 'value' && anc[i - 1]?.node.type === 'ObjectPattern'))) return false;
   }
@@ -895,12 +956,6 @@ function loopCounter(name, a) {
   }
   return false;
 }
-/** `const T = Object.freeze({ __proto__: null, <plain key>: <literal>, ... })`: a read T[k] is one of those literals or undefined. */
-const isFrozenTable = (init) => init?.type === 'CallExpression' && init.callee.type === 'MemberExpression' && !init.callee.computed && init.callee.object.type === 'Identifier'
-  && init.callee.object.name === 'Object' && init.callee.property.name === 'freeze' && init.arguments.length === 1 && init.arguments[0].type === 'ObjectExpression'
-  && ((ps) => ps.filter((q) => q.type === 'Property' && !q.computed && !q.shorthand && propName(q) === '__proto__' && q.value.type === 'Literal' && q.value.value === null).length === 1
-    && ps.every((q) => q.type === 'Property' && q.kind === 'init' && !q.computed && !q.shorthand && !q.method && q.value.type === 'Literal'
-      && (propName(q) !== '__proto__' || q.value.value === null)))(init.arguments[0].properties);
 // Every node type the vendored acorn can produce (derived from its source by the exhaustiveness test): 'rule' has a case
 // in the walker, 'walk' only has its children visited, 'fail' is refused. Any other type is unclassifiable.
 const NODE_RULES = {
@@ -931,15 +986,13 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
   }
   const hits = [];
   let anc = [];
-  // Parents, the module's binding count per name, and its frozen null-prototype literal tables.
+  // Parents and the module's binding count per name.
   const parent = new Map();
   const bindCount = new Map();
-  const tables = new Set();
   walk(ast, (n, a) => {
     const up = a[a.length - 1];
     parent.set(n, up);
     if (n.type === 'Identifier' && (isBinding(a) || (/Specifier$/.test(up?.node.type ?? '') && up.key === 'local'))) bindCount.set(n.name, (bindCount.get(n.name) ?? 0) + 1);
-    if (n.type === 'VariableDeclarator' && up.node.kind === 'const' && n.id.type === 'Identifier' && isFrozenTable(n.init)) tables.add(n.id.name);
   });
   const text = (n) => src.slice(n.start, n.end).replace(/\s+/g, ' ');
   const isCall = (x) => x?.type === 'CallExpression' || x?.type === 'NewExpression';
@@ -952,7 +1005,17 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
     for (let q = parent.get(n); q; q = parent.get(q.node)) if (isCall(q.node)) return q.node;
     return n;
   };
-  const hit = (n, rule, why = rule) => hits.push({ file, fn: fnName(anc), rule, why, line: n.loc.start.line, pos: n.start, text: text(n), site: text(siteOf(n)) });
+  /** Where the site sits: the enclosing statement (only its head, up to its body, for a compound one), declaration, or parameter default. */
+  const contextOf = (n) => {
+    for (let q = parent.get(n); q; q = parent.get(q.node)) {
+      const c = q.node;
+      if (!/Statement$|^VariableDeclaration$|^AssignmentPattern$/.test(c.type)) continue;
+      const body = c.body ?? c.consequent ?? c.block;
+      return body?.type && body !== n ? src.slice(c.start, body.start).replace(/\s+/g, ' ').trim() : text(c);
+    }
+    return text(n);
+  };
+  const hit = (n, rule, why = rule) => hits.push({ file, fn: fnName(anc), rule, why, line: n.loc.start.line, pos: n.start, text: text(n), site: text(siteOf(n)), ctx: contextOf(n) });
   const objectFree = !bindCount.has('Object');
   /** The two admitted reflective productions: the own-data reader (whole function source) and a defining defineProperty. */
   function admittedReflect(m, a) {
@@ -971,8 +1034,7 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
   function safeRead(m, a) {
     const { node: p, key: k } = a[a.length - 1];
     if ((p.type === 'AssignmentExpression' && k === 'left' && p.operator === '=') || (p.type === 'UnaryExpression' && p.operator === 'delete')) return true;
-    if (numericKey(m.property) || (m.property.type === 'Identifier' && loopCounter(m.property.name, a))) return true;
-    return m.object.type === 'Identifier' && tables.has(m.object.name) && bindCount.get(m.object.name) === 1 && objectFree;
+    return numericKey(m.property) || (m.property.type === 'Identifier' && loopCounter(m.property.name, a));
   }
   /** The checks on a constant string (a literal, a folded `+` chain or a folded template). */
   const strRules = (n, t, asKey) => {
@@ -1139,36 +1201,434 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
   return hits.sort((x, y) => x.pos - y.pos);
 }
 
-/** lib/ modules (recursive), excluding tests, as paths relative to lib/ with `/` separators. */
+// ------------------------------------------------------------------ T4a grammar layer: the allowlist the guarded files are written in
+//
+// The SOUNDNESS GATE of T4a (decision and claim: the HOW block above). A recursive descent over the acorn AST that
+// admits only the constructs listed in the GRAMMAR_* tables below and refuses ('unclassifiable', never allowlisted)
+// everything else, at the position where it appears. The tables are exactly what the two guarded files use: the
+// tightness test fails on an entry the files do not use, so adding a construct means editing a table under review.
+// After the descent, any AST node that was neither visited nor inside a refused node is refused too ('not visited'),
+// so a production that forgets a child cannot hide code there.
+
+/** Acorn node types admitted somewhere in the grammar (each only at the positions its production below allows). */
+const GRAMMAR_TYPES = new Set(['ArrayExpression', 'ArrayPattern', 'ArrowFunctionExpression', 'AssignmentExpression', 'AssignmentPattern',
+  'BinaryExpression', 'BlockStatement', 'CallExpression', 'CatchClause', 'ChainExpression', 'ClassBody', 'ClassDeclaration', 'ConditionalExpression',
+  'ContinueStatement', 'ExportNamedDeclaration', 'ExpressionStatement', 'ForOfStatement', 'ForStatement', 'FunctionDeclaration', 'FunctionExpression',
+  'Identifier', 'IfStatement', 'ImportDeclaration', 'ImportDefaultSpecifier', 'ImportSpecifier', 'Literal', 'LogicalExpression', 'MemberExpression',
+  'MethodDefinition', 'NewExpression', 'ObjectExpression', 'ObjectPattern', 'Program', 'Property', 'RestElement', 'ReturnStatement', 'SpreadElement',
+  'Super', 'TemplateElement', 'TemplateLiteral', 'ThisExpression', 'ThrowStatement', 'TryStatement', 'UnaryExpression', 'UpdateExpression',
+  'VariableDeclaration', 'VariableDeclarator']);
+/** Operators admitted, per expression type. Assignment is `=` only and update is `++` only. */
+const GRAMMAR_OPS = new Map([
+  ['UnaryExpression', new Set(['!', 'typeof', '+'])],
+  ['BinaryExpression', new Set(['*', '+', '>>', '&', '<', '<=', '>', '>=', '===', '!==', 'instanceof'])],
+  ['LogicalExpression', new Set(['&&', '||', '??'])],
+  ['AssignmentExpression', new Set(['='])],
+  ['UpdateExpression', new Set(['++'])],
+]);
+/**
+ * Free identifiers: a name declared NOWHERE in the module resolves through globalThis, so it must be one of these,
+ * in one of its listed forms: `members` maps a member to 'any' (read anywhere), 'call' (only as a callee), or a
+ * pinned production ('ownValue', 'defineThis', 'methodKey', checked where it is used); `call`, `new`, `value`,
+ * `instanceof`, `extends` admit the bare name in that position; `newSrc` admits exactly one `new` expression.
+ */
+const GRAMMAR_GLOBALS = new Map([
+  ['Object', { members: new Map([['keys', 'call'], ['entries', 'call'], ['fromEntries', 'call'], ['hasOwn', 'call'], ['freeze', 'any'],
+    ['getOwnPropertyDescriptor', 'ownValue'], ['defineProperty', 'defineThis']]) }],
+  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call']]) }],
+  ['Array', { members: new Map([['isArray', 'call']]) }],
+  ['Number', { members: new Map([['isSafeInteger', 'call']]) }],
+  ['Symbol', { members: new Map([['for', 'methodKey']]) }],
+  ['String', { call: true, members: new Map([['fromCharCode', 'call']]) }],
+  ['process', { members: new Map([['env', 'any'], ['platform', 'any'], ['cwd', 'call']]) }],
+  ['TextDecoder', { newSrc: "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })" }],
+  ['Map', { new: true }], ['Set', { new: true }], ['WeakMap', { new: true }], ['TypeError', { new: true }],
+  ['Error', { extends: true }], ['Uint8Array', { instanceof: true }], ['Boolean', { value: true }], ['Infinity', { value: true }], ['undefined', { value: true }],
+]);
+/**
+ * Imports, per guarded file: exact specifier -> imported name -> use. A Map, so no inherited name is a key. The
+ * local name must equal the imported name (default: any local), and is declared once. Uses: 'call' (callee only),
+ * 'spawnSync' (callee only, in the pinned shape below), 'value' (any position; its members are member names),
+ * 'member:<m>' (only `local.<m>` as a value), 'callMember:<m>' (only `local.<m>(...)`).
+ */
+const GRAMMAR_IMPORTS = new Map([
+  ['git-exec.mjs', new Map([
+    ['node:child_process', new Map([['spawnSync', 'spawnSync']])],
+    ['node:fs', new Map([['statSync', 'call']])],
+    ['./git-capability.mjs', new Map([['probeGit', 'call']])],
+  ])],
+  ['git-capability.mjs', new Map([
+    ['node:child_process', new Map([['spawnSync', 'spawnSync']])],
+    ['node:fs', new Map([['accessSync', 'call'], ['constants', 'member:X_OK'], ['realpathSync', 'callMember:native'], ['statSync', 'call']])],
+    ['node:path', new Map([['default', 'value']])],
+  ])],
+]);
+/**
+ * Non-computed member names readable on any value that is not a global or a restricted import (also the keys a
+ * destructuring pattern may read, and the `this.<name>` a constructor may assign). None names a reflective
+ * property or an explicit decoder of any built-in: `decode` reaches only the pinned TextDecoder (the only one
+ * `new` can build). Implicit ToString through these (`join`, `sort`, `test`, `startsWith` on a Buffer) is the
+ * documented NOT CHECKED class.
+ */
+const GRAMMAR_MEMBERS = new Set([
+  'PATH', 'add', 'ambient', 'args', 'buffer', 'byteOffset', 'bytes', 'code', 'cwd', 'decode', 'delete', 'deletes',
+  'dirname', 'endsWith', 'env', 'envLimit', 'envTooLarge', 'equals', 'error', 'every', 'exclude', 'exec', 'filter',
+  'find', 'flatMap', 'forEach', 'fs', 'get', 'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'includes',
+  'isAbsolute', 'isDirectory', 'isExecutableFile', 'isFile', 'join', 'keys', 'lastIndexOf', 'length', 'map',
+  'maxBuffer', 'name', 'neutralisation', 'noLazyFetch', 'op', 'pairs', 'partialClone', 'path', 'platform', 'policy',
+  'posix', 'prerelease', 'push', 'reduce', 'relative', 'replace', 'resolve', 'selection', 'sep', 'set', 'signal',
+  'slice', 'some', 'sort', 'split', 'startsWith', 'status', 'stderr', 'stdout', 'subarray', 'test', 'timeoutMs',
+  'toLowerCase', 'toUpperCase', 'total', 'trimEnd', 'value', 'version', 'win32'
+]);
+/** Member names that ARE decode-capable: admitted by the grammar only because every use is a legacy-rule hit that
+ * must match an ALLOWED_SITES entry (positive control: the layer-link test). */
+const GRAMMAR_SITE_PINNED = new Map([['toString', 'decoder-api'], ['realpath', 'name-api-no-buffer']]);
+/** Class method keys (besides `constructor` and the one pinned `[Symbol.for('<literal>')]` key). */
+const GRAMMAR_METHOD_KEYS = new Set(['toJSON']);
+/** Names no declaration may take: every name reachable as a property of globalThis on THIS Node (its prototype
+ * chain included: `constructor`, `toString`), the allowlisted globals, and the CommonJS wrapper names. */
+const RESERVED_NAME = (name) => name in globalThis || GRAMMAR_GLOBALS.has(name) || ['arguments', 'eval', 'require', 'module', 'exports', '__filename', '__dirname'].includes(name);
+
+/**
+ * The grammar layer's refusals for one guarded module: [{file, rule: 'unclassifiable', why, line, pos, text}] in
+ * source order, plus `used`, the table entries the module exercised (for the tightness test).
+ */
+function grammarSites(file, src) {
+  assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
+  let ast;
+  try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true }); } catch (e) {
+    return { hits: [{ file, fn: '<module>', rule: 'unclassifiable', why: `parse error: ${e.message}`, line: e.loc?.line ?? 1, pos: e.pos ?? 0, text: '' }], used: new Set() };
+  }
+  const hits = [];
+  const used = new Set();
+  const seen = new Set();
+  const refused = new Set();
+  const parent = new Map();
+  walk(ast, (n, a) => parent.set(n, a[a.length - 1]));
+  const ancestors = (n) => { const a = []; for (let p = parent.get(n); p; p = parent.get(p.node)) a.unshift(p); return a; };
+  const text = (n) => src.slice(n.start, n.end).replace(/\s+/g, ' ');
+  const refuse = (n, why) => { refused.add(n); hits.push({ file, fn: '<grammar>', rule: 'unclassifiable', why, line: n.loc.start.line, pos: n.start, text: text(n) }); };
+  const see = (n) => { seen.add(n); if (!GRAMMAR_TYPES.has(n.type)) { refuse(n, `${n.type} is not in the supported grammar`); return false; } used.add(`type:${n.type}`); return true; };
+  const op = (n) => (GRAMMAR_OPS.get(n.type).has(n.operator) ? used.add(`op:${n.type}:${n.operator}`) : refuse(n, `operator ${n.operator} (${n.type}) is not in the supported grammar`));
+
+  // Declarations, by name, anywhere in the module (binding positions only).
+  const decl = new Map();
+  const declare = (id) => { if (!decl.has(id.name)) decl.set(id.name, []); decl.get(id.name).push(id); };
+  const pat = (p) => {
+    if (p?.type === 'Identifier') declare(p);
+    else if (p?.type === 'ObjectPattern') p.properties.forEach((q) => pat(q.type === 'RestElement' ? q.argument : q.value));
+    else if (p?.type === 'ArrayPattern') p.elements.forEach(pat);
+    else if (p?.type === 'AssignmentPattern') pat(p.left);
+    else if (p?.type === 'RestElement') pat(p.argument);
+  };
+  walk(ast, (n) => {
+    if (n.type === 'VariableDeclarator') pat(n.id);
+    if (FN_TYPES.has(n.type)) { if (n.id) declare(n.id); n.params.forEach(pat); }
+    if (/^Class(?:Declaration|Expression)$/.test(n.type) && n.id) declare(n.id);
+    if (n.type === 'CatchClause') pat(n.param);
+    if (/^Import(?:Default|Namespace)?Specifier$/.test(n.type)) declare(n.local);
+  });
+  for (const [name, ids] of decl) if (RESERVED_NAME(name)) refuse(ids[0], `declaration of ${name}, a global name (no shadowing)`);
+  const isLocal = (name) => decl.has(name);
+
+  // Imports: local name -> use.
+  const imports = new Map();
+  const table = GRAMMAR_IMPORTS.get(file) ?? new Map();
+  const importDecl = (d) => {
+    see(d); see(d.source);
+    const names = table.get(d.source.value);
+    if (!names) return refuse(d, `import of ${d.source.value}: not an allowlisted specifier for ${file}`);
+    if (d.attributes?.length) return refuse(d, 'import attributes');
+    if (!d.specifiers.length) return refuse(d, 'side-effect import');
+    for (const s of d.specifiers) {
+      if (!see(s)) continue;
+      see(s.local);
+      if (s.imported) see(s.imported);
+      const imported = s.type === 'ImportDefaultSpecifier' ? 'default' : (s.imported.name ?? s.imported.value);
+      const u = names.get(imported);
+      if (!u) { refuse(s, `${d.source.value} export ${imported} is not allowlisted`); continue; }
+      if (imported !== 'default' && s.local.name !== imported) { refuse(s, `import ${imported} renamed`); continue; }
+      if (decl.get(s.local.name).length !== 1) { refuse(s, `import ${s.local.name} redeclared`); continue; }
+      used.add(`import:${file}:${d.source.value}:${imported}`);
+      imports.set(s.local.name, u);
+    }
+    return undefined;
+  };
+
+  /** A bare identifier in position pos: 'value' | 'callee' | 'new' | 'object' | 'instanceof' | 'extends'. */
+  const ref = (id, pos) => {
+    see(id);
+    const name = id.name;
+    if (isLocal(name)) {
+      const u = imports.get(name);
+      if (u === undefined || u === 'value') return true;
+      if (pos === 'callee' && (u === 'call' || u === 'spawnSync')) return true;
+      if (pos === 'object' && /^(?:member|callMember):/.test(u)) return true;
+      return refuse(id, `import ${name} used as ${pos}`);
+    }
+    const g = GRAMMAR_GLOBALS.get(name);
+    if (!g) return refuse(id, `free identifier ${name} is not an allowlisted global`);
+    used.add(`global:${name}`);
+    if ((pos === 'object' && g.members) || (pos === 'value' && g.value) || (pos === 'callee' && g.call) || (pos === 'new' && (g.new || g.newSrc))
+      || (pos === 'instanceof' && g.instanceof) || (pos === 'extends' && g.extends)) { if (pos !== 'object') used.add(`global:${name}:${pos}`); return true; }
+    return refuse(id, `global ${name} used as ${pos}`);
+  };
+
+  /** A member expression in position pos ('value' | 'callee'); returns the pinned mode of a global member, if any. */
+  const member = (n, pos) => {
+    see(n);
+    if (n.object.type === 'Super') { see(n.object); return refuse(n, 'a super member'); }
+    if (n.computed) {
+      if (pos !== 'value') return refuse(n, `a computed member used as ${pos}`);
+      if (!(numericKey(n.property) || (n.property.type === 'Identifier' && loopCounter(n.property.name, ancestors(n))))) return refuse(n, 'a computed member key that is not provably numeric');
+      used.add('computed:numeric');
+      expr(n.object, 'value');
+      expr(n.property, 'value');
+      return undefined;
+    }
+    see(n.property);
+    if (n.property.type !== 'Identifier') return refuse(n, 'a private member');
+    const name = n.property.name;
+    const o = n.object;
+    if (o.type === 'Identifier' && !isLocal(o.name)) {
+      if (!ref(o, 'object')) return undefined;
+      const mode = GRAMMAR_GLOBALS.get(o.name).members.get(name);
+      if (!mode) return refuse(n, `${o.name}.${name} is not allowlisted`);
+      used.add(`global:${o.name}.${name}`);
+      if (mode === 'any' || (pos === 'callee' && ['call', 'ownValue', 'defineThis'].includes(mode))) return mode;
+      return refuse(n, `${o.name}.${name} used as ${pos}`);
+    }
+    if (o.type === 'Identifier' && imports.has(o.name)) {
+      if (!ref(o, 'object')) return undefined;
+      const u = imports.get(o.name);
+      if (u === `member:${name}` || (u === `callMember:${name}` && pos === 'callee')) { used.add(`import-member:${o.name}.${name}`); return undefined; }
+      if (u !== 'value') return refuse(n, `${o.name}.${name} is not allowlisted`);
+    } else expr(o, 'value');
+    if (GRAMMAR_MEMBERS.has(name)) { used.add(`member:${name}`); return undefined; }
+    if (GRAMMAR_SITE_PINNED.has(name)) { used.add(`pinned:${name}`); return undefined; }
+    return refuse(n, `member .${name} is not allowlisted`);
+  };
+
+  const args = (list) => { for (const x of list) if (x.type === 'SpreadElement') { see(x); expr(x.argument, 'value'); } else expr(x, 'value'); };
+  const innermostFn = (n) => { for (let p = parent.get(n); p; p = parent.get(p.node)) if (FN_TYPES.has(p.node.type)) return p.node; return null; };
+  /** The one own-data reader: `const ownValue = <OWN_VALUE_SRC>` at module top level, and the call inside it. */
+  const ownValueProduction = (call) => {
+    const f = innermostFn(call);
+    const d = f && parent.get(f);
+    const v = d && parent.get(d.node);
+    return !!f && text(f) === OWN_VALUE_SRC && d.node.type === 'VariableDeclarator' && d.key === 'init' && d.node.id.type === 'Identifier'
+      && d.node.id.name === 'ownValue' && v.node.kind === 'const' && parent.get(v.node)?.node.type === 'Program';
+  };
+  /** `Object.defineProperty(this, '<plain name>', { value|enumerable|writable|configurable: <literal>, ... })` in a constructor. */
+  const defineThis = (call, ctx) => {
+    const [o, k, d, ...rest] = call.arguments;
+    return ctx.ctor && !rest.length && o?.type === 'ThisExpression' && k?.type === 'Literal' && typeof k.value === 'string' && GRAMMAR_MEMBERS.has(k.value)
+      && d?.type === 'ObjectExpression' && d.properties.every((q) => q.type === 'Property' && q.kind === 'init' && !q.computed && !q.shorthand && !q.method
+        && ['value', 'enumerable', 'writable', 'configurable'].includes(propName(q)) && q.value.type === 'Literal');
+  };
+  /** spawnSync(file, [args], { static options with no `encoding` }): Buffer output, nothing reinterpreted as options. */
+  const spawnShape = (call) => call.arguments.length === 3 && call.arguments[1].type === 'ArrayExpression' && call.arguments[2].type === 'ObjectExpression'
+    && call.arguments[2].properties.every((q) => q.type === 'Property' && q.kind === 'init' && !q.computed && !['encoding', '__proto__'].includes(propName(q)));
+
+  function fn(n, ctx = {}) {
+    if (!see(n)) return;
+    if (n.async || n.generator) return refuse(n, 'an async or generator function');
+    if (n.id) see(n.id);
+    n.params.forEach(pattern);
+    if (n.body.type === 'BlockStatement') stmt(n.body, { ctor: !!ctx.ctor }); else expr(n.body, 'value', {});
+  }
+  function pattern(p) {
+    if (!see(p)) return;
+    switch (p.type) {
+      case 'Identifier': return;
+      case 'ObjectPattern':
+        for (const q of p.properties) {
+          if (!see(q)) continue;
+          if (q.type === 'RestElement') { pattern(q.argument); continue; }
+          see(q.key);
+          if (q.computed || q.key.type !== 'Identifier') { refuse(q, 'a destructuring key that is not a plain name'); continue; }
+          if (!GRAMMAR_MEMBERS.has(q.key.name)) { refuse(q, `destructuring key ${q.key.name} is not allowlisted`); continue; }
+          used.add(`member:${q.key.name}`);
+          pattern(q.value);
+        }
+        return;
+      case 'ArrayPattern': p.elements.forEach((e) => e && pattern(e)); return;
+      case 'AssignmentPattern': pattern(p.left); expr(p.right, 'value', {}); return;
+      case 'RestElement': pattern(p.argument); return;
+      default: refuse(p, `${p.type} as a binding pattern`);
+    }
+  }
+  function cls(n) {
+    if (!see(n)) return;
+    see(n.id);
+    if (n.superClass) { if (n.superClass.type === 'Identifier') ref(n.superClass, 'extends'); else refuse(n.superClass, 'a class extending a non-identifier'); }
+    see(n.body);
+    for (const m of n.body.body) {
+      if (!see(m)) continue;
+      if (m.type !== 'MethodDefinition' || m.static || !['constructor', 'method'].includes(m.kind)) { refuse(m, `a class member of kind ${m.kind ?? m.type}`); continue; }
+      see(m.key);
+      if (m.computed) {
+        const k = m.key;
+        const ok = k.type === 'CallExpression' && k.arguments.length === 1 && k.arguments[0].type === 'Literal' && typeof k.arguments[0].value === 'string'
+          && k.callee.type === 'MemberExpression' && !k.callee.computed && k.callee.object.type === 'Identifier' && k.callee.object.name === 'Symbol'
+          && !isLocal('Symbol') && k.callee.property.name === 'for';
+        if (!ok) { refuse(m, 'a computed class member key other than [Symbol.for(<string>)]'); continue; }
+        [k.callee, k.callee.object, k.callee.property, k.arguments[0]].forEach((x) => seen.add(x));
+        used.add('global:Symbol').add('global:Symbol.for');
+      } else if (m.kind === 'method' && !(m.key.type === 'Identifier' && GRAMMAR_METHOD_KEYS.has(m.key.name))) { refuse(m, `class method ${m.key.name ?? m.key.value} is not allowlisted`); continue; }
+      else if (m.kind === 'method') used.add(`method:${m.key.name}`);
+      fn(m.value, { ctor: m.kind === 'constructor' });
+    }
+  }
+  function stmt(n, ctx = {}) {
+    if (!see(n)) return;
+    switch (n.type) {
+      case 'VariableDeclaration':
+        if (!['const', 'let'].includes(n.kind)) return refuse(n, `a ${n.kind} declaration`);
+        for (const d of n.declarations) { see(d); pattern(d.id); if (d.init) expr(d.init, 'value', ctx); }
+        return;
+      case 'FunctionDeclaration': return fn(n);
+      case 'ClassDeclaration': return cls(n);
+      case 'ExpressionStatement': return expr(n.expression, 'value', ctx);
+      case 'IfStatement': expr(n.test, 'value', ctx); stmt(n.consequent, ctx); if (n.alternate) stmt(n.alternate, ctx); return;
+      case 'ForStatement':
+        if (n.init) { if (n.init.type === 'VariableDeclaration') stmt(n.init, ctx); else expr(n.init, 'value', ctx); }
+        if (n.test) expr(n.test, 'value', ctx);
+        if (n.update) expr(n.update, 'value', ctx);
+        return stmt(n.body, ctx);
+      case 'ForOfStatement':
+        if (n.await) return refuse(n, 'for await');
+        if (!(see(n.left) && n.left.type === 'VariableDeclaration' && ['const', 'let'].includes(n.left.kind) && n.left.declarations.length === 1 && !n.left.declarations[0].init)) return refuse(n, 'a for-of head that is not one const/let binding');
+        see(n.left.declarations[0]);
+        pattern(n.left.declarations[0].id);
+        expr(n.right, 'value', ctx);
+        return stmt(n.body, ctx);
+      case 'BlockStatement': n.body.forEach((s) => stmt(s, ctx)); return;
+      case 'ReturnStatement': if (n.argument) expr(n.argument, 'value', ctx); return;
+      case 'ThrowStatement': return expr(n.argument, 'value', ctx);
+      case 'TryStatement':
+        stmt(n.block, ctx);
+        if (n.handler) { see(n.handler); if (n.handler.param) pattern(n.handler.param); stmt(n.handler.body, ctx); }
+        if (n.finalizer) stmt(n.finalizer, ctx);
+        return;
+      case 'ContinueStatement': if (n.label) refuse(n, 'a labelled continue'); return;
+      default: refuse(n, `${n.type} is not admitted as a statement`);
+    }
+  }
+  function expr(n, pos = 'value', ctx = {}) {
+    if (n.type === 'Identifier') return ref(n, pos);
+    if (n.type === 'MemberExpression') return member(n, pos);
+    if (!see(n)) return undefined;
+    if (pos !== 'value' && n.type !== 'ChainExpression') return refuse(n, `a ${n.type} in ${pos} position`);
+    switch (n.type) {
+      case 'Literal': return undefined;
+      case 'TemplateLiteral': n.quasis.forEach(see); n.expressions.forEach((e) => expr(e, 'value', ctx)); return undefined;
+      case 'ArrayExpression': for (const e of n.elements) if (e) { if (e.type === 'SpreadElement') { see(e); expr(e.argument, 'value', ctx); } else expr(e, 'value', ctx); } return undefined;
+      case 'ObjectExpression':
+        for (const q of n.properties) {
+          if (!see(q)) continue;
+          if (q.type === 'SpreadElement') { expr(q.argument, 'value', ctx); continue; }
+          see(q.key);
+          if (q.computed || q.kind !== 'init') { refuse(q, q.computed ? 'a computed object key' : `an object ${q.kind}ter`); continue; }
+          if (propName(q) === '__proto__' && !q.shorthand && !q.method) {
+            if (q.value.type === 'Literal' && q.value.value === null) { see(q.value); used.add('proto:null'); } else refuse(q, '__proto__ other than null in an object literal');
+            continue;
+          }
+          if (q.method) fn(q.value); else expr(q.value, 'value', ctx);
+        }
+        return undefined;
+      case 'FunctionExpression': case 'ArrowFunctionExpression': return fn(n);
+      case 'ChainExpression': return expr(n.expression, pos, ctx);
+      case 'CallExpression': {
+        const c = n.callee;
+        let mode;
+        if (c.type === 'Super') { see(c); if (!ctx.ctor) refuse(c, 'super() outside a constructor'); else used.add('super()'); }
+        else if (c.type === 'Identifier') ref(c, 'callee');
+        else if (c.type === 'MemberExpression') mode = member(c, 'callee');
+        else if (see(c)) refuse(c, `a call of a ${c.type}`);
+        if (mode === 'ownValue' && !ownValueProduction(n)) refuse(n, 'Object.getOwnPropertyDescriptor outside the own-data reader production');
+        if (mode === 'defineThis' && !defineThis(n, ctx)) refuse(n, 'Object.defineProperty other than the pinned constructor form');
+        if (c.type === 'Identifier' && imports.get(c.name) === 'spawnSync' && !spawnShape(n)) refuse(n, 'spawnSync other than (file, [args], { static options without encoding })');
+        args(n.arguments);
+        return undefined;
+      }
+      case 'NewExpression': {
+        const c = n.callee;
+        if (c.type !== 'Identifier') { if (see(c)) refuse(c, `new through a ${c.type}`); }
+        else if (ref(c, 'new') && !isLocal(c.name) && GRAMMAR_GLOBALS.get(c.name).newSrc && text(n) !== GRAMMAR_GLOBALS.get(c.name).newSrc) refuse(n, `new ${c.name} other than exactly ${GRAMMAR_GLOBALS.get(c.name).newSrc}`);
+        args(n.arguments);
+        return undefined;
+      }
+      case 'AssignmentExpression': {
+        op(n);
+        const l = n.left;
+        if (l.type === 'Identifier') { see(l); if (!isLocal(l.name) || imports.has(l.name)) refuse(l, `assignment to ${l.name}, which is not a local binding`); }
+        else if (l.type === 'MemberExpression' && !l.computed && l.object.type === 'ThisExpression' && l.property.type === 'Identifier' && ctx.ctor && GRAMMAR_MEMBERS.has(l.property.name)) {
+          [l, l.object, l.property].forEach((x) => seen.add(x));
+          used.add(`member:${l.property.name}`).add('assign:this');
+        } else { seen.add(l); refuse(l, 'an assignment target other than a local name or this.<member> in a constructor'); }
+        return expr(n.right, 'value', ctx);
+      }
+      case 'UpdateExpression':
+        op(n);
+        if (n.argument.type === 'Identifier' && isLocal(n.argument.name) && !imports.has(n.argument.name)) see(n.argument);
+        else refuse(n, 'an update of something other than a local name');
+        return undefined;
+      case 'UnaryExpression': op(n); return expr(n.argument, 'value', ctx);
+      case 'BinaryExpression': op(n); expr(n.left, 'value', ctx); return expr(n.right, n.operator === 'instanceof' ? 'instanceof' : 'value', ctx);
+      case 'LogicalExpression': op(n); expr(n.left, 'value', ctx); return expr(n.right, 'value', ctx);
+      case 'ConditionalExpression': expr(n.test, 'value', ctx); expr(n.consequent, 'value', ctx); return expr(n.alternate, 'value', ctx);
+      case 'ThisExpression': return undefined;
+      default: return refuse(n, `${n.type} is not admitted as an expression`);
+    }
+  }
+
+  see(ast);
+  for (const item of ast.body) {
+    if (item.type === 'ImportDeclaration') importDecl(item);
+    else if (item.type === 'ExportNamedDeclaration') {
+      see(item);
+      if (item.source || item.specifiers.length || !item.declaration) refuse(item, 'an export other than `export <declaration>`');
+      else stmt(item.declaration);
+    } else stmt(item);
+  }
+  // Fail closed on any node the descent did not reach (outside a refused subtree).
+  walk(ast, (n, a) => { if (!seen.has(n) && !a.some(({ node }) => refused.has(node))) refuse(n, `${n.type} not visited by the grammar`); });
+  return { hits: hits.sort((x, y) => x.pos - y.pos), used };
+}
+
+/** lib/ JS modules (.mjs, .cjs, .js; recursive), excluding *.test.*, as paths relative to lib/ with `/` separators. */
 function libModules(dir = here, rel = '') {
   return readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? libModules(join(dir, d.name), `${rel}${d.name}/`)
-    : d.name.endsWith('.mjs') && !d.name.endsWith('.test.mjs') ? [`${rel}${d.name}`] : [])).sort();
+    : /\.(?:mjs|cjs|js)$/.test(d.name) && !/\.test\.(?:mjs|cjs|js)$/.test(d.name) ? [`${rel}${d.name}`] : [])).sort();
 }
 // Sanctioned sites: [file, enclosing function, rule, ordinal of that rule in that function (source order), the
-// COMPLETE invocation's source (whitespace-normalised: callee and every argument), reason]. A hit no entry names
-// exactly fails, and so does an entry no hit matches (stale): a second same-rule site in the function is a new
-// ordinal, and any change to the call (`toString('latin1')` -> `toString('utf8')`, or `toString() || 'latin1'`)
-// changes its invocation text. The LINE is not pinned, so CRLF and reformatting elsewhere do not matter.
+// COMPLETE invocation's source (whitespace-normalised: callee and every argument), its CONTEXT (the enclosing
+// statement, only its head for a compound statement, or the parameter default it sits in), reason]. A hit no entry
+// names exactly fails, and so does an entry no hit matches (stale): a second same-rule site in the function is a new
+// ordinal, any change to the call (`toString('latin1')` -> `toString('utf8')`, or `toString() || 'latin1'`) changes
+// its invocation text, and moving the call to another statement, or changing what consumes it there, changes its
+// context. The LINE is not pinned, so CRLF and reformatting elsewhere do not matter.
 // `unclassifiable` is never allowlisted.
 const ALLOWED_SITES = [
-  ['git-exec.mjs', '<module>', 'decoder-api', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
-  ['git-exec.mjs', '<module>', 'encoding-literal', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", 'its label'],
-  ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync.native(p)', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd()', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath(d)', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
-  ['git-capability.mjs', 'resolveGitBinary', 'string-coercion', 0, "String(pathVar ?? '')", 'coerces the PATH env value (already a string), not bytes'],
-  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 1, 'fs.realpath(file)', 'the resolver seam: the spawn executable, never compared with git output (S-02a0a)'],
-  ['git-capability.mjs', 'parseGitVersion', 'string-coercion', 0, 'String(out)', 'encodes (string to bytes); not a decode'],
-  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 0, "Buffer.from(String(out), 'utf8')", 'Buffer.from(string, utf8): string to bytes'],
-  ['git-capability.mjs', 'parseGitVersion', 'decoder-api', 0, "bytes.toString('latin1')", 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
-  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 1, "bytes.toString('latin1')", 'the encoding of that map'],
+  ['git-exec.mjs', '<module>', 'decoder-api', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
+  ['git-exec.mjs', '<module>', 'encoding-literal', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'its label'],
+  ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync.native(p)', 'return realpathSync.native(p);', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd()', 'cwd = process.cwd()', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath(d)', 'const banned = [cwd, ...exclude].flatMap((d) => [P.resolve(d), fs.realpath(d)]).filter(Boolean);', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
+  ['git-capability.mjs', 'resolveGitBinary', 'string-coercion', 0, "String(pathVar ?? '')", "for (const raw of String(pathVar ?? '').split(win ? ';' : ':'))", 'coerces the PATH env value (already a string), not bytes'],
+  ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 1, 'fs.realpath(file)', 'const real = fs.realpath(file);', 'the resolver seam: the spawn executable, never compared with git output (S-02a0a)'],
+  ['git-capability.mjs', 'parseGitVersion', 'string-coercion', 0, 'String(out)', "const bytes = Buffer.isBuffer(out) ? out : Buffer.from(String(out), 'utf8');", 'encodes (string to bytes); not a decode'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 0, "Buffer.from(String(out), 'utf8')", "const bytes = Buffer.isBuffer(out) ? out : Buffer.from(String(out), 'utf8');", 'Buffer.from(string, utf8): string to bytes'],
+  ['git-capability.mjs', 'parseGitVersion', 'decoder-api', 0, "bytes.toString('latin1')", "const m = VERSION.exec(bytes.toString('latin1'));", 'lossless byte-to-code-point map feeding an ASCII-only anchored regex; any non-ASCII byte fails it (S-02a0a, owned there)'],
+  ['git-capability.mjs', 'parseGitVersion', 'encoding-literal', 1, "bytes.toString('latin1')", "const m = VERSION.exec(bytes.toString('latin1'));", 'the encoding of that map'],
 ];
-/** Each hit's site key: file, function, rule, its ordinal among same-(file, function, rule) hits in order, and its complete invocation. */
-const siteKeys = (hits) => { const seen = new Map(); return hits.map((h) => { const b = `${h.file}\0${h.fn}\0${h.rule}`; const n = seen.get(b) ?? 0; seen.set(b, n + 1); return `${b}\0${n}\0${h.site}`; }); };
+/** Each hit's site key: file, function, rule, its ordinal among same-(file, function, rule) hits in order, its complete invocation and its context. */
+const siteKeys = (hits) => { const seen = new Map(); return hits.map((h) => { const b = `${h.file}\0${h.fn}\0${h.rule}`; const n = seen.get(b) ?? 0; seen.set(b, n + 1); return `${b}\0${n}\0${h.site}\0${h.ctx}`; }); };
 /** unexplained: hits no entry names; stale: entries no hit matches. */
 function allowVerdict(hits, allowed = ALLOWED_SITES) {
   const keys = siteKeys(hits);
-  const want = allowed.map(([f, fn, r, n, text]) => `${f}\0${fn}\0${r}\0${n}\0${text}`);
+  const want = allowed.map(([f, fn, r, n, text, ctx]) => `${f}\0${fn}\0${r}\0${n}\0${text}\0${ctx}`);
   return { unexplained: keys.filter((x) => !want.includes(x)), stale: want.filter((x) => !keys.includes(x)) };
 }
 
@@ -1176,24 +1636,33 @@ test('T4a: no listed lossy decode form appears in the scanned lib outside the st
   const files = SCANNED;
   const hits = files.flatMap((f) => decodeSites(f, readFileSync(join(here, f), 'utf8'), SCANNED));
   assert.deepEqual(hits.filter((h) => h.rule === 'unclassifiable'), [], 'no site the checker cannot classify (fail closed; never allowlisted)');
+  assert.deepEqual(files.flatMap((f) => grammarSites(f, readFileSync(join(here, f), 'utf8')).hits), [], 'the grammar layer (the soundness gate) refuses nothing');
   const { unexplained, stale } = allowVerdict(hits);
   assert.deepEqual(unexplained, []);
   assert.deepEqual(stale, [], 'every allowlist entry matches a real site');
   assert.ok(!ALLOWED_SITES.some(([, , r]) => r === 'unclassifiable'));
   // One more site of an allowlisted rule in the same function is a new ordinal, so it is unexplained.
   const extra = allowVerdict([...hits, { ...hits.find((h) => h.fn === 'parseGitVersion' && h.rule === 'decoder-api'), pos: Infinity }]);
-  assert.deepEqual(extra.unexplained, ["git-capability.mjs\0parseGitVersion\0decoder-api\x001\0bytes.toString('latin1')"]);
+  const CTX = "\0const m = VERSION.exec(bytes.toString('latin1'));";
+  assert.deepEqual(extra.unexplained, [`git-capability.mjs\0parseGitVersion\0decoder-api\x001\0bytes.toString('latin1')${CTX}`]);
   // Swapping an allowlisted site for another of the same rule in the same function changes its invocation, so it fails.
   const swapped = allowVerdict(hits.map((h) => (h.text === "'latin1'" ? { ...h, site: "bytes.toString('utf8')" } : h)));
-  assert.deepEqual([swapped.unexplained, swapped.stale], [["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('utf8')"], ["git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('latin1')"]]);
+  assert.deepEqual([swapped.unexplained, swapped.stale], [[`git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('utf8')${CTX}`], [`git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('latin1')${CTX}`]]);
+  // The context is pinned too: the same invocation moved to another statement (here: its result returned
+  // instead of matched) leaves function, rule, ordinal and invocation unchanged, but no allowlisted context.
+  const moved = decodeSites('git-capability.mjs', readFileSync(join(here, 'git-capability.mjs'), 'utf8').replace("const m = VERSION.exec(bytes.toString('latin1'));", "const m = VERSION.exec(''); if (!m) return bytes.toString('latin1');"), SCANNED);
+  assert.deepEqual(allowVerdict([...hits.filter((h) => h.file !== 'git-capability.mjs'), ...moved]).unexplained, [
+    "git-capability.mjs\0parseGitVersion\0decoder-api\x000\0bytes.toString('latin1')\0return bytes.toString('latin1');",
+    "git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0bytes.toString('latin1')\0return bytes.toString('latin1');",
+  ]);
   // The complete invocation is pinned, not just the member: dropping the decode's argument (the review's
   // `bytes.toString() || 'latin1'`) leaves both literal and member in parseGitVersion, but no allowlisted invocation.
   const capSrc = readFileSync(join(here, 'git-capability.mjs'), 'utf8');
   assert.equal(capSrc.split("bytes.toString('latin1')").length, 2, 'the allowlisted decode site is in git-capability.mjs once');
   const argless = decodeSites('git-capability.mjs', capSrc.replace("bytes.toString('latin1')", "bytes.toString() || 'latin1'"), SCANNED);
   assert.deepEqual(allowVerdict([...hits.filter((h) => h.file !== 'git-capability.mjs'), ...argless]).unexplained, [
-    'git-capability.mjs\0parseGitVersion\0decoder-api\x000\0bytes.toString()',
-    "git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0VERSION.exec(bytes.toString() || 'latin1')",
+    "git-capability.mjs\0parseGitVersion\0decoder-api\x000\0bytes.toString()\0const m = VERSION.exec(bytes.toString() || 'latin1');",
+    "git-capability.mjs\0parseGitVersion\0encoding-literal\x001\0VERSION.exec(bytes.toString() || 'latin1')\0const m = VERSION.exec(bytes.toString() || 'latin1');",
   ]);
   assert.ok(hits.some((h) => h.file === 'git-exec.mjs' && h.rule === 'decoder-api' && h.fn === '<module>'), 'positive control: the decoder site itself was seen');
   // L10: a CRLF checkout (Windows) gives the same verdict.
@@ -1297,6 +1766,11 @@ const RESOLVE = [
   ["import r from 'data:text/javascript,export default 1';", U], ["import { r } from './GIT-EXEC.mjs';", U], ["import { r } from 'node:fs?x';", U],
   ["import { r } from './sub/';", U], ["import { r } from './m.test.mjs';", U],
   ["import { r } from 'file:git-exec.mjs';", U], ["import { r } from 'file:./git-exec.mjs';", U], ["export * from 'file:sub/x.mjs';", U],
+  // round 6 (codex r5 #2): an inherited dictionary name is not a watched builtin (the table is a Map)
+  ...['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable',
+    'toString', 'valueOf', '__proto__', 'toLocaleString'].map((x) => [`import '${x}';`, U]),
+  // round 6 (opus r5 B1): a compound or logical assignment reads the name, so a refused global stays refused
+  ['Function ||= 0;', U], ['eval ??= 0;', U], ['process += 1;', U], ['Buffer ||= 0;', U], ['Reflect &&= 0;', U],
 ];
 const RESOLVE_FINE = ["import { decodeStrict } from './sub/%2e%2e/git-exec.mjs';", "import { decodeStrict } from './git%2Dexec.mjs';",
   "import { decodeStrict } from './git-exec.mjs?v=1#f';", "export * from './sub/../sub/x.mjs';",
@@ -1332,12 +1806,15 @@ const COMPUTED = [
   ["const o = Object.freeze({ A: 'a' }); o[k];", U], ['const o = Object.freeze({ __proto__: null, ...p }); o[k];', U],
   ["const o = Object.freeze({ __proto__: null, A: 'a' }); const Object = q; o[k];", U],
   ["const o = Object.assign({ __proto__: null, A: 'a' }); o[k];", U], ["const o = f({ __proto__: null, A: 'a' }); o[k];", U],
+  // round 6: the frozen-table exemption is gone (its spelling was trusted, codex r5 #1; module-wide, opus r5 M1), so a
+  // read through a non-numeric key is refused whatever the table looks like (this was a FINE fixture in round 5).
+  ["const o = Object.freeze({ __proto__: null, A: 'a', B: 1 }); const v = o[k] ?? 'z';", U],
 ];
 const COMPUTED_FINE = ['for (let i = 0; i < n; i++) x[i];', 'for (let i = 0; x[i]; i++);', 'for (let i = 0; i < 3; i++) if (a[i] !== b[i]) f(a[i] > b[i]);',
-  'x[b >> 4]; x[b & 15]; x[-1]; x[n - 1]; x[i++]; x[~i]; x[+k]; x[2n];', 'delete o[k];', 'o[k] = v;', "const o = Object.freeze({ __proto__: null, A: 'a', B: 1 }); const v = o[k] ?? 'z';",
+  'x[b >> 4]; x[b & 15]; x[-1]; x[n - 1]; x[i++]; x[~i]; x[+k]; x[2n];', 'delete o[k];', 'o[k] = v;',
   OWN_VALUE, "Object.defineProperty(this, 'name', { value: 'n', enumerable: false });", 'class C { constructor(a) { this.a = a; } }', 'const o = Object.freeze(Object.keys(p).map(Object.freeze));'];
 // What the coverage statement declares NOT CHECKED: asserted to give no hit, so the statement stays true.
-const UNCHECKED = ['const s = `${buf}`;', "const s = buf + '';", 'const s = [buf].join();', 'const o = JSON.parse(buf);', 'const s = String.fromCharCode(...buf);',
+const UNCHECKED = ['const s = `${buf}`;', "const s = buf + '';", 'const s = [buf].join();', 'const s = [buf].sort();', "const s = 'a'.startsWith(buf);", 'const o = JSON.parse(buf);', 'const s = String.fromCharCode(...buf);',
   'const m = re.exec(buf);', "import path from 'node:path';\nconst r = path.resolve('x');"];
 const FINE = [...RESOLVE_FINE, ...COMPUTED_FINE, '// buf.toString() in a comment', "const n = decodeStrict(buf, 'path_not_utf8');",
   "const r = realpathSync.native(dir, { encoding: 'buffer' });", "const l = readdirSync(dir, { encoding: 'buffer' });", 'const s = statSync(cwd);',
@@ -1360,11 +1837,11 @@ test('T4a checker flags every planted form and reviewer escape with exactly its 
   assert.deepEqual(fns.map((h) => h.fn), ['o.f', 'g.h', 'C.m'], 'sites are keyed by their enclosing named functions');
 });
 
-test('T4a scans lib/ recursively and skips only *.test.mjs', (t) => {
+test('T4a partitions every lib/ JS module (.mjs, .cjs, .js, recursively) and skips only *.test.*', (t) => {
   const d = tmp(t);
   mkdirSync(join(d, 'sub', 'deeper'), { recursive: true });
-  for (const f of ['a.mjs', 'a.test.mjs', 'n.js', 'sub/b.mjs', 'sub/deeper/c.mjs', 'sub/b.test.mjs']) writeFileSync(join(d, f), '');
-  assert.deepEqual(libModules(d), ['a.mjs', 'sub/b.mjs', 'sub/deeper/c.mjs']);
+  for (const f of ['a.mjs', 'a.test.mjs', 'n.js', 'c.cjs', 'c.test.cjs', 'r.md', 'sub/b.mjs', 'sub/deeper/c.mjs', 'sub/b.test.mjs', 'sub/b.test.js']) writeFileSync(join(d, f), '');
+  assert.deepEqual(libModules(d), ['a.mjs', 'c.cjs', 'n.js', 'sub/b.mjs', 'sub/deeper/c.mjs']);
 });
 
 test('T4a: every non-test lib/ module is either scanned or named out of scope with a reason, and the out-of-scope git-output finding is real', () => {
@@ -1410,7 +1887,7 @@ x = a ? b : c; x = a || b; x = a + b; x = -a; x++; x = (a, b); x = t\`s\${1}\`; 
   ['with (o) { x; }', { sourceType: 'script' }],
 ];
 
-test('T4a: the walker is closed over acorn\'s grammar: every node type acorn can produce is classified, and nothing else is', () => {
+test('T4a layer 2: the legacy walker\'s type table classifies exactly the node types acorn can produce (rule, walk or fail)', () => {
   assert.ok(acorn, 'the vendored acorn failed its integrity check (UPSTREAM.json)');
   const types = acornNodeTypes();
   assert.equal(types.size, 73, `acorn ${UPSTREAM.version} produces 73 node types (re-derive NODE_RULES on any upgrade)`);
@@ -1430,33 +1907,433 @@ test('T4a: the walker is closed over acorn\'s grammar: every node type acorn can
   assert.deepEqual(decodeSites('m.mjs', 'x;', FIXTURE_SET, { ...NODE_RULES, ExpressionStatement: 'fail' }).map((h) => [h.rule, h.why]), [['unclassifiable', 'ExpressionStatement is refused']]);
 });
 
-test('T4a: the vendored acorn is test-only: no runtime module of the skill references or imports vendor/', () => {
-  const skill = join(here, '..', '..');
-  const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? (d.name === 'vendor' || d.name === 'node_modules' ? [] : files(join(dir, d.name)))
-    : /\.(?:mjs|cjs|js)$/.test(d.name) ? [join(dir, d.name)] : []));
-  const runtime = files(skill).filter((f) => !/\.test\.mjs$|\.test-helper\.mjs$/.test(f));
-  /** Every literal specifier (import, export-from, import(), require) resolved to a path, and every string piece. */
-  const refs = (f) => {
-    const src = readFileSync(f, 'utf8');
-    let ast;
-    try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true }); } catch { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true }); }
-    const specs = [];
-    const strings = [];
-    walk(ast, (n) => {
-      if (/^(?:Import|ExportAll|ExportNamed)Declaration$|^ImportExpression$/.test(n.type) && n.source?.type === 'Literal') specs.push(n.source.value);
-      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'require' && n.arguments[0]?.type === 'Literal') specs.push(n.arguments[0].value);
-      if (n.type === 'Literal' && typeof n.value === 'string') strings.push(n.value);
-      if (n.type === 'TemplateElement') strings.push(n.value.cooked ?? '');
-    });
-    const paths = specs.filter((x) => /^\.{0,2}\//.test(x)).map((x) => fileURLToPath(new URL(x, pathToFileURL(f))));
-    return { paths, strings };
+// ------------------------------------------------------------------ T4a grammar layer: tests
+
+/** Every entry of the grammar tables, as the `used` keys the descent records when it admits that entry. */
+function grammarEntries() {
+  const e = new Set(['proto:null', 'computed:numeric', 'super()', 'assign:this']);
+  for (const t of GRAMMAR_TYPES) e.add(`type:${t}`);
+  for (const [type, ops] of GRAMMAR_OPS) for (const o of ops) e.add(`op:${type}:${o}`);
+  for (const [name, g] of GRAMMAR_GLOBALS) {
+    e.add(`global:${name}`);
+    for (const m of g.members?.keys() ?? []) e.add(`global:${name}.${m}`);
+    for (const [flag, pos] of [['call', 'callee'], ['new', 'new'], ['newSrc', 'new'], ['value', 'value'], ['instanceof', 'instanceof'], ['extends', 'extends']]) if (g[flag]) e.add(`global:${name}:${pos}`);
+  }
+  for (const [file, specs] of GRAMMAR_IMPORTS) {
+    for (const [spec, names] of specs) {
+      for (const [name, u] of names) {
+        e.add(`import:${file}:${spec}:${name}`);
+        if (/^(?:member|callMember):/.test(u)) e.add(`import-member:${name}.${u.split(':')[1]}`);
+      }
+    }
+  }
+  for (const m of GRAMMAR_MEMBERS) e.add(`member:${m}`);
+  for (const m of GRAMMAR_SITE_PINNED.keys()) e.add(`pinned:${m}`);
+  for (const k of GRAMMAR_METHOD_KEYS) e.add(`method:${k}`);
+  return e;
+}
+
+test('T4a grammar: the guarded files are written in the allowlisted grammar, and every allowlist entry is used by them (no slack)', () => {
+  const used = new Set();
+  for (const f of SCANNED) {
+    for (const nl of ['\n', '\r\n']) {
+      const r = grammarSites(f, readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, nl));
+      assert.deepEqual(r.hits, [], `${f} (${nl === '\n' ? 'LF' : 'CRLF'})`);
+      r.used.forEach((x) => used.add(x));
+    }
+  }
+  const entries = grammarEntries();
+  assert.deepEqual([...entries].filter((x) => !used.has(x)).sort(), [], 'an allowlist entry no guarded file uses (remove it)');
+  assert.deepEqual([...used].filter((x) => !entries.has(x)).sort(), [], 'a use the tables do not list');
+  // The member allowlist names nothing reflective, call-forwarding or decoding (the site-pinned decoders are separate).
+  const FORBIDDEN = /^(?:call|apply|bind|caller|callee|arguments|valueOf|toJSON|text|json|arrayBuffer|blob|formData|readAsText)$/;
+  assert.deepEqual([...GRAMMAR_MEMBERS].filter((m) => REFLECT_NAME.test(m) || DECODER_NAME.test(m) || FORBIDDEN.test(m) || GRAMMAR_SITE_PINNED.has(m)), []);
+  // No declared name of a guarded file is a global name (the rule is live on this Node, not vacuous).
+  assert.ok(RESERVED_NAME('constructor') && RESERVED_NAME('Function') && RESERVED_NAME('fetch') && RESERVED_NAME('Object') && !RESERVED_NAME('ownValue'));
+});
+
+// Each refused module (checked as git-exec.mjs, so its import table applies) must give a grammar refusal whose reason
+// matches. The reviewers' round-5 findings come first, verbatim or as complete modules.
+const GRAMMAR_REFUSED = [
+  // codex r5 #1: the frozen-table spelling was trusted; here every step is refused on its own
+  ["Object.freeze = () => () => {};\nconst T = Object.freeze({ __proto__: null, A: 1 });\nconst k = ['con', 'structor'].join('');\nconst F = T[k];\nF('b', 'return b.toString()')(Buffer.from([0xff]));", /assignment target/],
+  ["const T = Object.freeze({ __proto__: null, A: 1 });\nconst k = ['con', 'structor'].join('');\nconst F = T[k];", /not provably numeric/],
+  ['const f = () => () => 0;\nf()();', /a call of a CallExpression/],
+  // codex r5 #2: inherited dictionary names as specifiers (all 12)
+  ...['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable',
+    'toString', 'valueOf', '__proto__', 'toLocaleString'].map((x) => [`import '${x}';`, /not an allowlisted specifier/]),
+  // opus r5 B1: compound or logical assignment to a refused global
+  ['Function ||= 0;', /operator \|\|=|free identifier Function/], ['TextDecoder ??= 0;', /operator \?\?=/], ["process += '';", /operator \+=/], ['Reflect &&= 0;', /operator &&=/],
+  ['Buffer ||= 0;', /operator \|\|=/], ['Function = 0;', /assignment to Function/], ['globalThis = 0;', /assignment to globalThis/],
+  // opus r5 M1: a block-scoped shadow; and any declaration that shadows a global
+  ["const T = Object.freeze({ __proto__: null, A: 'a' });\nconst k = 'constructor';\n{ const T = () => {}; T[k]; }", /not provably numeric/],
+  ['{ const Object = { freeze: (x) => x }; }', /declaration of Object/], ['function f(Buffer) { return Buffer; }', /declaration of Buffer/],
+  ['const constructor = 1;', /declaration of constructor/], ['let toString = 1;', /declaration of toString/], ['const fetch = 1;', /declaration of fetch/],
+  ['try { } catch (globalThis) { }', /declaration of globalThis/], ['class Function { }', /declaration of Function/],
+  // opus r5 M2: writes to members of Object or Buffer
+  ['Object.freeze = (x) => x;', /assignment target/], ['Buffer.from = (x) => x;', /assignment target/], ['Object.keys.x = 1;', /assignment target/],
+  // opus r5 M3: decoders the old deny list missed (an allowlist refuses every unlisted global)
+  ["const r = new Request('x');", /free identifier Request/], ["fetch('x');", /free identifier fetch/], ['const r = new Response(Buffer.from([0]));', /free identifier Response/],
+  ['const b = new Blob([]);', /free identifier Blob/], ["atob('x');", /free identifier atob/], ['const d = new TextDecoderStream();', /free identifier TextDecoderStream/],
+  ['structuredClone(0);', /free identifier structuredClone/], ["new Function('x');", /free identifier Function/], ["eval('x');", /free identifier eval/],
+  ['globalThis.x;', /free identifier globalThis/], ['Reflect.ownKeys({});', /free identifier Reflect/], ['const p = new Proxy({}, {});', /free identifier Proxy/],
+  ['const c = constructor;', /free identifier constructor/], ['const t = toString;', /free identifier toString/],
+  // opus r5: computed-key write, delete, call and new through a computed member; tagged template
+  ["const o = {};\nconst p = 'toString';\no[p] = Buffer.from('x');", /assignment target/], ['const o = {};\nconst p = 0;\no[p] = 1;', /assignment target/],
+  ["const o = { a: 1 };\ndelete o.a;", /operator delete/], ["const o = {};\nconst k = 'f';\no[k]();", /computed member used as callee/],
+  ['const o = [];\no[0]();', /computed member used as callee/], ["const o = {};\nconst k = 'C';\nnew o[k]();", /new through a MemberExpression/],
+  ['const f = () => 0;\nnew (f())();', /new through a CallExpression/], ['String.raw`x`;', /TaggedTemplateExpression/], ['const t = (s) => s;\nt`x`;', /TaggedTemplateExpression/],
+  // imports: exact specifier and name, unrenamed, declared once
+  ["import { spawnSync as s } from 'node:child_process';", /renamed/], ["import { execSync } from 'node:child_process';", /export execSync is not allowlisted/],
+  ["import { probeGit } from './git%2Dcapability.mjs';", /not an allowlisted specifier/], ["import { probeGit } from './git-capability.mjs?x';", /not an allowlisted specifier/],
+  ["import * as fs from 'node:fs';", /ImportNamespaceSpecifier/], ["import { statSync } from 'node:fs' with { type: 'json' };", /import attributes/],
+  ["import { statSync } from 'node:fs';\n{ const statSync = 1; }", /redeclared/], ["import 'node:fs';", /side-effect import/],
+  ["import path from 'node:path';", /not an allowlisted specifier/],
+  // import uses
+  ["import { statSync } from 'node:fs';\nconst s = statSync;", /import statSync used as value/], ["import { probeGit } from './git-capability.mjs';\nprobeGit.x;", /import probeGit used as object/],
+  ["import { spawnSync } from 'node:child_process';\nspawnSync('g', [], { encoding: 'utf8' });", /spawnSync other than/],
+  ["import { spawnSync } from 'node:child_process';\nspawnSync('g', []);", /spawnSync other than/], ["import { spawnSync } from 'node:child_process';\nconst a = [];\nspawnSync('g', a, {});", /spawnSync other than/],
+  ["import { spawnSync } from 'node:child_process';\nconst o = {};\nspawnSync('g', [], o);", /spawnSync other than/],
+  ["import { spawnSync } from 'node:child_process';\nconst o = {};\nspawnSync('g', [], { ...o });", /spawnSync other than/],
+  ["import { spawnSync } from 'node:child_process';\nconst k = 'encoding';\nspawnSync('g', [], { [k]: 'utf8' });", /spawnSync other than|computed object key/],
+  ["import { spawnSync } from 'node:child_process';\nconst o = {};\nspawnSync('g', [], { __proto__: o });", /spawnSync other than/],
+  ["import { spawnSync } from 'node:child_process';\nconst a = [];\nspawnSync(...a);", /spawnSync other than/],
+  // exports
+  ['const a = 1;\nexport { a };', /an export other than/], ["export * from './git-capability.mjs';", /ExportAllDeclaration/], ['export default 1;', /ExportDefaultDeclaration/],
+  // globals in a form they do not allow
+  ['foo;', /free identifier foo/], ['const O = Object;', /global Object used as value/], ['const o = {};\nObject.getPrototypeOf(o);', /Object.getPrototypeOf is not allowlisted/],
+  ['Object.assign({}, {});', /Object.assign is not allowlisted/], ['Buffer.alloc(1);', /Buffer.alloc is not allowlisted/], ["process.binding('fs');", /process.binding is not allowlisted/],
+  ['process.mainModule;', /process.mainModule is not allowlisted/], ['const k = Object.keys;', /Object.keys used as value/], ['const c = process.cwd;', /process.cwd used as value/],
+  ['String.raw;', /String.raw is not allowlisted/], ["const s = new String('x');", /global String used as new/], ['Map();', /global Map used as callee/],
+  ['const o = {};\no instanceof Object;', /global Object used as instanceof/], ['class A extends Object { }', /global Object used as extends/],
+  ["const t = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true });", /new TextDecoder other than exactly/], ['const t = new TextDecoder();', /new TextDecoder other than exactly/],
+  ["const t = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true, x: 1 });", /new TextDecoder other than exactly/],
+  ['Symbol.for;', /Symbol.for used as value/], ['Number.isSafeInteger;', /used as value/], ['const u = Infinity.x;', /global Infinity used as object/],
+  // the two pinned reflective productions, and nothing else
+  ["const o = {};\nObject.getOwnPropertyDescriptor(o, 'x');", /outside the own-data reader production/],
+  [`const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue2 = ${OWN_VALUE_SRC};`, /outside the own-data reader production/],
+  [`const own = (o, k) => Object.hasOwn(o, k);\nfunction g() { const ownValue = ${OWN_VALUE_SRC}; return ownValue; }`, /outside the own-data reader production/],
+  [`const own = (o, k) => Object.hasOwn(o, k);\nlet ownValue = ${OWN_VALUE_SRC};`, /outside the own-data reader production/],
+  [`const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue = ${OWN_VALUE_SRC.replace('d.value :', 'd.get :')};`, /outside the own-data reader production|member \.get/],
+  ["const o = {};\nObject.defineProperty(o, 'name', { value: 1 });", /pinned constructor form/], ["function f() { Object.defineProperty(this, 'name', { value: 1 }); }", /pinned constructor form/],
+  ["class A { constructor() { Object.defineProperty(this, 'name', { get: () => 1 }); } }", /pinned constructor form/],
+  ["class A { constructor() { Object.defineProperty(this, 'constructor', { value: 1 }); } }", /pinned constructor form/],
+  // members: only the allowlist; reflective, forwarding and decoding names are not on it
+  ...['constructor', '__proto__', 'prototype', 'call', 'apply', 'bind', 'text', 'valueOf', 'toJSON', 'toLocaleString', 'utf8Slice', 'setEncoding', 'caller', 'arguments']
+    .map((m) => [`const x = {};\nx.${m};`, new RegExp(`member \\.${m} is not allowlisted`)]),
+  ['class A { #p = 1; m() { return this.#p; } }', /PropertyDefinition|private member/], ['class A extends Error { toJSON() { return super.message; } }', /super member/],
+  // destructuring keys are member reads
+  ['const x = {};\nconst { constructor: c } = x;', /destructuring key constructor/], ["const x = {};\nconst k = 'a';\nconst { [k]: v } = x;", /not a plain name/],
+  // assignment targets: a local name, or this.<member> in a constructor
+  ['const x = {};\nx.code = 1;', /assignment target/], ['function f() { this.code = 1; }', /assignment target/], ['class A { constructor() { this.foo = 1; } }', /assignment target/],
+  ['undeclared = 1;', /assignment to undeclared/], ["import { statSync } from 'node:fs';\nstatSync = 1;", /assignment to statSync/],
+  ['let a = 1;\na += 1;', /operator \+=/], ['let a = 1;\na ||= 1;', /operator \|\|=/], ['let a = 1;\n[a] = [1];', /assignment target/], ['let a = 1;\n({ a } = { a: 2 });', /assignment target/],
+  ['const x = { y: 1 };\nx.y++;', /an update of something other than a local name/], ['let i = 0;\ni--;', /operator --/], ['Infinity++;', /an update of something other than a local name/],
+  // operators outside the list
+  ['void 0;', /operator void/], ['let x = 1;\nx = -x;', /operator -/], ['let x = 1;\nx = ~x;', /operator ~/], ["const o = {};\n'a' in o;", /operator in/],
+  ['let a = 1;\na == 1;', /operator ==/], ['let a = 1;\na = a - 1;', /operator -/],
+  // calls and new
+  ['const f = () => 0;\n(0, f)();', /SequenceExpression/], ['const f = () => 0;\nconst g = f;\n(f || g)();', /a call of a LogicalExpression/], ['const o = { C: class {} };\nnew o.C();', /new through a MemberExpression|ClassExpression/],
+  ['function f() { super.x(); }', /super member|'super' keyword/],
+  // functions, classes and objects
+  ['async function f() { }', /async or generator/], ['function* g() { }', /async or generator/], ['const f = async () => 1;', /async or generator/],
+  ['class A { get x() { return 1; } }', /kind get/], ['class A { static m() { } }', /class member/], ['class A { x = 1; }', /PropertyDefinition/], ['class A { static { } }', /StaticBlock/],
+  ["class A { ['toJSON']() { } }", /computed class member key/], ['class A { foo() { } }', /class method foo is not allowlisted/],
+  ["class A { [Symbol.for(String('x'))]() { } }", /computed class member key/],
+  ['const o = { get x() { return 1; } };', /object getter/], ["const k = 'a';\nconst o = { [k]: 1 };", /computed object key/], ['const p = {};\nconst o = { __proto__: p };', /__proto__ other than null/],
+  ["const p = {};\nconst o = { '__proto__': p };", /__proto__ other than null/],
+  // statements and expressions outside the grammar
+  ['var v = 1;', /a var declaration/], ['while (false) { }', /WhileStatement/], ['do { } while (false);', /DoWhileStatement/], ['for (const k in {}) { }', /ForInStatement/],
+  ['switch (1) { case 1: }', /SwitchStatement/], ['l: for (const x of []) continue l;', /LabeledStatement/], ['for (const x of []) break;', /BreakStatement/], ['debugger;', /DebuggerStatement/],
+  [';', /EmptyStatement/], ['let x = 0;\nfor (x of []) { }', /for-of head/], ['await 0;', /AwaitExpression/], ['function* g() { yield 1; }', /async or generator/],
+  ["import('node:fs');", /ImportExpression/], ['const u = import.meta;', /MetaProperty/], ['function f() { return new.target; }', /MetaProperty/], ['const C = class { };', /ClassExpression/],
+  ['const a = (1, 2);', /SequenceExpression/], ['with (o) { }', /parse error/], ['function f() { super(); }', /super/],
+];
+// Supported forms that must give no grammar refusal (each a complete module, checked as git-exec.mjs).
+const GRAMMAR_FINE = [
+  `const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue = ${OWN_VALUE_SRC};\nownValue({ a: 1 }, 'a');`,
+  "class E extends Error { constructor(c) { super(c); Object.defineProperty(this, 'name', { value: 'E', enumerable: false }); this.code = c; } toJSON() { return { code: this.code }; } [Symbol.for('nodejs.util.inspect.custom')]() { return 'E'; } }",
+  'const x = [1, 2];\nfor (let i = 0; i < x.length; i++) if (x[i]) continue;',
+  "import { spawnSync } from 'node:child_process';\nimport { probeGit } from './git-capability.mjs';\nconst r = spawnSync(probeGit().path, ['--version'], { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });",
+  "import { statSync } from 'node:fs';\nlet isDir = false;\ntry { isDir = statSync('/').isDirectory(); } catch { /* refused */ }",
+  "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });\nconst s = DECODER.decode(Buffer.from([0x61]));",
+  "const m = new Map([['a', 'b']]);\nconst v = m.get('a') ?? 'c';\nconst w = new WeakMap();\nconst st = new Set(['x']);",
+  'const b = Buffer.from([1]);\nconst isBytes = b instanceof Uint8Array && Buffer.isBuffer(b) && Array.isArray([]) && Number.isSafeInteger(1);',
+  "export function f({ platform = process.platform } = {}) { return platform === 'win32' ? process.env : Infinity; }",
+  'const o = { __proto__: null, ...Object.fromEntries(Object.entries({ a: 1 })) };\nconst p = Object.freeze([o].map(Object.freeze));',
+  "const HEX = '0123456789abcdef';\nexport const label = (bytes) => [...bytes].map((b) => (b < 0x7f ? String.fromCharCode(b) : `\\\\x${HEX[b >> 4]}${HEX[b & 15]}`)).join('');",
+  'const xs = [[1, 2]];\nconst [[a, b]] = xs;\nconst { length, ...rest } = xs;\nconst t = typeof a === `number` && !b && +a > 0 && a * 2 >= 1 && a !== b;',
+  "const s = 'a';\nconst ok = s?.startsWith('a') || [].filter(Boolean).length <= 0;",
+];
+
+test('T4a grammar: each refusal class has counterexamples (every round-5 reviewer finding among them), and supported forms pass', () => {
+  assert.ok(GRAMMAR_REFUSED.length > 150);
+  const wrong = GRAMMAR_REFUSED.map(([src, why]) => [src, grammarSites('git-exec.mjs', src).hits.map((h) => h.why)])
+    .filter(([src, whys], i) => !whys.some((w) => GRAMMAR_REFUSED[i][1].test(w)));
+  assert.deepEqual(wrong, [], 'each case: [source, the grammar refusals it got] (none matched the expected class)');
+  assert.deepEqual(GRAMMAR_FINE.map((src) => [src, grammarSites('git-exec.mjs', src).hits.map((h) => h.why)]).filter(([, w]) => w.length), []);
+  // The import table is per file: a specifier allowed for git-capability.mjs is refused for git-exec.mjs, and a module
+  // outside the guarded set has no imports at all.
+  assert.deepEqual(grammarSites('git-capability.mjs', "import path from 'node:path';\npath.sep;").hits, []);
+  assert.ok(grammarSites('m.mjs', "import { statSync } from 'node:fs';\nstatSync('/');").hits.some((h) => /not an allowlisted specifier for m\.mjs/.test(h.why)));
+});
+
+// One module per acorn node type the grammar refuses, each parsing to that type (or, for `with`, failing to parse).
+const GRAMMAR_REFUSED_TYPES = {
+  AwaitExpression: 'await 0;', BreakStatement: 'for (const x of []) break;', ClassExpression: 'const C = class {};', DebuggerStatement: 'debugger;',
+  DoWhileStatement: 'do {} while (false);', EmptyStatement: ';', ExportAllDeclaration: "export * from './git-capability.mjs';", ExportDefaultDeclaration: 'export default 1;',
+  ExportSpecifier: 'const a = 1;\nexport { a };', ForInStatement: 'for (const k in {}) {}', ImportAttribute: "import { statSync } from 'node:fs' with { type: 'json' };",
+  ImportExpression: "import('node:fs');", ImportNamespaceSpecifier: "import * as fs from 'node:fs';", LabeledStatement: 'l: for (const x of []) continue l;',
+  MetaProperty: 'const u = import.meta;', PrivateIdentifier: 'class A { #p; }', PropertyDefinition: 'class A { x = 1; }', SequenceExpression: 'const a = (1, 2);',
+  StaticBlock: 'class A { static {} }', SwitchCase: 'switch (1) { case 1: }', SwitchStatement: 'switch (1) {}', TaggedTemplateExpression: 'String.raw`x`;',
+  WhileStatement: 'while (false) {}', WithStatement: 'with (o) {}', YieldExpression: 'function* g() { yield 1; }',
+  // acorn builds this type only under preserveParens, which the grammar's parse never sets: `(0)` parses to a Literal.
+  ParenthesizedExpression: '(0);',
+};
+test('T4a grammar: every node type acorn can produce is either admitted (and used by the guarded files) or refused wherever it appears', () => {
+  const types = acornNodeTypes();
+  const admitted = [...GRAMMAR_TYPES];
+  const refused = Object.keys(GRAMMAR_REFUSED_TYPES);
+  assert.deepEqual([...admitted, ...refused].sort(), [...types].sort(), 'the two lists partition acorn\'s 73 types');
+  assert.equal(new Set([...admitted, ...refused]).size, admitted.length + refused.length, 'and are disjoint');
+  for (const [type, src] of Object.entries(GRAMMAR_REFUSED_TYPES)) {
+    const hits = grammarSites('git-exec.mjs', src).hits;
+    if (type === 'ParenthesizedExpression') {
+      assert.deepEqual(hits, []);
+      let present = false;
+      walk(acorn.parse(src, PARSE), (n) => { if (n.type === type) present = true; });
+      assert.equal(present, false, 'the grammar parse never yields ParenthesizedExpression');
+      continue;
+    }
+    if (type === 'WithStatement') { assert.match(hits[0]?.why ?? '', /parse error/); continue; }
+    let present = false;
+    walk(acorn.parse(src, PARSE), (n) => { if (n.type === type) present = true; });
+    assert.ok(present, `${type}: the fixture parses to that type (not vacuous)`);
+    assert.ok(hits.length > 0, `${type} is refused`);
+  }
+  // Admitted types are the ones the guarded files use (the tightness test checks it entry by entry).
+  assert.equal(admitted.length, 47);
+});
+
+// Each grammar-capable decode is ALSO a legacy-rule hit, so ALLOWED_SITES pins every site of it (the layer link).
+const LAYER_LINK = [
+  ['member .toString', 'x.toString();', 'decoder-api'], ['member .realpath', 'seam.realpath(d);', 'name-api-no-buffer'],
+  ['realpathSync.native(...)', 'realpathSync.native(p);', 'name-api-no-buffer'], ['String(...)', 'String(b);', 'string-coercion'],
+  ['process.cwd()', 'process.cwd();', 'cwd'], ['new TextDecoder(...)', "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'decoder-api'],
+];
+test('T4a grammar: every decode-capable form the grammar admits is a legacy-rule hit, so only an ALLOWED_SITES entry can admit it', () => {
+  for (const [what, src, rule] of LAYER_LINK) assert.ok(rulesOf(src).includes(rule), `${what} -> ${rule}`);
+  assert.deepEqual([...GRAMMAR_SITE_PINNED].map(([m, rule]) => [m, LAYER_LINK.find(([w]) => w === `member .${m}`)?.[2]]), [...GRAMMAR_SITE_PINNED]);
+  assert.equal(GRAMMAR_GLOBALS.get('String').call, true);
+  assert.equal(GRAMMAR_GLOBALS.get('process').members.get('cwd'), 'call');
+  assert.equal(GRAMMAR_IMPORTS.get('git-capability.mjs').get('node:fs').get('realpathSync'), 'callMember:native');
+});
+
+// [form, the refusal reason it must raise in place, top level only]: grammar counterexamples injected into the real sources.
+const GRAMMAR_INJECT = [
+  ['Object.freeze = (x) => x;', /assignment target/], ['Function ||= 0;', /operator \|\|=/], ["{ const r__ = new Request('x'); }", /free identifier Request/],
+  ["fetch('x');", /free identifier fetch/], ["{ const o__ = {}; const k__ = 'toString'; o__[k__] = 1; }", /assignment target/],
+  ["{ const o__ = {}; const k__ = 'constructor'; const f__ = o__[k__]; }", /not provably numeric/], ['String.raw`x`;', /TaggedTemplateExpression/],
+  ["{ const o__ = {}; const k__ = 'C'; const c__ = new o__[k__](); }", /new through a MemberExpression/], ['{ const Object = 1; }', /declaration of Object/],
+  ["{ const x__ = {}; const c__ = x__.constructor; }", /member \.constructor/], ['{ let a__ = 1; a__ += 1; }', /operator \+=/],
+  ["{ const t__ = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }); }", /new TextDecoder other than exactly/],
+  ["import 'constructor';", /not an allowlisted specifier/, true], ["import { execSync } from 'node:child_process';", /not allowlisted/, true],
+  ["export * from './git-capability.mjs';", /ExportAllDeclaration/, true],
+];
+test('T4a grammar property: each counterexample injected at seeded random statement boundaries of the guarded sources is refused in place', () => {
+  const SEED = 0x6a0b6;
+  const rnd = prng(SEED);
+  const RUNS = 6;
+  let checked = 0;
+  for (const f of SCANNED) {
+    for (const nl of ['\n', '\r\n']) {
+      const src = readFileSync(join(here, f), 'utf8').replace(/\r?\n/g, nl);
+      const top = [];
+      const all = [];
+      walk(acorn.parse(src, PARSE), (n) => {
+        const list = ['Program', 'BlockStatement'].includes(n.type) ? n.body : [];
+        for (const s of list) (n.type === 'Program' ? top : all).push(s.start);
+      });
+      all.push(...top);
+      for (const [form, why, topOnly] of GRAMMAR_INJECT) {
+        for (let r = 0; r < RUNS; r++) {
+          const pool = topOnly ? top : all;
+          const at = pool[Math.floor(rnd() * pool.length)];
+          const where = `seed ${SEED}: ${JSON.stringify(form)} at ${f}:${at}`;
+          const put = (text) => src.slice(0, at) + text + src.slice(at);
+          const text = `${form}${nl}`;
+          assert.doesNotThrow(() => acorn.parse(put(text), PARSE), `${where}: parses`);
+          const inPlace = (t) => grammarSites(f, put(t)).hits.filter((h) => h.pos >= at && h.pos < at + t.length);
+          assert.ok(inPlace(text).some((h) => why.test(h.why)), `${where} not refused (${JSON.stringify(inPlace(text).map((h) => h.why))})`);
+          for (const ctl of [`/* ${form} */ `, `// ${form}${nl}`, `{ const c__ = ${JSON.stringify(form)}; }${nl}`, `{ const c__ = 0; }${nl}`]) {
+            assert.deepEqual(inPlace(ctl), [], `${where}: control ${JSON.stringify(ctl)}`);
+          }
+          checked++;
+        }
+      }
+    }
+  }
+  assert.equal(checked, SCANNED.length * 2 * GRAMMAR_INJECT.length * RUNS, 'every injection ran');
+});
+
+// ------------------------------------------------------------------ the vendored parser stays test-only (AGENTS.md vendoring rule)
+// WHAT THIS CHECKS, for every runtime JS module of EVERY skill (.mjs/.cjs/.js outside vendor/ and node_modules, not
+// *.test.* or *.test-helper.*): (1) no import/export-from declaration, import() or require() specifier lands in a
+// vendor/ directory or on a test or test-helper file (a constant specifier: a literal, a `+` chain or template folded by
+// staticStr, or a top-level `const X = new URL('<literal>', import.meta.url).href`; relative and file: specifiers are
+// resolved by WHATWG URL rules, percent-decoding included; containment uses the platform's path rules, so another
+// drive is outside); (2) every import()/require() whose specifier is not such a constant is an offender (none exist);
+// (3) no string piece, percent-decoded, names the package or a vendor/ path. It does NOT cover other ways to run the
+// file: createRequire, module.require, eval or Function, vm, a child process, a Worker, or reading it from disk.
+
+/** Whether `child` is `parent` or inside it, by the rules of path module P: a different drive or UNC root is outside. */
+const within = (child, parent, P) => { const rel = P.relative(parent, child); return rel === '' || (rel !== '..' && !rel.startsWith(`..${P.sep}`) && !P.isAbsolute(rel)); };
+const TEST_FILE = /\.test(?:-helper)?\.(?:mjs|cjs|js)$/;
+/** Runtime JS modules under root, and the vendor/ directories there. */
+function skillTree(root) {
+  const modules = [];
+  const vendors = [];
+  const go = (dir) => {
+    for (const d of readdirSync(dir, { withFileTypes: true })) {
+      const f = join(dir, d.name);
+      if (d.isDirectory()) { if (d.name === 'vendor') vendors.push(f); else if (d.name !== 'node_modules' && d.name !== '.git') go(f); } else if (/\.(?:mjs|cjs|js)$/.test(d.name) && !TEST_FILE.test(d.name)) modules.push(f);
+    }
   };
-  const named = (x) => /acorn/i.test(x) || /(?:^|[\\/])vendor(?:[\\/]|$)/.test(x);
-  assert.ok(runtime.length > 30 && runtime.includes(join(here, 'git-exec.mjs')), `runtime modules: ${runtime.length}`);
-  const offenders = runtime.flatMap((f) => ((r) => [...r.paths.filter((p) => !relative(VENDOR, p).startsWith('..')), ...r.strings.filter(named)])(refs(f)).map((x) => [f, x]));
-  assert.deepEqual(offenders, []);
-  // Positive control: the same scan sees this test file's own references to the vendored parser.
-  assert.ok(refs(join(here, 'git-exec.test.mjs')).strings.filter(named).length >= 2);
+  go(root);
+  return { modules: modules.sort(), vendors };
+}
+/** Where a specifier lands as a file path (relative or file:, WHATWG URL rules), else null (a builtin or a package). */
+function landing(spec, from) {
+  try {
+    const rel = /^\.{0,2}\//.test(spec);
+    if (!rel && !/^file:/i.test(spec)) return null;
+    const u = rel ? new URL(spec, pathToFileURL(from)) : new URL(spec);
+    u.search = ''; u.hash = '';
+    return fileURLToPath(u);
+  } catch { return null; }
+}
+/** One module's loader edges: constant specifiers, non-constant loader calls (their source), and every string piece. */
+function loaderEdges(file, src) {
+  let ast;
+  try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true }); } catch { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true }); }
+  const urlConst = new Map();
+  for (const d of ast.body) {
+    for (const x of d.type === 'VariableDeclaration' && d.kind === 'const' ? d.declarations : []) {
+      const i = x.init;
+      if (x.id.type === 'Identifier' && i?.type === 'MemberExpression' && !i.computed && i.property.name === 'href' && i.object.type === 'NewExpression' && i.object.callee.name === 'URL'
+        && i.object.arguments.length === 2 && staticStr(i.object.arguments[0]) !== null && src.slice(i.object.arguments[1].start, i.object.arguments[1].end) === 'import.meta.url') {
+        urlConst.set(x.id.name, new URL(staticStr(i.object.arguments[0]), pathToFileURL(file)).href);
+      }
+    }
+  }
+  const specs = [];
+  const dynamic = [];
+  const strings = [];
+  const loader = (arg, n) => {
+    const v = staticStr(arg) ?? (arg?.type === 'Identifier' ? urlConst.get(arg.name) : undefined);
+    if (typeof v === 'string') specs.push(v); else dynamic.push(src.slice(n.start, n.end));
+  };
+  walk(ast, (n) => {
+    if (/^(?:Import|ExportAll|ExportNamed)Declaration$/.test(n.type) && n.source) specs.push(n.source.value);
+    if (n.type === 'ImportExpression') loader(n.source, n);
+    if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'require') loader(n.arguments[0], n);
+    if (n.type === 'Literal' && typeof n.value === 'string') strings.push(n.value);
+    if (n.type === 'TemplateElement') strings.push(n.value.cooked ?? '');
+  });
+  return { specs, dynamic, strings };
+}
+const pctDecode = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
+const namesVendor = (x) => ((d) => /acorn/i.test(d) || /(?:^|[\\/])vendor[\\/]|[\\/]vendor$/.test(d))(pctDecode(x));
+// The non-constant loaders that exist, each pinned to its file and exact source: a new one, or an edit to one, fails.
+// A pinned loader is a gap in this check by construction; its reason says why it cannot reach vendor/.
+const DYNAMIC_LOADERS = [
+  ['ship-ticket/scripts/legacy-golden.capture.test-helper.mjs', 'import(pathToFileURL(join(scriptsDir, name)).href)',
+    "load(name): its only calls pass the literals 'eval.mjs' and 'run-summary.mjs', joined to the scripts dir its caller gives (the work tree, or legacy-golden.mjs's git-archive extraction of the pinned base)"],
+];
+/**
+ * [runtime module (relative to root), kind, detail] for every violation in the tree at root. Each runtime module's
+ * constant edges are followed TRANSITIVELY through every JS file they land on (a test or test helper included), and every
+ * reached file is held to the same three rules: no edge into vendor/, no unpinned non-constant loader, no vendor string.
+ */
+function vendorOffenders(root, P = path, pinned = DYNAMIC_LOADERS) {
+  const { modules, vendors } = skillTree(root);
+  const cache = new Map();
+  const edgesOf = (f) => { if (!cache.has(f)) cache.set(f, loaderEdges(f, readFileSync(f, 'utf8'))); return cache.get(f); };
+  const rel = (f) => relative(root, f).split(sep).join('/');
+  const out = [];
+  for (const m of modules) {
+    const reached = new Set([m]);
+    const queue = [m];
+    while (queue.length) {
+      const f = queue.shift();
+      const e = edgesOf(f);
+      const via = f === m ? '' : ` (via ${rel(f)})`;
+      for (const spec of e.specs) {
+        const to = landing(spec, f);
+        if (!to) continue;
+        if (vendors.some((v) => within(to, v, P))) out.push([rel(m), 'vendor', spec + via]);
+        else if (/\.(?:mjs|cjs|js)$/.test(to) && !reached.has(to) && existsSync(to)) { reached.add(to); queue.push(to); }
+      }
+      for (const d of e.dynamic) if (!pinned.some(([pf, ps]) => pf === rel(f) && ps === d)) out.push([rel(m), 'dynamic', d + via]);
+      for (const x of e.strings) if (namesVendor(x)) out.push([rel(m), 'string', x + via]);
+    }
+  }
+  return out;
+}
+
+test('T4a: the vendored parser is test-only as far as loader specifiers go: no runtime module of any skill reaches vendor/ through them, transitively', () => {
+  const skills = join(here, '..', '..', '..');
+  const { modules, vendors } = skillTree(skills);
+  assert.ok(modules.length > 50 && modules.includes(join(here, 'git-exec.mjs')) && vendors.includes(VENDOR.replace(/[\\/]acorn$/, '')), `runtime modules: ${modules.length}`);
+  assert.ok(new Set(modules.map((m) => relative(skills, m).split(sep)[0])).size > 1, 'every skill is scanned, not only ship-ticket');
+  assert.deepEqual(vendorOffenders(skills), []);
+  // Every pinned loader still exists exactly (an edited or removed one is stale), and is reached from a runtime module.
+  for (const [f, src] of DYNAMIC_LOADERS) assert.ok(loaderEdges(join(skills, f), readFileSync(join(skills, f), 'utf8')).dynamic.includes(src), `stale pin: ${f}`);
+  assert.ok(vendorOffenders(skills, path, []).some(([, k, d]) => k === 'dynamic' && d.startsWith(DYNAMIC_LOADERS[0][1])), 'the pin is load-bearing');
+  // Control: the same edge reader sees this test file's own (non-constant) import of the parser and its strings.
+  const self = loaderEdges(join(here, 'git-exec.test.mjs'), readFileSync(join(here, 'git-exec.test.mjs'), 'utf8'));
+  assert.ok(self.dynamic.some((d) => /acorn\.mjs/.test(d)) && self.strings.filter(namesVendor).length >= 2);
+});
+
+test('T4a: the test-only check flags each leg: relative, folded, template, file: URL (percent-encoded), URL constant, require, re-export, non-constant loader, via a test file, string; containment is per platform', (t) => {
+  const root = tmp(t);
+  const sk = join(root, 's');
+  mkdirSync(join(sk, 'vendor', 'acorn'), { recursive: true });
+  mkdirSync(join(sk, 'scripts'), { recursive: true });
+  writeFileSync(join(sk, 'vendor', 'acorn', 'acorn.mjs'), 'export const v = 1;\n');
+  const encoded = pathToFileURL(join(sk, 'vendor', 'acorn', 'x.mjs')).href.replace('/vendor/', '/%76endor/').replace('/acorn/', '/%61corn/');
+  const legs = {
+    'rel.mjs': ["import '../vendor/acorn/acorn.mjs';", 'vendor'], 'fold.mjs': ["await import('../ven' + 'dor/x/y.mjs');", 'vendor'],
+    'tpl.mjs': ["await import(`../vendor/${'x'}/y.mjs`);", 'vendor'], 'enc.mjs': [`await import(${JSON.stringify(encoded)});`, 'vendor'],
+    'url.mjs': ["const U = new URL('../ve' + 'ndor/x/y.mjs', import.meta.url).href;\nawait import(U);", 'vendor'],
+    'req.cjs': ["require('../vendor/x/y.js');", 'vendor'], 'reexp.mjs': ["export * from '../vendor/x/y.mjs';", 'vendor'],
+    'dyn.mjs': ['const p = globalThis.p;\nawait import(p);', 'dynamic'], 'dynreq.cjs': ['require(process.argv[2]);', 'dynamic'],
+    'tst.mjs': ["import './t.test.mjs';", 'vendor'], 'hlp.mjs': ["import { h } from './h.test-helper.mjs';", 'dynamic'], 'deep.mjs': ["import './ok.mjs';\nimport './tst.mjs';", 'vendor'],
+    'str.mjs': ["const s = '%61corn';", 'string'], 'ok.mjs': ["import './benign.mjs';\nimport 'node:fs';\nconst s = 'vendors are fine';", null],
+  };
+  for (const [f, [src]] of Object.entries(legs)) writeFileSync(join(sk, 'scripts', f), `${src}\n`);
+  writeFileSync(join(sk, 'scripts', 'a.test.mjs'), "import '../vendor/acorn/acorn.mjs';\n");
+  // Reached test files: one imports the parser, one loads by a non-constant specifier, one is benign.
+  writeFileSync(join(sk, 'scripts', 't.test.mjs'), "import '../vendor/acorn/acorn.mjs';\n");
+  writeFileSync(join(sk, 'scripts', 'h.test-helper.mjs'), 'export const h = (n) => import(n);\n');
+  writeFileSync(join(sk, 'scripts', 'b.test-helper.mjs'), "import 'node:fs';\nexport const b = 1;\n");
+  writeFileSync(join(sk, 'scripts', 'benign.mjs'), "import { b } from './b.test-helper.mjs';\n");
+  const got = vendorOffenders(root);
+  for (const [f, [, kind]] of Object.entries(legs)) {
+    const mine = got.filter(([m]) => m === `s/scripts/${f}`).map(([, k]) => k);
+    assert.deepEqual(mine.includes(kind) || (kind === null && mine.length === 0), true, `${f}: ${JSON.stringify(mine)}`);
+  }
+  assert.ok(!got.some(([m]) => m.endsWith('a.test.mjs')), 'a test file is not a runtime module');
+  assert.deepEqual(got.filter(([m]) => m === 's/scripts/benign.mjs'), [], 'a runtime module may reach a benign test helper');
+  assert.deepEqual(got.find(([m]) => m === 's/scripts/tst.mjs'), ['s/scripts/tst.mjs', 'vendor', '../vendor/acorn/acorn.mjs (via s/scripts/t.test.mjs)']);
+  assert.deepEqual(vendorOffenders(root, path, [['s/scripts/h.test-helper.mjs', 'import(n)']]).filter(([m]) => m === 's/scripts/hlp.mjs'), [], 'a pinned loader is not reported');
+  // Containment by the platform's rules: on win32 another drive is outside, and the parent itself is inside.
+  assert.equal(within('D:\\safe\\x.mjs', 'C:\\repo\\vendor\\acorn', path.win32), false, 'cross-drive (codex r5 #7)');
+  assert.equal(within('C:\\repo\\vendor\\acorn\\a.mjs', 'C:\\repo\\vendor\\acorn', path.win32), true);
+  assert.equal(within('C:\\repo\\vendor\\acornx\\a.mjs', 'C:\\repo\\vendor\\acorn', path.win32), false);
+  assert.equal(within('\\\\srv\\share\\vendor\\a.mjs', 'C:\\repo\\vendor', path.win32), false, 'UNC root');
+  assert.equal(within('/r/vendor/a.mjs', '/r/vendor', path.posix), true);
+  assert.equal(within('/r/vendor/../x.mjs', '/r/vendor', path.posix), false);
 });
 
 /** Deterministic PRNG (mulberry32) for the seeded property test. */
@@ -1521,7 +2398,10 @@ test('T4a property: each listed form and reviewer escape injected at seeded rand
 });
 
 // ------------------------------------------------------------------ mutation evidence (AC6)
-// Harness: session scratchpad s02b-repair/mutation-round5/mutate5.py (+ lib_mutants.py; round 4's set re-anchored, plus
+// ROUND 6 (current): the harness, its full log, the tally and the sha256 of every file under test are in
+// .specs/reviews/S-02a0b/round-6/ (kept out of this file, so the tested bytes are the committed bytes). The round-5
+// record below is historical: it describes the checker before the grammar layer.
+// Harness (round 5): session scratchpad s02b-repair/mutation-round5/mutate5.py (+ lib_mutants.py; round 4's set re-anchored, plus
 // one or more mutants per round-5 rule). Each run gets a copy of the whole skill folder (the runtime-module scan needs
 // it); anchors are LF-normalised and must match exactly once. A mutant counts as KILLED only when the baseline test
 // count ran and a failing test reports ERR_ASSERTION; a load failure, changed test count or timeout is INVALID.
@@ -1586,3 +2466,4 @@ test('T4a property: each listed form and reviewer escape injected at seeded rand
 // |                      | mkdirSync classified safe; spread TextDecoder args; constructor destructuring;    |
 // |                      | Function / atob / opendir dropped from their lists                                 |
 // | vendored acorn       | one byte of acorn.mjs changed; an extra file in vendor/acorn                        |
+

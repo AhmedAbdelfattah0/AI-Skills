@@ -223,21 +223,28 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
   - the sha256 of each copied file;
   - `modifications: []`.
 
-  A test must check every pinned hash before the code is imported, and must check that the directory
-  listing is exact (as `T4a` does in `ship-ticket/scripts/lib/git-exec.test.mjs`).
+  A test must check, before the code is imported, that the pin map lists exactly the expected files and that
+  every pinned hash matches. It must also check that the directory listing is exact (as `T4a` does in
+  `ship-ticket/scripts/lib/git-exec.test.mjs`).
 - **Notices.** Ship the package's `LICENSE` verbatim next to the files, and add an entry (licence text and
   provenance) to the skill's `THIRD_PARTY_NOTICES.md`.
 - **Line endings.** Add `skills/<skill>/vendor/** -text` to `.gitattributes`. A CRLF checkout would
   otherwise break the hashes.
 - **No scripts.** Never run the package's install, prepare or postinstall scripts. Never vendor a package
   whose files need a build step.
-- **Test-only by default.** Production code must not import vendored code. A test must prove this by
-  resolving every runtime module's import specifiers and checking its strings (`T4a` does this for
-  ship-ticket). A production dependency needs its own design decision, recorded here.
+- **Test-only by default.** Production code must not import vendored code. A test must check this for every
+  runtime module of every skill (`T4a` in `ship-ticket/scripts/lib/git-exec.test.mjs` does). It follows every
+  constant `import`/`export … from`, `import()` and `require()` specifier transitively, test files included. It
+  resolves relative and `file:` specifiers as URLs, percent-decoding included, and none may land in a `vendor/`
+  directory. Every non-constant `import()`/`require()` must be on a pinned list with a reason. No runtime string may
+  name the package or a `vendor/` path. The test does not cover other ways to run the file: `createRequire`,
+  `eval`/`Function`, `vm`, a child process, a Worker, or reading it from disk. Review must catch those. A production
+  dependency needs its own design decision, recorded here.
 - **Install footprint (accepted residual).** `cli.mjs install`/`update` ship `vendor/` along with the
   `*.test.mjs` files that use it. The default link mode cannot filter files. The copy filter (`isNoise`)
   matches basenames and is shared with `hashSkill`. A future production `vendor/` would be stripped by
-  it. So vendored files are not excluded. They are inert: no runtime module imports them.
+  it. So vendored files are not excluded. They stay inert only as far as the check above reaches: no runtime
+  module's loader specifier reaches them.
 
 **Cross-skill references** (load-bearing convention): a skill may point at a sibling skill's
 reference file via a relative path like `../code-quality/references/ai-failure-modes.md` — this
