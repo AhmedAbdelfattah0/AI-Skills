@@ -143,9 +143,9 @@ export function waiverState(S, sec, candidate) {
   return { waived, unauthorized };
 }
 
-// ---- S-01b2 test-kind waivers: TEST_KIND_WAIVER (design rev 3 §4) -----------------------------------
+// ---- S-01b2 test-kind waivers: TEST_KIND_WAIVER (design rev 5 §4) -----------------------------------
 
-/** Run caps for {@link testKindWaivers} (L3): authority lines read, their total UTF-16 length, subjects per set. */
+/** Run caps for {@link testKindWaivers} (L3): authority lines read, the total UTF-8 bytes of the TEST_KIND_WAIVER lines among them, subjects per set. */
 export const TEST_KIND_WAIVER_BUDGET = Object.freeze({ lines: 10000, bytes: 8 * 1024 * 1024, subjects: 1024 });
 /** A waivable subject: the strict marker grammar of the test-title scanner (`kind:` or `plan:` and an ASCII id). */
 const TK_SUBJECT = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -175,7 +175,7 @@ function ownArray(arr, max) {
 }
 
 /**
- * The test-kind waivers effective for `candidate` (S-01b2 §4, §6 row 32). A TEST_KIND_WAIVER { run_id,
+ * The test-kind waivers effective for `candidate` (S-01b2 §4, §6 row 30). A TEST_KIND_WAIVER { run_id,
  * requirement: 'kind:<id>'|'plan:<id>', candidate, plan_digest, authorized_by, reason } removes
  * `requirement` only when it is trusted (observeAuthority), of this run, for this plan digest
  * (normDigest on both sides) and exactly this candidate, and the requirement is in `required` and
@@ -197,25 +197,32 @@ export function testKindWaivers(S, candidate, sets) {
     if (required === BAD || prot === BAD || ![...required, ...prot].every(s => typeof s === 'string' && TK_SUBJECT.test(s))) return refuse('test_kinds_waiver_input_invalid');
     const runId = own(S, 'run_id'), digest = own(S, 'plan_digest');
     if (!nonEmpty(runId) || !nonEmpty(digest)) return refuse('test_kinds_waiver_state_invalid');
+    // P5 must bind activation at START; see review (an upgrade-taint gap is a P5 design item, not handled here)
     const authority = own(S, 'authority');
     if (authority === BAD) return refuse('test_kinds_waiver_state_invalid');
-    const listOf = (key) => (authority === undefined ? [] : ownArray(own(authority, key) ?? [], B.lines));
+    // a present authority record must carry both lists: null or missing is a broken state, not an empty list
+    const listOf = (key) => (authority === undefined ? [] : ownArray(own(authority, key), B.lines));
     const trusted = listOf('trusted'), untrusted = listOf('untrusted');
     if (trusted === BAD || untrusted === BAD) return refuse('test_kinds_waiver_state_invalid');
     if (trusted === 'over' || untrusted === 'over' || trusted.length + untrusted.length > B.lines) return refuse('test_kinds_waiver_budget_exceeded');
     const lines = [];
     for (const line of trusted) lines.push({ line, trusted: true });
     for (const u of untrusted) lines.push({ line: own(u, 'line'), trusted: false });
+    // every line must parse to a JSON object; only TEST_KIND_WAIVER lines count toward the byte budget (real bytes)
     let bytes = 0;
     for (const l of lines) {
       if (typeof l.line !== 'string') return refuse('test_kinds_waiver_state_invalid');
-      bytes += l.line.length;
+      const e = JSON.parse(l.line);
+      if (e === null || typeof e !== 'object' || Array.isArray(e)) return refuse('test_kinds_waiver_state_invalid');
+      l.e = e;
+      if (own(e, 'event') !== 'TEST_KIND_WAIVER') continue;
+      bytes += Buffer.byteLength(l.line, 'utf8');
       if (bytes > B.bytes) return refuse('test_kinds_waiver_budget_exceeded');
     }
     const req = new Set(required), protectedSet = new Set(prot), wantDigest = normDigest(digest);
     const waived = new Set(), forged = new Set();
     for (const l of lines) {
-      const e = JSON.parse(l.line);
+      const e = l.e;
       if (own(e, 'event') !== 'TEST_KIND_WAIVER') continue;
       const subject = own(e, 'requirement');
       const fields = TK_FIELDS.map(k => own(e, k));
@@ -224,6 +231,7 @@ export function testKindWaivers(S, candidate, sets) {
       if (run !== runId || cand !== candidate || normDigest(dig) !== wantDigest) { if (l.trusted) ignored.foreign++; continue; }
       if (!req.has(subject)) { if (l.trusted) ignored.not_required++; continue; }
       if (!l.trusted) { forged.add(subject); continue; }
+      // design: P2 applies protection first (the caller's recomputed set); a protected subject is never waived by a trusted line
       if (protectedSet.has(subject)) { ignored.protected++; continue; }
       waived.add(subject);
     }

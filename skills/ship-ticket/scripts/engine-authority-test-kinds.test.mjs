@@ -161,6 +161,56 @@ test('[P6-AC3] invalid required/protected inputs and unparsable lines fail close
   assert.equal(tw(notString).ok, false, 'a non-string untrusted line');
 });
 
+test('[P6-F1] a parsed trusted or untrusted line that is not a JSON object is a typed state refusal, never skipped', () => {
+  const STATE = { ok: false, code: 'test_kinds_waiver_state_invalid', waived: [], unauthorized: [], ignored: ZERO };
+  for (const raw of ['null', '[]', '[{}]', 'false', 'true', '0', '1', '"bad"']) {
+    const T = pureS({ trusted: [TKW()] });
+    T.authority.trusted.push(raw);
+    assert.deepEqual(tw(T), STATE, `trusted ${raw}`);
+    const U = pureS({ trusted: [TKW()] });
+    U.authority.untrusted.push({ line: raw, seq: 1 });
+    assert.deepEqual(tw(U), STATE, `untrusted ${raw}`);
+  }
+});
+
+test('[P6-F2] authority.trusted / authority.untrusted that is null or missing is a state refusal, not an empty list', () => {
+  const STATE = { ok: false, code: 'test_kinds_waiver_state_invalid', waived: [], unauthorized: [], ignored: ZERO };
+  for (const key of ['trusted', 'untrusted']) {
+    for (const how of ['null', 'missing']) {
+      const S = pureS({ trusted: [TKW()] });
+      if (how === 'null') S.authority[key] = null; else delete S.authority[key];
+      assert.deepEqual(tw(S), STATE, `${key} ${how}`);
+    }
+  }
+});
+
+test('[P6-F3] only TEST_KIND_WAIVER lines count toward the byte budget; the budget is real bytes, not UTF-16 length', () => {
+  const B = A.TEST_KIND_WAIVER_BUDGET;
+  // a flood of fat unrelated untrusted lines (over the byte budget in total) cannot block a valid owner waiver
+  const noise = J({ event: 'NOTE', pad: 'x'.repeat(1024) });
+  const S = pureS({ trusted: [TKW()] });
+  for (let i = 0; i < B.lines - 1; i++) S.authority.untrusted.push({ line: noise, seq: 1 });
+  assert.ok(noise.length * (B.lines - 1) > B.bytes, 'the unrelated lines alone exceed the byte budget');
+  assert.deepEqual(tw(S), { ok: true, waived: ['kind:contract'], unauthorized: [], ignored: ZERO });
+  // the budget counts bytes: 2-byte characters are over at half the character count
+  const wide = pureS({ trusted: [TKW({ reason: 'é'.repeat(B.bytes / 2) })] });
+  assert.deepEqual(tw(wide), { ok: false, code: 'test_kinds_waiver_budget_exceeded', waived: [], unauthorized: [], ignored: ZERO });
+});
+
+test('[P6-F4] an e1: candidate identity matches the same identity only, over LF and CRLF plan text', () => {
+  const E1 = 'e1:' + 'b'.repeat(64), OTHER = 'e1:' + 'c'.repeat(64);
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ candidate: E1 })] }), E1), { ok: true, waived: ['kind:contract'], unauthorized: [], ignored: ZERO });
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ candidate: E1 })] }), OTHER), { ok: true, waived: [], unauthorized: [], ignored: { ...ZERO, foreign: 1 } });
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ candidate: E1 })] }), E1 + '\r'), { ok: true, waived: [], unauthorized: [], ignored: { ...ZERO, foreign: 1 } }, 'no newline trimming');
+  for (const eol of ['\n', '\r\n']) {
+    const S = { run_id: RUN, plan_digest: DIGEST, attempts: [] };
+    A.observeAuthority(S, plan([START]).replace(/\n/g, eol), () => false);
+    A.observeAuthority(S, plan([START, TKW({ candidate: E1 })]).replace(/\n/g, eol), () => false);
+    assert.deepEqual(tw(S, E1), { ok: true, waived: ['kind:contract'], unauthorized: [], ignored: ZERO }, J(eol));
+    assert.deepEqual(tw(S, OTHER).waived, [], `${J(eol)} other identity`);
+  }
+});
+
 // ------------------------------------------------------------------ hostile inputs (L6) and budget (L3)
 
 test('[P6-L6] Proxy and accessor inputs are refused through own data descriptors only: no trap and no getter runs', () => {
@@ -374,8 +424,14 @@ test('[P6-AC4] differential: observeAuthority classifies every pre-existing even
   assert.ok(cases > 5000, String(cases));
 });
 
-test('[P6-AC4] testKindWaivers ignores every security event, and normDigest is the only digest normalisation', () => {
+test('[P6-AC4] testKindWaivers ignores every security event, and normDigest is the only digest normalisation (sha256- matches; case does not)', () => {
   const S = secS([WAIVE(), ADD(), { ...WAIVE(), requirement: 'kind:contract', plan_digest: DIGEST }], [WAIVE(), ADD()], [PAIR]);
   assert.deepEqual(tw(S), { ok: true, waived: [], unauthorized: [], ignored: ZERO });
   assert.equal(normDigest('sha256-x'), 'sha256:x');
+  // normDigest is the whole normalisation: the legacy sha256- spelling matches; case and other forms do not
+  const hex = 'a'.repeat(64);
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ plan_digest: 'sha256-' + hex })] })).waived, ['kind:contract'], 'legacy sha256- waiver digest');
+  assert.deepEqual(tw(pureS({ trusted: [TKW()], over: { plan_digest: 'sha256-' + hex } })).waived, ['kind:contract'], 'legacy sha256- state digest');
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ plan_digest: 'SHA256:' + hex })] })).ignored.foreign, 1, 'uppercase prefix is not normalised');
+  assert.deepEqual(tw(pureS({ trusted: [TKW({ plan_digest: 'sha256:' + hex.toUpperCase() })] })).ignored.foreign, 1, 'uppercase hex is not normalised');
 });
