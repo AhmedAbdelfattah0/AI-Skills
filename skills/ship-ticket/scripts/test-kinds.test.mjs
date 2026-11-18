@@ -687,6 +687,13 @@ test('P3 AC1: optIn equals the #83 opt-in expression and requiredFor\'s own opt-
     assert.equal(TK.optIn({ planText }), true, String(planText)); assert.equal(TK.requiredFor({ planText }).status, 'refused');
   }
   assert.equal(TK.optIn(), true, 'no argument at all is not "nothing declared"');
+  let calls = 0;
+  const notDeclared = `# Plan\n\nnothing\n${RS}`;
+  assert.equal(TK.optIn({ planText: notDeclared }), false);
+  const hostile = [null, 1, 'x', new Proxy({ planText: notDeclared }, {}), Object.defineProperty({}, 'planText', { enumerable: true, get() { calls++; return notDeclared; } }),
+    Object.defineProperty({ planText: notDeclared }, 'declaration', { enumerable: true, get() { calls++; return null; } })];
+  hostile.forEach((arg, i) => assert.equal(TK.optIn(arg), true, `hostile argument #${i} is opted in (fail closed)`));
+  assert.equal(calls, 0, 'no accessor was ever called');
   // every MARKERS opt-in carrier, valid and near miss, opts in alone; prose does not
   for (const m of TK.MARKERS.filter((x) => x.opt_in)) for (const [, p] of corpus(m.id)) assert.equal(TK.optIn({ planText: p }), true, m.id);
   assert.equal(TK.optIn({ planText: `# Plan\n\nThis test triggers a reload.\n${RS}` }), false);
@@ -779,6 +786,14 @@ test('P3 AC3 / L6: kindsForClasses never throws, never calls an accessor, and re
   declBad.forEach((declaration, i) => assert.deepEqual(TK.kindsForClasses({ classes: ['billing_core'], declaration }).errors, ['declaration_invalid'], `declaration #${i}`));
   assert.equal(calls, 0, 'no accessor was ever called');
   assert.deepEqual(TK.kindsForClasses().errors, ['risk_floor_invalid']);
+  // the argument itself: not plain data refuses with a code, and its accessors are never called
+  for (const arg of [null, 7, 'tenancy', [['tenancy']], new Proxy({ classes: ['tenancy'] }, {}), getter({}, 'classes', ['tenancy'])]) assert.deepEqual(TK.kindsForClasses(arg).errors, ['risk_floor_invalid']);
+  assert.deepEqual(TK.kindsForClasses(getter({ classes: ['tenancy'] }, 'declaration', null)).errors, ['declaration_invalid']);
+  // the producer's largest record: risk-floor.mjs allows 200 declared classes plus risk_declaration_changed (201 <= the 256 cap)
+  const most = [...Array.from({ length: 200 }, (_, i) => `c${i}`), TK.CHANGED];
+  const big = TK.requiredFor({ planText: plan('test-triggers: none', floorFor(most)) });
+  assert.deepEqual(big.errors, ['risk_class_unmapped'], 'the producer accepted the set; the table does not map it');
+  assert.deepEqual(TK.kindsForClasses({ classes: most }).errors, ['risk_class_unmapped'], 'the same answer, not a size refusal');
   assert.equal(TK.kindsForClasses({ classes: ['billing_core'], declaration: ok }).ok, true);
   // a JSON-restored (normal-prototype) declaration never resolves an inherited name
   assert.deepEqual(TK.kindsForClasses({ classes: ['constructor'], declaration: JSON.parse(JSON.stringify(P3_DECLS[1])) }).errors, ['risk_class_unmapped']);
@@ -801,6 +816,7 @@ test('P3 AC4: the declaration key `tests` is validated (globs by the #72 grammar
   bad.forEach((tests, i) => assert.throws(() => TK.validateDeclaration({ version: 1, tests }), (e) => e.code === 'declaration_invalid', `tests #${i}`));
   assert.throws(() => TK.validateDeclaration(getter({ version: 1 }, 'tests', { globs: ['t/**'] })), (e) => e.code === 'declaration_invalid');
   assert.throws(() => TK.validateDeclaration(new Proxy({ version: 1 }, {})), (e) => e.code === 'declaration_invalid');
+  assert.throws(() => TK.validateDeclaration(getter({}, 'version', 1)), (e) => e.code === 'declaration_invalid', 'a top-level accessor is refused before any read');
   assert.equal(calls, 0, 'no accessor was ever called');
 });
 
@@ -845,6 +861,6 @@ test('P3 declared deltas (L5): the only #83 behaviour changes, each pinned', () 
   let r4;
   assert.doesNotThrow(() => { r4 = req(plan('test-triggers: none', realFloor(['constructor'])), plainDecl); });
   assert.deepEqual(r4.errors, ['risk_class_unmapped']);
-  // 5. validateDeclaration refuses a Proxy or an accessor property instead of evaluating it
+  // 5. validateDeclaration refuses a Proxy, or a TOP-LEVEL or `tests` accessor, instead of evaluating it (nested tags/classes are #83's reads, unchanged)
   assert.throws(() => TK.validateDeclaration(Object.defineProperty({ version: 1 }, 'tags', { enumerable: true, get: () => ({}) })), (e) => e.code === 'declaration_invalid');
 });

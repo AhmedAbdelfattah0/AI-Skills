@@ -116,9 +116,8 @@ function validateTests(v, inv) {
 export function validateDeclaration(d) {
   const inv = (m) => bad('declaration_invalid', m);
   const isMap = (v) => v && typeof v === 'object' && !Array.isArray(v);
-  if (types.isProxy(d)) throw inv('a declaration is plain data');
+  if (types.isProxy(d) || (isMap(d) && Reflect.ownKeys(d).some((k) => !('value' in Object.getOwnPropertyDescriptor(d, k))))) throw inv('a declaration is plain data (no proxy, no top-level accessor)');
   if (!isMap(d) || d.version !== 1 || Object.keys(d).some((k) => !['version', 'tags', 'classes', 'tests'].includes(k))) throw inv('version must be 1; only version, tags, classes and tests are allowed');
-  if (Reflect.ownKeys(d).some((k) => !('value' in Object.getOwnPropertyDescriptor(d, k)))) throw inv('a declaration is plain data (no accessors)');
   const tests = validateTests(d.tests, inv);
   const list = (v, ok, what) => { if (!Array.isArray(v) || !v.length || v.length > 16 || !v.every(ok)) throw inv(`${what} must be a non-empty list of at most 16 known names`); return uniq(v); };
   const tags = Object.create(null), classes = Object.create(null); // no inherited names (`constructor`) can resolve
@@ -220,11 +219,19 @@ const linesOf = (text, key) => text.split(LINES).map((l) => KEY_LINE(key).exec(l
 
 // opt-in: a repository declaration or any opt-in token (scanned over the whole plan when RUN-STATE is malformed)
 const optedIn = (planText, text, declaration) => Boolean(declaration) || MARKERS.some((m) => m.opt_in && carriers(text ?? planText, m).length > 0);
+/** `arg`'s own data fields, or null when `arg` is not a plain object or a field is an accessor (never called). */
+function fieldsOf(arg, ...keys) {
+  if (arg === null || typeof arg !== 'object' || types.isProxy(arg)) return null;
+  try { return keys.map((k) => ownData(arg, k, () => bad('arg_invalid'))); } catch { return null; }
+}
 /**
- * S-01b2 activation: true exactly when `requiredFor` with the same input does NOT answer `not_declared` (it is the predicate
- * requiredFor itself calls). Total: a non-string plan is opted in (requiredFor refuses it), never "nothing declared".
+ * S-01b2 activation: true exactly when `requiredFor` with the same input does NOT answer `not_declared`; requiredFor calls
+ * it. Total and fail-closed: a non-string plan, or an argument that is not plain data, is opted in, never "nothing declared".
  */
-export function optIn({ planText, declaration = null } = {}) {
+export function optIn(arg) {
+  const fields = fieldsOf(arg, 'planText', 'declaration');
+  if (!fields) return true;
+  const [planText, declaration = null] = fields;
   return typeof planText !== 'string' || optedIn(planText, planNarrative(planText), declaration);
 }
 
@@ -268,7 +275,7 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
   const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), provenance: {}, ...o });
   if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
   const text = planNarrative(planText); // the ONE narrative every parse below reads
-  if (!optedIn(planText, text, declaration)) return out('not_declared');
+  if (!optIn({ planText, declaration })) return out('not_declared');
   if (text === null) return (errors.push('run_state_invalid'), out('refused'));
   for (const m of MARKERS) if (carriers(text, m).some((l) => !m.valid(l))) errors.push(m.code);
   const trig = linesOf(text, 'test-triggers');
@@ -332,11 +339,16 @@ function declarationCopy(d) {
  * S-01b2: the kinds a list of risk classes (a `reassess` result) adds, through the SAME class loop as requiredFor
  * (`classTags`) under the same base-pinned declaration. Pure; never throws. Output:
  * `{ ok, tags, kinds, provenance: {<kind>: [<source>...]}, errors }`; `ok:false` has empty lists and one or more of
- * `risk_floor_invalid` (classes not a list of 0..256 class names, `none` excluded), `declaration_invalid`, `risk_class_unmapped`.
+ * `risk_floor_invalid` (classes not a list of 0..256 class names, `none` excluded; risk-floor.mjs writes at most 200 declared
+ * classes plus `risk_declaration_changed`), `declaration_invalid`, `risk_class_unmapped`, `test_kinds_error` (an internal fault).
  */
-export function kindsForClasses({ classes, declaration = null } = {}) {
+export function kindsForClasses(arg) {
   const refused = (errors) => ({ ok: false, tags: [], kinds: [], provenance: {}, errors: uniq(errors) });
   try {
+    const cfield = fieldsOf(arg, 'classes'), dfield = fieldsOf(arg, 'declaration'); // own data only: an accessor is never called
+    if (!cfield) return refused(['risk_floor_invalid']);
+    if (!dfield) return refused(['declaration_invalid']);
+    const [classes] = cfield, declaration = dfield[0] ?? null;
     const empty = !types.isProxy(classes) && Array.isArray(classes) && classes.length === 0; // `classes=none`: the empty set
     let list;
     try { list = empty ? [] : stringList(classes, MAX_CLASSES, (c) => CLASS_NAME.test(c) && c !== 'none', () => bad('risk_floor_invalid')); } catch { return refused(['risk_floor_invalid']); }
