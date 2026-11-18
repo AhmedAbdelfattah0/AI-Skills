@@ -192,8 +192,7 @@ hard rules when adding or editing a skill:
    a comma list in any `SKILL.md` or `references/*.md` are expanded and each ID must appear in the
    owner's `SKILL.md` or `references/`. On its first run it found five: `nn-guard` blocked edits on a
    `BE-SEC-10` that no skill defined, and three of its ranges ran past the last rule of their
-   family. Three limits: a typo inside the owning skill defines itself; the `ux-audit` families
-   (cited only inside `ux-audit`) are not covered; and a comma-list member followed by a word
+   family. Two limits: a typo inside the owning skill defines itself; and a comma-list member followed by a word
    (`TEST-01, 02 and 08`) is read as prose and not checked, because `BE-SEC-01, 20 lines later`
    must not invent a citation. A range end that is a full ID of another family
    (`BE-SEC-01…BE-AUTH-09`) is checked as a citation of its own; one that names another family
@@ -298,7 +297,7 @@ staging**; that rule of engagement is load-bearing, not boilerplate.
 **Spec-artifact root: `.specs/`.** One home for on-disk artifacts across the
 library — `ship-ticket` (`.specs/plans/`, `.specs/design-parity/`), `vapt`
 (`.specs/vapt/`), `security-audit` (external Cloudflare skill), `project-audit`
-(`.specs/project-audit/`), and `ux-audit` (`.specs/ux-audit/`). The removed `spec-driven` skill historically
+(`.specs/project-audit/`). The removed `spec-driven` skill historically
 used `.spec/` (singular), so its bundled scripts resolve `SPEC_ROOT` as *"an
 existing `.spec/` wins, else `.specs/`"* — that keeps pre-existing projects
 working while new ones converge. **Never introduce a third root**, and when
@@ -483,41 +482,9 @@ check** (diff against that pinned SHA). Both carry a one-sentence fallback gloss
 skill still makes sense installed alone. If you rename a gate in `ship-ticket`,
 update those glosses too.
 
-**`pr-review` reviews a PR that already exists — the one review skill that is
-*not* about the local diff.** `ship-ticket`'s bounded review and the CodeRabbit
-`code-review` skill both judge a diff **before** a PR exists; `pr-review` takes a
-PR **URL or ID** (GitHub via `gh`, Azure DevOps via the `repo_pull_request*` MCP
-tools), which is usually someone *else's* PR. Three properties are load-bearing:
-
-- **It never touches the user's checkout.** The PR is fetched into a throwaway
-  `git worktree` from `refs/pull/<n>/head` (GitHub) or `/merge` (ADO, which often
-  publishes no `/head`) — discovered with `git ls-remote`, never assumed — and
-  reviewed at `merge-base...HEAD`, so commits merged into the base since the PR
-  opened are not blamed on its author. Cleanup runs on every exit path.
-- **Three passes, none seeing the others.** A fresh Claude reviewer subagent
-  (A), a `codex` process (B), and `code-quality` with the stack's reference running
-  its rule-by-rule **Verification Pass** (C) all read the same diff blind;
-  reconciliation is the orchestrator's judgment and attributes each finding
-  `[claude]`/`[codex]`/`[rules]`. A and B are free-form and find what they
-  notice; C exists because the worst defects are **absences** — its table has a
-  row per rule in force, so an unperformed check surfaces as an empty box
-  instead of as silence. C shares A's model, so it adds method diversity, not
-  model diversity — never report it as a third opinion. Since there is no
-  Design Contract here, C derives the rules in force from the diff (every
-  `[NN]` rule + every rule whose surface the diff touches + a mandatory `AI-FM`
-  row), and a FAIL is a finding rather than a gate. Dropping a finding requires
-  a contract failure or a **named rule ID** — a bare "style-only" retires
-  nothing.
-- **Report-first, post-on-approval.** Findings land in `.specs/pr-review/<host>-<id>.md`;
-  comments reach the PR only after the user approves them, and the skill never
-  approves, votes, or requests changes — that is a human act.
-
-**Do not rename it `code-review`** — that name is taken by the installed
-CodeRabbit plugin skill, and a collision shadows one of them.
-
 **`project-audit` assesses a whole built application and changes nothing.** It
-fills the scope none of the others own: `ship-ticket` is one ticket, `pr-review`
-one PR, `security-audit` static security only, `vapt` runtime attacks only, and the
+fills the scope none of the others own: `ship-ticket` is one ticket,
+`security-audit` static security only, `vapt` runtime attacks only, and the
 code-quality family owns rules. It is an orchestrator with **no rule catalogue** —
 every judgment routes to those specialists (report-only, as an explicit audit)
 or to the repository's own commands. These properties are load-bearing:
@@ -567,41 +534,21 @@ or to the repository's own commands. These properties are load-bearing:
   or is redacted. Publication never changes the audit verdict and never
   authorizes implementation.
 
-**`ux-audit` is a report-only audit of a running web UI.** DESIGN.md is its
-identity lock: `LOCKED` items gate every finding and recommendation, while
-`FLEXIBLE` items may be refined. Its only target writes are a consented root
-`DESIGN.md` and `.specs/ux-audit/<run-id>/`; application code is never changed.
-The user-authored `references/rules.md` is the catalogue for rule IDs from
-`A11Y-*`, `HEUR-*`, and the intervening families through `ID-*`. Automated,
-measured, keyboard, visual and manual lanes never substitute, and declared-token
-analysis distinguishes app-authored choices from framework defaults before it
-judges scales or proposes framework-native fixes.
-
-**Its `codex review` invocation is version-pinned knowledge, verified on
+**`ship-ticket`'s `codex review` invocation is version-pinned knowledge, verified on
 `codex-cli 0.145.0`:** the scope flags (`--uncommitted`, `--base`, `--commit`)
 **each conflict with a custom `[PROMPT]`**, including the `-` stdin form — the
 command exits during argument parsing. So a Codex pass is either *instructed*
 (bare prompt, scope stated in the prompt text) or *scoped* (`--base`, no
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
-worktree paths**, so dedupe and strip the prefix before anything is posted.
-**`ship-ticket`'s elevated Codex opinion carries the same constraint** — it used to
-document `codex review --uncommitted "<instructions>"`, which exits during
-argument parsing on 0.145.0, and now states the scope in the prompt instead.
+worktree paths**, so dedupe and strip the prefix before quoting it.
+**The elevated Codex opinion carries the same constraint:** it states the scope in the
+prompt, because `codex review --uncommitted "<instructions>"` exits during argument
+parsing on 0.145.0.
 **That optional opinion always sets `-c model_reasoning_effort=` explicitly rather than
 inheriting the account's global default** — measured on this repo, same diff and
 prompt, `xhigh` took 384s against `medium`'s 177s (2.2x) — and asks for
 severity-ordered findings rather than unbounded enumeration.
-
-**What the two skills must keep in sync, and what they need not.** The *CLI
-contract* is shared and must match in both: the scope-flag-vs-prompt conflict, the
-duplicated final report, and the absolute paths. The *cost policy* — an explicit,
-constant `model_reasoning_effort` and the bounded ask — is
-`ship-ticket`'s; `pr-review` reviews one PR and may keep a bare invocation.
-**Effort is pinned whenever the optional opinion runs**: profile selection decides
-whether redundancy is needed; it does not weaken a dispatched review. If you
-change how either skill invokes Codex, change both. An effort-policy-only change
-may remain local to ship-ticket.
 
 ## Script-delivery patterns
 
@@ -628,12 +575,6 @@ matching pattern when extending them:
 - **`project-audit`** — *executes its bundled dependency-free Node continuity
   checker in place*. It reads current/prior manifests without writing to the
   audited repositories; structural accounting does not replace evidence review.
-- **`ux-audit`** — *executes bundled cross-platform Node helpers in place*, like
-  `ship-ticket`, but resolves its pinned npm dependencies (`playwright` and
-  `@axe-core/playwright` via `scripts/package-lock.json`) from
-  `UX_AUDIT_DEPS_DIR`, a compatible target install read-only, or a lockfile-keyed
-  user cache — never by installing into the audited project. It requires Node >=
-  20, while the repository CLI remains compatible with Node >= 18.
 
 ## Adding or editing a skill
 

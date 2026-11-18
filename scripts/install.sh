@@ -13,7 +13,7 @@
 #   all          claude + agents + gemini + antigravity
 #
 #   ./scripts/install.sh                          # all skills → Claude Code, symlinked
-#   ./scripts/install.sh security researcher      # only the named skills
+#   ./scripts/install.sh ship-ticket generate-ticket     # only the named skills
 #   ./scripts/install.sh --copy                   # real files instead of symlinks
 #   ./scripts/install.sh --target codex           # all skills → OpenAI Codex
 #   ./scripts/install.sh --target all security    # one skill → every tool
