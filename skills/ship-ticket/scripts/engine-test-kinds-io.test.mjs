@@ -476,7 +476,8 @@ test('[P4r-28] C5 (I-D), superseded by S1: a stored record is its rows; a total 
 test('[P4r-29] C6 (I-F): every declared entry\'s CURRENT command is validated before its record is looked up (an absent record too)', (t) => {
   const r = repo(t), rec = good(r), other = { ...ENTRY, name: 'other' };
   const two = (cmd) => tkVerdict({ ...view(r, rec), entries: [ENTRY, other], commands: { unit: { cmd: ENTRY.cmd, args: ARGS }, other: cmd } }, 'F1');
-  assert.equal(two({ cmd: ENTRY.cmd, args: ARGS }).status, 'pass', 'the control: a valid command for the absent entry');
+  // round 8 (D3): two declared entries are refused in V0, but only AFTER every current command is validated (C6 still decides first)
+  assert.equal(two({ cmd: ENTRY.cmd, args: ARGS }).detail, 'multi_entry_unsupported_v0', 'the control: a valid command for the absent entry reaches the entry rule');
   for (const bad of [{ cmd: '/tmp/evil/vitest', args: ARGS }, { cmd: ENTRY.cmd, args: [...ARGS, '--typecheck'] }]) {
     const v = two(bad);
     assert.equal(v.status, 'refused', JSON.stringify(bad)); assert.equal(v.code, 'runner_unsupported', JSON.stringify(bad));
@@ -484,7 +485,7 @@ test('[P4r-29] C6 (I-F): every declared entry\'s CURRENT command is validated be
   // a command may be MISSING only for an entry with no record ({files} may have nothing to run); a present one is always validated
   const E2 = (records, commands) => tkVerdict({ ...view(r, rec), entries: [ENTRY, other], commands, records }, 'F1');
   const ok = E2({ unit: rec }, { unit: { cmd: ENTRY.cmd, args: ARGS } });
-  assert.equal(ok.status, 'pass'); assert.deepEqual(ok.records, { unit: 'current', other: 'absent' });
+  assert.equal(ok.detail, 'multi_entry_unsupported_v0', 'a missing command for an entry with no record is allowed: the entry rule decides');
   assert.equal(E2({ unit: rec, other: rec }, { unit: { cmd: ENTRY.cmd, args: ARGS } }).code, 'test_kinds_error', 'a record with no current command');
   assert.equal(E2({ unit: rec }, {}).code, 'test_kinds_error', 'the same for the entry that has the record');
   assert.equal(tkVerdict({ ...view(r, rec), entries: [ENTRY, ENTRY] }, 'F1').code, 'test_kinds_error', 'entry names are unique');
@@ -853,13 +854,13 @@ function hiddenEdit(t, setup, edit = "test('old [kind:negative]', () => { proces
   put(r.dir, file, edit);
   return { r, before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }), gitSees: git(r.dir, 'diff', '--name-only', r.base).split('\n').filter(Boolean) };
 }
-const moves = (h, why, file = 'libs/money/old.test.ts') => {
-  assert.equal(h.before.ok, true, why); assert.equal(h.after.ok, true, `${why}: ${JSON.stringify(h.after)}`);
-  assert.notEqual(h.after.evidence_id, h.before.evidence_id, `${why}: the identity moves`);
-  assert.ok(h.after.paths.includes(file), `${why}: the edited file is a path of P`);
+/** Round 8: a tree git converts is refused (round 6 let the edited file into P, which credited unchanged pointer files: Fable D2). */
+const moves = (h, why) => {
+  assert.equal(h.before.ok, true, why);
+  assert.deepEqual(h.after, CONVERTED, `${why}: refused, never counted`);
 };
 const hideWith = (attrLine, driver, extra = () => {}) => (r) => { put(r.dir, '.git/info/attributes', attrLine); git(r.dir, 'config', `filter.${driver}.clean`, 'git show HEAD:%f'); extra(r); };
-test('[P4r-37] round 6: an edit hidden from git by a clean filter of ANY name is a change of P (raw bytes vs the base blob)', (t) => {
+test('[P4r-37] rounds 6 and 8: an edit hidden from git by a clean filter of ANY name is refused (raw bytes vs the base blob)', (t) => {
   for (const [why, setup] of [['a filter named unspecified (reads like no filter: the Opus repro of bcd7f9e)', hideWith('*.ts filter=unspecified\n', 'unspecified')],
     ['a filter named hide', hideWith('*.ts filter=hide\n', 'hide')], ['a filter named unset (reads like -filter)', hideWith('*.ts filter=unset\n', 'unset')],
     ['a filter set through a macro', hideWith('[attr]quiet filter=hide\n*.ts quiet\n', 'hide')],
@@ -868,13 +869,13 @@ test('[P4r-37] round 6: an edit hidden from git by a clean filter of ANY name is
     assert.deepEqual(h.gitSees, [], `${why}: the fixture really hides the edit from git`);
     moves(h, why);
   }
-  // all four interfaces see the change: a record built before the hidden edit is stale (identity), and a fresh build includes the file
+  // all four interfaces refuse the converted tree alike
   { const r = repo(t), rec = good(r);
     hideWith('*.ts filter=unspecified\n', 'unspecified')(r); put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
-    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'hidden edit'), 'stale:identity');
-    const b = build(r, passing(r.dir)); assert.equal(b.ok, true, JSON.stringify(b)); }
-  // the attributes no longer refuse anything by themselves: an undeclared filter, ident, working-tree-encoding, -filter, text/eol give an
-  // identity. (Git LFS is not listed: with a REQUIRED git-lfs filter configured and git-lfs missing, git's own diff fails, so the outcome
+    assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'hidden edit'), 'refused:evidence_unavailable');
+    assert.deepEqual(build(r, passing(r.dir)), CONVERTED); }
+  // an attribute alone refuses nothing: an undeclared filter, ident, working-tree-encoding, -filter, text/eol over unchanged LF bytes give
+  // an identity (only an OBSERVED conversion refuses). (Git LFS is not listed: with a REQUIRED git-lfs filter configured and git-lfs missing, git's own diff fails, so the outcome
   // is the machine's, not this rule's.)
   for (const line of ['*.json filter=undeclared\n', '*.ts ident\n', '*.ts working-tree-encoding=UTF-16\n', '*.ts -filter\n', '*.ts !filter\n', '*.ts text eol=crlf\n']) {
     const r = repo(t); put(r.dir, '.git/info/attributes', line);
@@ -882,20 +883,22 @@ test('[P4r-37] round 6: an edit hidden from git by a clean filter of ANY name is
   }
 });
 
-test('[P4r-39] round 6: ident, a replaced symlink under core.symlinks=false, and a CRLF-only rewrite are changes too (raw bytes decide)', (t) => {
+test('[P4r-39] rounds 6 and 8: ident, a replaced symlink under core.symlinks=false, a sha256 repo and a CRLF-only rewrite are refused alike', (t) => {
   // ident: git collapses `$Id: ...$` back to `$Id$`, so an edit inside it is invisible to git
   { const r = repo(t);
     put(r.dir, 'libs/money/id.test.ts', "const v = '$Id$';\n"); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'id'); r.base = git(r.dir, 'rev-parse', 'HEAD');
     const before = evidenceIdentity({ repo: r.dir, baseSha: r.base });
     put(r.dir, '.git/info/attributes', '*.ts ident\n'); put(r.dir, 'libs/money/id.test.ts', "const v = '$Id: '; process.exit(0); '$';\n");
     assert.ok(!git(r.dir, 'diff', '--name-only', r.base).includes('id.test.ts'), 'the fixture really hides the edit from git');
-    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'ident', 'libs/money/id.test.ts'); }
-  // a tracked symlink replaced by a regular file that holds the target path (core.symlinks=false): same bytes, another kind
-  { const r = repo(t);
+    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'ident'); }
+  // a tracked symlink replaced by a regular file that holds the target path (core.symlinks=false): same bytes, another kind. POSIX only:
+  // Git for Windows defaults to core.symlinks=false, so a symlink Node creates there is committed as a regular file and the fixture's
+  // base is not a symlink to begin with.
+  if (process.platform !== 'win32') { const r = repo(t);
     symlinkSync('old.test.ts', join(r.dir, 'libs/money/l.test.ts')); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'l'); r.base = git(r.dir, 'rev-parse', 'HEAD');
     const before = evidenceIdentity({ repo: r.dir, baseSha: r.base });
     git(r.dir, 'config', 'core.symlinks', 'false'); rmSync(join(r.dir, 'libs/money/l.test.ts')); writeFileSync(join(r.dir, 'libs/money/l.test.ts'), 'old.test.ts');
-    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'core.symlinks=false', 'libs/money/l.test.ts'); }
+    moves({ before, after: evidenceIdentity({ repo: r.dir, baseSha: r.base }) }, 'core.symlinks=false'); }
   // a sha256 repository: the raw hash follows the id's length (an unchanged tracked file stays outside P, an edit hidden by a filter moves it)
   { const dir = tmp(t, 'p4r-s256-');
     git(dir, 'init', '-q', '--object-format=sha256', '-b', 'main'); put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n"); put(dir, 'libs/money/same.test.ts', 'x\n');
@@ -904,8 +907,8 @@ test('[P4r-39] round 6: ident, a replaced symlink under core.symlinks=false, and
     assert.equal(r.base.length, 64, 'the fixture really is sha256'); assert.deepEqual(before.paths, [], 'nothing changed');
     hideWith('*.ts filter=unspecified\n', 'unspecified')(r); put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
     const after = evidenceIdentity({ repo: dir, baseSha: r.base });
-    moves({ before, after }, 'sha256'); assert.ok(!after.paths.includes('libs/money/same.test.ts'), 'an unchanged file stays outside P'); }
-  // the conservative side, documented: a CRLF-only rewrite under autocrlf is a change of P (a false positive, never a hidden edit)
+    moves({ before, after }, 'sha256'); }
+  // a CRLF-only rewrite under autocrlf: git converts, so V0 refuses the checkout (a Windows autocrlf checkout of CRLF files is refused)
   { const h = hiddenEdit(t, (r) => git(r.dir, 'config', 'core.autocrlf', 'true'), "test('old [kind:negative]', () => {});\r\n");
     moves(h, 'CRLF only'); }
 });
@@ -995,7 +998,10 @@ test('[P4r-45] round 7: kind evidence comes from exactly ONE entry: a second ent
     assert.deepEqual(recA.files.flatMap((f) => f.credited), ['kind:negative'], 'the builder, per entry, credits A by a +1 only B explains (the borrow)');
     const v = two(r, A, B, recA, recB, { cmd: ENTRY.cmd, args: argsA }, { cmd: ENTRY.cmd, args: argsB });
     assert.equal(v.status, 'refused', JSON.stringify(v)); assert.deepEqual({ code: v.code, detail: v.detail }, MULTI, 'complementary');
-    assert.equal(two(r, A, B, recA, null, { cmd: ENTRY.cmd, args: argsA }, { cmd: ENTRY.cmd, args: argsB }).records.a, 'current', 'one record alone is not refused'); }
+    // round 8 (D3): the same borrow with B's record ABSENT: two declared entries are refused whatever records are present
+    const one = two(r, A, B, recA, null, { cmd: ENTRY.cmd, args: argsA }, { cmd: ENTRY.cmd, args: argsB });
+    assert.equal(one.status, 'refused', JSON.stringify(one)); assert.deepEqual({ code: one.code, detail: one.detail }, MULTI, 'one record of two entries');
+    assert.equal(tkVerdict({ ...view(r, recA, { entry: A, args: argsA }), commands: { a: { cmd: ENTRY.cmd, args: argsA } }, records: { a: recA } }, 'F1').records.a, 'current', 'the control: ONE declared entry'); }
   // (b) overlapping coverage: both entries run old.test.ts; only B's report carries the new skipped test that A's +1 comes from
   { const r = repo(t); rmSync(join(r.dir, 'libs/money/new.test.ts'));
     put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest.skip('n [kind:negative]', () => {});\n");
@@ -1006,6 +1012,71 @@ test('[P4r-45] round 7: kind evidence comes from exactly ONE entry: a second ent
     assert.deepEqual(recB.files.flatMap((f) => f.credited), [], 'B, which saw the skip, does not');
     const v = two(r, A, B, recA, recB, { cmd: ENTRY.cmd, args }, { cmd: ENTRY.cmd, args });
     assert.equal(v.status, 'refused', JSON.stringify(v)); assert.deepEqual({ code: v.code, detail: v.detail }, MULTI, 'overlapping'); }
+});
+
+// ---- round 8: the blind Fable review of e476cd5 ----
+const CONVERTED = { ok: false, code: 'evidence_unavailable', detail: 'worktree_conversion_unsupported_v0' };
+/** A repo whose test files pass through a content-changing clean filter (an LFS or git-crypt style pointer); smudge is `cat`. */
+function pointerRepo(t) {
+  const dir = tmp(t, 'p4r-ptr-');
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'filter.ptr.clean', "sh -c 'cat >/dev/null; echo version-pointer-oid-123'"); git(dir, 'config', 'filter.ptr.smudge', 'cat');
+  put(dir, '.gitattributes', 'libs/**/*.test.ts filter=ptr\n'); put(dir, 'vitest.config.ts', 'export default {};\n'); put(dir, 'package-lock.json', '{}\n');
+  put(dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n");
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base');
+  return { dir, base: git(dir, 'rev-parse', 'HEAD') };
+}
+test('[P4r-46] round 8 (D2): a working tree git converts (pointer filters, LFS, autocrlf, ident) is refused, listed or not, never counted', (t) => {
+  const args = [...ARGS.slice(0, 4), 'libs/money/old.test.ts'];
+  // the Fable repro: only a doc changes; the UNCHANGED old test's raw bytes (1 marker) differ from its pointer blob (0 markers)
+  { const r = pointerRepo(t), file = join(r.dir, 'libs/money/old.test.ts');
+    put(r.dir, 'docs/note.md', 'n\n');
+    assert.deepEqual(git(r.dir, 'diff', '--name-only', r.base).split('\n').filter(Boolean), [], 'git lists nothing tracked');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED);
+    assert.deepEqual(build(r, report([{ file, cases: [{ title: 'old [kind:negative]' }] }]), { args, before: 'e1:' + '0'.repeat(64) }), CONVERTED, 'no false credit');
+    assert.deepEqual(recordUsable(good(repo(t)), cur(r)), { ok: false, reason: 'unavailable', code: 'evidence_unavailable', detail: 'worktree_conversion_unsupported_v0' }); }
+  // the LISTED twin: the test file really changed, so git lists it, but its base blob is a pointer: the base count would be 0
+  { const r = pointerRepo(t);
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
+    put(r.dir, 'libs/money/other.test.ts', 'x\n'); git(r.dir, 'add', 'libs/money/other.test.ts');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'a listed file git converts'); }
+});
+
+test('[P4r-47] round 8 (D4): a config path absent at base and present now is runner_config_changed, even when a local ignore rule hides it', (t) => {
+  const entry = { ...ENTRY, config_paths: ['vitest.config.ts', 'package-lock.json', 'vitest.workspace.ts'] };
+  const r = repo(t), rec = good(r, passing(r.dir));
+  assert.equal(build(r, passing(r.dir), { entry }).ok, true, 'the control: absent at base and absent now');
+  put(r.dir, '.git/info/exclude', 'vitest.workspace.ts\n'); put(r.dir, 'vitest.workspace.ts', 'export default [{ test: { reporters: ["./evil.js"] } }];\n');
+  assert.equal(git(r.dir, 'status', '--porcelain'), '?? libs/money/new.test.ts', 'git shows nothing for the workspace file');
+  assert.equal(code(build(r, passing(r.dir), { entry })), 'runner_config_changed');
+  assert.equal(recordUsable(rec, cur(r, { entry })).code, 'runner_config_changed');
+  assert.equal(verdict(r, rec, { entry }).code, 'runner_config_changed');
+});
+
+test('[P4r-48] round 8 (D6): withheld ids are capped across rows like credited items (P2 takes at most 512); the builder never emits more', (t) => {
+  const r = repo(t), files = ['A', 'B', 'C', 'D'];
+  const ids = (k) => Array.from({ length: 140 }, (_, i) => `plan:${k}${String(i).padStart(3, '0')}`);
+  const cases = (k) => [0, 1, 2].map((h) => ({ title: ids(`${k}${h}`).map((m) => `[${m}]`).join('') }));
+  for (const k of files) put(r.dir, `libs/money/${k}.test.ts`, "test('dynamic', () => {});\n"); // the titles' markers are not in the bytes: r3_unchanged
+  const b = build(r, report(files.map((k) => ({ file: join(r.dir, `libs/money/${k}.test.ts`), cases: cases(k) }))));
+  assert.equal(code(b), 'evidence_budget_exceeded', '4 x 420 withheld ids');
+  // the control under the cap: one file withholds its 420
+  const one = build(r, report([{ file: join(r.dir, 'libs/money/A.test.ts'), cases: cases('A') }]));
+  assert.equal(Object.keys(one.record.files[0].withheld).length, 420);
+  const stored = clone(one.record);
+  stored.files = files.map((k) => ({ file: `libs/money/${k}.test.ts`, outcome: 'counted', credited: [], withheld: Object.fromEntries(cases(k).flatMap((c) => c.title.slice(1, -1).split('][')).map((m) => [m, 'r3_unchanged'])), skipped: {}, unknown: 0 }));
+  stored.counts = { marker_files: 4, credited: 0, unknown_markers: 0 };
+  assert.equal(agree(recordUsable(stored, cur(r)), verdict(r, stored), 'withheld over P2'), 'refused:evidence_budget_exceeded');
+});
+
+test('[P4r-49] round 8 (D9): the list, path-length and scan-token caps refuse', (t) => {
+  const r = repo(t);
+  assert.equal(tkVerdict({ ...view(r, null), entries: Array.from({ length: LIMITS.maxList + 1 }, (_, i) => ({ ...ENTRY, name: `e${i}` })) }, 'F1').code, 'evidence_budget_exceeded', 'maxList');
+  assert.equal(tkVerdict({ ...view(r, null), entries: Array.from({ length: LIMITS.maxList }, (_, i) => ({ ...ENTRY, name: `e${i}` })) }, 'F1').detail, 'multi_entry_unsupported_v0', 'the control: at maxList the list is read');
+  assert.throws(() => readEntry({ ...ENTRY, config_paths: ['a/'.repeat(LIMITS.maxPathChars / 2) + 'x'] }), { code: 'test_kinds_error' }, 'maxPathChars');
+  assert.doesNotThrow(() => readEntry({ ...ENTRY, config_paths: ['a/'.repeat(LIMITS.maxPathChars / 2 - 1) + 'x'] }), 'the control: at maxPathChars');
+  const tokens = `[${'0,'.repeat(LIMITS.maxScanTokens)}0]`;
+  assert.equal(code(build(r, tokens)), 'evidence_budget_exceeded', 'maxScanTokens');
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
@@ -1362,7 +1433,9 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 // ---- mutation check (L1): a mutant counts as killed ONLY by an ERR_ASSERTION failure in the [P4r-n] test it names ----
 // `file`: the patched module (base = limits, readers, report scan; io = the shared rules and the record; reuse = reuse and the verdict).
 // `tag`: the test expected to kill it; it is the ONLY test run against that mutant, so a kill is attributed. `posix`: the killing test
-// needs a POSIX facility (it is skipped on win32). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
+// needs a POSIX facility (it is skipped on win32): a fifo; EACCES and ELOOP fixtures; ENOTDIR (Windows reports ENOENT below a file, so
+// the mutant is unobservable there: it survived on the bcd7f9e Windows run); a TRACKED symlink (Git for Windows defaults to
+// core.symlinks=false and commits a symlink Node creates as a regular file). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
 // Documented EQUIVALENT (not listed, no input can observe them):
 //   - `retry_authorised` forced to true: P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads it only when held > 0.
 //   - `typeof r.title/r.file` in build: preflight has already refused every result without a string title or suite name
@@ -1438,7 +1511,7 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-29', name: 'verdict: no entry needs a command', from: 'needCommand: (en) => has(records, en.name)', to: 'needCommand: () => false' },
   { file: IO, tag: 'P4r-26', name: 'context: a config path in P does not refuse (C3)', from: '  if (entries.some((en) => en.config_paths.some((p) => c.inAll(p, \'runner_config_changed\') !== null))) refuse(\'runner_config_changed\');\n', to: '' },
   { file: IO, tag: 'P4r-7', name: 'context: config_paths are checked after the exclusions', from: 'c.inAll(p, \'runner_config_changed\')', to: 'c.inP(p, \'runner_config_changed\')' },
-  { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code, cd.detail);\n    per.set', to: '    per.set' },
+  { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code, cd.detail);\n', to: '' },
   { file: IO, tag: 'P4r-21', name: 'context: the declared args are hashed instead of the substituted ones', from: 'command_digest: command && commandDigest(command.cmd, command.args)', to: 'command_digest: command && commandDigest(entry.cmd, entry.args)' },
   // reuse: the verdict
   { file: RE, tag: 'P4r-2', name: 'verdict: a stale record is used as evidence', from: 'if (!u.ok) continue;', to: '' },
@@ -1557,7 +1630,7 @@ const MUTANTS = [
   // round 4: attributes that make git hash bytes other than the working tree's
   // round 5: the CodeRabbit findings at 848f6dc
   { file: IO, tag: 'P4r-38', name: 'CR1: a path below a symlinked directory is hashed through it', from: '    if (st && realOrAncestor(dirname(abs(p)), { work: 0, max: 1e6 }) !== dirname(abs(p))) refuse(\'evidence_unavailable\'); // reached through a symlinked directory: bytes git does not see\n', to: '' },
-  { file: IO, tag: 'P4r-38', name: 'CR1: a path below a file refuses (ENOTDIR)', from: 'if (e?.code !== \'ENOENT\' && e?.code !== \'ENOTDIR\') refuse(\'evidence_unavailable\'); } // below a file: deleted', to: 'if (e?.code !== \'ENOENT\') refuse(\'evidence_unavailable\'); } // below a file: deleted' },
+  { file: IO, tag: 'P4r-38', name: 'CR1: a path below a file refuses (ENOTDIR)', from: 'if (e?.code !== \'ENOENT\' && e?.code !== \'ENOTDIR\') refuse(\'evidence_unavailable\'); } // below a file: deleted', to: 'if (e?.code !== \'ENOENT\') refuse(\'evidence_unavailable\'); } // below a file: deleted', posix: true },
   { file: BA, tag: 'P4r-40', name: 'CR3: the path is not folded', from: 'const segs = segsOf(rel);', to: 'const segs = rel.split(\'/\');' },
   { file: BA, tag: 'P4r-40', name: 'CR3: the path is not case folded', from: 'fold(rel.replace(', to: '(rel.replace(' },
   { file: BA, tag: 'P4r-40', name: 'CR3: format characters are kept', from: 'rel.replace(/\\p{Cf}/gu, \'\')', to: 'rel' },
@@ -1566,15 +1639,23 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-43', name: 'CR10: a leading U+FEFF is stripped from git file names', from: '{ fatal: true, ignoreBOM: true }', to: '{ fatal: true }' },
   { file: IO, tag: 'P4r-44', name: 'CR5: a non-string repo reaches the filesystem', from: '(typeof repo !== \'string\' ? refuse(\'test_kinds_error\') : realpathSync.native(', to: '(false ? refuse(\'test_kinds_error\') : realpathSync.native(' },
   // round 6: "changed" is decided from raw bytes against the base blob id
-  { file: IO, tag: 'P4r-37', name: 'R6: a raw change git does not list is not added to P', from: '  if (hidden.length) all =', to: '  if (false) all =' },
-  { file: IO, tag: 'P4r-39', name: 'R6: a symlink base path is not compared', from: '/^(100644|100755|120000) blob', to: '/^(100644|100755) blob' },
-  { file: IO, tag: 'P4r-39', name: 'R6: the file kind is not compared', from: '  if (mode === \'120000\' ? !st.isSymbolicLink() : !st.isFile()) return false;\n', to: '' },
+  { file: IO, tag: 'P4r-46', name: 'R8: an unlisted raw mismatch is accepted (the round 6 false credit)', from: '  if (base.some(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget))) refuse(\'evidence_unavailable\', CONVERTED);\n', to: '' },
+  { file: IO, tag: 'P4r-39', name: 'R6: a symlink base path is not compared', from: '/^(100644|100755|120000) blob', to: '/^(100644|100755) blob', posix: true },
+  { file: IO, tag: 'P4r-39', name: 'R6: the file kind is not compared', from: 'if (!st || (mode === \'120000\' ? !st.isSymbolicLink() : !st.isFile())) return false;', to: 'if (!st) return false;', posix: true },
   { file: IO, tag: 'P4r-5', name: 'R6: the blob header is not hashed (every tracked file looks changed)', from: '.update(`blob ${bytes.length}\\0`)', to: '' },
-  { file: IO, tag: 'P4r-39', name: 'R6: a sha256 repository is hashed as sha1', from: 'oid.length === 64 ? \'sha256\' : \'sha1\'', to: '\'sha1\'' },
+  { file: IO, tag: 'P4r-39', name: 'R6: a sha256 repository is hashed as sha1', from: 'readFileSync(join(top, p)), oid.length === 64) === oid;', to: 'readFileSync(join(top, p)), false) === oid;' },
   // round 7: kind evidence from exactly one entry (FND-003-1)
-  { file: RE, tag: 'P4r-45', name: 'R7: records of two entries are accepted (a cross-entry borrow)', from: '  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);\n', to: '' },
-  { file: RE, tag: 'P4r-45', name: 'R7: a third record is needed before refusing', from: '.filter((name) => has(records, name)).length > 1)', to: '.filter((name) => has(records, name)).length > 2)' },
+  { file: RE, tag: 'P4r-45', name: 'R7: two declared entries are accepted (a cross-entry borrow)', from: '  if (ctxt.per.size > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: '  if (false) refuse(\'evidence_unavailable\', MULTI_ENTRY);' },
+  { file: RE, tag: 'P4r-45', name: 'R8: only records count, not declared entries (D3)', from: '  if (ctxt.per.size > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: '  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);' },
   { file: RE, tag: 'P4r-45', name: 'R7: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: 'refuse(\'evidence_unavailable\');' },
+  // round 8: the blind Fable review of e476cd5
+  { file: IO, tag: 'P4r-46', name: 'R8: a listed file git converts is counted (the pointer-blob base)', from: '  gitConverts(top, base.filter(([p, m]) => m && m[1] !== \'120000\' && listed.has(p) && stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);\n', to: '' },
+  { file: IO, tag: 'P4r-46', name: 'R8: the conversion refusal does not name its cause', from: '!rawUnchanged(top, p, m[1], m[2], budget))) refuse(\'evidence_unavailable\', CONVERTED);', to: '!rawUnchanged(top, p, m[1], m[2], budget))) refuse(\'evidence_unavailable\');' },
+  { file: IO, tag: 'P4r-47', name: 'R8: a config path absent at base may appear (D4)', from: '    if (entry.config_paths.some((p) => !c.atBase.has(p) && stat(c.top, p))) refuse(\'runner_config_changed\');\n', to: '' },
+  { file: IO, tag: 'P4r-48', name: 'R8: withheld ids are not capped across rows (D6)', from: '  if (new Set(copy.files.flatMap((f) => [...f.withheld.keys()])).size > P2_LIMITS.maxItems) refuse(\'evidence_budget_exceeded\'); // D6: across rows too\n', to: '' },
+  { file: BA, tag: 'P4r-49', name: 'R8: a list over maxList is read (D9)', from: '  if (n > max) refuse(\'evidence_budget_exceeded\');\n', to: '' },
+  { file: BA, tag: 'P4r-49', name: 'R8: a path over maxPathChars is repo-relative (D9)', from: 'p.length > 0 && p.length <= LIMITS.maxPathChars && ', to: 'p.length > 0 && ' },
+  { file: BA, tag: 'P4r-49', name: 'R8: the scan-token cap is dropped (D9)', from: '    if (++tokens > LIMITS.maxScanTokens) refuse(\'evidence_budget_exceeded\');\n', to: '    ++tokens;\n' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1627,7 +1708,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run, and a failed control stops here
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 44 : 45), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 48 : 49), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');

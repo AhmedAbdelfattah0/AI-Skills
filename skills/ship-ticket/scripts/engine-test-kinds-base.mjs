@@ -101,7 +101,8 @@ export function countMarkers(text, out = new Map()) {
 export const bufMarkers = (buf) => countMarkers(buf.toString('latin1'));
 
 // ---- the report: a strict JSON shape scan (duplicate keys, depth, work), then the whole-run pre-pass ----
-/** Throws a Refusal: evidence_unavailable for malformed/duplicate-key/too-deep JSON, evidence_budget_exceeded past the token cap. */
+/** Throws a Refusal: evidence_unavailable for malformed/duplicate-key/too-deep JSON (at most 65 nested levels: `d` counts from 0 to
+ * `maxDepth`), evidence_budget_exceeded past the token cap. */
 export function scanJson(text) {
   let i = 0, tokens = 0;
   const n = text.length, bad = () => refuse('evidence_unavailable');

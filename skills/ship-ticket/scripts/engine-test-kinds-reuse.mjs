@@ -73,8 +73,12 @@ const refusedVerdict = ({ code, detail }) => ({ status: 'refused', code, ...(det
 /**
  * tkVerdict(E, point) -> the P2 verdict plus { evidence_id, claim:'L-ran', records:{<entry>: 'current'|'absent'|'stale:<reason>'}, voids:{runner_uncovered:n},
  *   withheld:{<id>: 'r3_unchanged'|'r3_offset'} (a passed marker R-3 did not credit, and why; an id credited by any record is not listed) }.
+ * CODES (D7): a refused verdict's `code` is a P4r refusal (base REFUSALS), a P2 code (`engine-test-kinds.mjs` CODES), or a P6 waiver
+ * code from `testKindWaivers` (e.g. `test_kinds_waiver_state_invalid`), passed through unchanged. A P4r refusal carries `counts: {}`
+ * (nothing was counted) where a P2 verdict carries P2's zero counts; P5r must read `status`/`code`, not the shape of `counts`.
+ * `reassessed` is the CALLER's (design 5.2 lists `reassess` as reused by the caller): P4r passes it to P2 and never calls `reassess`.
  * A refusal carries `detail` when one cause is worth naming (`submodule_unsupported_v0`, `path_alias`, `multi_entry_unsupported_v0`).
- * ONE ENTRY (round 7): records for more than one declared entry are refused (`evidence_unavailable` / `multi_entry_unsupported_v0`):
+ * ONE ENTRY (round 7, round 8 D3): more than one DECLARED entry is refused, whatever records are present (`evidence_unavailable` / `multi_entry_unsupported_v0`):
  * R-3 is entry-local (each record's skipped carriers and total are its own), so credits from two entries could borrow each other's
  * carriers. Candidate-wide skipped provenance (one accounting over every entry's report, no double counting) is a future slice.
  * E = { repo, baseSha, exclusions?, dagDigest, entries:[entry], commands:{<name>:{cmd,args}} (the CURRENT substituted commands;
@@ -95,7 +99,7 @@ function verdict(E, point) {
   const { c, testGlobs } = ctxt, dagDigest = own(E, 'dagDigest');
   // round 7 (FND-003-1): R-3's skipped and total accounting is per RECORD, so a second entry's report (its skipped carriers) is not in the
   // first entry's accounting and could be borrowed. V0 (OD-2: one vitest runner) takes kind evidence from exactly one entry.
-  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse('evidence_unavailable', MULTI_ENTRY);
+  if (ctxt.per.size > 1) refuse('evidence_unavailable', MULTI_ENTRY); // round 8 (D3): DECLARED entries, whatever records are present
   const kinds = new Set(), items = new Set(), states = {}, withheld = {};
   let unknown = 0;
   for (const [name] of ctxt.per) {
