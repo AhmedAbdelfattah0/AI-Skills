@@ -809,14 +809,15 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-20', name: 'identity: a dirty submodule is accepted', from: "if (status.length) refuse('evidence_unavailable');", to: '' },
   { file: IO, tag: 'P4r-12', posix: true, name: 'identity: a fifo is read', from: "else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)", to: "else { kind = 'other'; }" },
 ];
-const RUN_TIMEOUT_MS = 3 * 60 * 1000;
-const run = (args, cwd) => new Promise((resolve) => {
+// one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
+const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
+const run = (args, cwd, timeoutMs = RUN_TIMEOUT_MS) => new Promise((resolve) => {
   const { NODE_TEST_CONTEXT: _nested, ...env } = process.env;
   const child = spawn(process.execPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', timedOut = false;
   child.stdout.on('data', (b) => { out += b; });
   child.stderr.on('data', (b) => { out += b; });
-  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, RUN_TIMEOUT_MS);
+  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
   child.on('close', (c) => { clearTimeout(timer); resolve({ code: c, out, timedOut }); });
 });
 /** Apply one mutant's edits to its module's LF text; every target must occur exactly once. */
@@ -836,7 +837,7 @@ async function runMutant(t, mutant) {
     if (load.code !== 0) return { invalid: true, tail: load.out.slice(-800) };
   }
   const pattern = mutant ? `\\[${mutant.tag}\\]` : '\\[P4r-\\d+\\]';
-  const r = await run(['--test', '--test-reporter=tap', `--test-name-pattern=${pattern}`, 'engine-test-kinds-io.test.mjs'], dir);
+  const r = await run(['--test', '--test-reporter=tap', `--test-name-pattern=${pattern}`, 'engine-test-kinds-io.test.mjs'], dir, mutant ? RUN_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
   const blocks = r.out.split(/^(?=\s*(?:not )?ok \d+ - )/m).filter((b) => /^\s*not ok \d+ - /.test(b));
   const killers = blocks.filter((b) => /^\s*not ok \d+ - \[P4r-\d+\]/.test(b) && /code: '?ERR_ASSERTION'?/.test(b)).map((b) => /\[(P4r-\d+)\]/.exec(b)[1]);
   const passed = Number(/^# pass (\d+)$/m.exec(r.out)?.[1] ?? 0);
@@ -844,14 +845,13 @@ async function runMutant(t, mutant) {
 }
 const uniq = (xs) => [...new Set(xs)].sort();
 
-test('mutation: the control passes every tagged test; every mutant loads and is killed by an assertion in the test it names', { timeout: 40 * 60 * 1000 }, async (t) => {
+test('mutation: the control passes every tagged test; every mutant loads and is killed by an assertion in the test it names', { timeout: 55 * 60 * 1000 }, async (t) => {
   assert.equal(new Set(MUTANTS.map((m) => m.name)).size, MUTANTS.length, 'mutant names are distinct');
   for (const m of MUTANTS) { assert.notEqual(m.from, m.to, m.name); assert.match(m.tag, /^P4r-\d+$/, m.name); }
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
-  const jobs = [null, ...live], results = [];
-  for (let i = 0; i < jobs.length; i += 3) results.push(...await Promise.all(jobs.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
-  const [control, ...mutants] = results;
-  assert.equal(control.code, 0, `the control passes every tagged test:\n${control.tail}`);
+  const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
+  for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
+  assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
   assert.ok(control.passed >= 23, `the control ran the tagged tests (${control.passed})`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
