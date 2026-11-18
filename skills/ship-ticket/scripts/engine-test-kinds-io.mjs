@@ -23,7 +23,7 @@
  *           the FLAT form `{name, format, cmd, args, covers, config_paths}` (P5r maps the design's `evidence:{...}` onto it).
  *   command the args that RAN: the template with `{report}` -> `/dev/fd/3` and `{files}` -> 1..N repo-relative paths, none
  *           starting with `-`. The record's `command_digest` hashes exactly these args; the verdict hashes the same.
- *   report  at most 32 MiB of UTF-8 BYTES; ONE JSON document (no duplicate keys after escape decoding, depth <= 64);
+ *   report  at most 32 MiB of UTF-8 BYTES; ONE JSON document (no duplicate keys after escape decoding, at most 65 nested levels);
  *           `success === true`, `numFailedTestSuites === 0`, `numFailedTests === 0`, every suite `status === 'passed'`
  *           (vitest 4 writes only `passed`/`failed`); at most 100000 results and every title at most 2048 characters, both
  *           checked on the parsed document BEFORE the runner parser builds its result list. Over a cap: REFUSED, never dropped.
@@ -38,7 +38,7 @@
  * R-3, WHAT IS ENFORCED (section 4 rule 5, no base run; owner amendment 2026-11-18: the design's total over P). With d(f, m) =
  * count_cand(f, m) - count_base(f, m) - skipped(f, m), a passed id m of a counted file f is
  *   credited                 when d(f, m) > 0 AND sum over f' in P of d(f', m) > 0 (deleted and renamed-away paths included);
- *   withheld `r3_unchanged`  when d(f, m) <= 0 (the file holds no MORE of m than at base);
+ *   withheld `r3_unchanged`  when d(f, m) <= 0 (no more of m than at base once the file's NON-passed carriers are subtracted);
  *   withheld `r3_offset`     when d(f, m) > 0 but the total over P is <= 0 (the marker was added here and removed elsewhere).
  * R-3 IS ENTRY-LOCAL: `skipped` comes from ONE entry's report, so a carrier only another entry reported is not subtracted here. The
  * verdict therefore takes kind evidence from exactly one entry (reuse header, `multi_entry_unsupported_v0`); candidate-wide skipped
@@ -57,21 +57,25 @@
  * PATH IDENTITY (S2): every comparison of a declared, stored or report-derived path with a git path goes through ONE rule
  * (`pathIndex`/`under` in the base module): a spelling that shares a key (NFC, lower case) with a git path without being it is
  * refused (`path_alias`), on every platform. A config path must also be its own file: no symlinked directory on the way.
- * CHANGED MEANS RAW BYTES (round 6; it replaces the round 4-5 attribute refusals): every base path not listed by git's diff is read
- * raw and hashed as a blob; a mismatch (or a file that is no longer the same kind) is a change of P. So a clean filter of any name,
- * a macro or `core.attributesFile` filter, `ident`, `working-tree-encoding` or `core.symlinks=false` makes the identity MOVE instead
- * of hiding an edit, and no attribute is refused by itself (Git LFS included). Conservative side: a file whose raw bytes differ only
- * by a conversion counts as changed (a false positive, never a hidden edit): a CRLF checkout under `core.autocrlf` (Windows) and a Git
- * LFS repository, whose checked-out files differ from the committed pointer files, put EVERY such file into P (fail closed: R-3 then
- * sees them all as changed). Cost: one read of every tracked file. The raw scan has its OWN `maxIdentityBytes` (256 MiB) budget
- * beside the identity's, so up to 512 MiB may be read in one call; that budget is UNTESTED (a 256 MiB tracked fixture). StoreCraft
- * (2209 files, 18.8 MB) takes about 0.4 s. Git's own diff (in
- * risk-floor, outside this module) may still RUN a configured clean filter while listing; that is the local user's git config.
+ * CONVERTED WORKING TREES ARE REFUSED (round 8; it replaces round 6's "the path enters P", which credited an unchanged test whose
+ * Git LFS-style pointer blob holds no marker: Fable D2). Every base path git's diff did not list must be, as RAW bytes, its base blob
+ * (a symlink by its link text, and still a symlink); every LISTED base file must hash the same raw as git hashes it with its filters.
+ * Otherwise git compares converted bytes (a clean filter of any name, a Git LFS or git-crypt pointer, `ident`, an encoding, autocrlf,
+ * `core.symlinks=false`), and the base blob is not the base of the bytes R-3 counts: `evidence_unavailable` / detail
+ * `worktree_conversion_unsupported_v0`. The observation decides, never an attribute name, so a Git LFS repository and a Windows
+ * checkout under `core.autocrlf` whose files hold CRLF are REFUSED in V0 (fail closed). Cost: one raw read of every tracked file plus a
+ * `git hash-object --stdin-paths` over the listed ones; StoreCraft (2209 files, 18.8 MB) reads in about 0.4 s. The raw reads have their
+ * OWN `maxIdentityBytes` (256 MiB) budget beside the identity's, so up to 512 MiB may be read in one call; that budget is UNTESTED (it
+ * needs a 256 MiB tracked fixture). Git's own diff and `hash-object` may RUN a configured clean filter: the local user's git config.
  * IDENTITY BRACKET (P5r/FX requirement, not decidable here): `evidence_id_before` is the identity before the run; a runner reading a
  * mutable checkout could modify a covered file and restore it before the identity is taken again. Binding what the runner reads to
  * the recorded identity (R-TC, the launch binding) is P5r's; P4r only checks the bracket it is given.
  * NOT IN P (accepted, design: ignored files are outside release scope): a NEW file that `.gitignore`, `.git/info/exclude` or a
- * global excludes file ignores never enters P, so it is outside the identity even if a test imports it.
+ * global excludes file ignores never enters P, so it is outside the identity even if a test imports it. The same holds for a file inside
+ * a `.git`-named directory within a tracked directory (`libs/money/.git/helper.mjs`; git never lists it) and, with `core.ignorecase=true`
+ * on a case-sensitive filesystem, for an untracked `OLD.TEST.TS` beside a tracked `old.test.ts`. None of them can be committed.
+ * TOCTOU (rests on P5r quiescence): files are read by path (lstat, then read) without `O_NOFOLLOW` or an fstat re-check; a writer
+ * racing the identity is excluded by the caller's quiescence (`quiesced`), not here.
  * NOT A CHANGE (accepted; it cannot help a test pass): a `chmod +x` with `core.fileMode=false` (the raw comparison reads bytes, not
  * the executable bit, which Vitest ignores).
  * SUBMODULES (S3): V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at base or
@@ -88,7 +92,7 @@
  * marker on a skipped title is not stored either. Hostile input (L3, L6): caller objects are read through own DATA descriptors
  * only (no getter or proxy trap runs); work is charged to per-call budgets and the named LIMITS. The exported entry points
  * return refusals (`{ code, detail? }`) instead of throwing, except `readEntry`, `commandFor`, `currentContext`, `candidate`,
- * `census`, `r3Rule` and `validRecord`, which THROW a `Refusal` for every input they refuse (a git or filesystem fault, or a
+ * `census`, `r3Inputs`, `r3Rule`, `applicable` and `validRecord`, which THROW a `Refusal` for every input they refuse (a git or filesystem fault, or a
  * caller callback of `currentContext`, may surface as another error; each entry point maps any error to a refusal).
  */
 import { createHash } from 'node:crypto';
@@ -127,19 +131,38 @@ const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }); // a fi
 /** The NUL-terminated records of a `-z` git listing, as bytes (a path is never decoded lossily). */
 const records = (buf) => { const out = []; for (let at = 0; at < buf.length;) { const end = buf.indexOf(0, at) < 0 ? buf.length : buf.indexOf(0, at); out.push(buf.subarray(at, end)); at = end + 1; } return out; };
 const isGitlink = (rec) => rec.subarray(0, 7).toString('latin1') === '160000 ';
+export const CONVERTED = 'worktree_conversion_unsupported_v0';
+const rawHash = (bytes, sha256) => createHash(sha256 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+/** lstat of a working-tree path: null when it is missing (ENOENT, or ENOTDIR below a file); any other error refuses. */
+function stat(top, p) { try { return lstatSync(join(top, p)); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? null : refuse('evidence_unavailable'); } }
 /**
- * Round 6, THE invariant for "changed": a base path whose working-tree file, read as RAW bytes, hashes to its base blob id (the same
- * `blob <len>\0` object hash, sha1 or sha256 by the id's length) is unchanged; anything else is a change of P, whatever git's diff
- * says. No attribute, filter (of any name), `ident`, `working-tree-encoding`, textconv or autocrlf is consulted, so none can hide an
- * edit. A symlink compares its link text and must still be a symlink; a regular file must still be one. Throws a Refusal.
+ * THE invariant for "unchanged" (round 6, tightened in round 8): a base path git's diff did not list must be, as RAW working-tree
+ * bytes, its base blob (`blob <len>\0` + bytes, sha1 or sha256 by the id's length; a symlink by its link text, and still a symlink).
+ * Otherwise git compared CONVERTED bytes (a clean filter of any name, a Git LFS or git-crypt pointer, `ident`, an encoding, autocrlf,
+ * `core.symlinks=false`), and the base blob is not the base of the bytes R-3 counts: refused, never counted (round 6 let such a path
+ * enter P, which credited an unchanged test whose pointer blob holds no marker: the Fable D2 finding). Throws a Refusal.
  */
 function rawUnchanged(top, p, mode, oid, budget) {
-  let st;
-  try { st = lstatSync(join(top, p)); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? false : refuse('evidence_unavailable'); }
-  if (mode === '120000' ? !st.isSymbolicLink() : !st.isFile()) return false;
+  const st = stat(top, p);
+  if (!st || (mode === '120000' ? !st.isSymbolicLink() : !st.isFile())) return false;
   if ((budget.bytes += st.size) > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
-  const bytes = mode === '120000' ? readlinkSync(join(top, p), { encoding: 'buffer' }) : readFileSync(join(top, p));
-  return createHash(oid.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === oid;
+  return rawHash(mode === '120000' ? readlinkSync(join(top, p), { encoding: 'buffer' }) : readFileSync(join(top, p)), oid.length === 64) === oid;
+}
+/**
+ * The LISTED twin (round 8): a base file git lists as changed is compared through the same conversion, so the hash git gives its
+ * working-tree file (`hash-object --stdin-paths`, filters applied) must equal the raw hash, or its base blob (a pointer) is not the
+ * base of the bytes counted. Throws a Refusal.
+ */
+function gitConverts(top, paths, sha256, budget) {
+  if (!paths.length) return;
+  if (paths.some((p) => /[\n\r]/.test(p))) refuse('evidence_unavailable'); // --stdin-paths reads lines
+  let out;
+  try { out = git(top, ['hash-object', '--stdin-paths'], 64 << 20, Buffer.from(`${paths.join('\n')}\n`, 'utf8')).toString('latin1').split('\n').filter(Boolean); } catch (e) { refuse(gitRefusal(e)); }
+  if (out.length !== paths.length) refuse('evidence_unavailable');
+  paths.forEach((p, i) => {
+    if ((budget.bytes += stat(top, p)?.size ?? 0) > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
+    if (rawHash(readFileSync(join(top, p)), sha256) !== out[i]) refuse('evidence_unavailable', CONVERTED);
+  });
 }
 /**
  * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
@@ -159,8 +182,9 @@ export function candidate(repo, baseSha, exclusions) {
     try { return [utf8.decode(rec.subarray(tab + 1)), /^(100644|100755|120000) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'))]; } catch { return refuse('evidence_unavailable'); } // never decoded lossily
   });
   try { all = changedPaths(top, baseSha, 'WORKTREE'); } catch { refuse('evidence_unavailable'); }
-  const listed = new Set(all), budget = { bytes: 0 }, hidden = base.filter(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget)).map(([p]) => p);
-  if (hidden.length) all = [...all, ...hidden].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))); // changed in raw bytes, whatever git's diff said
+  const listed = new Set(all), budget = { bytes: 0 };
+  if (base.some(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget))) refuse('evidence_unavailable', CONVERTED);
+  gitConverts(top, base.filter(([p, m]) => m && m[1] !== '120000' && listed.has(p) && stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);
   if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
   const exact = new Set(paths), blobs = base.filter(([p, m]) => m && m[1] !== '120000' && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
@@ -186,7 +210,7 @@ export function candidate(repo, baseSha, exclusions) {
     }
     h.update(Buffer.from(p, 'utf8')); h.update(`\0${kind}\0${mode}\0${content.length}\0`); h.update(content); h.update('\0');
   }
-  return { evidence_id: `e1:${h.digest('hex')}`, paths, all, inP, inAll, top, cand, blobs, base_sha: baseSha, census: null };
+  return { evidence_id: `e1:${h.digest('hex')}`, paths, all, inP, inAll, atBase: new Set(base.map(([p]) => p)), top, cand, blobs, base_sha: baseSha, census: null };
 }
 /**
  * The R-3 census over P: candidate and base marker counts per path. Base blobs (listed by `candidate`) come from ONE `cat-file
@@ -277,7 +301,7 @@ export function configDigest(repo, paths) {
  *   2. EVERY entry's current command through `commandFor`, before any record is looked at (C6); `undefined` is allowed only
  *      when `needCommand(entry)` is false (the verdict: an entry with no record, whose `{files}` may have nothing to run);
  *   3. the candidate; 4. `runner_config_changed`: any entry's config_paths in `all`, or an alias of one, BEFORE any exclusion (I6, C3, S2);
- *   5. every entry's config digest; 6. the test globs.
+ *   5. every entry's config digest, then (D4) a config path absent at base but present now is `runner_config_changed`; 6. the test globs.
  */
 export function currentContext(input, ctx) {
   const entries = arr(own(input, 'entries'), LIMITS.maxList, plain, ctx).map(readEntry);
@@ -294,6 +318,9 @@ export function currentContext(input, ctx) {
   for (const { entry, command } of decl) {
     const cd = configDigest(c.top, entry.config_paths);
     if (!cd.ok) refuse(cd.code, cd.detail);
+    // D4: a config path must EQUAL base (design rev 6): absent at base and present now is a change, even when a local ignore rule keeps
+    // it out of git's diff (after the digest, so a symlinked or non-regular config path is still `evidence_unavailable`)
+    if (entry.config_paths.some((p) => !c.atBase.has(p) && stat(c.top, p))) refuse('runner_config_changed');
     per.set(entry.name, { entry, covers: matcher(entry.covers), command, command_digest: command && commandDigest(command.cmd, command.args), config_digest: cd.digest });
   }
   const testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globList(own(input, 'globs'), ctx)]);
@@ -357,6 +384,7 @@ export function validRecord(R, ctx) {
   }
   // P2 takes at most this many items: a record that would exceed it is refused (I-B: the builder never emits one), never truncated
   if (new Set(copy.files.flatMap((f) => f.credited.filter((m) => m.startsWith('plan:')))).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded');
+  if (new Set(copy.files.flatMap((f) => [...f.withheld.keys()])).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded'); // D6: across rows too
   return COUNTS.every((k) => copy.counts[k] === sum[k]) ? copy : null; // S1: a stored total is the total of its rows, or the record is malformed
 }
 

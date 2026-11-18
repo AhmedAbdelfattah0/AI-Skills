@@ -949,6 +949,12 @@ test('P4r delta: jest-like results carry the leaf title and the ancestor titles,
     assert.equal(hit.title, 'refuses stale candidate', `${format}: the leaf title`);
     assert.deepEqual(hit.suite_path, ['gate'], `${format}: the ancestors`);
     assert.deepEqual(Object.keys(hit).sort(), ['detail', 'failure_kind', 'file', 'name', 'status', 'suite_path', 'title'], `${format}: exactly two added keys`);
+    // the pre-P4r fields keep their VALUES, pinned literally (round 8, D8: comparing the parser with itself could not see a change)
+    assert.deepEqual({ name: hit.name, status: hit.status, failure_kind: hit.failure_kind }, { name: 'gate > refuses stale candidate', status: 'fail', failure_kind: 'assertion' }, `${format}: the failed assertion`);
+    assert.match(hit.detail, format === 'vitest-json' ? /^AssertionError: expected true to be false/ : /^Error: expect\(received\)\.toBe/, `${format}: its failure message`);
+    const thrown = byName(p, 'gate > throws'), passed = byName(p, 'gate > passes');
+    assert.deepEqual([thrown.status, thrown.failure_kind], ['fail', 'runtime'], `${format}: a runtime failure`); assert.match(thrown.detail, /TypeError: Cannot read properties/, format);
+    assert.deepEqual([passed.status, passed.failure_kind, passed.detail], ['pass', null, null], `${format}: a pass carries no failure`);
     // a suite that failed to load has no test title: its result keeps the pre-P4r shape
     const load = p.results.find((r) => r.failure_kind === 'load');
     assert.deepEqual(Object.keys(load).sort(), ['detail', 'failure_kind', 'file', 'name', 'status']);
@@ -963,5 +969,10 @@ test('P4r delta: RED and proof outcomes are identical with and without the added
     const old_ = (x) => x && { name: x.name, file: x.file, status: x.status, failure_kind: x.failure_kind, detail: x.detail };
     assert.deepEqual({ hit: old_(now.hit), load: old_(now.load) }, { hit: old_(old.hit), load: old_(old.load) }, spec.name);
     assert.equal(specStatus(spec, p), specStatus(spec, stripped), spec.name);
+  }
+  // pinned literally too, so a change to the shared fields shows here (D8)
+  for (const [spec, want] of [[{ file: 'src/gate.test.ts', name: 'gate > refuses stale candidate' }, ['fail', 'assertion']], [{ file: 'src/gate.test.ts', name: 'gate > passes' }, ['pass', null]]]) {
+    const now = findSpec(spec, p.results);
+    assert.deepEqual([now.hit?.status, now.hit?.failure_kind], want, spec.name);
   }
 });
