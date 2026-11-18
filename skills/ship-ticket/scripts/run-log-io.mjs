@@ -1,56 +1,115 @@
 /**
- * The one append path of `<ticket>.jsonl` (S-04a2): the lock is lib/durable-io.mjs `acquireLock` (on its own
- * `<ticket>.jsonl.lock`, never the engine's per-ticket lock); the append itself is custom, because durable-io has only a
- * JSON replace. Under the lock, synchronously: read the file, apply the R11 rule (measure/events.mjs `committedLength`),
- * run the caller's `check` on the committed bytes (a throw refuses: nothing is truncated or written), truncate a torn
- * tail or torn record, write the whole record text in ONE positional write at the committed length (the file is opened
- * read-write, never in append mode, so truncation works on win32 too), fsync, and fsync the directory of a new file (POSIX).
- * Any failure after the write starts (short write, write or fsync error) rolls the file back to the committed length, so a
- * rejection always means "committed history only"; if even the rollback fails, the torn bytes are left for R11 to drop.
- * Cancellation (`lockOptions.signal`) applies to the lock wait only: once the lock is held the append runs to completion.
- * Only run-log.mjs calls this (a structural test pins it).
+ * The write paths of `<ticket>.jsonl` (S-04a2). Lock: lib/durable-io.mjs `acquireLock` on `<log>.lock` (never the engine's
+ * per-ticket lock). Sidecars: durable-io `writeStateAtomic`. The append and the quarantine rewrite are custom (durable-io has
+ * only a JSON replace). Only run-log.mjs calls these (a structural test pins it). Invariants (measure/events.mjs header):
+ * - I1: `check(after, before)` sees the WHOLE file as it will be after the write (committed bytes + loss record + new text)
+ *   and throws to refuse; nothing is written, moved or truncated before it passes.
+ * - I2: bytes leave the log only after they are durable in `<log>.lost-<offset>-<sha12>.json` (verbatim, base64), and the
+ *   same write carries the `log_loss` record `marker(info)` returns. A refusal or a failure restores the original bytes.
+ * - I3: only the bytes after the last LF are torn (measure/events.mjs `committedLength`).
+ * Cancellation (`lockOptions.signal`) applies to the lock wait only: once the lock is held the operation runs to completion.
+ * The awaits inside the lock are test fault-injection boundaries (`hooks.boundary`); no other code runs between them.
  */
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { acquireLock, boundary } from './lib/durable-io.mjs';
+import { acquireLock, boundary, writeStateAtomic } from './lib/durable-io.mjs';
 import { committedLength } from './measure/events.mjs';
 
 const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`), { code });
+/** A log larger than this is refused rather than read into memory (L3). */
+export const LOG_BYTES_MAX = 64 * 1024 * 1024;
+export const LOSS_SCHEMA = 'ship-ticket-run-log-loss-v1';
+export const sidecarPath = (file, { offset, sha256 }) => `${file}.lost-${offset}-${sha256.slice(0, 12)}.json`;
+const sha = (buf) => createHash('sha256').update(buf).digest('hex');
+const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fsyncSync ?? fsyncSync, truncate: fs.ftruncateSync ?? ftruncateSync });
+const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
 
-/**
- * Append `text` (whole LF-terminated lines) to `file`. Options: `check(committedBuffer)`; `waitMs` (lock wait, default 10 s);
- * seams for tests: `lock` (acquireLock), `lockCtx` (merged into its ctx), `lockOptions` (merged into its options),
- * `hooks.boundary(name)` (append-read, append-truncate, append-write, append-fsync), `fs` ({ writeSync, fsyncSync, ftruncateSync }),
- * `platform`. Resolves `{ truncated, bytes }`.
- */
-export async function appendLocked(file, text, { check, waitMs = 10000, lock = acquireLock, lockCtx = {}, lockOptions = {}, hooks, fs = {}, platform = process.platform } = {}) {
-  if (typeof text !== 'string' || !text.endsWith('\n')) throw coded('bad_append', 'text must be whole LF-terminated lines');
-  const data = Buffer.from(text, 'utf8');
-  const write = fs.writeSync ?? writeSync, fsync = fs.fsyncSync ?? fsyncSync, truncate = fs.ftruncateSync ?? ftruncateSync;
+/** Lock, open (read-write, never append mode: truncation must work on win32) and read; `body` runs with the file's bytes. */
+async function locked(file, opts, body) {
+  const { waitMs = 10000, lock = acquireLock, lockCtx = {}, lockOptions = {} } = opts;
   const handle = await lock({ lockFile: `${file}.lock`, runId: 'run-log', ...lockCtx }, { waitMs, ...lockOptions });
   try {
     const created = !existsSync(file);
     const fd = openSync(file, created ? 'wx+' : 'r+', 0o600);
     try {
-      await boundary(hooks, 'append-read', { file });
-      const size = fstatSync(fd).size, buf = Buffer.alloc(size);
+      await boundary(opts.hooks, 'append-read', { file });
+      const size = fstatSync(fd).size;
+      if (size > (opts.maxBytes ?? LOG_BYTES_MAX)) throw coded('log_too_large', `${file} is ${size} bytes`);
+      const buf = Buffer.alloc(size);
       for (let at = 0; at < size;) { const n = readSync(fd, buf, at, size - at, at); if (n === 0) throw coded('short_read', file); at += n; }
-      const committed = committedLength(buf);
-      if (check) check(buf.subarray(0, committed));
-      await boundary(hooks, 'append-truncate', { file });
-      if (committed < size) truncate(fd, committed);
-      await boundary(hooks, 'append-write', { file });
-      try {
-        const written = write(fd, data, 0, data.length, committed);
-        if (written !== data.length) throw coded('short_write', `${written} of ${data.length} bytes to ${file}`);
-        await boundary(hooks, 'append-fsync', { file });
-        fsync(fd);
-        if (created && platform !== 'win32') { const dfd = openSync(dirname(file), 'r'); try { fsync(dfd); } finally { closeSync(dfd); } }
-      } catch (error) {
-        try { truncate(fd, committed); } catch { /* left torn: R11 drops it */ }
-        throw error;
-      }
-      return { truncated: size - committed, bytes: data.length };
+      return await body(fd, buf, created);
     } finally { closeSync(fd); }
   } finally { await handle.release(); }
+}
+
+/** I2: persist the bytes leaving the log, verbatim, before they leave it. */
+async function saveLost(file, info, pieces, opts) {
+  await boundary(opts.hooks, 'append-sidecar', { file });
+  await writeStateAtomic(sidecarPath(file, info), { schema: LOSS_SCHEMA, log: file.split(/[\\/]/).pop(), ...info,
+    pieces: pieces.map(([from, bytes]) => ({ offset: from, base64: bytes.toString('base64') })) }, { fs: { fsyncSync: seams(opts).fsync }, platform: opts.platform });
+}
+const lossInfo = (offset, bytes, cause) => ({ offset, bytes: bytes.length, sha256: sha(bytes), cause });
+
+/**
+ * Append `text` (whole LF-terminated lines). A torn tail is moved to a sidecar and replaced by `marker(info)` + `text` in one
+ * positional write; any failure after the write starts restores the original bytes. Options: `check(after, before)`,
+ * `marker(info) -> text` (required when a torn tail exists), `waitMs`, `maxBytes`; test seams `lock`, `lockCtx`, `lockOptions`,
+ * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync }), `platform`. Resolves `{ lost: info | null, bytes }`.
+ */
+export async function appendLocked(file, text, opts = {}) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) throw coded('bad_append', 'text must be whole LF-terminated lines');
+  const { write, fsync, truncate } = seams(opts), platform = opts.platform ?? process.platform;
+  return locked(file, opts, async (fd, buf, created) => {
+    const committed = committedLength(buf), tail = buf.subarray(committed);
+    const info = tail.length ? lossInfo(committed, tail, 'torn_tail') : null;
+    if (info && !opts.marker) throw coded('loss_unrecorded', `${file} has a torn tail and no loss record was supplied`);
+    const out = Buffer.from((info ? opts.marker(info) : '') + text, 'utf8');
+    const before = buf.subarray(0, committed);
+    if (opts.check) opts.check(Buffer.concat([before, out]), before);
+    if (info) await saveLost(file, info, [[committed, tail]], opts);
+    await boundary(opts.hooks, 'append-write', { file });
+    try {
+      writeAll(write, fd, out, committed);
+      if (buf.length > committed + out.length) truncate(fd, committed + out.length);
+      await boundary(opts.hooks, 'append-fsync', { file });
+      fsync(fd);
+      if (created && platform !== 'win32') { const dfd = openSync(dirname(file), 'r'); try { fsync(dfd); } finally { closeSync(dfd); } }
+    } catch (error) {
+      try { writeAll(write, fd, tail, committed); truncate(fd, buf.length); } catch { /* the sidecar holds the tail; R11 drops a torn rest */ }
+      throw error;
+    }
+    return { lost: info, bytes: out.length };
+  });
+}
+
+/**
+ * I4: move the byte ranges `select(buf)` names (sorted, disjoint [from, to)) to a sidecar and atomically replace the log with
+ * the remaining bytes + `marker(info)`. `check(after, before)` must accept the result. Resolves the loss info, or null when
+ * nothing is selected (the log is untouched).
+ */
+export async function quarantineLocked(file, { select, marker, check, ...opts }) {
+  const { write, fsync } = seams(opts), platform = opts.platform ?? process.platform;
+  return locked(file, opts, async (fd, buf) => {
+    const ranges = select(buf);
+    if (!ranges.length) return null;
+    const pieces = ranges.map(([from, to]) => [from, buf.subarray(from, to)]);
+    const keep = [];
+    let at = 0;
+    for (const [from, to] of ranges) { keep.push(buf.subarray(at, from)); at = to; }
+    keep.push(buf.subarray(at));
+    const info = lossInfo(ranges[0][0], Buffer.concat(pieces.map(([, b]) => b)), 'quarantine');
+    const after = Buffer.concat([...keep, Buffer.from(marker(info), 'utf8')]);
+    if (check) check(after, buf);
+    await saveLost(file, info, pieces, opts);
+    await boundary(opts.hooks, 'append-write', { file });
+    const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+    try {
+      const t = openSync(tmp, 'wx', 0o600);
+      try { writeAll(write, t, after, 0); fsync(t); } finally { closeSync(t); }
+      renameSync(tmp, file);
+    } catch (error) { try { unlinkSync(tmp); } catch { /* never created */ } throw error; }
+    if (platform !== 'win32') { const dfd = openSync(dirname(file), 'r'); try { fsync(dfd); } finally { closeSync(dfd); } }
+    return info;
+  });
 }

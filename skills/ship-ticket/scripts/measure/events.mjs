@@ -7,17 +7,25 @@
  * the shape spec, the string policy, CLI value typing and the event_id derivation all come from it (no second list).
  * Every string in metrics/detail is SAFE_ID (some fields stricter), except `ts` fields. Unknown keys are refused.
  *
- * R11 (torn tail; rule adopted from deepseek-harness session-persistence-jsonl `SessionLogScanner`, no code copied): bytes
- * after the last LF are a torn tail, and a final complete line that is an S-04 START row is a torn record (its end row was
- * part of the same write). Both are ignored by readers and truncated before the next append. Lines are split on the LF
- * byte first, then each is decoded strictly (fatal UTF-8): an undecodable line is reported, never replaced.
+ * Invariants (each has a named test in events.test.mjs):
+ * I1 only validated bytes are written: every record is serialised by ONE data-only encoder (`canonicalJson`: own data
+ *    properties of plain objects/arrays only; no toJSON, getter, Proxy `get` or prototype is ever consulted), those exact bytes
+ *    are parsed back and validated, and run-log validates the whole resulting file before writing.
+ * I2 bytes are never deleted silently: bytes leaving the log go first to a durable sidecar, and a `log_loss` record in the
+ *    same write makes the loss visible to every later reader (`readEvents().lost`).
+ * I3 R11 (rule adopted from deepseek-harness session-persistence-jsonl `SessionLogScanner`, no code copied): ONLY the bytes
+ *    after the last LF are torn. Every complete line stays visible: an undecodable, malformed or invalid one fails closed.
+ *    Lines are split on the LF byte first, then decoded strictly (fatal UTF-8), never replaced.
+ * I4 recovery is explicit: `run-log quarantine` moves the lines `readEvents().bad` names to the sidecar, with a `log_loss`.
  */
 import { isTimestamp, validate } from '../lib/shape.mjs';
 
 /** The run-log row schema literal: held here only (the encoder's module); run-log.mjs imports it. */
 export const RUN_LOG_SCHEMA = 'ship-ticket-run-log-v1';
 export const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const HEX = /^[a-f0-9]{7,64}$/, SHA256 = /^[a-f0-9]{64}$/, REVIEW_EXEC = /^review-[A-Za-z0-9._-]{1,120}$/;
+const HEX = /^[a-f0-9]{7,64}$/, SHA256 = /^[a-f0-9]{64}$/, REVIEW_EXEC = /^review-[A-Za-z0-9._-]{1,80}$/;
+// Fields a canonical event_id embeds are capped so every derived id fits SAFE_ID's 128 characters (a test proves it at the maxima).
+const FINGERPRINT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 export const ROW_BYTES_MAX = 65536;
 const LIMITS = { maxDepth: 6, maxItems: 1000, maxNodes: 20000, maxProblems: 20 };
 
@@ -54,16 +62,24 @@ export const EVENTS = Object.freeze({
   host_sleep: { kind: 'wait', id: null, metrics: { ...LABEL } },
   milestone: { kind: 'activity', point: true, id: (m) => `milestone-${m.at}`,
     metrics: { ...LABEL, at: E(['plan_approved', 'ship_ready', 'merged', 'failed', 'abandoned']) } },
-  finding: { kind: 'activity', point: true, id: (m) => `finding-${m.fingerprint}-${m.occurrence}`,
+  finding: { kind: 'activity', point: true, id: (m) => `finding-${m.fingerprint}-${m.occurrence}`, pattern: { fingerprint: FINGERPRINT },
     metrics: { ...LABEL, fingerprint: 'string', severity: E(['Blocker', 'Major', 'Minor', 'Info']), repeat: 'boolean', occurrence: 'posint' } },
-  closure: { kind: 'activity', point: true, id: (m) => `closure-${m.through.replace(/[-:.]/g, '')}-${m.final ? 'final' : 'interim'}`,
+  // The id is per INSTANT (millisecond): `...:00Z` and `...:00.000Z` are one fact. Written only by `run-log close` (cli: false).
+  closure: { kind: 'activity', point: true, cli: false, id: (m) => `closure-${new Date(m.through).toISOString().replace(/[-:.]/g, '')}-${m.final ? 'final' : 'interim'}`,
     pattern: { state_sha256: SHA256 },
     metrics: { ...LABEL, through: 'ts', final: 'boolean', emitter: E(['engine', 'orchestrator']),
       count_source: E(['engine_state', 'orchestrator_tally', 'posthoc']), state_sha256: '?string', state_seq: '?uint' },
     detail: { counts } },
+  // I2: bytes moved out of the log (to `<log>.lost-<offset>-<sha12>.json`); written only by run-log's writer (cli: false).
+  log_loss: { kind: 'activity', point: true, cli: false, id: (m) => `log_loss-${m.offset}-${m.sha256.slice(0, 12)}`, pattern: { sha256: SHA256 },
+    metrics: { label: E(['measured']), cause: E(['torn_tail', 'quarantine']), offset: 'uint', bytes: 'posint', sha256: 'string' } },
 });
 export const EVENT_NAMES = Object.freeze(Object.keys(EVENTS));
 export const isEventName = (name) => typeof name === 'string' && Object.hasOwn(EVENTS, name);
+/** The names `run-log event` writes; `closure` comes only from `close`, `log_loss` only from the writer. */
+export const CLI_EVENT_NAMES = Object.freeze(EVENT_NAMES.filter((n) => EVENTS[n].cli !== false));
+/** Run id of `log_loss` records (a loss belongs to the log, not to a run). */
+export const LOSS_RUN_ID = 'log';
 /** The legacy row set (V §4.2 rule 2): every row whose name is an S-04 event name removed. */
 export const legacyRows = (rows) => rows.filter((row) => !isEventName(row?.name));
 
@@ -151,6 +167,40 @@ export function checkEventPair(start, end) {
   return { ok: true, problems: [] };
 }
 
+/**
+ * I1: the ONE serialiser of run-log rows. Reads only own data properties of plain objects and arrays (no toJSON, getter,
+ * Proxy `get`, inherited or non-enumerable property is ever consulted: any of them is refused), finite numbers, strings,
+ * booleans and null; bounded work. Same bytes as JSON.stringify for plain data. Throws `not_plain_data`.
+ */
+export function canonicalJson(value) {
+  let work = 0;
+  const bad = (why) => { throw coded('not_plain_data', why); };
+  const enc = (v, depth) => {
+    if (++work > LIMITS.maxNodes || depth > 32) bad('too large or too deep');
+    if (v === null || typeof v === 'boolean' || typeof v === 'string') return JSON.stringify(v);
+    if (typeof v === 'number') return Number.isFinite(v) ? JSON.stringify(v) : bad('non-finite number');
+    if (typeof v !== 'object') return bad(`a ${typeof v}`);
+    const arr = Array.isArray(v), proto = Reflect.getPrototypeOf(v);
+    if (proto !== (arr ? Array.prototype : Object.prototype) && !(proto === null && !arr)) bad('not a plain object or array');
+    const parts = [];
+    for (const k of Reflect.ownKeys(v)) {
+      if (typeof k === 'symbol') bad('a symbol key');
+      const d = Reflect.getOwnPropertyDescriptor(v, k);
+      if (arr && k === 'length') continue;
+      if (!d || !('value' in d) || !d.enumerable) bad(`${String(k).slice(0, 40)} is not an enumerable data property`);
+      if (arr && !/^(0|[1-9]\d*)$/.test(k)) bad('an array with extra keys');
+      parts.push(arr ? enc(d.value, depth + 1) : `${JSON.stringify(k)}:${enc(d.value, depth + 1)}`);
+    }
+    if (arr) {
+      const len = Reflect.getOwnPropertyDescriptor(v, 'length')?.value;
+      if (len !== parts.length) bad('a sparse array');
+      return `[${parts.join(',')}]`;
+    }
+    return `{${parts.join(',')}}`;
+  };
+  try { return enc(value, 0); } catch (e) { if (e?.code === 'not_plain_data') throw e; return bad('unreadable'); }
+}
+
 const ENCODED = new WeakSet();
 /**
  * THE encoder of S-04 rows: validates the input, serialises the start/end pair, re-parses those exact bytes and checks them
@@ -168,7 +218,7 @@ export function encodeEvent({ ticket, runId, eventId, name, metrics, detail, sta
   const base = { schema: RUN_LOG_SCHEMA, ticket, run_id: runId, event_id: id, kind: def.kind, name };
   let text, s, e;
   try {
-    text = `${JSON.stringify({ ...base, event: 'start', timestamp: startedAt, metrics: {} })}\n${JSON.stringify({ ...base, event: 'end', timestamp: endedAt,
+    text = `${canonicalJson({ ...base, event: 'start', timestamp: startedAt, metrics: {} })}\n${canonicalJson({ ...base, event: 'end', timestamp: endedAt,
       duration_ms: Date.parse(endedAt) - Date.parse(startedAt), outcome: 'complete', metrics, ...(detail === undefined ? {} : { detail }) })}\n`;
     [s, e] = text.split('\n').map((l) => (l ? JSON.parse(l) : null));
   } catch { throw coded('invalid_event', `${name}: not serialisable`); }
@@ -181,41 +231,38 @@ export function encodeEvent({ ticket, runId, eventId, name, metrics, detail, sta
 }
 export const isEncodedEvent = (x) => ENCODED.has(x);
 
+/** I2: the branded `log_loss` record for bytes moved out of `ticket`'s log at `info.offset` (at `at`, an ISO instant). */
+export const encodeLoss = (ticket, { offset, bytes, sha256, cause }, at) => encodeEvent({ ticket, runId: LOSS_RUN_ID, name: 'log_loss',
+  metrics: { label: 'measured', cause, offset, bytes, sha256 }, startedAt: at, endedAt: at });
+
 /**
- * The run-log write choke point: records -> the bytes to append. A branded encodeEvent result passes as is; any other record is
- * a legacy row and is refused when its name is an S-04 event name (only encodeEvent may produce those). Throws; writes nothing.
+ * The run-log write choke point (I1): records -> the bytes to append. A branded encodeEvent result passes as is. Any other record
+ * is a legacy row: it is serialised by canonicalJson, and the PARSED BYTES must be a row of this schema whose name is not an S-04
+ * event name (writer-side, in-process: only encodeEvent produces those; readers re-check every pair). Throws; writes nothing.
  */
 export function encodeRecords(records) {
   let text = '';
   for (const r of records) {
     if (ENCODED.has(r)) { text += r.text; continue; }
-    if (!r || typeof r !== 'object' || isEventName(own(r, 'name'))) throw coded('unvalidated_event', 'an S-04 event row must come from encodeEvent');
-    if (own(r, 'schema') !== RUN_LOG_SCHEMA) throw coded('not_a_row', `a run-log row carries schema ${RUN_LOG_SCHEMA}`);
-    text += `${JSON.stringify(r)}\n`;
+    const line = canonicalJson(r), row = JSON.parse(line);
+    if (!row || typeof row !== 'object' || Array.isArray(row) || isEventName(row.name)) throw coded('unvalidated_event', 'an S-04 event row must come from encodeEvent');
+    if (row.schema !== RUN_LOG_SCHEMA || typeof row.name !== 'string') throw coded('not_a_row', `a run-log row carries schema ${RUN_LOG_SCHEMA} and a name`);
+    text += `${line}\n`;
   }
   return text;
 }
 
 const strict = new TextDecoder('utf-8', { fatal: true });
 const decode = (bytes) => { try { return strict.decode(bytes); } catch { return null; } };
-/** R11: length of the committed prefix of a log (see the header). */
-export function committedLength(buf) {
-  let end = buf.lastIndexOf(0x0a) + 1;
-  if (end > 0) {
-    const from = end >= 2 ? buf.lastIndexOf(0x0a, end - 2) + 1 : 0, text = decode(buf.subarray(from, end - 1));
-    let row = null;
-    try { row = text === null ? null : JSON.parse(text); } catch { /* not a row: committed as is */ }
-    if (row && typeof row === 'object' && row.event === 'start' && isEventName(row.name)) end = from;
-  }
-  return end;
-}
+/** I3 (R11): length of the committed prefix of a log: everything up to and including the last LF. Nothing else is torn. */
+export const committedLength = (buf) => buf.lastIndexOf(0x0a) + 1;
 
-/** The committed lines of a log buffer: `{ lines: [{ line, text }], torn_bytes }`; `text` is null for an undecodable line. */
+/** The committed lines of a log buffer: `{ lines: [{ line, from, to, text }], torn_bytes }` (`to` excludes the LF); `text` is null when undecodable. */
 export function readLog(buf) {
   const committed = committedLength(buf), lines = [];
   for (let from = 0, n = 1; from < committed; n++) {
-    const lf = buf.indexOf(0x0a, from), to = lf < 0 || lf > committed ? committed : lf; // bounded even if `committed` is not at an LF
-    lines.push({ line: n, text: decode(buf.subarray(from, to)) });
+    const to = buf.indexOf(0x0a, from);
+    lines.push({ line: n, from, to, text: decode(buf.subarray(from, to)) });
     from = to + 1;
   }
   return { lines, torn_bytes: buf.length - committed };
@@ -223,24 +270,30 @@ export function readLog(buf) {
 
 /**
  * S-04 events of a log buffer and the ticket's lost signal (read by later slices, never printed by a2):
- * `lost = { torn_bytes, undecodable_lines, malformed_lines, invalid_events }`. Legacy rows are skipped.
+ * `lost = { torn_bytes, undecodable_lines, malformed_lines, invalid_events, loss_records, recovered_bytes }`; the last two come
+ * from `log_loss` records (bytes already moved to a sidecar), so a loss stays visible after recovery. `bad` = the byte ranges
+ * [from, to) a quarantine moves out: the torn tail, every undecodable or malformed line, and every S-04 line that is not part
+ * of a valid pair. Legacy rows are not judged here (run-log's legacy rules do that).
  */
 export function readEvents(buf) {
   const { lines, torn_bytes } = readLog(buf);
-  const lost = { torn_bytes, undecodable_lines: 0, malformed_lines: 0, invalid_events: 0 };
-  const starts = new Map(), events = [];
-  for (const { text } of lines) {
-    if (text === null) { lost.undecodable_lines++; continue; }
-    if (!text.trim()) continue;
+  const lost = { torn_bytes, undecodable_lines: 0, malformed_lines: 0, invalid_events: 0, loss_records: 0, recovered_bytes: 0 };
+  const starts = new Map(), events = [], bad = [];
+  const reject = (l) => { lost.invalid_events++; bad.push([l.from, l.to + 1]); };
+  for (const l of lines) {
+    if (l.text === null) { lost.undecodable_lines++; bad.push([l.from, l.to + 1]); continue; }
+    if (!l.text.trim()) continue;
     let row;
-    try { row = JSON.parse(text); } catch { lost.malformed_lines++; continue; }
+    try { row = JSON.parse(l.text); } catch { lost.malformed_lines++; bad.push([l.from, l.to + 1]); continue; }
     if (!row || typeof row !== 'object' || !isEventName(row.name)) continue;
     const key = JSON.stringify([row.run_id, row.event_id]);
-    if (row.event === 'start') { if (starts.has(key)) lost.invalid_events++; starts.set(key, row); continue; }
+    if (row.event === 'start') { if (starts.has(key)) reject(starts.get(key).l); starts.set(key, { row, l }); continue; }
     const start = starts.get(key);
     starts.delete(key);
-    if (start && checkEventPair(start, row).ok) events.push({ start, end: row }); else lost.invalid_events++;
+    if (!start || !checkEventPair(start.row, row).ok) { reject(l); if (start) bad.push([start.l.from, start.l.to + 1]); continue; }
+    if (row.name === 'log_loss') { lost.loss_records++; lost.recovered_bytes += row.metrics.bytes; } else events.push({ start: start.row, end: row });
   }
-  lost.invalid_events += starts.size;
-  return { events, lost };
+  for (const { l } of starts.values()) reject(l);
+  if (torn_bytes) bad.push([buf.length - torn_bytes, buf.length]);
+  return { events, lost, bad: bad.sort((a, b) => a[0] - b[0]) };
 }

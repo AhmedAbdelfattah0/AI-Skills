@@ -23,6 +23,16 @@ events (`MARK`, resume and retry events) to a sibling file,
 `<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
 log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
 
+Measurement events (`run-log.mjs event`, `close`) are validated against a closed schema
+(`scripts/measure/events.mjs`) and written by the same single append path as `start`/`end`.
+Every write takes `<TICKET>.jsonl.lock` (waiting up to 10 s) and refuses unless the whole
+resulting log is valid. Bytes after the last newline (an interrupted write) are moved
+verbatim to `<TICKET>.jsonl.lost-<offset>-<sha>.json`, and a `log_loss` record takes their
+place, so the loss stays visible. A complete but invalid line is never dropped: every write
+refuses until `run-log.mjs quarantine --repo <path> --ticket <key>` moves undecodable,
+malformed and invalid measurement lines to such a sidecar (with a `log_loss` record).
+Damaged legacy rows are not quarantined; they refuse writes as before.
+
 Usage events (`usage.mjs`, carrier `usageLog`, the run engine) carry `source` (`carrier`,
 `engine`, `session` or `codex`; one source per execution, never double-counted) and `role`
 (`builder`, `repair`, `evidence`, `orchestrator`, `reviewer`, `unattributed`: an import given no role). Per-role totals and

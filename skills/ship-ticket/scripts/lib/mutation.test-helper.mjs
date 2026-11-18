@@ -1,7 +1,7 @@
 // Shared mutation harness (L1), extracted unchanged in behaviour from S-30b lib/shape.test.mjs so every slice uses ONE harness.
 // A mutant is 'killed' ONLY when at least one test failed and EVERY failure is an assertion error. A load/syntax/runtime error,
 // a crash, a signal or a timeout is 'invalid' (proves nothing); a clean pass is 'survived'.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,12 +24,29 @@ export function classify(r) {
  * Copy the whole tree at `root` (every module a test may import, at any depth, plus data files; every OTHER *.test.mjs is left
  * out) to a temp dir, write `overrides` ({ relPath: source }), run `node --test ...args <testRel>` there -> raw spawn result.
  */
-export function runMutant({ root, testRel, overrides = {}, env, args = [], timeout = 120000 }) {
+function copyTree(root, testRel, overrides) {
   const dir = mkdtempSync(join(tmpdir(), 'mutant-'));
-  try {
-    const keep = join(root, testRel);
-    cpSync(root, dir, { recursive: true, filter: (src) => !src.endsWith('.test.mjs') || src === keep });
-    for (const [rel, src] of Object.entries(overrides)) writeFileSync(join(dir, rel), src);
-    return spawnSync(process.execPath, ['--test', ...args, join(dir, testRel)], { env, encoding: 'utf8', timeout });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const keep = join(root, testRel);
+  cpSync(root, dir, { recursive: true, filter: (src) => !src.endsWith('.test.mjs') || src === keep });
+  for (const [rel, src] of Object.entries(overrides)) writeFileSync(join(dir, rel), src);
+  return dir;
+}
+export function runMutant({ root, testRel, overrides = {}, env, args = [], timeout = 120000 }) {
+  const dir = copyTree(root, testRel, overrides);
+  try { return spawnSync(process.execPath, ['--test', ...args, join(dir, testRel)], { env, encoding: 'utf8', timeout }); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** runMutant without blocking, so independent mutants can run side by side: resolves the same shape as spawnSync (SIGKILL at `timeout`). */
+export function runMutantAsync({ root, testRel, overrides = {}, env, args = [], timeout = 120000 }) {
+  const dir = copyTree(root, testRel, overrides);
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--test', ...args, join(dir, testRel)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', error;
+    child.stdout.setEncoding('utf8').on('data', (d) => { stdout += d; });
+    child.stderr.setEncoding('utf8').on('data', (d) => { stderr += d; });
+    const timer = setTimeout(() => { error = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); child.kill('SIGKILL'); }, timeout);
+    child.on('error', (e) => { error = e; });
+    child.on('close', (status, signal) => { clearTimeout(timer); rmSync(dir, { recursive: true, force: true }); resolve({ status, signal, stdout, stderr, error }); });
+  });
 }

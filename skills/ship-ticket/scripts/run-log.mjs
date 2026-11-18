@@ -12,8 +12,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
-import { CLOSABLE, EVENT_NAMES, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
-import { appendLocked } from './run-log-io.mjs';
+import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
+import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
 
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -30,12 +30,16 @@ function usage() {
   run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>]
   run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> [--event-id <id>] [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>]
   run-log.mjs close --repo <path> --ticket <key> --run-id <id> --through <iso> --final true|false --count-source orchestrator_tally|posthoc --count <kind>=<n> ...
+  run-log.mjs quarantine --repo <path> --ticket <key>
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
-Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${EVENT_NAMES.filter((n) => n !== 'closure').join(', ')}.
+Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${CLI_EVENT_NAMES.join(', ')}.
 start/end refuse these names. event writes one start/end pair in one append; event_id is derived where the event has an identity.
 A fallback or recovery run is recorded by hand: event --name run_mode --metric mode=fallback|recovery --metric label=measured.
+Every write takes <log>.lock (waits up to 10 s) and validates the whole resulting log; an invalid log refuses every write.
+A torn tail (bytes after the last newline) is moved to <log>.lost-<offset>-<sha>.json and a log_loss record is written in its place.
+quarantine moves undecodable, malformed and invalid measurement lines (and a torn tail) the same way, so writes can resume.
 close records an orchestrator closure (label estimated) with explicit counts: <kind> in ${CLOSABLE.filter((k) => k !== 'usage').join(', ')}, or usage.<provider>.
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
@@ -280,24 +284,31 @@ function importCarrier(options, started, root, timestamp) {
 }
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+const unsafe = (path, why) => Object.assign(new Error(`${path}: ${why}; left unchanged`), { code: 'unsafe_history' });
+/**
+ * I1/I3: the whole log as it will be after a write must be clean: strict UTF-8, every legacy row valid under the legacy rules,
+ * every S-04 record a valid pair, no malformed line and no torn tail. Throws a typed `unsafe_history` error.
+ */
+function assertCleanLog(bytes, path) {
+  let text;
+  try { text = strictUtf8.decode(bytes); } catch { throw unsafe(path, 'the log is not valid UTF-8 (recovery: run-log.mjs quarantine)'); }
+  const { warnings } = rowsFromText(text, path);
+  if (warnings.length) throw unsafe(path, `unsafe log history (${warnings[0].code})`);
+  const { lost } = readEvents(bytes);
+  const bad = Object.entries(lost).filter(([k, n]) => n && !['loss_records', 'recovered_bytes'].includes(k));
+  if (bad.length) throw unsafe(path, `unsafe measurement history (${bad.map(([k, n]) => `${k}=${n}`).join(', ')}; recovery: run-log.mjs quarantine)`);
+}
 /**
  * The single write path of <ticket>.jsonl: records pass the encodeRecords choke point (an S-04 row only from encodeEvent),
- * then one locked append. With `check(eventEndRows)`, the committed history is verified under the lock (legacy rules, then every
- * S-04 record), then `check` runs on the S-04 events; any problem throws and nothing is written.
+ * then one locked append whose WHOLE resulting file passes assertCleanLog (I1). A torn tail from an interrupted earlier write
+ * is moved to a sidecar with a `log_loss` record in the same write (I2). `check(eventEndRows)` sees the committed S-04 events.
  */
 async function appendRows(directory, ticket, records, check) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const path = logPath(directory, ticket);
-  const { truncated } = await appendLocked(path, encodeRecords(records), { check: check && ((bytes) => {
-    let text;
-    try { text = strictUtf8.decode(bytes); } catch { throw new Error(`${path}: log is not valid UTF-8; left unchanged`); }
-    const { warnings } = rowsFromText(text, path);
-    if (warnings.length) throw new Error(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
-    const { events, lost } = readEvents(bytes);
-    if (lost.invalid_events) throw new Error(`${path}: unsafe measurement history (${lost.invalid_events} invalid event record(s)); left unchanged`);
-    check(events.map((e) => e.end));
-  }) });
-  if (truncated) process.stderr.write(`run-log: dropped ${truncated} byte(s) of a torn tail (an interrupted earlier write) before appending\n`);
+  const path = logPath(directory, ticket), now = new Date().toISOString();
+  const { lost } = await appendLocked(path, encodeRecords(records), { marker: (info) => encodeRecords([encodeLoss(ticket, info, now)]),
+    check: (after, before) => { assertCleanLog(after, path); if (check) check(readEvents(before).events.map((e) => e.end)); } });
+  if (lost) process.stderr.write(`run-log: moved ${lost.bytes} byte(s) of a torn tail to ${sidecarPath(path, lost)} and recorded log_loss\n`);
 }
 const failOnError = (promise) => promise.catch((error) => fail(error.message));
 
@@ -452,7 +463,7 @@ const typed = (raw, type) => (type === 'int' && /^-?(?:0|[1-9]\d*)$/.test(raw) ?
 
 async function eventCommand(options) {
   const name = requireOption(options, 'name');
-  if (!isEventName(name) || name === 'closure') fail(`--name must be one of: ${EVENT_NAMES.filter((n) => n !== 'closure').join(', ')} (closures: run-log.mjs close)`);
+  if (!CLI_EVENT_NAMES.includes(name)) fail(`--name must be one of: ${CLI_EVENT_NAMES.join(', ')} (closures: run-log.mjs close)`);
   for (const key of ['through', 'final', 'count-source', 'outcome']) if (options[key] !== undefined) fail(`--${key} is not an event option`);
   if (options.count.length) fail('--count is not an event option');
   const metrics = {};
@@ -489,6 +500,17 @@ async function closeCommand(options) {
   const final = options.final === 'true' ? true : options.final === 'false' ? false : fail('--final must be true or false');
   await writeEvent(options, 'closure', { label: 'estimated', through: requireOption(options, 'through'), final,
     emitter: 'orchestrator', count_source: requireOption(options, 'count-source') }, { counts });
+}
+
+/** I4: move every undecodable, malformed or invalid S-04 line and a torn tail to a sidecar, with a `log_loss` record. */
+async function quarantineCommand(options) {
+  const { directory } = locations(requireOption(options, 'repo'));
+  const ticket = validateId('ticket', requireOption(options, 'ticket'));
+  const path = logPath(directory, ticket), now = new Date().toISOString();
+  if (!existsSync(path)) fail(`${path} does not exist`);
+  const info = await failOnError(quarantineLocked(path, { select: (buf) => readEvents(buf).bad,
+    marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path) }));
+  process.stdout.write(`${JSON.stringify(info ? { quarantined: info, sidecar: sidecarPath(path, info) } : { quarantined: null })}\n`);
 }
 
 /** No known run: `unknown`. Some unknown runs: only a known sum (a lower bound) next to unknown_runs, never a bare total. */
@@ -547,5 +569,6 @@ if (command === 'start') await start(options);
 else if (command === 'end') await end(options);
 else if (command === 'event') await eventCommand(options);
 else if (command === 'close') await closeCommand(options);
+else if (command === 'quarantine') await quarantineCommand(options);
 else if (command === 'summary') summary(options);
 else fail(`unknown command: ${command}`);

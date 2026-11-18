@@ -389,12 +389,14 @@ function readUsage(path, skipped) {
 
 /**
  * S-04a2 lost signal of one ticket, passed on to the measurement reader and never printed: the R11/strict reader's counts
- * for the run log (torn bytes, undecodable, malformed, invalid S-04 events) and whether a present engine state is unreadable.
+ * for the run log (torn bytes, undecodable, malformed, invalid S-04 events, and `log_loss` records of bytes already moved to a
+ * sidecar, so a recovered loss stays visible) and whether a present engine state is unreadable.
  * A legacy figure never reads it. Lost usage lines are the report-wide `skipped_usage_lines`.
  */
 export function lostSignal(dir, ticket) {
+  if (typeof ticket !== 'string' || !SAFE_ID.test(ticket)) throw new TypeError('lostSignal: ticket must be a safe id');
   const log = join(dir, `${ticket}.jsonl`), statePath = join(dir, `${ticket}.state.json`);
-  const lost = existsSync(log) ? readEvents(readFileSync(log)).lost : { torn_bytes: 0, undecodable_lines: 0, malformed_lines: 0, invalid_events: 0 };
+  const lost = readEvents(existsSync(log) ? readFileSync(log) : Buffer.alloc(0)).lost;
   let stateUnreadable = false;
   if (existsSync(statePath)) { try { JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(statePath))); } catch { stateUnreadable = true; } }
   return { ...lost, state_unreadable: stateUnreadable };
