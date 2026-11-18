@@ -239,7 +239,8 @@ Tags come from three places, all in the plan narrative (the RUN-STATE block neve
   `risk_declaration_changed` adds nothing and `none` is reserved by `risk-floor.mjs` as a class name (a declaration change is reviewed as a declaration, not a code surface); any
   other class must be mapped by the repository, else `risk_class_unmapped`. The line is **trusted advisory input as
   recorded in the approved plan**: this script does not recompute the floor (`risk-floor.mjs reassess` does, and
-  feeding its classes here is S-01b2);
+  feeding its classes here is S-01b2: `kindsForClasses` maps reassessed classes through this same class loop, and
+  `require` also outputs `provenance`, each required kind's sources `tag:`, `class:` and `surface:`; still advisory);
 - the verified security block (`scripts/security-plan.mjs`): each surface kind maps to tags (`SURFACE_TAGS`).
 
 A repository extends the table in `.ship-ticket/test-triggers.json`, read from the base commit only:
