@@ -136,6 +136,13 @@ test('[P4r-3] AC1: an exit-0 control stays current when nothing it depends on mo
   assert.deepEqual(recordUsable(rec, cur(r)), { ok: true, evidence: { kinds: ['negative'], items: [], unknown_markers: 0 } });
   assert.deepEqual(recordUsable({ ...rec, dag_digest: 'e'.repeat(64) }, cur(r)), { ok: false, reason: 'freshness' });
   assert.deepEqual(recordUsable(rec, { ...cur(r), baseSha: 'HEAD' }), { ok: false, reason: 'unavailable', code: 'test_kinds_error' });
+  // the input is validated by the same current context the verdict uses: entry, command, config digest
+  const un = (o, want, why) => assert.deepEqual(recordUsable(rec, { ...cur(r), ...o }), { ok: false, reason: 'unavailable', code: want }, why);
+  un({ entry: { ...ENTRY, cmd: 'node_modules/.bin/jest' } }, 'runner_unsupported', 'another runner');
+  un({ command: { cmd: '/tmp/evil/vitest', args: ARGS } }, 'runner_unsupported', 'another cmd');
+  un({ command: { cmd: ENTRY.cmd, args: [...ARGS, '--typecheck'] } }, 'runner_unsupported', 'an extra flag');
+  un({ command: undefined }, 'test_kinds_error', 'recordUsable always needs the current command');
+  un({ entry: { ...ENTRY, config_paths: ['libs'] } }, 'evidence_unavailable', 'a config path that is not a regular file (the digest fails)');
 });
 
 test('[P4r-4] AC2 rules 2 and 4: only a PASSED result with the marker in its OWN leaf title counts; skip, todo, fail and load never do', (t) => {
@@ -158,18 +165,20 @@ test('[P4r-4] AC2 rules 2 and 4: only a PASSED result with the marker in its OWN
   const doc = (o = {}) => JSON.stringify({ success: true, numFailedTestSuites: 0, numFailedTests: 0, ...o.top, testResults: [{ name: file, status: o.suite ?? 'passed', message: '', assertionResults: [{ ancestorTitles: [], title: 'p [kind:negative]', status: o.case ?? 'passed', failureMessages: [] }] }] });
   assert.deepEqual(credits(build(r, doc())), ['kind:negative'], 'the control');
   for (const o of [{ top: { success: false } }, { top: { numFailedTestSuites: 1 } }, { top: { numFailedTests: 1 } }, { suite: 'failed' }, { case: 'failed' }]) assert.equal(code(build(r, doc(o))), 'evidence_run_failed', JSON.stringify(o));
-  // a status outside vitest's six is not evidence
+  // a status outside vitest's six is not evidence; nor is a suite status other than passed/failed (vitest 4 writes only those)
   assert.equal(code(only({ title: 'p [kind:negative]', status: 'passed-ish' })), 'evidence_unavailable');
+  for (const suite of ['skipped', 'pending', 'todo']) assert.equal(code(build(r, doc({ suite }))), 'evidence_unavailable', String(suite));
   assert.equal(verdict(r, null).code, 'missing_test_kinds');
   // markers: one `[plan:X]` (credited: its bytes are added), one unknown kind (counted, never credited), a malformed and an invalid item
   put(r.dir, 'libs/money/new.test.ts', "test('p [plan:Item1] [kind:not-a-kind] [kind:] [plan:9x]', () => {});\n");
   const res = only({ title: 'p [plan:Item1] [kind:not-a-kind] [kind:] [plan:9x]' });
   assert.deepEqual(credits(res), ['plan:Item1']);
   assert.equal(res.record.counts.unknown_markers, 2, 'kind:not-a-kind and plan:9x are unknown, never credited');
-  // a title longer than the cap is not read at all
+  // a title longer than the cap refuses the whole report (I-C: never silently unread; C1), at the cap it is read
   const long = `${'x'.repeat(LIMITS.maxTitleChars)} [kind:negative]`;
   put(r.dir, 'libs/money/new.test.ts', `test('${long}', () => {});\n`);
-  assert.deepEqual(credits(only({ title: long })), []);
+  assert.equal(code(only({ title: long })), 'evidence_budget_exceeded');
+  assert.deepEqual(credits(only({ title: long.slice(-LIMITS.maxTitleChars) })), ['kind:negative']);
 });
 
 test('[P4r-5] AC2 rule 5 (R-3): a marker counts only when the file holds MORE of it than at base; the base file of a new file is empty', (t) => {
@@ -181,6 +190,9 @@ test('[P4r-5] AC2 rule 5 (R-3): a marker counts only when the file holds MORE of
   // the file is edited but holds the SAME number of markers as at base: nothing is credited
   put(r.dir, 'libs/money/old.test.ts', "test('renamed [kind:negative]', () => { expect(1).toBe(1); });\n");
   assert.deepEqual(one(old, 'renamed [kind:negative]').files[0], { file: 'libs/money/old.test.ts', outcome: 'counted', credited: [], skipped: {} });
+  // ... even when another reported file adds one, so the total over P allows it: the per-file count decides for each file
+  const both = build(r, report([{ file: old, cases: [{ title: 'renamed [kind:negative]' }] }, { file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }]));
+  assert.deepEqual(both.record.files.map((f) => [f.file, f.credited]), [['libs/money/new.test.ts', ['kind:negative']], ['libs/money/old.test.ts', []]]);
   // one more marker than at base: credited
   put(r.dir, 'libs/money/old.test.ts', "test('renamed [kind:negative]', () => {});\ntest('added [kind:negative]', () => {});\n");
   assert.deepEqual(one(old, 'added [kind:negative]').files[0].credited, ['kind:negative']);
@@ -223,6 +235,9 @@ test('[P4r-6] AC2 rule 3: a result file outside the repo, outside P, not regular
     assert.deepEqual(b.record.files.flatMap((f) => f.credited), [], file);
     assert.ok(FILE_VOIDS.includes(outcome));
   }
+  // a skipped carrier in a file outside P subtracts nothing and is not stored on its void row
+  const outP = build(r, report([{ file: join(r.dir, 'libs/money/unchanged.test.ts'), cases: [{ title: 'u [kind:race]', status: 'skipped' }] }]));
+  assert.deepEqual(outP.ok && outP.record.files, [{ file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', credited: [], skipped: {} }]);
   // a relative name is never resolved against the cwd, even when the cwd IS the repo
   const cwd = process.cwd();
   try {
@@ -235,6 +250,8 @@ test('[P4r-6] AC2 rule 3: a result file outside the repo, outside P, not regular
   const dirRes = build(r, report([{ file: join(r.dir, 'libs/money/old.test.ts'), cases: [{ title: 'x [kind:negative]' }] }]));
   assert.deepEqual(dirRes.ok && dirRes.record.files.map((f) => f.outcome), ['not_regular']);
   // a symlink named *.test.ts resolves to its target: the target is the file that counts, and a link + target merge into ONE row
+  // (the target gets two added markers: old.test.ts was deleted above, so ONE added marker would be a move and credit nothing)
+  put(r.dir, 'libs/money/new.test.ts', "test('x [kind:negative]', () => {});\ntest('y [kind:negative]', () => {});\n");
   const viaLink = build(r, report([{ file: join(r.dir, 'libs/money/link.test.ts'), cases: [{ title: 'x [kind:negative]' }] }, { file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: 'y [kind:negative]' }] }]));
   assert.deepEqual(viaLink.record.files.map((f) => [f.file, f.outcome, f.credited]), [['libs/money/new.test.ts', 'counted', ['kind:negative']]]);
 });
@@ -268,6 +285,11 @@ test('[P4r-7] AC3: runner_config_changed (a config_paths file is in P, whatever 
   const e4 = { ...ENTRY, config_paths: ['cfg.ts'] };
   assert.equal(code(build(rr, passing(r4.dir), { entry: e4 })), 'evidence_unavailable', 'a symlinked config (not in P) is never hashed through');
   assert.equal(verdict(rr, rec, { entry: e4 }).code, 'evidence_unavailable');
+  // a lockfile over the 4 MiB test-file cap is still digested (its own 64 MiB cap); over that it is refused (a sparse file)
+  put(r.dir, 'big.json', 'x'.repeat(LIMITS.maxFileBytes + 1));
+  assert.equal(configDigest(r.dir, ['big.json']).ok, true);
+  writeFileSync(join(r.dir, 'huge.json'), ''); truncateSync(join(r.dir, 'huge.json'), LIMITS.maxConfigBytes + 1);
+  assert.deepEqual(configDigest(r.dir, ['huge.json']), { ok: false, code: 'evidence_unavailable' });
   // the config digest binds the path names, not only the bytes
   assert.notEqual(configDigest(r.dir, ['package-lock.json']).digest, configDigest(r.dir, ['missing.json']).digest);
   put(r.dir, 'a.json', 'same'); put(r.dir, 'b.json', 'same');
@@ -307,10 +329,12 @@ test('[P4r-9] AC3: provenance: every integrity field, the report digest, the exi
     [{ sealed: false }, 'runner_output_tampered'], [{ binding_verified: false }, 'runner_output_tampered'], [{ report_sha256: sha('forged') }, 'runner_output_tampered'],
     [{ report_eof: false }, 'runner_survivor'], [{ quiesced: false }, 'quiescence_unknown'], [{ exit_code: 1 }, 'evidence_run_failed'], [{ exit_code: null }, 'evidence_run_failed'],
     [{ evidence_id_before: `e1:${'1'.repeat(64)}` }, 'candidate_moved'], [{ attempt_id: '' }, 'test_kinds_error'], [{ runner_version: 5 }, 'test_kinds_error'],
+    [{ runner_version: '' }, 'test_kinds_error'], [{ runner_version: 'v 1' }, 'test_kinds_error'], [{ runner_version: '2.1.0;x' }, 'test_kinds_error'], [{ runner_version: 'x'.repeat(65) }, 'test_kinds_error'],
   ];
   for (const [over, want] of cases) assert.equal(code(build(r, text, { prov: over })), want, JSON.stringify(over));
   // a report that changed after it was sealed (forged text, original digest)
   assert.equal(code(build(r, text.replace('passed', 'passed ') /* not equal bytes */, { prov: { report_sha256: sha(text) } })), 'runner_output_tampered');
+  assert.equal(build(r, text, { prov: { runner_version: '4.0.0-beta.3+sha' } }).ok, true, 'a pre-release version is a version');
   assert.deepEqual([...REFUSALS].sort(), ['candidate_moved', 'evidence_budget_exceeded', 'evidence_run_failed', 'evidence_unavailable', 'quiescence_unknown', 'runner_config_changed', 'runner_output_tampered', 'runner_survivor', 'runner_unsupported', 'test_kinds_error']);
 });
 
@@ -334,6 +358,7 @@ test('[P4r-10] AC3 budgets (L3): bytes not characters, too many results or marke
   assert.equal(code(build(r, `{"testResults":${'['.repeat(65)}${']'.repeat(65)}}`)), 'evidence_unavailable');
   assert.equal(code(build(r, passing(r.dir).replace('"success":true', '"success":true,"success":false'))), 'evidence_unavailable');
   assert.equal(code(build(r, passing(r.dir).replace('"success":true', '"success":true,"\\u0073uccess":false'))), 'evidence_unavailable');
+  assert.equal(code(build(r, passing(r.dir).replace('"startTime":1', '"startTime":"\\x"'))), 'evidence_unavailable', 'an invalid escape in a value is malformed evidence, not an internal error');
   for (const bad of ['', '{', 'null', '[]', '{"testResults":5}', '{"testResults":[{"name":5}]}', '{"testResults":[null]}', 'not json', JSON.stringify({ ...top, testResults: [{ name: file, status: 'passed' }] }),
     JSON.stringify({ testResults: [] }), JSON.stringify({ ...top, success: 'yes', testResults: [] }), JSON.stringify({ ...top, numFailedTests: -1, testResults: [] })]) assert.equal(code(build(r, bad)), 'evidence_unavailable', bad);
   // per-row id caps: more distinct creditable or skipped markers in one file than LIMITS.maxIds
@@ -384,6 +409,15 @@ test('[P4r-25] C2 (I-E): a hidden index flag inside a submodule of P is refused 
     assert.notEqual(readFileSync(join(inner, 'f.txt'), 'utf8'), git(inner, 'show', 'HEAD:f.txt') + '\n', 'while its tracked bytes differ from HEAD');
     assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, flag);
   }
+  // one level down the same flags would hide again: a submodule that holds a submodule of its own is refused, even when clean
+  const r = repo(t), s2 = tmp(t, 'p4r-s2-'), s1 = tmp(t, 'p4r-s1-');
+  git(s2, 'init', '-q', '-b', 'main'); put(s2, 'a.txt', 'a\n'); git(s2, 'add', '-A'); git(s2, 'commit', '-q', '-m', 'a');
+  git(s1, 'init', '-q', '-b', 'main'); put(s1, 'b.txt', 'b\n'); git(s1, 'add', '-A'); git(s1, 'commit', '-q', '-m', 'b');
+  git(s1, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', s2, 'nested'); git(s1, 'commit', '-q', '-m', 'n');
+  git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', s1, 'vendor/sub');
+  assert.equal(git(join(r.dir, 'vendor/sub'), 'status', '--porcelain'), '', 'the outer submodule is clean');
+  assert.match(git(join(r.dir, 'vendor/sub'), 'ls-files', '-s'), /^160000 /m, 'and holds a gitlink');
+  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' });
 });
 
 test('[P4r-26] C3 (I-A): recordUsable refuses runner_config_changed exactly as the verdict does (a config path in the candidate, whatever is excluded)', (t) => {
@@ -410,6 +444,17 @@ test('[P4r-27] C4 (I-C): the id caps hold AFTER report names merge into one file
   assert.equal(code(two('plan:A', 'plan:B')), 'evidence_budget_exceeded', 'credited ids');
   assert.equal(code(two('plan:A', 'plan:B', 'skipped')), 'evidence_budget_exceeded', 'skipped ids');
   assert.equal(code(two('kind:ua', 'kind:ub')), 'evidence_budget_exceeded', 'unknown ids');
+  // the merge itself is fine under the cap: 2 x 200 ids through the link and the target is ONE row of 400 credits
+  const small = (a, b) => build(r, report([{ file: link, cases: titles(a, 200).map((title) => ({ title })) }, { file: target, cases: titles(b, 200).map((title) => ({ title })) }]));
+  assert.equal(credits(small('plan:A', 'plan:B')).length, 400);
+  // the skipped carriers of the link are the target's (Opus survivor): a skip reported through the link cancels the target's credit
+  const r2 = repo(t);
+  symlinkSync(join(r2.dir, 'libs/money/new.test.ts'), join(r2.dir, 'libs/money/link.test.ts'));
+  const lt = (cases) => build(r2, report([{ file: join(r2.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, ...cases]));
+  assert.deepEqual(credits(lt([])), ['kind:negative'], 'the control: the target alone credits');
+  const viaLink = lt([{ file: join(r2.dir, 'libs/money/link.test.ts'), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]);
+  assert.deepEqual(credits(viaLink), []);
+  assert.deepEqual(viaLink.record.files[0].skipped, { 'kind:negative': 1 });
 });
 
 test('[P4r-28] C5 (I-D): a stored record whose provenance contradicts itself is malformed, in recordUsable and in the verdict', (t) => {
@@ -421,6 +466,22 @@ test('[P4r-28] C5 (I-D): a stored record whose provenance contradicts itself is 
     assert.deepEqual(recordUsable(c, cur(r)), { ok: false, reason: 'malformed' }, why);
     assert.deepEqual(verdict(r, c).records, { unit: 'stale:malformed' }, why);
   }
+  // I-D: each relation alone, against a control that differs only in the relation (the control is accepted)
+  const voidRow = { file: null, outcome: 'result_outside_repo', credited: [], skipped: {} };
+  const pairs = [
+    ['a row needs a result', (c) => { c.files.push(clone(voidRow)); c.counts.marker_files = 2; }, (c) => { c.files.push(clone(voidRow)); c.counts.marker_files = 2; c.counts.results = 2; }],
+    ['a skipped carrier needs a non-passed result', (c) => { c.files[0].skipped = { 'kind:race': 1 }; }, (c) => { c.files[0].skipped = { 'kind:race': 1 }; c.counts.results = 2; }],
+    ['an unknown marker needs a passed result', (c) => { c.files[0].credited = []; c.counts.credited = 0; c.counts.passed = 0; c.counts.unknown_markers = 1; }, (c) => { c.files[0].credited = []; c.counts.credited = 0; c.counts.unknown_markers = 1; }],
+    ['unknown markers fit the counted rows', (c) => { c.counts.unknown_markers = LIMITS.maxIds + 1; }, (c) => { c.counts.unknown_markers = LIMITS.maxIds; }],
+    ['a skipped carrier only on a row inside P', (c) => { c.files.push({ file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', credited: [], skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; c.counts.results = 3; },
+      (c) => { c.files.push({ file: 'libs/money/unchanged.test.ts', outcome: 'runner_uncovered', credited: [], skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; c.counts.results = 3; }],
+    ['report_len is at least one byte', (c) => { c.report_len = 0; }, (c) => { c.report_len = 1; }],
+  ];
+  for (const [why, bad, ok] of pairs) {
+    const b = clone(rec), o = clone(rec); bad(b); ok(o);
+    assert.deepEqual(recordUsable(b, cur(r)), { ok: false, reason: 'malformed' }, why);
+    assert.equal(recordUsable(o, cur(r)).ok, true, `control: ${why}`);
+  }
 });
 
 test('[P4r-29] C6 (I-F): every declared entry\'s CURRENT command is validated before its record is looked up (an absent record too)', (t) => {
@@ -431,11 +492,85 @@ test('[P4r-29] C6 (I-F): every declared entry\'s CURRENT command is validated be
     const v = two(bad);
     assert.equal(v.status, 'refused', JSON.stringify(bad)); assert.equal(v.code, 'runner_unsupported', JSON.stringify(bad));
   }
+  // a command may be MISSING only for an entry with no record ({files} may have nothing to run); a present one is always validated
+  const E2 = (records, commands) => tkVerdict({ ...view(r, rec), entries: [ENTRY, other], commands, records }, 'F1');
+  const ok = E2({ unit: rec }, { unit: { cmd: ENTRY.cmd, args: ARGS } });
+  assert.equal(ok.status, 'pass'); assert.deepEqual(ok.records, { unit: 'current', other: 'absent' });
+  assert.equal(E2({ unit: rec, other: rec }, { unit: { cmd: ENTRY.cmd, args: ARGS } }).code, 'test_kinds_error', 'a record with no current command');
+  assert.equal(E2({ unit: rec }, {}).code, 'test_kinds_error', 'the same for the entry that has the record');
+  assert.equal(tkVerdict({ ...view(r, rec), entries: [ENTRY, ENTRY] }, 'F1').code, 'test_kinds_error', 'entry names are unique');
 });
 
 test('[P4r-30] C7 (I-B): buildRecord refuses provenance that reuse would reject (an empty runner_version)', (t) => {
   const r = repo(t);
   assert.equal(code(build(r, passing(r.dir), { prov: { runner_version: '' } })), 'test_kinds_error');
+});
+
+// ---- I-B: the three interfaces agree, over a corpus that includes the seven Codex inputs ----
+/** recordUsable and the verdict give the SAME answer for one record on one candidate (current / stale:reason / refused:code). */
+const agree = (ru, v, why) => {
+  if (ru.reason === 'unavailable') { assert.equal(v.status, 'refused', `${why}: the verdict refuses too`); assert.equal(v.code, ru.code, why); return `refused:${ru.code}`; }
+  const state = ru.ok ? 'current' : `stale:${ru.reason}`;
+  assert.deepEqual(v.records, { unit: state }, why);
+  return state;
+};
+test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable and the verdict; every refusal of one interface is a refusal of the others', (t) => {
+  // (1) round trip: a corpus of build scenarios; each built record is current on the candidate it was built on, with the same credits
+  const scenarios = [
+    ['basic', (r) => passing(r.dir)],
+    ['.each', (r) => { put(r.dir, 'libs/money/new.test.ts', "test.each([1,2])('c %i [kind:negative]', () => {});\n"); return report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [1, 2].map((i) => ({ title: `c ${i} [kind:negative]` })) }]); }],
+    ['a plan item and unknown markers', (r) => { put(r.dir, 'libs/money/new.test.ts', "test('p [plan:Item1] [kind:zz]', () => {});\n"); return passing(r.dir, 'p [plan:Item1] [kind:zz] [plan:9x]'); }],
+    ['a genuine addition beside a skipped one', (r) => { put(r.dir, 'libs/money/new.test.ts', "test('a [kind:negative]', () => {});\ntest('b [kind:negative]', () => {});\ntest.skip('s [kind:negative]', () => {});\n");
+      return report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: 'a [kind:negative]' }, { title: 'b [kind:negative]' }, { title: 's [kind:negative]', status: 'skipped' }] }]); }],
+    ['a skipped-only file and a void row', (r) => { put(r.dir, 'libs/money/s.test.ts', "test.skip('s [kind:race]', () => {});\n");
+      return report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, { file: join(r.dir, 'libs/money/s.test.ts'), cases: [{ title: 's [kind:race]', status: 'todo' }] }, { file: join(r.dir, 'apps/web/ng.test.ts'), cases: [{ title: 'w [kind:race]' }] }]); }],
+    ['a link and its target (C4 under the cap)', (r) => { symlinkSync(join(r.dir, 'libs/money/new.test.ts'), join(r.dir, 'libs/money/link.test.ts'));
+      return report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, { file: join(r.dir, 'libs/money/link.test.ts'), cases: [{ title: 'l [kind:negative]' }] }]); }],
+    ['a title AT the cap (C1 control)', (r) => { const at = `${'x'.repeat(LIMITS.maxTitleChars - 16)} [kind:negative]`; return passing(r.dir, at); }],
+    ['a move (credits nothing, still current)', (r) => { rmSync(join(r.dir, 'libs/money/new.test.ts')); git(r.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
+      return report([{ file: join(r.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]); }],
+  ];
+  for (const [why, mk] of scenarios) {
+    const r = repo(t), b = build(r, mk(r));
+    assert.equal(b.ok, true, `${why}: ${JSON.stringify(b).slice(0, 300)}`);
+    const ru = recordUsable(b.record, cur(r));
+    assert.equal(agree(ru, verdict(r, b.record), why), 'current', why);
+    assert.deepEqual([...ru.evidence.kinds.map((k) => `kind:${k}`), ...ru.evidence.items.map((i) => `plan:${i}`)].sort(), b.record.files.flatMap((f) => f.credited).sort(), why);
+    assert.equal(ru.evidence.unknown_markers, b.record.counts.unknown_markers, why);
+  }
+  // (2) the seven Codex inputs are refused by the builder (C1, C4, C7) or by every interface alike (C2, C3, C5, C6)
+  // (3) context perturbations of one good record: recordUsable and the verdict agree; a context refusal is the builder's too
+  const contexts = [
+    ['nothing moved', () => ({})],
+    ['C3: a staged config, excluded, working bytes restored', (r) => { const o = readFileSync(join(r.dir, 'vitest.config.ts')); put(r.dir, 'vitest.config.ts', 'x\n'); git(r.dir, 'add', 'vitest.config.ts'); writeFileSync(join(r.dir, 'vitest.config.ts'), o); return { exclusions: ['vitest.config.ts'] }; }],
+    ['a config edited in the worktree', (r) => { put(r.dir, 'vitest.config.ts', 'y\n'); return {}; }],
+    ['C2: a hidden flag on a tracked file', (r) => { git(r.dir, 'update-index', '--assume-unchanged', 'package-lock.json'); return {}; }],
+    ['a config that is not a regular file', () => ({ entry: { ...ENTRY, config_paths: ['libs'] } })],
+    ['another runner', () => ({ entry: { ...ENTRY, cmd: 'node_modules/.bin/jest' } })],
+    ['C6: another cmd now', () => ({ cmd: '/tmp/evil/vitest' })],
+    ['C6: an extra flag now', () => ({ args: [...ARGS, '--typecheck'] })],
+    ['another file set now', () => ({ args: [...ARGS, 'libs/money/other.test.ts'] })],
+    ['covers no longer includes the file', () => ({ entry: { ...ENTRY, covers: ['apps/api/**'] } })],
+    ['the candidate moved', (r) => { put(r.dir, 'docs/x.md', 'x'); return {}; }],
+    ['an invalid base', () => ({ baseSha: 'HEAD' })],
+  ];
+  for (const [why, perturb] of contexts) {
+    const r = repo(t), rec = good(r), o = perturb(r);
+    const entry = o.entry ?? ENTRY, args = o.args ?? ARGS, ex = o.exclusions ?? [], base = o.baseSha ?? r.base, cmd = o.cmd ?? ENTRY.cmd;
+    const ru = recordUsable(rec, { ...cur(r, { entry, args }), baseSha: base, exclusions: ex, command: { cmd, args } });
+    const v = tkVerdict({ ...view(r, rec, { entry, args, exclusions: ex }), baseSha: base, commands: { unit: { cmd, args } } }, 'F1');
+    const state = agree(ru, v, why);
+    if (cmd !== ENTRY.cmd) continue; // the builder has no separate cmd input: it runs the entry's own
+    const before = evidenceIdentity({ repo: r.dir, baseSha: base, exclusions: ex }).evidence_id;
+    const b = buildRecord({ repo: r.dir, baseSha: base, entry, commandArgs: args, tests: { globs: [] }, dagDigest: DAG, exclusions: ex, report: prov(passing(r.dir), { evidence_id_before: before }) });
+    if (state.startsWith('refused:')) assert.deepEqual(b, { ok: false, code: state.slice(8) }, `${why}: the builder refuses the same candidate`);
+    else { assert.equal(b.ok, true, `${why}: ${JSON.stringify(b)}`); assert.equal(recordUsable(b.record, { ...cur(r, { entry, args }), exclusions: ex }).ok, true, `${why}: a fresh record is current`); }
+  }
+  // (4) record perturbations (C5 and the schema): recordUsable and the verdict agree on every one
+  const r = repo(t), rec = good(r);
+  const muts = [(c) => { c.counts.passed = 0; }, (c) => { c.report_len = 0; }, (c) => { c.runner.version = ''; }, (c) => { c.files[0].credited = ['kind:race']; }, (c) => { c.integrity.sealed = false; },
+    (c) => { c.dag_digest = 'e'.repeat(64); }, (c) => { c.files[0].skipped = { 'kind:negative': 1 }; c.counts.results = 2; }, (c) => { c.evidence_id = `e1:${'0'.repeat(64)}`; }, () => {}];
+  for (const m of muts) { const c = clone(rec); m(c); agree(recordUsable(c, cur(r)), verdict(r, c), m.toString()); }
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
@@ -537,6 +672,9 @@ test('[P4r-14] AC5: a config.base=HEAD commit changes evidence_id while the lega
   assert.notEqual(baseA, baseB);
   assert.deepEqual(other.paths, same.paths, 'identical trees give an identical P');
   assert.notEqual(other.evidence_id, same.evidence_id, 'base_sha is part of the identity');
+  // the same bytes under another path name is another identity (the name is hashed, not only the content)
+  const named = (rel) => { put(r.dir, rel, 'same\n'); const id = evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id; rmSync(join(r.dir, rel)); return id; };
+  assert.notEqual(named('docs/a1.md'), named('docs/a2.md'));
   // same path set, same length, other bytes; and the exec bit alone
   const idBefore = evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id;
   put(r.dir, 'libs/money/new.test.ts', "test('m [kind:negative]', () => {});\n");
@@ -550,7 +688,7 @@ test('[P4r-14] AC5: a config.base=HEAD commit changes evidence_id while the lega
 
 test('[P4r-15] AC6: no fixture test title appears in a record, a verdict, a void or a refusal', (t) => {
   const r = repo(t);
-  const titles = ['SECRET-TITLE-zq9-pass', 'SECRET-TITLE-zq9-skip', 'SECRET-TITLE-zq9-unknown [kind:zzzz-unknown]', 'SECRET-TITLE-zq9-suite'];
+  const titles = ['SECRET-TITLE-zq9-pass', 'SECRET-TITLE-zq9-skip [kind:zzzz-skipped] [plan:9zzzz]', 'SECRET-TITLE-zq9-unknown [kind:zzzz-unknown]', 'SECRET-TITLE-zq9-suite'];
   put(r.dir, 'libs/money/new.test.ts', "test('SECRET-TITLE-zq9-pass [kind:negative]', () => {});\ntest('SECRET-TITLE-zq9-unknown [kind:zzzz-unknown]', () => {});\n");
   const file = join(r.dir, 'libs/money/new.test.ts');
   const text = report([{ file, cases: [{ title: `${titles[0]} [kind:negative]` }, { title: titles[1], status: 'skipped' }, { title: titles[2] }, { title: 'x', ancestors: [titles[3]] }] }]);
@@ -562,7 +700,7 @@ test('[P4r-15] AC6: no fixture test title appears in a record, a verdict, a void
   const dump = JSON.stringify([b, v, verdict(r, null), build(r, text, { prov: { exit_code: 1 } }), build(r, report([{ file: join(r.dir, 'apps/web/ng.test.ts'), cases: [{ title: titles[0] }] }]))]);
   assert.ok(dump.includes('kind:negative'), 'the dump is not empty');
   assert.ok(dump.includes('libs/money/new.test.ts'), 'file names are state');
-  assert.doesNotMatch(dump, /SECRET-TITLE|zq9|zzzz-unknown|forged input/);
+  assert.doesNotMatch(dump, /SECRET-TITLE|zq9|zzzz|forged input/, 'no title, and no non-creditable marker of a skipped title');
 });
 
 test('[P4r-16] AC1/AC6: a record round-trips through JSON (state), has exactly the schema keys, and is still read by the same rule', (t) => {
@@ -595,7 +733,7 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
     (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = c.counts.results + 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; },
     (c) => { c.files[0].skipped = { 'not a marker': 1 }; }, (c) => { c.files[0].skipped = []; }, (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; },
     (c) => { c.files[0].file = '../escape.test.ts'; }, (c) => { c.report_sha256 = 5; }, (c) => { c.report_sha256 = 'x'; }, (c) => { c.runner.version = 5; },
-    (c) => { c.runner.version = ''; }, (c) => { c.dag_digest = 'D'.repeat(64); }, (c) => { c.config_digest = null; }, (c) => { c.base_sha = 'HEAD'; }, (c) => { c.entry = '-x'; },
+    (c) => { c.runner.version = ''; }, (c) => { c.runner.id = 5; }, (c) => { c.runner.format = ''; }, (c) => { c.dag_digest = 'D'.repeat(64); }, (c) => { c.config_digest = null; }, (c) => { c.base_sha = 'HEAD'; }, (c) => { c.entry = '-x'; },
     (c) => { c.claim = 5; }, (c) => { c.counts.results = 1e9; }, (c) => { c.report_len = LIMITS.maxReportBytes + 1; }, (c) => { c.files[0].credited = ['kind:race', 'kind:negative']; c.counts.credited = 2; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
     assert.equal(state(mut), 'stale:malformed', mut.toString());
   // re-derived applicability (the record is otherwise well-formed): a file outside P, missing, not a test file, a symlink, a credit R-3 refuses
@@ -636,11 +774,24 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
     const b = build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status }] }]));
     assert.deepEqual(credits(b), [], status);
     assert.deepEqual(b.record.files[0].skipped, { 'kind:negative': 1 });
-    assert.equal(verdict(r4, b.record).code, 'missing_test_kinds', 'the stored record re-derives the same refusal');
+    // reuse subtracts the STORED skipped count: a record claiming the credit beside its own skipped carrier is refused
+    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.counts.credited = 1;
+    assert.deepEqual(verdict(r4, forged).records, { unit: 'stale:applicability' }, status);
+    assert.deepEqual(recordUsable(forged, cur(r4)), { ok: false, reason: 'applicability' }, status);
   }
-  // the same, with an extra marker elsewhere in P (a helper comment): the total over P allows it, the per-file rule refuses
-  put(r4.dir, 'libs/money/helper.ts', '// [kind:negative]\n');
-  assert.deepEqual(credits(build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status: 'skipped' }] }]))), []);
+  // NOT re-derivable (pinned; the reuse header says so): the same forgery with its skipped count deleted is consistent, and accepted
+  { const b = build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status: 'skipped' }] }]));
+    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.files[0].skipped = {}; forged.counts.credited = 1;
+    assert.deepEqual(verdict(r4, forged).records, { unit: 'current' }, 'a consistent forgery of engine state is outside what reuse can see'); }
+  // the same, with a genuine addition in ANOTHER reported file: the total over P allows it, the per-file rule refuses old.test.ts
+  const b4 = build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status: 'skipped' }] },
+    { file: join(r4.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }]));
+  assert.deepEqual(b4.record.files.map((f) => [f.file, f.credited]), [['libs/money/new.test.ts', ['kind:negative']], ['libs/money/old.test.ts', []]]);
+  // a move plus a NEW skipped test in another reported file: the skipped carrier is subtracted over P, so the move credits nothing
+  { const rs = repo(t); dropNew(rs);
+    git(rs.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
+    put(rs.dir, 'libs/money/s.test.ts', "test.skip('s [kind:negative]', () => {});\n");
+    assert.deepEqual(credits(build(rs, report([{ file: join(rs.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }, { file: join(rs.dir, 'libs/money/s.test.ts'), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]))), []); }
   // a genuine new passing test next to a skipped one still credits (2 added, 1 skipped)
   const r5 = repo(t);
   put(r5.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('new [kind:negative]', () => {});\ntest.skip('s [kind:negative]', () => {});\n");
@@ -652,6 +803,22 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
   put(r6.dir, 'apps/web/skip.test.ts', "it.skip('k [kind:negative]', () => {});\n");
   const b6 = build(r6, report([{ file: join(r6.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }, { file: join(r6.dir, 'apps/web/skip.test.ts'), cases: [{ title: 'k [kind:negative]', status: 'skipped' }] }]));
   assert.deepEqual(credits(b6), []);
+  // CLOSED (stricter than design section 4 rule 5): a move plus a marker added OUTSIDE the counted files credits nothing,
+  // whether the marker is in a README, a helper, an uncovered test, or a covered test file the runner did not report
+  for (const [rel, text] of [['README.md', '<!-- [kind:negative] -->\n'], ['libs/money/helper.ts', '// [kind:negative]\n'], ['apps/web/w.test.ts', "it('w [kind:negative]', () => {});\n"],
+    ['libs/money/unrun.test.ts', "test('u [kind:negative]', () => {});\n"]]) {
+    const rm = repo(t); dropNew(rm);
+    git(rm.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
+    put(rm.dir, rel, text);
+    assert.deepEqual(credits(build(rm, report([{ file: join(rm.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]))), [], rel);
+  }
+  // NOT ENFORCED (pinned, the accepted L-ran limit): a marker added in a comment of a file the runner reported (in K) credits a
+  // moved test, as it does a test beside it (next case)
+  { const rk = repo(t); dropNew(rk);
+    git(rk.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
+    put(rk.dir, 'libs/money/other.test.ts', "test('o [kind:race]', () => {});\n// [kind:negative]\n");
+    const b = build(rk, report([{ file: join(rk.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }, { file: join(rk.dir, 'libs/money/other.test.ts'), cases: [{ title: 'o [kind:race]' }] }]));
+    assert.deepEqual(credits(b), ['kind:negative', 'kind:race'], 'a visible added marker in a reported file is NOT distinguished'); }
   // NOT ENFORCED (pinned, the accepted L-ran limit): a comment-only marker beside an old passing test credits it
   const r7 = repo(t);
   put(r7.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\n// TODO [kind:negative]\n");
@@ -761,11 +928,15 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 });
 
 // ---- mutation check (L1): a mutant counts as killed ONLY by an ERR_ASSERTION failure in the [P4r-n] test it names ----
-// `file`: the patched module (io = the record side, reuse = the verdict side). `tag`: the test expected to kill it; it is the ONLY
-// test run against that mutant, so a kill is attributed. `posix`: the killing test needs a POSIX facility (it is skipped on win32).
-// Documented EQUIVALENT (not listed): `retry_authorised` forced to true. P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads
-// retry_authorised only when held > 0, so no input can observe it (engine-test-kinds.mjs: `held > 0 && HELD_POINTS...`).
-const IO = 'engine-test-kinds-io.mjs', RE = 'engine-test-kinds-reuse.mjs';
+// `file`: the patched module (base = limits, readers, report scan; io = the shared rules and the record; reuse = reuse and the verdict).
+// `tag`: the test expected to kill it; it is the ONLY test run against that mutant, so a kill is attributed. `posix`: the killing test
+// needs a POSIX facility (it is skipped on win32). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
+// Documented EQUIVALENT (not listed, no input can observe them):
+//   - `retry_authorised` forced to true: P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads it only when held > 0.
+//   - `if (!parsed.supported) refuse(...)` and `typeof r.title/r.file` in build: preflight has already refused every document the
+//     parser would reject or return a result without a string title or file for (defence in depth only).
+//   - `counted.has(rel) &&` in r3Rule: the rule is only ever asked about rows whose outcome is `counted`, on build and on reuse.
+const IO = 'engine-test-kinds-io.mjs', RE = 'engine-test-kinds-reuse.mjs', BA = 'engine-test-kinds-base.mjs';
 const MUTANTS = [
   // reuse: the four conditions
   { file: RE, tag: 'P4r-2', name: 'identity: the evidence_id comparison is dropped', from: 'if (copy.evidence_id !== c.evidence_id || copy.base_sha !== c.base_sha)', to: 'if (copy.base_sha !== c.base_sha)' },
@@ -778,27 +949,57 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-2', name: 'applicability: the runner id is not compared', from: 'copy.runner.id === RUNNER.id && ', to: '' },
   { file: RE, tag: 'P4r-2', name: 'applicability: the runner format is not compared', from: 'copy.runner.format === RUNNER.format && ', to: '' },
   { file: RE, tag: 'P4r-2', name: 'applicability: the claim is not compared', from: ' && copy.claim === CLAIM;', to: ';' },
-  { file: RE, tag: 'P4r-2', name: 'applicability: covers is not re-derived', from: 'const inP = new Set(c.paths), covers = matcher(entry.covers),', to: 'const inP = new Set(c.paths), covers = matcher([\'**\']),' },
+  { file: IO, tag: 'P4r-2', name: 'applicability: covers is not re-derived', from: 'covers: matcher(entry.covers), command,', to: "covers: matcher(['**']), command," },
   { file: RE, tag: 'P4r-18', name: 'applicability: P membership is not re-derived', from: 'if (!inP.has(f.file) || applicable(', to: 'if (applicable(' },
   { file: RE, tag: 'P4r-18', name: 'applicability: the file checks are not re-derived', from: "|| applicable(c.top, f.file, testGlobs, covers, ctx) !== null) return", to: ') return' },
-  { file: RE, tag: 'P4r-18', name: 'applicability: R-3 is not re-derived', from: "if (!r3(cs, f.file, m, skipped)) return { ok: false, reason: 'applicability' };", to: '' },
+  { file: RE, tag: 'P4r-18', name: 'applicability: R-3 is not re-derived', from: "for (const f of counted) for (const m of f.credited) if (!credit(f.file, m)) return { ok: false, reason: 'applicability' };", to: '' },
+  { file: RE, tag: 'P4r-19', name: 'applicability: the STORED skipped counts are ignored on reuse (Opus survivor)', from: 'r3Rule(census(c), r3Inputs(copy.files, inP), ctx)', to: 'r3Rule(census(c), r3Inputs(copy.files.map((f) => ({ ...f, skipped: new Map() })), inP), ctx)' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the dag digest is not compared', from: 'copy.dag_digest !== cur.dag_digest || ', to: '' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the command digest is not compared', from: ' || copy.command_digest !== cur.command_digest', to: '' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the config digest is not compared', from: " || copy.config_digest !== cur.config_digest) return { ok: false, reason: 'freshness' };", to: ") return { ok: false, reason: 'freshness' };" },
-  // reuse: the schema (I1)
-  { file: RE, tag: 'P4r-18', name: 'schema: a void row may credit', from: "if ((outcome !== 'counted' && ids.length) || !sortedUnique(ids)) return null;", to: 'if (!sortedUnique(ids)) return null;' },
-  { file: RE, tag: 'P4r-18', name: 'schema: credited ids are not validated', from: "arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx)", to: "arr(own(f, 'credited'), LIMITS.maxIds, (m) => typeof m === 'string', ctx)" },
-  { file: RE, tag: 'P4r-18', name: 'schema: credited ids may repeat', from: '|| !sortedUnique(ids)) return null;', to: ') return null;' },
-  { file: RE, tag: 'P4r-18', name: 'schema: an invented outcome is accepted', from: "if (typeof outcome !== 'string' || !OUTCOMES.includes(outcome)) return null;", to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: extra or missing top-level keys are accepted', from: 'if (!exactKeys(R, TOP)) return null;', to: 'if (!plain(R)) return null;' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the runner keys are not exact', from: '!exactKeys(runner, RUNNER_KEYS) || ', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the row keys are not exact', from: 'if (!exactKeys(f, ROW)) return null;', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the counts are not reconciled with the rows', from: 'if (copy.counts.marker_files !== copy.files.length || copy.counts.credited !== credited) return null;', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: unknown_markers is not validated', from: 'COUNTS.every((k) => uint(copy.counts[k]))', to: "COUNTS.every((k) => k === 'unknown_markers' || uint(copy.counts[k]))" },
-  { file: RE, tag: 'P4r-18', name: 'schema: duplicate file rows are accepted', from: 'if (file !== null && seen.has(file)) return null;', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: skipped counts are not validated', from: 'if (!uint(n) || n === 0) return null;', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: a row file escaping the repo is accepted', from: "if (!(file === null ? outcome === 'result_outside_repo' : safeRel(file) && outcome !== 'result_outside_repo')) return null;", to: '' },
-  { file: IO, tag: 'P4r-11', name: 'schema: a proxy record is read', from: "if (!plain(o)) return null;\n  const ks", to: "if (o === null || typeof o !== 'object') return null;\n  const ks" },
+  // the record schema (I1), shared by build and reuse
+  { file: IO, tag: 'P4r-18', name: 'schema: a void row may credit', from: "if ((outcome !== 'counted' && ids.length) || !sortedUnique(ids)) return null;", to: 'if (!sortedUnique(ids)) return null;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: credited ids are not validated', from: "arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx)", to: "arr(own(f, 'credited'), LIMITS.maxIds, (m) => typeof m === 'string', ctx)" },
+  { file: IO, tag: 'P4r-18', name: 'schema: credited ids may repeat', from: '|| !sortedUnique(ids)) return null;', to: ') return null;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: an invented outcome is accepted', from: "if (typeof outcome !== 'string' || !OUTCOMES.includes(outcome)) return null;", to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: extra or missing top-level keys are accepted', from: 'if (!exactKeys(R, TOP)) return null;', to: 'if (!plain(R)) return null;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the runner keys are not exact', from: '!exactKeys(runner, RUNNER_KEYS) || ', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the row keys are not exact', from: 'if (!exactKeys(f, ROW)) return null;', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the counts are not reconciled with the rows', from: 'n.marker_files === copy.files.length && n.credited === credited && ', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: unknown_markers is not validated', from: 'COUNTS.every((k) => uint(copy.counts[k]))', to: "COUNTS.every((k) => k === 'unknown_markers' || uint(copy.counts[k]))" },
+  { file: IO, tag: 'P4r-18', name: 'schema: duplicate file rows are accepted', from: 'if (file !== null && seen.has(file)) return null;', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: skipped counts are not validated', from: 'if (!uint(n) || n === 0) return null;', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: skipped keys are not creditable ids', from: 'if (!creditable(k)) return null;', to: "if (typeof k !== 'string') return null;" },
+  { file: IO, tag: 'P4r-18', name: 'schema: a row file escaping the repo is accepted', from: "if (!(file === null ? outcome === 'result_outside_repo' : safeRel(file) && outcome !== 'result_outside_repo')) return null;", to: '' },
+  { file: BA, tag: 'P4r-11', name: 'schema: a proxy record is read', from: "if (!plain(o)) return null;\n  const ks", to: "if (o === null || typeof o !== 'object') return null;\n  const ks" },
+  { file: IO, tag: 'P4r-18', name: 'schema: digests are not typed', from: "['dag_digest', 'command_digest', 'config_digest', 'report_sha256'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))", to: "['dag_digest', 'command_digest', 'config_digest'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))" },
+  { file: IO, tag: 'P4r-18', name: 'schema: the runner id and format are not typed', from: 'str(copy.runner.id, 64) && str(copy.runner.format, 64) && ', to: '' },
+  { file: IO, tag: 'P4r-9', name: 'schema: the runner version is free text (Opus minor)', from: "typeof copy.runner.version === 'string' && RUNNER_VERSION.test(copy.runner.version)", to: 'str(copy.runner.version, 64)' },
+  { file: IO, tag: 'P4r-18', name: 'schema: report_len is not bounded', from: 'uint(copy.report_len, LIMITS.maxReportBytes)', to: 'uint(copy.report_len)' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the result count is not bounded', from: ' && n.results <= LIMITS.maxResults', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: passed may exceed results', from: 'n.passed <= n.results && ', to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the entry name is not typed', from: "typeof copy.entry === 'string' && ENTRY_NAME.test(copy.entry) && ", to: '' },
+  { file: IO, tag: 'P4r-18', name: 'schema: the claim is not typed', from: ' && str(copy.claim, 16)', to: '' },
+  // the provenance relations (I-D, C5)
+  { file: IO, tag: 'P4r-28', name: 'relations: report_len 0 is accepted', from: ' && copy.report_len >= 1 && ', to: ' && ' },
+  { file: IO, tag: 'P4r-28', name: 'relations: a row needs no result', from: 'n.marker_files <= n.results && ', to: '' },
+  { file: IO, tag: 'P4r-28', name: 'relations: a credit or unknown marker needs no passed result', from: '(n.passed >= 1 || (n.credited === 0 && n.unknown_markers === 0))', to: 'true' },
+  { file: IO, tag: 'P4r-28', name: 'relations: an unknown marker needs no passed result', from: '(n.passed >= 1 || (n.credited === 0 && n.unknown_markers === 0))', to: '(n.passed >= 1 || n.credited === 0)' },
+  { file: IO, tag: 'P4r-28', name: 'relations: a skipped carrier needs no non-passed result', from: '(n.results > n.passed || copy.files.every((f) => f.skipped.size === 0))', to: 'true' },
+  { file: IO, tag: 'P4r-28', name: 'relations: unknown markers are bounded by all rows, not the counted ones', from: 'n.unknown_markers <= countedRows * LIMITS.maxIds', to: 'n.unknown_markers <= LIMITS.maxMarkerFiles * LIMITS.maxIds' },
+  { file: IO, tag: 'P4r-28', name: 'relations: a skipped carrier may sit on a row outside P', from: " || (keys.length && ['not_in_P', 'result_outside_repo'].includes(outcome))", to: '' },
+  { file: IO, tag: 'P4r-30', name: 'I-B: buildRecord does not pass its own output through the schema (C7)', from: "  if (!validRecord(record, ctx)) refuse('test_kinds_error'); // I-B: never emit a record reuse would reject (C7)", to: '' },
+  // the current context (I-A, I-F), shared by the three interfaces
+  { file: IO, tag: 'P4r-8', name: 'context: entries are not validated by readEntry', from: 'arr(own(input, \'entries\'), LIMITS.maxList, plain, ctx).map(readEntry);', to: "arr(own(input, 'entries'), LIMITS.maxList, plain, ctx).map((x) => ({ ...x }));" },
+  { file: IO, tag: 'P4r-29', name: 'context: entry names may repeat', from: "if (new Set(entries.map((e) => e.name)).size !== entries.length) refuse('test_kinds_error');", to: '' },
+  { file: IO, tag: 'P4r-21', name: 'context: the current command is not validated', from: "return { entry, command: commandFor(entry, own(raw, 'cmd'), own(raw, 'args')) };", to: "return { entry, command: { cmd: own(raw, 'cmd'), args: own(raw, 'args') } };" },
+  { file: IO, tag: 'P4r-29', name: 'context: a missing command is accepted for an entry with a record', from: "if (raw === undefined) { if (needCommand(entry) !== false) refuse('test_kinds_error'); return { entry, command: null }; }", to: 'if (raw === undefined) return { entry, command: null };' },
+  { file: RE, tag: 'P4r-29', name: 'verdict: an absent record skips its command validation (C6)', from: 'commandOf: (en) => (has(commands, en.name) ? own(commands, en.name) : undefined)', to: 'commandOf: (en) => (has(commands, en.name) && has(records, en.name) ? own(commands, en.name) : undefined)' },
+  { file: RE, tag: 'P4r-29', name: 'verdict: no entry needs a command', from: 'needCommand: (en) => has(records, en.name)', to: 'needCommand: () => false' },
+  { file: IO, tag: 'P4r-26', name: 'context: a config path in P does not refuse (C3)', from: "if (entries.some((en) => en.config_paths.some((p) => all.has(p)))) refuse('runner_config_changed');", to: '' },
+  { file: IO, tag: 'P4r-7', name: 'context: config_paths are checked after the exclusions', from: 'const all = new Set(c.all);\n  if (entries', to: 'const all = new Set(c.paths);\n  if (entries' },
+  { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code);\n    per.set', to: '    per.set' },
+  { file: IO, tag: 'P4r-21', name: 'context: the declared args are hashed instead of the substituted ones', from: 'command_digest: command && commandDigest(command.cmd, command.args)', to: 'command_digest: command && commandDigest(entry.cmd, entry.args)' },
   // reuse: the verdict
   { file: RE, tag: 'P4r-2', name: 'verdict: a stale record is used as evidence', from: 'if (!u.ok) continue;', to: '' },
   { file: RE, tag: 'P4r-13', name: 'verdict: kind and plan routing swapped', from: "(m.startsWith('kind:') ? kinds : items)", to: "(m.startsWith('plan:') ? kinds : items)" },
@@ -811,26 +1012,24 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-13', name: 'verdict: a P2 input error falls through to P6', from: "if (['test_kinds_error', 'evidence_budget_exceeded'].includes(v0.code)) return done(v0);", to: '' },
   { file: RE, tag: 'P4r-13', name: 'verdict: the decision point is fixed to F1', from: 'state: { point,', to: "state: { point: 'F1'," },
   { file: RE, tag: 'P4r-7', name: 'verdict: uncovered counts covered files too', from: '&& !coverSets.some((cv) => matches(cv, p, ctx))) uncovered++;', to: ') uncovered++;' },
-  { file: RE, tag: 'P4r-7', name: 'verdict: a config path in P does not refuse', from: "if (entries.some((en) => en.config_paths.some((p) => all.has(p)))) refuse('runner_config_changed');", to: '' },
-  { file: RE, tag: 'P4r-7', name: 'verdict: config_paths are checked after the exclusions', from: 'const all = new Set(c.all);\n  if (entries', to: 'const all = new Set(c.paths);\n  if (entries' },
-  { file: RE, tag: 'P4r-7', name: 'verdict: a config digest failure is ignored', from: 'cd = configDigest(c.top, en.config_paths);\n    if (!cd.ok) refuse(cd.code);', to: 'cd = configDigest(c.top, en.config_paths);' },
-  { file: RE, tag: 'P4r-8', name: 'verdict: entries are not validated by readEntry', from: '.map(readEntry); // runner_unsupported', to: '.map((x) => ({ ...x })); // runner_unsupported' },
-  { file: RE, tag: 'P4r-21', name: 'verdict: the current command is not validated', from: 'command = commandFor(en, own(cmd, \'cmd\'), own(cmd, \'args\'))', to: "command = { cmd: own(cmd, 'cmd'), args: own(cmd, 'args') }" },
   // record: counting
-  { file: IO, tag: 'P4r-4', name: 'counting: a skipped result counts', from: "if (r.status !== 'pass') { countMarkers(r.title, slot.skipped);", to: "if (false) { countMarkers(r.title, slot.skipped);" },
-  { file: IO, tag: 'P4r-4', name: 'report: a failed result is accepted', from: "if (field(c, 'status') === 'failed') failed();", to: '' },
+  { file: IO, tag: 'P4r-4', name: 'counting: a skipped result counts', from: "if (r.status !== 'pass') { for (const [k, n] of countMarkers(r.title))", to: 'if (false) { for (const [k, n] of countMarkers(r.title))' },
+  { file: IO, tag: 'P4r-15', name: 'counting: a non-creditable marker of a skipped title is stored', from: 'if (creditable(k)) slot.skipped.set(k,', to: 'slot.skipped.set(k,' },
+  { file: BA, tag: 'P4r-4', name: 'report: a failed result is accepted', from: "      if (field(c, 'status') === 'failed') failed();", to: '' },
   { file: IO, tag: 'P4r-4', name: 'counting: the marker is read from the suite title too', from: 'const m = markers([r.title]);', to: 'const m = markers([r.title, ...(Array.isArray(r.suite_path) ? r.suite_path : [])]);' },
   { file: IO, tag: 'P4r-4', name: 'counting: an invalid item id is credited', from: '(ITEM_ID.test(i) ? slot.ids : slot.unknown)', to: 'slot.ids' },
   { file: IO, tag: 'P4r-4', name: 'counting: an unknown kind is credited', from: 'for (const u of m.unknown) slot.unknown.add(u);', to: 'for (const u of m.unknown) slot.ids.add(u);' },
-  { file: IO, tag: 'P4r-4', name: 'counting: the title length cap is dropped', from: 'r.title.length > LIMITS.maxTitleChars || ', to: '' },
-  { file: IO, tag: 'P4r-15', name: 'counting: unknown markers are not counted', from: 'unknownMarkers += slot.unknown.size; credited += ids.length;', to: 'credited += ids.length;' },
-  { file: IO, tag: 'P4r-5', name: 'R-3: the per-file base count is dropped', from: "n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0", to: "n(cs.cand.get(rel), m) - n(skipped.get(rel), m) > 0" },
-  { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: "n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0", to: "n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) >= 0" },
-  { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: ' && n(cs.total.cand, m) - n(cs.total.base, m) - skipTotal > 0', to: '' },
+  { file: BA, tag: 'P4r-24', name: 'C1: the title cap is dropped', from: "      if (field(c, 'title').length > LIMITS.maxTitleChars) refuse('evidence_budget_exceeded'); // I-C: refused, whatever the status (C1)", to: '' },
+  { file: BA, tag: 'P4r-24', name: 'C1: the title cap applies to passed results only', from: "      if (field(c, 'title').length > LIMITS.maxTitleChars) refuse(", to: "      if (field(c, 'status') === 'passed' && field(c, 'title').length > LIMITS.maxTitleChars) refuse(" },
+  { file: IO, tag: 'P4r-15', name: 'counting: unknown markers are not counted', from: 'unknownMarkers += row.unknown.size; credited += ids.length;', to: 'credited += ids.length;' },
+  { file: IO, tag: 'P4r-5', name: 'R-3: the per-file base count is dropped', from: 'n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0', to: 'n(cs.cand.get(rel), m) - n(skipped.get(rel), m) > 0' },
+  { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: 'n(skipped.get(rel), m) > 0 && n(total', to: 'n(skipped.get(rel), m) >= 0 && n(total' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: ' && n(total, m) > 0;', to: ';' },
   { file: IO, tag: 'P4r-19', name: 'R-3: the per-file skip subtraction is dropped', from: ' - n(skipped.get(rel), m) > 0', to: ' > 0' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction over P is dropped', from: ' - skipTotal > 0', to: ' > 0' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction over P is dropped', from: 'const d = n(a, m) - n(b, m) - n(s, m);', to: 'const d = n(a, m) - n(b, m);' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: a marker added outside the counted files offsets a removal (move + marker elsewhere)', from: '(counted.has(p) ? d : Math.min(d, 0))', to: 'd' },
   { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'if (m && want.has(m[3])) oids.push([m[3], m[2]]);', to: 'if (m && want.has(m[3]) && existsSync(join(c.top, m[3]))) oids.push([m[3], m[2]]);', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
-  // record: files (rule 3)
+  // record: files (rule 3), names merging
   { file: IO, tag: 'P4r-5', name: 'file: a file outside P is counted', from: "if (!inP.has(rel)) return { outcome: 'not_in_P', rel };", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: the test globs are not applied', from: "if (!matches(testGlobs, rel, ctx)) return 'not_test_file';", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: covers is not applied', from: "if (!matches(covers, rel, ctx)) return 'runner_uncovered';", to: '' },
@@ -841,17 +1040,19 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-6', name: 'file: realpath is not used', from: 'const real = realOrAncestor(file, ctx),', to: 'const real = file,' },
   { file: IO, tag: 'P4r-6', name: 'file: a missing file is classified without its real ancestor', from: "try { return join(realpathSync.native(dirname(at)), ...tail); }", to: 'try { return file; }' },
   { file: IO, tag: 'P4r-6', name: 'file: a link and its target are two rows', from: 'prev = v.rel === null ? null : byRel.get(v.rel);', to: 'prev = null;' },
+  { file: IO, tag: 'P4r-27', name: 'C4: merged rows are not re-capped', from: '      capSlot(prev);\n      continue;', to: '      continue;' },
+  { file: IO, tag: 'P4r-27', name: 'merge: the link\'s skipped carriers are dropped (Opus survivor)', from: '      for (const [k, n] of slot.skipped) prev.skipped.set(k, (prev.skipped.get(k) ?? 0) + n);\n', to: '' },
+  { file: IO, tag: 'P4r-6', name: 'merge: a carrier outside P is kept on its row', from: '  for (const row of rows) if (row.file === null || !inP.has(row.file)) row.skipped = new Map(); // a carrier outside P subtracts nothing\n', to: '' },
   // record: config, runner, provenance, budgets, scan
-  { file: IO, tag: 'P4r-7', name: 'config: a config path in P does not refuse the record', from: "if (entry.config_paths.some((p) => all.has(p))) refuse('runner_config_changed');", to: '' },
-  { file: IO, tag: 'P4r-7', name: 'config: config_paths are checked after the exclusions', from: 'const all = new Set(c.all), inP', to: 'const all = new Set(c.paths), inP' },
   { file: IO, tag: 'P4r-7', name: 'config: the path is not hashed', from: 'h.update(`${p}\\0`); h.update(st ?', to: 'h.update(st ?' },
-  { file: IO, tag: 'P4r-7', name: 'config: a symlinked config is hashed through', from: "if (st && (!st.isFile() || st.size > LIMITS.maxFileBytes)) refuse('evidence_unavailable');", to: '' },
+  { file: IO, tag: 'P4r-7', name: 'config: a symlinked config is hashed through', from: "if (st && (!st.isFile() || st.size > LIMITS.maxConfigBytes)) refuse('evidence_unavailable');", to: '' },
+  { file: IO, tag: 'P4r-7', name: 'config: a lockfile is held to the 4 MiB test-file cap (Opus minor)', from: 'st.size > LIMITS.maxConfigBytes', to: 'st.size > LIMITS.maxFileBytes' },
+  { file: IO, tag: 'P4r-7', name: 'config: the config size is not capped', from: '(!st.isFile() || st.size > LIMITS.maxConfigBytes)', to: '(!st.isFile())' },
   { file: IO, tag: 'P4r-8', name: 'runner: another format is accepted', from: 'if (format !== RUNNER.format || cmd !== RUNNER.cmd)', to: 'if (cmd !== RUNNER.cmd)' },
   { file: IO, tag: 'P4r-8', name: 'runner: another cmd is accepted', from: 'if (format !== RUNNER.format || cmd !== RUNNER.cmd)', to: 'if (format !== RUNNER.format)' },
   { file: IO, tag: 'P4r-8', name: 'runner: the fixed args are not compared', from: 'if (!RUNNER.args.every((a, i) => args[i] === a) || ', to: 'if (' },
   { file: IO, tag: 'P4r-8', name: 'runner: extra args are accepted', from: '!(args.length === RUNNER.args.length || (hasFiles(args) && args[RUNNER.args.length] === RUNNER.files))', to: 'false' },
   { file: IO, tag: 'P4r-8', name: 'runner: the runner id is not checked', from: "if (prov.runner_id !== RUNNER.id) refuse('runner_unsupported');", to: '' },
-  { file: IO, tag: 'P4r-21', name: 'command: buildRecord hashes the declared args', from: 'command_digest: commandDigest(command.cmd, command.args),', to: 'command_digest: commandDigest(entry.cmd, entry.args),' },
   { file: IO, tag: 'P4r-21', name: 'command: a file argument may be a flag', from: "if (!files.every((f) => safeRel(f) && !f.startsWith('-'))) refuse('runner_unsupported');", to: '' },
   { file: IO, tag: 'P4r-21', name: 'command: {report} is not pinned', from: "if (!fixed.every((a, i) => list[i] === a)) refuse('runner_unsupported');", to: '' },
   { file: IO, tag: 'P4r-21', name: 'command: the {files} arity is not checked', from: "if (hasFiles(entry.args) ? !files.length : files.length) refuse('runner_unsupported');", to: '' },
@@ -863,34 +1064,34 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-9', name: 'provenance: a non-quiescent group is accepted', from: "if (prov.quiesced !== true) refuse('quiescence_unknown');", to: '' },
   { file: IO, tag: 'P4r-9', name: 'provenance: the exit status is not checked', from: "if (prov.exit_code !== 0) refuse('evidence_run_failed');", to: '' },
   { file: IO, tag: 'P4r-9', name: 'provenance: a null exit (timeout) is accepted', from: "if (prov.exit_code !== 0) refuse('evidence_run_failed');", to: "if (prov.exit_code !== 0 && prov.exit_code !== null) refuse('evidence_run_failed');" },
-  { file: IO, tag: 'P4r-4', name: 'report: success:false is accepted', from: 'if (!success) failed();', to: '' },
-  { file: IO, tag: 'P4r-4', name: 'report: a failed suite is accepted', from: "if (field(s, 'status') === 'failed') failed();", to: '' },
-  { file: IO, tag: 'P4r-4', name: 'report: an unknown result status is accepted', from: '!STATUSES.has(field(c, \'status\')) || ', to: '' },
-  { file: IO, tag: 'P4r-4', name: 'report: the failed counters are not read', from: 'if (v > 0) failed(); }', to: '}' },
+  { file: BA, tag: 'P4r-4', name: 'report: success:false is accepted', from: 'if (!success) failed();', to: '' },
+  { file: BA, tag: 'P4r-4', name: 'report: a failed suite is accepted', from: "if (field(s, 'status') === 'failed') failed();", to: '' },
+  { file: BA, tag: 'P4r-4', name: 'report: a suite status other than passed is accepted (Opus untested branch)', from: "if (field(s, 'status') !== 'passed') unavailable();", to: '' },
+  { file: BA, tag: 'P4r-4', name: 'report: an unknown result status is accepted', from: '!STATUSES.has(field(c, \'status\')) || ', to: '' },
+  { file: BA, tag: 'P4r-4', name: 'report: the failed counters are not read', from: 'if (v > 0) failed(); }', to: '}' },
+  { file: BA, tag: 'P4r-10', name: 'report: an invalid escape is an internal error (Opus minor)', from: "try { return JSON.parse(text); } catch { return refuse('evidence_unavailable'); }", to: 'return JSON.parse(text);' },
   { file: IO, tag: 'P4r-10', name: 'budget: the report is measured in UTF-16 units', from: 'if (bytes > LIMITS.maxReportBytes) refuse', to: 'if (text.length > LIMITS.maxReportBytes) refuse' },
   { file: IO, tag: 'P4r-10', name: 'budget: report_len is the character count', from: 'report_len: bytes,', to: 'report_len: text.length,' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the result count is not capped before parsing', from: "if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');", to: '' },
+  { file: BA, tag: 'P4r-10', name: 'budget: the result count is not capped before parsing', from: "if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-10', name: 'budget: the marker-file count is not capped', from: "if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-23', name: 'budget: the path count is not capped', from: "if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');", to: '' },
   { file: IO, tag: 'P4r-23', name: 'budget: the identity bytes are not capped', from: "bytes += st.size; if (bytes > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');", to: 'bytes += st.size;' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the per-row creditable id cap is dropped', from: 'if (slot.ids.size > LIMITS.maxIds || slot.unknown.size > LIMITS.maxIds) refuse', to: 'if (slot.unknown.size > LIMITS.maxIds) refuse' },
-  { file: IO, tag: 'P4r-10', name: 'budget: the per-row skipped id cap is dropped', from: "countMarkers(r.title, slot.skipped); if (slot.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded'); continue; }", to: 'countMarkers(r.title, slot.skipped); continue; }' },
+  { file: IO, tag: 'P4r-10', name: 'budget: the per-row creditable id cap is dropped', from: 'if (s.ids.size > LIMITS.maxIds || ', to: 'if (' },
+  { file: IO, tag: 'P4r-27', name: 'budget: the per-row unknown id cap is dropped', from: ' || s.unknown.size > LIMITS.maxIds || ', to: ' || ' },
+  { file: IO, tag: 'P4r-10', name: 'budget: the per-row skipped id cap is dropped', from: ' || s.skipped.size > LIMITS.maxIds) refuse', to: ') refuse' },
   { file: IO, tag: 'P4r-11', name: 'identity: the input is destructured (a getter runs)', from: "try { const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', []));", to: "const { repo, baseSha, exclusions = [] } = input ?? {}; try { const c = candidate(repo, baseSha, exclusions);" },
-  { file: RE, tag: 'P4r-18', name: 'schema: digests are not typed', from: "['dag_digest', 'command_digest', 'config_digest', 'report_sha256'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))", to: "['dag_digest', 'command_digest', 'config_digest'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))" },
-  { file: RE, tag: 'P4r-18', name: 'schema: the runner fields are not typed', from: 'RUNNER_KEYS.every((k) => str(copy.runner[k], 64))', to: "['id', 'format'].every((k) => str(copy.runner[k], 64))" },
-  { file: RE, tag: 'P4r-18', name: 'schema: report_len is not bounded', from: 'uint(copy.report_len, LIMITS.maxReportBytes)', to: 'uint(copy.report_len)' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the result count is not bounded', from: ' && copy.counts.results <= LIMITS.maxResults', to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the entry name is not typed', from: "typeof copy.entry === 'string' && ENTRY_NAME.test(copy.entry) && ", to: '' },
-  { file: RE, tag: 'P4r-18', name: 'schema: the claim is not typed', from: ' && str(copy.claim, 16)', to: '' },
-  { file: IO, tag: 'P4r-10', name: 'scan: duplicate keys are accepted', from: 'if (keys.has(key)) bad();', to: '' },
-  { file: IO, tag: 'P4r-10', name: 'scan: escaped duplicate keys are not normalised', from: "if (key.includes('\\\\')) { try { key = JSON.parse(raw); } catch { bad(); } }", to: '' },
-  { file: IO, tag: 'P4r-10', name: 'scan: depth is not capped', from: 'if (d > LIMITS.maxDepth) bad();', to: '' },
+  { file: BA, tag: 'P4r-10', name: 'scan: duplicate keys are accepted', from: 'if (keys.has(key)) bad();', to: '' },
+  { file: BA, tag: 'P4r-10', name: 'scan: escaped duplicate keys are not normalised', from: "if (key.includes('\\\\')) { try { key = JSON.parse(raw); } catch { bad(); } }", to: '' },
+  { file: BA, tag: 'P4r-10', name: 'scan: depth is not capped', from: 'if (d > LIMITS.maxDepth) bad();', to: '' },
   // record: identity
   { file: IO, tag: 'P4r-14', name: 'identity: the pinned base is not hashed', from: 'h.update(`ship-ticket-tk-evidence-v1\\0${baseSha}\\0`);', to: 'h.update(`ship-ticket-tk-evidence-v1\\0`);' },
+  { file: IO, tag: 'P4r-14', name: 'identity: the path names are not hashed (Opus survivor)', from: "h.update(Buffer.from(p, 'utf8')); ", to: '' },
   { file: IO, tag: 'P4r-14', name: 'identity: file bytes are not hashed', from: "h.update(content); h.update('\\0');", to: "h.update('\\0');" },
   { file: IO, tag: 'P4r-20', name: 'identity: a symlink target is not hashed', from: "content = readlinkSync(abs(p), { encoding: 'buffer' });", to: "content = Buffer.from('');" },
   { file: IO, tag: 'P4r-20', name: 'identity: a submodule HEAD is not hashed', from: "if (head) { kind = 'submodule'; mode = '160000'; content = head; }", to: "if (head) { kind = 'submodule'; mode = '160000'; content = Buffer.from(''); }" },
   { file: IO, tag: 'P4r-20', name: 'identity: a dirty submodule is accepted', from: "if (status.length) refuse('evidence_unavailable');", to: '' },
+  { file: IO, tag: 'P4r-25', name: 'C2: hidden index flags in a submodule are not read', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hasGitlink(index))' },
+  { file: IO, tag: 'P4r-25', name: 'C2: a submodule holding a submodule is accepted', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hiddenFlagged(index))' },
   { file: IO, tag: 'P4r-12', posix: true, name: 'identity: a fifo is read', from: "else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)", to: "else { kind = 'other'; }" },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
@@ -929,6 +1130,15 @@ async function runMutant(t, mutant) {
 }
 const uniq = (xs) => [...new Set(xs)].sort();
 
+test('mutants: every target text occurs exactly once in the module it names, and each names a tagged test that exists (fast)', () => {
+  const tags = new Set([...readFileSync(join(HERE, 'engine-test-kinds-io.test.mjs'), 'utf8').matchAll(/^test\('\[(P4r-\d+)\]/gm)].map((m) => m[1]));
+  for (const m of MUTANTS) {
+    assert.ok([IO, RE, BA].includes(m.file), m.name);
+    patch(m, lf(readFileSync(join(HERE, m.file), 'utf8')));
+    assert.ok(tags.has(m.tag), `${m.name}: [${m.tag}] exists`);
+  }
+});
+
 test('mutation: the control passes every tagged test; every mutant loads and is killed by an assertion in the test it names', { timeout: 55 * 60 * 1000 }, async (t) => {
   assert.equal(new Set(MUTANTS.map((m) => m.name)).size, MUTANTS.length, 'mutant names are distinct');
   for (const m of MUTANTS) { assert.notEqual(m.from, m.to, m.name); assert.match(m.tag, /^P4r-\d+$/, m.name); }
@@ -936,7 +1146,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 22 : 23), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 30 : 31), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);

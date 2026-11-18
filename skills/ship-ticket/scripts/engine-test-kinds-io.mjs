@@ -1,6 +1,13 @@
 /**
- * S-01b2 P4r: runner evidence I/O, the RECORD side (design rev 6, sections 1, 3, 4, 5.2 row P4r; owner decision OD-2).
- * The reuse rule and the verdict live in `engine-test-kinds-reuse.mjs`; both share the readers and the R-3 census below.
+ * S-01b2 P4r: runner evidence I/O (design rev 6, sections 1, 3, 4, 5.2 row P4r; owner decision OD-2). This module holds the
+ * SHARED RULES and builds records; `engine-test-kinds-reuse.mjs` reuses records and gives the verdict; the bottom layer
+ * (limits, readers, the report scan) is `engine-test-kinds-base.mjs`.
+ *
+ * ONE RULE, ONE PLACE (I-A). Every rule a record depends on is implemented ONCE, here, and buildRecord, recordUsable and
+ * tkVerdict all call the same function: the current context (`currentContext`: entries, current commands, candidate,
+ * runner_config_changed, config digests, test globs), the record schema with its provenance relations (`validRecord`) and R-3
+ * (`r3Inputs` + `r3Rule`). buildRecord passes its own output through `validRecord` before returning it (I-B), so a record it
+ * emits is a record reuse accepts, and a field reuse would reject is never emitted.
  *
  * CLAIM (L-ran, and nothing stronger; L5/L12): a record built here says the runner EXECUTED a test whose own title carries a
  * marker and recorded it as passed. It does NOT say the test is meaningful (a vacuous or assertion-free test passes; mutation
@@ -12,133 +19,92 @@
  * SUPPORTED GRAMMAR (L11): an allowlist. Everything not listed is a typed refusal or no evidence, never a guess.
  *   entry   format `vitest-json`; cmd EXACTLY `node_modules/.bin/vitest` (repo-relative; the launcher runs it from the repo top);
  *           args EXACTLY `run --pool=forks --reporter=json --outputFile={report}`, optionally followed by ONE `{files}`. Any
- *           other runner, format, flag, order or `--` terminator is `runner_unsupported` (OD-2; never bypassed).
+ *           other runner, format, flag, order or `--` terminator is `runner_unsupported` (OD-2; never bypassed). The entry is
+ *           the FLAT form `{name, format, cmd, args, covers, config_paths}` (P5r maps the design's `evidence:{...}` onto it).
  *   command the args that RAN: the template with `{report}` -> `/dev/fd/3` and `{files}` -> 1..N repo-relative paths, none
  *           starting with `-`. The record's `command_digest` hashes exactly these args; the verdict hashes the same.
  *   report  at most 32 MiB of UTF-8 BYTES; ONE JSON document (no duplicate keys after escape decoding, depth <= 64);
  *           `success === true`, `numFailedTestSuites === 0`, `numFailedTests === 0`, every suite `status === 'passed'`
- *           (vitest 4 writes only `passed`/`failed`); at most 100000 results, counted on the parsed document BEFORE the runner
- *           parser builds its result list (the document itself is bounded by the byte and scan-token caps).
- *           Fields read: those, plus `testResults[].{name, assertionResults[].{ancestorTitles, title, status}}`.
+ *           (vitest 4 writes only `passed`/`failed`); at most 100000 results and every title at most 2048 characters, both
+ *           checked on the parsed document BEFORE the runner parser builds its result list. Over a cap: REFUSED, never dropped.
  *   result  counts only when `status === 'passed'`; a `failed` result or suite, or `success:false`, makes the WHOLE record
  *           `evidence_run_failed` even with exit 0. Any status outside vitest's six is `evidence_unavailable`.
  *   marker  `[kind:<id>]` / `[plan:<id>]` read from the test's OWN (leaf) title only, through P3 `markers`.
  *   file    the report name, realpath-resolved (the nearest existing ancestor for a missing file), inside the repo, in P, an
  *           lstat-regular file (a symlink is resolved first, so the TARGET is what counts), matching the test globs and the
- *           entry's `covers`, at most 4 MiB. Otherwise a typed FILE void that never credits.
+ *           entry's `covers`, at most 4 MiB. Otherwise a typed FILE void that never credits. Names resolving to one file merge
+ *           into one row, and every per-row cap is re-checked after the merge (I-C).
  *
- * R-3, WHAT IS ENFORCED (section 4 rule 5, no base run). Marker m is credited from file f only when BOTH hold:
- *   (per file)  count_cand(f, m) - count_base(f, m) - skipped(f, m) > 0
- *   (over P)    sum_P count_cand(m) - sum_P count_base(m) - sum_P skipped(m) > 0  (deleted and renamed-away paths included)
- * where `count` is the number of `[kind:x]`/`[plan:x]` occurrences in the bytes and `skipped(f, m)` is the number of NON-passed
- * results in f whose own title carries m. So a pure rename or move credits nothing, nor does a skipped or todo test added
- * beside an old passing one (a skipped `.each` over-subtracts, failing closed); `preflight` has already refused any failed result.
- * NOT ENFORCED: a marker added in a comment or in dead code that never registers a test is indistinguishable from an added
- * title and CAN credit a passing test that already carried m, in f itself or (for a moved test) anywhere in P: the accepted
- * L-ran limit "gameable only by a visible added marker" (design section 4). A skip that is never reported is the same case.
+ * R-3, WHAT IS ENFORCED (section 4 rule 5, no base run; stricter than the design). With K the files that have a `counted` row
+ * and d(f, m) = count_cand(f, m) - count_base(f, m) - skipped(f, m):
+ *   (per file)  d(f, m) > 0, for f in K
+ *   (over P)    sum over f in P of (f in K ? d(f, m) : min(d(f, m), 0)) > 0 (deleted and renamed-away paths included)
+ * Each term is at most the round-1 term (d), so this is pointwise stricter than the rule it replaces.
+ * `count` is the number of `[kind:x]`/`[plan:x]` occurrences in the bytes; `skipped(f, m)` the occurrences in NON-passed result
+ * titles of f. A marker added OUTSIDE K (a README, a helper, an unrun or uncovered test) can only lower the total, so a pure
+ * rename or move credits nothing even with a marker added elsewhere, nor does a skipped or todo test added beside an old passing
+ * one (a skipped `.each` over-subtracts, failing closed).
+ * NOT ENFORCED (the accepted L-ran limit, "gameable only by a visible added marker", design section 4): a marker added in a
+ * comment or in dead code of a file IN K is indistinguishable from an added title and CAN credit a passing test that already
+ * carried m, in that file or (for a moved test) anywhere in K. A skip that is never reported is the same case.
  *
  * PROVENANCE (supplied by the caller, section 1): `runner_id`, `runner_version`, `attempt_id`, `exit_code`, `report_sha256`
  * (checked against the text), `report_eof`, `sealed`, `quiesced`, `binding_verified` (all `true`), `evidence_id_before`.
- * Refusal order in buildRecord: input shape, runner, report size, identity, `runner_config_changed`, tamper, survivor,
- * quiescence, exit, `candidate_moved`, report content (rev 6 section 1 orders the VERDICT codes; this is the build order).
+ * Refusal order in buildRecord: the current context (entry, command, identity, `runner_config_changed`, config digest, globs),
+ * then report text, runner, report size, tamper, survivor, quiescence, exit, `candidate_moved`, report content, and last the
+ * record schema (`test_kinds_error`). Rev 6 section 1 orders the VERDICT codes; this is the build order.
  *
- * State and output carry ids, codes, counts and repo-relative file names only: NEVER a test title (AC6).
- * Hostile input (L3, L6): caller objects are read through own DATA descriptors only (no getter or proxy trap runs); work is
- * charged to per-call budgets and the named LIMITS. The exported entry points return refusals instead of throwing, except
- * `readEntry`/`commandFor`, which THROW a `Refusal` (they are the validators the entry points call).
+ * State and output carry ids, codes, counts and repo-relative file names only: NEVER a test title (AC6); a non-creditable
+ * marker on a skipped title is not stored either. Hostile input (L3, L6): caller objects are read through own DATA descriptors
+ * only (no getter or proxy trap runs); work is charged to per-call budgets and the named LIMITS. The exported entry points
+ * return refusals instead of throwing, except `readEntry`/`commandFor`/`currentContext`, which THROW a `Refusal`.
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep, basename } from 'node:path';
-import { types } from 'node:util';
-import { changedPaths, compileGlob, matchSegments } from './risk-floor.mjs';
-import { markers, ITEM_ID, KINDS } from './test-kinds.mjs';
+import { changedPaths, hiddenFlagged } from './risk-floor.mjs';
+import { markers, ITEM_ID } from './test-kinds.mjs';
 import { parseRunnerOutput } from './gate.mjs';
+import { LIMITS, FILE_VOIDS, creditable, refuse, codeOf, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, globList, matcher, matches, countMarkers, bufMarkers, parseScanned, preflight } from './engine-test-kinds-base.mjs';
 
-export const LIMITS = Object.freeze({ maxReportBytes: 32 * 1024 * 1024, maxResults: 100_000, maxPaths: 20_000, maxIdentityBytes: 256 * 1024 * 1024,
-  maxFileBytes: 4 * 1024 * 1024, maxMarkerFiles: 2_000, maxScanTokens: 8_000_000, maxDepth: 64, maxList: 64, maxPathChars: 512, maxTitleChars: 2048, maxIds: 512 });
-export const REFUSALS = Object.freeze(['runner_unsupported', 'runner_config_changed', 'runner_output_tampered', 'runner_survivor', 'evidence_run_failed', 'evidence_unavailable', 'candidate_moved', 'quiescence_unknown', 'evidence_budget_exceeded', 'test_kinds_error']);
-export const FILE_VOIDS = Object.freeze(['runner_uncovered', 'result_outside_repo', 'not_in_P', 'not_regular', 'not_test_file', 'file_too_large']);
+export { LIMITS, REFUSALS, FILE_VOIDS, MARKER_ID, creditable, Refusal, refuse, codeOf, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, globList, matcher, matches } from './engine-test-kinds-base.mjs';
 export const CLAIM = 'L-ran';
 export const BUILTIN_TEST_GLOBS = Object.freeze(['**/*.test.*', '**/*.spec.*']);
 export const RUNNER = Object.freeze({ id: 'vitest', format: 'vitest-json', cmd: 'node_modules/.bin/vitest', args: Object.freeze(['run', '--pool=forks', '--reporter=json', '--outputFile={report}']), files: '{files}', report: '/dev/fd/3' });
 export const INTEGRITY = Object.freeze(['sealed', 'report_eof', 'quiesced', 'binding_verified', 'identity_stable']);
 export const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/, HEX64 = /^[0-9a-f]{64}$/, EVIDENCE_ID = /^e1:[0-9a-f]{64}$/, ENTRY_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/;
-/** A marker id as the bytes spell it, and a CREDITABLE id (a known kind or a lifecycle item id). */
-export const MARKER_ID = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-export const creditable = (m) => typeof m === 'string' && (m.startsWith('kind:') ? Object.hasOwn(KINDS, m.slice(5)) : m.startsWith('plan:') && ITEM_ID.test(m.slice(5)));
-
-export class Refusal extends Error { constructor(code) { super(code); this.code = code; } }
-export const refuse = (code) => { throw new Refusal(code); };
-export const codeOf = (e, dflt) => (e instanceof Refusal ? e.code : dflt);
-export const charge = (ctx, n = 1) => { ctx.work += n; if (ctx.work > ctx.max) refuse('evidence_budget_exceeded'); };
+/** A runner version as a package manager spells it (`2.1.0`, `4.0.0-beta.3+sha`): never empty, never free text. */
+export const RUNNER_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 const sha256 = (...parts) => { const h = createHash('sha256'); for (const p of parts) h.update(p); return h.digest('hex'); };
-
-// ---- hostile-input readers (L6): own DATA descriptors only, never a trap or a getter ----
-export const plain = (v) => v !== null && typeof v === 'object' && !types.isProxy(v) && [Object.prototype, null].includes(Reflect.getPrototypeOf(v));
-export function own(o, k) {
-  if (!plain(o) && !(Array.isArray(o) && !types.isProxy(o))) refuse('test_kinds_error');
-  const d = Reflect.getOwnPropertyDescriptor(o, k);
-  if (!d || !('value' in d)) refuse('test_kinds_error');
-  return d.value;
-}
-/** An optional own data property: absent or `undefined` gives `dflt`. */
-export const ownOr = (o, k, dflt) => { if (!plain(o)) refuse('test_kinds_error'); const v = Reflect.getOwnPropertyDescriptor(o, k) ? own(o, k) : undefined; return v === undefined ? dflt : v; };
-export function arr(v, max, ok, ctx) {
-  if (!Array.isArray(v) || types.isProxy(v) || Reflect.getPrototypeOf(v) !== Array.prototype) refuse('test_kinds_error');
-  const n = Reflect.getOwnPropertyDescriptor(v, 'length')?.value;
-  if (!Number.isSafeInteger(n) || n < 0) refuse('test_kinds_error');
-  if (n > max) refuse('evidence_budget_exceeded');
-  charge(ctx, n + 1);
-  const out = [];
-  for (let i = 0; i < n; i++) { const x = own(v, String(i)); if (!ok(x)) refuse('test_kinds_error'); out.push(x); }
-  return out;
-}
-/** The object's own keys when they are exactly `keys` (a plain object, string keys only), else null. */
-export function exactKeys(o, keys) {
-  if (!plain(o)) return null;
-  const ks = Reflect.ownKeys(o);
-  return ks.length === keys.length && ks.every((k) => typeof k === 'string' && keys.includes(k)) ? ks : null;
-}
-export const isStr = (max) => (v) => typeof v === 'string' && v.length <= max;
-/** A repo-relative POSIX path: no absolute, backslash, NUL, empty, `.` or `..` segment. */
-export const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length <= LIMITS.maxPathChars && !/[\\\0]/.test(p) && !p.startsWith('/') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
-const isGlob = (g) => { try { compileGlob(g); return typeof g === 'string' && g.length <= LIMITS.maxPathChars; } catch { return false; } };
-export const globList = (v, ctx) => arr(v, LIMITS.maxList, isGlob, ctx);
-export const matcher = (globs) => globs.map((g) => compileGlob(g));
-export const matches = (compiled, rel, ctx) => {
-  charge(ctx);
-  try { const segs = rel.split('/'); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
-};
 
 // ---- git (TEMPORARY fourth copy of the hardened-git helper, as in test-kinds.mjs: TODO(S-02a0b) replace with lib/git-capability.mjs) ----
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 const git = (cwd, args, max = 1 << 20, input = undefined) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: max, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
 const topOf = (repo) => realpathSync.native(git(realpathSync.native(repo), ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, ''));
-
-// ---- marker counting (R-3) ----
-const MARKER = /\[(kind|plan):([A-Za-z0-9][A-Za-z0-9_-]{0,63})\]/g;
-/** Occurrences of every `[kind:x]` / `[plan:x]` marker (latin1 view: markers are ASCII, line endings do not matter). */
-function countMarkers(text, out = new Map()) {
-  for (const m of text.matchAll(MARKER)) out.set(`${m[1]}:${m[2]}`, (out.get(`${m[1]}:${m[2]}`) ?? 0) + 1);
-  return out;
-}
-const bufMarkers = (buf) => countMarkers(buf.toString('latin1'));
-const sumInto = (total, m) => { for (const [k, n] of m) total.set(k, (total.get(k) ?? 0) + n); return total; };
+const gitRefusal = (e) => (e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable');
 
 // ---- the evidence identity (design rev 5 section 1a): the candidate-id encoding over P, from the worktree ----
 /** `e1:` + sha256 over base_sha and every changed path (byte order): path, kind, mode, length, bytes. Never throws. */
 export function evidenceIdentity(input) {
   try { const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', [])); return { ok: true, evidence_id: c.evidence_id, paths: c.paths }; } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
 }
-/** A directory in P is a submodule only when it is the top of its own clean work tree; a dirty one is refused (I4). */
+/** An index entry that is a gitlink (`<tag> 160000 ...` in `ls-files -v -s -z` output). */
+const hasGitlink = (buf) => buf.toString('latin1').split('\0').some((l) => /^\S 160000 /.test(l));
+/**
+ * A directory in P is a submodule only when it is the top of its own work tree. Its HEAD identifies it only when nothing can
+ * differ from HEAD unseen (I4, I-E): it is refused when it is dirty, when a tracked file carries an assume-unchanged or
+ * skip-worktree bit (git status would not look at it), or when it contains a submodule of its own (one level down, the same
+ * flags would hide again). Returns the HEAD bytes, or null for a plain directory. Throws a Refusal.
+ */
 function submoduleHead(abs) {
   let top;
   try { top = realpathSync.native(git(abs, ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, '')); } catch { return refuse('evidence_unavailable'); }
   if (top !== realpathSync.native(abs)) return null; // a plain directory (its files are paths of P themselves)
-  let status;
-  try { status = git(abs, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']); } catch { return refuse('evidence_unavailable'); }
+  let index, status;
+  try { index = git(abs, ['ls-files', '-v', '-s', '-z'], 64 << 20); } catch (e) { return refuse(gitRefusal(e)); }
+  if (hiddenFlagged(index) || hasGitlink(index)) refuse('evidence_unavailable');
+  try { status = git(abs, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']); } catch (e) { return refuse(gitRefusal(e)); }
   if (status.length) refuse('evidence_unavailable'); // a dirty submodule cannot be identified by its HEAD
   try { return Buffer.from(git(abs, ['rev-parse', '--verify', 'HEAD^{commit}']).toString('utf8').trim()); } catch { return refuse('evidence_unavailable'); }
 }
@@ -178,21 +144,21 @@ export function candidate(repo, baseSha, exclusions) {
   return { evidence_id: `e1:${h.digest('hex')}`, paths, all, top, cand, base_sha: baseSha, census: null };
 }
 /**
- * The R-3 census over P: candidate and base marker counts per path and summed over P. Base blobs come from ONE `ls-tree` and
- * ONE `cat-file --batch`; an unreadable or oversized base refuses (never skipped). Memoised on the candidate. Throws a Refusal.
+ * The R-3 census over P: candidate and base marker counts per path. Base blobs come from ONE `ls-tree` and ONE `cat-file
+ * --batch`; an unreadable or oversized base refuses (never skipped). Memoised on the candidate. Throws a Refusal.
  */
 export function census(c) {
   if (c.census) return c.census;
   const want = new Set(c.paths), base = new Map(), oids = [];
   let ls;
-  try { ls = git(c.top, ['ls-tree', '-r', '-z', '--full-tree', c.base_sha], 64 << 20).toString('utf8'); } catch (e) { refuse(e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable'); }
+  try { ls = git(c.top, ['ls-tree', '-r', '-z', '--full-tree', c.base_sha], 64 << 20).toString('utf8'); } catch (e) { refuse(gitRefusal(e)); }
   for (const line of ls.split('\0')) {
     const m = /^(100644|100755) blob ([0-9a-f]{40,64})\t(.*)$/s.exec(line);
     if (m && want.has(m[3])) oids.push([m[3], m[2]]);
   }
   if (oids.length) {
     let out;
-    try { out = git(c.top, ['cat-file', '--batch'], LIMITS.maxIdentityBytes + oids.length * 128, oids.map((o) => o[1]).join('\n') + '\n'); } catch (e) { refuse(e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable'); }
+    try { out = git(c.top, ['cat-file', '--batch'], LIMITS.maxIdentityBytes + oids.length * 128, oids.map((o) => o[1]).join('\n') + '\n'); } catch (e) { refuse(gitRefusal(e)); }
     let at = 0;
     for (const [p, oid] of oids) {
       const nl = out.indexOf(10, at), head = /^([0-9a-f]+) blob (\d+)$/.exec(out.subarray(at, nl).toString('latin1'));
@@ -202,18 +168,31 @@ export function census(c) {
       at = nl + 1 + size + 1;
     }
   }
-  const total = { cand: new Map(), base: new Map() };
-  for (const m of c.cand.values()) sumInto(total.cand, m);
-  for (const m of base.values()) sumInto(total.base, m);
-  c.census = { cand: c.cand, base, total };
+  c.census = { cand: c.cand, base };
   return c.census;
 }
-/** R-3 (header): may id `m` be credited from `rel`, given the non-passed carriers per file (`skipped`: path -> Map)? */
-export function r3(cs, rel, m, skipped) {
-  const n = (map, k) => map?.get(k) ?? 0;
-  let skipTotal = 0;
-  for (const s of skipped.values()) skipTotal += n(s, m);
-  return n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0 && n(cs.total.cand, m) - n(cs.total.base, m) - skipTotal > 0;
+/** The R-3 inputs from rows `{file, outcome, skipped: Map}` (a built row or a stored one, the SAME function): K and skipped-in-P. */
+export function r3Inputs(rows, inP) {
+  const counted = new Set(), skipped = new Map();
+  for (const f of rows) {
+    if (f.file === null || !inP.has(f.file)) continue;
+    skipped.set(f.file, f.skipped);
+    if (f.outcome === 'counted') counted.add(f.file);
+  }
+  return { counted, skipped };
+}
+/** R-3 (header): returns `(rel, m) => may m be credited from rel`. The totals over P are computed once, charged to `ctx`. */
+export function r3Rule(cs, { counted, skipped }, ctx) {
+  const n = (map, k) => map?.get(k) ?? 0, total = new Map();
+  for (const p of new Set([...cs.cand.keys(), ...cs.base.keys(), ...skipped.keys()])) {
+    const a = cs.cand.get(p), b = cs.base.get(p), s = skipped.get(p);
+    for (const m of new Set([...(a?.keys() ?? []), ...(b?.keys() ?? []), ...(s?.keys() ?? [])])) {
+      charge(ctx);
+      const d = n(a, m) - n(b, m) - n(s, m);
+      total.set(m, (total.get(m) ?? 0) + (counted.has(p) ? d : Math.min(d, 0))); // outside K a file can only subtract
+    }
+  }
+  return (rel, m) => counted.has(rel) && n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0 && n(total, m) > 0;
 }
 
 // ---- the declared entry (config.testCommands.<name>) and the exact-argv rule (OD-2, I2) ----
@@ -243,86 +222,109 @@ export function commandFor(entry, cmd, args) {
 }
 /** The digest of the command after substitution. */
 export const commandDigest = (cmd, args) => sha256(JSON.stringify([cmd, args]));
-/** The digest of the `config_paths` bytes (a missing file is `absent`; a symlink or non-regular file is refused). Never throws. */
+/** The digest of the `config_paths` bytes (a missing file is `absent`; a symlink, non-regular or over-64-MiB file is refused). Never throws. */
 export function configDigest(repo, paths) {
   try {
     const list = arr(paths, LIMITS.maxList, safeRel, { work: 0, max: 1e6 }), top = topOf(repo), h = createHash('sha256');
     for (const p of [...new Set(list)].sort()) {
       let st = null;
       try { st = lstatSync(join(top, p)); } catch (e) { if (e?.code !== 'ENOENT') refuse('evidence_unavailable'); }
-      if (st && (!st.isFile() || st.size > LIMITS.maxFileBytes)) refuse('evidence_unavailable');
+      if (st && (!st.isFile() || st.size > LIMITS.maxConfigBytes)) refuse('evidence_unavailable');
       h.update(`${p}\0`); h.update(st ? readFileSync(join(top, p)) : 'absent'); h.update('\0');
     }
     return { ok: true, digest: h.digest('hex') };
   } catch (e) { return { ok: false, code: codeOf(e, 'evidence_unavailable') }; }
 }
 
-// ---- the report: a strict JSON shape scan (duplicate keys, depth, work), then the whole-run pre-pass ----
-/** Throws a Refusal: evidence_unavailable for malformed/duplicate-key/too-deep JSON, evidence_budget_exceeded past the token cap. */
-function scanJson(text) {
-  let i = 0, tokens = 0;
-  const n = text.length, bad = () => refuse('evidence_unavailable');
-  const ws = () => { while (i < n) { const c = text.charCodeAt(i); if (c === 32 || c === 10 || c === 13 || c === 9) i++; else break; } };
-  const str = () => { const s = i++; while (i < n) { const c = text.charCodeAt(i); if (c === 34) { i++; return text.slice(s, i); } if (c === 92) i += 2; else if (c < 32) bad(); else i++; } return bad(); };
-  const lit = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/y;
-  const val = (d) => {
-    if (d > LIMITS.maxDepth) bad();
-    if (++tokens > LIMITS.maxScanTokens) refuse('evidence_budget_exceeded');
-    ws();
-    const c = text[i];
-    if (c === '{' || c === '[') {
-      const close = c === '{' ? '}' : ']', keys = new Set();
-      i++; ws();
-      if (text[i] === close) { i++; return; }
-      for (;;) {
-        ws();
-        if (c === '{') {
-          if (text[i] !== '"') bad();
-          const raw = str();
-          let key = raw.slice(1, -1);
-          if (key.includes('\\')) { try { key = JSON.parse(raw); } catch { bad(); } }
-          if (keys.has(key)) bad(); // a duplicate key: which value wins is a parser accident, never evidence
-          keys.add(key); ws();
-          if (text[i++] !== ':') bad();
-        }
-        val(d + 1); ws();
-        if (text[i] === ',') { i++; continue; }
-        if (text[i] === close) { i++; return; }
-        bad();
-      }
-    } else if (c === '"') str();
-    else { lit.lastIndex = i; const m = lit.exec(text); if (!m) bad(); i += m[0].length; }
-  };
-  val(0); ws();
-  if (i !== n) bad();
-}
-const STATUSES = new Set(['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']); // vitest's StatusMap image plus jest's `disabled`
-const field = (o, k) => (Object.hasOwn(o, k) ? o[k] : undefined);
-const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-/** The whole-run checks (I8), on the parsed document, BEFORE the parser materialises any result. Throws a Refusal. */
-function preflight(doc, ctx) {
-  const unavailable = () => refuse('evidence_unavailable'), failed = () => refuse('evidence_run_failed');
-  if (!isObj(doc)) unavailable();
-  const success = field(doc, 'success'), suites = field(doc, 'testResults');
-  for (const k of ['numFailedTestSuites', 'numFailedTests']) { const v = field(doc, k); if (!Number.isSafeInteger(v) || v < 0) unavailable(); if (v > 0) failed(); }
-  if (typeof success !== 'boolean') unavailable();
-  if (!success) failed();
-  if (!Array.isArray(suites)) unavailable();
-  let results = 0;
-  for (const s of suites) {
-    charge(ctx);
-    if (!isObj(s) || typeof field(s, 'name') !== 'string' || !Array.isArray(field(s, 'assertionResults'))) unavailable();
-    if (field(s, 'status') === 'failed') failed();
-    if (field(s, 'status') !== 'passed') unavailable();
-    const cases = field(s, 'assertionResults');
-    results += cases.length;
-    if (results > LIMITS.maxResults) refuse('evidence_budget_exceeded');
-    for (const c of cases) {
-      charge(ctx);
-      if (!isObj(c) || !STATUSES.has(field(c, 'status')) || typeof field(c, 'title') !== 'string') unavailable();
-      if (field(c, 'status') === 'failed') failed();
-    }
+// ---- THE current context (I-A, I-F): one derivation, one refusal order, for buildRecord, recordUsable and tkVerdict ----
+/**
+ * currentContext({ repo, baseSha, exclusions, entries:[entry], commandOf(entry) -> {cmd,args}|undefined, needCommand(entry), globs }, ctx)
+ *   -> { c, testGlobs, per: Map(name -> { entry, covers, command, command_digest, config_digest }) }. THROWS a Refusal, in this order:
+ *   1. every entry through `readEntry` (names unique);
+ *   2. EVERY entry's current command through `commandFor`, before any record is looked at (C6); `undefined` is allowed only
+ *      when `needCommand(entry)` is false (the verdict: an entry with no record, whose `{files}` may have nothing to run);
+ *   3. the candidate; 4. `runner_config_changed`: any entry's config_paths in `all`, BEFORE any exclusion (I6, C3);
+ *   5. every entry's config digest; 6. the test globs.
+ */
+export function currentContext(input, ctx) {
+  const entries = arr(own(input, 'entries'), LIMITS.maxList, plain, ctx).map(readEntry);
+  if (new Set(entries.map((e) => e.name)).size !== entries.length) refuse('test_kinds_error');
+  const commandOf = own(input, 'commandOf'), needCommand = own(input, 'needCommand');
+  const decl = entries.map((entry) => {
+    const raw = commandOf(entry);
+    if (raw === undefined) { if (needCommand(entry) !== false) refuse('test_kinds_error'); return { entry, command: null }; }
+    return { entry, command: commandFor(entry, own(raw, 'cmd'), own(raw, 'args')) };
+  });
+  const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', []));
+  const all = new Set(c.all);
+  if (entries.some((en) => en.config_paths.some((p) => all.has(p)))) refuse('runner_config_changed');
+  const per = new Map();
+  for (const { entry, command } of decl) {
+    const cd = configDigest(c.top, entry.config_paths);
+    if (!cd.ok) refuse(cd.code);
+    per.set(entry.name, { entry, covers: matcher(entry.covers), command, command_digest: command && commandDigest(command.cmd, command.args), config_digest: cd.digest });
   }
+  const testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globList(own(input, 'globs'), ctx)]);
+  return { c, testGlobs, per };
+}
+
+// ---- THE record schema (I1, I-B, I-D): one validator, used by buildRecord on its own output and by reuse on a stored record ----
+const TOP = ['evidence_id', 'base_sha', 'entry', 'dag_digest', 'command_digest', 'config_digest', 'attempt_id', 'exit_code', 'report_sha256', 'report_len', 'runner', 'claim', 'integrity', 'files', 'counts'];
+const ROW = ['file', 'outcome', 'credited', 'skipped'], COUNTS = ['results', 'passed', 'marker_files', 'credited', 'unknown_markers'], RUNNER_KEYS = ['id', 'version', 'format'];
+const OUTCOMES = ['counted', ...FILE_VOIDS];
+const uint = (v, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(v) && v >= 0 && v <= max;
+const str = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+const sortedUnique = (xs) => xs.every((x, i) => i === 0 || xs[i - 1] < x);
+/**
+ * validRecord(R, ctx) -> a fresh copy built from primitives (rows carry `skipped` as a Map), or null. Throws only a Refusal on a
+ * hostile shape. Checks: exact key sets at every level; typed fields (`runner.version` a RUNNER_VERSION, `report_len` >= 1);
+ * row outcomes in the allowlist; `credited` only on `counted` rows, creditable, sorted and unique; `skipped` keys creditable
+ * with counts >= 1, only on rows inside P; and the RELATIONS a real report imposes on its counts (I-D): rows and credits
+ * reconcile, passed <= results, every row came from a result, a credit or an unknown marker needs a passed result, a skipped
+ * carrier needs a non-passed result, unknown markers fit the counted rows.
+ */
+export function validRecord(R, ctx) {
+  if (!exactKeys(R, TOP)) return null;
+  const g = (k) => own(R, k);
+  const runner = g('runner'), integ = g('integrity'), counts = g('counts');
+  if (!exactKeys(runner, RUNNER_KEYS) || !exactKeys(integ, INTEGRITY) || !exactKeys(counts, COUNTS)) return null;
+  const copy = {
+    evidence_id: g('evidence_id'), base_sha: g('base_sha'), entry: g('entry'), dag_digest: g('dag_digest'), command_digest: g('command_digest'), config_digest: g('config_digest'),
+    attempt_id: g('attempt_id'), exit_code: g('exit_code'), report_sha256: g('report_sha256'), report_len: g('report_len'), claim: g('claim'),
+    runner: Object.fromEntries(RUNNER_KEYS.map((k) => [k, own(runner, k)])), integrity: Object.fromEntries(INTEGRITY.map((k) => [k, own(integ, k)])),
+    counts: Object.fromEntries(COUNTS.map((k) => [k, own(counts, k)])), files: [],
+  };
+  const typed = typeof copy.evidence_id === 'string' && EVIDENCE_ID.test(copy.evidence_id) && typeof copy.base_sha === 'string' && SHA.test(copy.base_sha)
+    && typeof copy.entry === 'string' && ENTRY_NAME.test(copy.entry) && ['dag_digest', 'command_digest', 'config_digest', 'report_sha256'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))
+    && str(copy.attempt_id, 80) && Number.isSafeInteger(copy.exit_code) && uint(copy.report_len, LIMITS.maxReportBytes) && copy.report_len >= 1 && str(copy.claim, 16)
+    && str(copy.runner.id, 64) && str(copy.runner.format, 64) && typeof copy.runner.version === 'string' && RUNNER_VERSION.test(copy.runner.version)
+    && INTEGRITY.every((k) => typeof copy.integrity[k] === 'boolean') && COUNTS.every((k) => uint(copy.counts[k]));
+  if (!typed) return null;
+  const seen = new Set();
+  let credited = 0;
+  for (const f of arr(g('files'), LIMITS.maxMarkerFiles, plain, ctx)) {
+    if (!exactKeys(f, ROW)) return null;
+    const file = own(f, 'file'), outcome = own(f, 'outcome');
+    if (typeof outcome !== 'string' || !OUTCOMES.includes(outcome)) return null;
+    if (!(file === null ? outcome === 'result_outside_repo' : safeRel(file) && outcome !== 'result_outside_repo')) return null;
+    if (file !== null && seen.has(file)) return null;
+    seen.add(file);
+    const ids = arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx);
+    if ((outcome !== 'counted' && ids.length) || !sortedUnique(ids)) return null; // a VOID row never credits (I1)
+    const sk = own(f, 'skipped');
+    if (!plain(sk)) return null;
+    const keys = Reflect.ownKeys(sk);
+    if (keys.length > LIMITS.maxIds || (keys.length && ['not_in_P', 'result_outside_repo'].includes(outcome))) return null;
+    const skipped = new Map();
+    for (const k of keys) { if (!creditable(k)) return null; const n = own(sk, k); if (!uint(n) || n === 0) return null; skipped.set(k, n); }
+    credited += ids.length;
+    copy.files.push({ file, outcome, credited: [...ids], skipped });
+  }
+  const n = copy.counts, countedRows = copy.files.filter((f) => f.outcome === 'counted').length;
+  const related = n.marker_files === copy.files.length && n.credited === credited && n.passed <= n.results && n.results <= LIMITS.maxResults
+    && n.marker_files <= n.results && (n.passed >= 1 || (n.credited === 0 && n.unknown_markers === 0))
+    && (n.results > n.passed || copy.files.every((f) => f.skipped.size === 0)) && n.unknown_markers <= countedRows * LIMITS.maxIds;
+  return related ? copy : null;
 }
 
 // ---- file classification ----
@@ -365,6 +367,11 @@ function classify(c, inP, file, testGlobs, covers, ctx) {
 }
 
 // ---- building a record from a provided report (section 1 output; sections 3-4 counting) ----
+/** I-C: every per-row collection is re-checked after EVERY change to it, a merge of two report names included (C4). */
+function capSlot(s) {
+  if (s.ids.size > LIMITS.maxIds || s.unknown.size > LIMITS.maxIds || s.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded');
+  return s;
+}
 /**
  * buildRecord({ repo, baseSha, entry, commandArgs, tests:{globs}, dagDigest, exclusions?, report:{text, ...provenance} })
  *   -> { ok:true, record, voids } | { ok:false, code }
@@ -376,77 +383,79 @@ export function buildRecord(input) {
 }
 function build(input) {
   const ctx = { work: 0, max: 5_000_000, glob: { steps: 0 } };
-  const entry = readEntry(own(input, 'entry')), command = commandFor(entry, entry.cmd, own(input, 'commandArgs'));
-  const repo = own(input, 'repo'), baseSha = own(input, 'baseSha'), dagDigest = own(input, 'dagDigest');
+  const { c, testGlobs, per } = currentContext({ repo: own(input, 'repo'), baseSha: own(input, 'baseSha'), exclusions: ownOr(input, 'exclusions', []), entries: [own(input, 'entry')],
+    commandOf: (en) => ({ cmd: en.cmd, args: own(input, 'commandArgs') }), needCommand: () => true, globs: own(own(input, 'tests'), 'globs') }, ctx);
+  const [{ entry, covers, command_digest, config_digest }] = per.values();
   const R = own(input, 'report'), text = own(R, 'text');
-  const globs = globList(own(own(input, 'tests'), 'globs'), ctx);
   const prov = {};
   for (const k of ['runner_id', 'runner_version', 'attempt_id', 'report_sha256', 'evidence_id_before', 'report_eof', 'sealed', 'quiesced', 'binding_verified', 'exit_code']) prov[k] = own(R, k);
-  if (typeof text !== 'string' || !isStr(80)(prov.attempt_id) || !prov.attempt_id || !isStr(64)(prov.runner_version) || typeof dagDigest !== 'string' || !HEX64.test(dagDigest) || typeof prov.evidence_id_before !== 'string') refuse('test_kinds_error');
+  if (typeof text !== 'string') refuse('test_kinds_error');
   if (prov.runner_id !== RUNNER.id) refuse('runner_unsupported');
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes > LIMITS.maxReportBytes) refuse('evidence_budget_exceeded');
-  const c = candidate(repo, baseSha, ownOr(input, 'exclusions', []));
-  const all = new Set(c.all), inP = new Set(c.paths);
-  if (entry.config_paths.some((p) => all.has(p))) refuse('runner_config_changed'); // before ANY exclusion (I6)
   const digest = sha256(text);
   if (prov.sealed !== true || prov.binding_verified !== true || prov.report_sha256 !== digest) refuse('runner_output_tampered');
   if (prov.report_eof !== true) refuse('runner_survivor');
   if (prov.quiesced !== true) refuse('quiescence_unknown');
   if (prov.exit_code !== 0) refuse('evidence_run_failed'); // non-zero, a timeout (null) or anything else: a RED run is never evidence
   if (prov.evidence_id_before !== c.evidence_id) refuse('candidate_moved');
-  scanJson(text);
-  preflight(JSON.parse(text), ctx);
+  preflight(parseScanned(text), ctx);
   const parsed = parseRunnerOutput(entry.format, text);
-  if (!parsed.supported) refuse('evidence_unavailable');
+  if (!parsed.supported) refuse('evidence_unavailable'); // unreachable after preflight (documented equivalent mutant)
   const results = parsed.results; // at most LIMITS.maxResults: preflight counted them
 
-  // per file: the creditable ids of PASSED results, unknown markers, and the non-passed carriers (R-3 subtracts them)
+  // per report name: the creditable ids of PASSED results, unknown markers, and the creditable non-passed carriers (R-3 subtracts them)
   const byFile = new Map();
   let passed = 0;
   for (const r of results) {
     charge(ctx);
+    if (typeof r.title !== 'string' || typeof r.file !== 'string') refuse('evidence_unavailable'); // unreachable after preflight
     if (r.status === 'pass') passed++;
-    if (typeof r.title !== 'string' || r.title.length > LIMITS.maxTitleChars || typeof r.file !== 'string') continue;
     const m = markers([r.title]);
     if (!m.kinds.length && !m.items.length && !m.unknown.length) continue;
     if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');
     const slot = byFile.get(r.file) ?? { ids: new Set(), unknown: new Set(), skipped: new Map() };
     byFile.set(r.file, slot);
-    if (r.status !== 'pass') { countMarkers(r.title, slot.skipped); if (slot.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded'); continue; }
-    for (const k of m.kinds) slot.ids.add(`kind:${k}`);
-    for (const i of m.items) (ITEM_ID.test(i) ? slot.ids : slot.unknown).add(`plan:${i}`);
-    for (const u of m.unknown) slot.unknown.add(u);
-    if (slot.ids.size > LIMITS.maxIds || slot.unknown.size > LIMITS.maxIds) refuse('evidence_budget_exceeded');
+    if (r.status !== 'pass') { for (const [k, n] of countMarkers(r.title)) if (creditable(k)) slot.skipped.set(k, (slot.skipped.get(k) ?? 0) + n); }
+    else {
+      for (const k of m.kinds) slot.ids.add(`kind:${k}`);
+      for (const i of m.items) (ITEM_ID.test(i) ? slot.ids : slot.unknown).add(`plan:${i}`);
+      for (const u of m.unknown) slot.unknown.add(u);
+    }
+    capSlot(slot);
   }
-  const testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globs]), covers = matcher(entry.covers);
-  // classify each report name; names resolving to the same repo file (a symlink and its target) merge into ONE row
-  const rows = [], byRel = new Map(), skipped = new Map(), voids = {};
+  // classify each report name; names resolving to the same repo file (a symlink and its target) merge into ONE row, re-capped
+  const rows = [], byRel = new Map(), voids = {}, inP = new Set(c.paths);
   for (const [file, slot] of [...byFile].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const v = classify(c, inP, file, testGlobs, covers, ctx), prev = v.rel === null ? null : byRel.get(v.rel);
-    if (prev) { for (const k of slot.ids) prev.slot.ids.add(k); for (const k of slot.unknown) prev.slot.unknown.add(k); sumInto(prev.slot.skipped, slot.skipped); continue; }
-    const row = { v, slot };
+    if (prev) {
+      for (const k of slot.ids) prev.ids.add(k);
+      for (const k of slot.unknown) prev.unknown.add(k);
+      for (const [k, n] of slot.skipped) prev.skipped.set(k, (prev.skipped.get(k) ?? 0) + n);
+      capSlot(prev);
+      continue;
+    }
+    const row = { file: v.rel, outcome: v.outcome, ...slot };
     rows.push(row);
     if (v.rel !== null) byRel.set(v.rel, row);
   }
-  for (const { v, slot } of rows) if (v.rel !== null && inP.has(v.rel)) skipped.set(v.rel, slot.skipped);
-  const cs = rows.some((x) => x.v.outcome === 'counted') ? census(c) : null;
+  for (const row of rows) if (row.file === null || !inP.has(row.file)) row.skipped = new Map(); // a carrier outside P subtracts nothing
+  const credit = rows.some((x) => x.outcome === 'counted') ? r3Rule(census(c), r3Inputs(rows, inP), ctx) : null;
   const files = [];
   let unknownMarkers = 0, credited = 0;
-  for (const { v, slot } of rows) {
-    const skip = skipped.has(v.rel) ? Object.fromEntries([...slot.skipped].sort((a, b) => (a[0] < b[0] ? -1 : 1))) : {};
-    if (v.outcome !== 'counted') { voids[v.outcome] = (voids[v.outcome] ?? 0) + 1; files.push({ file: v.rel, outcome: v.outcome, credited: [], skipped: skip }); continue; }
-    const ids = [...slot.ids].filter((m) => r3(cs, v.rel, m, skipped)).sort();
-    unknownMarkers += slot.unknown.size; credited += ids.length;
-    files.push({ file: v.rel, outcome: 'counted', credited: ids, skipped: skip });
+  for (const row of rows) {
+    const skip = Object.fromEntries([...row.skipped].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+    if (row.outcome !== 'counted') { voids[row.outcome] = (voids[row.outcome] ?? 0) + 1; files.push({ file: row.file, outcome: row.outcome, credited: [], skipped: skip }); continue; }
+    const ids = [...row.ids].filter((m) => credit(row.file, m)).sort();
+    unknownMarkers += row.unknown.size; credited += ids.length;
+    files.push({ file: row.file, outcome: 'counted', credited: ids, skipped: skip });
   }
   files.sort((a, b) => ((a.file ?? '') < (b.file ?? '') ? -1 : (a.file ?? '') > (b.file ?? '') ? 1 : 0));
-  const cfg = configDigest(repo, entry.config_paths);
-  if (!cfg.ok) refuse(cfg.code);
-  const record = { evidence_id: c.evidence_id, base_sha: baseSha, entry: entry.name, dag_digest: dagDigest, command_digest: commandDigest(command.cmd, command.args),
-    config_digest: cfg.digest, attempt_id: prov.attempt_id, exit_code: 0, report_sha256: digest, report_len: bytes,
+  const record = { evidence_id: c.evidence_id, base_sha: c.base_sha, entry: entry.name, dag_digest: own(input, 'dagDigest'), command_digest,
+    config_digest, attempt_id: prov.attempt_id, exit_code: 0, report_sha256: digest, report_len: bytes,
     runner: { id: prov.runner_id, version: prov.runner_version, format: entry.format }, claim: CLAIM,
     integrity: Object.fromEntries(INTEGRITY.map((k) => [k, true])), files,
     counts: { results: results.length, passed, marker_files: files.length, credited, unknown_markers: unknownMarkers } };
+  if (!validRecord(record, ctx)) refuse('test_kinds_error'); // I-B: never emit a record reuse would reject (C7)
   return { record, voids };
 }
