@@ -135,9 +135,15 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * non-blocking. One read of up to STDOUT_CAP + 1 bytes (more than any socket queue holds) empties
  * the channel's queue and is its latch point (a full read is refused); the channel is at EOF only
  * when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is not
- * kept). No drain follows. It is not an atomic snapshot: bytes another process wrote and then
- * closed before a channel's latch point (before the exit was observed, or for the report channel
- * during the read of stdout) are kept.
+ * kept). No drain follows.
+ * Claim (exact): the decision predicate is the OBSERVED EOF/open/read-error state of each
+ * channel at its latching read in the exit callback, per channel, platform and read cap (runner
+ * stdout on POSIX; plus the report channel on darwin, whose latching read comes after stdout's).
+ * A channel still open there (EAGAIN), returning bytes after that read, or failing to read is
+ * refused. Writes made earlier, or during earlier reads before the latch, are accepted, including
+ * those of a process handed the descriptor by an in-run holder; no additional verdict manipulation
+ * has been demonstrated under the current adapters and the tested threat model (see the in-run
+ * injection risk R-T2). This is not an atomic snapshot and writers are not authenticated.
  * On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
  * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
  * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
@@ -206,7 +212,7 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
     first.unref(); every.unref(); sm.timers.push(first, every);
   }
-  // Decision bytes are only those present when the launcher observes the runner's exit (the
+  // Decision bytes are only those read by each channel's latching read in the exit callback (the
   // boundary): each channel's EOF state is latched there and nothing read later is kept.
   const takeOut = (c) => { if (latched) return; size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); };
   const takeRep = (c) => { if (latched) return; rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); };
@@ -236,8 +242,11 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   // The runner is dead: its own descriptors closed before its exit was reported, so whatever it wrote
   // is already in the socket. Read each channel in turn, synchronously (non-blocking): one read
   // larger than any queue empties it and latches it. Then EOF means no process holds it; EAGAIN or
-  // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot at
-  // exit: bytes another process wrote and closed before a channel's latch point are kept.
+  // any further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot and
+  // writers are not authenticated: writes made earlier, or during earlier reads before the latch,
+  // are kept; no additional verdict manipulation has been demonstrated under the current adapters
+  // and the tested threat model (see the in-run injection risk R-T2; RECOMMENDED for temporary risk acceptance, the owner's decision
+  // is PENDING: HANDOVER OD-D4 reverted on 2026-11-18; remediation item FX-R1).
   const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
   const drain = (s, take) => {
     const fd = fdOf(s);
