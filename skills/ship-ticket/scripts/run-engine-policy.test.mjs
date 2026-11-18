@@ -215,16 +215,16 @@ test('[AC2] a present but malformed policy_version is refused, never read as leg
 
 test('[AC2] archive stays open for an unsupported run (it copies bytes and applies no semantics: the rollback rescue path)', (t) => {
   const fx = initialised(t);
-  fx.editState((s) => { s.policy_version = 2; });
+  fx.editState((s) => { s.policy_version = 3; });
   const r = fx.cli('archive');
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.equal(JSON.parse(readFileSync(join(r.out.archive, 'state.json'), 'utf8')).policy_version, 2);
+  assert.equal(JSON.parse(readFileSync(join(r.out.archive, 'state.json'), 'utf8')).policy_version, 3);
 });
 
 test('[AC2] the carrier refuses to authorize a REPAIR from the engine state of an unsupported run', async (t) => {
   const { verifyReviewExecution } = await import('./carrier.mjs');
   const fx = initialised(t);
-  fx.editState((s) => { s.policy_version = 2; s.review_chain = [{ review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', write_set: ['src/a.txt'] }]; });
+  fx.editState((s) => { s.policy_version = 3; s.review_chain = [{ review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', write_set: ['src/a.txt'] }]; });
   assert.throws(() => verifyReviewExecution(fx.repo, { ticket: 'T-1', run_id: 'run-1' }, 'rx-1', ['src/a.txt']), /policy_version_unsupported/);
   fx.editState((s) => { delete s.policy_version; });
   assert.equal(verifyReviewExecution(fx.repo, { ticket: 'T-1', run_id: 'run-1' }, 'rx-1', ['src/a.txt']), 'engine', 'a legacy state still authorizes');
