@@ -84,6 +84,7 @@ jobs:
           skills/ship-ticket/scripts/candidate-id.test.mjs
           skills/ship-ticket/scripts/usage.test.mjs
           skills/ship-ticket/scripts/gate.test.mjs
+          skills/ship-ticket/scripts/lib/durable-io.test.mjs
           skills/ship-ticket/scripts/run-engine.test.mjs
           skills/ship-ticket/scripts/run-engine-repair.test.mjs
           skills/ship-ticket/scripts/run-engine-review3.test.mjs
@@ -99,6 +100,8 @@ jobs:
           skills/ship-ticket/scripts/gate-security.test.mjs
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs
+          skills/ship-ticket/scripts/risk-floor.test.mjs
+          skills/ship-ticket/scripts/test-kinds.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
@@ -113,6 +116,8 @@ jobs:
           skills/ship-ticket/scripts/engine-explore.test.mjs
           skills/ship-ticket/scripts/engine-crash.test.mjs
           skills/ship-ticket/scripts/fast-checks.test.mjs
+          skills/ship-ticket/scripts/ci-snapshot.test.mjs
+          skills/ship-ticket/scripts/lib/shape.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check
@@ -142,6 +147,10 @@ jobs:
         run: >-
           node --test --test-concurrency=1
           skills/ship-ticket/scripts/engine-security-mutation.test.mjs
+      - name: Test-kinds fail-closed recognition mutation check
+        run: >-
+          node --test --test-concurrency=1
+          skills/ship-ticket/scripts/test-kinds-mutation.test.mjs
       - name: Record guard mutation check
         env:
           ENGINE_RECORD_MUTATION: '1'
