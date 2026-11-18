@@ -37,7 +37,9 @@ const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fs
 const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
 
 /** Remove `file` only when it is still the very file this process created (same device and inode as the handle's) and is empty.
- *  Best effort: a failure here never hides the error that got us here, and another creator's file is never removed. */
+ *  Best effort: a failure here never hides the error that got us here. Within the lock protocol (every writer holds <log>.lock) another
+ *  creator's file is not removed. Outside it there is a stat-then-unlink window, and on win32 inode values can be 0 or unstable, so the
+ *  identity check is a guard, not a guarantee. */
 function dropIfOurs(file, mine) {
   try { const now = statSync(file); if (now.dev === mine.dev && now.ino === mine.ino && now.size === 0) unlinkSync(file); } catch { /* absent, or not removable: leave it */ }
 }
