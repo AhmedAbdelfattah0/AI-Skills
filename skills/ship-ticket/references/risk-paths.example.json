@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "classes": [
+    { "name": "money", "floor": "ELEVATED", "globs": ["apps/api/src/billing/**", "apps/api/src/pricing/", "**/checkout/**", "*.pricing.ts"] },
+    { "name": "tenancy", "floor": "ELEVATED", "globs": ["apps/api/src/tenancy/**", "db/policies/**"] },
+    { "name": "auth", "floor": "ELEVATED", "globs": ["apps/api/src/auth/**", "apps/api/src/middleware/auth*.ts"] },
+    { "name": "schema", "floor": "ELEVATED", "globs": ["db/migrations/**", "*.sql", "openapi.yaml"] },
+    { "name": "shared-contracts", "floor": "ELEVATED", "globs": ["libs/shared/**"] }
+  ]
+}
