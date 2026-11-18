@@ -1,6 +1,7 @@
 /**
  * Durable I/O shared by every writer of engine state: the atomic JSON state write and the
- * per-ticket engine lock, moved verbatim from engine-io.mjs (S-30a), which re-exports them.
+ * per-ticket engine lock, moved verbatim from engine-io.mjs (S-30a), which re-exports them. S-04a2 adds `renameRetrying`
+ * (the win32 rename retry, extracted from writeStateAtomic and also used by run-log-io's quarantine replace).
  * Node built-ins plus engine-quiesce.mjs (itself free of local imports), so any script can
  * import this module without a cycle.
  *
@@ -77,6 +78,9 @@ export function gitPath(repoRoot, rel) {
  * Replace `to` with `from` by rename. On win32 a rename EPERM/EBUSY/EACCES (antivirus, indexers) is retried up to 10 attempts,
  * waiting `wait(10 * attempt)` between them; elsewhere, and for any other error, it is thrown at once. The caller must not
  * hold `to` open: win32 refuses to replace an open file, and no retry fixes a handle the caller itself keeps.
+ * It is async: even when the first rename succeeds, awaiting it yields to the microtask queue before the caller's next step.
+ * The caller is suspended meanwhile, so for writeStateAtomic the order rename -> `dir-fsync` hook -> directory fsync is unchanged
+ * (pinned by durable-io.test.mjs "writeStateAtomic order").
  */
 export async function renameRetrying(from, to, { rename = renameSync, platform = process.platform, wait = delay } = {}) {
   for (let attempt = 1; ; attempt++) {
