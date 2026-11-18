@@ -105,7 +105,8 @@ function parseJestLike(text) {
         const matcher = (c.failureDetails ?? []).some((d) => d && d.matcherResult);
         failure_kind = matcher || /^(AssertionError|Error: expect\()/m.test(msgs) ? 'assertion' : 'runtime';
       }
-      results.push({ name, file: suite.name, status, failure_kind, detail: status === 'fail' ? msgs : null });
+      // S-01b2 P4r (additive): the leaf title and its ancestors, so a caller can read a marker from the test's OWN title
+      results.push({ name, file: suite.name, status, failure_kind, detail: status === 'fail' ? msgs : null, title: c.title, suite_path: c.ancestorTitles ?? [] });
     }
   }
   return results;
