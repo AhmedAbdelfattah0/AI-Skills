@@ -57,6 +57,9 @@
  * ATTRIBUTES (round 4): a `filter`, `ident` or `working-tree-encoding` attribute on any base path is refused (`evidence_unavailable` /
  * detail `filter_attribute_unsupported_v0`): git would compare bytes other than the working tree's. A Git LFS repository is
  * therefore refused in V0. `text`/`eol` (and `core.autocrlf`) are accepted (CRLF pairs only).
+ * IDENTITY BRACKET (P5r/FX requirement, not decidable here): `evidence_id_before` is the identity before the run; a runner reading a
+ * mutable checkout could modify a covered file and restore it before the identity is taken again. Binding what the runner reads to
+ * the recorded identity (R-TC, the launch binding) is P5r's; P4r only checks the bracket it is given.
  * NOT IN P (accepted, design: ignored files are outside release scope): a NEW file that `.gitignore`, `.git/info/exclude` or a
  * global excludes file ignores never enters P, so it is outside the identity even if a test imports it.
  * HIDDEN BY GIT CONFIG (accepted; neither can help a test pass): with `core.symlinks=false`, a tracked symlink replaced by a regular
@@ -101,7 +104,7 @@ const sha256 = (...parts) => { const h = createHash('sha256'); for (const p of p
 // ---- git (TEMPORARY fourth copy of the hardened-git helper, as in test-kinds.mjs: TODO(S-02a0b) replace with lib/git-capability.mjs) ----
 const gitEnv = () => { const e = { ...process.env }; for (const k of Object.keys(e)) if (k.toUpperCase().startsWith('GIT_')) delete e[k]; return { ...e, GIT_NO_REPLACE_OBJECTS: '1', GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }; };
 const git = (cwd, args, max = 1 << 20, input = undefined) => execFileSync('git', ['--no-replace-objects', '-c', 'core.fsmonitor=false', ...args], { cwd, env: gitEnv(), maxBuffer: max, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
-const topOf = (repo) => realpathSync.native(git(realpathSync.native(repo), ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, ''));
+const topOf = (repo) => (typeof repo !== 'string' ? refuse('test_kinds_error') : realpathSync.native(git(realpathSync.native(repo), ['rev-parse', '--show-toplevel']).toString('utf8').replace(/\n$/, ''))); // a primitive string, before the filesystem sees it (no URL-like getter runs)
 const gitRefusal = (e) => (e?.code === 'ENOBUFS' ? 'evidence_budget_exceeded' : 'evidence_unavailable');
 
 // ---- the evidence identity (design rev 5 section 1a): the candidate-id encoding over P, from the worktree ----
@@ -110,7 +113,7 @@ export const SUBMODULE = 'submodule_unsupported_v0';
 export function evidenceIdentity(input) {
   try { const c = candidate(own(input, 'repo'), own(input, 'baseSha'), ownOr(input, 'exclusions', [])); return { ok: true, evidence_id: c.evidence_id, paths: c.paths }; } catch (e) { return { ok: false, ...refusalOf(e, 'evidence_unavailable') }; }
 }
-const utf8 = new TextDecoder('utf-8', { fatal: true });
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }); // a file name may start with U+FEFF: keep it
 /** The NUL-terminated records of a `-z` git listing, as bytes (a path is never decoded lossily). */
 const records = (buf) => { const out = []; for (let at = 0; at < buf.length;) { const end = buf.indexOf(0, at) < 0 ? buf.length : buf.indexOf(0, at); out.push(buf.subarray(at, end)); at = end + 1; } return out; };
 const isGitlink = (rec) => rec.subarray(0, 7).toString('latin1') === '160000 ';
@@ -119,7 +122,7 @@ export const FILTERED = 'filter_attribute_unsupported_v0';
  * Round 4: git compares a tracked file through its attributes, so a path unchanged since base is outside P only if git hashed the
  * working-tree bytes. A `filter` (any value, Git LFS included), `ident` (an edit inside `$Id: ...$` is collapsed) or
  * `working-tree-encoding` (a conversion, not proven injective) on a base path can make git report bytes other than the file's:
- * refused. `text`/`eol` are not: they only convert CRLF pairs, which no JavaScript or TypeScript source can tell apart. A path not
+ * refused, as is an `unset` answer (`-filter` and the driver name `filter=unset` print the same); only `unspecified` passes. `text`/`eol` are not: they only convert CRLF pairs, which no JavaScript or TypeScript source can tell apart. A path not
  * at base is in P (added, or deleted from the index), and its bytes are hashed from the working tree directly. Throws a Refusal.
  */
 const ATTRS = ['filter', 'ident', 'working-tree-encoding'];
@@ -128,7 +131,7 @@ function hashedAsWorktree(top, paths) {
   let out;
   try { out = records(git(top, ['check-attr', '--stdin', '-z', ...ATTRS], 64 << 20, Buffer.from(`${paths.join('\0')}\0`, 'utf8'))); } catch (e) { refuse(gitRefusal(e)); }
   if (out.length !== paths.length * ATTRS.length * 3) refuse('evidence_unavailable'); // path, attribute, value for each: a short answer is no answer
-  for (let i = 2; i < out.length; i += 3) if (!['unspecified', 'unset'].includes(out[i].toString('latin1'))) refuse('evidence_unavailable', FILTERED);
+  for (let i = 2; i < out.length; i += 3) { const v = out[i].toString('latin1'); if (v !== 'unspecified') refuse('evidence_unavailable', FILTERED); } // `unset` too: it is also how the VALUE `unset` reads
 }
 /**
  * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
@@ -158,7 +161,8 @@ export function candidate(repo, baseSha, exclusions) {
   for (const p of paths) {
     let kind = 'deleted', mode = '0', content = Buffer.from('tombstone');
     let st = null;
-    try { st = lstatSync(abs(p)); } catch (e) { if (e?.code !== 'ENOENT') refuse('evidence_unavailable'); }
+    try { st = lstatSync(abs(p)); } catch (e) { if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') refuse('evidence_unavailable'); } // below a file: deleted
+    if (st && realOrAncestor(dirname(abs(p)), { work: 0, max: 1e6 }) !== dirname(abs(p))) refuse('evidence_unavailable'); // reached through a symlinked directory: bytes git does not see
     if (st) {
       if (st.isSymbolicLink()) { kind = 'symlink'; mode = '120000'; content = readlinkSync(abs(p), { encoding: 'buffer' }); }
       else if (st.isFile()) {
@@ -249,7 +253,8 @@ export function configDigest(repo, paths) {
       let st = null;
       try { st = lstatSync(join(top, p)); } catch (e) { if (e?.code !== 'ENOENT') refuse('evidence_unavailable'); }
       if (st && (!st.isFile() || st.size > LIMITS.maxConfigBytes)) refuse('evidence_unavailable');
-      h.update(`${p}\0`); h.update(st ? readFileSync(join(top, p)) : 'absent'); h.update('\0');
+      const bytes = st ? readFileSync(join(top, p)) : null; // presence and length before the bytes: `absent` is not a file holding "absent"
+      h.update(`${p}\0${bytes ? `present\0${bytes.length}\0` : 'absent\0'}`); if (bytes) h.update(bytes); h.update('\0');
     }
     return { ok: true, digest: h.digest('hex') };
   } catch (e) { return { ok: false, ...refusalOf(e, 'evidence_unavailable') }; }
@@ -373,7 +378,8 @@ export function applicable(top, rel, testGlobs, covers, ctx) {
   let st;
   try { st = lstatSync(join(top, rel)); } catch { return 'not_regular'; }
   if (!st.isFile()) return 'not_regular';
-  try { if (realpathSync.native(join(top, rel)) !== join(top, rel)) return 'not_regular'; } catch { return 'not_regular'; } // no symlinked directory on the way
+  // no symlinked directory on the way: `candidate` refuses any existing path of P reached through one (round 5), and `classify` names
+  // a file by its realpath, so every rel that reaches here already is its own file
   if (!matches(testGlobs, rel, ctx)) return 'not_test_file';
   if (!matches(covers, rel, ctx)) return 'runner_uncovered';
   if (st.size > LIMITS.maxFileBytes) return 'file_too_large';

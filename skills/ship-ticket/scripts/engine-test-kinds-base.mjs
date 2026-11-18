@@ -79,9 +79,16 @@ export const under = (p, dir) => {
 const isGlob = (g) => { try { compileGlob(g); return typeof g === 'string' && g.length <= LIMITS.maxPathChars; } catch { return false; } };
 export const globList = (v, ctx) => arr(v, LIMITS.maxList, isGlob, ctx);
 export const matcher = (globs) => globs.map((g) => compileGlob(g));
+/**
+ * A path prepared EXACTLY as P3 prepares one (risk-floor `segmentsOf`, which `compileGlob` applies to the glob): format characters
+ * dropped, NFC, case folded per code point, U+0307 dropped. Matching a folded glob against an unfolded path would miss `X.TEST.ts`
+ * (and leave an uncovered test uncounted). P4r-40 holds this equal to risk-floor's own `globMatches`.
+ */
+const fold = (x) => { let o = ''; for (const c of x) o += c.toLowerCase().toUpperCase().toLowerCase(); return o.replace(/\u0307/g, ''); };
+const segsOf = (rel) => fold(rel.replace(/\p{Cf}/gu, '').normalize('NFC')).normalize('NFC').replace(/\\/g, '/').split('/').filter((s) => s !== '' && s !== '.');
 export const matches = (compiled, rel, ctx) => {
   charge(ctx);
-  try { const segs = rel.split('/'); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
+  try { const segs = segsOf(rel); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
 };
 
 // ---- marker counting (R-3): the same grammar as P3 `markers` ----

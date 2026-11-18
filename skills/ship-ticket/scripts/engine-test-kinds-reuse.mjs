@@ -18,7 +18,7 @@
  * integrity of engine state is FX/P5r's to protect. Credits are read ONLY from the validated copy (no getter or trap runs).
  */
 import { kindsForClasses, PROTECTED_TAGS } from './test-kinds.mjs';
-import { testKindsVerdict } from './engine-test-kinds.mjs';
+import { testKindsVerdict, LIMITS as P2_LIMITS } from './engine-test-kinds.mjs';
 import { testKindWaivers } from './engine-authority.mjs';
 import { CLAIM, RUNNER, INTEGRITY, refuse, codeOf, refusalOf, own, ownOr, plain, matches, census, r3Inputs, r3Rule, applicable, currentContext, validRecord } from './engine-test-kinds-io.mjs';
 
@@ -41,6 +41,7 @@ function judge(copy, cur, ctx) {
   if (copy.dag_digest !== cur.dag_digest || copy.command_digest !== cur.command_digest || copy.config_digest !== cur.config_digest) return { ok: false, reason: 'freshness' };
   const kinds = [], items = [], withheld = {};
   for (const f of counted) for (const m of f.credited) (m.startsWith('kind:') ? kinds : items).push(m.slice(5));
+  if (new Set(items).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded'); // P2 takes at most this many: refused here and in the verdict alike, never truncated
   for (const f of counted) for (const [m, why] of f.withheld) if (withheld[m] !== 'r3_offset') withheld[m] = why;
   return { ok: true, evidence: { kinds, items, unknown_markers: copy.counts.unknown_markers, withheld } };
 }

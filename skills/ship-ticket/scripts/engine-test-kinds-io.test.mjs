@@ -20,6 +20,8 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRecord, readEntry, commandFor, evidenceIdentity, commandDigest, configDigest, toRepoRel, LIMITS, REFUSALS, FILE_VOIDS, CLAIM, RUNNER } from './engine-test-kinds-io.mjs';
 import { tkVerdict, recordUsable } from './engine-test-kinds-reuse.mjs';
+import { globMatches } from './risk-floor.mjs';
+import { matcher, matches } from './engine-test-kinds-base.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILLS = join(HERE, '..', '..');
@@ -785,6 +787,10 @@ test('[P4r-35] S4 (round 3, D): drive paths, parser-rejected reports and unexpec
     writeFileSync(raw, 'x'); git(rl.dir, 'add', '-A'); git(rl.dir, 'commit', '-q', '-m', 'raw'); const base = git(rl.dir, 'rev-parse', 'HEAD');
     assert.equal(evidenceIdentity({ repo: rl.dir, baseSha: base }).code, 'evidence_unavailable', 'a non-UTF-8 base path');
   }
+  // an unexpected realpath error that does not depend on permissions (so it holds as root): a symlink loop outside the candidate
+  { const loop = tmp(t, 'p4r-loop-'); symlinkSync(join(loop, 'b'), join(loop, 'a')); symlinkSync(join(loop, 'a'), join(loop, 'b'));
+    assert.throws(() => realpathSync.native(join(loop, 'a', 'x.test.ts')), { code: 'ELOOP' }, 'the fixture really loops');
+    assert.equal(code(build(r, report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, { file: join(loop, 'a', 'x.test.ts'), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]))), 'evidence_unavailable'); }
   // an unexpected realpath error (EACCES) on a report name is a refusal, not "outside the repo" (a dropped skipped carrier)
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     const locked = join(r.dir, 'libs/locked');
@@ -856,9 +862,87 @@ test('[P4r-37] round 4: a filter, ident or working-tree-encoding attribute on a 
     ['a pattern matching only one directory', attrs('info', 'libs/money/*.ts filter=x\n')], ['Git LFS (info/attributes: committing it would run a global git-lfs filter in the fixture)', attrs('info', '*.json filter=lfs diff=lfs merge=lfs -text\n')],
     ['ident (an edit inside $Id: ...$ is collapsed)', attrs('info', '*.ts ident\n')], ['working-tree-encoding', attrs('info', '*.ts working-tree-encoding=UTF-16\n')]];
   for (const [why, setup] of refused) { const r = repo(t); setup(r); assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED, why); }
-  const accepted = [['no attribute (the control)', () => {}], ['an unset filter', attrs('info', '*.ts -filter\n')], ['an unspecified filter', attrs('info', '*.ts !filter\n')],
+  // round 5: `check-attr` prints `unset` for `-filter` AND for the string value `filter=unset` (which can name a configured driver): refused
+  for (const [why, line] of [['an unset filter (indistinguishable from filter=unset)', '*.ts -filter\n'], ['an unset ident', '*.ts -ident\n']]) { const r = repo(t); attrs('info', line)(r); assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED, why); }
+  const accepted = [['no attribute (the control)', () => {}], ['an unspecified filter', attrs('info', '*.ts !filter\n')],
     ['a filter on a pattern no tracked path matches', attrs('info', 'docs/*.md filter=x\n')], ['text and eol (line endings only)', attrs('info', '*.ts text eol=crlf\n')]];
   for (const [why, setup] of accepted) { const r = repo(t); setup(r); assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).ok, true, why); }
+});
+
+// ---- round 5: the CodeRabbit review of 848f6dc, each finding verified by its own failing test before any change ----
+test('[P4r-38] round 5 (CodeRabbit 1): a path below a directory replaced by a symlink is refused; below a file it is deleted', (t) => {
+  // (1) a directory replaced by a symlink: lstat of a path BELOW it follows the link, so bytes git does not see would be hashed
+  { const r = repo(t), ext = tmp(t, 'p4r-ext-');
+    put(ext, 'old.test.ts', "test('old [kind:negative]', () => {});\ntest('x [kind:negative]', () => {});\n");
+    rmSync(join(r.dir, 'libs/money'), { recursive: true }); symlinkSync(ext, join(r.dir, 'libs/money'), 'dir');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, 'a path below a symlinked directory'); }
+  // (1, minor) a directory replaced by a regular FILE: the paths below it are deleted (ENOTDIR is ENOENT's twin), not a refusal
+  { const r = repo(t);
+    rmSync(join(r.dir, 'libs/money'), { recursive: true }); put(r.dir, 'libs/money', 'now a file\n');
+    const id = evidenceIdentity({ repo: r.dir, baseSha: r.base });
+    assert.equal(id.ok, true, JSON.stringify(id)); assert.ok(id.paths.includes('libs/money/old.test.ts'), 'the tracked file below it is a deleted path of P'); }
+});
+
+test('[P4r-39] round 5 (CodeRabbit 2): `filter=unset` names a driver and reads exactly like `-filter`: refused', (t) => {
+  // (2) the STRING value `filter=unset` names a driver git runs, and check-attr prints it exactly as it prints `-filter`
+  { const r = repo(t);
+    put(r.dir, '.git/info/attributes', '*.ts filter=unset\n'); git(r.dir, 'config', 'filter.unset.clean', 'git show HEAD:%f');
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => { process.exit(0); });\n");
+    assert.equal(git(r.dir, 'diff', '--name-only', r.base), '', 'the fixture really hides the edit');
+    assert.match(git(r.dir, 'check-attr', 'filter', '--', 'libs/money/old.test.ts'), /: filter: unset$/, 'and check-attr reports it as unset');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), FILTERED); }
+});
+
+test('[P4r-40] round 5 (CodeRabbit 3): test globs fold case and Unicode exactly as P3 compileGlob does', (t) => {
+  // (3) the test globs fold case and Unicode like P3's compileGlob: an upper-case test file is a test file, and an uncovered one is COUNTED
+  { const r = repo(t);
+    put(r.dir, 'apps/web/New.TEST.ts', "it('w [kind:negative]', () => {});\n");
+    assert.equal(verdict(r, null).voids.runner_uncovered, 1, 'an uncovered upper-case test file is not silently bypassed');
+    put(r.dir, 'libs/money/Up.TEST.ts', "test('u [kind:race]', () => {});\n");
+    const b = build(r, report([{ file: join(r.dir, 'libs/money/Up.TEST.ts'), cases: [{ title: 'u [kind:race]' }] }]));
+    assert.deepEqual(credits(b), ['kind:race'], 'an upper-case covered test file counts');
+    // the drift guard: the same answer as risk-floor's own globMatches, for every glob x path of a corpus
+    const globs = ['**/*.test.*', 'libs/**', 'apps/api/**', 'LIBS/Money/*.TS', 'caf\u00e9/**'], paths = ['libs/a.test.ts', 'LIBS/A.TEST.TS', 'apps/api/x.Spec.ts', 'libs/money/b.ts', 'cafe\u0301/x.ts', 'Libs/Money/c.ts', 'a\u200b.test.ts', 'x.te\u200bst.ts', 'LIBS/X.Te\u200bST.ts'];
+    for (const g of globs) for (const p of paths) assert.equal(matches(matcher([g]), p, { work: 0, max: 1e6, glob: { steps: 0 } }), globMatches(g, p), `${g} ~ ${p}`); }
+});
+
+test('[P4r-41] round 5 (CodeRabbit 7): one accepted record never carries more items than P2 takes', (t) => {
+  // (7) the evidence of ONE accepted record must fit P2's input: more distinct items than P2 takes is refused by both interfaces alike
+  { const r = repo(t), ids = (k, n) => Array.from({ length: n }, (_, i) => `plan:${k}${String(i).padStart(3, '0')}`);
+    const cases = (k) => [0, 1].map((h) => ({ title: ids(k, 300).slice(h * 150, h * 150 + 150).map((m) => `[${m}]`).join('') }));
+    for (const k of ['A', 'B']) put(r.dir, `libs/money/${k}.test.ts`, cases(k).map((c) => `test('${c.title}', () => {});`).join('\n'));
+    const b = build(r, report(['A', 'B'].map((k) => ({ file: join(r.dir, `libs/money/${k}.test.ts`), cases: cases(k) }))));
+    assert.equal(credits(b).length, 600, 'the builder credits 600 items over two rows');
+    assert.equal(agree(recordUsable(b.record, cur(r)), verdict(r, b.record), 'over P2'), 'refused:evidence_budget_exceeded'); }
+});
+
+test('[P4r-42] round 5 (CodeRabbit 9): the config digest encodes presence and length', (t) => {
+  // (9) the config digest says whether a file is there: a missing config is not a config holding the bytes `absent`
+  { const r = repo(t), missing = configDigest(r.dir, ['x.json']);
+    put(r.dir, 'x.json', 'absent');
+    assert.notEqual(configDigest(r.dir, ['x.json']).digest, missing.digest); }
+});
+
+test('[P4r-43] round 5 (CodeRabbit 10): a git file name starting with U+FEFF keeps it', (t) => {
+  // (10) a git file name that starts with U+FEFF keeps it: the base blob is found, so an in-place rewrite is r3_unchanged, not a credit
+  { const dir = tmp(t, 'p4r-bom-'), name = '\ufeffb.test.ts', entry = { ...ENTRY, covers: ['**'] }; // TextDecoder strips a BOM only at the START of its input
+    git(dir, 'init', '-q', '-b', 'main'); put(dir, 'vitest.config.ts', 'export default {};\n'); put(dir, 'package-lock.json', '{}\n');
+    put(dir, name, "test('o [kind:negative]', () => {});\n"); git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'b');
+    const r = { dir, base: git(dir, 'rev-parse', 'HEAD') };
+    put(dir, name, "test('o [kind:negative]', () => { expect(1).toBe(1); });\n");
+    const b = build(r, report([{ file: join(dir, name), cases: [{ title: 'o [kind:negative]' }] }]), { entry });
+    assert.deepEqual(credits(b), []); assert.deepEqual(b.record.files[0].withheld, { 'kind:negative': 'r3_unchanged' }); }
+});
+
+test('[P4r-44] round 5 (CodeRabbit 5): a non-string repo is refused before any filesystem call, no getter runs', (t) => {
+  // (5) a non-string repo is refused before the filesystem sees it: no getter of a URL-like object runs
+  { const r = repo(t); let ran = 0;
+    const urlish = { get href() { ran++; return pathToFileURL(r.dir).href; }, get protocol() { ran++; return 'file:'; } };
+    assert.equal(evidenceIdentity({ repo: urlish, baseSha: r.base }).code, 'test_kinds_error');
+    assert.equal(code(buildRecord({ repo: urlish, baseSha: r.base, entry: ENTRY, commandArgs: ARGS, tests: { globs: [] }, dagDigest: DAG, report: prov(passing(r.dir)) })), 'test_kinds_error');
+    assert.equal(recordUsable(good(r), { ...cur(r), repo: urlish }).code, 'test_kinds_error');
+    assert.equal(configDigest(urlish, ['vitest.config.ts']).code, 'test_kinds_error');
+    assert.equal(ran, 0, 'no getter ran'); }
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
@@ -1042,14 +1126,12 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
   const voidOnly = verdict(r, (() => { const c = clone(rec2); row({ file: 'libs/money/helper.ts', outcome: 'not_test_file' })(c); return c; })());
   assert.equal(voidOnly.code, 'missing_test_kinds'); assert.deepEqual(voidOnly.records, { unit: 'current' });
   assert.equal(state(() => {}, rec2), 'current');
-  // a regular file reached through a symlinked DIRECTORY of P is not the file the record names (a forged row; build resolves realpath)
-  const r2 = repo(t);
+  // a tracked directory replaced by a symlink: since round 5 (P4r-38) the candidate itself is refused, before any record is read, so
+  // a forged row naming a file reached through it never reaches applicability
+  const r2 = repo(t), recR2 = good(r2);
   renameSync(join(r2.dir, 'libs/money'), join(r2.dir, 'libs/real')); symlinkSync('real', join(r2.dir, 'libs/money'), 'dir');
-  put(r2.dir, 'libs/real/old.test.ts', "test('old [kind:negative]', () => {});\ntest('two [kind:negative]', () => {});\n");
-  const recR2 = good(r2, report([{ file: join(r2.dir, 'libs/real/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }]));
-  assert.equal(verdict(r2, recR2).status, 'pass', 'the control on this candidate');
   const forged = clone(recR2); forged.files = [{ file: 'libs/money/old.test.ts', outcome: 'counted', credited: ['kind:negative'], withheld: {}, skipped: {}, unknown: 0 }];
-  assert.deepEqual(verdict(r2, forged).records, { unit: 'stale:applicability' });
+  assert.equal(agree(recordUsable(forged, cur(r2)), verdict(r2, forged), 'symlinked directory'), 'refused:evidence_unavailable');
   assert.equal(state(() => {}, rec), 'stale:identity', 'the candidate moved since the first record');
 });
 
@@ -1227,6 +1309,10 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //     turns a truncated or garbled answer into a refusal instead of fewer checks (fail closed, defence in depth).
 //   - the early marker-file cap in build: it stops work early; without it `validRecord` refuses the same record with the same
 //     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
+//   - round 5: the NFC step BEFORE folding in `segsOf` mirrors risk-floor; the NFC step after folding makes it unobservable for every
+//     input tried (composed and decomposed accents, U+0130, U+212B), so it carries no mutant.
+// Removed in round 5: `file: a symlinked path is counted on reuse` (its check in `applicable` was deleted: `candidate` now refuses
+// any existing path of P reached through a symlinked directory, and `classify` names a file by its realpath, so it was redundant).
 // Removed in round 3 with the code they mutated: the relations over the round 2 result counts (S1: the counts are gone, the
 // remaining totals are compared with their rows), the submodule HEAD/dirty/hidden-flag mutants (S3: every gitlink is refused),
 // and `min(d, 0)` -> `d` (owner amendment 2026-11-18: the total over P is the plain sum, so the mutant has no target).
@@ -1320,7 +1406,6 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-6', name: 'file: covers is not applied', from: "if (!matches(covers, rel, ctx)) return 'runner_uncovered';", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: a relative result name is resolved against the cwd', from: "if (!isAbsolute(file)) return { outcome: 'result_outside_repo', rel: null };", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: a non-regular file is counted', from: "if (!st.isFile()) return 'not_regular';", to: '' },
-  { file: IO, tag: 'P4r-18', name: 'file: a symlinked path is counted on reuse', from: "try { if (realpathSync.native(join(top, rel)) !== join(top, rel)) return 'not_regular'; } catch { return 'not_regular'; }", to: '' },
   { file: IO, tag: 'P4r-5', name: 'file: the size cap is dropped', from: "if (st.size > LIMITS.maxFileBytes) return 'file_too_large';", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: realpath is not used', from: 'const real = realOrAncestor(file, ctx),', to: 'const real = file,' },
   { file: IO, tag: 'P4r-6', name: 'file: a missing file is classified without its real ancestor', from: "try { return join(realpathSync.native(dirname(at)), ...tail); }", to: 'try { return file; }' },
@@ -1329,7 +1414,7 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-27', name: 'merge: the link\'s skipped carriers are dropped (Opus survivor)', from: '      for (const [k, n] of slot.skipped) prev.skipped.set(k, (prev.skipped.get(k) ?? 0) + n);\n', to: '' },
   { file: IO, tag: 'P4r-6', name: 'merge: a carrier outside P is kept on its row', from: '  for (const row of rows) if (row.file === null || c.inP(row.file) === null) row.skipped = new Map(); // a carrier outside P subtracts nothing\n', to: '' },
   // record: config, runner, provenance, budgets, scan
-  { file: IO, tag: 'P4r-7', name: 'config: the path is not hashed', from: 'h.update(`${p}\\0`); h.update(st ?', to: 'h.update(st ?' },
+  { file: IO, tag: 'P4r-7', name: 'config: the path is not hashed', from: 'h.update(`${p}\\0${bytes ?', to: 'h.update(`${bytes ?' },
   { file: IO, tag: 'P4r-7', name: 'config: a symlinked config is hashed through', from: "if (st && (!st.isFile() || st.size > LIMITS.maxConfigBytes)) refuse('evidence_unavailable');", to: '' },
   { file: IO, tag: 'P4r-7', name: 'config: a lockfile is held to the 4 MiB test-file cap (Opus minor)', from: 'st.size > LIMITS.maxConfigBytes', to: 'st.size > LIMITS.maxFileBytes' },
   { file: IO, tag: 'P4r-7', name: 'config: the config size is not capped', from: '(!st.isFile() || st.size > LIMITS.maxConfigBytes)', to: '(!st.isFile())' },
@@ -1407,9 +1492,19 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-37', name: 'round 4: filter is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'ident\', \'working-tree-encoding\'];' },
   { file: IO, tag: 'P4r-37', name: 'round 4: ident is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'working-tree-encoding\'];' },
   { file: IO, tag: 'P4r-37', name: 'round 4: working-tree-encoding is not asked', from: 'const ATTRS = [\'filter\', \'ident\', \'working-tree-encoding\'];', to: 'const ATTRS = [\'filter\', \'ident\'];' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: an unset attribute refuses', from: '![\'unspecified\', \'unset\'].includes(', to: '![\'unspecified\'].includes(' },
-  { file: IO, tag: 'P4r-37', name: 'round 4: an unspecified attribute refuses', from: '![\'unspecified\', \'unset\'].includes(', to: '![\'unset\'].includes(' },
+  { file: IO, tag: 'P4r-39', name: 'round 5: an unset answer is accepted (as round 4 did)', from: 'if (v !== \'unspecified\') refuse(\'evidence_unavailable\', FILTERED);', to: 'if (v !== \'unspecified\' && v !== \'unset\') refuse(\'evidence_unavailable\', FILTERED);' },
+  { file: IO, tag: 'P4r-37', name: 'round 4: an unspecified attribute refuses', from: 'if (v !== \'unspecified\') refuse(\'evidence_unavailable\', FILTERED);', to: 'if (v !== \'unspecified-x\') refuse(\'evidence_unavailable\', FILTERED);' },
   { file: IO, tag: 'P4r-37', name: 'round 4: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', FILTERED);', to: 'refuse(\'evidence_unavailable\');' },
+  // round 5: the CodeRabbit findings at 848f6dc
+  { file: IO, tag: 'P4r-38', name: 'CR1: a path below a symlinked directory is hashed through it', from: '    if (st && realOrAncestor(dirname(abs(p)), { work: 0, max: 1e6 }) !== dirname(abs(p))) refuse(\'evidence_unavailable\'); // reached through a symlinked directory: bytes git does not see\n', to: '' },
+  { file: IO, tag: 'P4r-38', name: 'CR1: a path below a file refuses (ENOTDIR)', from: 'if (e?.code !== \'ENOENT\' && e?.code !== \'ENOTDIR\') refuse(\'evidence_unavailable\'); } // below a file: deleted', to: 'if (e?.code !== \'ENOENT\') refuse(\'evidence_unavailable\'); } // below a file: deleted' },
+  { file: BA, tag: 'P4r-40', name: 'CR3: the path is not folded', from: 'const segs = segsOf(rel);', to: 'const segs = rel.split(\'/\');' },
+  { file: BA, tag: 'P4r-40', name: 'CR3: the path is not case folded', from: 'fold(rel.replace(', to: '(rel.replace(' },
+  { file: BA, tag: 'P4r-40', name: 'CR3: format characters are kept', from: 'rel.replace(/\\p{Cf}/gu, \'\')', to: 'rel' },
+  { file: RE, tag: 'P4r-41', name: 'CR7: a record may carry more items than P2 takes', from: '  if (new Set(items).size > P2_LIMITS.maxItems) refuse(\'evidence_budget_exceeded\'); // P2 takes at most this many: refused here and in the verdict alike, never truncated\n', to: '' },
+  { file: IO, tag: 'P4r-42', name: 'CR9: presence and length are not encoded', from: '${bytes ? `present\\0${bytes.length}\\0` : \'absent\\0\'}', to: '${bytes ? \'\' : \'absent\'}' },
+  { file: IO, tag: 'P4r-43', name: 'CR10: a leading U+FEFF is stripped from git file names', from: '{ fatal: true, ignoreBOM: true }', to: '{ fatal: true }' },
+  { file: IO, tag: 'P4r-44', name: 'CR5: a non-string repo reaches the filesystem', from: '(typeof repo !== \'string\' ? refuse(\'test_kinds_error\') : realpathSync.native(', to: '(false ? refuse(\'test_kinds_error\') : realpathSync.native(' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1460,10 +1555,10 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   assert.equal(new Set(MUTANTS.map((m) => m.name)).size, MUTANTS.length, 'mutant names are distinct');
   for (const m of MUTANTS) { assert.notEqual(m.from, m.to, m.name); assert.match(m.tag, /^P4r-\d+$/, m.name); }
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
-  const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
-  for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
+  const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run, and a failed control stops here
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 36 : 37), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 43 : 44), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);
