@@ -25,11 +25,15 @@
  * that the test exercises the property (mutation is S-01c), and `check` trusts the titles it is given.
  * REUSE: util.parseArgs (native); risk-floor.mjs parseRecordedLine/decodeStrict; security-plan.mjs parsePlanSecurityBlock;
  * worker-report.mjs parseWorkerReport. The declaration validator follows risk-floor.mjs (lib/shape.mjs is not on this base).
+ * S-01b2 (P3, requirement provenance for the engine gate): `optIn` is the opt-in predicate requiredFor calls; requiredFor
+ * also returns `provenance` {<kind>: [`tag:<t>` | `class:<c>` | `surface:<s>`...]}, keyed by exactly its `kinds`;
+ * `kindsForClasses` maps reassessed classes through requiredFor's own class loop; `PROTECTED_TAGS`; and the declaration key
+ * `tests: {globs?, runner_modules?}` (evidence scope only, read from BASE like the rest; it never changes a requirement).
  */
 import { execFileSync } from 'node:child_process';
 import { realpathSync, readFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
-import { parseRecordedLine, decodeStrict, CHANGED, CLASS_NAME } from './risk-floor.mjs';
+import { parseArgs, types } from 'node:util';
+import { parseRecordedLine, decodeStrict, compileGlob, CHANGED, CLASS_NAME } from './risk-floor.mjs';
 import { parsePlanSecurityBlock } from './security-plan.mjs';
 import { parseWorkerReport } from './worker-report.mjs';
 import { isEntrypoint } from './harness.mjs';
@@ -74,17 +78,52 @@ export const SURFACE_TAGS = f({
   'outbound-data': f(['input-path']), 'async-consumer': f(['concurrency', 'input-path']), 'security-config': f(['entrypoint']), 'business-invariant': f(['money']),
 });
 
+/**
+ * S-01b2: a kind is PROTECTED (never waivable) when any of its sources is one of these tags, reached directly or through a
+ * class mapping, or a security surface. With `provenance` (below) that is: some `tag:<t>` with t here, or any `surface:<s>`.
+ */
+export const PROTECTED_TAGS = f(['money', 'tenancy', 'auth']);
+/** S-01b2 evidence scope (declaration key `tests`): the import specifiers a test file may take `test`/`it`/`describe`/`suite`
+ * from, matched by exact string equality. Grammar: `node:` or `bun:` plus lower-case segments, or a lower-case package name
+ * with an optional `@scope/` and subpath segments. No `.`/`..` segment, no query, fragment, percent-encoding or whitespace. */
+export const RUNNER_MODULE = /^(?:(?:node|bun):[a-z][a-z0-9_-]{0,63}(?:\/[a-z][a-z0-9_-]{0,63}){0,3}|(?:@[a-z0-9][a-z0-9._-]{0,63}\/)?[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,63}){0,7})$/;
+const MAX_TEST_GLOBS = 64, MAX_RUNNER_MODULES = 16, MAX_CLASSES = 256;
+
 const bad = (code, message = code) => Object.assign(new Error(message), { code });
 const uniq = (xs) => [...new Set(xs)].sort();
+/** An own DATA property (an accessor is refused, never called); undefined when absent. Never reads through a trap. */
+const ownData = (o, k, refuse) => { const d = Object.getOwnPropertyDescriptor(o, k); if (d && !('value' in d)) throw refuse(); return d?.value; };
+/** A list of strings read by own descriptors: an array (no proxy), 1..max entries, each passing `ok`; sorted and unique. */
+function stringList(a, max, ok, refuse) {
+  if (types.isProxy(a) || !Array.isArray(a) || a.length < 1 || a.length > max) throw refuse();
+  const out = [];
+  for (let i = 0; i < a.length; i++) { const x = ownData(a, String(i), refuse); if (typeof x !== 'string' || !ok(x)) throw refuse(); out.push(x); }
+  return uniq(out);
+}
+const isGlob = (g) => { try { compileGlob(g); return true; } catch { return false; } }; // the #72 grammar and matcher
+/** The declaration key `tests: {globs?, runner_modules?}` (S-01b2): both lists widen the EVIDENCE scope only, never the requirement. */
+function validateTests(v, inv) {
+  const refuse = () => inv('tests must be {globs?, runner_modules?}: non-empty lists of #72 globs and runner module names');
+  if (v === undefined) return { globs: [], runner_modules: [] };
+  if (types.isProxy(v) || v === null || typeof v !== 'object' || Array.isArray(v)) throw refuse();
+  const keys = Reflect.ownKeys(v);
+  if (!keys.length || keys.some((k) => k !== 'globs' && k !== 'runner_modules')) throw refuse();
+  const list = (k, max, ok) => { const x = ownData(v, k, refuse); return x === undefined ? [] : stringList(x, max, ok, refuse); };
+  return { globs: list('globs', MAX_TEST_GLOBS, isGlob), runner_modules: list('runner_modules', MAX_RUNNER_MODULES, (m) => RUNNER_MODULE.test(m)) };
+}
 
-/** Validate a parsed repository declaration `{version:1, tags?:{tag:[kind]}, classes?:{riskClass:[tag]}}`; it can only ADD rows. */
+/** Validate a parsed repository declaration `{version:1, tags?:{tag:[kind]}, classes?:{riskClass:[tag]}, tests?:{globs?, runner_modules?}}`; it can only ADD rows. */
 export function validateDeclaration(d) {
   const inv = (m) => bad('declaration_invalid', m);
   const isMap = (v) => v && typeof v === 'object' && !Array.isArray(v);
-  if (!isMap(d) || d.version !== 1 || Object.keys(d).some((k) => !['version', 'tags', 'classes'].includes(k))) throw inv('version must be 1; only version, tags and classes are allowed');
+  if (types.isProxy(d) || (isMap(d) && Reflect.ownKeys(d).some((k) => !('value' in Object.getOwnPropertyDescriptor(d, k))))) throw inv('a declaration is plain data (no proxy, no top-level accessor)');
+  if (isMap(d) && Object.getPrototypeOf(d) !== null && Object.getPrototypeOf(d) !== Object.prototype) throw inv('a declaration has a plain or null prototype (nothing is read through an inherited name)');
+  if (!isMap(d) || ownData(d, 'version', () => inv('version is plain data')) !== 1 || Object.keys(d).some((k) => !['version', 'tags', 'classes', 'tests'].includes(k))) throw inv('version must be 1; only version, tags, classes and tests are allowed');
+  const [dTags, dClasses, dTests] = ['tags', 'classes', 'tests'].map((k) => ownData(d, k, () => inv(`${k} is plain data`))); // own data only: never through the prototype
+  const tests = validateTests(dTests, inv);
   const list = (v, ok, what) => { if (!Array.isArray(v) || !v.length || v.length > 16 || !v.every(ok)) throw inv(`${what} must be a non-empty list of at most 16 known names`); return uniq(v); };
   const tags = Object.create(null), classes = Object.create(null); // no inherited names (`constructor`) can resolve
-  for (const [k, field, out] of [['tags', d.tags, tags], ['classes', d.classes, classes]]) {
+  for (const [k, field, out] of [['tags', dTags, tags], ['classes', dClasses, classes]]) {
     if (field === undefined) continue;
     if (!isMap(field) || Object.keys(field).length > 64) throw inv(`${k} must be an object of at most 64 entries`);
     for (const name of Object.keys(field)) if (!(k === 'classes' ? CLASS_NAME : NAME).test(name) || name === 'none') throw inv(`${k} name ${JSON.stringify(name)} is not a lower-case identifier (none is reserved)`);
@@ -93,7 +132,7 @@ export function validateDeclaration(d) {
   for (const t of Object.keys(tags)) tags[t] = list(tags[t], (x) => Object.hasOwn(KINDS, x), `tags.${t}`);
   const known = (x) => Object.hasOwn(TAGS, x) || Object.hasOwn(tags, x);
   for (const c of Object.keys(classes)) classes[c] = list(classes[c], known, `classes.${c}`);
-  return { tags, classes };
+  return { tags, classes, tests };
 }
 
 // ---- FAIL-CLOSED RECOGNITION: one tokeniser over one marker table ----
@@ -180,22 +219,78 @@ export function planNarrative(t) {
 }
 const linesOf = (text, key) => text.split(LINES).map((l) => KEY_LINE(key).exec(l)).filter(Boolean).map((m) => m[1].trim());
 
+// opt-in: a repository declaration or any opt-in token (scanned over the whole plan when RUN-STATE is malformed)
+const optedIn = (planText, text, declaration) => Boolean(declaration) || MARKERS.some((m) => m.opt_in && carriers(text ?? planText, m).length > 0);
+/** `arg`'s own data fields, or null when `arg` is not a plain object or a field is an accessor (never called). */
+function fieldsOf(arg, ...keys) {
+  if (arg === null || typeof arg !== 'object' || types.isProxy(arg)) return null;
+  try { return keys.map((k) => ownData(arg, k, () => bad('arg_invalid'))); } catch { return null; }
+}
+/**
+ * S-01b2 activation: true exactly when `requiredFor` with the same input does NOT answer `not_declared`; requiredFor calls
+ * it, and both read the input through `fieldsOf`: own data fields only, so an inherited field is not there and an accessor or
+ * a proxy is never called. Total and fail-closed: a non-string plan, or an argument that is not plain data, is opted in,
+ * never "nothing declared".
+ */
+export function optIn(arg) {
+  const fields = fieldsOf(arg, 'planText', 'declaration');
+  if (!fields) return true;
+  const [planText, declaration = null] = fields;
+  return typeof planText !== 'string' || optedIn(planText, planNarrative(planText), declaration);
+}
+
+/** The tag table under a declaration: built-in rows united with the declared ones (add-only; no inherited names). */
+function tagTable(declaration) {
+  const table = Object.assign(Object.create(null), TAGS);
+  for (const [t, ks] of Object.entries(declaration?.tags ?? {})) table[t] = uniq([...(table[t] ?? []), ...ks]);
+  return table;
+}
+/**
+ * THE class loop: requiredFor (recorded floor classes) and kindsForClasses (reassessed classes) both run it, so a class maps
+ * the same way at init and at every verdict. Add-only: the declared mapping and the built-in reading (a class named like a
+ * tag is that tag; `risk_declaration_changed` is nothing) are UNITED. Own properties only, so a JSON-restored declaration
+ * never resolves `constructor`. `add(tag, source)` receives each tag with its `class:<c>` source.
+ */
+function classTags(classes, declaration, table, errors, add) {
+  for (const c of classes) {
+    const declared = declaration && Object.hasOwn(declaration.classes, c) ? declaration.classes[c] : null;
+    const builtin = Object.hasOwn(table, c) ? [c] : c === CHANGED ? [] : null;
+    if (!declared && !builtin) errors.push('risk_class_unmapped'); else [...(declared ?? []), ...(builtin ?? [])].forEach((t) => add(t, `class:${c}`));
+  }
+}
+/** A tag set that records where each tag came from (`class:<c>`, `surface:<s>`; a plan tag adds no origin beyond itself). */
+function sourcedTags() {
+  const tags = new Set(), origins = new Map();
+  const add = (t, src = null) => { tags.add(t); if (src) { if (!origins.has(t)) origins.set(t, new Set()); origins.get(t).add(src); } };
+  return { tags, add, origins };
+}
+/** kind -> sorted sources: `tag:<t>` for every tag whose row requires the kind, plus that tag's `class:`/`surface:` origins. Keys = the kinds. */
+function provenanceOf(tags, origins, table) {
+  const by = new Map();
+  for (const t of tags) for (const k of table[t]) {
+    if (!by.has(k)) by.set(k, new Set());
+    by.get(k).add(`tag:${t}`); for (const o of origins.get(t) ?? []) by.get(k).add(o);
+  }
+  return Object.fromEntries([...by.keys()].sort().map((k) => [k, [...by.get(k)].sort()]));
+}
+
 /** The required kinds and items for a plan, under an optional validated declaration. Pure; never throws. */
-export function requiredFor({ planText, declaration = null, baseSha = null }) {
-  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), ...o });
-  if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
+// P5 must pass readDeclaration output only (validated declaration)
+export function requiredFor(arg) {
+  const fields = fieldsOf(arg, 'planText', 'declaration', 'baseSha'); // the same own-data reader as optIn
+  const [planText, declaration = null, baseSha = null] = fields ?? [];
+  const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), provenance: {}, ...o });
+  if (!fields || typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
   const text = planNarrative(planText); // the ONE narrative every parse below reads
-  // opt-in: a repository declaration or any opt-in token (scanned over the whole plan when RUN-STATE is malformed)
-  if (!declaration && !MARKERS.some((m) => m.opt_in && carriers(text ?? planText, m).length)) return out('not_declared');
+  if (!optIn({ planText, declaration })) return out('not_declared');
   if (text === null) return (errors.push('run_state_invalid'), out('refused'));
   for (const m of MARKERS) if (carriers(text, m).some((l) => !m.valid(l))) errors.push(m.code);
   const trig = linesOf(text, 'test-triggers');
-  const table = Object.assign(Object.create(null), TAGS);
-  for (const [t, ks] of Object.entries(declaration?.tags ?? {})) table[t] = uniq([...(table[t] ?? []), ...ks]);
-  const tags = new Set();
+  const table = tagTable(declaration);
+  const { tags, add, origins } = sourcedTags();
   if (!trig.length) errors.push('plan_tags_missing');
   else if (trig.length > 1 || !trig[0]) errors.push('plan_line_invalid');
-  else if (trig[0] !== 'none') for (const t of trig[0].split(',').map((x) => x.trim())) { if (Object.hasOwn(table, t)) tags.add(t); else errors.push('unknown_tag'); }
+  else if (trig[0] !== 'none') for (const t of trig[0].split(',').map((x) => x.trim())) { if (Object.hasOwn(table, t)) add(t); else errors.push('unknown_tag'); }
   // risk floor classes: exactly one strict record line as risk-floor.mjs writes it (trusted as recorded in the plan, not recomputed)
   const floorLines = text.split(LINES).filter(floorLine);
   if (!floorLines.length) errors.push('risk_floor_missing');
@@ -208,11 +303,7 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
       classes = raw === 'none' ? [] : raw.split(','); // `none` is the producer's empty-set sentinel
       if (!classes.every((c) => CLASS_NAME.test(c) && c !== 'none')) throw new Error('bad class');
     } catch { classes = null; errors.push('risk_floor_invalid'); }
-    for (const c of classes ?? []) { // add-only: the built-in reading of a class and the declared mapping are UNITED
-      const declared = declaration && c in declaration.classes ? declaration.classes[c] : null;
-      const builtin = c in table ? [c] : c === CHANGED ? [] : null;
-      if (!declared && !builtin) errors.push('risk_class_unmapped'); else [...(declared ?? []), ...(builtin ?? [])].forEach((t) => tags.add(t));
-    }
+    classTags(classes ?? [], declaration, table, errors, add);
   }
   // security surfaces: BOTH readings, ALWAYS (no early exit when the narrative carries no security token). The block is
   // parsed from the one narrative, never re-cut; the engine binds parsePlanSecurityBlock(plan), which cuts RUN-STATE at
@@ -221,7 +312,7 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
   const blockToken = carriers(text, MARKER['security-plan']).length > 0 || carriers(text, MARKER['security-pairs']).length > 0;
   const block = parsePlanSecurityBlock(text, { alreadyCut: true }), engineBlock = parsePlanSecurityBlock(planText);
   if ((blockToken && !block) || JSON.stringify(engineBlock) !== JSON.stringify(block)) errors.push('security_block_invalid');
-  else if (block) for (const s of block.surfaces) { if (Object.hasOwn(SURFACE_TAGS, s.kind)) SURFACE_TAGS[s.kind].forEach((t) => tags.add(t)); else errors.push('surface_kind_unmapped'); }
+  else if (block) for (const s of block.surfaces) { if (Object.hasOwn(SURFACE_TAGS, s.kind)) SURFACE_TAGS[s.kind].forEach((t) => add(t, `surface:${s.kind}`)); else errors.push('surface_kind_unmapped'); }
   const items = [];
   for (const l of linesOf(text, 'lifecycle-item')) { const m = /^(\S+)\s+\S/.exec(l); if (!m || !ITEM_ID.test(m[1]) || Object.hasOwn(KINDS, m[1]) || items.includes(m[1])) errors.push('plan_line_invalid'); else items.push(m[1]); }
   const waivers = new Set();
@@ -229,7 +320,52 @@ export function requiredFor({ planText, declaration = null, baseSha = null }) {
   if (errors.length) return out('refused');
   const kinds = uniq([...tags].flatMap((t) => table[t]));
   // waivers are reported, never applied: the requirement stays and a missing kind is still missing
-  return out('required', { tags: uniq([...tags]), kinds, items: items.sort(), waiver_requested: uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w))) });
+  return out('required', { tags: uniq([...tags]), kinds, items: items.sort(), waiver_requested: uniq([...waivers].filter((w) => kinds.includes(w) || items.includes(w))),
+    provenance: provenanceOf(tags, origins, table) });
+}
+
+/** A bound declaration (validated, possibly restored from JSON) copied by own data properties into null-prototype maps of string lists. */
+function declarationCopy(d) {
+  const refuse = () => bad('declaration_invalid');
+  if (d === null) return null;
+  if (types.isProxy(d) || typeof d !== 'object' || Array.isArray(d)) throw refuse();
+  const copy = (field, keyOk, itemOk) => {
+    const v = ownData(d, field, refuse), out = Object.create(null);
+    if (v === undefined) return out;
+    if (types.isProxy(v) || v === null || typeof v !== 'object' || Array.isArray(v)) throw refuse();
+    const keys = Reflect.ownKeys(v);
+    if (keys.length > 64) throw refuse();
+    for (const k of keys) { if (typeof k !== 'string' || !keyOk.test(k) || k === 'none') throw refuse(); out[k] = stringList(ownData(v, k, refuse), 16, itemOk, refuse); }
+    return out;
+  };
+  const tags = copy('tags', NAME, (k) => Object.hasOwn(KINDS, k));
+  const classes = copy('classes', CLASS_NAME, (t) => Object.hasOwn(TAGS, t) || Object.hasOwn(tags, t));
+  return { tags, classes };
+}
+/**
+ * S-01b2: the kinds a list of risk classes (a `reassess` result) adds, through the SAME class loop as requiredFor
+ * (`classTags`) under the same base-pinned declaration. Pure; never throws. Output:
+ * `{ ok, tags, kinds, provenance: {<kind>: [<source>...]}, errors }`; `ok:false` has empty lists and one or more of
+ * `risk_floor_invalid` (classes not a list of 0..256 class names, `none` excluded; risk-floor.mjs writes at most 200 declared
+ * classes plus `risk_declaration_changed`), `declaration_invalid`, `risk_class_unmapped`, `test_kinds_error` (an internal fault).
+ */
+export function kindsForClasses(arg) {
+  const refused = (errors) => ({ ok: false, tags: [], kinds: [], provenance: {}, errors: uniq(errors) });
+  try {
+    const cfield = fieldsOf(arg, 'classes'), dfield = fieldsOf(arg, 'declaration'); // own data only: an accessor is never called
+    if (!cfield) return refused(['risk_floor_invalid']);
+    if (!dfield) return refused(['declaration_invalid']);
+    const [classes] = cfield, declaration = dfield[0] ?? null;
+    const empty = !types.isProxy(classes) && Array.isArray(classes) && classes.length === 0; // `classes=none`: the empty set
+    let list;
+    try { list = empty ? [] : stringList(classes, MAX_CLASSES, (c) => CLASS_NAME.test(c) && c !== 'none', () => bad('risk_floor_invalid')); } catch { return refused(['risk_floor_invalid']); }
+    let decl;
+    try { decl = declarationCopy(declaration); } catch { return refused(['declaration_invalid']); }
+    const table = tagTable(decl), errors = [], { tags, add, origins } = sourcedTags();
+    classTags(list, decl, table, errors, add);
+    if (errors.length) return refused(errors);
+    return { ok: true, tags: uniq([...tags]), kinds: uniq([...tags].flatMap((t) => table[t])), provenance: provenanceOf(tags, origins, table), errors: [] };
+  } catch { return refused(['test_kinds_error']); }
 }
 
 /** The `[kind:..]` and `[plan:..]` markers in test titles. `unknown`: well-formed kind markers naming no kind. */
@@ -273,7 +409,7 @@ export function readDeclaration(repo, base) {
 }
 
 // ---- CLI ----
-const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waiver_requested: [], tags: [], errors: [code] });
+const refusedOut = (code) => ({ status: 'refused', kinds: [], items: [], waiver_requested: [], tags: [], errors: [code], provenance: {} });
 export function main(argv) {
   const usage = { code: 2, out: { status: 'refused', errors: ['bad_usage'], usage: 'test-kinds.mjs require|check --repo <dir> --base <commit> --plan <plan.md> [--titles <json|file> | --report-file <file>]' } };
   const [cmd, ...rest] = argv;
