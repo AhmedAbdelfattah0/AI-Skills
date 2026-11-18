@@ -1,6 +1,7 @@
 /**
- * S-01b2 P4r: the bottom layer of the runner-evidence modules (design rev 6 sections 1 and 4): the named limits, the typed
- * refusal, the hostile-input readers, the marker counter and the strict report scan. It imports nothing from its siblings.
+ * S-01b2 P4r: the bottom layer of the runner-evidence modules (design rev 6 sections 1 and 4): PURE primitives with no I/O
+ * (owner amendment 2026-11-18): the named limits, the typed refusal, the hostile-input readers, the ONE path identity, the
+ * marker counter and the strict report scan. It imports nothing from its siblings.
  * `engine-test-kinds-io.mjs` holds the shared rules (identity, R-3, the declared entry, the current context, the record schema)
  * and builds records; `engine-test-kinds-reuse.mjs` reuses them and gives the verdict. The header of the io module states the claim.
  *
@@ -20,9 +21,12 @@ export const FILE_VOIDS = Object.freeze(['runner_uncovered', 'result_outside_rep
 export const MARKER_ID = /^(?:kind|plan):[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 export const creditable = (m) => typeof m === 'string' && (m.startsWith('kind:') ? Object.hasOwn(KINDS, m.slice(5)) : m.startsWith('plan:') && ITEM_ID.test(m.slice(5)));
 
-export class Refusal extends Error { constructor(code) { super(code); this.code = code; } }
-export const refuse = (code) => { throw new Refusal(code); };
+/** A typed refusal: a code from REFUSALS and, where one cause is worth naming, a `detail` (e.g. `submodule_unsupported_v0`). */
+export class Refusal extends Error { constructor(code, detail) { super(code); this.code = code; this.detail = detail; } }
+export const refuse = (code, detail) => { throw new Refusal(code, detail); };
 export const codeOf = (e, dflt) => (e instanceof Refusal ? e.code : dflt);
+/** `{ code, detail? }` of a caught error: what every exported interface returns for a refusal. */
+export const refusalOf = (e, dflt) => ({ code: codeOf(e, dflt), ...(e instanceof Refusal && e.detail ? { detail: e.detail } : {}) });
 export const charge = (ctx, n = 1) => { ctx.work += n; if (ctx.work > ctx.max) refuse('evidence_budget_exceeded'); };
 
 // ---- hostile-input readers (L6): own DATA descriptors only, never a trap or a getter ----
@@ -52,8 +56,26 @@ export function exactKeys(o, keys) {
   return ks.length === keys.length && ks.every((k) => typeof k === 'string' && keys.includes(k)) ? ks : null;
 }
 export const isStr = (max) => (v) => typeof v === 'string' && v.length <= max;
-/** A repo-relative POSIX path: no absolute, backslash, NUL, empty, `.` or `..` segment. */
-export const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length <= LIMITS.maxPathChars && !/[\\\0]/.test(p) && !p.startsWith('/') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+/** A repo-relative POSIX path: no absolute, drive (`C:/x`, `C:x`), backslash, NUL, empty, `.` or `..` segment. */
+export const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length <= LIMITS.maxPathChars && !/[\\\0]|^[A-Za-z]:/.test(p) && !p.startsWith('/') && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+/**
+ * THE path identity (S2): every comparison of a path with a git path goes through `pathIndex`. Two spellings with one key (NFC,
+ * then lower case) may name ONE file on a case- or normalisation-insensitive filesystem (macOS, Windows), so a spelling that
+ * shares a key with a git path without being it is an ALIAS and is refused, on every platform (a pure string rule, no probing).
+ * `pathIndex(paths)` refuses two git paths with one key; it returns `lookup(p, code)`: p when p is a git path, null when no git
+ * path shares its key, and for an alias THROWS `code` (detail `path_alias`). `under(p, dir)` is the same rule for a prefix.
+ */
+export const pathKey = (p) => p.normalize('NFC').toLowerCase();
+export function pathIndex(paths) {
+  const byKey = new Map();
+  for (const p of paths) { const k = pathKey(p); if (byKey.has(k)) refuse('evidence_unavailable', 'path_alias'); byKey.set(k, p); }
+  return (p, code = 'evidence_unavailable') => { const q = byKey.get(pathKey(p)); return q === undefined ? null : q === p ? p : refuse(code, 'path_alias'); };
+}
+export const under = (p, dir) => {
+  if (p === dir || p.startsWith(`${dir}/`)) return true;
+  const k = pathKey(p), d = pathKey(dir);
+  return k === d || k.startsWith(`${d}/`) ? refuse('evidence_unavailable', 'path_alias') : false;
+};
 const isGlob = (g) => { try { compileGlob(g); return typeof g === 'string' && g.length <= LIMITS.maxPathChars; } catch { return false; } };
 export const globList = (v, ctx) => arr(v, LIMITS.maxList, isGlob, ctx);
 export const matcher = (globs) => globs.map((g) => compileGlob(g));

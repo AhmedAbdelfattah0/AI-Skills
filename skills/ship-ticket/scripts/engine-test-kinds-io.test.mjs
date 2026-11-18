@@ -12,7 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path, { dirname, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -85,7 +85,7 @@ test('[P4r-1] AC1 control: a record built from a sealed passing run reaches a pa
   assert.equal(CLAIM, 'L-ran');
   assert.equal(rec.claim, 'L-ran');
   assert.deepEqual(rec.runner, { id: 'vitest', version: '2.1.0', format: 'vitest-json' });
-  assert.deepEqual(rec.files, [{ file: 'libs/money/new.test.ts', outcome: 'counted', credited: ['kind:negative'], skipped: {} }]);
+  assert.deepEqual(rec.files, [{ file: 'libs/money/new.test.ts', outcome: 'counted', credited: ['kind:negative'], withheld: {}, skipped: {}, unknown: 0 }]);
   assert.equal(rec.command_digest, commandDigest(ENTRY.cmd, ARGS), 'the record binds the args that RAN');
   const v = verdict(r, rec);
   assert.equal(v.status, 'pass', JSON.stringify(v));
@@ -133,7 +133,7 @@ test('[P4r-3] AC1: an exit-0 control stays current when nothing it depends on mo
   const r = repo(t), rec = good(r);
   const a = verdict(r, rec), b = verdict(r, clone(rec));
   assert.equal(a.status, 'pass'); assert.equal(b.status, 'pass');
-  assert.deepEqual(recordUsable(rec, cur(r)), { ok: true, evidence: { kinds: ['negative'], items: [], unknown_markers: 0 } });
+  assert.deepEqual(recordUsable(rec, cur(r)), { ok: true, evidence: { kinds: ['negative'], items: [], unknown_markers: 0, withheld: {} } });
   assert.deepEqual(recordUsable({ ...rec, dag_digest: 'e'.repeat(64) }, cur(r)), { ok: false, reason: 'freshness' });
   assert.deepEqual(recordUsable(rec, { ...cur(r), baseSha: 'HEAD' }), { ok: false, reason: 'unavailable', code: 'test_kinds_error' });
   // the input is validated by the same current context the verdict uses: entry, command, config digest
@@ -187,9 +187,9 @@ test('[P4r-5] AC2 rule 5 (R-3): a marker counts only when the file holds MORE of
   const one = (file, title) => { const b = build(r, report([{ file, cases: [{ title }] }])); assert.equal(b.ok, true, JSON.stringify(b)); return b.record; };
   // unchanged file: not in P, so a void (it cannot be evidence of THIS candidate)
   assert.equal(one(old, 'old [kind:negative]').files[0].outcome, 'not_in_P');
-  // the file is edited but holds the SAME number of markers as at base: nothing is credited
+  // the file is edited but holds the SAME number of markers as at base: nothing is credited, and the row says why
   put(r.dir, 'libs/money/old.test.ts', "test('renamed [kind:negative]', () => { expect(1).toBe(1); });\n");
-  assert.deepEqual(one(old, 'renamed [kind:negative]').files[0], { file: 'libs/money/old.test.ts', outcome: 'counted', credited: [], skipped: {} });
+  assert.deepEqual(one(old, 'renamed [kind:negative]').files[0], { file: 'libs/money/old.test.ts', outcome: 'counted', credited: [], withheld: { 'kind:negative': 'r3_unchanged' }, skipped: {}, unknown: 0 });
   // ... even when another reported file adds one, so the total over P allows it: the per-file count decides for each file
   const both = build(r, report([{ file: old, cases: [{ title: 'renamed [kind:negative]' }] }, { file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }]));
   assert.deepEqual(both.record.files.map((f) => [f.file, f.credited]), [['libs/money/new.test.ts', ['kind:negative']], ['libs/money/old.test.ts', []]]);
@@ -237,7 +237,7 @@ test('[P4r-6] AC2 rule 3: a result file outside the repo, outside P, not regular
   }
   // a skipped carrier in a file outside P subtracts nothing and is not stored on its void row
   const outP = build(r, report([{ file: join(r.dir, 'libs/money/unchanged.test.ts'), cases: [{ title: 'u [kind:race]', status: 'skipped' }] }]));
-  assert.deepEqual(outP.ok && outP.record.files, [{ file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', credited: [], skipped: {} }]);
+  assert.deepEqual(outP.ok && outP.record.files, [{ file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', credited: [], withheld: {}, skipped: {}, unknown: 0 }]);
   // a relative name is never resolved against the cwd, even when the cwd IS the repo
   const cwd = process.cwd();
   try {
@@ -396,39 +396,15 @@ test('[P4r-24] C1 (I-C): a title over the cap is REFUSED, never dropped: an over
   assert.equal(code(build(r, report([{ file: old, cases: [{ title: long }] }]))), 'evidence_budget_exceeded');
 });
 
-test('[P4r-25] C2 (I-E): a hidden index flag inside a submodule of P is refused (assume-unchanged and skip-worktree)', (t) => {
-  for (const flag of ['--assume-unchanged', '--skip-worktree']) {
-    const r = repo(t), sub = tmp(t, 'p4r-sub-');
-    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
-    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
-    const inner = join(r.dir, 'vendor/sub'), clean = evidenceIdentity({ repo: r.dir, baseSha: r.base });
-    assert.equal(clean.ok, true, JSON.stringify(clean));
-    git(inner, 'update-index', flag, 'f.txt');
-    put(r.dir, 'vendor/sub/f.txt', 'two\n');
-    assert.match(git(inner, 'ls-files', '-v'), flag === '--assume-unchanged' ? /^h f\.txt$/m : /^S f\.txt$/m, 'the fixture really hides the flag');
-    assert.equal(git(inner, 'status', '--porcelain'), '', 'and git status really reports the submodule clean');
-    assert.notEqual(readFileSync(join(inner, 'f.txt'), 'utf8'), git(inner, 'show', 'HEAD:f.txt') + '\n', 'while its tracked bytes differ from HEAD');
-    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, flag);
+test('[P4r-25] C2 (I-E), superseded by S3: a hidden index flag inside a submodule, in P or outside it, or a nested one, is refused', (t) => {
+  for (const atBase of [false, true]) for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+    const { r, inner } = withSubmodule(t, { atBase });
+    git(inner, 'update-index', flag, 'a.txt'); put(r.dir, 'vendor/s/a.txt', 'two\n');
+    assert.equal(git(inner, 'status', '--porcelain'), '', 'git status really reports the submodule clean');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), SUBMODULE, `${flag} atBase=${atBase}`);
   }
-  // the twin OUTSIDE P: a submodule committed at base (so not a changed path) hides an edit behind the same flag
-  { const r = repo(t), sub = tmp(t, 'p4r-sub-');
-    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
-    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub'); git(r.dir, 'commit', '-q', '-m', 'sub');
-    const base = git(r.dir, 'rev-parse', 'HEAD'), inner = join(r.dir, 'vendor/sub');
-    const clean = evidenceIdentity({ repo: r.dir, baseSha: base });
-    assert.equal(clean.ok, true, JSON.stringify(clean)); assert.ok(!clean.paths.includes('vendor/sub'), 'the submodule is not in P');
-    git(inner, 'update-index', '--assume-unchanged', 'f.txt'); put(r.dir, 'vendor/sub/f.txt', 'two\n');
-    assert.ok(!git(r.dir, 'status', '--porcelain').includes('vendor/sub'), 'the parent sees nothing');
-    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: base }), { ok: false, code: 'evidence_unavailable' }, 'outside P'); }
-  // one level down the same flags would hide again: a submodule that holds a submodule of its own is refused, even when clean
-  const r = repo(t), s2 = tmp(t, 'p4r-s2-'), s1 = tmp(t, 'p4r-s1-');
-  git(s2, 'init', '-q', '-b', 'main'); put(s2, 'a.txt', 'a\n'); git(s2, 'add', '-A'); git(s2, 'commit', '-q', '-m', 'a');
-  git(s1, 'init', '-q', '-b', 'main'); put(s1, 'b.txt', 'b\n'); git(s1, 'add', '-A'); git(s1, 'commit', '-q', '-m', 'b');
-  git(s1, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', s2, 'nested'); git(s1, 'commit', '-q', '-m', 'n');
-  git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', s1, 'vendor/sub');
-  assert.equal(git(join(r.dir, 'vendor/sub'), 'status', '--porcelain'), '', 'the outer submodule is clean');
-  assert.match(git(join(r.dir, 'vendor/sub'), 'ls-files', '-s'), /^160000 /m, 'and holds a gitlink');
-  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' });
+  const { r } = withSubmodule(t, { nested: true });
+  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), SUBMODULE, 'nested');
 });
 
 test('[P4r-26] C3 (I-A): recordUsable refuses runner_config_changed exactly as the verdict does (a config path in the candidate, whatever is excluded)', (t) => {
@@ -468,24 +444,24 @@ test('[P4r-27] C4 (I-C): the id caps hold AFTER report names merge into one file
   assert.deepEqual(viaLink.record.files[0].skipped, { 'kind:negative': 1 });
 });
 
-test('[P4r-28] C5 (I-D): a stored record whose provenance contradicts itself is malformed, in recordUsable and in the verdict', (t) => {
+test('[P4r-28] C5 (I-D), superseded by S1: a stored record is its rows; a total that disagrees with them, or a row that contradicts itself, is malformed', (t) => {
   const r = repo(t), rec = good(r);
   assert.equal(recordUsable(rec, cur(r)).ok, true, 'the control');
-  for (const [mut, why] of [[(c) => { c.counts.passed = 0; }, 'credited rows with passed:0'], [(c) => { c.counts.passed = 0; c.counts.results = 0; }, 'credited rows with results:0'],
+  for (const [mut, why] of [[(c) => { c.counts.passed = 0; }, 'a result count (round 2 schema) is no longer state'], [(c) => { c.counts.results = 1; c.counts.passed = 1; }, 'nor both'],
     [(c) => { c.report_len = 0; }, 'report_len:0']]) {
     const c = clone(rec); mut(c);
     assert.deepEqual(recordUsable(c, cur(r)), { ok: false, reason: 'malformed' }, why);
     assert.deepEqual(verdict(r, c).records, { unit: 'stale:malformed' }, why);
   }
-  // I-D: each relation alone, against a control that differs only in the relation (the control is accepted)
-  const voidRow = { file: null, outcome: 'result_outside_repo', credited: [], skipped: {} };
+  // each relation alone, against a control that differs only in the relation (the control is accepted)
+  const voidRow = { file: null, outcome: 'result_outside_repo', credited: [], withheld: {}, skipped: {}, unknown: 0 };
   const pairs = [
-    ['a row needs a result', (c) => { c.files.push(clone(voidRow)); c.counts.marker_files = 2; }, (c) => { c.files.push(clone(voidRow)); c.counts.marker_files = 2; c.counts.results = 2; }],
-    ['a skipped carrier needs a non-passed result', (c) => { c.files[0].skipped = { 'kind:race': 1 }; }, (c) => { c.files[0].skipped = { 'kind:race': 1 }; c.counts.results = 2; }],
-    ['an unknown marker needs a passed result', (c) => { c.files[0].credited = []; c.counts.credited = 0; c.counts.passed = 0; c.counts.unknown_markers = 1; }, (c) => { c.files[0].credited = []; c.counts.credited = 0; c.counts.unknown_markers = 1; }],
-    ['unknown markers fit the counted rows', (c) => { c.counts.unknown_markers = LIMITS.maxIds + 1; }, (c) => { c.counts.unknown_markers = LIMITS.maxIds; }],
-    ['a skipped carrier only on a row inside P', (c) => { c.files.push({ file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', credited: [], skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; c.counts.results = 3; },
-      (c) => { c.files.push({ file: 'libs/money/unchanged.test.ts', outcome: 'runner_uncovered', credited: [], skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; c.counts.results = 3; }],
+    ['marker_files is the number of rows', (c) => { c.files.push(clone(voidRow)); }, (c) => { c.files.push(clone(voidRow)); c.counts.marker_files = 2; }],
+    ['credited is the number of credits', (c) => { c.counts.credited = 2; }, () => {}],
+    ['unknown_markers is the sum of the rows', (c) => { c.files[0].unknown = 1; }, (c) => { c.files[0].unknown = 1; c.counts.unknown_markers = 1; }],
+    ['a skipped carrier only on a row inside P', (c) => { c.files.push({ ...clone(voidRow), file: 'libs/money/unchanged.test.ts', outcome: 'not_in_P', skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; },
+      (c) => { c.files.push({ ...clone(voidRow), file: 'libs/money/unchanged.test.ts', outcome: 'runner_uncovered', skipped: { 'kind:race': 1 } }); c.counts.marker_files = 2; }],
+    ['a withheld id is not also credited', (c) => { c.files[0].withheld = { 'kind:negative': 'r3_offset' }; }, (c) => { c.files[0].withheld = { 'kind:race': 'r3_unchanged' }; }],
     ['report_len is at least one byte', (c) => { c.report_len = 0; }, (c) => { c.report_len = 1; }],
   ];
   for (const [why, bad, ok] of pairs) {
@@ -556,9 +532,9 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
     assert.equal(code(build(r, report([{ file, cases: [{ title: `${TITLE} [kind:negative]` }, { title: long, status: 'skipped' }] }]))), 'evidence_budget_exceeded', 'C1 builder');
     assert.equal(code(build(r, passing(r.dir), { prov: { runner_version: '' } })), 'test_kinds_error', 'C7 builder');
     const ids = Array.from({ length: 600 }, (_, i) => `plan:A${String(i).padStart(3, '0')}`).sort();
-    const emitted = [['C7 as emitted', (c) => { c.runner.version = ''; }, 'stale:malformed'], ['C5 as stored', (c) => { c.counts.passed = 0; }, 'stale:malformed'],
+    const emitted = [['C7 as emitted', (c) => { c.runner.version = ''; }, 'stale:malformed'], ['C5 as stored (a round 2 result count)', (c) => { c.counts.passed = 0; }, 'stale:malformed'],
       ['C4 as emitted: 600 ids in one row', (c) => { c.files[0].credited = ids; c.counts.credited = 600; }, 'refused:evidence_budget_exceeded'],
-      ['C4 as emitted: 600 skipped ids', (c) => { c.files[0].skipped = Object.fromEntries(ids.map((k) => [k, 1])); c.counts.results = 2; }, 'stale:malformed']];
+      ['C4 as emitted: 600 skipped ids', (c) => { c.files[0].skipped = Object.fromEntries(ids.map((k) => [k, 1])); }, 'stale:malformed']];
     for (const [why, m, want] of emitted) { const c = clone(rec); m(c); assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), why), want, why); }
     const other = { ...ENTRY, name: 'other' };
     for (const bad of [{ cmd: '/tmp/evil/vitest', args: ARGS }, { cmd: ENTRY.cmd, args: [...ARGS, '--typecheck'] }]) {
@@ -567,11 +543,8 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
       assert.deepEqual(recordUsable(rec, { ...cur(r), command: bad }), { ok: false, reason: 'unavailable', code: 'runner_unsupported' }, 'C6 recordUsable');
       if (bad.cmd === ENTRY.cmd) assert.equal(code(build(r, passing(r.dir), { args: bad.args })), 'runner_unsupported', 'C6 builder');
     } }
-  { const r = repo(t), sub = tmp(t, 'p4r-sub-');
-    git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
-    git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
-    const rec = good(r);
-    git(join(r.dir, 'vendor/sub'), 'update-index', '--skip-worktree', 'f.txt'); put(r.dir, 'vendor/sub/f.txt', 'two\n');
+  { const { r, inner } = withSubmodule(t), rec = good(repo(t));
+    git(inner, 'update-index', '--skip-worktree', 'a.txt'); put(r.dir, 'vendor/s/a.txt', 'two\n');
     assert.equal(agree(recordUsable(rec, cur(r)), verdict(r, rec), 'C2'), 'refused:evidence_unavailable', 'C2 reuse');
     assert.equal(code(build(r, passing(r.dir))), 'evidence_unavailable', 'C2 builder'); }
   // (3) context perturbations of one good record: recordUsable and the verdict agree; a context refusal is the builder's too
@@ -604,8 +577,233 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
   // (4) record perturbations (C5 and the schema): recordUsable and the verdict agree on every one
   const r = repo(t), rec = good(r);
   const muts = [(c) => { c.counts.passed = 0; }, (c) => { c.report_len = 0; }, (c) => { c.runner.version = ''; }, (c) => { c.files[0].credited = ['kind:race']; }, (c) => { c.integrity.sealed = false; },
-    (c) => { c.dag_digest = 'e'.repeat(64); }, (c) => { c.files[0].skipped = { 'kind:negative': 1 }; c.counts.results = 2; }, (c) => { c.evidence_id = `e1:${'0'.repeat(64)}`; }, () => {}];
+    (c) => { c.dag_digest = 'e'.repeat(64); }, (c) => { c.files[0].skipped = { 'kind:negative': 1 }; }, (c) => { c.evidence_id = `e1:${'0'.repeat(64)}`; }, () => {}];
   for (const m of muts) { const c = clone(rec); m(c); agree(recordUsable(c, cur(r)), verdict(r, c), m.toString()); }
+});
+
+// ---- round 3: the Codex and Opus confirmation findings at dc41c69, each written RED before its fix ----
+/** A seeded PRNG (mulberry32): the property corpus is the same on every run and every platform. */
+const prng = (seed) => () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+const IDS = ['kind:negative', 'kind:race', 'plan:Item1', 'kind:zz', null];
+/**
+ * An INDEPENDENT oracle (it shares no code with the module): from the base and candidate test lists and the report it computes
+ * the rows the record must hold. d(f, m) = cand - base - skipped; the total over P is the plain sum of d (owner amendment 2).
+ * A passed creditable id: credited when d > 0 and the total > 0; withheld `r3_unchanged` when d <= 0, else `r3_offset`.
+ */
+function oracle(files) {
+  const occ = (tests, m, pred = () => true) => tests.filter((x) => x.id === m && pred(x)).length;
+  const creditableIds = IDS.slice(0, 3), d = (f, m) => occ(f.cand ?? [], m) - occ(f.base ?? [], m) - occ(f.cand ?? [], m, (x) => x.status !== 'passed');
+  const total = Object.fromEntries(creditableIds.map((m) => [m, files.reduce((s, f) => s + d(f, m), 0)]));
+  const rows = [];
+  for (const f of files) {
+    if (!f.cand || !f.cand.some((x) => x.id)) continue;
+    const passed = new Set(f.cand.filter((x) => x.status === 'passed' && x.id).map((x) => x.id));
+    const row = { file: f.rel, outcome: 'counted', credited: [], withheld: {}, skipped: {}, unknown: passed.has('kind:zz') ? 1 : 0 };
+    for (const m of creditableIds) {
+      const s = occ(f.cand, m, (x) => x.status !== 'passed');
+      if (s) row.skipped[m] = s;
+      if (!passed.has(m)) continue;
+      if (d(f, m) <= 0) row.withheld[m] = 'r3_unchanged'; else if (total[m] > 0) row.credited.push(m); else row.withheld[m] = 'r3_offset';
+    }
+    row.credited.sort();
+    rows.push(row);
+  }
+  rows.sort((a, b) => (a.file < b.file ? -1 : 1));
+  return { rows, counts: { marker_files: rows.length, credited: rows.reduce((s, r) => s + r.credited.length, 0), unknown_markers: rows.reduce((s, r) => s + r.unknown, 0) } };
+}
+const line = (x) => `test('${x.title}', () => {});`;
+/** A repo whose base holds `files[i].base` and whose candidate holds `files[i].cand` (absent: deleted); the report runs the candidate. */
+function scenario(t, files) {
+  const dir = tmp(t, 'p4r-prop-');
+  git(dir, 'init', '-q', '-b', 'main'); put(dir, 'vitest.config.ts', 'export default {};\n'); put(dir, 'package-lock.json', '{}\n');
+  for (const f of files) if (f.base) put(dir, f.rel, f.base.map(line).join('\n') + '\n');
+  git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base');
+  const base = git(dir, 'rev-parse', 'HEAD');
+  for (const f of files) if (f.cand) put(dir, f.rel, f.cand.map(line).join('\n') + '\n'); else if (f.base) rmSync(join(dir, f.rel));
+  const text = report(files.filter((f) => f.cand).map((f) => ({ file: join(dir, f.rel), cases: f.cand.map((x) => ({ title: x.title, status: x.status })) })));
+  return { r: { dir, base }, text };
+}
+const rowsOf = (rec) => rec.files.map((f) => ({ file: f.file, outcome: f.outcome, credited: f.credited, withheld: f.withheld, skipped: f.skipped, unknown: f.unknown }));
+
+test('[P4r-32] S1 (round 3, A): aggregates are DERIVED from the rows; an independent oracle agrees with every interface', (t) => {
+  // (1) the Codex inputs: a stored total that disagrees with its rows is malformed; there is no stored result count left to forge
+  const { r, text } = scenario(t, [{ rel: 'libs/money/a.test.ts', cand: [{ title: 'a [kind:negative]', status: 'passed', id: 'kind:negative' }] },
+    { rel: 'libs/money/b.test.ts', cand: [{ title: 'b [kind:race]', status: 'passed', id: 'kind:race' }, { title: 's [kind:race]', status: 'skipped', id: 'kind:race' }] }]);
+  const b = build(r, text);
+  assert.equal(b.ok, true, JSON.stringify(b));
+  assert.deepEqual(Object.keys(b.record.counts).sort(), ['credited', 'marker_files', 'unknown_markers'], 'only totals a row set determines');
+  assert.equal(recordUsable(b.record, cur(r)).ok, true, 'the control');
+  for (const [why, m] of [['counts.credited off by one', (c) => { c.counts.credited -= 1; }], ['counts.marker_files off by one', (c) => { c.counts.marker_files += 1; }],
+    ['counts.unknown_markers disagrees with the rows', (c) => { c.counts.unknown_markers = 1; }], ['an old stored result count', (c) => { c.counts.passed = 1; }],
+    ['an old stored result count (results)', (c) => { c.counts.results = 1; }], ['a row unknown count disagrees with the total', (c) => { c.files[0].unknown = 1; }]]) {
+    const c = clone(b.record); m(c);
+    assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), why), 'stale:malformed', why);
+  }
+  // (2) the property: a seeded corpus of base/candidate/report triples; the oracle's rows are the record's, and the record is current
+  const rnd = prng(0x5eed), pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const tests = (n, tag) => Array.from({ length: n }, (_, i) => { const id = pick(IDS); return { title: `${tag}${i}${id ? ` [${id}]` : ''}`, status: pick(['passed', 'passed', 'skipped', 'todo']), id }; });
+  for (let k = 0; k < 24; k++) {
+    const files = Array.from({ length: 1 + Math.floor(rnd() * 3) }, (_, i) => {
+      const kind = pick(['new', 'edited', 'deleted', 'unchanged-reported']), base = kind === 'new' ? null : tests(Math.floor(rnd() * 3), `b${i}x`).map((x) => ({ ...x, status: 'passed' }));
+      return { rel: `libs/money/g${i}.test.ts`, base, cand: kind === 'deleted' ? null : kind === 'unchanged-reported' ? base : tests(1 + Math.floor(rnd() * 3), `c${i}x`) };
+    }).filter((f) => f.base || f.cand);
+    const { r: rr, text: tx } = scenario(t, files), want = oracle(files.filter((f) => !(f.cand && f.base && f.cand === f.base)));
+    const got = build(rr, tx), why = `case ${k}: ${JSON.stringify(files)}`;
+    assert.equal(got.ok, true, `${why}: ${JSON.stringify(got)}`);
+    // an unchanged file is not in P: its row is a not_in_P void that neither credits nor subtracts
+    const unchanged = files.filter((f) => f.cand && f.cand === f.base && f.cand.some((x) => x.id)).map((f) => ({ file: f.rel, outcome: 'not_in_P', credited: [], withheld: {}, skipped: {}, unknown: 0 }));
+    assert.deepEqual(rowsOf(got.record), [...want.rows, ...unchanged].sort((a, b2) => (a.file < b2.file ? -1 : 1)), why);
+    assert.deepEqual(got.record.counts, { ...want.counts, marker_files: want.counts.marker_files + unchanged.length }, why);
+    const ru = recordUsable(got.record, cur(rr));
+    assert.equal(agree(ru, verdict(rr, got.record), why), 'current', why);
+    assert.deepEqual([...new Set([...ru.evidence.kinds.map((x) => `kind:${x}`), ...ru.evidence.items.map((x) => `plan:${x}`)])].sort(), [...new Set(want.rows.flatMap((x) => x.credited))].sort(), why);
+    assert.equal(ru.evidence.unknown_markers, want.counts.unknown_markers, why);
+  }
+});
+
+test('[P4r-33] S2 (round 3, B): ONE path identity: a case or normalisation alias of a git path is refused by every interface, on every platform', (t) => {
+  // the Codex input: the changed config declared under another spelling
+  for (const alias of ['VITEST.CONFIG.TS', 'Vitest.config.ts']) {
+    const r = repo(t), entry = { ...ENTRY, config_paths: [alias] }, rec = good(r);
+    put(r.dir, 'vitest.config.ts', 'export default { globalSetup: "./evil.ts" };\n');
+    assert.equal(code(build(r, passing(r.dir), { entry })), 'runner_config_changed', alias);
+    assert.equal(recordUsable(rec, cur(r, { entry })).code, 'runner_config_changed', alias);
+    assert.equal(verdict(r, null, { entry }).code, 'runner_config_changed', alias);
+  }
+  // a NFD spelling of an NFC git path, and a config deleted in the candidate declared under an alias (realpath cannot see it)
+  { const r = repo(t), nfc = 'libs/caf\u00e9.config.ts';
+    put(r.dir, nfc, 'a\n'); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'cfg'); const base = git(r.dir, 'rev-parse', 'HEAD');
+    put(r.dir, nfc, 'b\n');
+    const entry = { ...ENTRY, config_paths: [nfc.normalize('NFD')] };
+    assert.equal(verdict({ ...r, base }, null, { entry }).code, 'runner_config_changed', 'NFD alias'); }
+  { const r = repo(t), entry = { ...ENTRY, config_paths: ['PACKAGE-LOCK.JSON'] };
+    rmSync(join(r.dir, 'package-lock.json'));
+    assert.equal(verdict(r, null, { entry }).code, 'runner_config_changed', 'a deleted config under an alias'); }
+  // a config path reached through a symlinked directory tracked at base: the bytes it hashes are not the path's own
+  { const r = repo(t);
+    put(r.dir, 'real/vitest.config.ts', 'a\n'); symlinkSync('real', join(r.dir, 'cfg')); git(r.dir, 'add', '-A'); git(r.dir, 'commit', '-q', '-m', 'l');
+    const base = git(r.dir, 'rev-parse', 'HEAD'), entry = { ...ENTRY, config_paths: ['cfg/vitest.config.ts'] };
+    const v = verdict({ ...r, base }, null, { entry });
+    assert.equal(v.status, 'refused', JSON.stringify(v)); assert.equal(v.code, 'evidence_unavailable', 'a symlinked directory on the way'); }
+  // an exclusion spelled as an alias of a changed path, and two candidate paths that are one key (a case-only rename)
+  { const r = repo(t);
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: ['LIBS/money'] }).code, 'evidence_unavailable', 'an aliased exclusion');
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: ['libs/money'] }).ok, true, 'the control: the exact spelling excludes');
+    git(r.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/tmp.test.ts'); git(r.dir, 'mv', 'libs/money/tmp.test.ts', 'libs/money/OLD.test.ts');
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).code, 'evidence_unavailable', 'two spellings of one key in the candidate'); }
+  // a stored row spelled as an alias of a P path is refused by both reuse interfaces with the same code
+  { const r = repo(t), rec = good(r), c = clone(rec); c.files[0].file = 'libs/money/NEW.test.ts';
+    assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), 'row alias'), 'refused:evidence_unavailable'); }
+  // a skipped carrier reported under another case: it may not drop its subtraction (refused, or it subtracts; never a credit)
+  { const r = repo(t), file = join(r.dir, 'libs/money/old.test.ts');
+    rmSync(join(r.dir, 'libs/money/new.test.ts')); // the old file's added skip is the only change: with its subtraction, d = 2 - 1 - 1 = 0
+    put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest.skip('s [kind:negative]', () => {});\n");
+    const mk = (name) => build(r, report([{ file, cases: [{ title: 'old [kind:negative]' }] }, { file: join(r.dir, name), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]));
+    assert.deepEqual(credits(mk('libs/money/old.test.ts')), [], 'the control: the carrier under git\'s spelling subtracts');
+    const b = mk('libs/money/OLD.test.ts');
+    if (b.ok) assert.deepEqual(credits(b), [], 'the aliased carrier still subtracts'); else assert.equal(b.code, 'evidence_unavailable'); }
+});
+
+const SUBMODULE = { ok: false, code: 'evidence_unavailable', detail: 'submodule_unsupported_v0' };
+/** A repo with a submodule at vendor/s, committed at base or not; `then(r, inner)` breaks it one way. */
+function withSubmodule(t, { atBase = false, nested = false } = {}) {
+  const r = repo(t), sub = tmp(t, 'p4r-sub-');
+  git(sub, 'init', '-q', '-b', 'main'); put(sub, 'a.txt', '1\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
+  if (nested) { const s2 = tmp(t, 'p4r-s2-'); git(s2, 'init', '-q', '-b', 'main'); put(s2, 'n.txt', 'n\n'); git(s2, 'add', '-A'); git(s2, 'commit', '-q', '-m', 'n'); git(sub, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', s2, 'nested'); git(sub, 'commit', '-q', '-m', 'n'); }
+  git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/s');
+  if (atBase) { git(r.dir, 'commit', '-q', '-m', 'sub'); r.base = git(r.dir, 'rev-parse', 'HEAD'); put(r.dir, 'libs/money/new.test.ts', `test('${TITLE} [kind:negative]', () => {});\n`); }
+  return { r, inner: join(r.dir, 'vendor/s') };
+}
+test('[P4r-34] S3 (round 3, C): V0 has no submodule support: ANY gitlink, in P or outside it, however it is disguised, is a typed refusal', (t) => {
+  const cases = [
+    ['a clean submodule in P', {}, () => {}],
+    ['a clean submodule outside P (committed at base)', { atBase: true }, () => {}],
+    ['core.worktree redirected to a clean copy', {}, ({ r, inner }) => { const clean = tmp(t, 'p4r-clean-'); put(clean, 'a.txt', '1\n'); git(r.dir, 'config', '-f', join(r.dir, '.git/modules/vendor/s/config'), 'core.worktree', clean); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); void inner; }],
+    ['the submodule .git removed (a plain directory now)', {}, ({ r, inner }) => { rmSync(join(inner, '.git')); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
+    ['the same outside P', { atBase: true }, ({ r, inner }) => { rmSync(join(inner, '.git')); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
+    ['a nested submodule', { nested: true }, () => {}],
+    ['a hidden index flag inside the submodule', {}, ({ r, inner }) => { git(inner, 'update-index', '--skip-worktree', 'a.txt'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
+    ['.gitmodules ignore=all', { atBase: true }, ({ r }) => { git(r.dir, 'config', '-f', '.gitmodules', 'submodule.vendor/s.ignore', 'all'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
+    ['a gitlink removed from the index, its checkout still on disk', { atBase: true }, ({ r }) => { git(r.dir, 'rm', '-q', '--cached', 'vendor/s'); }],
+    ['a gitlink committed after base only, then removed from the index', {}, ({ r }) => { git(r.dir, 'commit', '-q', '-m', 'sub'); git(r.dir, 'rm', '-q', '--cached', 'vendor/s'); put(r.dir, 'vendor/s/a.txt', 'EDIT\n'); }],
+  ];
+  for (const [why, opts, breakIt] of cases) {
+    const s = withSubmodule(t, opts); breakIt(s);
+    const { r } = s, rec = clone(good(repo(t)));
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), SUBMODULE, why);
+    assert.deepEqual(build(r, passing(r.dir), { before: 'e1:' + '0'.repeat(64) }), SUBMODULE, `${why}: the builder`);
+    assert.deepEqual(recordUsable(rec, cur(r)), { ok: false, reason: 'unavailable', code: 'evidence_unavailable', detail: 'submodule_unsupported_v0' }, `${why}: recordUsable`);
+    const v = verdict(r, rec);
+    assert.equal(v.code, 'evidence_unavailable', why); assert.equal(v.detail, 'submodule_unsupported_v0', why);
+  }
+  // an untracked nested repository (a directory in P that git cannot list file by file) is refused too
+  const r = repo(t), nest = join(r.dir, 'vendor/n');
+  mkdirSync(nest, { recursive: true }); git(nest, 'init', '-q', '-b', 'main'); put(nest, 'x.txt', 'x\n'); git(nest, 'add', '-A'); git(nest, 'commit', '-q', '-m', 'x');
+  assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).code, 'evidence_unavailable', 'an untracked nested repo');
+});
+
+test('[P4r-35] S4 (round 3, D): drive paths, parser-rejected reports and unexpected realpath errors are refused, never guessed', (t) => {
+  const r = repo(t), e = readEntry(ENTRY);
+  for (const p of ['C:/outside/a.test.ts', 'C:a.test.ts', 'c:libs/a.test.ts']) {
+    assert.throws(() => commandFor(e, ENTRY.cmd, [...ARGS.slice(0, 4), p]), { code: 'runner_unsupported' }, p);
+    assert.throws(() => readEntry({ ...ENTRY, config_paths: [p] }), { code: 'test_kinds_error' }, `config ${p}`);
+    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: [p] }).code, 'test_kinds_error', `exclusion ${p}`);
+  }
+  assert.doesNotThrow(() => commandFor(e, ENTRY.cmd, [...ARGS.slice(0, 4), 'libs/C:a.test.ts']), 'a colon later in a name is a POSIX name');
+  // documents preflight accepts and the runner parser rejects: the guard after the parser is REACHABLE (no longer "equivalent")
+  for (const extra of [{ ancestorTitles: {} }, { failureMessages: {} }]) {
+    const doc = JSON.parse(passing(r.dir)); Object.assign(doc.testResults[0].assertionResults[0], extra);
+    assert.equal(code(build(r, JSON.stringify(doc))), 'evidence_unavailable', JSON.stringify(extra));
+  }
+  // an unexpected realpath error (EACCES) on a report name is a refusal, not "outside the repo" (a dropped skipped carrier)
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    const locked = join(r.dir, 'libs/locked');
+    put(r.dir, 'libs/locked/s.test.ts', "test.skip('s [kind:negative]', () => {});\n");
+    let b;
+    chmodSync(locked, 0o000);
+    try {
+      const before = evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id; // the identity as the locked candidate stands
+      assert.throws(() => realpathSync.native(join(locked, 's.test.ts')), { code: 'EACCES' }, 'the fixture really denies the lookup');
+      b = build(r, report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, { file: join(locked, 's.test.ts'), cases: [{ title: 's [kind:negative]', status: 'skipped' }] }]), { before });
+    } finally { chmodSync(locked, 0o755); }
+    assert.equal(code(b), 'evidence_unavailable');
+  }
+});
+
+test('[P4r-36] R-3 amendment (owner 2026-11-18): the total over P is the plain sum, and every withheld credit names its reason', (t) => {
+  const NEW = { title: 'n [kind:negative]', status: 'passed', id: 'kind:negative' }, OLD = { title: 'o [kind:negative]', status: 'passed', id: 'kind:negative' };
+  const run = (files) => { const { r, text } = scenario(t, files); const b = build(r, text); assert.equal(b.ok, true, JSON.stringify(b)); return { r, b }; };
+  const reasons = (b) => Object.assign({}, ...b.record.files.map((f) => f.withheld));
+  // a NEW covered test with a marker: credited
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', cand: [NEW] }]);
+    assert.deepEqual(credits(b), ['kind:negative']); assert.deepEqual(reasons(b), {});
+    const v = verdict(r, b.record); assert.equal(v.status, 'pass'); assert.deepEqual(v.withheld, {}); }
+  // REPLACEMENT: the test file rewritten in place, the same marker count: nothing added in that file
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', base: [OLD], cand: [NEW] }]);
+    assert.deepEqual(credits(b), []); assert.deepEqual(reasons(b), { 'kind:negative': 'r3_unchanged' });
+    const v = verdict(r, b.record); assert.equal(v.code, 'missing_test_kinds'); assert.deepEqual(v.withheld, { 'kind:negative': 'r3_unchanged' }); }
+  // RELOCATION (git mv of a marked test): added in the new file, removed from the old: the total is 0
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', base: [OLD] }, { rel: 'libs/money/b.test.ts', cand: [OLD] }]);
+    assert.deepEqual(credits(b), []); assert.deepEqual(reasons(b), { 'kind:negative': 'r3_offset' });
+    const v = verdict(r, b.record); assert.equal(v.code, 'missing_test_kinds'); assert.deepEqual(v.withheld, { 'kind:negative': 'r3_offset' }); }
+  // DELETE ONE, ADD ONE of the same kind: the same offset
+  { const { b } = run([{ rel: 'libs/money/a.test.ts', base: [OLD] }, { rel: 'libs/money/b.test.ts', cand: [NEW] }]);
+    assert.deepEqual(credits(b), []); assert.deepEqual(reasons(b), { 'kind:negative': 'r3_offset' }); }
+  // DELETION alone: no passed result carries the marker, so nothing is credited or withheld; the verdict misses the kind
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', base: [OLD] }, { rel: 'libs/money/c.test.ts', cand: [{ title: 'plain', status: 'passed', id: null }] }]);
+    assert.deepEqual(credits(b), []); assert.deepEqual(reasons(b), {});
+    const v = verdict(r, b.record); assert.equal(v.code, 'missing_test_kinds'); assert.deepEqual(v.missing_kinds, ['negative']); assert.deepEqual(v.withheld, {}); }
+  // the verdict lists an id once: credited anywhere, it is not withheld; withheld twice, `r3_offset` (the informative cause) wins
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', cand: [NEW] }, { rel: 'libs/money/b.test.ts', base: [OLD], cand: [{ ...NEW, title: 'b [kind:negative]' }] }]);
+    assert.deepEqual(credits(b), ['kind:negative']); assert.deepEqual(reasons(b), { 'kind:negative': 'r3_unchanged' }, 'the row still says why b did not credit');
+    const v = verdict(r, b.record); assert.equal(v.status, 'pass'); assert.deepEqual(v.withheld, {}, 'credited elsewhere'); }
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', cand: [OLD] }, { rel: 'libs/money/b.test.ts', base: [OLD], cand: [{ ...OLD, title: 'b [kind:negative]' }] }, { rel: 'libs/money/c.test.ts', base: [OLD] }]);
+    assert.deepEqual(b.record.files.map((f) => f.withheld), [{ 'kind:negative': 'r3_offset' }, { 'kind:negative': 'r3_unchanged' }]);
+    assert.deepEqual(verdict(r, b.record).withheld, { 'kind:negative': 'r3_offset' }); }
+  // a withheld reason is RE-DERIVED on reuse: a stored reason the candidate does not support is stale
+  { const { r, b } = run([{ rel: 'libs/money/a.test.ts', base: [OLD], cand: [NEW] }]);
+    const c = clone(b.record); c.files[0].withheld = { 'kind:negative': 'r3_offset' };
+    assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), 'wrong reason'), 'stale:applicability'); }
 });
 
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
@@ -751,13 +949,17 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
   put(r.dir, 'apps/web/x.test.ts', "it('x', () => {});\n");
   const rec2 = good(r); // the same evidence on the candidate with the helper and the link
   const state = (mut, base = rec2) => { const c = clone(base); mut(c); return verdict(r, c).records.unit; };
-  const row = (o) => (c) => { c.files = [{ file: null, outcome: 'result_outside_repo', credited: [], skipped: {}, ...o }]; c.counts.marker_files = 1; c.counts.credited = (o.credited ?? []).length; };
+  const row = (o) => (c) => { c.files = [{ file: null, outcome: 'result_outside_repo', credited: [], withheld: {}, skipped: {}, unknown: 0, ...o }]; c.counts.marker_files = 1; c.counts.credited = (o.credited ?? []).length; c.counts.unknown_markers = o.unknown ?? 0; };
   // Codex M1: every void outcome, and an invented one, with a credit: malformed, never a pass
   for (const outcome of [...FILE_VOIDS, 'invented', 'COUNTED']) {
     const file = outcome === 'result_outside_repo' ? null : 'libs/money/new.test.ts';
     assert.equal(state(row({ file, outcome, credited: ['kind:negative'] })), 'stale:malformed', outcome);
   }
   assert.equal(state(row({ file: 'libs/money/new.test.ts', outcome: 'invented' })), 'stale:malformed', 'an invented outcome, even with no credit');
+  // a void row withholds nothing and counts no unknown marker either (each alone; the totals agree with the rows)
+  assert.equal(state(row({ file: 'libs/money/helper.ts', outcome: 'not_test_file' })), 'current', 'the control: a bare void row');
+  assert.equal(state(row({ file: 'libs/money/helper.ts', outcome: 'not_test_file', withheld: { 'kind:race': 'r3_offset' } })), 'stale:malformed', 'a void row withholds');
+  assert.equal(state(row({ file: 'libs/money/helper.ts', outcome: 'not_test_file', unknown: 1 })), 'stale:malformed', 'a void row counts unknown markers');
   // schema: provenance fields, extra keys, ids, ordering, counts
   assert.equal(state((c) => { for (const k of ['attempt_id', 'report_sha256', 'report_len', 'runner', 'claim']) delete c[k]; }), 'stale:malformed');
   for (const k of ['attempt_id', 'report_sha256', 'report_len', 'runner', 'claim', 'counts', 'files', 'exit_code', 'command_digest']) assert.equal(state((c) => { delete c[k]; }), 'stale:malformed', k);
@@ -765,15 +967,18 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
     (c) => { delete c.runner.format; }, (c) => { c.integrity.sealed = 'true'; }, (c) => { c.report_len = -1; }, (c) => { c.exit_code = '0'; }, (c) => { c.attempt_id = ''; },
     (c) => { c.files[0].credited = ['kind:not-a-kind']; }, (c) => { c.files[0].credited = ['plan:9x']; }, (c) => { c.files[0].credited = ['kind:negative', 'kind:negative']; c.counts.credited = 2; },
     (c) => { c.files[0].credited = 'kind:negative'; }, (c) => { c.counts.credited = 0; }, (c) => { c.counts.marker_files = 2; }, (c) => { c.counts.unknown_markers = -1; },
-    (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = c.counts.results + 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; c.counts.results = 2; },
-    (c) => { c.files[0].skipped = { 'not a marker': 1 }; c.counts.results = 2; }, (c) => { c.files[0].skipped = { 'kind:zzzz': 1 }; c.counts.results = 2; }, (c) => { c.files[0].skipped = []; },
-    (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; c.counts.results = 2; c.counts.passed = 2; },
+    (c) => { c.counts.unknown_markers = 1.5; }, (c) => { c.counts.passed = 1; }, (c) => { c.files[0].skipped = { 'kind:negative': 0 }; },
+    (c) => { c.files[0].skipped = { 'not a marker': 1 }; }, (c) => { c.files[0].skipped = { 'kind:zzzz': 1 }; }, (c) => { c.files[0].skipped = []; },
+    (c) => { c.files.push(clone(c.files[0])); c.counts.marker_files = 2; c.counts.credited = 2; },
+    (c) => { delete c.files[0].withheld; }, (c) => { delete c.files[0].unknown; }, (c) => { c.files[0].withheld = { 'kind:race': 'nope' }; }, (c) => { c.files[0].withheld = { 'kind:zzzz': 'r3_offset' }; },
+    (c) => { c.files[0].withheld = { 'kind:negative': 'r3_offset' }; }, (c) => { c.files[0].withheld = []; }, (c) => { c.files[0].unknown = -1; c.counts.unknown_markers = -1; },
+    (c) => { c.files[0].unknown = LIMITS.maxIds + 1; c.counts.unknown_markers = LIMITS.maxIds + 1; }, (c) => { c.files[0].unknown = 0.5; c.counts.unknown_markers = 0.5; },
     (c) => { c.files[0].file = '../escape.test.ts'; }, (c) => { c.report_sha256 = 5; }, (c) => { c.report_sha256 = 'x'; }, (c) => { c.runner.version = 5; },
     (c) => { c.runner.version = ''; }, (c) => { c.runner.id = 5; }, (c) => { c.runner.format = ''; }, (c) => { c.dag_digest = 'D'.repeat(64); }, (c) => { c.config_digest = null; }, (c) => { c.base_sha = 'HEAD'; }, (c) => { c.entry = '-x'; },
-    (c) => { c.claim = 5; }, (c) => { c.counts.results = 1e9; }, (c) => { c.report_len = LIMITS.maxReportBytes + 1; }, (c) => { c.files[0].credited = ['kind:race', 'kind:negative']; c.counts.credited = 2; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
+    (c) => { c.claim = 5; }, (c) => { c.counts.unknown_markers = 1e9; }, (c) => { c.report_len = LIMITS.maxReportBytes + 1; }, (c) => { c.files[0].credited = ['kind:race', 'kind:negative']; c.counts.credited = 2; }, (c) => { c.files[0].file = null; }, (c) => { c.evidence_id = c.evidence_id.slice(3); }])
     assert.equal(state(mut), 'stale:malformed', mut.toString());
   // re-derived applicability (the record is otherwise well-formed): a file outside P, missing, not a test file, a symlink, a credit R-3 refuses
-  const counted = (file, credited) => (c) => { c.files = [{ file, outcome: 'counted', credited, skipped: {} }]; c.counts.marker_files = 1; c.counts.credited = credited.length; };
+  const counted = (file, credited) => (c) => { c.files = [{ file, outcome: 'counted', credited, withheld: {}, skipped: {}, unknown: 0 }]; c.counts.marker_files = 1; c.counts.credited = credited.length; };
   for (const [file, credited, why] of [['libs/money/unchanged.test.ts', [], 'not in P, even with no credit'], ['libs/money/does-not-exist.test.ts', ['kind:negative'], 'missing'],
     ['libs/money/helper.ts', ['kind:race'], 'not a test file'], ['libs/money/link.test.ts', ['kind:negative'], 'a symlink'], ['libs/money/new.test.ts', ['kind:race'], 'R-3: no added race marker'],
     ['apps/web/x.test.ts', [], 'uncovered, even with no credit']])
@@ -788,7 +993,7 @@ test('[P4r-18] I1: a stored record never vouches for itself: the complete schema
   put(r2.dir, 'libs/real/old.test.ts', "test('old [kind:negative]', () => {});\ntest('two [kind:negative]', () => {});\n");
   const recR2 = good(r2, report([{ file: join(r2.dir, 'libs/real/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }]));
   assert.equal(verdict(r2, recR2).status, 'pass', 'the control on this candidate');
-  const forged = clone(recR2); forged.files = [{ file: 'libs/money/old.test.ts', outcome: 'counted', credited: ['kind:negative'], skipped: {} }];
+  const forged = clone(recR2); forged.files = [{ file: 'libs/money/old.test.ts', outcome: 'counted', credited: ['kind:negative'], withheld: {}, skipped: {}, unknown: 0 }];
   assert.deepEqual(verdict(r2, forged).records, { unit: 'stale:applicability' });
   assert.equal(state(() => {}, rec), 'stale:identity', 'the candidate moved since the first record');
 });
@@ -811,13 +1016,13 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
     assert.deepEqual(credits(b), [], status);
     assert.deepEqual(b.record.files[0].skipped, { 'kind:negative': 1 });
     // reuse subtracts the STORED skipped count: a record claiming the credit beside its own skipped carrier is refused
-    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.counts.credited = 1;
+    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.files[0].withheld = {}; forged.counts.credited = 1;
     assert.deepEqual(verdict(r4, forged).records, { unit: 'stale:applicability' }, status);
     assert.deepEqual(recordUsable(forged, cur(r4)), { ok: false, reason: 'applicability' }, status);
   }
   // NOT re-derivable (pinned; the reuse header says so): the same forgery with its skipped count deleted is consistent, and accepted
   { const b = build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status: 'skipped' }] }]));
-    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.files[0].skipped = {}; forged.counts.credited = 1;
+    const forged = clone(b.record); forged.files[0].credited = ['kind:negative']; forged.files[0].withheld = {}; forged.files[0].skipped = {}; forged.counts.credited = 1;
     assert.deepEqual(verdict(r4, forged).records, { unit: 'current' }, 'a consistent forgery of engine state is outside what reuse can see'); }
   // the same, with a genuine addition in ANOTHER reported file: the total over P allows it, the per-file rule refuses old.test.ts
   const b4 = build(r4, report([{ file: join(r4.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'new [kind:negative]', status: 'skipped' }] },
@@ -839,14 +1044,17 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
   put(r6.dir, 'apps/web/skip.test.ts', "it.skip('k [kind:negative]', () => {});\n");
   const b6 = build(r6, report([{ file: join(r6.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }, { file: join(r6.dir, 'apps/web/skip.test.ts'), cases: [{ title: 'k [kind:negative]', status: 'skipped' }] }]));
   assert.deepEqual(credits(b6), []);
-  // CLOSED (stricter than design section 4 rule 5): a move plus a marker added OUTSIDE the counted files credits nothing,
-  // whether the marker is in a README, a helper, an uncovered test, or a covered test file the runner did not report
+  // NOT ENFORCED (owner amendment 2026-11-18: min(d, 0) REMOVED; the design's total over P): a move plus a marker planted
+  // ANYWHERE in P credits the moved test, whether the marker is in a README, a helper, an uncovered test or an unreported test
+  // file. It is the accepted visible-marker limit (header); round 2 had closed it with min(d, 0), which the owner withdrew.
   for (const [rel, text] of [['README.md', '<!-- [kind:negative] -->\n'], ['libs/money/helper.ts', '// [kind:negative]\n'], ['apps/web/w.test.ts', "it('w [kind:negative]', () => {});\n"],
     ['libs/money/unrun.test.ts', "test('u [kind:negative]', () => {});\n"]]) {
     const rm = repo(t); dropNew(rm);
     git(rm.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
+    const one = (x) => build(rm, report([{ file: join(rm.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]));
+    assert.deepEqual(one().record.files[0].withheld, { 'kind:negative': 'r3_offset' }, `${rel}: the control, before the planted marker`);
     put(rm.dir, rel, text);
-    assert.deepEqual(credits(build(rm, report([{ file: join(rm.dir, 'libs/money/moved.test.ts'), cases: [{ title: 'old [kind:negative]' }] }]))), [], rel);
+    assert.deepEqual(credits(one()), ['kind:negative'], rel);
   }
   // NOT ENFORCED (pinned, the accepted L-ran limit): a marker added in a comment of a file the runner reported (in K) credits a
   // moved test, as it does a test beside it (next case)
@@ -865,23 +1073,11 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
   assert.deepEqual(credits(build(r8, report([{ file: join(r8.dir, 'libs/money/old.test.ts'), cases: [{ title: 'old [kind:negative]' }, { title: 'n [kind:negative]' }, ...[1, 2, 3].map((i) => ({ title: `e ${i} [kind:negative]`, status: 'skipped' }))] }]))), []);
 });
 
-test('[P4r-20] I4: a dirty submodule is refused; a submodule HEAD and a symlink target are part of the identity', (t) => {
-  const r = repo(t), sub = tmp(t, 'p4r-sub-');
-  git(sub, 'init', '-q', '-b', 'main'); put(sub, 'f.txt', 'one\n'); git(sub, 'add', '-A'); git(sub, 'commit', '-q', '-m', 's');
-  git(r.dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub');
-  const clean = evidenceIdentity({ repo: r.dir, baseSha: r.base });
-  assert.equal(clean.ok, true, JSON.stringify(clean)); assert.ok(clean.paths.includes('vendor/sub'));
-  // the tracked worktree content changes, HEAD does not (Codex M3)
-  put(r.dir, 'vendor/sub/f.txt', 'two\n');
-  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' });
-  git(join(r.dir, 'vendor/sub'), 'checkout', '-q', '--', 'f.txt');
-  put(r.dir, 'vendor/sub/untracked.txt', 'u\n');
-  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable' }, 'an untracked file is dirty too');
-  rmSync(join(r.dir, 'vendor/sub/untracked.txt'));
-  assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id, clean.evidence_id, 'clean again: the same identity');
-  // a new submodule commit (clean) is a new identity
-  put(r.dir, 'vendor/sub/f.txt', 'three\n'); git(join(r.dir, 'vendor/sub'), 'commit', '-q', '-am', 'c2');
-  assert.notEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id, clean.evidence_id);
+test('[P4r-20] I4: a symlink target is part of the identity; a submodule, dirty or clean, is refused (V0, P4r-34)', (t) => {
+  const { r } = withSubmodule(t);
+  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), SUBMODULE, 'clean');
+  put(r.dir, 'vendor/s/a.txt', 'two\n');
+  assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), SUBMODULE, 'dirty');
   // a symlink's target is hashed (retargeting it alone moves the identity)
   const r2 = repo(t);
   symlinkSync('a.ts', join(r2.dir, 'libs/money/l.ts'));
@@ -969,11 +1165,14 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 // needs a POSIX facility (it is skipped on win32). Since round 2 a rule shared by the three interfaces (I-A) is ONE mutant, not one per copy.
 // Documented EQUIVALENT (not listed, no input can observe them):
 //   - `retry_authorised` forced to true: P4r passes `held: 0, open_repairs: 0` (inert in V0), and P2 reads it only when held > 0.
-//   - `if (!parsed.supported) refuse(...)` and `typeof r.title/r.file` in build: preflight has already refused every document the
-//     parser would reject or return a result without a string title or file for (defence in depth only).
-//   - `counted.has(rel) &&` in r3Rule: the rule is only ever asked about rows whose outcome is `counted`, on build and on reuse.
+//   - `typeof r.title/r.file` in build: preflight has already refused every result without a string title or suite name
+//     (defence in depth only). Round 3 withdrew the same claim for `if (!parsed.supported)`: a document preflight accepts can
+//     still make the parser reject it (`ancestorTitles: {}`, `failureMessages: {}`), so that guard is a mutant killed by P4r-35.
 //   - the early marker-file cap in build: it stops work early; without it `validRecord` refuses the same record with the same
 //     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
+// Removed in round 3 with the code they mutated: the relations over the round 2 result counts (S1: the counts are gone, the
+// remaining totals are compared with their rows), the submodule HEAD/dirty/hidden-flag mutants (S3: every gitlink is refused),
+// and `min(d, 0)` -> `d` (owner amendment 2026-11-18: the total over P is the plain sum, so the mutant has no target).
 const IO = 'engine-test-kinds-io.mjs', RE = 'engine-test-kinds-reuse.mjs', BA = 'engine-test-kinds-base.mjs';
 const MUTANTS = [
   // reuse: the four conditions
@@ -988,44 +1187,37 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-2', name: 'applicability: the runner format is not compared', from: 'copy.runner.format === RUNNER.format && ', to: '' },
   { file: RE, tag: 'P4r-2', name: 'applicability: the claim is not compared', from: ' && copy.claim === CLAIM;', to: ';' },
   { file: IO, tag: 'P4r-2', name: 'applicability: covers is not re-derived', from: 'covers: matcher(entry.covers), command,', to: "covers: matcher(['**']), command," },
-  { file: RE, tag: 'P4r-18', name: 'applicability: P membership is not re-derived', from: 'if (!inP.has(f.file) || applicable(', to: 'if (applicable(' },
+  { file: RE, tag: 'P4r-18', name: 'applicability: P membership is not re-derived', from: 'if (c.inP(f.file) === null || applicable(', to: 'if (applicable(' },
   { file: RE, tag: 'P4r-18', name: 'applicability: the file checks are not re-derived', from: "|| applicable(c.top, f.file, testGlobs, covers, ctx) !== null) return", to: ') return' },
-  { file: RE, tag: 'P4r-18', name: 'applicability: R-3 is not re-derived', from: "for (const f of counted) for (const m of f.credited) if (!credit(f.file, m)) return { ok: false, reason: 'applicability' };", to: '' },
-  { file: RE, tag: 'P4r-19', name: 'applicability: the STORED skipped counts are ignored on reuse (Opus survivor)', from: 'r3Rule(census(c), r3Inputs(copy.files, inP), ctx)', to: 'r3Rule(census(c), r3Inputs(copy.files.map((f) => ({ ...f, skipped: new Map() })), inP), ctx)' },
+  { file: RE, tag: 'P4r-18', name: 'applicability: R-3 is not re-derived', from: '      for (const m of f.credited) if (rule(f.file, m) !== \'credit\') return { ok: false, reason: \'applicability\' };\n', to: '' },
+  { file: RE, tag: 'P4r-19', name: 'applicability: the STORED skipped counts are ignored on reuse (Opus survivor)', from: 'r3Rule(census(c), r3Inputs(copy.files, c.inP), ctx)', to: 'r3Rule(census(c), r3Inputs(copy.files.map((f) => ({ ...f, skipped: new Map() })), c.inP), ctx)' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the dag digest is not compared', from: 'copy.dag_digest !== cur.dag_digest || ', to: '' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the command digest is not compared', from: ' || copy.command_digest !== cur.command_digest', to: '' },
   { file: RE, tag: 'P4r-2', name: 'freshness: the config digest is not compared', from: " || copy.config_digest !== cur.config_digest) return { ok: false, reason: 'freshness' };", to: ") return { ok: false, reason: 'freshness' };" },
   // the record schema (I1), shared by build and reuse
-  { file: IO, tag: 'P4r-18', name: 'schema: a void row may credit', from: "if ((outcome !== 'counted' && ids.length) || !sortedUnique(ids)) return null;", to: 'if (!sortedUnique(ids)) return null;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: a void row may credit', from: 'if (outcome !== \'counted\' && (ids.length || withheld.size || unknown)) return null;', to: 'if (outcome !== \'counted\' && (withheld.size || unknown)) return null;' },
   { file: IO, tag: 'P4r-18', name: 'schema: credited ids are not validated', from: "arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx)", to: "arr(own(f, 'credited'), LIMITS.maxIds, (m) => typeof m === 'string', ctx)" },
-  { file: IO, tag: 'P4r-18', name: 'schema: credited ids may repeat', from: '|| !sortedUnique(ids)) return null;', to: ') return null;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: credited ids may repeat', from: '|| !sortedUnique(ids) ||', to: '||' },
   { file: IO, tag: 'P4r-18', name: 'schema: an invented outcome is accepted', from: "if (typeof outcome !== 'string' || !OUTCOMES.includes(outcome)) return null;", to: '' },
   { file: IO, tag: 'P4r-18', name: 'schema: extra or missing top-level keys are accepted', from: 'if (!exactKeys(R, TOP)) return null;', to: 'if (!plain(R)) return null;' },
   { file: IO, tag: 'P4r-18', name: 'schema: the runner keys are not exact', from: '!exactKeys(runner, RUNNER_KEYS) || ', to: '' },
   { file: IO, tag: 'P4r-18', name: 'schema: the row keys are not exact', from: 'if (!exactKeys(f, ROW)) return null;', to: '' },
-  { file: IO, tag: 'P4r-18', name: 'schema: the counts are not reconciled with the rows', from: 'n.marker_files === copy.files.length && n.credited === credited && ', to: '' },
-  { file: IO, tag: 'P4r-18', name: 'schema: unknown_markers is not validated', from: 'COUNTS.every((k) => uint(copy.counts[k]))', to: "COUNTS.every((k) => k === 'unknown_markers' || uint(copy.counts[k]))" },
+  { file: IO, tag: 'P4r-28', name: 'S1: the stored totals are not compared with the rows', from: 'return COUNTS.every((k) => copy.counts[k] === sum[k]) ? copy : null;', to: 'return copy;' },
+  { file: IO, tag: 'P4r-18', name: 'schema: a row unknown count is not validated', from: '!uint(unknown, LIMITS.maxIds)', to: '!Number.isFinite(unknown)' },
   { file: IO, tag: 'P4r-18', name: 'schema: duplicate file rows are accepted', from: 'if (file !== null && seen.has(file)) return null;', to: '' },
-  { file: IO, tag: 'P4r-18', name: 'schema: skipped counts are not validated', from: 'if (!uint(n) || n === 0) return null;', to: '' },
-  { file: IO, tag: 'P4r-18', name: 'schema: skipped keys are not creditable ids', from: 'if (!creditable(k)) return null;', to: "if (typeof k !== 'string') return null;" },
+  { file: IO, tag: 'P4r-18', name: 'schema: skipped counts are not validated', from: '(v) => uint(v) && v > 0)', to: '(v) => typeof v === \'number\')' },
+  { file: IO, tag: 'P4r-18', name: 'schema: skipped and withheld keys are not creditable ids', from: 'if (!creditable(k) || !ok(own(o, k))) return null;', to: 'if (!ok(own(o, k))) return null;' },
   { file: IO, tag: 'P4r-18', name: 'schema: a row file escaping the repo is accepted', from: "if (!(file === null ? outcome === 'result_outside_repo' : safeRel(file) && outcome !== 'result_outside_repo')) return null;", to: '' },
   { file: BA, tag: 'P4r-11', name: 'schema: a proxy record is read', from: "if (!plain(o)) return null;\n  const ks", to: "if (o === null || typeof o !== 'object') return null;\n  const ks" },
   { file: IO, tag: 'P4r-18', name: 'schema: digests are not typed', from: "['dag_digest', 'command_digest', 'config_digest', 'report_sha256'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))", to: "['dag_digest', 'command_digest', 'config_digest'].every((k) => typeof copy[k] === 'string' && HEX64.test(copy[k]))" },
   { file: IO, tag: 'P4r-18', name: 'schema: the runner id and format are not typed', from: 'str(copy.runner.id, 64) && str(copy.runner.format, 64) && ', to: '' },
   { file: IO, tag: 'P4r-9', name: 'schema: the runner version is free text (Opus minor)', from: "typeof copy.runner.version === 'string' && RUNNER_VERSION.test(copy.runner.version)", to: 'str(copy.runner.version, 64)' },
   { file: IO, tag: 'P4r-18', name: 'schema: report_len is not bounded', from: 'uint(copy.report_len, LIMITS.maxReportBytes)', to: 'uint(copy.report_len)' },
-  { file: IO, tag: 'P4r-18', name: 'schema: the result count is not bounded', from: ' && n.results <= LIMITS.maxResults', to: '' },
-  { file: IO, tag: 'P4r-18', name: 'schema: passed may exceed results', from: 'n.passed <= n.results && ', to: '' },
   { file: IO, tag: 'P4r-18', name: 'schema: the entry name is not typed', from: "typeof copy.entry === 'string' && ENTRY_NAME.test(copy.entry) && ", to: '' },
   { file: IO, tag: 'P4r-18', name: 'schema: the claim is not typed', from: ' && str(copy.claim, 16)', to: '' },
   // the provenance relations (I-D, C5)
   { file: IO, tag: 'P4r-28', name: 'relations: report_len 0 is accepted', from: ' && copy.report_len >= 1 && ', to: ' && ' },
-  { file: IO, tag: 'P4r-28', name: 'relations: a row needs no result', from: 'n.marker_files <= n.results && ', to: '' },
-  { file: IO, tag: 'P4r-28', name: 'relations: a credit or unknown marker needs no passed result', from: '(n.passed >= 1 || (n.credited === 0 && n.unknown_markers === 0))', to: 'true' },
-  { file: IO, tag: 'P4r-28', name: 'relations: an unknown marker needs no passed result', from: '(n.passed >= 1 || (n.credited === 0 && n.unknown_markers === 0))', to: '(n.passed >= 1 || n.credited === 0)' },
-  { file: IO, tag: 'P4r-28', name: 'relations: a skipped carrier needs no non-passed result', from: '(n.results > n.passed || copy.files.every((f) => f.skipped.size === 0))', to: 'true' },
-  { file: IO, tag: 'P4r-28', name: 'relations: unknown markers are bounded by all rows, not the counted ones', from: 'n.unknown_markers <= countedRows * LIMITS.maxIds', to: 'n.unknown_markers <= LIMITS.maxMarkerFiles * LIMITS.maxIds' },
-  { file: IO, tag: 'P4r-28', name: 'relations: a skipped carrier may sit on a row outside P', from: " || (keys.length && ['not_in_P', 'result_outside_repo'].includes(outcome))", to: '' },
+  { file: IO, tag: 'P4r-28', name: 'relations: a skipped carrier may sit on a row outside P', from: '    if (skipped.size && [\'not_in_P\', \'result_outside_repo\'].includes(outcome)) return null;\n', to: '' },
   { file: IO, tag: 'P4r-30', name: 'I-B: buildRecord does not pass its own output through the schema (C7)', from: "  if (!validRecord(record, ctx)) refuse('test_kinds_error'); // I-B: never emit a record reuse would reject (C7)", to: '' },
   // the current context (I-A, I-F), shared by the three interfaces
   { file: IO, tag: 'P4r-8', name: 'context: entries are not validated by readEntry', from: 'arr(own(input, \'entries\'), LIMITS.maxList, plain, ctx).map(readEntry);', to: "arr(own(input, 'entries'), LIMITS.maxList, plain, ctx).map((x) => ({ ...x }));" },
@@ -1034,13 +1226,13 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-29', name: 'context: a missing command is accepted for an entry with a record', from: "if (raw === undefined) { if (needCommand(entry) !== false) refuse('test_kinds_error'); return { entry, command: null }; }", to: 'if (raw === undefined) return { entry, command: null };' },
   { file: RE, tag: 'P4r-29', name: 'verdict: an absent record skips its command validation (C6)', from: 'commandOf: (en) => (has(commands, en.name) ? own(commands, en.name) : undefined)', to: 'commandOf: (en) => (has(commands, en.name) && has(records, en.name) ? own(commands, en.name) : undefined)' },
   { file: RE, tag: 'P4r-29', name: 'verdict: no entry needs a command', from: 'needCommand: (en) => has(records, en.name)', to: 'needCommand: () => false' },
-  { file: IO, tag: 'P4r-26', name: 'context: a config path in P does not refuse (C3)', from: "if (entries.some((en) => en.config_paths.some((p) => all.has(p)))) refuse('runner_config_changed');", to: '' },
-  { file: IO, tag: 'P4r-7', name: 'context: config_paths are checked after the exclusions', from: 'const all = new Set(c.all);\n  if (entries', to: 'const all = new Set(c.paths);\n  if (entries' },
-  { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code);\n    per.set', to: '    per.set' },
+  { file: IO, tag: 'P4r-26', name: 'context: a config path in P does not refuse (C3)', from: '  if (entries.some((en) => en.config_paths.some((p) => c.inAll(p, \'runner_config_changed\') !== null))) refuse(\'runner_config_changed\');\n', to: '' },
+  { file: IO, tag: 'P4r-7', name: 'context: config_paths are checked after the exclusions', from: 'c.inAll(p, \'runner_config_changed\')', to: 'c.inP(p, \'runner_config_changed\')' },
+  { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code, cd.detail);\n    per.set', to: '    per.set' },
   { file: IO, tag: 'P4r-21', name: 'context: the declared args are hashed instead of the substituted ones', from: 'command_digest: command && commandDigest(command.cmd, command.args)', to: 'command_digest: command && commandDigest(entry.cmd, entry.args)' },
   // reuse: the verdict
   { file: RE, tag: 'P4r-2', name: 'verdict: a stale record is used as evidence', from: 'if (!u.ok) continue;', to: '' },
-  { file: RE, tag: 'P4r-13', name: 'verdict: kind and plan routing swapped', from: "(m.startsWith('kind:') ? kinds : items)", to: "(m.startsWith('plan:') ? kinds : items)" },
+  { file: RE, tag: 'P4r-13', name: 'verdict: kind and plan routing swapped', from: 'for (const m of f.credited) (m.startsWith(\'kind:\') ? kinds : items)', to: 'for (const m of f.credited) (m.startsWith(\'plan:\') ? kinds : items)' },
   { file: RE, tag: 'P4r-15', name: 'verdict: unknown markers are not summed', from: 'unknown += u.evidence.unknown_markers;', to: '' },
   { file: RE, tag: 'P4r-13', name: 'verdict: waivers are matched to a fixed candidate instead of the evidence identity', from: 'testKindWaivers(S, c.evidence_id,', to: "testKindWaivers(S, 'fixed'," },
   { file: RE, tag: 'P4r-13', name: 'verdict: protected kinds are not handed to P6', from: 'protected: v0.protected_kinds.map((k) => `kind:${k}`)', to: 'protected: []' },
@@ -1059,16 +1251,14 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-4', name: 'counting: an unknown kind is credited', from: 'for (const u of m.unknown) slot.unknown.add(u);', to: 'for (const u of m.unknown) slot.ids.add(u);' },
   { file: BA, tag: 'P4r-24', name: 'C1: the title cap is dropped', from: "      if (field(c, 'title').length > LIMITS.maxTitleChars) refuse('evidence_budget_exceeded'); // I-C: refused, whatever the status (C1)", to: '' },
   { file: BA, tag: 'P4r-24', name: 'C1: the title cap applies to passed results only', from: "      if (field(c, 'title').length > LIMITS.maxTitleChars) refuse(", to: "      if (field(c, 'status') === 'passed' && field(c, 'title').length > LIMITS.maxTitleChars) refuse(" },
-  { file: IO, tag: 'P4r-15', name: 'counting: unknown markers are not counted', from: 'unknownMarkers += row.unknown.size; credited += ids.length;', to: 'credited += ids.length;' },
-  { file: IO, tag: 'P4r-5', name: 'R-3: the per-file base count is dropped', from: 'n(cs.cand.get(rel), m) - n(cs.base.get(rel), m) - n(skipped.get(rel), m) > 0', to: 'n(cs.cand.get(rel), m) - n(skipped.get(rel), m) > 0' },
-  { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: 'n(skipped.get(rel), m) > 0 && n(total', to: 'n(skipped.get(rel), m) >= 0 && n(total' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: ' && n(total, m) > 0;', to: ';' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: the per-file skip subtraction is dropped', from: ' - n(skipped.get(rel), m) > 0', to: ' > 0' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction over P is dropped', from: 'const d = n(a, m) - n(b, m) - n(s, m);', to: 'const d = n(a, m) - n(b, m);' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: a marker added outside the counted files offsets a removal (move + marker elsewhere)', from: '(counted.has(p) ? d : Math.min(d, 0))', to: 'd' },
-  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'if (m && want.has(m[3])) oids.push([m[3], m[2]]);', to: 'if (m && want.has(m[3]) && existsSync(join(c.top, m[3]))) oids.push([m[3], m[2]]);', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
+  { file: IO, tag: 'P4r-15', name: 'counting: unknown markers are not counted', from: 'unknown: row.unknown.size });', to: 'unknown: 0 });' },
+  { file: IO, tag: 'P4r-5', name: 'R-3: the base count is dropped', from: 'n(cs.cand.get(p), m) - n(cs.base.get(p), m) - n(skipped.get(p), m);', to: 'n(cs.cand.get(p), m) - n(skipped.get(p), m);' },
+  { file: IO, tag: 'P4r-5', name: 'R-3: equal counts credit', from: 'd(rel, m) <= 0 ? \'r3_unchanged\'', to: 'd(rel, m) < 0 ? \'r3_unchanged\'' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: the total over P is dropped (a rename credits)', from: 'n(total, m) > 0 ? \'credit\' : \'r3_offset\'', to: 'true ? \'credit\' : \'r3_offset\'' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: the skip subtraction is dropped', from: ' - n(skipped.get(p), m);', to: ';' },
+  { file: IO, tag: 'P4r-19', name: 'R-3: base totals miss deleted paths', from: 'if (m && exact.has(p)) blobs.push([p, m[2]]);', to: 'if (m && exact.has(p) && existsSync(join(top, p))) blobs.push([p, m[2]]);', also: [["import { lstatSync, readFileSync,", "import { existsSync, lstatSync, readFileSync,"]] },
   // record: files (rule 3), names merging
-  { file: IO, tag: 'P4r-5', name: 'file: a file outside P is counted', from: "if (!inP.has(rel)) return { outcome: 'not_in_P', rel };", to: '' },
+  { file: IO, tag: 'P4r-5', name: 'file: a file outside P is counted', from: '  if (c.inP(rel) === null) return { outcome: \'not_in_P\', rel }; // an alias of a path in P is refused (S2)\n', to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: the test globs are not applied', from: "if (!matches(testGlobs, rel, ctx)) return 'not_test_file';", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: covers is not applied', from: "if (!matches(covers, rel, ctx)) return 'runner_uncovered';", to: '' },
   { file: IO, tag: 'P4r-6', name: 'file: a relative result name is resolved against the cwd', from: "if (!isAbsolute(file)) return { outcome: 'result_outside_repo', rel: null };", to: '' },
@@ -1080,7 +1270,7 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-6', name: 'file: a link and its target are two rows', from: 'prev = v.rel === null ? null : byRel.get(v.rel);', to: 'prev = null;' },
   { file: IO, tag: 'P4r-27', name: 'C4: merged rows are not re-capped', from: '      capSlot(prev);\n      continue;', to: '      continue;' },
   { file: IO, tag: 'P4r-27', name: 'merge: the link\'s skipped carriers are dropped (Opus survivor)', from: '      for (const [k, n] of slot.skipped) prev.skipped.set(k, (prev.skipped.get(k) ?? 0) + n);\n', to: '' },
-  { file: IO, tag: 'P4r-6', name: 'merge: a carrier outside P is kept on its row', from: '  for (const row of rows) if (row.file === null || !inP.has(row.file)) row.skipped = new Map(); // a carrier outside P subtracts nothing\n', to: '' },
+  { file: IO, tag: 'P4r-6', name: 'merge: a carrier outside P is kept on its row', from: '  for (const row of rows) if (row.file === null || c.inP(row.file) === null) row.skipped = new Map(); // a carrier outside P subtracts nothing\n', to: '' },
   // record: config, runner, provenance, budgets, scan
   { file: IO, tag: 'P4r-7', name: 'config: the path is not hashed', from: 'h.update(`${p}\\0`); h.update(st ?', to: 'h.update(st ?' },
   { file: IO, tag: 'P4r-7', name: 'config: a symlinked config is hashed through', from: "if (st && (!st.isFile() || st.size > LIMITS.maxConfigBytes)) refuse('evidence_unavailable');", to: '' },
@@ -1125,12 +1315,35 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-14', name: 'identity: the path names are not hashed (Opus survivor)', from: "h.update(Buffer.from(p, 'utf8')); ", to: '' },
   { file: IO, tag: 'P4r-14', name: 'identity: file bytes are not hashed', from: "h.update(content); h.update('\\0');", to: "h.update('\\0');" },
   { file: IO, tag: 'P4r-20', name: 'identity: a symlink target is not hashed', from: "content = readlinkSync(abs(p), { encoding: 'buffer' });", to: "content = Buffer.from('');" },
-  { file: IO, tag: 'P4r-20', name: 'identity: a submodule HEAD is not hashed', from: "if (head) { kind = 'submodule'; mode = '160000'; content = head; }", to: "if (head) { kind = 'submodule'; mode = '160000'; content = Buffer.from(''); }" },
-  { file: IO, tag: 'P4r-20', name: 'identity: a dirty submodule is accepted', from: "if (status.length) refuse('evidence_unavailable');", to: '' },
-  { file: IO, tag: 'P4r-25', name: 'C2: hidden index flags in a submodule are not read', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hasGitlink(index))' },
-  { file: IO, tag: 'P4r-25', name: 'C2: a submodule holding a submodule is accepted', from: 'if (hiddenFlagged(index) || hasGitlink(index))', to: 'if (hiddenFlagged(index))' },
-  { file: IO, tag: 'P4r-25', name: 'C2 twin: a submodule outside P is not checked', from: '    if (st?.isDirectory()) submoduleCheckout(join(top, m[1]));\n', to: '' },
   { file: IO, tag: 'P4r-12', posix: true, name: 'identity: a fifo is read', from: "else refuse('evidence_unavailable'); // a fifo or device is never read (it could block)", to: "else { kind = 'other'; }" },
+  // round 3 (S1-S4) and the owner R-3 amendment
+  { file: IO, tag: 'P4r-18', name: 'schema: a void row may withhold', from: '(ids.length || withheld.size || unknown)', to: '(ids.length || unknown)' },
+  { file: IO, tag: 'P4r-18', name: 'schema: a void row may count unknown markers', from: '(ids.length || withheld.size || unknown)', to: '(ids.length || withheld.size)' },
+  { file: IO, tag: 'P4r-18', name: 'schema: a withheld reason is free text', from: '(v) => WITHHELD.includes(v)', to: '(v) => typeof v === \'string\'' },
+  { file: IO, tag: 'P4r-28', name: 'schema: an id may be both credited and withheld', from: ' || ids.some((m) => withheld.has(m))', to: '' },
+  { file: IO, tag: 'P4r-28', name: 'S1: marker_files is not compared with the rows', from: 'COUNTS.every((k) => copy.counts[k] === sum[k])', to: 'COUNTS.every((k) => k === \'marker_files\' || copy.counts[k] === sum[k])' },
+  { file: IO, tag: 'P4r-28', name: 'S1: credited is not compared with the rows', from: 'COUNTS.every((k) => copy.counts[k] === sum[k])', to: 'COUNTS.every((k) => k === \'credited\' || copy.counts[k] === sum[k])' },
+  { file: IO, tag: 'P4r-28', name: 'S1: unknown_markers is not compared with the rows', from: 'COUNTS.every((k) => copy.counts[k] === sum[k])', to: 'COUNTS.every((k) => k === \'unknown_markers\' || copy.counts[k] === sum[k])' },
+  { file: IO, tag: 'P4r-36', name: 'R-3: the two withheld reasons are swapped', from: '? \'r3_unchanged\' : n(total', to: '? \'r3_offset\' : n(total' },
+  { file: RE, tag: 'P4r-36', name: 'reuse: a withheld reason is not re-derived', from: '      for (const [m, why] of f.withheld) if (rule(f.file, m) !== why) return { ok: false, reason: \'applicability\' };\n', to: '' },
+  { file: RE, tag: 'P4r-36', name: 'reuse: R-3 is re-derived only when a row credits', from: 'counted.some((f) => f.credited.length || f.withheld.size)', to: 'counted.some((f) => f.credited.length)' },
+  { file: RE, tag: 'P4r-36', name: 'verdict: withheld reasons are not surfaced', from: '    for (const [m, why] of Object.entries(u.evidence.withheld)) if (withheld[m] !== \'r3_offset\') withheld[m] = why;\n', to: '' },
+  { file: RE, tag: 'P4r-36', name: 'verdict: an id credited elsewhere is still listed as withheld', from: '  for (const m of Object.keys(withheld)) if ((m.startsWith(\'kind:\') ? kinds : items).has(m.slice(5))) delete withheld[m]; // credited elsewhere\n', to: '' },
+  { file: RE, tag: 'P4r-36', name: 'reuse: r3_offset does not take precedence over r3_unchanged', from: 'for (const [m, why] of f.withheld) if (withheld[m] !== \'r3_offset\') withheld[m] = why;', to: 'for (const [m, why] of f.withheld) withheld[m] = why;' },
+  { file: BA, tag: 'P4r-33', name: 'S2: an alias is treated as a different path', from: 'return q === undefined ? null : q === p ? p : refuse(code, \'path_alias\');', to: 'return q === p ? p : null;' },
+  { file: BA, tag: 'P4r-33', name: 'S2: the key ignores Unicode normalisation', from: 'export const pathKey = (p) => p.normalize(\'NFC\').toLowerCase();', to: 'export const pathKey = (p) => p.toLowerCase();' },
+  { file: BA, tag: 'P4r-33', name: 'S2: the key ignores case', from: 'export const pathKey = (p) => p.normalize(\'NFC\').toLowerCase();', to: 'export const pathKey = (p) => p.normalize(\'NFC\');' },
+  { file: BA, tag: 'P4r-33', name: 'S2: two git paths with one key are accepted', from: 'if (byKey.has(k)) refuse(\'evidence_unavailable\', \'path_alias\'); ', to: '' },
+  { file: BA, tag: 'P4r-33', name: 'S2: an aliased exclusion prefix is accepted', from: 'return k === d || k.startsWith(`${d}/`) ? refuse(\'evidence_unavailable\', \'path_alias\') : false;', to: 'return false;' },
+  { file: IO, tag: 'P4r-33', name: 'S2: a config path may cross a symlinked directory', from: '      if (realOrAncestor(join(top, p), { work: 0, max: 1e6 }) !== join(top, p)) refuse(\'evidence_unavailable\'); // its own file: no symlinked directory, no alias\n', to: '' },
+  { file: IO, tag: 'P4r-34', name: 'S3: a gitlink in the index is accepted', from: 'records(index).some(isGitlink) || ', to: '' },
+  { file: IO, tag: 'P4r-34', name: 'S3: a gitlink at base is accepted', from: ' || treeRecs.some(isGitlink)', to: '' },
+  { file: IO, tag: 'P4r-34', name: 'S3: a repository directory in P is hashed as a plain directory', from: '        try { lstatSync(join(abs(p), \'.git\')); refuse(\'evidence_unavailable\', SUBMODULE); } catch (e) { if (e?.code !== \'ENOENT\') throw e; }\n', to: '' },
+  { file: IO, tag: 'P4r-34', name: 'S3: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', SUBMODULE); // S3, before anything else reads it', to: 'refuse(\'evidence_unavailable\'); // S3, before anything else reads it' },
+  { file: BA, tag: 'P4r-34', name: 'S3: a refusal detail is not returned', from: '...(e instanceof Refusal && e.detail ? { detail: e.detail } : {})', to: '...{}' },
+  { file: BA, tag: 'P4r-35', name: 'S4: a drive-prefixed path is repo-relative', from: '|^[A-Za-z]:/.test(p)', to: '/.test(p)' },
+  { file: IO, tag: 'P4r-35', name: 'S4: the parser guard is removed (it is reachable)', from: '  if (!parsed.supported) refuse(\'evidence_unavailable\'); // REACHABLE: preflight does not check every field the parser reads (P4r-35)\n', to: '' },
+  { file: IO, tag: 'P4r-35', name: 'S4: an unexpected realpath error is "outside the repo"', from: 'const missing = (e) => (e?.code === \'ENOENT\' || e?.code === \'ENOTDIR\' ? null : refuse(\'evidence_unavailable\'));', to: 'const missing = () => null;', posix: true },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1184,7 +1397,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 30 : 31), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 35 : 36), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');
   const survivors = mutants.filter((r) => r.timedOut || r.code === 0 || !r.killers.includes(r.m.tag)).map((r) => `${r.m.name} (exit ${r.code}, killers ${uniq(r.killers ?? [])})`);
