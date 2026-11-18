@@ -1,6 +1,7 @@
 /**
- * The one worker launcher of ship-ticket, shared by carrier.mjs (dispatch) and the run engine
- * (engine-io.mjs: workers, RED runners and proof runners). Node built-ins only.
+ * The launchers of ship-ticket. LAUNCHER is shared by carrier.mjs (dispatch) and the run engine's
+ * workers (engine-io.mjs); SEALED_LAUNCHER runs the engine's runner attempts (RED, proof, unit
+ * checks) and returns their result over the engine's own pipe. Node built-ins only.
  */
 
 /** Byte the carrier (and the run engine) writes to the launcher's stdin to let the provider CLI start. */
@@ -11,6 +12,39 @@ const DRAIN_MS = 1000;
 const SAMPLE_MS = 1000, FIRST_SAMPLE_MS = 100;
 /** Durable mode keeps at most this much stdout; beyond it the envelope carries `truncated` (B12: flagged, never a failure). */
 export const STDOUT_CAP = 32 * 1024 * 1024;
+
+/** The durable launchers' resource sampler (source text, shared by LAUNCHER and SEALED_LAUNCHER). */
+const SAMPLER = `  // Resource sampler (durable mode, POSIX): every ${SAMPLE_MS} ms (first sample after ${FIRST_SAMPLE_MS} ms) one async \`ps\` of the
+  // launcher's own process group, minus the launcher and the ps itself. Keeps the max summed RSS (KiB) and the max summed
+  // ps %cpu (a per-process lifetime average, so an estimate). Observation only: timers are unref'd, any failure
+  // leaves n = 0 (reported as 'unknown', never 0), and stopSampler() kills an in-flight ps before the envelope.
+  const sm = { n: 0, rss: 0, cpu: 0, ps: null, timers: [] };
+  const sampling = durable && spec.sample !== false && process.platform !== 'win32';
+  const sample = () => {
+    if (sm.ps || done) return;
+    try {
+      const ps = require('node:child_process').execFile('ps', ['-A', '-o', 'pid=,pgid=,rss=,pcpu='], { timeout: 2000, maxBuffer: 8388608, env: Object.assign({}, process.env, { LC_ALL: 'C' }) }, (err, so) => {
+        sm.ps = null;
+        if (err || done) return;
+        try {
+          const rows = String(so).split('\\n').map((l) => l.trim().split(/\\s+/).map(Number)).filter((r) => r.length === 4 && r.every(Number.isFinite));
+          const me = rows.find((r) => r[0] === process.pid);
+          if (!me) return;
+          let rss = 0, cpu = 0, any = false;
+          for (const r of rows) if (r[1] === me[1] && r[0] !== process.pid && r[0] !== ps.pid) { rss += r[2]; cpu += r[3]; any = true; }
+          if (!any) return;
+          sm.n++; sm.rss = Math.max(sm.rss, rss); sm.cpu = Math.max(sm.cpu, cpu);
+        } catch {}
+      });
+      sm.ps = ps;
+      ps.on('error', () => {});
+    } catch {}
+  };
+  const stopSampler = () => {
+    for (const t of sm.timers) { clearTimeout(t); clearInterval(t); }
+    try { if (sm.ps) sm.ps.kill('SIGKILL'); } catch {}
+  };
+`;
 
 /**
  * Launcher (CommonJS, run with `node -e`), shared by the carrier and the run engine. argv[1] is
@@ -41,37 +75,7 @@ process.stdin.once('data', (chunk) => {
   process.stdin.pause();
   const out = [];
   let size = 0;
-  // Resource sampler (durable mode, POSIX): every ${SAMPLE_MS} ms (first sample after ${FIRST_SAMPLE_MS} ms) one async \`ps\` of the
-  // launcher's own process group, minus the launcher and the ps itself. Keeps the max summed RSS (KiB) and the max summed
-  // ps %cpu (a per-process lifetime average, so an estimate). Observation only: timers are unref'd, any failure
-  // leaves n = 0 (reported as 'unknown', never 0), and stopSampler() kills an in-flight ps before the envelope.
-  const sm = { n: 0, rss: 0, cpu: 0, ps: null, timers: [] };
-  const sampling = durable && spec.sample !== false && process.platform !== 'win32';
-  const sample = () => {
-    if (sm.ps || done) return;
-    try {
-      const ps = require('node:child_process').execFile('ps', ['-A', '-o', 'pid=,pgid=,rss=,pcpu='], { timeout: 2000, maxBuffer: 8388608, env: Object.assign({}, process.env, { LC_ALL: 'C' }) }, (err, so) => {
-        sm.ps = null;
-        if (err || done) return;
-        try {
-          const rows = String(so).split('\\n').map((l) => l.trim().split(/\\s+/).map(Number)).filter((r) => r.length === 4 && r.every(Number.isFinite));
-          const me = rows.find((r) => r[0] === process.pid);
-          if (!me) return;
-          let rss = 0, cpu = 0, any = false;
-          for (const r of rows) if (r[1] === me[1] && r[0] !== process.pid && r[0] !== ps.pid) { rss += r[2]; cpu += r[3]; any = true; }
-          if (!any) return;
-          sm.n++; sm.rss = Math.max(sm.rss, rss); sm.cpu = Math.max(sm.cpu, cpu);
-        } catch {}
-      });
-      sm.ps = ps;
-      ps.on('error', () => {});
-    } catch {}
-  };
-  const stopSampler = () => {
-    for (const t of sm.timers) { clearTimeout(t); clearInterval(t); }
-    try { if (sm.ps) sm.ps.kill('SIGKILL'); } catch {}
-  };
-  const envelope = (code, signal, error) => {
+${SAMPLER}  const envelope = (code, signal, error) => {
     stopSampler();
     fs.writeFileSync(spec.outFile, Buffer.concat(out), { mode: 0o600 });
     const tmp = spec.envelopeFile + '.tmp';
@@ -117,13 +121,110 @@ process.stdin.once('data', (chunk) => {
 });
 `;
 
+/** Schema of the sealed launcher's result frame (engine-io.mjs decodeSealedFrame). */
+export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
+
+/**
+ * Sealed launcher (CommonJS, `node -e`): the run engine's RUNNER attempts only (RED, proof, unit
+ * checks; design S-01b2 rev 6 §2.3). Workers and the carrier never use it. argv[1] is JSON
+ * `{file, args, shell, outFile, envelopeFile, attemptId}` plus optional `report: true` / `sample: false`.
+ * Same release protocol and process group as LAUNCHER; the runner's stdin is empty. Its own fd 1
+ * is a pipe the engine holds. Once the runner finishes (stdout and the report channel closed, or a
+ * DRAIN_MS drain after its exit) it writes ONE length-framed result to fd 1, before any file:
+ * a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own child `exit`,
+ * spawn_error, out_len, truncated, stdout_bytes, out_eof, report, report_len, report_truncated,
+ * report_bytes, report_eof), then the stdout bytes, then the report bytes. The write loops over
+ * EAGAIN; fd 1 is then closed and the launcher exits 0 iff exit_code is 0.
+ * - `report: true`: the runner gets a pathless pipe at fd 3 (reached as /dev/fd/3), collected up to
+ *   STDOUT_CAP; `report_eof` is true only when it reached EOF before the result was framed.
+ * - `.out` and the envelope are forensic copies, written after the frame and never read for a
+ *   decision: each goes to a fresh `<file>.tmp` (O_EXCL, no-follow) renamed over the name, so a
+ *   planted FIFO, symlink or file there is skipped and can never block the launcher.
+ */
+const SEALED_LAUNCHER = `'use strict';
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const spec = JSON.parse(process.argv[1]);
+const durable = true;
+let started = false, done = false;
+process.stdin.on('end', () => { if (!started) process.exit(125); });
+process.stdin.on('error', () => { if (!started) process.exit(125); });
+process.stdin.once('data', (chunk) => {
+  if (chunk[0] !== ${RELEASE_BYTE[0]}) process.exit(125);
+  started = true;
+  process.stdin.pause();
+  const out = [], rep = [];
+  let size = 0, rsize = 0, outEof = false, repEof = false;
+${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
+  const writeAll = (fd, buf) => {
+    for (let off = 0; off < buf.length;) {
+      try { off += fs.writeSync(fd, buf, off, buf.length - off); } catch (e) { if (e.code !== 'EAGAIN') throw e; Atomics.wait(nap, 0, 0, 1); }
+    }
+  };
+  const CREATE = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0);
+  const forensic = (file, bytes) => {
+    try {
+      const tmp = file + '.tmp', fd = fs.openSync(tmp, CREATE, 0o600);
+      try { writeAll(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(tmp, file);
+    } catch {}
+  };
+  const finish = (code, signal, error) => {
+    if (done) return; done = true;
+    stopSampler();
+    const stdout = Buffer.concat(out), report = Buffer.concat(rep);
+    const head = { schema: '${SEALED_SCHEMA}', attempt_id: spec.attemptId, exit_code: code, signal: signal || null, spawn_error: error || null,
+      out_len: stdout.length, truncated: size > ${STDOUT_CAP}, stdout_bytes: size, out_eof: outEof,
+      report: spec.report === true, report_len: report.length, report_truncated: rsize > ${STDOUT_CAP}, report_bytes: rsize, report_eof: repEof };
+    try { writeAll(1, Buffer.concat([Buffer.from(JSON.stringify(head) + '\\n'), stdout, report])); } catch {}
+    try { fs.closeSync(1); } catch {}
+    forensic(spec.outFile, stdout);
+    forensic(spec.envelopeFile, Buffer.from(JSON.stringify({ schema: 'ship-ticket-engine-envelope-v1', attempt_id: spec.attemptId,
+      exit_code: code, signal: signal || null, spawn_error: error || null, stdout_file: spec.outFile, ended_at: new Date().toISOString(),
+      peak_rss_mb: sm.n ? Math.round(sm.rss / 1024 * 10) / 10 : 'unknown', peak_cpu_pct: sm.n ? Math.round(sm.cpu * 10) / 10 : 'unknown', resource_samples: sm.n,
+      ...(size > ${STDOUT_CAP} ? { truncated: true, stdout_bytes: size } : {}) })));
+    process.exit(code === 0 ? 0 : 1);
+  };
+  let cli;
+  try { cli = spawn(spec.file, spec.args, { shell: spec.shell, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore', ...(spec.report === true ? ['pipe'] : [])] }); }
+  catch (e) { return finish(null, null, e.code || 'spawn_error'); }
+  cli.on('error', (e) => finish(null, null, e.code || 'spawn_error'));
+  cli.stdin.on('error', () => {});
+  if (sampling) {
+    const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
+    first.unref(); every.unref(); sm.timers.push(first, every);
+  }
+  cli.stdout.on('data', (c) => { size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); });
+  cli.stdout.on('end', () => { outEof = true; });
+  if (spec.report === true) {
+    const r = cli.stdio[3];
+    r.on('data', (c) => { rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); });
+    r.on('end', () => { repEof = true; });
+    r.on('error', () => {});
+  }
+  let exited = null;
+  cli.on('exit', (code, signal) => { exited = [code, signal]; setTimeout(() => finish(code, signal, null), ${DRAIN_MS}); });
+  cli.on('close', (code, signal) => finish(exited ? exited[0] : code, exited ? exited[1] : signal, null));
+  cli.stdin.end();
+});
+`;
+
 const DURABLE_KEYS = ['promptFile', 'outFile', 'envelopeFile', 'attemptId'];
+const SEALED_KEYS = ['outFile', 'envelopeFile', 'attemptId'];
 const SAMPLER_OFF = 'SHIP_TICKET_SAMPLER_OFF';
 
-/** Arguments that run the launcher for a resolved provider spawn spec (durable mode when `spec.envelopeFile` is set). */
+/**
+ * Arguments that run the launcher for a resolved provider spawn spec (durable mode when
+ * `spec.envelopeFile` is set). `spec.sealed === true` (engine runner attempts only) selects
+ * SEALED_LAUNCHER; without it the output is byte-identical to before the sealed launcher existed.
+ */
 export function launcherArgs(spec) {
+  const sample = spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {};
+  if (spec.sealed === true) {
+    return ['-e', SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
+      ...Object.fromEntries(SEALED_KEYS.map(k => [k, spec[k]])), ...(spec.report === true ? { report: true } : {}), ...sample })];
+  }
   const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
-  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable,
-    ...(spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {}) })];
+  return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];
 }
 
