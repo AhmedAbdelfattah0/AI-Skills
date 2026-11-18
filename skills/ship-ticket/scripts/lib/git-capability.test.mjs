@@ -241,6 +241,33 @@ test('probeGit refuses a failing, old or malformed git', { skip: !posix && 'POSI
   assert.equal(probe('echo "git version 2.44.0"')().noLazyFetch, false);
 });
 
+test('probeGit maps each spawn failure through its launch table; an unlisted code is git_launch_failed', { skip: !posix && 'POSIX fake git and modes' }, (t) => {
+  const root = tmp(t);
+  const cwd = join(root, 'cwd');
+  mkdirSync(cwd);
+  const via = (dir, extra = {}) => () => probeGit({ env: { PATH: dir }, cwd, ...extra });
+  // ENOENT: the resolver seam vouches for a binary that does not exist.
+  const gone = join(root, 'gone');
+  mkdirSync(gone);
+  assert.throws(via(gone, { fs: { realpath: (p) => p, isExecutableFile: () => true } }), code('git_unavailable'), 'ENOENT');
+  // EACCES: the seam vouches for a real file without an execute bit.
+  const noexec = join(root, 'noexec');
+  fakeGit(noexec, 'echo "git version 2.50.0"');
+  chmodSync(join(noexec, 'git'), 0o644);
+  assert.throws(via(noexec, { fs: { realpath: (p) => p, isExecutableFile: () => true } }), code('git_unavailable'), 'EACCES');
+  // ETIMEDOUT and ENOBUFS (the probe's maxBuffer is 4096 bytes). The probe's PATH is only the fake's dir: absolute tools.
+  const slow = join(root, 'slow');
+  fakeGit(slow, '/bin/sleep 5');
+  assert.throws(via(slow, { timeoutMs: 200 }), code('git_timeout'), 'ETIMEDOUT');
+  const loud = join(root, 'loud');
+  fakeGit(loud, `/usr/bin/head -c 8192 /dev/zero | /usr/bin/tr '\\0' x; echo`);
+  assert.throws(via(loud), code('git_output_truncated'), 'ENOBUFS');
+  // E2BIG (no row): an environment larger than the OS argument limit.
+  const okDir = join(root, 'ok');
+  fakeGit(okDir, 'echo "git version 2.50.0"');
+  assert.throws(() => probeGit({ env: { PATH: okDir, BIG: 'x'.repeat(8 * 1024 * 1024) }, cwd }), code('git_launch_failed'), 'E2BIG');
+});
+
 test('a git that ignores SIGTERM cannot hold probeGit past its timeout (external watchdog)', { skip: !posix && 'POSIX signal traps; Windows has no SIGTERM to ignore' }, (t) => {
   const root = tmp(t);
   const pidFile = join(root, 'pid');

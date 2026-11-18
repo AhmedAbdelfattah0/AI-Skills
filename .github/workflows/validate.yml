@@ -113,6 +113,7 @@ jobs:
           skills/ship-ticket/scripts/engine-crash.test.mjs
           skills/ship-ticket/scripts/fast-checks.test.mjs
           skills/ship-ticket/scripts/lib/git-capability.test.mjs
+          skills/ship-ticket/scripts/lib/git-exec.test.mjs
           skills/ship-ticket/scripts/ci-snapshot.test.mjs
           skills/ship-ticket/scripts/lib/shape.test.mjs
           skills/ship-ticket/scripts/lib/mutation-harness.test.mjs

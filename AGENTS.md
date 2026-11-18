@@ -212,6 +212,43 @@ A `SKILL.md` is YAML frontmatter + a markdown workflow body:
   hold the stack rule sets `stack-angular.md` and `stack-backend.md`, and per-stack summaries
   `react.md`, `vue.md`, …).
 - **`scripts/`** (optional) — bundled executables the skill invokes.
+- **`vendor/<package>/`** (optional) — third-party source copied in verbatim. See the vendoring rule below.
+
+**Vendoring a third-party package** (first use: `ship-ticket/vendor/acorn`, a test-only parser):
+
+- **Acquire with integrity.** Take the files from the registry tarball. Before copying anything, check
+  the tarball against the registry's `dist.integrity` (sha512). Copy only the files you need, byte for
+  byte, with no edits. Keep the acquisition record (URL, hashes, date) as review evidence.
+- **Pin it in `vendor/<package>/UPSTREAM.json`.** Record:
+  - the name and exact version;
+  - the tarball URL with its sha256, sha1 and sha512;
+  - the sha256 of each copied file;
+  - `modifications: []`.
+
+  A test must check, before the code is imported, that the pin map lists exactly the expected files and that
+  every pinned hash matches. It must also check that the directory listing is exact (as `T4a` does in
+  `ship-ticket/scripts/lib/git-exec.test.mjs`).
+- **Notices.** Ship the package's `LICENSE` verbatim next to the files, and add an entry (licence text and
+  provenance) to the skill's `THIRD_PARTY_NOTICES.md`.
+- **Line endings.** Add `skills/<skill>/vendor/** -text` to `.gitattributes`. A CRLF checkout would
+  otherwise break the hashes.
+- **No scripts.** Never run the package's install, prepare or postinstall scripts. Never vendor a package
+  whose files need a build step.
+- **Test-only by default.** Production code must not import vendored code. A test must check this for every
+  runtime module of every skill (`T4a` in `ship-ticket/scripts/lib/git-exec.test.mjs` does). It follows every
+  constant `import`/`export … from`, `import()` and `require()` specifier transitively, test files included. It
+  resolves relative and `file:` specifiers as URLs, percent-decoding included, and also tries an extensionless one
+  with `.js`, `.cjs`, `.mjs` and a directory's `index.js`/`index.cjs`. It does not follow a package.json `main` or
+  `exports`, which CommonJS would. None may land in a `vendor/`
+  directory. Every non-constant `import()`/`require()` must be on a pinned list with a reason. No runtime string may
+  name the package or a `vendor/` path. The test does not cover other ways to run the file: `createRequire`,
+  `eval`/`Function`, `vm`, a child process, a Worker, or reading it from disk. Review must catch those. A production
+  dependency needs its own design decision, recorded here.
+- **Install footprint (accepted residual).** `cli.mjs install`/`update` ship `vendor/` along with the
+  `*.test.mjs` files that use it. The default link mode cannot filter files. The copy filter (`isNoise`)
+  matches basenames and is shared with `hashSkill`. A future production `vendor/` would be stripped by
+  it. So vendored files are not excluded. They stay inert only as far as the check above reaches: no runtime
+  module's loader specifier reaches them.
 
 **Cross-skill references** (load-bearing convention): a skill may point at a sibling skill's
 reference file via a relative path like `../code-quality/references/ai-failure-modes.md` — this
