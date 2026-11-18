@@ -319,7 +319,7 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
   const getter = (o, k, v) => Object.defineProperty(o, k, { enumerable: true, get: () => { touched++; return v; } });
   const huge = []; huge.length = LIMITS.maxItems + 1; getter(huge, 0, 'race'); // the length alone must refuse it
   const sparse = ['race']; sparse.length = 3;
-  const deepKinds = { race: ['tag:concurrency'] }; let d = deepKinds; for (let i = 0; i < 1000; i++) { d.race.push([]); d = { race: d.race[1] }; }
+  const deepKinds = { race: ['tag:concurrency'] }; let cur = deepKinds.race; for (let i = 0; i < 1000; i++) { const next = []; cur.push(next); cur = next; }
   const wideMap = {}; for (let i = 0; i < 5000; i++) wideMap[`k${i}`] = ['tag:money'];
   class Box { constructor() { this.kinds = []; this.items = []; this.unknown_markers = 0; } }
   const inherited = Object.create({ kinds: [], items: [], unknown_markers: 0 });
@@ -341,6 +341,8 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
     'inherited fields': { ...base, evidence: inherited },
     'symbol key': { ...base, evidence: withSym },
     'unknown key': { ...base, extra: true },
+    'array with an extra key': { ...base, evidence: { ...base.evidence, kinds: Object.assign(['race'], { x: 1 }) } },
+    'work budget': { ...base, bound: { ...base.bound, kinds: Object.fromEntries(Object.keys(KINDS).map((k) => [k, Array.from({ length: 450 }, () => 'tag:concurrency')])) } },
     'missing key': { bound: base.bound, evidence: base.evidence, waivers: base.waivers, state: base.state, reassessed: [] },
     'array as object': { ...base, evidence: [] },
     'string object': { ...base, evidence: { ...base.evidence, kinds: [Object('race')] } },
@@ -369,6 +371,10 @@ test('[R10] hostile input: proxies, getters, huge, sparse, deep, non-plain and i
   const many = Array.from({ length: LIMITS.maxItems }, () => 'race');
   assert.equal(verdict({ bound: boundFrom({ tags: ['concurrency'] }), kinds: many }).status, 'pass');
   ERROR_ONLY(verdict({ bound: boundFrom({ tags: ['concurrency'] }), kinds: [...many, 'race'] }));
+  // the work budget is charged across lists: each list within maxItems, the total over maxWork, refuses (the case above);
+  // one full list stays within it
+  assert.ok(Object.keys(KINDS).length * 451 > LIMITS.maxWork && LIMITS.maxItems < LIMITS.maxWork / 2, 'the budget case really exceeds only the total');
+  assert.equal(verdict({ bound: { tags: [], items: [], kinds: { race: Array.from({ length: LIMITS.maxItems }, () => 'tag:concurrency') }, protected: [] }, kinds: ['race'] }).status, 'pass');
 });
 
 test('[R11] purity: no input is mutated, nothing is cached across calls, frozen inputs work', () => {
@@ -490,7 +496,37 @@ test('[R13] CRLF copy: every module of the closure with CRLF line endings gives 
 });
 
 // ---- mutation check (L1): a mutant counts as killed ONLY by an ERR_ASSERTION failure in an [R#] test ----
-const MUTANTS = [];
+const MUTANTS = [
+  { name: 'a security surface does not protect', from: "if (s.startsWith('surface:') || (s.startsWith", to: 'if ((s.startsWith' },
+  { name: 'a protected tag does not protect', from: "(s.startsWith('tag:') && protectedTags.has(s.slice(4)))", to: 'false' },
+  { name: 'the bound protection is dropped (not add-only)', from: 'const prot = new Set(boundProtected);', to: 'const prot = new Set();' },
+  { name: 'bound class sources are not re-mapped (protection not recomputed for them)', from: "for (const srcs of boundKinds.values()) for (const s of srcs) if (s.startsWith('class:')) classes.add(s.slice(6));", to: '' },
+  { name: 'reassessed kinds are not required', from: 'for (const m of [boundKinds, mapped.kinds])', to: 'for (const m of [boundKinds])' },
+  { name: 'a protected subject is waivable', from: "else if (w.startsWith('kind:') && prot.has(name)) waiverProtected++;", to: '' },
+  { name: 'a waiver of a subject that is not required counts as effective', from: "if (w.startsWith('kind:') ? !effective.has(name) : !items.has(name)) waiverNotRequired++;", to: 'if (false) waiverNotRequired++;' },
+  { name: 'a trusted waiver removes nothing', from: 'const missing = missing0.filter((k) => !effectiveWaivers.has(`kind:${k}`));', to: 'const missing = missing0;' },
+  { name: 'an item waiver removes nothing', from: 'const unmapped = unmapped0.filter((i) => !effectiveWaivers.has(`plan:${i}`));', to: 'const unmapped = unmapped0;' },
+  { name: 'an untrusted waiver is ignored', from: "if (unauthorized) raised.add('waiver_unauthorized');", to: '' },
+  { name: 'any trusted waiver, even ineffective, suppresses an untrusted one', from: 'untrusted.some((w) => !effectiveWaivers.has(w))', to: 'untrusted.some((w) => !trusted.includes(w))' },
+  { name: 'an authorised RETRY does not lift the held check at F1', from: "!(S.point === 'F1' && S.retry_authorised)", to: 'true' },
+  { name: 'the held check is not derived in the view', from: "new Set(['F1', 'F4', 'S1', 'V'])", to: "new Set(['F1', 'F4', 'S1'])" },
+  { name: 'an open repair refuses at every point', from: "open > 0 && S.point === 'gate'", to: 'open > 0' },
+  { name: 'an unmapped class is ignored', from: "if (mapped.unmapped) raised.add('risk_class_unmapped');", to: '' },
+  { name: 'a missing item does not refuse', from: "if (unmapped.length) raised.add('unmapped_lifecycle_item');", to: '' },
+  { name: 'a missing kind does not refuse', from: "if (missing.length) raised.add('missing_test_kinds');", to: '' },
+  { name: 'any failure code from kindsForClasses reads as unmapped', from: "record(res, ['ok', 'code'], ctx).code === 'risk_class_unmapped'", to: 'true' },
+  { name: 'an object proxy is read', from: "if (v === null || typeof v !== 'object' || types.isProxy(v)) return false;", to: "if (v === null || typeof v !== 'object') return false;" },
+  { name: 'an array proxy is read', from: '!Array.isArray(v) || types.isProxy(v) ||', to: '!Array.isArray(v) ||' },
+  { name: 'a getter is invoked', from: "    if (!d || !('value' in d)) fail();\n    out[k] = d.value;", to: '    out[k] = v[k];' },
+  { name: 'the array length cap is dropped', from: '|| n > LIMITS.maxItems) fail();', to: ') fail();' },
+  { name: 'extra array keys are accepted', from: 'if (Reflect.ownKeys(v).length !== n + 1) fail();', to: '' },
+  { name: 'the work budget is not enforced', from: 'if (ctx.work > LIMITS.maxWork) fail();', to: '' },
+  { name: 'an empty source list is accepted', from: 'if (!sources.length) fail();', to: '' },
+  { name: 'any string is a source', from: 'const sources = list(d.value, isSource, ctx);', to: "const sources = list(d.value, (x) => typeof x === 'string', ctx);" },
+  { name: 'evidence may name an unknown kind', from: 'new Set(list(E.kinds, isKindId, ctx))', to: "new Set(list(E.kinds, (x) => typeof x === 'string', ctx))" },
+  { name: 'an empty protected set is accepted', from: 'if (!protectedTags.size) fail();', to: '' },
+  { name: 'an exception escapes', from: 'try { return compute(input, deps); } catch { return errorVerdict(); }', to: 'return compute(input, deps);' },
+];
 const RUN_TIMEOUT_MS = 3 * 60 * 1000;
 const run = (args, cwd) => new Promise((resolve) => {
   const { NODE_TEST_CONTEXT: _nested, ...env } = process.env;
