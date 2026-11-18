@@ -312,16 +312,18 @@ the shared git library (S-02a0).
 
 ## The static proof
 
-Run the routed specialist's **security rows only** — `BE-SEC-*`, `BE-AUTH-*`,
-`BE-TEN-*`, or the stack's equivalents — over the changed surfaces.
+Run only the **security rows** of `code-quality`'s routed stack reference —
+`BE-SEC-*`, `BE-AUTH-*`, `BE-TEN-*` from `stack-backend.md`, or the stack's
+equivalents — over the changed surfaces.
 
 **Trace the control; do not assume the diff contains it.** A surface's control
 often lives in **unchanged** middleware, config or a base class. Follow each
 in-scope surface through its whole static control path, including the parts this
 ticket did not touch.
 
-**Where no static mapping exists** — a hub-only stack, no specialist installed, a
-control with no readable owner — say so. That half is **declared degraded**, not
+**Where no static mapping exists** — a stack with no stack reference, `code-quality`
+or the applicable stack reference not installed, a control with no readable
+owner — say so. That half is **declared degraded**, not
 proven, so the runtime test is checked against a claim you actually made.
 
 **Emit a stable security-evidence map** listing each in-scope surface, every

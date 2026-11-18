@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,4 +87,21 @@ test('the multi-line assertions hold on a CRLF checkout of the same files', () =
     }
     assert.ok(load(join(dir, 'review.md')).includes('with a finding\ndisposed `fix`'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// The code-quality specialists are retired aliases with no rules. ship-ticket must
+// never route to one, nor make a proof or fallback depend on one being installed:
+// a unified-only install would satisfy "no specialist installed" literally.
+test('no ship-ticket instruction names or depends on a retired code-quality specialist', () => {
+  const dir = fileURLToPath(new URL('../', import.meta.url));
+  const files = ['SKILL.md', ...readdirSync(join(dir, 'references')).filter((f) => f.endsWith('.md')).map((f) => `references/${f}`)];
+  assert.ok(files.length > 10, `read ${files.length} files`);
+  const hits = [];
+  for (const f of files) {
+    load(join(dir, f)).split('\n').forEach((line, i) => {
+      if (/\bspecialists?\b|angular-code-quality|backend-code-quality/i.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
+    });
+  }
+  assert.deepEqual(hits, []);
+  assert.ok(load(join(dir, 'references/prove.md')).includes('`code-quality`\nor the applicable stack reference not installed'));
 });

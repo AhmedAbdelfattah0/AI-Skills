@@ -175,14 +175,20 @@ later, after a plan was already approved.
 
 ### Routing
 
-| The ticket touches | Invoke | Owns |
-|---|---|---|
-| **Angular** frontend | `angular-code-quality` | `NG-*` |
-| **Any other frontend** — React, Vue, Svelte, Next/Nuxt, plain TS | `code-quality` hub | the universal core; its `references/` carry per-stack rule sets |
-| **Any backend**, any language | `backend-code-quality` | `BE-*` — it detects the runtime itself |
-| **A stack with no reference file** — Go, Rust, Java, C# | `code-quality` hub | the universal principles applied to that language |
+Every row loads the one `code-quality` skill (its entry `SKILL.md` plus the
+universal core its LOAD TABLE names); the row adds the stack reference.
 
-**Pass the evidence forward.** The specialist receives the stack profile and the
+| The ticket touches | Load from `code-quality` | Owns |
+|---|---|---|
+| **Angular** frontend | + `references/stack-angular.md` | `NG-*` |
+| **Any other frontend** — React, Vue, Svelte, Next/Nuxt, plain TS | the entry and core only | the universal core; per-stack summaries via `references/constitution.md` |
+| **Any backend**, any language | + the whole of `references/stack-backend.md` | `BE-*` — it detects the runtime itself |
+| **Full-stack** | + `references/stack-backend.md`, and + `references/stack-angular.md` only when the frontend is Angular (any other frontend keeps the core) | `BE-*`, plus `NG-*` for Angular; one Design Contract |
+| **A stack with no reference file** — Go, Rust, Java, C# | the entry and core only | the universal principles applied to that language |
+
+A retired alias of `code-quality` holds no rules; never route to one.
+
+**Pass the evidence forward.** The rule pass receives the stack profile and the
 pinned design evidence you already gathered. It should not reopen the same files
 to re-derive the same facts — that is the same agent deriving the same thing twice,
 and it costs a wave.

@@ -62,7 +62,7 @@ it loads `stack-backend.md`, never only the core.
 | Any backend, any language | + `references/stack-backend.md` (`BE-*`) |
 | Webhook / tenancy / PostgreSQL RLS | + `references/backend-webhook-safety.md` / `references/backend-multi-tenancy.md` / `references/backend-postgres-rls.sql` |
 | No `CLAUDE.md` to read | + `references/angular-profile-template.md` or `references/backend-profile-template.md` |
-| Full-stack | both stack references, one Design Contract (STEP 0B) |
+| Full-stack | `references/stack-backend.md`, plus `references/stack-angular.md` only for an Angular frontend (any other frontend keeps the core); one Design Contract (STEP 0B) |
 | Other frontends and non-backend code (React, Vue, Svelte, libraries, CLIs, any language) | the core only; per-stack summaries via `references/constitution.md` |
 | INIT / LOAD / UPDATE | + `references/constitution.md` |
 | GUARD | + `references/guard.md` |

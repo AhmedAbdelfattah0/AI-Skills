@@ -179,7 +179,7 @@ and rule-catalogue work:
 
 - verify every acceptance criterion and approved scope boundary;
 - inspect behavior, edge cases, errors and regression risk;
-- walk every applicable specialist rule plus the separate `AI-FM` and
+- walk every applicable stack-reference rule plus the separate `AI-FM` and
   `UNIVERSAL` rows;
 - include `TEST` and `DOC` rows when their surfaces changed;
 - for UI, perform the complete parity comparison against the pinned reference;
