@@ -130,17 +130,20 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * `{file, args, shell, outFile, envelopeFile, attemptId}` plus optional `report: true` / `sample: false`.
  * Same release protocol and process group as LAUNCHER; the runner's stdin is empty. Its own fd 1
  * is a pipe the engine holds (its absence from the runner and descendants is probed on darwin and
- * Linux, reasoned on win32). The boundary is the launcher's observed child `exit`: there it reads
- * what is already in each channel synchronously (non-blocking, to EAGAIN or EOF) and LATCHES each
- * channel's EOF state; nothing read after the boundary is kept, and no drain follows (POSIX;
- * `boundary: 'exit'`). On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
+ * Linux, reasoned on win32). The boundary is the launcher's observed child `exit` (POSIX;
+ * `boundary: 'exit'`): in that callback it reads each channel in turn, synchronously and
+ * non-blocking. A channel's first short read empties its queue and is its latch point; it is at
+ * EOF only when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is
+ * not kept). No drain follows. It is not an atomic snapshot: bytes another process wrote and then
+ * closed before a channel's latch point (in practice, before the exit was observed) are kept. On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
  * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
  * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
  * child `exit`, spawn_error, boundary, out_len, truncated, stdout_bytes, out_eof, report,
  * report_len, report_truncated, report_bytes, report_eof), then the stdout bytes, then the report
  * bytes. The write loops over EAGAIN; fd 1 is then closed and the launcher exits 0 iff exit_code is 0.
- * - `out_eof` / `report_eof` are true only when that channel was at EOF at the boundary, i.e. no
- *   process other than the dead runner still held it. The engine refuses either being false.
+ * - `out_eof` / `report_eof` are true only when that channel reached EOF right after its latch
+ *   point, i.e. no process other than the dead runner held it then. The engine refuses either
+ *   being false. `testHooks` (tests only) instruments these reads; the engine never sets it.
  * - `report: true`: the runner gets a pathless pipe at fd 3 (reached as /dev/fd/3), collected up to
  *   STDOUT_CAP.
  * - `.out` and the envelope are forensic copies, written after the frame and never read for a
@@ -207,6 +210,18 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
   cli.stdout.on('data', takeOut);
   cli.stdout.on('end', () => { if (!latched) outEof = true; });
   cli.stdout.on('error', () => {});
+  // Test instrumentation only (engine-runner-sealed.test.mjs; gateRunner never sets testHooks):
+  // stopReads leaves stdout unread until the exit callback; pauseFile/resumeFile pause after the
+  // first synchronous read of a channel until the test lets it continue (at most 10 s).
+  const hooks = spec.testHooks || {};
+  if (hooks.stopReads === true) { try { cli.stdout._handle.readStop(); } catch {} }
+  let paused = false;
+  const pause = () => {
+    if (paused || typeof hooks.pauseFile !== 'string') return;
+    paused = true;
+    try { fs.writeFileSync(hooks.pauseFile, ''); } catch {}
+    for (const end = Date.now() + 10000; Date.now() < end && !fs.existsSync(hooks.resumeFile);) Atomics.wait(nap, 0, 0, 5);
+  };
   const r = spec.report === true ? cli.stdio[3] : null;
   if (r) {
     r.on('data', takeRep);
@@ -214,18 +229,26 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     r.on('error', () => {});
   }
   // The runner is dead: its own descriptors closed before its exit was reported, so whatever it wrote
-  // is already in the socket. Read that synchronously (non-blocking) up to EAGAIN or EOF. EOF means
-  // no other process holds the channel; EAGAIN means one does (a survivor): not at EOF, refused.
+  // is already in the socket. Read each channel in turn, synchronously (non-blocking): its first
+  // short read empties the queue and latches it. Then EOF means no process holds it; EAGAIN or any
+  // further byte means one does (a survivor): not at EOF, refused. Not an atomic snapshot at exit:
+  // bytes another process wrote and closed before a channel's latch point are kept.
   const fdOf = (s) => (s && !s.destroyed && s._handle && Number.isInteger(s._handle.fd) && s._handle.fd >= 0 ? s._handle.fd : -1);
   const drain = (s, take) => {
     const fd = fdOf(s);
     if (fd < 0) return false;
     const b = Buffer.allocUnsafe(65536);
+    // A short read empties the queue: that instant latches the channel. Any byte read after it was
+    // written after it, so the channel is refused (not at EOF) and that byte is not kept.
+    let emptied = false;
     for (;;) {
       let n;
       try { n = fs.readSync(fd, b, 0, b.length, null); } catch (e) { if (e.code === 'EINTR') continue; return false; }
       if (n === 0) return true;
+      if (emptied) return false;
       take(Buffer.from(b.subarray(0, n)));
+      if (n < b.length) emptied = true;
+      pause();
     }
   };
   const latch = () => {
@@ -258,7 +281,8 @@ export function launcherArgs(spec) {
   const sample = spec.sample === false || process.env[SAMPLER_OFF] === '1' ? { sample: false } : {};
   if (spec.sealed === true) {
     return ['-e', SEALED_LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell,
-      ...Object.fromEntries(SEALED_KEYS.map(k => [k, spec[k]])), ...(spec.report === true ? { report: true } : {}), ...sample })];
+      ...Object.fromEntries(SEALED_KEYS.map(k => [k, spec[k]])), ...(spec.report === true ? { report: true } : {}),
+      ...(spec.testHooks ? { testHooks: spec.testHooks } : {}), ...sample })];
   }
   const durable = typeof spec.envelopeFile === 'string' ? Object.fromEntries(DURABLE_KEYS.map(k => [k, spec[k]])) : {};
   return ['-e', LAUNCHER, JSON.stringify({ file: spec.file, args: spec.args, shell: spec.shell, ...durable, ...sample })];

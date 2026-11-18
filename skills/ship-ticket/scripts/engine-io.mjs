@@ -226,14 +226,15 @@ export function decodeSealedFrame(buf, attemptId) {
  * runner's exit (POSIX), or a result pipe still open `frameCloseMs` after the launcher exited)
  * unless the run timed out, which returns a result with `timedOut: true` and no exit code.
  * It rejects with `runner_survivor` when stdout (or, with `report`, the report channel) was not
- * at EOF when the launcher observed the runner's exit: another process still held it, so bytes
- * there are not the runner's alone. Only bytes present at that boundary are ever returned. A
- * process that held the channel during the run can still write before the boundary (in-run
- * injection, design §6.1 R-T2), including in the instants between the runner's death and the
- * launcher observing it: a survivor that writes AND closes in that window is accepted. The
- * kernel closes the runner's descriptors before it reports the exit, so a fast survivor usually
- * wins (measured in PR #94: 99-100/100 on Linux, 7-87/100 on darwin). The boundary refuses only
- * a survivor still holding the channel when the exit is observed.
+ * at EOF at the boundary. In the exit callback the launcher reads each channel in turn; the
+ * channel's first short read (fewer bytes than asked: the queue is empty) is its latch point. It is
+ * refused when a later read returns any byte (written after the latch point; not kept) or EAGAIN
+ * (another process still holds it). That is the whole guarantee. Bytes another process wrote and
+ * then closed before a channel's latch point are accepted as the runner's: in practice before the
+ * exit was observed (the kernel closes the runner's descriptors before it reports the exit, so a
+ * fast survivor usually wins: measured in PR #94, 99-100/100 on Linux, 7-87/100 on darwin). Any
+ * such writer held the channel during the run (in-run injection, design §6.1 R-T2; accepting it
+ * is a proposed owner decision, still pending).
  * `report` must be a boolean (anything else rejects `bad_input`). `report: true` adds the report
  * channel (the runner's fd 3, reached as /dev/fd/3; measured on darwin only, so any other
  * platform rejects `channel_unsupported` before anything starts): the result then carries

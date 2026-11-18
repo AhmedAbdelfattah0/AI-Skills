@@ -14,8 +14,12 @@
  * - S1w  (all)    1 ms path-overwrite forger of `.out` and the envelope: result equals the genuine run.
  * - S2a  (darwin) a survivor rewriting the argv report path (/dev/fd/3) has no effect.
  * - S2b  (darwin) a survivor holding the report channel past the runner's exit: `runner_survivor`.
- * - (a)-(d)       a survivor writing to the report channel or stdout AFTER the runner exits (and
- *                 closing inside the old 1 s drain, or never): `runner_survivor`, nothing accepted.
+ * - (a)-(d)       a survivor that writes to the report channel or stdout after the runner exits
+ *                 and keeps it open through that channel's EOF check in the launcher's exit
+ *                 callback (it closes only on EPIPE, or inside the old 1 s drain): `runner_survivor`.
+ * - boundary      deterministic through the launcher's testHooks: a survivor that writes and closes
+ *                 DURING the exit callback's reads (after the first short read) is refused; output
+ *                 still unread when `exit` fires is collected by those reads (not refused).
  * - S3            positive: exit code, stdout and report bytes exactly as the runner wrote them;
  *                 a non-detached child that exits before the runner is not a survivor.
  * - AC5           workers' launch is byte-identical to fe5d075 (argv hashes, stdio, options).
@@ -23,8 +27,8 @@
  * - frame         another attempt, a disagreeing exit, a malformed header, a non-exit boundary or
  *                 an oversized frame is refused; forensic tmp plants are never written through.
  * - callers       gateRed, unit checks and proof keep the typed code; unit checks never retry it.
- * The exit-boundary race (a survivor that writes AND closes between the runner's death and the
- * launcher observing it) is measured, not asserted: see the PR body.
+ * Not asserted (measured in the PR body): a survivor that writes AND closes between the runner's
+ * death and the launcher observing it is accepted in most trials.
  * Off darwin the report channel is refused as `channel_unsupported` (Linux: /dev/fd/N on a
  * socketpair fails ENXIO, measured in Docker node:18; win32: no /dev/fd).
  */
@@ -134,6 +138,14 @@ else if (mode === 'fifo-forge') {
     if (reportSrc) fs.writeFileSync('/dev/fd/3', fs.readFileSync(reportSrc));
     exitWith(genuine, Number(code));
   });
+} else if (mode === 'drain-writer') {
+  // A detached survivor holding stdout that writes and closes WHILE the launcher reads stdout in its
+  // exit callback (the launcher's testHooks pause it after its first read and publish pauseFile).
+  const [pauseFile, resumeFile, dir] = rest;
+  const src = 'const fs=require("fs");const [pf,rf,d]=process.argv.slice(1);fs.writeFileSync(d+"/late.pid",String(process.pid));fs.writeSync(3,"R");fs.closeSync(3);'
+    + 'const t=setInterval(()=>{if(!fs.existsSync(pf))return;clearInterval(t);fs.writeSync(1,"AFTER_FIRST_READ\\n");fs.closeSync(1);fs.writeFileSync(rf,"");setTimeout(()=>{},20000);},2);';
+  const f = spawn(process.execPath, ['-e', src, pauseFile, resumeFile, dir], { detached: true, stdio: ['ignore', 'inherit', 'ignore', 'pipe'] });
+  f.stdio[3].on('data', () => { f.stdio[3].destroy(); f.unref(); exitWith('BEFORE_DRAIN\n', 0); });
 } else if (mode === 'tmp-plant') {
   // A regular file at the .out tmp name and a symlink (to a victim file) at the envelope tmp name.
   const [dir] = rest;
@@ -469,13 +481,15 @@ async function lateWriter(t, { fd, payload, genuine, code, fallback, report = fa
 }
 
 /**
+ * Each survivor below stays open through its channel's EOF check in the launcher's exit callback;
+ * that is the only case the boundary refuses (see the boundary rows for what it accepts).
  * The survivor rows below are RED on the pre-latch launcher (a writer that closed inside its 1 s
  * drain was accepted: report `{"genuine":true}INJECTED` with report_eof true; stdout with the
  * injected TAP). The survivor only closes once a write fails (the launcher closed its end) or at
  * `fallback`: on the latched launcher `late.how` proves the channel was still held at the boundary,
  * so no exit race decides these rows.
  */
-test('(a) report writer injects after the runner exits and closes inside the old drain: runner_survivor, nothing accepted', { skip: DARWIN ? false : 'report channel is darwin-only (see S2a)', timeout: 60000 }, async (t) => {
+test('(a) report writer injects after the runner exits and stays open through the channel\'s EOF check (closes inside the old drain): runner_survivor', { skip: DARWIN ? false : 'report channel is darwin-only (see S2a)', timeout: 60000 }, async (t) => {
   const { r, late } = await lateWriter(t, { fd: '3', payload: '{"forged":true}', genuine: 'ok 1 - real\n', code: 0, fallback: 700, report: true });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r));
@@ -485,7 +499,7 @@ test('(a) report writer injects after the runner exits and closes inside the old
   assert.match(late.how, /^closed:/, `the survivor closed by its fallback, not because the launcher had already latched: ${J(late)}`);
 });
 
-test('(b) stdout writer injects after the runner exits and closes inside the old drain: runner_survivor, nothing accepted', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('(b) stdout writer injects after the runner exits and stays open through stdout\'s EOF check (closes inside the old drain): runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const { r, late } = await lateWriter(t, { fd: '1', payload: 'INJECTED-AFTER-EXIT\n', genuine: 'ok 1 - real\n', code: 0, fallback: 700 });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r));
@@ -494,7 +508,7 @@ test('(b) stdout writer injects after the runner exits and closes inside the old
   assert.match(late.how, /^closed:/, J(late));
 });
 
-test('(c) Codex: a silent failing runner whose survivor writes a TAP failure after it exits: runner_survivor, no forged RED', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('(c) Codex: a silent failing runner whose survivor writes a TAP failure after it exits and stays open through stdout\'s EOF check: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n';
   const { r, late } = await lateWriter(t, { fd: '1', payload: tap, genuine: '', code: 1, fallback: 700 });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
@@ -503,7 +517,7 @@ test('(c) Codex: a silent failing runner whose survivor writes a TAP failure aft
   assert.match(late.how, /^closed:/, J(late));
 });
 
-test('(d) stdout held past the runner exit by a detached process that never closes it: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('(d) stdout held through its EOF check by a detached process that closes only when the launcher is gone: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const { r, late } = await lateWriter(t, { fd: '1', payload: 'HELD\n', genuine: 'ok 1 - real\n', code: 0, fallback: 0 });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r));
@@ -619,4 +633,52 @@ test('proof: a typed runner refusal is recorded on the LOCAL_PROOF command with 
   const cmd = fx.readState().local_proof?.commands?.find(c => c.name === 'surv');
   assert.ok(cmd, J(fx.readState().local_proof));
   assert.deepEqual([cmd.result, cmd.exit_code, cmd.error_code], ['fail', null, 'runner_survivor']);
+});
+
+// ------------------------------------------------------------------ the boundary's limits (launcher testHooks)
+
+/** Run the sealed launcher directly with `testHooks` (the engine never sets them) and decode its frame. */
+function sealedWithHooks(w, args, testHooks) {
+  const id = 'att-' + randomUUID();
+  const spec = { file: process.execPath, args: [w.fixture, ...args], shell: false, sealed: true, testHooks, sample: false,
+    outFile: join(w.dir, id + '.out'), envelopeFile: join(w.dir, id + '.envelope.json'), attemptId: id };
+  const child = spawn(process.execPath, launcherArgs(spec), { cwd: w.dir, detached: POSIX, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const chunks = [];
+  child.stdout.on('data', (c) => chunks.push(c));
+  child.stdin.end(io.RELEASE);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { try { process.kill(POSIX ? -child.pid : child.pid, 'SIGKILL'); } catch { /* gone */ } resolve({ hung: true }); }, 30000);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, ...io.decodeSealedFrame(Buffer.concat(chunks), id) }); });
+  });
+}
+
+test('boundary: output still unread when exit fires is collected by the exit callback\'s synchronous read, not refused', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  // stopReads: the launcher never reads stdout before its exit callback (exit-before-drain, deterministic).
+  const f = await sealedWithHooks(w, ['plain', 'ok 1 - unread at exit\n', '0'], { stopReads: true });
+  assert.notEqual(f.hung, true);
+  assert.equal(f.reason, undefined, J(f));
+  assert.deepEqual([f.head.boundary, f.head.out_eof, f.head.exit_code, f.stdout.toString()], ['exit', true, 0, 'ok 1 - unread at exit\n']);
+});
+
+test('boundary: more unread output than one read takes (Linux: a socket holds over 64 KiB) is collected whole, not refused', { skip: process.platform === 'linux' ? false : 'only Linux socket buffers hold more than one 64 KiB read for a dead runner (darwin: the runner would block)', timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const text = 'y'.repeat(100000) + '\n';
+  const f = await sealedWithHooks(w, ['plain', text, '0'], { stopReads: true });
+  assert.notEqual(f.hung, true);
+  assert.equal(f.reason, undefined, J(f));
+  assert.deepEqual([f.head.out_eof, f.stdout.length], [true, text.length]);
+});
+
+test('boundary (Codex, PR #94): a survivor that writes and closes DURING the exit callback\'s reads is refused; its bytes are not kept', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+  const w = world(t);
+  const pauseFile = join(w.dir, 'paused'), resumeFile = join(w.dir, 'resume');
+  // The launcher pauses right after its first (short) read of stdout; the survivor then writes, closes and lets it resume.
+  const f = await sealedWithHooks(w, ['drain-writer', pauseFile, resumeFile, w.dir], { stopReads: true, pauseFile, resumeFile });
+  assert.ok(existsSync(join(w.dir, 'late.pid')) && existsSync(pauseFile) && existsSync(resumeFile), 'the survivor never wrote during the pause (the row would prove nothing)');
+  assert.equal(f.reason, undefined, J(f));
+  // The first short read emptied the queue and latched stdout: a byte after it means a writer, so not at EOF.
+  assert.deepEqual([f.head.boundary, f.head.out_eof, f.stdout.toString()], ['exit', false, 'BEFORE_DRAIN\n']);
+  const doc = readFileSync(fileURLToPath(new URL('./engine-io.mjs', import.meta.url)), 'utf8');
+  assert.match(doc, /first\s+\*?\s*short read/, 'gateRunner\'s JSDoc must state the latch point (the first short read)');
 });
