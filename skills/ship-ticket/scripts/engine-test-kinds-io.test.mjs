@@ -496,7 +496,7 @@ test('[P4r-30] C7 (I-B): buildRecord refuses provenance that reuse would reject 
 // ---- I-B: the three interfaces agree, over a corpus that includes the seven Codex inputs ----
 /** recordUsable and the verdict give the SAME answer for one record on one candidate (current / stale:reason / refused:code). */
 const agree = (ru, v, why) => {
-  if (ru.reason === 'unavailable') { assert.equal(v.status, 'refused', `${why}: the verdict refuses too`); assert.equal(v.code, ru.code, why); return `refused:${ru.code}`; }
+  if (ru.reason === 'unavailable') { assert.equal(v.status, 'refused', `${why}: the verdict refuses too`); assert.equal(v.code, ru.code, why); assert.equal(v.detail, ru.detail, `${why}: the same detail`); return `refused:${ru.code}`; }
   const state = ru.ok ? 'current' : `stale:${ru.reason}`;
   assert.deepEqual(v.records, { unit: state }, why);
   return state;
@@ -561,6 +561,14 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
     ['covers no longer includes the file', () => ({ entry: { ...ENTRY, covers: ['apps/api/**'] } })],
     ['the candidate moved', (r) => { put(r.dir, 'docs/x.md', 'x'); return {}; }],
     ['an invalid base', () => ({ baseSha: 'HEAD' })],
+    // round 3: the S2/S4 inputs, through all three interfaces (and the identity where it is the one that refuses)
+    ['S2: a changed config under a case alias', (r) => { put(r.dir, 'vitest.config.ts', 'z\n'); return { entry: { ...ENTRY, config_paths: ['VITEST.CONFIG.TS'] } }; }],
+    ['S2: a deleted config under a case alias', (r) => { rmSync(join(r.dir, 'package-lock.json')); return { entry: { ...ENTRY, config_paths: ['PACKAGE-LOCK.JSON'] } }; }],
+    ['S2: a changed config under an NFD alias', (r) => { const nfc = 'caf\u00e9.config.ts'; put(r.dir, nfc, 'a\n'); git(r.dir, 'add', nfc); git(r.dir, 'commit', '-q', '-m', 'c'); const baseSha = git(r.dir, 'rev-parse', 'HEAD'); put(r.dir, nfc, 'b\n'); return { baseSha, entry: { ...ENTRY, config_paths: [nfc.normalize('NFD')] } }; }],
+    ['S2: a config through a symlinked directory', (r) => { put(r.dir, 'real/v.ts', 'a\n'); symlinkSync('real', join(r.dir, 'cfg')); return { entry: { ...ENTRY, config_paths: ['cfg/v.ts'] } }; }],
+    ['S2: an aliased exclusion', () => ({ exclusions: ['LIBS/money'], identity: true })],
+    ['S2: a case-only rename in the candidate', (r) => { git(r.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/t.test.ts'); git(r.dir, 'mv', 'libs/money/t.test.ts', 'libs/money/OLD.test.ts'); return { identity: true }; }],
+    ['S4: a drive path among the files that ran', () => ({ args: [...ARGS.slice(0, 4), 'C:/outside/a.test.ts'] })],
   ];
   for (const [why, perturb] of contexts) {
     const r = repo(t), rec = good(r), o = perturb(r);
@@ -571,8 +579,9 @@ test('[P4r-31] I-B: every record buildRecord emits is current to recordUsable an
     if (cmd !== ENTRY.cmd) continue; // the builder has no separate cmd input: it runs the entry's own
     const before = evidenceIdentity({ repo: r.dir, baseSha: base, exclusions: ex }).evidence_id;
     const b = buildRecord({ repo: r.dir, baseSha: base, entry, commandArgs: args, tests: { globs: [] }, dagDigest: DAG, exclusions: ex, report: prov(passing(r.dir), { evidence_id_before: before }) });
-    if (state.startsWith('refused:')) assert.deepEqual(b, { ok: false, code: state.slice(8) }, `${why}: the builder refuses the same candidate`);
+    if (state.startsWith('refused:')) assert.deepEqual(b, { ok: false, code: state.slice(8), ...(ru.detail ? { detail: ru.detail } : {}) }, `${why}: the builder refuses the same candidate`);
     else { assert.equal(b.ok, true, `${why}: ${JSON.stringify(b)}`); assert.equal(recordUsable(b.record, { ...cur(r, { entry, args }), exclusions: ex }).ok, true, `${why}: a fresh record is current`); }
+    if (o.identity) assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: base, exclusions: ex }), { ok: false, code: ru.code, detail: ru.detail }, `${why}: the identity refuses the same candidate`);
   }
   // (4) record perturbations (C5 and the schema): recordUsable and the verdict agree on every one
   const r = repo(t), rec = good(r);
@@ -642,6 +651,7 @@ test('[P4r-32] S1 (round 3, A): aggregates are DERIVED from the rows; an indepen
   // (2) the property: a seeded corpus of base/candidate/report triples; the oracle's rows are the record's, and the record is current
   const rnd = prng(0x5eed), pick = (xs) => xs[Math.floor(rnd() * xs.length)];
   const tests = (n, tag) => Array.from({ length: n }, (_, i) => { const id = pick(IDS); return { title: `${tag}${i}${id ? ` [${id}]` : ''}`, status: pick(['passed', 'passed', 'skipped', 'todo']), id }; });
+  const reached = new Set(); // the corpus must reach every outcome, or agreement proves nothing about it
   for (let k = 0; k < 24; k++) {
     const files = Array.from({ length: 1 + Math.floor(rnd() * 3) }, (_, i) => {
       const kind = pick(['new', 'edited', 'deleted', 'unchanged-reported']), base = kind === 'new' ? null : tests(Math.floor(rnd() * 3), `b${i}x`).map((x) => ({ ...x, status: 'passed' }));
@@ -658,7 +668,16 @@ test('[P4r-32] S1 (round 3, A): aggregates are DERIVED from the rows; an indepen
     assert.equal(agree(ru, verdict(rr, got.record), why), 'current', why);
     assert.deepEqual([...new Set([...ru.evidence.kinds.map((x) => `kind:${x}`), ...ru.evidence.items.map((x) => `plan:${x}`)])].sort(), [...new Set(want.rows.flatMap((x) => x.credited))].sort(), why);
     assert.equal(ru.evidence.unknown_markers, want.counts.unknown_markers, why);
+    for (const f of got.record.files) {
+      if (f.credited.length) reached.add('credited');
+      for (const w of Object.values(f.withheld)) reached.add(w);
+      if (Object.keys(f.skipped).length) reached.add('skipped');
+      if (f.unknown) reached.add('unknown');
+      reached.add(f.outcome);
+    }
+    if (files.some((f) => f.base && !f.cand)) reached.add('deleted');
   }
+  assert.deepEqual([...reached].sort(), ['counted', 'credited', 'deleted', 'not_in_P', 'r3_offset', 'r3_unchanged', 'skipped', 'unknown'], 'the corpus reaches every outcome');
 });
 
 test('[P4r-33] S2 (round 3, B): ONE path identity: a case or normalisation alias of a git path is refused by every interface, on every platform', (t) => {
@@ -668,7 +687,8 @@ test('[P4r-33] S2 (round 3, B): ONE path identity: a case or normalisation alias
     put(r.dir, 'vitest.config.ts', 'export default { globalSetup: "./evil.ts" };\n');
     assert.equal(code(build(r, passing(r.dir), { entry })), 'runner_config_changed', alias);
     assert.equal(recordUsable(rec, cur(r, { entry })).code, 'runner_config_changed', alias);
-    assert.equal(verdict(r, null, { entry }).code, 'runner_config_changed', alias);
+    const v = verdict(r, null, { entry });
+    assert.equal(v.code, 'runner_config_changed', alias); assert.equal(v.detail, 'path_alias', alias);
   }
   // a NFD spelling of an NFC git path, and a config deleted in the candidate declared under an alias (realpath cannot see it)
   { const r = repo(t), nfc = 'libs/caf\u00e9.config.ts';
@@ -687,10 +707,10 @@ test('[P4r-33] S2 (round 3, B): ONE path identity: a case or normalisation alias
     assert.equal(v.status, 'refused', JSON.stringify(v)); assert.equal(v.code, 'evidence_unavailable', 'a symlinked directory on the way'); }
   // an exclusion spelled as an alias of a changed path, and two candidate paths that are one key (a case-only rename)
   { const r = repo(t);
-    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: ['LIBS/money'] }).code, 'evidence_unavailable', 'an aliased exclusion');
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: ['LIBS/money'] }), { ok: false, code: 'evidence_unavailable', detail: 'path_alias' }, 'an aliased exclusion');
     assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base, exclusions: ['libs/money'] }).ok, true, 'the control: the exact spelling excludes');
     git(r.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/tmp.test.ts'); git(r.dir, 'mv', 'libs/money/tmp.test.ts', 'libs/money/OLD.test.ts');
-    assert.equal(evidenceIdentity({ repo: r.dir, baseSha: r.base }).code, 'evidence_unavailable', 'two spellings of one key in the candidate'); }
+    assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), { ok: false, code: 'evidence_unavailable', detail: 'path_alias' }, 'two spellings of one key in the candidate'); }
   // a stored row spelled as an alias of a P path is refused by both reuse interfaces with the same code
   { const r = repo(t), rec = good(r), c = clone(rec); c.files[0].file = 'libs/money/NEW.test.ts';
     assert.equal(agree(recordUsable(c, cur(r)), verdict(r, c), 'row alias'), 'refused:evidence_unavailable'); }
@@ -755,6 +775,15 @@ test('[P4r-35] S4 (round 3, D): drive paths, parser-rejected reports and unexpec
   for (const extra of [{ ancestorTitles: {} }, { failureMessages: {} }]) {
     const doc = JSON.parse(passing(r.dir)); Object.assign(doc.testResults[0].assertionResults[0], extra);
     assert.equal(code(build(r, JSON.stringify(doc))), 'evidence_unavailable', JSON.stringify(extra));
+  }
+  // a missing report name deeper than the ancestor walk allows is refused, never classified
+  { const deep = join(r.dir, 'libs', ...Array(300).fill('m'), 'x.test.ts');
+    assert.equal(code(build(r, report([{ file: join(r.dir, 'libs/money/new.test.ts'), cases: [{ title: `${TITLE} [kind:negative]` }] }, { file: deep, cases: [{ title: 'd [kind:negative]', status: 'skipped' }] }]))), 'evidence_budget_exceeded'); }
+  // a base-tree path that is not UTF-8 is refused, never decoded lossily (Linux only: APFS and NTFS cannot hold such a name)
+  if (process.platform === 'linux') {
+    const rl = repo(t), raw = Buffer.concat([Buffer.from(join(rl.dir, 'libs/bad-')), Buffer.from([0xff]), Buffer.from('.txt')]);
+    writeFileSync(raw, 'x'); git(rl.dir, 'add', '-A'); git(rl.dir, 'commit', '-q', '-m', 'raw'); const base = git(rl.dir, 'rev-parse', 'HEAD');
+    assert.equal(evidenceIdentity({ repo: rl.dir, baseSha: base }).code, 'evidence_unavailable', 'a non-UTF-8 base path');
   }
   // an unexpected realpath error (EACCES) on a report name is a refusal, not "outside the repo" (a dropped skipped carrier)
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
@@ -1057,7 +1086,7 @@ test('[P4r-19] I3 (R-3 over P): a rename or move, a skip/todo-only addition and 
     put(rm.dir, rel, text);
     assert.deepEqual(credits(one()), ['kind:negative'], rel);
   }
-  // NOT ENFORCED (pinned, the accepted L-ran limit): a marker added in a comment of a file the runner reported (in K) credits a
+  // NOT ENFORCED (pinned, the accepted L-ran limit): a marker added in a comment of a file the runner reported (a counted row) credits a
   // moved test, as it does a test beside it (next case)
   { const rk = repo(t); dropNew(rk);
     git(rk.dir, 'mv', 'libs/money/old.test.ts', 'libs/money/moved.test.ts');
@@ -1344,6 +1373,7 @@ const MUTANTS = [
   { file: BA, tag: 'P4r-34', name: 'S3: a refusal detail is not returned', from: '...(e instanceof Refusal && e.detail ? { detail: e.detail } : {})', to: '...{}' },
   { file: BA, tag: 'P4r-35', name: 'S4: a drive-prefixed path is repo-relative', from: '|^[A-Za-z]:/.test(p)', to: '/.test(p)' },
   { file: IO, tag: 'P4r-35', name: 'S4: the parser guard is removed (it is reachable)', from: '  if (!parsed.supported) refuse(\'evidence_unavailable\'); // REACHABLE: preflight does not check every field the parser reads (P4r-35)\n', to: '' },
+  { file: IO, tag: 'P4r-35', name: 'S4: a too-deep missing report name is "outside the repo"', from: "if (tail.length > 256) refuse('evidence_budget_exceeded');", to: 'if (tail.length > 256) return null;' },
   { file: IO, tag: 'P4r-35', name: 'S4: an unexpected realpath error is "outside the repo"', from: 'const missing = (e) => (e?.code === \'ENOENT\' || e?.code === \'ENOTDIR\' ? null : refuse(\'evidence_unavailable\'));', to: 'const missing = () => null;', posix: true },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)

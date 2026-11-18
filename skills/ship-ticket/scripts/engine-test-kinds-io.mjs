@@ -68,7 +68,8 @@
  * marker on a skipped title is not stored either. Hostile input (L3, L6): caller objects are read through own DATA descriptors
  * only (no getter or proxy trap runs); work is charged to per-call budgets and the named LIMITS. The exported entry points
  * return refusals (`{ code, detail? }`) instead of throwing, except `readEntry`, `commandFor`, `currentContext`, `candidate`,
- * `census`, `r3Rule` and `validRecord`, which THROW a `Refusal` (and nothing else).
+ * `census`, `r3Rule` and `validRecord`, which THROW a `Refusal` for every input they refuse (a git or filesystem fault, or a
+ * caller callback of `currentContext`, may surface as another error; each entry point maps any error to a refusal).
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -123,8 +124,7 @@ export function candidate(repo, baseSha, exclusions) {
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
   const exact = new Set(paths), blobs = [];
   for (const rec of treeRecs) { // git spelling against git spelling: exact
-    const tab = rec.indexOf(9);
-    if (tab < 0) refuse('evidence_unavailable');
+    const tab = rec.indexOf(9); // ls-tree always writes one; a record without it matches no mode below and is skipped
     let p; try { p = utf8.decode(rec.subarray(tab + 1)); } catch { refuse('evidence_unavailable'); } // a non-UTF-8 path is refused, never approximated
     const m = /^(100644|100755) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'));
     if (m && exact.has(p)) blobs.push([p, m[2]]);
@@ -312,7 +312,7 @@ export function validRecord(R, ctx) {
     if (file !== null && seen.has(file)) return null;
     seen.add(file);
     const ids = arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx), withheld = idMap(own(f, 'withheld'), (v) => WITHHELD.includes(v)), skipped = idMap(own(f, 'skipped'), (v) => uint(v) && v > 0);
-    if (!withheld || !skipped || !sortedUnique(ids) || !uint(unknown, LIMITS.maxIds) || ids.some((m) => withheld.has(m)) || ids.length + withheld.size > LIMITS.maxIds) return null;
+    if (!withheld || !skipped || !sortedUnique(ids) || !uint(unknown, LIMITS.maxIds) || ids.some((m) => withheld.has(m))) return null;
     if (outcome !== 'counted' && (ids.length || withheld.size || unknown)) return null; // a VOID row never credits (I1)
     if (skipped.size && ['not_in_P', 'result_outside_repo'].includes(outcome)) return null;
     sum.marker_files++; sum.credited += ids.length; sum.unknown_markers += unknown;
