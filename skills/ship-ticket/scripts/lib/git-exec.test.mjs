@@ -1390,7 +1390,7 @@ function grammarSites(file, src) {
     const f = c && innermostFn(c.node);
     const fp = f && parent.get(f);
     return m.key === 'object' && m.node.type === 'MemberExpression' && !m.node.computed && m.node.property.name === 'decode'
-      && c.key === 'callee' && c.node.type === 'CallExpression' && text(c.node) === GRAMMAR_DECODER.call
+      && c.key === 'callee' && c.node.type === 'CallExpression' // its text is fixed by the exact statement below
       && a.key === 'right' && a.node.type === 'AssignmentExpression' && st.node.type === 'ExpressionStatement' && text(st.node) === GRAMMAR_DECODER.stmt
       && f.type === 'FunctionDeclaration' && f.id?.name === GRAMMAR_DECODER.fn && /^(?:Program|ExportNamedDeclaration)$/.test(fp?.node.type ?? '');
   };
@@ -2213,6 +2213,10 @@ const DECODE_ESCAPES = [
   ['.decode on another value', 'const x = { decode: (b) => b };\nconst y = x.decode(1);'],
   ['.decode read as a value', 'const x = {};\nconst y = x.decode;'],
   ['a second decoder', "const D2 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });"],
+  ['the pinned call text in another statement', `${TD}export function decodeStrict(bytes) { let t = null; t = DECODER.decode(bytes); return t; }`],
+  ['the pinned statement in another function', `${TD}export function other(bytes) { let s = null; s = DECODER.decode(bytes); return s; }`],
+  ['the pinned statement in a closure inside decodeStrict', `${TD}export function decodeStrict(bytes) { const g = () => { let s = null; s = DECODER.decode(bytes); return s; }; return g(); }`],
+  ['decodeStrict nested in another function', `${TD}function outer() { function decodeStrict(bytes) { let s = null; s = DECODER.decode(bytes); return s; } return decodeStrict; }`],
 ];
 test('T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict', () => {
   for (const [what, src] of DECODE_ESCAPES) assert.ok(grammarSites('git-exec.mjs', src).hits.length > 0, `${what} is refused`);

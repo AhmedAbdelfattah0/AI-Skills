@@ -258,7 +258,6 @@ ALL = [
  ('vendor: only ship-ticket scanned', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [("  const skills = join(here, '..', '..', '..');", "  const skills = join(here, '..', '..');")]),
  ('vendor: test files counted as runtime', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [('const TEST_FILE = /\\.test(?:-helper)?\\.(?:mjs|cjs|js)$/;', 'const TEST_FILE = /\\.test-helper\\.(?:mjs|cjs|js)$/;')]),
  ('scan: partition lists .mjs only', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [(': /\\.(?:mjs|cjs|js)$/.test(d.name) && !/\\.test\\.(?:mjs|cjs|js)$/.test(d.name) ? [`${rel}${d.name}`] : [])).sort();', ": d.name.endsWith('.mjs') && !d.name.endsWith('.test.mjs') ? [`${rel}${d.name}`] : [])).sort();")]),
- ('r7: decoder call text unchecked', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [(' && text(c.node) === GRAMMAR_DECODER.call', '')]),
  ('r7: decoder statement unchecked', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [(' && text(st.node) === GRAMMAR_DECODER.stmt', '')]),
  ('r7: decoder function unchecked', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [("      && f.type === 'FunctionDeclaration' && f.id?.name === GRAMMAR_DECODER.fn && /^(?:Program|ExportNamedDeclaration)$/.test(fp?.node.type ?? '');", '      && !!f;')]),
  ('r7: decoder aliasable', 'skills/ship-ticket/scripts/lib/git-exec.test.mjs', [('      return refuse(id, `the decoder ${name} used other than', '      return true || refuse(id, `the decoder ${name} used other than')]),
