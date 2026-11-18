@@ -117,11 +117,13 @@ export function validateDeclaration(d) {
   const inv = (m) => bad('declaration_invalid', m);
   const isMap = (v) => v && typeof v === 'object' && !Array.isArray(v);
   if (types.isProxy(d) || (isMap(d) && Reflect.ownKeys(d).some((k) => !('value' in Object.getOwnPropertyDescriptor(d, k))))) throw inv('a declaration is plain data (no proxy, no top-level accessor)');
-  if (!isMap(d) || d.version !== 1 || Object.keys(d).some((k) => !['version', 'tags', 'classes', 'tests'].includes(k))) throw inv('version must be 1; only version, tags, classes and tests are allowed');
-  const tests = validateTests(d.tests, inv);
+  if (isMap(d) && Object.getPrototypeOf(d) !== null && Object.getPrototypeOf(d) !== Object.prototype) throw inv('a declaration has a plain or null prototype (nothing is read through an inherited name)');
+  if (!isMap(d) || ownData(d, 'version', () => inv('version is plain data')) !== 1 || Object.keys(d).some((k) => !['version', 'tags', 'classes', 'tests'].includes(k))) throw inv('version must be 1; only version, tags, classes and tests are allowed');
+  const [dTags, dClasses, dTests] = ['tags', 'classes', 'tests'].map((k) => ownData(d, k, () => inv(`${k} is plain data`))); // own data only: never through the prototype
+  const tests = validateTests(dTests, inv);
   const list = (v, ok, what) => { if (!Array.isArray(v) || !v.length || v.length > 16 || !v.every(ok)) throw inv(`${what} must be a non-empty list of at most 16 known names`); return uniq(v); };
   const tags = Object.create(null), classes = Object.create(null); // no inherited names (`constructor`) can resolve
-  for (const [k, field, out] of [['tags', d.tags, tags], ['classes', d.classes, classes]]) {
+  for (const [k, field, out] of [['tags', dTags, tags], ['classes', dClasses, classes]]) {
     if (field === undefined) continue;
     if (!isMap(field) || Object.keys(field).length > 64) throw inv(`${k} must be an object of at most 64 entries`);
     for (const name of Object.keys(field)) if (!(k === 'classes' ? CLASS_NAME : NAME).test(name) || name === 'none') throw inv(`${k} name ${JSON.stringify(name)} is not a lower-case identifier (none is reserved)`);
@@ -226,7 +228,9 @@ function fieldsOf(arg, ...keys) {
 }
 /**
  * S-01b2 activation: true exactly when `requiredFor` with the same input does NOT answer `not_declared`; requiredFor calls
- * it. Total and fail-closed: a non-string plan, or an argument that is not plain data, is opted in, never "nothing declared".
+ * it, and both read the input through `fieldsOf`: own data fields only, so an inherited field is not there and an accessor or
+ * a proxy is never called. Total and fail-closed: a non-string plan, or an argument that is not plain data, is opted in,
+ * never "nothing declared".
  */
 export function optIn(arg) {
   const fields = fieldsOf(arg, 'planText', 'declaration');
@@ -271,9 +275,12 @@ function provenanceOf(tags, origins, table) {
 }
 
 /** The required kinds and items for a plan, under an optional validated declaration. Pure; never throws. */
-export function requiredFor({ planText, declaration = null, baseSha = null }) {
+// P5 must pass readDeclaration output only (validated declaration)
+export function requiredFor(arg) {
+  const fields = fieldsOf(arg, 'planText', 'declaration', 'baseSha'); // the same own-data reader as optIn
+  const [planText, declaration = null, baseSha = null] = fields ?? [];
   const errors = [], out = (status, o = {}) => ({ status, kinds: [], items: [], waiver_requested: [], tags: [], errors: uniq(errors), provenance: {}, ...o });
-  if (typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
+  if (!fields || typeof planText !== 'string') return (errors.push('plan_invalid'), out('refused'));
   const text = planNarrative(planText); // the ONE narrative every parse below reads
   if (!optIn({ planText, declaration })) return out('not_declared');
   if (text === null) return (errors.push('run_state_invalid'), out('refused'));
