@@ -232,11 +232,11 @@ export function decodeSealedFrame(buf, attemptId) {
  * It is refused when a later read returns any byte (written after the latch point; not kept) or
  * EAGAIN (another process still holds it).
  * Claim (exact): runner stdout (POSIX; plus the report channel on darwin) is refused if any
- * process still holds the channel at the instant the launcher observes the runner exit. A process
- * that wrote and closed just before that instant, including one handed the descriptor by an in-run
+ * process still holds the channel at the channel's latching read in the exit callback. A process
+ * that wrote and closed just before that read, including one handed the descriptor by an in-run
  * holder, is accepted; such bytes are the in-run injection risk R-T2 (design §6.1), not a new
- * route. This is not an atomic snapshot and writers are not authenticated. (For the report
- * channel the instant is its own latching read, after the read of stdout.) Measured on PR #94
+ * route. This is not an atomic snapshot and writers are not authenticated. (The report channel's
+ * latching read comes after the read of stdout.) Measured on PR #94
  * head 4180cbc, a fast write-then-close survivor is accepted: Linux Node 18 100/100, Node 22
  * 91/100; darwin Node 18 84/100, Node 22 6/100. Accepted with conditions by the owner's delegation
  * on 2026-11-18 (HANDOVER OD-D4); conditions: macOS harness 18/22 + engine-properties green on the

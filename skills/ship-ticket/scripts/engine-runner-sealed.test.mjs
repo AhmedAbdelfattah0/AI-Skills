@@ -28,8 +28,8 @@
  *                 an oversized frame is refused; forensic tmp plants are never written through.
  * - callers       gateRed, unit checks and proof keep the typed code; unit checks never retry it.
  * Not asserted (measured in the PR body): the claim refuses a channel any process still holds at
- * the instant the launcher observes the runner exit. A process that wrote and closed just before
- * that instant, including one handed the descriptor by an in-run holder, is accepted (R-T2; not an
+ * the channel's latching read in the exit callback. A process that wrote and closed just before
+ * that read, including one handed the descriptor by an in-run holder, is accepted (R-T2; not an
  * atomic snapshot, writers not authenticated). On 4180cbc: Linux N18 100/100, N22 91/100; darwin
  * N18 84/100, N22 6/100 for a fast write-then-close survivor.
  * Off darwin the report channel is refused as `channel_unsupported` (Linux: /dev/fd/N on a

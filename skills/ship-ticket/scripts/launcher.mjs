@@ -136,11 +136,11 @@ export const SEALED_SCHEMA = 'ship-ticket-sealed-result-v1';
  * the channel's queue and is its latch point (a full read is refused); the channel is at EOF only
  * when the next read returns EOF (EAGAIN or any further byte: not at EOF, and that byte is not
  * kept). No drain follows. Claim (exact): runner stdout (POSIX; plus the report channel on darwin)
- * is refused if any process still holds the channel at the instant the launcher observes the
- * runner exit. A process that wrote and closed just before that instant, including one handed the
+ * is refused if any process still holds the channel at the channel's latching read in the exit
+ * callback. A process that wrote and closed just before that read, including one handed the
  * descriptor by an in-run holder, is accepted; such bytes are the in-run injection risk R-T2, not
  * a new route. This is not an atomic snapshot and writers are not authenticated. (The report
- * channel's instant is its own latching read, after the read of stdout.)
+ * channel's latching read comes after the read of stdout.)
  * On win32, which exposes no descriptor to read, it waits up to DRAIN_MS for
  * EOF instead (`boundary: 'drain'`, weaker). It then writes ONE length-framed result to fd 1,
  * before any file: a JSON header line (SEALED_SCHEMA, attempt_id, exit_code and signal from its own
@@ -209,7 +209,7 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
     first.unref(); every.unref(); sm.timers.push(first, every);
   }
-  // Decision bytes are only those present when the launcher observes the runner's exit (the
+  // Decision bytes are only those read by each channel's latching read in the exit callback (the
   // boundary): each channel's EOF state is latched there and nothing read later is kept.
   const takeOut = (c) => { if (latched) return; size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); };
   const takeRep = (c) => { if (latched) return; rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); };
