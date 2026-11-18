@@ -5,13 +5,13 @@
  *
  * ONE RULE, ONE PLACE (I-A). Every rule a record depends on is implemented ONCE, here, and buildRecord, recordUsable and
  * tkVerdict all call the same function: the current context (`currentContext`: entries, current commands, candidate,
- * runner_config_changed, config digests, test globs), the record schema with its provenance relations (`validRecord`) and R-3
- * (`r3Inputs` + `r3Rule`). buildRecord passes its own output through `validRecord` before returning it (I-B), so a record it
- * emits is a record reuse accepts, and a field reuse would reject is never emitted.
+ * runner_config_changed, config digests, test globs) and the record schema with its provenance relations (`validRecord`).
+ * buildRecord passes its own output through `validRecord` before returning it (I-B), so a record it emits is a record reuse
+ * accepts, and a field reuse would reject is never emitted.
  *
  * CLAIM (L-ran, and nothing stronger; L5/L12): a record built here says the runner EXECUTED a test whose own title carries a
- * marker and recorded it as passed. It does NOT say the test is meaningful (a vacuous or assertion-free test passes; mutation
- * testing and independent review cover that), and it does not cover Angular/nx tests, `threads` pools or tampering with
+ * marker and recorded it as passed. It does NOT say the test is meaningful (a vacuous or assertion-free test passes; review
+ * against the acceptance criteria covers that), and it does not cover Angular/nx tests, `threads` pools or tampering with
  * installed dependencies. This module never runs a runner: it consumes a report PROVIDED BY THE CALLER (P5r, from the sealed
  * runner result of FX) with provenance, and decides what that report may be believed for. `channel_unsupported` (win32) and
  * `evidence_unquiet` (another attempt is live) are design section 1 refusals OWNED BY P5r/FX: they are decided before a run.
@@ -27,49 +27,32 @@
  *           `success === true`, `numFailedTestSuites === 0`, `numFailedTests === 0`, every suite `status === 'passed'`
  *           (vitest 4 writes only `passed`/`failed`); at most 100000 results and every title at most 2048 characters, both
  *           checked on the parsed document BEFORE the runner parser builds its result list. Over a cap: REFUSED, never dropped.
- *   result  counts only when `status === 'passed'`; a `failed` result or suite, or `success:false`, makes the WHOLE record
- *           `evidence_run_failed` even with exit 0. Any status outside vitest's six is `evidence_unavailable`.
+ *   result  credits only when `status === 'passed'`; skipped, todo, pending and disabled results NEVER credit. A `failed` result
+ *           or suite, or `success:false`, makes the WHOLE record `evidence_run_failed` even with exit 0. Any status outside
+ *           vitest's six is `evidence_unavailable`.
  *   marker  `[kind:<id>]` / `[plan:<id>]` read from the test's OWN (leaf) title only, through P3 `markers`.
  *   file    the report name, realpath-resolved (the nearest existing ancestor for a missing file), inside the repo, in P, an
  *           lstat-regular file (a symlink is resolved first, so the TARGET is what counts), matching the test globs and the
  *           entry's `covers`, at most 4 MiB. Otherwise a typed FILE void that never credits. Names resolving to one file merge
- *           into one row, and every per-row cap is re-checked after the merge (I-C).
+ *           into one row, and every per-row cap is re-checked after the merge (I-C). Every report name that carries a marker,
+ *           passed or not, is classified, so an unclassifiable name refuses the record instead of being guessed.
  *
- * R-3, WHAT IS ENFORCED (section 4 rule 5, no base run; owner amendment 2026-11-18: the design's total over P). With d(f, m) =
- * count_cand(f, m) - count_base(f, m) - skipped(f, m), a passed id m of a counted file f is
- *   credited                 when d(f, m) > 0 AND sum over f' in P of d(f', m) > 0 (deleted and renamed-away paths included);
- *   withheld `r3_unchanged`  when d(f, m) <= 0 (no more of m than at base once the file's NON-passed carriers are subtracted);
- *   withheld `r3_offset`     when d(f, m) > 0 but the total over P is <= 0 (the marker was added here and removed elsewhere).
- * R-3 IS ENTRY-LOCAL: `skipped` comes from ONE entry's report, so a carrier only another entry reported is not subtracted here. The
- * verdict therefore takes kind evidence from exactly one entry (reuse header, `multi_entry_unsupported_v0`); candidate-wide skipped
- * provenance is a future slice.
- * A withheld id is stored on its row (`withheld: {id: reason}`), RE-DERIVED on reuse like a credit, and surfaced by the verdict
- * as `withheld`, so a missing kind is never silent. `count` is the number of `[kind:x]`/`[plan:x]` occurrences in the bytes;
- * `skipped(f, m)` the occurrences in NON-passed result titles of f (a skipped `.each` over-subtracts, failing closed).
- * LIMITATIONS (accepted, L-ran; design section 4 "gameable only by a visible added marker"):
- *   - a marker added in a comment or in dead code of a counted file is indistinguishable from an added title;
- *   - a marker planted ANYWHERE in P (a README, a helper) adds to the total, so it can offset a move or a deletion;
- *   - a consistent forgery of engine state (the reuse header);
- *   - a LEGITIMATE rewrite or replacement credits nothing: rewriting a marked test in place is `r3_unchanged`; moving it, or
- *     deleting an old marked test while adding a new one of the same kind, is `r3_offset`. The reason is explicit, the credit is not given.
- * FUTURE (not implemented): title-level move detection, which could tell a relocated test from a new one.
+ * CREDIT RULE (owner decision 2026-11-19, SIMP design: the "test is NEW" rule R-3 and every historical Git comparison are
+ * REMOVED). A kind or item is credited from a PASSED result whose leaf title carries a valid marker, in a counted file (above),
+ * in a report bound to the exact candidate, runner and config. The age of the test is NOT checked: an old test that already
+ * carried its marker, in a file of P, credits when it passes. Whether a credited test is RELEVANT and ADEQUATE to the ticket's
+ * acceptance criteria is the reviewers' to judge (ship-ticket review), never this module's.
+ * WHY "in P" STAYS (exact-candidate binding, not novelty): the identity hashes the bytes of exactly the paths of P, so a credited
+ * file is always one whose bytes the identity holds. A file outside P is bound only through `base_sha` and git's view of it, which
+ * a local clean filter or line-ending conversion can make differ from the bytes the runner read (the round 6-9 conversion checks
+ * that closed this for R-3 are removed with R-3): such a file is `not_in_P` and never credits, whatever its bytes.
+ * ACCEPTED (owner, SIMP section 6): a marker added to an unrelated test credits when that test passes; the diff review sees it.
+ * RESIDUAL (reported, not decided here): an edit that git's diff does not list (a local clean filter, `core.autocrlf`) is outside
+ * the identity, so it can influence a run without moving `evidence_id`; it can never be the credited file (it is not in P).
  *
  * PATH IDENTITY (S2): every comparison of a declared, stored or report-derived path with a git path goes through ONE rule
  * (`pathIndex`/`under` in the base module): a spelling that shares a key (NFC, lower case) with a git path without being it is
  * refused (`path_alias`), on every platform. A config path must also be its own file: no symlinked directory on the way.
- * CONVERTED WORKING TREES ARE REFUSED (round 8; it replaces round 6's "the path enters P", which credited an unchanged test whose
- * Git LFS-style pointer blob holds no marker: Fable D2). Every base path git's diff did not list must be, as RAW bytes, its base blob
- * (a symlink by its link text, and still a symlink); every LISTED base path must carry no converting attribute, at base or now.
- * Otherwise git compares converted bytes (a clean filter of any name, a Git LFS or git-crypt pointer, `ident`, an encoding, autocrlf,
- * `core.symlinks=false`), and the base blob is not the base of the bytes R-3 counts: `evidence_unavailable` / detail
- * `worktree_conversion_unsupported_v0`. Round 9 adds the BASE side: a listed base path whose attributes, at base or now, include
- * `filter`, `ident`, `working-tree-encoding`, `text` or `eol` is refused too (a pointer blob is never a credit base, even after the filter
- * stops applying), so a repository with `* text=auto` is refused whenever a listed path is at base (V0 over-refusal, documented). A
- * Git LFS repository and a Windows
- * checkout under `core.autocrlf` whose files hold CRLF are REFUSED in V0 (fail closed). Cost: one raw read of every tracked file plus
- * two `git check-attr --all` over the listed ones; StoreCraft (2209 files, 18.8 MB) reads in about 0.4 s. The raw reads have their
- * OWN `maxIdentityBytes` (256 MiB) budget beside the identity's, so up to 512 MiB may be read in one call; that budget is UNTESTED (it
- * needs a 256 MiB tracked fixture). Git's own diff may RUN a configured clean filter: the local user's git config.
  * IDENTITY BRACKET (P5r/FX requirement, not decidable here): `evidence_id_before` is the identity before the run; a runner reading a
  * mutable checkout could modify a covered file and restore it before the identity is taken again. Binding what the runner reads to
  * the recorded identity (R-TC, the launch binding) is P5r's; P4r only checks the bracket it is given.
@@ -81,9 +64,12 @@
  * racing the identity is excluded by the caller's quiescence (`quiesced`), not here.
  * NOT A CHANGE (accepted; it cannot help a test pass): a `chmod +x` with `core.fileMode=false` (the raw comparison reads bytes, not
  * the executable bit, which Vitest ignores).
- * SUBMODULES (S3): V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at base or
- * in the index, and any changed path that is a directory holding a `.git` (a repository git does not list file by file), is refused with
- * `evidence_unavailable` / detail `submodule_unsupported_v0`.
+ * SUBMODULES (S3, kept for the BINDING): the identity hashes a nested repository as an empty directory, so its contents would be
+ * outside `evidence_id`. V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at
+ * base or in the index (a name listing, no blob is read), and any changed path that is a directory holding a `.git`, is refused
+ * with `evidence_unavailable` / detail `submodule_unsupported_v0`.
+ * CONFIG AT BASE (D4, kept for the config binding): the same base listing says whether a declared config path existed at base; one
+ * absent at base and present now is `runner_config_changed`, even when a local ignore rule keeps it out of git's diff.
  *
  * PROVENANCE (supplied by the caller, section 1): `runner_id`, `runner_version`, `attempt_id`, `exit_code`, `report_sha256`
  * (checked against the text), `report_eof`, `sealed`, `quiesced`, `binding_verified` (all `true`), `evidence_id_before`.
@@ -92,10 +78,10 @@
  * record schema (`test_kinds_error`). Rev 6 section 1 orders the VERDICT codes; this is the build order.
  *
  * State and output carry ids, codes, counts and repo-relative file names only: NEVER a test title (AC6); a non-creditable
- * marker on a skipped title is not stored either. Hostile input (L3, L6): caller objects are read through own DATA descriptors
+ * marker, or any marker of a non-passed title, is not stored either. Hostile input (L3, L6): caller objects are read through own DATA descriptors
  * only (no getter or proxy trap runs); work is charged to per-call budgets and the named LIMITS. The exported entry points
  * return refusals (`{ code, detail? }`) instead of throwing, except `readEntry`, `commandFor`, `currentContext`, `candidate`,
- * `census`, `r3Inputs`, `r3Rule`, `applicable` and `validRecord`, which THROW a `Refusal` for every input they refuse (a git or filesystem fault, or a
+ * `applicable` and `validRecord`, which THROW a `Refusal` for every input they refuse (a git or filesystem fault, or a
  * caller callback of `currentContext`, may surface as another error; each entry point maps any error to a refusal).
  */
 import { createHash } from 'node:crypto';
@@ -106,7 +92,7 @@ import { changedPaths } from './risk-floor.mjs';
 import { markers, ITEM_ID } from './test-kinds.mjs';
 import { parseRunnerOutput } from './gate.mjs';
 import { LIMITS as P2_LIMITS } from './engine-test-kinds.mjs';
-import { LIMITS, FILE_VOIDS, creditable, refuse, refusalOf, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, pathIndex, under, globList, matcher, matches, countMarkers, bufMarkers, parseScanned, preflight } from './engine-test-kinds-base.mjs';
+import { LIMITS, FILE_VOIDS, creditable, refuse, refusalOf, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, pathIndex, under, globList, matcher, matches, parseScanned, preflight } from './engine-test-kinds-base.mjs';
 
 export { LIMITS, REFUSALS, FILE_VOIDS, MARKER_ID, creditable, Refusal, refuse, codeOf, refusalOf, pathKey, pathIndex, under, charge, plain, own, ownOr, arr, exactKeys, isStr, safeRel, globList, matcher, matches } from './engine-test-kinds-base.mjs';
 export const CLAIM = 'L-ran';
@@ -134,47 +120,11 @@ const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }); // a fi
 /** The NUL-terminated records of a `-z` git listing, as bytes (a path is never decoded lossily). */
 const records = (buf) => { const out = []; for (let at = 0; at < buf.length;) { const end = buf.indexOf(0, at) < 0 ? buf.length : buf.indexOf(0, at); out.push(buf.subarray(at, end)); at = end + 1; } return out; };
 const isGitlink = (rec) => rec.subarray(0, 7).toString('latin1') === '160000 ';
-export const CONVERTED = 'worktree_conversion_unsupported_v0';
-const rawHash = (bytes, sha256) => createHash(sha256 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
 /** lstat of a working-tree path: null when it is missing (ENOENT, or ENOTDIR below a file); any other error refuses. */
 function stat(top, p) { try { return lstatSync(join(top, p)); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? null : refuse('evidence_unavailable'); } }
 /**
- * THE invariant for "unchanged" (round 6, tightened in round 8): a base path git's diff did not list must be, as RAW working-tree
- * bytes, its base blob (`blob <len>\0` + bytes, sha1 or sha256 by the id's length; a symlink by its link text, and still a symlink).
- * Otherwise git compared CONVERTED bytes (a clean filter of any name, a Git LFS or git-crypt pointer, `ident`, an encoding, autocrlf,
- * `core.symlinks=false`), and the base blob is not the base of the bytes R-3 counts: refused, never counted (round 6 let such a path
- * enter P, which credited an unchanged test whose pointer blob holds no marker: the Fable D2 finding). Throws a Refusal.
- */
-function rawUnchanged(top, p, mode, oid, budget) {
-  const st = stat(top, p);
-  if (!st || (mode === '120000' ? !st.isSymbolicLink() : !st.isFile())) return false;
-  if ((budget.bytes += st.size) > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
-  return rawHash(mode === '120000' ? readlinkSync(join(top, p), { encoding: 'buffer' }) : readFileSync(join(top, p)), oid.length === 64) === oid;
-}
-/**
- * Round 9 (Opus M1): the BASE side of a credit must not be conversion output either. Round 8's listed check (`hash-object` with
- * filters against the raw hash) saw only today's attributes, so a base stored through a filter that no longer applies (a local `* -filter`, or the candidate dropping the line from `.gitattributes`)
- * would count the pointer blob as the base. For every LISTED base path, the attributes git would apply AT BASE (`check-attr --source`)
- * and NOW must not touch the bytes: any `filter`, `ident`, `working-tree-encoding`, `text` or `eol` present in `--all` (which lists only
- * attributes that are set, unset or given a value, so no sentinel can hide one) is refused. This replaces round 8's listed check: every
- * conversion that can change a marker count needs one of these attributes (a filter, `ident`, an encoding); the one that needs none,
- * `core.autocrlf`, only rewrites CRLF pairs. Throws a Refusal.
- */
-const CONVERTING = ['filter', 'ident', 'working-tree-encoding', 'text', 'eol'];
-function attributesPlain(top, baseSha, paths) {
-  if (!paths.length) return;
-  const input = Buffer.from(`${paths.join('\0')}\0`, 'utf8');
-  for (const source of [['--source', baseSha], []]) {
-    let out;
-    try { out = records(git(top, ['check-attr', ...source, '--all', '-z', '--stdin'], 64 << 20, input)); } catch (e) { refuse(gitRefusal(e)); }
-    if (out.length % 3) refuse('evidence_unavailable'); // path, attribute, value: a short answer is no answer
-    for (let i = 1; i < out.length; i += 3) if (CONVERTING.includes(out[i].toString('latin1'))) refuse('evidence_unavailable', CONVERTED);
-  }
-}
-/**
- * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths),
- * the path lookups over both (`inP`, `inAll`), the base blob of every path in P and the candidate marker counts of every
- * regular file in P (`cand`). Throws a Refusal.
+ * The candidate: identity, P (`paths`, after exclusions), every changed path before ANY exclusion (`all`, for config_paths), the
+ * path lookups over both (`inP`, `inAll`) and the NAMES at base (`atBase`, for D4; no base blob is read). Throws a Refusal.
  */
 export function candidate(repo, baseSha, exclusions) {
   if (typeof baseSha !== 'string' || !SHA.test(baseSha)) refuse('test_kinds_error');
@@ -184,18 +134,11 @@ export function candidate(repo, baseSha, exclusions) {
   try { index = git(top, ['ls-files', '-s', '-z'], 64 << 20); tree = git(top, ['ls-tree', '-r', '-z', '--full-tree', baseSha], 64 << 20); } catch (e) { refuse(gitRefusal(e)); }
   const treeRecs = records(tree);
   if (records(index).some(isGitlink) || treeRecs.some(isGitlink)) refuse('evidence_unavailable', SUBMODULE); // S3, before anything else reads it
-  const base = treeRecs.map((rec) => { // ls-tree always writes a tab; a record without one matches no mode below and is skipped
-    const tab = rec.indexOf(9);
-    try { return [utf8.decode(rec.subarray(tab + 1)), /^(100644|100755|120000) blob ([0-9a-f]{40,64})$/.exec(rec.subarray(0, tab).toString('latin1'))]; } catch { return refuse('evidence_unavailable'); } // never decoded lossily
-  });
+  const atBase = new Set(treeRecs.map((rec) => { try { return utf8.decode(rec.subarray(rec.indexOf(9) + 1)); } catch { return refuse('evidence_unavailable'); } })); // never decoded lossily
   try { all = changedPaths(top, baseSha, 'WORKTREE'); } catch { refuse('evidence_unavailable'); }
-  const listed = new Set(all), budget = { bytes: 0 };
-  if (base.some(([p, m]) => m && !listed.has(p) && !rawUnchanged(top, p, m[1], m[2], budget))) refuse('evidence_unavailable', CONVERTED);
-  attributesPlain(top, baseSha, base.filter(([p, m]) => m && listed.has(p)).map(([p]) => p)); // deleted ones too: their base count enters the total
   if (all.length > LIMITS.maxPaths) refuse('evidence_budget_exceeded');
   const inAll = pathIndex(all), paths = all.filter((p) => !p.startsWith('.ship-ticket/') && !ex.some((e) => under(p, e))), inP = pathIndex(paths);
-  const exact = new Set(paths), blobs = base.filter(([p, m]) => m && m[1] !== '120000' && exact.has(p)).map(([p, m]) => [p, m[2]]); // git spelling against git spelling: exact
-  const h = createHash('sha256'), abs = (p) => join(top, p), cand = new Map();
+  const h = createHash('sha256'), abs = (p) => join(top, p);
   h.update(`ship-ticket-tk-evidence-v1\0${baseSha}\0`);
   let bytes = 0;
   for (const p of paths) {
@@ -208,7 +151,6 @@ export function candidate(repo, baseSha, exclusions) {
       else if (st.isFile()) {
         bytes += st.size; if (bytes > LIMITS.maxIdentityBytes) refuse('evidence_budget_exceeded');
         kind = 'file'; mode = (st.mode & 0o111) === 0 ? '100644' : '100755'; content = readFileSync(abs(p));
-        cand.set(p, bufMarkers(content));
       } else if (st.isDirectory()) { // a file replaced by a directory: git lists its files as paths of P; a REPOSITORY it does not
         try { lstatSync(join(abs(p), '.git')); refuse('evidence_unavailable', SUBMODULE); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
         kind = 'directory'; mode = '40000'; content = Buffer.alloc(0);
@@ -217,46 +159,8 @@ export function candidate(repo, baseSha, exclusions) {
     }
     h.update(Buffer.from(p, 'utf8')); h.update(`\0${kind}\0${mode}\0${content.length}\0`); h.update(content); h.update('\0');
   }
-  return { evidence_id: `e1:${h.digest('hex')}`, paths, all, inP, inAll, atBase: new Set(base.map(([p]) => p)), top, cand, blobs, base_sha: baseSha, census: null };
+  return { evidence_id: `e1:${h.digest('hex')}`, paths, all, inP, inAll, atBase, top, base_sha: baseSha };
 }
-/**
- * The R-3 census over P: candidate and base marker counts per path. Base blobs (listed by `candidate`) come from ONE `cat-file
- * --batch`; an unreadable or oversized base refuses (never skipped). Memoised on the candidate. Throws a Refusal.
- */
-export function census(c) {
-  if (c.census) return c.census;
-  const base = new Map(), oids = c.blobs;
-  if (oids.length) {
-    let out;
-    try { out = git(c.top, ['cat-file', '--batch'], LIMITS.maxIdentityBytes + oids.length * 128, oids.map((o) => o[1]).join('\n') + '\n'); } catch (e) { refuse(gitRefusal(e)); }
-    let at = 0;
-    for (const [p, oid] of oids) {
-      const nl = out.indexOf(10, at), head = /^([0-9a-f]+) blob (\d+)$/.exec(out.subarray(at, nl).toString('latin1'));
-      if (nl < 0 || !head || head[1] !== oid) refuse('evidence_unavailable');
-      const size = Number(head[2]);
-      base.set(p, bufMarkers(out.subarray(nl + 1, nl + 1 + size)));
-      at = nl + 1 + size + 1;
-    }
-  }
-  c.census = { cand: c.cand, base };
-  return c.census;
-}
-/** The R-3 input from rows `{file, skipped: Map}` (a built row or a stored one, the SAME function): the skipped counts in P. */
-export function r3Inputs(rows, inP) {
-  const skipped = new Map();
-  for (const f of rows) if (f.file !== null && inP(f.file) !== null) skipped.set(f.file, f.skipped);
-  return skipped;
-}
-/** R-3 (header): returns `(rel, m) => 'credit' | 'r3_unchanged' | 'r3_offset'`. The totals over P are computed once, charged to `ctx`. */
-export function r3Rule(cs, skipped, ctx) {
-  const n = (map, k) => map?.get(k) ?? 0, total = new Map();
-  const d = (p, m) => n(cs.cand.get(p), m) - n(cs.base.get(p), m) - n(skipped.get(p), m);
-  for (const p of new Set([...cs.cand.keys(), ...cs.base.keys(), ...skipped.keys()])) {
-    for (const m of new Set([...(cs.cand.get(p)?.keys() ?? []), ...(cs.base.get(p)?.keys() ?? []), ...(skipped.get(p)?.keys() ?? [])])) { charge(ctx); total.set(m, n(total, m) + d(p, m)); }
-  }
-  return (rel, m) => (d(rel, m) <= 0 ? 'r3_unchanged' : n(total, m) > 0 ? 'credit' : 'r3_offset');
-}
-
 // ---- the declared entry (config.testCommands.<name>) and the exact-argv rule (OD-2, I2) ----
 const hasFiles = (args) => args.length === RUNNER.args.length + 1;
 /** Validate an entry against the allowlisted grammar. Returns a plain copy. THROWS a Refusal (`runner_unsupported` for any other runner). */
@@ -336,26 +240,17 @@ export function currentContext(input, ctx) {
 
 // ---- THE record schema (I1, I-B, S1): one validator, used by buildRecord on its own output and by reuse on a stored record ----
 const TOP = ['evidence_id', 'base_sha', 'entry', 'dag_digest', 'command_digest', 'config_digest', 'attempt_id', 'exit_code', 'report_sha256', 'report_len', 'runner', 'claim', 'integrity', 'files', 'counts'];
-const ROW = ['file', 'outcome', 'credited', 'withheld', 'skipped', 'unknown'], COUNTS = ['marker_files', 'credited', 'unknown_markers'], RUNNER_KEYS = ['id', 'version', 'format'];
+const ROW = ['file', 'outcome', 'credited', 'unknown'], COUNTS = ['marker_files', 'credited', 'unknown_markers'], RUNNER_KEYS = ['id', 'version', 'format'];
 const OUTCOMES = ['counted', ...FILE_VOIDS];
-export const WITHHELD = Object.freeze(['r3_unchanged', 'r3_offset']);
 const uint = (v, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(v) && v >= 0 && v <= max;
 const str = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 const sortedUnique = (xs) => xs.every((x, i) => i === 0 || xs[i - 1] < x);
-/** A plain object of creditable ids to values `ok` accepts, as a Map; null for anything else. */
-function idMap(o, ok) {
-  if (!plain(o) || Reflect.ownKeys(o).length > LIMITS.maxIds) return null;
-  const out = new Map();
-  for (const k of Reflect.ownKeys(o)) { if (!creditable(k) || !ok(own(o, k))) return null; out.set(k, own(o, k)); }
-  return out;
-}
 /**
- * validRecord(R, ctx) -> a fresh copy built from primitives (rows carry `withheld` and `skipped` as Maps), or null. Throws only a
- * Refusal on a hostile shape. A record is its ROWS plus provenance (S1): nothing is stored that the rows cannot be checked
- * against. Checks: exact key sets at every level; typed fields (`runner.version` a RUNNER_VERSION, `report_len` >= 1); per row,
- * the outcome allowlist, `credited` creditable, sorted and unique, `withheld` creditable ids with an R-3 reason and disjoint from
- * `credited`, `skipped` creditable ids with counts >= 1 and only on rows that may be in P, `unknown` a count; a VOID row credits,
- * withholds and counts nothing; and `counts` EQUAL to the totals recomputed from the rows.
+ * validRecord(R, ctx) -> a fresh copy built from primitives, or null. Throws only a Refusal on a hostile shape. A record is its
+ * ROWS plus provenance (S1): nothing is stored that the rows cannot be checked against. Checks: exact key sets at every level
+ * (a row is exactly `{file, outcome, credited, unknown}`; a pre-2026-11-19 row with `withheld`/`skipped` is malformed); typed
+ * fields (`runner.version` a RUNNER_VERSION, `report_len` >= 1); per row, the outcome allowlist, `credited` creditable, sorted and
+ * unique, `unknown` a count; a VOID row credits and counts nothing; and `counts` EQUAL to the totals recomputed from the rows.
  */
 export function validRecord(R, ctx) {
   if (!exactKeys(R, TOP)) return null;
@@ -382,16 +277,14 @@ export function validRecord(R, ctx) {
     if (!(file === null ? outcome === 'result_outside_repo' : safeRel(file) && outcome !== 'result_outside_repo')) return null;
     if (file !== null && seen.has(file)) return null;
     seen.add(file);
-    const ids = arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx), withheld = idMap(own(f, 'withheld'), (v) => WITHHELD.includes(v)), skipped = idMap(own(f, 'skipped'), (v) => uint(v) && v > 0);
-    if (!withheld || !skipped || !sortedUnique(ids) || !uint(unknown, LIMITS.maxIds) || ids.some((m) => withheld.has(m))) return null;
-    if (outcome !== 'counted' && (ids.length || withheld.size || unknown)) return null; // a VOID row never credits (I1)
-    if (skipped.size && ['not_in_P', 'result_outside_repo'].includes(outcome)) return null;
+    const ids = arr(own(f, 'credited'), LIMITS.maxIds, creditable, ctx);
+    if (!sortedUnique(ids) || !uint(unknown, LIMITS.maxIds)) return null;
+    if (outcome !== 'counted' && (ids.length || unknown)) return null; // a VOID row never credits (I1)
     sum.marker_files++; sum.credited += ids.length; sum.unknown_markers += unknown;
-    copy.files.push({ file, outcome, credited: [...ids], withheld, skipped, unknown });
+    copy.files.push({ file, outcome, credited: [...ids], unknown });
   }
   // P2 takes at most this many items: a record that would exceed it is refused (I-B: the builder never emits one), never truncated
   if (new Set(copy.files.flatMap((f) => f.credited.filter((m) => m.startsWith('plan:')))).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded');
-  if (new Set(copy.files.flatMap((f) => [...f.withheld.keys()])).size > P2_LIMITS.maxItems) refuse('evidence_budget_exceeded'); // D6: across rows too
   return COUNTS.every((k) => copy.counts[k] === sum[k]) ? copy : null; // S1: a stored total is the total of its rows, or the record is malformed
 }
 
@@ -443,7 +336,7 @@ function classify(c, file, testGlobs, covers, ctx) {
 // ---- building a record from a provided report (section 1 output; sections 3-4 counting) ----
 /** I-C: every per-row collection is re-checked after EVERY change to it, a merge of two report names included (C4). */
 function capSlot(s) {
-  if (s.ids.size > LIMITS.maxIds || s.unknown.size > LIMITS.maxIds || s.skipped.size > LIMITS.maxIds) refuse('evidence_budget_exceeded');
+  if (s.ids.size > LIMITS.maxIds || s.unknown.size > LIMITS.maxIds) refuse('evidence_budget_exceeded');
   return s;
 }
 /**
@@ -478,7 +371,7 @@ function build(input) {
   if (!parsed.supported) refuse('evidence_unavailable'); // REACHABLE: preflight does not check every field the parser reads (P4r-35)
   const results = parsed.results; // at most LIMITS.maxResults: preflight counted them
 
-  // per report name: the creditable ids of PASSED results, unknown markers, and the creditable non-passed carriers (R-3 subtracts them)
+  // per report name: the creditable ids and unknown markers of PASSED results; a non-passed marked result only makes its name a row
   const byFile = new Map();
   for (const r of results) {
     charge(ctx);
@@ -486,10 +379,9 @@ function build(input) {
     const m = markers([r.title]);
     if (!m.kinds.length && !m.items.length && !m.unknown.length) continue;
     if (!byFile.has(r.file) && byFile.size >= LIMITS.maxMarkerFiles) refuse('evidence_budget_exceeded');
-    const slot = byFile.get(r.file) ?? { ids: new Set(), unknown: new Set(), skipped: new Map() };
+    const slot = byFile.get(r.file) ?? { ids: new Set(), unknown: new Set() };
     byFile.set(r.file, slot);
-    if (r.status !== 'pass') { for (const [k, n] of countMarkers(r.title)) if (creditable(k)) slot.skipped.set(k, (slot.skipped.get(k) ?? 0) + n); }
-    else {
+    if (r.status === 'pass') { // skipped, todo, pending and disabled never credit
       for (const k of m.kinds) slot.ids.add(`kind:${k}`);
       for (const i of m.items) (ITEM_ID.test(i) ? slot.ids : slot.unknown).add(`plan:${i}`);
       for (const u of m.unknown) slot.unknown.add(u);
@@ -503,7 +395,6 @@ function build(input) {
     if (prev) {
       for (const k of slot.ids) prev.ids.add(k);
       for (const k of slot.unknown) prev.unknown.add(k);
-      for (const [k, n] of slot.skipped) prev.skipped.set(k, (prev.skipped.get(k) ?? 0) + n);
       capSlot(prev);
       continue;
     }
@@ -511,14 +402,10 @@ function build(input) {
     rows.push(row);
     if (v.rel !== null) byRel.set(v.rel, row);
   }
-  for (const row of rows) if (row.file === null || c.inP(row.file) === null) row.skipped = new Map(); // a carrier outside P subtracts nothing
-  const rule = rows.some((x) => x.outcome === 'counted') ? r3Rule(census(c), r3Inputs(rows, c.inP), ctx) : null;
-  const files = [], sorted = (m) => Object.fromEntries([...m].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+  const files = [];
   for (const row of rows) {
-    if (row.outcome !== 'counted') { voids[row.outcome] = (voids[row.outcome] ?? 0) + 1; files.push({ file: row.file, outcome: row.outcome, credited: [], withheld: {}, skipped: sorted(row.skipped), unknown: 0 }); continue; }
-    const withheld = new Map();
-    for (const m of row.ids) { const why = rule(row.file, m); if (why !== 'credit') withheld.set(m, why); }
-    files.push({ file: row.file, outcome: 'counted', credited: [...row.ids].filter((m) => !withheld.has(m)).sort(), withheld: sorted(withheld), skipped: sorted(row.skipped), unknown: row.unknown.size });
+    if (row.outcome !== 'counted') { voids[row.outcome] = (voids[row.outcome] ?? 0) + 1; files.push({ file: row.file, outcome: row.outcome, credited: [], unknown: 0 }); continue; }
+    files.push({ file: row.file, outcome: 'counted', credited: [...row.ids].sort(), unknown: row.unknown.size });
   }
   files.sort((a, b) => ((a.file ?? '') < (b.file ?? '') ? -1 : (a.file ?? '') > (b.file ?? '') ? 1 : 0));
   const record = { evidence_id: c.evidence_id, base_sha: c.base_sha, entry: entry.name, dag_digest: own(input, 'dagDigest'), command_digest,
