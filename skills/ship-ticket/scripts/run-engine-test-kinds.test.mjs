@@ -31,9 +31,11 @@ import * as TKR from './engine-test-kinds-reuse.mjs';
 import { validateEngineDag, flatEntry } from './engine-dag.mjs';
 import { sealedReport, evidenceCommand, TYPED_RUNNER_REFUSALS } from './engine-gates.mjs';
 import { gate as gateCmd, status as statusCmd } from './run-engine.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const DARWIN = process.platform === 'darwin';
 const NOT_DARWIN = DARWIN ? false : 'V0 evidence runs on darwin only (FX report channel); non-darwin is covered by the channel_unsupported rows';
+const WIN_SKIP = process.platform === 'win32' ? 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)' : false;
 const J = JSON.stringify;
 const SCRIPTS = dirname(fileURLToPath(import.meta.url));
 const ok = (r, msg) => { assert.equal(r.status, 0, `${msg ?? ''} ${r.stdout}${r.stderr}`); return r; };
@@ -155,7 +157,7 @@ async function sealedRun(t, r, env = {}) {
   const entry = TKIO.readEntry(flatEntry('unit', ENTRY)), command = evidenceCommand(entry, ['test/a.test.ts']);
   const run = io.gateRunner({ repoRoot: r.dir, dir: join(r.dir, '.git', 'att'), platform: process.platform, env: { ...process.env, FAKE_VITEST: join(r.dir, '.git', 'ctl.json'), ...env },
     toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g, process.platform) });
-  const launch = await run({ attempt_id: 'att-seam', command, timeoutMs: 20000, report: true });
+  const launch = await run({ attempt_id: 'att-seam', command, timeoutMs: WORKER_FAILURE_BOUND_MS, report: true });
   launch.release();
   return { entry, command, result: await launch.done };
 }
@@ -302,9 +304,12 @@ function mainEngine(t) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'p5r-main-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const top = git(SCRIPTS, 'rev-parse', '--show-toplevel').stdout.trim();
-  const ar = spawnSync('sh', ['-c', `git -C "${top}" archive origin/main skills | tar -x -C "${dir}"`], { encoding: 'utf8' });
+  if (git(top, 'rev-parse', '--verify', '--quiet', 'origin/main^{commit}').status !== 0) return null; // a shallow CI checkout has no base ref
+  const ar = spawnSync('sh', ['-c', `set -o pipefail; git -C "${top}" archive origin/main skills | tar -x -C "${dir}"`], { encoding: 'utf8', shell: false });
   assert.equal(ar.status, 0, ar.stderr);
-  return join(dir, 'skills', 'ship-ticket', 'scripts', 'run-engine.mjs');
+  const cli = join(dir, 'skills', 'ship-ticket', 'scripts', 'run-engine.mjs');
+  assert.ok(existsSync(cli), 'the extracted origin/main engine exists');
+  return cli;
 }
 const VOLATILE = new Set(['dag_digest', 'plan_digest', 'approved_plan_digest', 'dag_file', 'created_at', 'timestamp', 'started_at', 'ended_at', 'pid', 'pgid', 'leader_start', 'skill_commit', 'at', 'duration_ms', 'event_id']);
 function normal(v, root) {
@@ -317,6 +322,7 @@ function normal(v, root) {
 
 test('[AC6] inactive differential: a run that declares nothing gives the same state, events and status as origin/main\'s engine; no identity, no run', { skip: NOT_DARWIN }, (t) => {
   const mainCli = mainEngine(t);
+  if (mainCli === null) { t.skip('origin/main is not in this checkout (shallow CI): the differential needs the base engine and runs locally'); return; }
   const scenario = (cli) => {
     const fx = fixture(t, { commit: true, config: { width: 1, testCommands: { proof: { cmd: process.execPath, args: ['-e', ''] } } } });
     const run = (cmd, flags = {}) => spawnSync(process.execPath, [cli, ...cmd.split(' '), '--repo', fx.repo, '--ticket', 'T-1', '--run-id', 'run-1',
@@ -458,9 +464,9 @@ test('[R4] a detached survivor holding the report channel: runner_survivor reach
   assert.equal(S.events.filter(e => e.type === 'TEST_KINDS_REFUSED').length, 1);
 });
 
-test('[R4] non-darwin: channel_unsupported is a typed, stored refusal (ctx.platform linux); nothing is accepted and nothing re-runs', async (t) => {
+test('[R4] non-darwin: channel_unsupported is a typed, stored refusal (native on Linux, ctx.platform linux on darwin); nothing is accepted and nothing re-runs', { skip: WIN_SKIP }, async (t) => {
   const fx = ready(tkFx(t));
-  const call = () => gateCmd({ ...fx.ctx({ platform: 'linux' }), gate: 'review', input: passReview('rx-1', fx.candidate()) });
+  const call = () => gateCmd({ ...fx.ctx(DARWIN ? { platform: 'linux' } : {}), gate: 'review', input: passReview('rx-1', fx.candidate()) });
   const r = await call();
   assert.deepEqual([r.ok, r.code, r.judgment_point], [false, 'channel_unsupported', true]);
   const S = fx.readState();
