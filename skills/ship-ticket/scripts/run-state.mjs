@@ -12,11 +12,12 @@ import { createHash } from 'node:crypto';
 export const BEGIN = '<!-- RUN-STATE:BEGIN -->';
 export const END = '<!-- RUN-STATE:END -->';
 /**
- * RUN-STATE events that carry owner authority (approval, DAG binding, review retry, unit clear, and under
- * security policy 2 an add-only control addendum and a per-candidate waiver): never a worker's to append.
+ * RUN-STATE events that carry owner authority (approval, DAG binding, review retry, unit clear, under
+ * security policy 2 an add-only control addendum and a per-candidate waiver, and a per-candidate
+ * test-kind waiver, S-01b2): never a worker's to append.
  * SECURITY_REASSESSED is engine-recorded (its truth is engine state), not authority.
  */
-export const AUTHORITY_EVENTS = ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR', 'SECURITY_ADDENDUM', 'SECURITY_WAIVER'];
+export const AUTHORITY_EVENTS = ['START', 'DAG_BOUND', 'RETRY', 'UNIT_CLEAR', 'SECURITY_ADDENDUM', 'SECURITY_WAIVER', 'TEST_KIND_WAIVER'];
 
 const BREAK = /\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
 const HIDDEN = /\r(?!\n)|[\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
