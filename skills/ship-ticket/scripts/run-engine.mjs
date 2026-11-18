@@ -114,6 +114,9 @@ function open(ctx) {
       // S-01b2 P5r: the version 2 flag, S.test_kinds and config.testKinds come together or not at all (rev 5 section 6 row 8)
       if (new Set([testKindsOn(E), E.S.test_kinds !== undefined, E.S.config?.testKinds !== undefined]).size !== 1)
         throw coded('test_kinds_state_missing', `policy_version ${E.S.policy_version}, test_kinds state and config.testKinds disagree: a partial activation is never resumed`);
+      // V0 single-entry invariant (R1), re-checked on every load: P4r refuses two RECORDS, not two DECLARED entries
+      if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
+        throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -569,7 +572,7 @@ export async function archive(ctx) {
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing']);
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;

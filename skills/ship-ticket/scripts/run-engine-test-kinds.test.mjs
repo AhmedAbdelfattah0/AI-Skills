@@ -239,6 +239,62 @@ test('[AC5] active init binds S.test_kinds with policy_version 2; a partial acti
   }
 });
 
+// ------------------------------------------------------------------ R1: the V0 single-entry invariant (FND-003-1 round 2)
+// P4r's verdict refuses two RECORDS, not two DECLARED entries (a declared entry without a record is skipped), so the engine
+// enforces "exactly one declared evidence entry" itself: at init, and at every load of a persisted state.
+
+test('[R1-1] INIT: two declared evidence entries are multi_entry_unsupported_v0, whatever their form (no record can exist yet)', (t) => {
+  const init = (fx) => fx.cli('init', { dag: fx.dagFile });
+  initFails(init(tkFx(t, { testCommands: { unit: ENTRY, unit2: ENTRY } })), 'multi_entry_unsupported_v0');
+  const full = { ...ENTRY, args: ARGS, evidence: { ...ENTRY.evidence, files: false } };
+  initFails(init(tkFx(t, { testCommands: { unit: ENTRY, unit2: full } })), 'multi_entry_unsupported_v0');
+});
+
+test('[R1-2/R1-4] RESUME: a persisted state declaring a second evidence entry (with or without records) is refused at every entry command', (t) => {
+  const fx = tkFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const good = readFileSync(fx.stateFile());
+  const edits = [
+    ['second entry, no record for either', (s) => { s.config.testCommands.unit2 = ENTRY; }],
+    ['second entry, a record for the second only', (s) => { s.config.testCommands.unit2 = ENTRY; s.test_kinds.records.unit2 = { forged: true }; }],
+    ['second entry, records for both', (s) => { s.config.testCommands.unit2 = ENTRY; s.test_kinds.records.unit = { forged: true }; s.test_kinds.records.unit2 = { forged: true }; }],
+    ['the bound entry renamed away', (s) => { s.config.testCommands.other = s.config.testCommands.unit; delete s.config.testCommands.unit; }],
+  ];
+  for (const [what, edit] of edits) {
+    writeFileSync(fx.stateFile(), good); fx.editState(edit);
+    const before = readFileSync(fx.stateFile());
+    for (const cmd of ['status', 'resume', 'drive']) {
+      const r = fx.cli(cmd);
+      assert.equal(r.status, 1, `${what}: ${cmd} ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /multi_entry_unsupported_v0/, `${what}: ${cmd}`);
+    }
+    refused(fx.gate('review', passReview('rx-1', 'c')), 'multi_entry_unsupported_v0', what);
+    refused(fx.gate('ship-ready', {}), 'multi_entry_unsupported_v0', what);
+    assert.deepEqual(readFileSync(fx.stateFile()), before, `${what}: nothing written`);
+  }
+});
+
+test('[R1-3 seam] P4r tkVerdict alone refuses two RECORDS but not two declared entries with one record; the engine feeds it one entry and its own record only', { skip: NOT_DARWIN }, async (t) => {
+  // the producer's guard, through its REAL export: two records refused, one record of two declared entries NOT refused
+  const r = seamRepo(t);
+  const { entry, command, result } = await sealedRun(t, r);
+  const id = TKIO.evidenceIdentity({ repo: r.dir, baseSha: r.base }), dag = 'b'.repeat(64);
+  const m = sealedReport(result, { attempt_id: 'att-seam', evidence_id_before: id.evidence_id, binding_verified: true, runner_version: '4.0.7' });
+  const rec = TKIO.buildRecord({ repo: r.dir, baseSha: r.base, entry, commandArgs: command.args, tests: { globs: [] }, dagDigest: dag, report: m.report }).record;
+  const second = { ...entry, name: 'unit2' };
+  const E = (records, entries = [entry, second]) => ({ repo: r.dir, baseSha: r.base, dagDigest: dag, entries, commands: { unit: command, unit2: command }, records, tests: { globs: [] },
+    bound: { tags: ['input-path'], items: [], kinds: { negative: ['tag:input-path'] }, protected: [] }, declaration: null, reassessed: [], S: { run_id: 'run-1', plan_digest: 'sha256:x' } });
+  const two = TKR.tkVerdict(E({ unit: rec, unit2: { ...rec, entry: 'unit2' } }), 'F1');
+  assert.deepEqual([two.code, two.detail], ['evidence_unavailable', 'multi_entry_unsupported_v0']);
+  assert.equal(TKR.tkVerdict(E({ unit: rec }), 'F1').status, 'pass', 'two DECLARED entries with ONE record pass P4r: the engine must enforce the invariant itself');
+  // the engine: a stray record under another name in state is never passed on (records reported: the bound entry only)
+  const fx = ready(tkFx(t, { behaviour: { a: { write: { 'test/a.test.ts': PLAIN } } } }));
+  refused(refreshThen(fx, 'review', passReview('rx-1', fx.candidate()), 'F1'), 'missing_test_kinds');
+  fx.editState((s) => { s.test_kinds.records.ghost = { ...s.test_kinds.records.unit, entry: 'ghost' }; });
+  const again = refused(fx.gate('review', passReview('rx-1', fx.candidate())), 'missing_test_kinds');
+  assert.match(again.out.reasons[0], /records \{"unit":"current"\};/, 'only the bound entry and its record reach P4r');
+});
+
 // ------------------------------------------------------------------ AC6: inactive differential against origin/main's engine
 
 /** origin/main's skills/ directory extracted to a temp dir: the "before" engine (no golden file). */
