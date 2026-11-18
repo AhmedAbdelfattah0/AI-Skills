@@ -592,6 +592,34 @@ test('I4 quarantine (in-process, every kind): moves exactly readEvents().bad to 
   }
 });
 
+test('I2 quarantine sidecars: two recoveries with equal removed bytes and first offset but different later offsets keep both sidecars', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 's04a2-qc-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const good = encodeValid('milestone').text, [s] = encodeValid('milestone').text.split('\n').filter(Boolean);
+  const dangling = Buffer.from(`${s}\n`), gapA = Buffer.from(good), gapB = Buffer.from(good + good);
+  const run = async (name, gap) => {
+    const file = join(dir, name);
+    writeFileSync(file, Buffer.concat([Buffer.from(good), dangling, gap, dangling]));
+    const info = await mustResolve(quarantineLocked(file, { lockCtx, fs: quiet, select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck }), 'quarantineLocked');
+    return { file, info };
+  };
+  const a = await run('a.jsonl', gapA), b = await run('b.jsonl', gapB);
+  assert.equal(a.info.sha256, b.info.sha256, 'same removed bytes');
+  assert.equal(a.info.offset, b.info.offset, 'same first offset');
+  // The same log name with the second layout: replay both recoveries into one log path to force the old collision.
+  const shared = join(dir, 'shared.jsonl');
+  const paths = [];
+  for (const gap of [gapA, gapB]) {
+    writeFileSync(shared, Buffer.concat([Buffer.from(good), dangling, gap, dangling]));
+    const info = await mustResolve(quarantineLocked(shared, { lockCtx, fs: quiet, select: (buf) => ev.readEvents(buf).bad, marker: marker(), check: cleanCheck }), 'quarantineLocked');
+    paths.push(sidecarPath(shared, info));
+  }
+  assert.notEqual(paths[0], paths[1], 'different layouts, different sidecars');
+  const offsets = paths.map((p) => readSidecar(p).pieces.map((x) => x.offset));
+  assert.notDeepEqual(offsets[0], offsets[1]);
+  for (const p of paths) assert.ok(existsSync(p), `${p} survived`);
+});
+
 test('reader: a hand-damaged pair of ANY kind is invalid at read (kind, canonical id, start payload, envelope), never an event', () => {
   for (const name of ev.EVENT_NAMES) {
     const [s, e] = encodeValid(name).text.split('\n').map((l) => (l ? JSON.parse(l) : null));

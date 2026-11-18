@@ -4,8 +4,9 @@
  * only a JSON replace). Only run-log.mjs calls these (a structural test pins it). Invariants (measure/events.mjs header):
  * - I1: `check(after, before)` sees the WHOLE file as it will be after the write (committed bytes + loss record + new text)
  *   and throws to refuse; nothing is written, moved or truncated before it passes.
- * - I2: bytes leave the log only after they are durable in `<log>.lost-<offset>-<sha12>.json` (verbatim, base64), and the
- *   same write carries the `log_loss` record `marker(info)` returns. A refusal or a failure restores the original bytes.
+ * - I2: bytes leave the log only after they are durable in `<log>.lost-<offset>-<sha12>[-<layout8>].json` (verbatim, base64), and the
+ *   same write carries the `log_loss` record `marker(info)` returns. The sidecar is the durable record of the removed bytes;
+ *   a refusal before the write changes nothing, and after a failed write restoring the original bytes is best effort.
  * - I3: only the bytes after the last LF are torn (measure/events.mjs `committedLength`).
  * Cancellation (`lockOptions.signal`) applies to the lock wait only: once the lock is held the operation runs to completion.
  * The awaits inside the lock are test fault-injection boundaries (`hooks.boundary`); no other code runs between them.
@@ -20,7 +21,9 @@ const coded = (code, message) => Object.assign(new Error(`${code}: ${message}`),
 /** A log larger than this is refused rather than read into memory (L3). */
 export const LOG_BYTES_MAX = 64 * 1024 * 1024;
 export const LOSS_SCHEMA = 'ship-ticket-run-log-loss-v1';
-export const sidecarPath = (file, { offset, sha256 }) => `${file}.lost-${offset}-${sha256.slice(0, 12)}.json`;
+/** `info.layout` (non-enumerable, set for a multi-piece quarantine) hashes every piece's offset and length, so two recoveries
+ *  with equal removed bytes and first offset but different later offsets never share a sidecar (the earlier one is never replaced). */
+export const sidecarPath = (file, { offset, sha256, layout }) => `${file}.lost-${offset}-${sha256.slice(0, 12)}${layout ? `-${layout}` : ''}.json`;
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const seams = ({ fs = {} }) => ({ write: fs.writeSync ?? writeSync, fsync: fs.fsyncSync ?? fsyncSync, truncate: fs.ftruncateSync ?? ftruncateSync });
 const writeAll = (write, fd, data, at) => { const n = write(fd, data, 0, data.length, at); if (n !== data.length) throw coded('short_write', `${n} of ${data.length} bytes`); };
@@ -49,11 +52,15 @@ async function saveLost(file, info, pieces, opts) {
   await writeStateAtomic(sidecarPath(file, info), { schema: LOSS_SCHEMA, log: file.split(/[\\/]/).pop(), ...info,
     pieces: pieces.map(([from, bytes]) => ({ offset: from, base64: bytes.toString('base64') })) }, { fs: { fsyncSync: seams(opts).fsync }, platform: opts.platform });
 }
-const lossInfo = (offset, bytes, cause) => ({ offset, bytes: bytes.length, sha256: sha(bytes), cause });
+const lossInfo = (offset, bytes, cause, pieces) => {
+  const info = { offset, bytes: bytes.length, sha256: sha(bytes), cause };
+  if (pieces && pieces.length > 1) Object.defineProperty(info, 'layout', { value: sha(Buffer.from(JSON.stringify(pieces.map(([from, b]) => [from, b.length])))).slice(0, 8), enumerable: false });
+  return info;
+};
 
 /**
  * Append `text` (whole LF-terminated lines). A torn tail is moved to a sidecar and replaced by `marker(info)` + `text` in one
- * positional write; any failure after the write starts restores the original bytes. Options: `check(after, before)`,
+ * positional write; after a failure once the write has started, restoring the original bytes is best effort (the sidecar is the durable record). Options: `check(after, before)`,
  * `marker(info) -> text` (required when a torn tail exists), `waitMs`, `maxBytes`; test seams `lock`, `lockCtx`, `lockOptions`,
  * `hooks`, `fs` ({ writeSync, fsyncSync, ftruncateSync }), `platform`. Resolves `{ lost: info | null, bytes }`.
  */
@@ -98,7 +105,7 @@ export async function quarantineLocked(file, { select, marker, check, ...opts })
     let at = 0;
     for (const [from, to] of ranges) { keep.push(buf.subarray(at, from)); at = to; }
     keep.push(buf.subarray(at));
-    const info = lossInfo(ranges[0][0], Buffer.concat(pieces.map(([, b]) => b)), 'quarantine');
+    const info = lossInfo(ranges[0][0], Buffer.concat(pieces.map(([, b]) => b)), 'quarantine', pieces);
     const after = Buffer.concat([...keep, Buffer.from(marker(info), 'utf8')]);
     if (check) check(after, buf);
     await saveLost(file, info, pieces, opts);
