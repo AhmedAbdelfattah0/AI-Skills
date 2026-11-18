@@ -662,8 +662,9 @@ const p3Digest = (fn) => {
   return h.digest('hex');
 };
 
-test('P3 AC5/L5 differential: requiredFor without `provenance` equals the #83 output on every corpus plan (golden captured on main 5a29114 before the change)', () => {
+test('P3 AC5/L5 differential: requiredFor without `provenance` equals the #83 output on every corpus plan (golden captured on main 5a29114 before the change)', (t) => {
   assert.ok(P3_PLANS.length >= 900, `corpus plans ${P3_PLANS.length}`);
+  t.diagnostic(`golden differential: ${P3_PLANS.length} plans x ${P3_DECLS.length} declarations x 2 bases`);
   const statuses = new Set(P3_PLANS.flatMap((p) => P3_DECLS.map((d) => TK.requiredFor({ planText: p, declaration: d }).status)));
   assert.deepEqual([...statuses].sort(), ['not_declared', 'refused', 'required'], 'the corpus reaches every status');
   assert.equal(p3Digest((a) => omitProvenance(TK.requiredFor(a))), '739efb1cfde46022671d680beddc5933c6d3d2768573913af3bb43002e40cbae');
