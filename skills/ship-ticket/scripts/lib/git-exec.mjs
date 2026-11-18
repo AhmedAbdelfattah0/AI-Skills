@@ -96,9 +96,7 @@ export function zSplit(bytes) {
 const HEX = '0123456789abcdef';
 /** Display only, never compared: printable ASCII kept, the backslash doubled, every other byte as \xNN. */
 export function label(bytes) {
-  let s = '';
-  for (const b of bytes) s += b === 0x5c ? '\\\\' : b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : `\\x${HEX[b >> 4]}${HEX[b & 15]}`;
-  return s;
+  return [...bytes].map((b) => (b === 0x5c ? '\\\\' : b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : `\\x${HEX[b >> 4]}${HEX[b & 15]}`)).join('');
 }
 
 // ------------------------------------------------------------------ environment composition (pure)
@@ -142,9 +140,8 @@ export function scrubAmbient(env, { platform = process.platform } = {}) {
     const seen = new Set();
     for (const k of [...keys].sort()) if (seen.has(up(k))) keep.delete(k); else seen.add(up(k));
   }
-  const out = Object.create(null);
-  for (const k of keys) if (keep.has(k)) out[k] = ownValue(env, k);
-  return out;
+  // Spread defines own data properties (a `__proto__` key stays an own key) on a null-prototype literal.
+  return { __proto__: null, ...Object.fromEntries(keys.filter((k) => keep.has(k)).map((k) => [k, ownValue(env, k)])) };
 }
 
 /** The P neutralEnv elements (a890b0d:337-342) as a pure policy; the caller owns and creates the paths. */
@@ -198,20 +195,20 @@ export function composeEnv({ ambient, platform = process.platform, gitInfo, hook
     || !isObj(set) || !Object.entries(set).every(settable)
     || !isObj(selection) || !Object.entries(selection).every(([k, v]) => SELECTION_KEYS.includes(k) && isAbs(v, platform))
     || !okPairs(pairs) || !okNeutral(neutralisation)) throw invalid();
-  const env = scrubAmbient(ambient, { platform });
-  const drop = (k) => { for (const e of Object.keys(env)) if (up(e) === up(k)) delete env[e]; };
-  const put = (k, v) => { drop(k); env[k] = v; };
+  const env = new Map(Object.entries(scrubAmbient(ambient, { platform })));
+  const drop = (k) => { for (const e of [...env.keys()]) if (up(e) === up(k)) env.delete(e); };
+  const put = (k, v) => { drop(k); env.set(k, v); };
   for (const k of deletes) drop(k);
   for (const [k, v] of Object.entries(BASE_ENV)) put(k, v);
   if (gitInfo.noLazyFetch) put('GIT_NO_LAZY_FETCH', '1');
   for (const [k, v] of Object.entries(set)) put(k, v);
   for (const [k, v] of Object.entries(selection)) put(k, v);
   const all = [['core.fsmonitor', 'false'], ['core.hooksPath', hooksDir], ...pairs, ...neutralisation];
-  all.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
-  env.GIT_CONFIG_COUNT = `${all.length}`;
-  Object.freeze(env);
-  COMPOSED.set(env, platform);
-  return env;
+  all.forEach(([k, v], i) => { env.set(`GIT_CONFIG_KEY_${i}`, k); env.set(`GIT_CONFIG_VALUE_${i}`, v); });
+  env.set('GIT_CONFIG_COUNT', `${all.length}`);
+  const out = Object.freeze({ __proto__: null, ...Object.fromEntries(env) });
+  COMPOSED.set(out, platform);
+  return out;
 }
 
 // ------------------------------------------------------------------ process outcome
@@ -219,7 +216,7 @@ export function composeEnv({ ambient, platform = process.platform, gitInfo, hook
 /** Design §2.2 precedence; the first matching row wins. */
 export const OUTCOME_ROWS = Object.freeze(['git_env_too_large', 'git_unavailable', 'git_launch_failed', 'git_timeout', 'git_signal',
   'git_output_truncated', 'git_failed', 'git_stderr', 'decode']);
-const ERROR_ROW = Object.freeze({ __proto__: null, ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' });
+const ERROR_ROW = new Map([['ENOENT', 'git_unavailable'], ['EACCES', 'git_unavailable'], ['ETIMEDOUT', 'git_timeout'], ['ENOBUFS', 'git_output_truncated']]);
 
 /**
  * Map the facts of one run to a frozen {outcome, status, stdout} or throw a typed GitError. A spawn error
@@ -231,7 +228,8 @@ export function classify(facts, spec) {
   const { op = null, status: map = { 0: 'ok' }, stderr: mode = 'forbid', decode } = spec;
   const err = (code) => fail(code, op, facts.stderr);
   if (facts.envTooLarge) throw err('git_env_too_large');
-  if (facts.error) throw err(own(ERROR_ROW, facts.error.code) ? ERROR_ROW[facts.error.code] : 'git_launch_failed');
+  // The spawn error's code is read once, as own data (an inherited or accessor `code` is no row).
+  if (facts.error) throw err(ERROR_ROW.get(ownValue(facts.error, 'code')) ?? 'git_launch_failed');
   if (facts.signal) throw err('git_signal');
   if (!own(map, facts.status)) throw err('git_failed');
   if (mode !== 'allow' && facts.stderr?.length > 0) throw err('git_stderr');
@@ -240,6 +238,17 @@ export function classify(facts, spec) {
   }
   return Object.freeze({ outcome: ownValue(map, facts.status), status: facts.status, stdout: facts.stdout });
 }
+
+/**
+ * A run's accepted-exit map as a frozen null-prototype copy of its own ENUMERABLE entries, each a decimal exit
+ * code with an own data string value; null when any entry is malformed. An accessor entry is refused without
+ * running it; an inherited or non-enumerable entry is not copied, so it can never become an outcome.
+ */
+const statusMap = (m) => {
+  if (!m || typeof m !== 'object') return null;
+  const entries = Object.keys(m).map((k) => [k, ownValue(m, k)]);
+  return entries.every(([k, v]) => /^\d+$/.test(k) && typeof v === 'string' && /^[a-z_]+$/.test(v)) ? Object.freeze({ __proto__: null, ...Object.fromEntries(entries) }) : null;
+};
 
 /** Conservative Windows environment-block bound in UTF-16 units (the real limit is UNVERIFIED, design R-A5). */
 const WIN_ENV_LIMIT = 32767;
@@ -261,11 +270,11 @@ export function gitRunner({ platform = process.platform, envLimit, ...probeOptio
   const gi = probeGit(probeOptions);
   const run = ({ args, cwd, env, op, status = { 0: 'ok' }, stderr = 'forbid', decode, timeoutMs = 60_000, maxBuffer = 64 * 1024 * 1024,
     ...unknown } = {}) => {
+    const accepted = statusMap(status);
     if (Object.keys(unknown).length || !isAbs(cwd, platform) || COMPOSED.get(env) !== platform || !Array.isArray(args) || !args.every(isStr)
-      || !status || typeof status !== 'object' || !Object.entries(status).every(([k, v]) => /^\d+$/.test(k) && /^[a-z_]+$/.test(v))
-      || !['forbid', 'allow'].includes(stderr) || (decode !== undefined && !DECODE_CODES.includes(decode))
+      || !accepted || !['forbid', 'allow'].includes(stderr) || (decode !== undefined && !DECODE_CODES.includes(decode))
       || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) throw invalid();
-    const spec = { op, status, stderr, decode };
+    const spec = { op, status: accepted, stderr, decode };
     if (envUnits(env) > (envLimit ?? (platform === 'win32' ? WIN_ENV_LIMIT : Infinity))) return classify({ envTooLarge: true }, spec);
     let isDir = false;
     try { isDir = statSync(cwd).isDirectory(); } catch { /* refused below */ }

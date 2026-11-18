@@ -96,6 +96,9 @@ export function assertGitCapable(info, { partialClone = false } = {}) {
   return info;
 }
 
+// Spawn error code -> refusal code; a Map, so an inherited name (`constructor`) is never a row.
+const LAUNCH = new Map([['ENOENT', 'git_unavailable'], ['EACCES', 'git_unavailable'], ['ETIMEDOUT', 'git_timeout'], ['ENOBUFS', 'git_output_truncated']]);
+
 /**
  * Resolve, run `<abs git> --version` with every GIT_* removed, parse, enforce the general floor.
  * SIGKILL on timeout: a binary that ignores SIGTERM cannot hold the synchronous caller. This bounds
@@ -103,12 +106,9 @@ export function assertGitCapable(info, { partialClone = false } = {}) {
  */
 export function probeGit(opts = {}) {
   const bin = resolveGitBinary(opts);
-  const env = { ...(opts.env ?? process.env) };
-  for (const k of Object.keys(env)) if (k.toUpperCase().startsWith('GIT_')) delete env[k];
-  env.LC_ALL = 'C';
+  const env = { ...Object.fromEntries(Object.entries(opts.env ?? process.env).filter(([k]) => !k.toUpperCase().startsWith('GIT_'))), LC_ALL: 'C' };
   const r = spawnSync(bin, ['--version'], { env, cwd: path.dirname(bin), shell: false, windowsHide: true, timeout: opts.timeoutMs ?? 10_000, killSignal: 'SIGKILL', maxBuffer: 4096 });
-  const launch = Object.freeze({ __proto__: null, ENOENT: 'git_unavailable', EACCES: 'git_unavailable', ETIMEDOUT: 'git_timeout', ENOBUFS: 'git_output_truncated' });
-  if (r.error) throw new GitCapabilityError(launch[r.error.code] ?? 'git_launch_failed');
+  if (r.error) throw new GitCapabilityError(LAUNCH.get(r.error.code) ?? 'git_launch_failed');
   if (r.signal) throw new GitCapabilityError('git_signal');
   if (r.status !== 0) throw new GitCapabilityError('git_failed');
   const parsed = parseGitVersion(r.stdout);

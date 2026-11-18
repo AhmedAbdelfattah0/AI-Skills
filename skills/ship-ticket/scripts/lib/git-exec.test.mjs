@@ -618,6 +618,33 @@ test('classify reads only own data: an inherited error code is not a row, and a 
   assert.equal(called, 0, 'the getter is not run');
 });
 
+test('classify reads the spawn error code as own data, once: an inherited or accessor code is not a row', () => {
+  const facts = { signal: null, stderr: Buffer.alloc(0), stdout: Buffer.from('x') };
+  assert.throws(() => classify({ ...facts, error: Object.create({ code: 'ENOENT' }) }, {}), code('git_launch_failed'), 'inherited .code');
+  let reads = 0;
+  const error = Object.defineProperty({}, 'code', { get() { reads++; return 'ENOENT'; }, enumerable: true });
+  assert.throws(() => classify({ ...facts, error }, {}), code('git_launch_failed'), 'accessor .code');
+  assert.equal(reads, 0, 'the accessor is never run');
+  for (const [c, row] of [['ENOENT', 'git_unavailable'], ['EACCES', 'git_unavailable'], ['ETIMEDOUT', 'git_timeout'], ['ENOBUFS', 'git_output_truncated'], ['E2BIG', 'git_launch_failed']]) {
+    assert.throws(() => classify({ ...facts, error: { code: c } }, {}), code(row), c);
+  }
+});
+
+test('run() normalises the status map before spawn: an accessor entry is refused unrun; inherited and non-enumerable entries are never outcomes', (t) => {
+  const g = gitRunner();
+  const cwd = tmp(t);
+  const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.child' };
+  let calls = 0;
+  const accessor = Object.defineProperty({}, '0', { get() { calls++; return 'ok'; }, enumerable: true });
+  assert.throws(() => g.run({ ...ok, status: accessor }), code('git_op_invalid'), 'an accessor entry is refused');
+  assert.equal(calls, 0, 'and its getter is never run');
+  assert.throws(() => g.run({ ...ok, status: Object.defineProperty({ 1: 'other' }, '0', { value: 'ok', enumerable: false }) }), code('git_failed'), 'non-enumerable own entry');
+  assert.throws(() => g.run({ ...ok, status: Object.create({ 0: 'ok' }) }), code('git_failed'), 'inherited entry');
+  for (const bad of [{ 0: 1 }, { 0: undefined }, { x: 'ok' }, null, 'ok']) assert.throws(() => g.run({ ...ok, status: bad }), code('git_op_invalid'), JSON.stringify(bad));
+  const r = g.run({ ...ok, status: { 0: 'ok', 1: 'other' } });
+  assert.deepEqual([r.outcome, r.status, Object.isFrozen(r)], ['ok', 0, true]);
+});
+
 // ------------------------------------------------------------------ T4a: decode-site check on the AST (AC4)
 
 // HOW. The SCANNED modules (the git-output path of the lib: git-exec.mjs and git-capability.mjs; every other non-test
