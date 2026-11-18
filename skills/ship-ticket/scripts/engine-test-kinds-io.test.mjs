@@ -1112,7 +1112,8 @@ test('[P4r-50] round 9 (Opus M1): a base blob stored THROUGH a conversion is nev
     put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
     assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, why);
   }
-  { const r = repo(t); put(r.dir, '.git/info/attributes', '*.ts text\n');
+  // added in the WORKING TREE's .gitattributes (`check-attr --source` still reads .git/info/attributes, so that file is seen on both sides)
+  { const r = repo(t); put(r.dir, '.gitattributes', '*.ts text\n');
     put(r.dir, 'libs/money/old.test.ts', "test('old [kind:negative]', () => {});\ntest('n [kind:negative]', () => {});\n");
     assert.deepEqual(evidenceIdentity({ repo: r.dir, baseSha: r.base }), CONVERTED, 'an attribute that is not at base'); }
   // the plain case (no attribute at base or now) is accepted: a legitimate edit of a base file is a change of P
@@ -1512,6 +1513,9 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //     code (`evidence_budget_exceeded`, from `arr` over `files`), so P4r-10 cannot tell them apart (I-B makes it redundant by design).
 //   - round 5: the NFC step BEFORE folding in `segsOf` mirrors risk-floor; the NFC step after folding makes it unobservable for every
 //     input tried (composed and decomposed accents, U+0130, U+212B), so it carries no mutant.
+// Removed in round 9 with the code they mutated: round 8's listed check (`gitConverts`, `hash-object --stdin-paths`) and its two
+// mutants (`R8: a listed file git converts is counted`, which survived once the base-attribute check caught every listed conversion, and
+// the m1/m2 mutants of its quoting and sha256 flag); P4r-46 and P4r-51 keep their cases as regressions.
 // Removed in round 6 with the code they mutated: the seven attribute-refusal mutants of rounds 4-5 (`check-attr` is gone; the
 // invariant is now raw bytes vs the base blob). Not mutated, documented: a base path git did NOT list whose file is MISSING is
 // reported as changed, but git always lists a missing tracked file unless an index flag hides it, which `changedPaths` refuses; and
@@ -1714,7 +1718,6 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-45', name: 'R8: only records count, not declared entries (D3)', from: '  if (ctxt.per.size > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: '  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);' },
   { file: RE, tag: 'P4r-45', name: 'R7: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: 'refuse(\'evidence_unavailable\');' },
   // round 8: the blind Fable review of e476cd5
-  { file: IO, tag: 'P4r-46', name: 'R8: a listed file git converts is counted (the pointer-blob base)', from: '  gitConverts(top, base.filter(([p, m]) => m && m[1] !== \'120000\' && listed.has(p) && stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);\n', to: '' },
   { file: IO, tag: 'P4r-46', name: 'R8: the conversion refusal does not name its cause', from: '!rawUnchanged(top, p, m[1], m[2], budget))) refuse(\'evidence_unavailable\', CONVERTED);', to: '!rawUnchanged(top, p, m[1], m[2], budget))) refuse(\'evidence_unavailable\');' },
   { file: IO, tag: 'P4r-47', name: 'R8: a config path absent at base may appear (D4)', from: '    if (entry.config_paths.some((p) => !c.atBase.has(p) && stat(c.top, p))) refuse(\'runner_config_changed\');\n', to: '' },
   { file: IO, tag: 'P4r-48', name: 'R8: withheld ids are not capped across rows (D6)', from: '  if (new Set(copy.files.flatMap((f) => [...f.withheld.keys()])).size > P2_LIMITS.maxItems) refuse(\'evidence_budget_exceeded\'); // D6: across rows too\n', to: '' },
@@ -1730,8 +1733,6 @@ const MUTANTS = [
   { file: IO, tag: 'P4r-50', name: 'R9: working-tree-encoding is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'text\', \'eol\'];' },
   { file: IO, tag: 'P4r-50', name: 'R9: text is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'eol\'];' },
   { file: IO, tag: 'P4r-50', name: 'R9: eol is not a converting attribute', from: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\', \'eol\'];', to: 'const CONVERTING = [\'filter\', \'ident\', \'working-tree-encoding\', \'text\'];' },
-  { file: IO, tag: 'P4r-51', name: 'R9: a name starting with a quote is not quoted for --stdin-paths (m1)', from: 'const line = (p) => (p.startsWith(\'"\') ?', to: 'const line = (p) => (false ?', posix: true },
-  { file: IO, tag: 'P4r-51', name: 'R9: the listed check hashes a sha256 repository as sha1 (m2)', from: 'stat(top, p)?.isFile()).map(([p]) => p), baseSha.length === 64, budget);', to: 'stat(top, p)?.isFile()).map(([p]) => p), false, budget);' },
 ];
 // one mutant runs ONE tagged test (3 min); the control runs all of them (about 4 min alone on a Windows runner, so 15 min)
 const RUN_TIMEOUT_MS = 3 * 60 * 1000, CONTROL_TIMEOUT_MS = 15 * 60 * 1000;
