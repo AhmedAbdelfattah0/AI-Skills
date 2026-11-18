@@ -1,0 +1,385 @@
+# RED at fd3d0d7 checker, round-7 test only
+TAP version 13
+# Subtest: T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
+not ok 1 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
+  ---
+  duration_ms: 3.816833
+  type: 'test'
+  location: '/Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
+  failureType: 'testCodeFailure'
+  error: 'a1: stream option is refused'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+    run (node:internal/test_runner/harness:307:12)
+    test (node:internal/test_runner/harness:316:12)
+    file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 65.289083
+TAP version 13
+# Subtest: the export list is pinned: no lossy or try-decoder can be added unseen
+ok 1 - the export list is pinned: no lossy or try-decoder can be added unseen # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.491709
+  ...
+# Subtest: decodeStrict returns exact UTF-8 and keeps a leading BOM as U+FEFF
+ok 2 - decodeStrict returns exact UTF-8 and keeps a leading BOM as U+FEFF # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.046125
+  ...
+# Subtest: decodeStrict refuses every invalid sequence with the requested typed code, never U+FFFD
+ok 3 - decodeStrict refuses every invalid sequence with the requested typed code, never U+FFFD # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.036625
+  ...
+# Subtest: decodeStrict takes bytes only and a decode code only
+ok 4 - decodeStrict takes bytes only and a decode code only # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.027375
+  ...
+# Subtest: property: random bytes either round-trip exactly or throw the typed code (no substitution)
+ok 5 - property: random bytes either round-trip exactly or throw the typed code (no substitution) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.042541
+  ...
+# Subtest: zSplit returns Buffers, strips only the trailing terminator, and keeps interior empty records
+ok 6 - zSplit returns Buffers, strips only the trailing terminator, and keeps interior empty records # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.025667
+  ...
+# Subtest: label escapes every non-printable or non-ASCII byte and the backslash (display only)
+ok 7 - label escapes every non-printable or non-ASCII byte and the backslash (display only) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.021458
+  ...
+# Subtest: GitError serialises {code, op} only; stderr is held off the object and redacted everywhere
+ok 8 - GitError serialises {code, op} only; stderr is held off the object and redacted everywhere # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.03
+  ...
+# Subtest: stored stderr is capped at STDERR_CAP bytes, with the total and a truncation flag
+ok 9 - stored stderr is capped at STDERR_CAP bytes, with the total and a truncation flag # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.026791
+  ...
+# Subtest: GitError refuses unknown codes and records only a closed-shape op id
+ok 10 - GitError refuses unknown codes and records only a closed-shape op id # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.088666
+  ...
+# Subtest: a real failing child: stderr, argv and bin path never reach the serialised error
+ok 11 - a real failing child: stderr, argv and bin path never reach the serialised error # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.044541
+  ...
+# Subtest: scrubAmbient removes every GIT_* and SSH_ASKPASS case-insensitively and keeps the rest
+ok 12 - scrubAmbient removes every GIT_* and SSH_ASKPASS case-insensitively and keeps the rest # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.024
+  ...
+# Subtest: scrubAmbient on Windows collapses case-duplicates to the lexicographically first key (Node child_process rule)
+ok 13 - scrubAmbient on Windows collapses case-duplicates to the lexicographically first key (Node child_process rule) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.019833
+  ...
+# Subtest: hostile prototype keys (__proto__, constructor, toString) are own data, never inherited reads or pollution
+ok 14 - hostile prototype keys (__proto__, constructor, toString) are own data, never inherited reads or pollution # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.090583
+  ...
+# Subtest: T2a: over the hostile corpus, the env holds only lib-set GIT_* keys, a contiguous COUNT and no hostile value
+ok 15 - T2a: over the hostile corpus, the env holds only lib-set GIT_* keys, a contiguous COUNT and no hostile value # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.022917
+  ...
+# Subtest: BASE is the design §2.2 list exactly
+ok 16 - BASE is the design §2.2 list exactly # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.019
+  ...
+# Subtest: pair order is BASE, policy, neutralisation, serialised once with contiguous indices
+ok 17 - pair order is BASE, policy, neutralisation, serialised once with contiguous indices # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.112375
+  ...
+# Subtest: AC5: hermeticPolicy carries every element of P neutralEnv (a890b0d:337-342)
+ok 18 - AC5: hermeticPolicy carries every element of P neutralEnv (a890b0d:337-342) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.133834
+  ...
+# Subtest: on Windows a set replaces every case-variant spelling (HOME vs Home)
+ok 19 - on Windows a set replaces every case-variant spelling (HOME vs Home) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.027625
+  ...
+# Subtest: composeEnv refuses inputs that could reach a GIT_CONFIG index, a BASE key or an untyped spawn throw
+ok 20 - composeEnv refuses inputs that could reach a GIT_CONFIG index, a BASE key or an untyped spawn throw # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.018875
+  ...
+# Subtest: absolute paths are judged for the TARGET platform (hooksDir, ceiling, hermetic paths)
+ok 21 - absolute paths are judged for the TARGET platform (hooksDir, ceiling, hermetic paths) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.074709
+  ...
+# Subtest: real git: hostile ambient COUNT/KEY_0/PARAMETERS lose to the lib pairs; HOME/XDG plants are ignored when hermetic
+ok 22 - real git: hostile ambient COUNT/KEY_0/PARAMETERS lose to the lib pairs; HOME/XDG plants are ignored when hermetic # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.020166
+  ...
+# Subtest: neutralisationPairs: upstream driver names, four pairs each, discovery order, deduplicated
+ok 23 - neutralisationPairs: upstream driver names, four pairs each, discovery order, deduplicated # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015542
+  ...
+# Subtest: neutralisationPairs: EACH attribute alone discovers its driver (process-only, required-only, clean-only, smudge-only)
+ok 24 - neutralisationPairs: EACH attribute alone discovers its driver (process-only, required-only, clean-only, smudge-only) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015167
+  ...
+# Subtest: neutralisationPairs refuses a non-UTF-8 driver name and takes bytes only
+ok 25 - neutralisationPairs refuses a non-UTF-8 driver name and takes bytes only # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014416
+  ...
+# Subtest: real git: neutralisation pairs override a required smudge driver in repo config without editing it
+ok 26 - real git: neutralisation pairs override a required smudge driver in repo config without editing it # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014625
+  ...
+# Subtest: real git: a process-only driver is discovered and neutralised (the discovery output comes from git itself)
+ok 27 - real git: a process-only driver is discovered and neutralised (the discovery output comes from git itself) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.020667
+  ...
+# Subtest: the module precedence rows equal the design table order
+ok 28 - the module precedence rows equal the design table order # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015916
+  ...
+# Subtest: every outcome code is reachable and exactly one fires, in precedence order, over the full fact cross-product
+ok 29 - every outcome code is reachable and exactly one fires, in precedence order, over the full fact cross-product # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014458
+  ...
+# Subtest: a decode failure is never reinterpreted as a mapped outcome (absent, ok)
+ok 30 - a decode failure is never reinterpreted as a mapped outcome (absent, ok) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.031959
+  ...
+# Subtest: real child: ok returns the stdout Buffer and the mapped outcome
+ok 31 - real child: ok returns the stdout Buffer and the mapped outcome # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.021208
+  ...
+# Subtest: real child: git_failed
+ok 32 - real child: git_failed # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.019
+  ...
+# Subtest: real child: git_stderr
+ok 33 - real child: git_stderr # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.02475
+  ...
+# Subtest: real child: git_output_not_utf8
+ok 34 - real child: git_output_not_utf8 # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.016625
+  ...
+# Subtest: real child: path_not_utf8
+ok 35 - real child: path_not_utf8 # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014958
+  ...
+# Subtest: real child: git_output_truncated (partial stdout never returned)
+ok 36 - real child: git_output_truncated (partial stdout never returned) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014084
+  ...
+# Subtest: real child: git_timeout
+ok 37 - real child: git_timeout # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.013916
+  ...
+# Subtest: real child: a SIGTERM-ignoring child cannot hold the runner past its timeout (external watchdog)
+ok 38 - real child: a SIGTERM-ignoring child cannot hold the runner past its timeout (external watchdog) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.020917
+  ...
+# Subtest: real child: git_signal
+ok 39 - real child: git_signal # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015416
+  ...
+# Subtest: real child: git_unavailable (the probed binary vanished)
+ok 40 - real child: git_unavailable (the probed binary vanished) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.013708
+  ...
+# Subtest: real child: git_launch_failed (E2BIG)
+ok 41 - real child: git_launch_failed (E2BIG) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.01375
+  ...
+# Subtest: git_env_too_large is decided before any fs check or spawn; a __proto__ key cannot shrink the size
+ok 42 - git_env_too_large is decided before any fs check or spawn; a __proto__ key cannot shrink the size # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015459
+  ...
+# Subtest: real child: the POSIX default applies no Windows bound
+ok 43 - real child: the POSIX default applies no Windows bound # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015167
+  ...
+# Subtest: the env bound counts the exact block size: k=v NUL per entry plus the final NUL
+ok 44 - the env bound counts the exact block size: k=v NUL per entry plus the final NUL # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.088958
+  ...
+# Subtest: a missing cwd is refused before spawn as git_launch_failed, not reported as a missing git
+ok 45 - a missing cwd is refused before spawn as git_launch_failed, not reported as a missing git # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.018125
+  ...
+# Subtest: the runner spawns only the probed binary, and refuses an env composeEnv did not build or a malformed spec
+ok 46 - the runner spawns only the probed binary, and refuses an env composeEnv did not build or a malformed spec # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014084
+  ...
+# Subtest: classify reads only own data: an inherited error code is not a row, and a status getter is never invoked
+ok 47 - classify reads only own data: an inherited error code is not a row, and a status getter is never invoked # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014833
+  ...
+# Subtest: classify reads the spawn error code as own data, once: an inherited or accessor code is not a row
+ok 48 - classify reads the spawn error code as own data, once: an inherited or accessor code is not a row # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014125
+  ...
+# Subtest: run() normalises the status map before spawn: an accessor entry is refused unrun; inherited and non-enumerable entries are never outcomes
+ok 49 - run() normalises the status map before spawn: an accessor entry is refused unrun; inherited and non-enumerable entries are never outcomes # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014334
+  ...
+# Subtest: T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing else is in its directory
+ok 50 - T4a: the vendored acorn is exactly the pinned upstream bytes, and nothing else is in its directory # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.155459
+  ...
+# Subtest: T4a: the pre-import integrity predicate needs the complete pin set and every hash
+ok 51 - T4a: the pre-import integrity predicate needs the complete pin set and every hash # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.014417
+  ...
+# Subtest: T4a: no listed lossy decode form appears in the scanned lib outside the strict decoder or an allowlisted, reasoned site
+ok 52 - T4a: no listed lossy decode form appears in the scanned lib outside the strict decoder or an allowlisted, reasoned site # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.011375
+  ...
+# Subtest: T4a checker flags every planted form and reviewer escape with exactly its rules, and only what it claims
+ok 53 - T4a checker flags every planted form and reviewer escape with exactly its rules, and only what it claims # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.010666
+  ...
+# Subtest: T4a partitions every lib/ JS module (.mjs, .cjs, .js, recursively) and skips only *.test.*
+ok 54 - T4a partitions every lib/ JS module (.mjs, .cjs, .js, recursively) and skips only *.test.* # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.010042
+  ...
+# Subtest: T4a: every non-test lib/ module is either scanned or named out of scope with a reason, and the out-of-scope git-output finding is real
+ok 55 - T4a: every non-test lib/ module is either scanned or named out of scope with a reason, and the out-of-scope git-output finding is real # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.009542
+  ...
+# Subtest: T4a layer 2: the legacy walker's type table classifies exactly the node types acorn can produce (rule, walk or fail)
+ok 56 - T4a layer 2: the legacy walker's type table classifies exactly the node types acorn can produce (rule, walk or fail) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.009875
+  ...
+# Subtest: T4a grammar: the guarded files are written in the allowlisted grammar, and every allowlist entry is used by them (no slack)
+ok 57 - T4a grammar: the guarded files are written in the allowlisted grammar, and every allowlist entry is used by them (no slack) # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.010083
+  ...
+# Subtest: T4a grammar: each refusal class has counterexamples (every round-5 reviewer finding among them), and supported forms pass
+ok 58 - T4a grammar: each refusal class has counterexamples (every round-5 reviewer finding among them), and supported forms pass # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.010125
+  ...
+# Subtest: T4a grammar: every node type acorn can produce is either admitted (and used by the guarded files) or refused wherever it appears
+ok 59 - T4a grammar: every node type acorn can produce is either admitted (and used by the guarded files) or refused wherever it appears # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.008833
+  ...
+# Subtest: T4a grammar: every decode-capable form the grammar admits is a legacy-rule hit, so only an ALLOWED_SITES entry can admit it
+ok 60 - T4a grammar: every decode-capable form the grammar admits is a legacy-rule hit, so only an ALLOWED_SITES entry can admit it # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.008875
+  ...
+# Subtest: T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
+not ok 61 - T4a grammar (round 7): the decoder is unaliasable and `.decode` exists only as the pinned call in decodeStrict
+  ---
+  duration_ms: 4.136625
+  location: 'file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2155:1'
+  failureType: 'testCodeFailure'
+  error: 'a1: stream option is refused'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///Users/ahmedabdelfatah/Documents/personal-projects/ais-s02b/skills/ship-ticket/scripts/lib/git-exec.test.mjs:2156:52)
+    Test.runInAsyncScope (node:async_hooks:203:9)
+    Test.run (node:internal/test_runner/test:631:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:374:18)
+    Test.postRun (node:internal/test_runner/test:715:19)
+    Test.run (node:internal/test_runner/test:673:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:374:7)
+  ...
+# Subtest: T4a grammar property: each counterexample injected at seeded random statement boundaries of the guarded sources is refused in place
+ok 62 - T4a grammar property: each counterexample injected at seeded random statement boundaries of the guarded sources is refused in place # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.033042
+  ...
+# Subtest: T4a: the vendored parser is test-only as far as loader specifiers go: no runtime module of any skill reaches vendor/ through them, transitively
+ok 63 - T4a: the vendored parser is test-only as far as loader specifiers go: no runtime module of any skill reaches vendor/ through them, transitively # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.015292
+  ...
+# Subtest: T4a: the test-only check flags each leg: relative, folded, template, file: URL (percent-encoded), URL constant, require, re-export, non-constant loader, via a test file, string; containment is per platform
+ok 64 - T4a: the test-only check flags each leg: relative, folded, template, file: URL (percent-encoded), URL constant, require, re-export, non-constant loader, via a test file, string; containment is per platform # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.013042
+  ...
+# Subtest: T4a property: each listed form and reviewer escape injected at seeded random statement boundaries of the scanned lib sources is flagged in place
+ok 65 - T4a property: each listed form and reviewer escape injected at seeded random statement boundaries of the scanned lib sources is flagged in place # SKIP test name does not match pattern
+  ---
+  duration_ms: 0.010958
+  ...
+1..65
+# tests 65
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 64
+# todo 0
+# duration_ms 83.380833

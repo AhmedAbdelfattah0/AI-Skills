@@ -1,0 +1,25 @@
+# RED at b5e6d8f checker, round-8 test only
+## v22.23.1
+not ok 1 - T4a grammar (round 8): every pinned name resolves to its one pinned top-level declaration, in the file that pins it
+  error: 'git-capability.mjs: opus r7 repro appended to git-capability.mjs is refused'
+## v18.20.8
+not ok 62 - T4a grammar (round 8): every pinned name resolves to its one pinned top-level declaration, in the file that pins it
+  error: 'git-capability.mjs: opus r7 repro appended to git-capability.mjs is refused'
+# ACCEPTED git-capability.mjs | opus r7 repro appended to git-capability.mjs
+# ACCEPTED git-exec.mjs | no decoder site, DECODER a parameter
+# ACCEPTED git-exec.mjs | let DECODER set by an exported setter
+# ACCEPTED git-exec.mjs | DECODER a local inside decodeStrict
+# ACCEPTED git-exec.mjs | DECODER a catch parameter
+# ACCEPTED git-exec.mjs | DECODER destructured
+# refused  git-exec.mjs | DECODER imported
+# ACCEPTED git-exec.mjs | decodeStrict a parameter
+# ACCEPTED git-exec.mjs | decodeStrict reassigned
+# ACCEPTED git-exec.mjs | decodeStrict a block local
+# ACCEPTED git-exec.mjs | ownValue a parameter
+# ACCEPTED git-exec.mjs | own a parameter
+# ACCEPTED git-exec.mjs | own reassigned
+# ACCEPTED git-capability.mjs | realFs a parameter
+# ACCEPTED git-capability.mjs | resolveGitBinary a block local
+# ACCEPTED git-capability.mjs | parseGitVersion a parameter
+# ACCEPTED git-capability.mjs | DECODER declared in the file that does not pin it
+# ACCEPTED git-capability.mjs | decodeStrict declared in the file that does not pin it

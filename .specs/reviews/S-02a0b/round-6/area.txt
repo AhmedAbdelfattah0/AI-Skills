@@ -1,0 +1,81 @@
+grammar: unknown node types admitted
+grammar: not-visited backstop removed
+grammar: any operator admitted
+grammar: assignment operator unchecked
+grammar: free names treated as locals
+grammar: a forgotten child (ForStatement update) is caught by the backstop
+grammar: shadowing a global allowed
+grammar: reserved names exclude globalThis
+grammar: global forms unchecked
+grammar: any global member
+grammar: call-only global member as a value
+grammar: member names unchecked
+grammar: computed read through any key
+grammar: computed member as callee
+grammar: any assignment target
+grammar: assignment to a non-local name
+grammar: this.<member> outside a constructor
+grammar: update of anything
+grammar: unlisted import specifier admitted
+grammar: import attributes admitted
+grammar: side-effect import admitted
+grammar: unlisted import name admitted
+grammar: renamed import admitted
+grammar: redeclared import admitted
+grammar: import use unchecked
+grammar: restricted import member unchecked
+grammar: spawnSync shape unchecked
+grammar: spawnSync encoding option admitted
+grammar: own-value production unchecked
+grammar: own-value production any name or scope
+grammar: defineProperty shape unchecked
+grammar: defineProperty outside a constructor
+grammar: TextDecoder with any arguments
+grammar: new through any callee
+grammar: call of any callee
+grammar: super() anywhere
+grammar: super member admitted
+grammar: object __proto__ any value
+grammar: computed object key admitted
+grammar: object accessor admitted
+grammar: static or accessor class member admitted
+grammar: any computed class key
+grammar: any class method key
+grammar: async or generator admitted
+grammar: var admitted
+grammar: destructuring keys unchecked
+grammar: computed destructuring key
+grammar: labelled continue admitted
+grammar: for-of head unchecked
+grammar: export forms unchecked
+grammar: instanceof right side as a value
+grammar: Symbol.for key with any argument
+grammar: member table slack (constructor)
+grammar: global table slack (Function)
+grammar: site-pinned member added (valueOf)
+grammar: ops table slack (+=)
+grammar: import table slack (execSync)
+grammar: production not checked by the verdict
+vendor: pin set not required
+vendor: pinned hash not compared
+vendor: not transitive
+vendor: strings not percent-decoded
+vendor: specifiers not folded
+vendor: URL constants not resolved
+vendor: non-constant loaders ignored
+vendor: containment by string prefix
+vendor: cross-drive counted inside (round-5 predicate)
+vendor: file: specifiers not resolved
+vendor: only ship-ticket scanned
+vendor: test files counted as runtime
+r7: decoder call text unchecked
+r7: decoder statement unchecked
+r7: decoder function unchecked
+r7: decoder aliasable
+r7: .decode on any value
+r7: decode back in the member table
+r7: a second or renamed decoder
+r7: decode-capable member read as a value
+r7: audit entry dropped (join)
+r7: data keys not distinguished
+vendor: CommonJS candidates not tried
