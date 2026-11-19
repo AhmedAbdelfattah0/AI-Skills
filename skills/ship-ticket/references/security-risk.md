@@ -43,6 +43,31 @@ Facts are the input to selection. Each fact in the catalog's `fact_vocabulary`:
 A surface path is a file; a directory path matches no signal. Paths use forward
 slashes: a backslash in a surface path or a changed path is refused `bad_input`.
 
+**Surface-level facts (block format 3).** A change-level fact is the OR of its
+surfaces, so one `true` fact makes every gated pair of every surface applicable. A
+surface may carry its own `facts` and `evidence` to say that a fact is false **for that
+surface**, under five rules, each refused when broken:
+
+- only a boolean fact, only lowered from `true` to `false`; never an `unknown` or a
+  `false` change fact, never on a surface of kind `unknown`
+  (`surface_fact_not_lowerable`);
+- only a fact that a catalog `not_applicable` gate for the surface's kind names
+  (`gated by <fact>[ or <fact>]: ...`), and only where lowering it drops at least one
+  pair (`surface_fact_ungated`);
+- with a machine-checkable citation: one repository-relative `path[:symbol]` naming
+  a file, no placeholder such as `TBD` or `n/a` (`fact_uncited`);
+- never on every surface: some surface must still hold the change fact
+  (`surface_fact_reinflates`);
+- never for a pair whose control is in the signal class of the surface's own path
+  (`surface_fact_not_lowerable`), because every reassessment would reopen it.
+
+The evaluator decides each pair separately: a pair is dropped only when its own
+control's gate for that kind names the lowered fact(s) and the control, evaluated
+again with them false, is no longer selected. A fact lowered for one control never
+drops another control whose gate does not name it. Lowering never adds a pair
+anywhere. The dropped pairs and the effective pairs together are exactly the pairs
+the same facts select without surface facts.
+
 ## 4. Running select
 
 ```text
@@ -51,9 +76,16 @@ node scripts/security-plan.mjs select --facts <file|-> [--catalog <path>]
 
 Input: `{ security_policy: 2, surfaces, facts, evidence, summary? }`. Output: the
 selected controls and `<boundary>:<control>` pairs, the excluded controls with
-reasons, unknown facts, a `config_fragment`, and `rows_md`, the §3a body with the
+reasons, unknown facts, a `config_fragment` (only DAG config keys: `securityPolicy`,
+`catalogDigest`, `controlCoverage`), and `rows_md`, the §3a body with the
 `security-pairs sha256:<hex>` line and the `<!-- security-plan: {...} -->` machine
-block. Exit 0 is a result; exit 2 a refusal (`catalog_missing`, `catalog_invalid`,
+block. With surface-level facts the output also has `block_format: 3` and
+`na_pairs` (each dropped pair with its lowered facts and citations). The block then
+has `policy: 3` and `na_pairs`, and its selection digest covers every surface (facts,
+citations, path, principals), the effective pairs and the dropped pairs. The
+`security-pairs` line and `controlCoverage` hold the **effective** pairs only. An
+engine older than block format 3 refuses such a block outright. A selection without
+surface facts is block format 2, byte for byte as before. Exit 0 is a result; exit 2 a refusal (`catalog_missing`, `catalog_invalid`,
 `fact_uncited`, `control_unpaired`, ...); exit 1 malformed input. A refusal of your
 own input (`fact_uncited`, `control_unpaired`, `fact_out_of_vocabulary`,
 `surface_facts_mismatch`, `bad_input`) is corrected and rerun, not a user decision:
@@ -63,12 +95,24 @@ with the code; a missing catalog is never an empty selection.
 If Node is unavailable the helper is a declared degradation: the plan says so
 and treats every `[NN]` control as applying.
 
-## 5. Exclusions, waivers, NOT_APPLICABLE
+## 5. Exclusions, dropped pairs, waivers, NOT_APPLICABLE
 
-An excluded control is listed in §3a with the catalog's reason for the cited
-facts. An approved pair can be dropped only by a `SECURITY_WAIVER` (below), an
-owner-authority event for exactly one candidate. `NOT_APPLICABLE` in a review row
-is **not** a waiver; it is accepted only for a pair that has a trusted waiver.
+Every surface x control cell of an approved plan has exactly one disposition
+(section 12). Four of them mean the cell needs no spec. Only one of those four is a
+risk acceptance:
+
+| Disposition | Decided by | Meaning |
+|---|---|---|
+| `excluded-by-change-fact` | the catalog predicate over the change facts | the control is not selected for the change (it is in `excluded[]`), or the kind's gate names only facts that are false for the change |
+| `dropped-by-kind` | the catalog's kind-level `not_applicable` reason | the control is selected for the change, but this kind of surface cannot exhibit the attack |
+| `dropped-by-fact` | a cited surface-level fact (section 3), approved in the plan | the control's gate for this kind names a fact that is false for this surface |
+| `waived` | a trusted `SECURITY_WAIVER` for exactly one candidate | an **effective** pair whose risk the owner accepts; the only risk acceptance |
+
+The fifth disposition, `proven`, is an effective pair: its own RED spec must prove it.
+A plan cannot accept risk. A `SECURITY_WAIVER` waives only an effective pair; one that
+names a dropped pair is ignored. `NOT_APPLICABLE` in a review row is **not** a waiver.
+For an effective pair it is accepted only with a trusted waiver. For a dropped pair it
+is the reviewer agreeing with the cited fact (section 9).
 
 ## 6. Binding into the DAG
 
@@ -86,6 +130,23 @@ refuses with `security_policy_required` (post-cutoff run without policy 2),
 does not match the DAG's pairs and digest, or an approved surface path lies outside
 every node's `writes`) and `catalog_unavailable` (catalog missing or not the one
 approved).
+
+For a block format 3, `controlCoverage` lists the effective pairs only. A dropped
+pair has no spec and is not in the DAG; listing it is `security_pairs_mismatch`.
+`init` also checks two more things. First, the obligation matrix must verify
+(section 12, `disposition_*` or `plan_block_invalid`). Second, every file-shaped DAG
+write that raises a surface-introducing signal (and is not a test file) must be a
+listed surface (`surface_inventory_incomplete`). The run records `policy_version` 3,
+or 4 with test kinds. An engine that does not know these versions refuses the run
+(`policy_version_unsupported`).
+
+**Preflight, before approval.**
+`run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]`
+runs these plan checks: `validateEngineDag`, the security binding and, for format 3,
+the matrix and inventory. It needs no START or RUN-STATE and writes nothing. Run it
+on the draft plan and DAG before `ExitPlanMode`. A refusal prints
+`run-engine: <code>: ...` and exits 1. A DAG without `securityPolicy: 2` is refused
+`security_policy_required`, because no START approves it.
 
 ## 7. Reassessment
 
@@ -162,6 +223,49 @@ whose `signal_id` matches no signal is ignored.
 
 A classification can only raise facts; it can never remove an approved pair.
 
+**Dropped pairs reopen (block format 3).** A dropped pair stays out of the approved
+pairs, so reopening it makes it a delta pair (`ADD_CONTROLS`, then
+`addendum_required` until an owner `SECURITY_ADDENDUM` adds it with its spec). Two
+things reopen it:
+
+- A signal at that surface's path whose class (table above) names the pair's
+  control. This happens whether the signal is classified, dismissed by a reason or
+  still open: classifying a signal never suppresses a reopen.
+- A used classification that raises the lowered fact to `true` or `unknown`. This
+  reopens every pair the fact dropped.
+
+Input `surfaces` keep exactly four keys. A surface-level fact is never accepted after
+approval, so the orchestrator cannot lower a fact mid-run (`bad_input`). An approved
+format-3 block is replayed under the installed catalog at every reassessment. A
+lowering that no longer follows from it is `plan_block_invalid`.
+
+**Test files and workspace folders (C5).** A test file is not deployed, so it raises
+no `new-route`, `auth-or-middleware-change` or `migration-or-rls-change` signal, by
+path or by added line. Its other signals (mail, payment, env, dependency) and its
+out-of-plan path still count. A test file is only one of these:
+
+- a `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|ex|exs>`,
+  `*_spec.<go|py|rb|ex|exs>` or `test_*.py` file;
+- a path under `__tests__/`, `__mocks__/` or `__fixtures__/`.
+
+A `test/`, `tests/`, `spec/` or `fixtures/` directory is deliberately **not** a test
+file, because file-system routers serve `app/test/route.ts` and
+`routes/fixtures.ts` as real routes.
+
+A workspace project folder named `api` (`apps/api/`, `packages/api/`,
+`services/api/`, `libs/api/`, `modules/api/`, `projects/api/`) is no longer a route
+directory by itself. So `apps/api/src/services/x.ts` and `apps/api/src/index.ts`
+raise no path-only route signal. Everything else still fires:
+
+- inside such a folder: `routes/`, `controllers/`, `handlers/`, `endpoints/`,
+  `webhooks/`, a nested `api/`, an `api.*` file, and every added route line;
+- outside it: a root `api/`, `pages/api/`, `app/api/`, `server/api/` and `src/api/`.
+
+For a format-3 block, a changed non-test path inside the Design Contract that raises
+one of the three surface signals and has no surface at its path is refused
+`surface_inventory_incomplete` before classification. Add the surface to the
+inventory.
+
 ## 8. Freshness
 
 The recorded reassessment must match the tuple **candidate_id + approved plan
@@ -194,6 +298,22 @@ is installed, an update that carries a catalog change does this mid-run.
 - `NOT_APPLICABLE` only for a waived pair (`security_row_escape` otherwise).
 - `security_outcome: NOT_TRIGGERED` is rejected while any unwaived pair is
   effective (`security_outcome_escape`).
+- Every **dropped** pair (block format 3, not reopened) also needs exactly one row
+  (`incomplete_contract`). The row can be:
+  - `NOT_APPLICABLE`, agreeing with the cited fact. Its evidence must name a cited
+    path (`incomplete_contract` otherwise).
+  - `FAIL`, disputing the drop.
+  - Never `PASS`: no spec proves a dropped pair (`security_row_escape`).
+- With every pair dropped or waived, `NOT_TRIGGERED` is accepted, unless a dropped
+  pair is disputed (`security_outcome_escape`).
+- A **disputed** dropped pair is a hard stop for the whole run. Repair and
+  confirmation never clear it, and neither does a later `RETRY` review: the dispute is
+  recorded run-wide. Confirmation and `gate ship-ready` refuse it with
+  `security_na_disputed` until the pair is effective again. Only these make it
+  effective:
+  - an owner `SECURITY_ADDENDUM`, after which the pair is proven or waived like any
+    pair;
+  - re-approval of the plan, which starts a new run.
 - Both `[NN]` and `[D]` pairs need a passing spec or a waiver.
 - A **skipped spec is not a pass**; `gate ship-ready` adds `control_unproven` per
   pair lacking an accepted RED, an unrewritten spec and a named pass in the proof.
@@ -221,3 +341,21 @@ closed. A later run without `securityPolicy: 2` is refused at `init` and
 Events: `SECURITY_ADDENDUM` and `SECURITY_WAIVER` are authority events (see
 [ship.md](ship.md)); one appended while dispatched work is live is untrusted and
 refused. `SECURITY_REASSESSED` is engine-recorded.
+
+## 12. The obligation matrix
+
+`node scripts/security-plan.mjs verify --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]`
+prints the full surface x control matrix of an approved block (format 2 or 3). It
+imports no engine module, so it runs in the manual flow too. Each cell is derived
+from the block and the catalog independently and gets exactly one of `proven`,
+`waived`, `dropped-by-fact` (with the facts and citations), `dropped-by-kind` or
+`excluded-by-change-fact` (section 5). The matrix fails closed:
+
+- a cell the block both pairs and drops is `disposition_duplicate`;
+- a cell the catalog pairs but the block neither pairs nor drops is
+  `disposition_missing`;
+- a cell with a value outside the vocabulary is `disposition_unknown`.
+
+There is no `accept_risk` or `structural` disposition. A format-3 `gate ship-ready`
+refuses an incomplete matrix and prints the matrix (counts, digest, cells) with its
+decision.

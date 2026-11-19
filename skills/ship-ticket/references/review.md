@@ -188,8 +188,10 @@ and rule-catalogue work:
   evidence without rerunning attacks;
 - return an explicit `security_outcome` for a security-sensitive ticket;
 - under security policy 2, return one primary `rule_row` per effective pair,
-  `subject_id` `<boundary>:<control>`, with the pair's spec evidence (see
-  [security-risk.md](security-risk.md)).
+  `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
+  dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
+  the cited fact holds, `FAIL` to dispute it (see
+  [security-risk.md](security-risk.md) section 9).
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
@@ -253,8 +255,10 @@ single Fable fallback, then `WAIT_FOR_USER`.
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
 passing and `overflow: false`. Under security policy 2, `NOT_TRIGGERED` for
-`security_outcome` is rejected while unwaived pairs are effective, and
-`NOT_APPLICABLE` is rejected for a pair without a trusted `SECURITY_WAIVER`.
+`security_outcome` is rejected while unwaived pairs are effective or a dropped pair
+is disputed, `NOT_APPLICABLE` is rejected for an effective pair without a trusted
+`SECURITY_WAIVER`, and `PASS` is rejected for a dropped pair. A disputed dropped pair
+is never cleared by repair and confirmation (`security_na_disputed`).
 
 ## Reconcile once
 

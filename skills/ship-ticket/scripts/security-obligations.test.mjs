@@ -38,6 +38,7 @@ import * as DAG from './engine-dag.mjs';
 import { preflight } from './run-engine.mjs';
 import { securityRowsRefusal, disputedRefusal } from './engine-gates.mjs';
 import * as POL from './engine-policy.mjs';
+import * as AUTH from './engine-authority.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown (known limit N7)';
 const J = JSON.stringify;
@@ -341,6 +342,18 @@ test('[S46] (h) a disputed dropped pair blocks until it is effective again (an a
   assert.equal(disputedRefusal({}, sec()), null);
 });
 
+test('(c) a SECURITY_WAIVER of a dropped pair waives nothing and is never "unauthorized" noise; waivers of effective pairs behave as before', () => {
+  const pair = { boundary: 'K', control: 'VAPT-API-04', node: 'api', specs: [{ file: 'spec/k.test.mjs', name: 'k' }] };
+  const w = (boundary, control) => J({ run_id: 'run-1', event: 'SECURITY_WAIVER', boundary, control, candidate: 'c1', policy_version: 2, authorized_by: 'owner', reason: 'r' });
+  const S = (trusted, untrusted = []) => ({ run_id: 'run-1', config: { securityPolicy: 2, controlCoverage: [pair] }, nodes: { api: { id: 'api', writes: ['spec'] } },
+    authority: { through: 0, trusted, untrusted: untrusted.map((line) => ({ line, seq: 1 })) } });
+  const st = (x) => AUTH.waiverState(x, AUTH.securityEvents(x), 'c1');
+  assert.deepEqual(st(S([w('A', 'VAPT-API-04')])), { waived: [], unauthorized: [] }, 'a trusted waiver of a dropped pair waives nothing');
+  assert.deepEqual(st(S([], [w('A', 'VAPT-API-04')])), { waived: [], unauthorized: [] });
+  assert.deepEqual(st(S([], [w('K', 'VAPT-API-04')])), { waived: [], unauthorized: ['K:VAPT-API-04'] }, 'a late waiver of an effective pair is still unauthorized');
+  assert.deepEqual(st(S([w('K', 'VAPT-API-04')])), { waived: ['K:VAPT-API-04'], unauthorized: [] });
+});
+
 test('policy version: a format-3 run records 3 (4 with test kinds); every other run keeps 1 or 2', () => {
   assert.equal(POL.recordedVersion({}), 1);
   assert.equal(POL.recordedVersion({ testKinds: true }), 2);
@@ -379,6 +392,12 @@ test('[S53] (j) init binds a format-3 plan with controlCoverage = the effective 
   const fx = obFx(t, { sel });
   assert.equal(initCode(fx.cli('init', { dag: fx.dagFile })), 'ok');
   assert.equal(fx.readState().policy_version, 3);
+  // (d) a surface fact or citation changed after approval: the narrative no longer matches the START (never silently accepted)
+  const text = readFileSync(fx.planFile, 'utf8');
+  writeFileSync(fx.planFile, text.replaceAll('src/orders.ts:bearerOnly', 'src/orders.ts:bearerOnlyV2'));
+  const moved = fx.gate('reassess', {});
+  assert.equal(moved.out?.code, 'approval_mismatch', moved.stdout);
+  writeFileSync(fx.planFile, text);
   // the legacy (format 2) selection of the same change: binding only the pairs format 3 keeps effective is refused
   const legacy = ok(SP.selectControls(REAL, { security_policy: 2, surfaces: sel.surfaces.map(({ facts, evidence, ...s }) => s), facts: sel.facts,
     evidence: Object.fromEntries(Object.keys(sel.facts).filter((k) => !['boundaries', 'principals'].includes(k)).map((k) => [k, 'src/orders.ts:handler'])) }));
