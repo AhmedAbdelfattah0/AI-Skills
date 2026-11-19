@@ -203,12 +203,16 @@ async function reviewGate(E, input, candidate) {
     if (stale) return stale;
     v.record.units_consumed = consumedUnits.map(c => ({ unit: c.unit, evidence_id: c.evidence_id }));
   }
+  let disputes = [];
   if (securityOn(S)) {
     const sec = await securityContext(E, candidate);
     const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);
     if (refusal) return refusal;
+    const disputed = input.kind === 'confirmation' ? disputedRefusal(S, sec) : null; // F12a: a repair never clears a disputed drop
+    if (disputed) return disputed;
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
+    if (input.kind === 'original') disputes = naDisputes(input.primary, sec);
   }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
@@ -219,6 +223,11 @@ async function reviewGate(E, input, candidate) {
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
+  if (disputes.length) { // F12a: run-wide and add-only (a later review cannot launder it); disputedRefusal reads it
+    S.security ??= {};
+    S.security.disputed_na = [...new Set([...(S.security.disputed_na ?? []), ...disputes])].sort();
+    note(S, 'SECURITY_NA_DISPUTED', { review_execution: input.review_execution, pairs: disputes });
+  }
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
   if (tk) S.test_kinds.freeze_evidence = tk.evidence_id; // informational: no decision reads it (F4/S1/S2 bind through the record)
   if (v.repair) {
@@ -291,7 +300,7 @@ function unitShipRefusal(E) {
 }
 
 /** Ship-ready's security conjuncts on one security context (checked before the proof and again after it). */
-const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? coverageRefusal(S, sec);
+const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? coverageRefusal(S, sec);
 
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
@@ -306,11 +315,14 @@ async function shipReadyGate(E, input, candidate) {
     if (list !== undefined) S.risk_evidence = boundRiskEvidence(S, list.map(({ kind, path }) => ({ kind, path })), io.evidenceExists(E.ctx.repoRoot));
   };
   rebind();
-  let sec = null;
+  let sec = null, obligations = null;
   if (securityOn(S)) {
     sec = await securityContext(E, candidate);
     const refusal = shipSecurityRefusal(S, sec);
     if (refusal) return refusal;
+    // F12a: a format-3 run ships only with a complete obligation matrix, which the decision prints.
+    obligations = obligationsOf(sec);
+    if (obligations && !obligations.ok) return gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true });
   }
   const tk = await ensureEvidence(E, 'S1');
   if (tk && !tk.ok) return tk;
@@ -348,7 +360,8 @@ async function shipReadyGate(E, input, candidate) {
     // RUN-STATE lines, so the pre-proof context is re-derived and its three refusals rerun before anything binds.
     if (sec) {
       sec = await securityContext(E, candidate); // post-proof security context
-      const moved = shipSecurityRefusal(S, sec);
+      obligations = obligationsOf(sec);
+      const moved = shipSecurityRefusal(S, sec) ?? (obligations && !obligations.ok ? gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true }) : null);
       if (moved) {
         S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [moved.code] };
         return moved;
@@ -373,7 +386,8 @@ async function shipReadyGate(E, input, candidate) {
     S.ship_ready = { candidate_id: candidate, seq: S.seq };
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   }
-  return { judgment_point: false, ...v };
+  return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
+    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
 // ---- S-01b2 P5r: runner-backed test-kind evidence at freeze (design rev 6 sections 3 and 5.1) ----------------
@@ -534,7 +548,12 @@ export async function securityContext(E, candidate) {
   const { waived, unauthorized } = waiverState(E.S, events, candidate);
   const tuple = { candidate_id: candidate, plan_digest: E.S.plan_digest, catalog_digest: catalog.ok ? catalog.digest : null,
     addendum_set: events.addenda.map(a => a.addendum_id).sort() };
-  return { sp, catalog, events, waived, unauthorized, tuple };
+  // F12a: the approved block (bound by the plan digest) and its dropped pairs still not effective (an addendum reopens one).
+  const block = sp.parsePlanSecurityBlock(io.readIfExists(E.P.plan) ?? '');
+  const effective = new Set(events.pairs.map(pairKey));
+  const na = block?.policy === 3 ? block.na_pairs.filter(n => !effective.has(n.pair_id)) : [];
+  const formatMismatch = (block?.policy === 3) !== (E.policy?.semantics?.securityObligations === true);
+  return { sp, catalog, events, waived, unauthorized, tuple, block, na, formatMismatch };
 }
 const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendum_set: [...sec.tuple.addendum_set] });
 const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
@@ -544,6 +563,7 @@ const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catal
 export function securityRefusal(sec) {
   const jp = { judgment_point: true };
   if (!sec.catalog.ok) return gateNo('catalog_unavailable', [`the control catalog is unavailable (${sec.catalog.code}): ${(sec.catalog.reasons ?? []).join('; ')}`], jp);
+  if (sec.formatMismatch) return gateNo('security_pairs_mismatch', ['the approved §3a block format and the run\'s recorded policy version disagree (a format-3 block needs policy_version 3 or 4, and only it)'], jp);
   const { conflicts, outside, forged, addenda } = sec.events;
   if (conflicts.length) return gateNo('addendum_conflict', conflicts.map(c => `${c.addendum_id}: ${c.reason}`), jp);
   if (outside.length) return gateNo('addendum_outside_contract', outside.map(c => `${c.addendum_id}: ${c.reason} (WAIT_FOR_USER: re-approve the plan)`), jp);
@@ -588,7 +608,51 @@ export function securityRowsRefusal(p, sec) {
   if (escape.length) return gateNo('security_row_escape', escape.map(k => `${k}: NOT_APPLICABLE needs a trusted SECURITY_WAIVER for this candidate`));
   if (p.security_outcome === 'NOT_TRIGGERED' && keys.some(k => !sec.waived.includes(k)))
     return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while unwaived security pairs are effective']);
+  return naRowsRefusal(p, sec);
+}
+
+/**
+ * F12a accountability: every dropped (not applicable) pair still needs exactly one primary rule_row. NOT_APPLICABLE
+ * agrees with its cited fact and its evidence must name a cited path; FAIL disputes the drop (recorded run-wide,
+ * see disputedRefusal); PASS is refused (security_row_escape): a dropped pair has no spec, so nothing proves it.
+ * security_outcome NOT_TRIGGERED is accepted with every pair dropped (or waived), never with a disputed one.
+ */
+function naRowsRefusal(p, sec) {
+  const na = sec.na ?? [], rows = p.rule_rows;
+  if (!na.length) return null;
+  const rowOf = (n) => rows.find(r => r.subject_id === n.pair_id);
+  const wrong = na.map(n => [n.pair_id, rows.filter(r => r.subject_id === n.pair_id).length]).filter(([, c]) => c !== 1);
+  if (wrong.length) return gateNo('incomplete_contract', wrong.map(([k, c]) => `primary.rule_rows must hold exactly one row with subject_id ${k} (a dropped pair; found ${c})`));
+  const passed = na.filter(n => rowOf(n).outcome === 'PASS');
+  if (passed.length) return gateNo('security_row_escape', passed.map(n => `${n.pair_id}: a dropped pair has no spec to PASS: NOT_APPLICABLE agrees with its cited fact, FAIL disputes it`));
+  const paths = (n) => n.facts.map(f => String(n.evidence[f]).split(':')[0]);
+  const uncited = na.filter(n => rowOf(n).outcome === 'NOT_APPLICABLE' && !paths(n).some(x => rowOf(n).evidence.includes(x)));
+  if (uncited.length) return gateNo('incomplete_contract', uncited.map(n => `${n.pair_id}: a NOT_APPLICABLE row of a dropped pair must cite its evidence (${paths(n).join(' or ')})`));
+  if (p.security_outcome === 'NOT_TRIGGERED' && na.some(n => rowOf(n).outcome === 'FAIL'))
+    return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while a dropped pair is disputed (its row is FAIL)']);
   return null;
+}
+
+/** The dropped pairs an original review disputes (its row FAIL). */
+const naDisputes = (p, sec) => (sec.na ?? []).filter(n => p.rule_rows.find(r => r.subject_id === n.pair_id)?.outcome === 'FAIL').map(n => n.pair_id);
+
+/**
+ * F12a disputed-N/A hard stop: a dropped pair any accepted original review disputed (S.security.disputed_na, kept
+ * run-wide so a RETRY review cannot launder it) blocks confirmation and ship-ready until it is EFFECTIVE again: only
+ * a trusted SECURITY_ADDENDUM reopens it (then it is proven or waived like any pair) or a re-approved plan (a new run).
+ * Repair and confirmation never clear it.
+ */
+export function disputedRefusal(S, sec) {
+  const effective = new Set(sec.events.pairs.map(pairKey));
+  const open = (S.security?.disputed_na ?? []).filter(k => !effective.has(k));
+  return open.length ? gateNo('security_na_disputed', open.map(k => `${k}: a reviewer disputed this dropped (not applicable) pair; repair and confirmation `
+    + 'cannot clear it: the owner reopens it with a SECURITY_ADDENDUM (then it is proven or waived like any pair) or re-approves the plan'), { judgment_point: true }) : null;
+}
+
+/** F12a: the obligation matrix of a format-3 run on this security context (null for a format-2 run: unchanged). */
+function obligationsOf(sec) {
+  if (sec.block?.policy !== 3) return null;
+  return sec.sp.obligationMatrix(sec.catalog, sec.block, { addenda: sec.events.addenda.flatMap(a => a.pairs.map(pairKey)), waived: sec.waived });
 }
 
 /**

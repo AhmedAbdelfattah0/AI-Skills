@@ -3,7 +3,7 @@
  * of the repository layout the engine needs (skills/ship-ticket/scripts and skills/vapt, for the
  * catalog and its evaluator) in a temp dir with ONE guard patched out by an exact string replacement
  * that must match exactly once (the repo is never edited). For mutant S#, the tests tagged [S#] in
- * gate-security.test.mjs, run-engine-security.test.mjs and security-plan.test.mjs must FAIL with a failing test carrying that
+ * gate-security.test.mjs, run-engine-security.test.mjs, security-plan.test.mjs and security-obligations.test.mjs must FAIL with a failing test carrying that
  * tag; the unpatched copy (the control) must PASS every tagged test, or the result would say nothing.
  *
  * Runs with ENGINE_MUTATION=1 (the engine-properties CI job) or ENGINE_SECURITY_MUTATION=1.
@@ -23,7 +23,7 @@ const VAPT = join(HERE, '..', '..', 'vapt');
 const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
   : process.env.ENGINE_MUTATION !== '1' && process.env.ENGINE_SECURITY_MUTATION !== '1'
     ? 'slow: runs with ENGINE_MUTATION=1 (engine-properties CI job) or ENGINE_SECURITY_MUTATION=1' : false;
-const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs', 'security-plan.test.mjs'];
+const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs', 'security-plan.test.mjs', 'security-obligations.test.mjs'];
 const CONCURRENCY = 4;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -111,6 +111,34 @@ export const SECURITY_MUTANTS = [
     from: "  if (outside.length) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
   { tag: 'S40', name: 'init: a reassess refusal of the approved block is taken for "no surface outside the contract"', file: 'run-engine.mjs',
     from: "  if (!res.ok) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
+  // ---- F12a (block format 3: surface-level facts, dropped pairs, accountability, C5) ----
+  { tag: 'S41', name: 'matrix: a dropped (not applicable) pair is counted as proven', file: 'security-plan.mjs',
+    from: '    const effective = new Set([...block.pairs, ...addenda]);\n', to: '    const effective = new Set([...block.pairs, ...addenda, ...(block.na_pairs ?? []).map((n) => n.pair_id)]);\n' },
+  { tag: 'S42', name: 'block format 3: the selection digest does not cover the surfaces (facts, citations, path, principals)', file: 'security-plan.mjs',
+    from: 'surfaces: v3.surfaces, ', to: '' },
+  { tag: 'S43', name: 'select: an unknown (or false) change fact is lowered by a surface', file: 'security-plan.mjs',
+    from: "      if (facts[f] !== true) refuse('surface_fact_not_lowerable',", to: "      if (false) refuse('surface_fact_not_lowerable'," },
+  { tag: 'S44', name: 'reassess: a signal at an approved surface path never reopens a dropped pair', file: 'security-plan.mjs',
+    from: 'for (const c of SIGNAL_CLASS[s.kind] ?? []) keep.add(', to: 'for (const c of []) keep.add(' },
+  { tag: 'S45', name: 'reassess: a classification that raises a lowered fact never reopens its dropped pairs', file: 'security-plan.mjs',
+    from: '.filter(([f]) => facts[f] === true && !raised.has(f))', to: '.filter(([f]) => facts[f] === true)' },
+  { tag: 'S46', name: 'review: repair + confirmation (and ship-ready) clear a disputed dropped pair', file: 'engine-gates.mjs',
+    from: 'export function disputedRefusal(S, sec) {\n', to: 'export function disputedRefusal(S, sec) {\n  return null;\n' },
+  { tag: 'S47', name: 'C5 too wide: a test/ or fixtures/ directory is taken for a test file (real routes there stop firing)', file: 'security-plan.mjs',
+    from: '(__tests__|__mocks__|__fixtures__)\\/|', to: '(__tests__|__mocks__|__fixtures__|tests?|fixtures?)\\/|' },
+  { tag: 'S48', name: 'C5 too wide: every <dir>/api/ is taken for a workspace project folder (pages/api, src/api stop firing)', file: 'security-plan.mjs',
+    from: 'const WORKSPACE_API = /(^|\\/)(apps|packages|services|libs|modules|projects)\\/api\\//g;', to: 'const WORKSPACE_API = /(^|\\/)([^/]+)\\/api\\//g;' },
+  { tag: 'S49', name: 'C5: a signalling non-test path with no surface is left to classification (no inventory refusal)', file: 'security-plan.mjs',
+    from: "      if (gaps.length) refuse('surface_inventory_incomplete',", to: "      if (false) refuse('surface_inventory_incomplete'," },
+  { tag: 'S50', name: 'review: dropped pairs need no row (and PASS / uncited NOT_APPLICABLE / NOT_TRIGGERED with a dispute pass)', file: 'engine-gates.mjs',
+    from: '  return naRowsRefusal(p, sec);\n', to: '  return null;\n' },
+  { tag: 'S51', name: 'select: a fact lowered on every surface is accepted (derived-OR re-inflation)', file: 'security-plan.mjs',
+    from: '    if (surfaces.every((s) => lower.get(s.boundary_id)?.has(f))) refuse(', to: '    if (false) refuse(' },
+  { tag: 'S52', name: 'reassess/matrix: a hand-edited format-3 block is not replayed under the catalog', file: 'security-plan.mjs',
+    from: 'function replayFormat3(r, block) {\n', to: 'function replayFormat3(r, block) {\n  return;\n' },
+  { tag: 'S53', name: 'init: a format-3 run records the legacy policy version (an engine without F12a would resume it)', file: 'run-engine.mjs',
+    from: '  const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;',
+    to: '  const version = active ? TEST_KINDS_POLICY_VERSION : engine.current;' },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

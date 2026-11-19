@@ -13,6 +13,8 @@ import * as SP from './security-plan.mjs';
 import * as EVAL from '../../vapt/controls.mjs';
 import { planNarrativeDigest } from './engine-dag.mjs'; // test-only parity check; the module itself imports no engine file
 import { scoreSelector } from '../../vapt/fixtures/selector.mjs';
+import * as OB from './security-obligations.test-helper.mjs';
+const GC = OB.gated();
 
 const SCRIPT = fileURLToPath(new URL('./security-plan.mjs', import.meta.url));
 const VAPT = new URL('../../vapt/', import.meta.url);
@@ -246,7 +248,9 @@ test('selection shape and config fragment', () => {
   const f = sel.config_fragment;
   assert.equal(f.securityPolicy, 2);
   assert.equal(f.catalogDigest, syn.digest);
-  assert.deepEqual(f.securityControls, ['VAPT-ABUSE-07', 'VAPT-API-01', 'VAPT-WEB-01']);
+  // F12a: the fragment holds only DAG config keys (engine-dag.mjs CONFIG_FIELDS); the selected ids are sel.controls.
+  assert.deepEqual(Object.keys(f).sort(), ['catalogDigest', 'controlCoverage', 'securityPolicy']);
+  assert.deepEqual(sel.controls.map((c) => c.control_id), ['VAPT-ABUSE-07', 'VAPT-API-01', 'VAPT-WEB-01']);
   assert.deepEqual(f.controlCoverage.map((x) => `${x.boundary}:${x.control}`), pairIds(sel));
   assert.ok(f.controlCoverage.every((x) => x.node === null && Array.isArray(x.specs) && x.specs.length === 0));
   assert.deepEqual(pairIds(sel), [...pairIds(sel)].sort(), 'pairs sorted by pair id');
@@ -941,6 +945,20 @@ test('meta: SECURITY_CODES equals the codes with a refusing case, each with an a
       () => SP.reassess(reIn({ changed: { contract_paths: ['src/a.ts', 'package.json'], files: [{ path: 'package.json' }] }, classifications: [{ signal_id: 'new-dependency@package.json', reason: 'bump' }] }))],
     plan_block_missing: [() => SP.reassess(reIn({ plan: '# none' })), () => SP.reassess(reIn())],
     plan_block_invalid: [() => SP.reassess(reIn({ plan: plan.replace('"policy":2', '"policy":3') })), () => SP.reassess(reIn({ plan }))],
+    // F12a (block format 3), on the gated synthetic catalog (security-obligations.test-helper.mjs); one field differs per twin.
+    surface_fact_not_lowerable: [() => OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts')], { ...OB.TRUE3, persistent_write: 'unknown' }),
+      () => OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts')])],
+    surface_fact_ungated: [() => OB.sel3(GC, [OB.surf('A', 'outbound-data', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts')]),
+      () => OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts')])],
+    surface_fact_reinflates: [() => OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts', ['persistent_write'])]),
+      () => OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['persistent_write']), OB.surf('K', 'request-handler', 'src/k.ts')])],
+    disposition_unknown: [() => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'accepted-risk' }], { surfaces: ['A'], controls: ['VAPT-API-01'] }),
+      () => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }], { surfaces: ['A'], controls: ['VAPT-API-01'] })],
+    disposition_duplicate: [() => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }, { boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'waived' }], { surfaces: ['A'], controls: ['VAPT-API-01'] }),
+      () => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }], { surfaces: ['A'], controls: ['VAPT-API-01'] })],
+    disposition_missing: [() => SP.verifyMatrix([], { surfaces: ['A'], controls: ['VAPT-API-01'] }),
+      () => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }], { surfaces: ['A'], controls: ['VAPT-API-01'] })],
+    surface_inventory_incomplete: [() => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }] })), () => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.test.ts' }] }))],
   };
   assert.deepEqual([...SP.SECURITY_CODES].sort(), Object.keys(rows).sort());
   for (const [code, [refuse, accept]] of Object.entries(rows)) {

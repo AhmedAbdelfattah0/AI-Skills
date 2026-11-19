@@ -22,9 +22,16 @@ const EVAL_FNS = ['unknownish', 'assertFacts', 'selected', 'via', 'why', 'catalo
 let DEFAULT_EVALUATOR = null;
 try { DEFAULT_EVALUATOR = await import(EVALUATOR_URL); } catch { DEFAULT_EVALUATOR = null; }
 
-/** Every refusal code this module emits. Exit 1 for EXIT_ONE codes, 2 for the rest. */
+/**
+ * Every refusal code this module emits. Exit 1 for EXIT_ONE codes, 2 for the rest. F12a (block format 3) added
+ * surface_fact_not_lowerable, surface_fact_ungated, surface_fact_reinflates (a refused surface-level fact),
+ * disposition_missing, disposition_duplicate, disposition_unknown (the obligation matrix) and
+ * surface_inventory_incomplete (a signalling non-test path written by the plan that no surface lists).
+ */
 export const SECURITY_CODES = ['catalog_missing', 'catalog_invalid', 'bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch',
-  'fact_uncited', 'control_unpaired', 'classification_missing', 'plan_block_missing', 'plan_block_invalid'];
+  'fact_uncited', 'control_unpaired', 'classification_missing', 'plan_block_missing', 'plan_block_invalid',
+  'surface_fact_not_lowerable', 'surface_fact_ungated', 'surface_fact_reinflates', 'disposition_missing', 'disposition_duplicate',
+  'disposition_unknown', 'surface_inventory_incomplete'];
 const EXIT_ONE = new Set(['bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch']);
 export const OUTCOMES = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
 
@@ -103,6 +110,48 @@ function catalogShapeErrors(c) {
 }
 
 /**
+ * The `not_applicable` grammar, parsed once at load (runtime never reads the prose again): per control, per
+ * boundary kind, either a fact gate (a reason that starts `gated by <fact>[ or <fact>...]: `, each fact a bool of
+ * the vocabulary) or null (a kind-level reason). Absent `not_applicable` is valid (no entry). A reason that starts
+ * `gated by` but breaks the grammar, names a non-bool fact or a gate that does not select the control is refused:
+ * a surface-level fact may only lower a gate this map names (security-plan.mjs F12a), so the map must be exact.
+ */
+export const GATED_CLAUSE = /^gated by ([a-z_]+(?: or [a-z_]+)*): \S/;
+function catalogGates(c, ev, errs) {
+  const gates = new Map();
+  const vocab = c.fact_vocabulary;
+  const kinds = vocab.boundaries.values;
+  const bools = Object.entries(vocab).filter(([, d]) => d.type === 'bool').map(([k]) => k);
+  const world = (k, extra) => ({ ...Object.fromEntries(bools.map((b) => [b, false])), boundaries: [k],
+    ...(isObj(vocab.principals) && vocab.principals.values?.length ? { principals: [vocab.principals.values[0]] } : {}), ...extra });
+  for (const x of c.controls) {
+    if (x.not_applicable === undefined) continue;
+    if (!isObj(x.not_applicable)) { errs.push(`${x.id} not_applicable must be an object`); continue; }
+    const m = new Map();
+    for (const [k, reason] of Object.entries(x.not_applicable)) {
+      if (!kinds.includes(k)) { errs.push(`${x.id} not_applicable key '${k}' is not a boundary kind`); continue; }
+      if (!nonEmpty(reason)) { errs.push(`${x.id} not_applicable.${k} needs a reason`); continue; }
+      if (!/^gated by\b/.test(reason)) { m.set(k, null); continue; }
+      const g = GATED_CLAUSE.exec(reason);
+      if (!g) { errs.push(`${x.id} not_applicable.${k}: malformed 'gated by <fact>[ or <fact>]: <reason>' clause`); continue; }
+      const facts = g[1].split(' or ');
+      const badFact = facts.find((f) => vocab[f]?.type !== 'bool');
+      if (badFact) { errs.push(`${x.id} not_applicable.${k}: gate '${badFact}' is not a bool fact`); continue; }
+      const one = { ...c, controls: [x] };
+      let wrong = null;
+      try {
+        if (ev.selected(one, world(k)).length) wrong = `${k} alone selects ${x.id}, so the gate is stale`;
+        else for (const f of facts) if (!ev.selected(one, world(k, { [f]: true })).length) wrong = `${k} + ${f}=true does not select ${x.id}`;
+      } catch (e) { wrong = String(e.message); }
+      if (wrong) { errs.push(`${x.id} not_applicable.${k}: ${wrong}`); continue; }
+      m.set(k, new Set(facts));
+    }
+    gates.set(x.id, m);
+  }
+  return gates;
+}
+
+/**
  * Load and register the catalog. `catalogPath` defaults to ../../vapt/controls.json. `evaluator` is the
  * evaluator module (default: ../../vapt/controls.mjs; null simulates its absence). Never throws.
  * -> { ok:true, code:'catalog_loaded', reasons:[], catalog, digest, catalog_version } | { ok:false, code, reasons }
@@ -119,8 +168,11 @@ export function loadCatalog({ catalogPath, evaluator } = {}) {
   try { catalog = JSON.parse(raw.toString('utf8')); } catch (e) { return { ok: false, code: 'catalog_invalid', reasons: [`catalog ${path}: ${e.message}`] }; }
   const errs = catalogShapeErrors(catalog);
   if (errs.length) return { ok: false, code: 'catalog_invalid', reasons: errs };
+  const gateErrs = [];
+  const gates = catalogGates(catalog, ev, gateErrs);
+  if (gateErrs.length) return { ok: false, code: 'catalog_invalid', reasons: gateErrs };
   const digest = ev.catalogDigest(raw);
-  REGISTRY.set(catalog, { digest, evaluator: ev });
+  REGISTRY.set(catalog, { digest, evaluator: ev, gates });
   return { ok: true, code: 'catalog_loaded', reasons: [], catalog, digest, catalog_version: catalog.catalog_version };
 }
 
@@ -137,9 +189,14 @@ function checkFacts(ev, facts, vocab) {
   try { ev.assertFacts(facts, vocab); } catch (e) { refuse('fact_out_of_vocabulary', String(e.message)); }
 }
 
-/** Surfaces -> normalized, sorted by boundary_id. */
-function validateSurfaces(surfaces, vocab) {
+/**
+ * Surfaces -> normalized, sorted by boundary_id. `allowFacts` (select only, never reassess: an inventory surface
+ * cannot lower a fact after approval) admits a surface's optional `facts` and `evidence` objects (F12a), which
+ * lowerings() checks; a surface without them normalizes exactly as before.
+ */
+function validateSurfaces(surfaces, vocab, { allowFacts = false } = {}) {
   if (!Array.isArray(surfaces)) refuse('bad_input', 'surfaces must be an array');
+  const keys = allowFacts ? ['boundary_id', 'kind', 'path', 'principals', 'facts', 'evidence'] : ['boundary_id', 'kind', 'path', 'principals'];
   const kinds = new Set([...vocab.boundaries.values, 'unknown']);
   const principals = isObj(vocab.principals) ? new Set([...vocab.principals.values, 'unknown']) : null;
   const seen = new Set();
@@ -149,12 +206,20 @@ function validateSurfaces(surfaces, vocab) {
       || !Array.isArray(s.principals) || !s.principals.length || !s.principals.every((p) => typeof p === 'string')) {
       refuse('bad_input', `surface ${JSON.stringify(s)} needs boundary_id, kind, path and a non-empty principals[]`);
     }
-    if (Object.keys(s).some((k) => !['boundary_id', 'kind', 'path', 'principals'].includes(k))) refuse('bad_input', `surface ${s.boundary_id} has unknown keys`);
+    if (Object.keys(s).some((k) => !keys.includes(k))) refuse('bad_input', `surface ${s.boundary_id} has unknown keys`);
     if (seen.has(s.boundary_id)) refuse('bad_input', `duplicate boundary_id ${s.boundary_id}`);
     seen.add(s.boundary_id);
     if (!kinds.has(s.kind)) refuse('fact_out_of_vocabulary', `surface ${s.boundary_id}: kind ${JSON.stringify(s.kind)} is not a boundary kind`);
     if (principals) for (const p of s.principals) if (!principals.has(p)) refuse('fact_out_of_vocabulary', `surface ${s.boundary_id}: principal ${JSON.stringify(p)}`);
-    out.push({ boundary_id: s.boundary_id, kind: s.kind, path: inputPath(s.path, `surface ${s.boundary_id}: path`), principals: uniqSorted(s.principals) });
+    const n = { boundary_id: s.boundary_id, kind: s.kind, path: inputPath(s.path, `surface ${s.boundary_id}: path`), principals: uniqSorted(s.principals) };
+    if (s.facts !== undefined || s.evidence !== undefined) {
+      if (!isObj(s.facts) || !Object.keys(s.facts).length || !isObj(s.evidence)) refuse('bad_input', `surface ${s.boundary_id}: facts must be a non-empty object with an evidence object`);
+      const extra = Object.keys(s.evidence).filter((k) => !Object.hasOwn(s.facts, k));
+      if (extra.length) refuse('bad_input', `surface ${s.boundary_id}: evidence for facts it does not set: ${extra.join(', ')}`);
+      n.facts = { ...s.facts };
+      n.evidence = { ...s.evidence };
+    }
+    out.push(n);
   }
   return out.sort((a, b) => (a.boundary_id < b.boundary_id ? -1 : a.boundary_id > b.boundary_id ? 1 : 0));
 }
@@ -186,17 +251,33 @@ function normFacts(ev, facts, vocab) {
 }
 
 // ---------------------------------------------------------------------------------------------------- selection core
-function compute({ catalog, evaluator: ev }, facts, surfaces) {
+/**
+ * The selection core. `lower` (block format 3 only; null = legacy, byte-identical): Map(boundary_id -> Map(fact ->
+ * citation)) of the facts that surface lowered true->false. A surface pair (s, C) is dropped-by-fact only when C's own catalog
+ * gate for s.kind names a lowered fact and C, re-evaluated by the evaluator with exactly those facts false, is no
+ * longer selected; its legacy pairing (and so the paired_by 'change' fallback) is computed WITHOUT lowering, so a
+ * drop can never re-inflate a control onto other surfaces. `keep`: pair ids reopened (never dropped).
+ */
+function compute({ catalog, evaluator: ev, gates }, facts, surfaces, { lower = null, keep = null } = {}) {
   const byId = new Map(catalog.controls.map((c) => [c.id, c]));
   const change = ev.selected(catalog, facts);
   const pairs = [];
+  const na = [];
   const bySurface = new Set();
   for (const s of surfaces) {
     const sf = { ...facts, boundaries: [s.kind] };
+    const low = lower?.get(s.boundary_id);
     for (const id of ev.selected(catalog, sf)) {
       bySurface.add(id);
       const c = byId.get(id);
-      pairs.push({ pair_id: pairId(s.boundary_id, id), boundary_id: s.boundary_id, kind: s.kind, control_id: id, tier: c.tier,
+      const pid = pairId(s.boundary_id, id);
+      const fs = low ? [...(gates?.get(id)?.get(s.kind) ?? [])].filter((f) => low.has(f)).sort() : [];
+      if (fs.length && !keep?.has(pid) && !ev.selected({ ...catalog, controls: [c] }, { ...sf, ...Object.fromEntries(fs.map((f) => [f, false])) }).length) {
+        na.push({ pair_id: pid, boundary_id: s.boundary_id, kind: s.kind, control_id: id, tier: c.tier, facts: fs,
+          evidence: Object.fromEntries(fs.map((f) => [f, low.get(f)])) });
+        continue;
+      }
+      pairs.push({ pair_id: pid, boundary_id: s.boundary_id, kind: s.kind, control_id: id, tier: c.tier,
         paired_by: 'surface', why: ev.via(c.applies_when, sf) });
     }
   }
@@ -210,20 +291,30 @@ function compute({ catalog, evaluator: ev }, facts, surfaces) {
       tier: c.tier, paired_by: 'change', why: 'change: ' + ev.via(c.applies_when, facts) });
   }
   pairs.sort((a, b) => (a.pair_id < b.pair_id ? -1 : a.pair_id > b.pair_id ? 1 : 0));
-  const ids = uniqSorted([...change, ...bySurface]);
+  na.sort((a, b) => (a.pair_id < b.pair_id ? -1 : a.pair_id > b.pair_id ? 1 : 0));
+  // Block format 3: `controls` are the controls with an effective pair (a control dropped on every surface is in na_pairs only).
+  const ids = lower ? uniqSorted(pairs.map((p) => p.control_id)) : uniqSorted([...change, ...bySurface]);
   const controls = ids.map((id) => {
     const c = byId.get(id);
     return { control_id: id, tier: c.tier, verify_type: c.verify?.type ?? null, env: c.env ?? null,
       why: change.includes(id) ? ev.via(c.applies_when, facts) : 'surface-level only',
       boundary_ids: uniqSorted(pairs.filter((p) => p.control_id === id).map((p) => p.boundary_id)) };
   });
-  const excluded = catalog.controls.filter((c) => !ids.includes(c.id)).map((c) => ({ control_id: c.id, why: ev.why(c.applies_when, facts) }))
+  const selectedIds = uniqSorted([...change, ...bySurface]);
+  const excluded = catalog.controls.filter((c) => !selectedIds.includes(c.id)).map((c) => ({ control_id: c.id, why: ev.why(c.applies_when, facts) }))
     .sort((a, b) => (a.control_id < b.control_id ? -1 : 1));
   const unknown_facts = Object.keys(catalog.fact_vocabulary).filter((k) => partlyUnknown(ev, facts[k])).sort();
-  return { controls, pairs, excluded, unknown_facts, unpaired };
+  return { controls, pairs, excluded, unknown_facts, unpaired, ...(lower ? { na_pairs: na } : {}) };
 }
 
-const selectionDigest = ({ catalog_digest, facts_digest, controls }) => sha(canon({ policy: 2, catalog_digest, facts_digest, controls: uniqSorted(controls) }));
+/**
+ * Legacy (block format 2): {policy:2, catalog_digest, facts_digest, controls}. Block format 3 adds what a
+ * surface-level fact changes: the surfaces (with their facts and citations), the effective pairs and the
+ * dropped pairs, so no surface fact, citation or disposition can move without moving the digest.
+ */
+const selectionDigest = ({ catalog_digest, facts_digest, controls, v3 }) => (v3
+  ? sha(canon({ policy: 3, catalog_digest, facts_digest, controls: uniqSorted(controls), surfaces: v3.surfaces, pairs: uniqSorted(v3.pairs), na_pairs: v3.na_pairs }))
+  : sha(canon({ policy: 2, catalog_digest, facts_digest, controls: uniqSorted(controls) })));
 
 /**
  * Select controls for a change. `catalogArg` is a loadCatalog() result (or its catalog). Input:
@@ -242,7 +333,7 @@ export function selectControls(catalogArg, input) {
     if (!isObj(input.facts)) refuse('bad_input', 'facts must be an object');
     if (!isObj(input.evidence)) refuse('bad_input', 'evidence must be an object');
     if (input.summary !== undefined && typeof input.summary !== 'string') refuse('bad_input', 'summary must be a string');
-    const surfaces = validateSurfaces(input.surfaces, vocab);
+    const surfaces = validateSurfaces(input.surfaces, vocab, { allowFacts: true });
     checkFacts(ev, input.facts, vocab);
     const derived = { boundaries: uniqSorted(surfaces.map((s) => s.kind)), principals: uniqSorted(surfaces.flatMap((s) => s.principals)) };
     for (const k of DERIVED) {
@@ -252,27 +343,111 @@ export function selectControls(catalogArg, input) {
     }
     checkCitations(ev, input.facts, input.evidence, vocab, Object.keys(vocab).filter((k) => !DERIVED.includes(k)));
     const facts = normFacts(ev, { ...input.facts, ...(vocab.principals ? derived : { boundaries: derived.boundaries }) }, vocab);
-    return buildSelection(r, catalog, digest, facts, surfaces);
+    const lower = surfaces.some((s) => s.facts) ? lowerings(r, facts, surfaces) : null;
+    return buildSelection(r, catalog, digest, facts, surfaces, lower);
   });
 }
 
-function buildSelection(reg, catalog, digest, facts, surfaces) {
-  const core = compute(reg, facts, surfaces);
+// ---------------------------------------------------------------------------------------------------- surface facts (F12a)
+const CITE_PATH = /^[A-Za-z0-9_@+.-]+(?:\/[A-Za-z0-9_@+.-]+)*$/;
+const CITE_SYMBOL = /^[A-Za-z_$][\w$.#<>[\]-]*$/;
+const PLACEHOLDER = /^(tbd|tba|todo|fixme|n\/?a|na|none|null|nil|unknown|placeholder|example|path|file|symbol|xxx+|-+|\.+|\?+|\*+)$/i;
+/**
+ * A machine-checkable citation of a surface-level fact: one `path[:symbol]`, repository-relative (no leading '/',
+ * no '.' or '..' segment, no whitespace or backslash), the path naming a file (it holds a '/' or a '.'), and no
+ * placeholder (TBD, n/a, unknown, ...) as the path, its last segment or the symbol. Null when acceptable.
+ */
+export function citationProblem(e) {
+  if (typeof e !== 'string' || !e.length || e.length > 300 || /\s/.test(e)) return 'a citation is one path[:symbol] with no whitespace (at most 300 characters)';
+  const i = e.indexOf(':');
+  const path = i < 0 ? e : e.slice(0, i), sym = i < 0 ? null : e.slice(i + 1);
+  if (!CITE_PATH.test(path) || path.split('/').some((x) => x === '.' || x === '..')) return `${JSON.stringify(path)} is not a repository-relative path`;
+  if (!/[./]/.test(path)) return `${JSON.stringify(path)} does not name a file`;
+  if (PLACEHOLDER.test(path) || PLACEHOLDER.test(path.split('/').pop()) || PLACEHOLDER.test(path.split('/').pop().replace(/\.[^.]*$/, ''))) return `${JSON.stringify(path)} is a placeholder`;
+  if (sym !== null && (!CITE_SYMBOL.test(sym) || PLACEHOLDER.test(sym))) return `symbol ${JSON.stringify(sym)} is not an identifier`;
+  return null;
+}
+
+/** The facts any control's catalog gate names for boundary kind `kind` (what a surface of that kind may lower). */
+const gatedFactsOf = (gates, kind) => new Set([...gates.values()].flatMap((m) => [...(m.get(kind) ?? [])]));
+
+/**
+ * Validate the surface-level facts of `surfaces` against the normalized change-level `facts`; returns the
+ * lowering map for compute(). A surface may only set a BOOLEAN fact from true to false
+ * (surface_fact_not_lowerable: a non-bool, a non-false value, a change-level value that is not true, a surface
+ * of kind `unknown`), only a fact some catalog gate for its kind names (surface_fact_ungated), with a
+ * machine-checkable citation (fact_uncited), and never on every surface: the change-level fact is the OR of
+ * its surfaces, so all of them lowering it contradicts the change fact (surface_fact_reinflates).
+ */
+function lowerings({ catalog, gates }, facts, surfaces) {
+  const vocab = catalog.fact_vocabulary;
+  const lower = new Map();
+  for (const s of surfaces) {
+    if (!s.facts) continue;
+    if (s.kind === 'unknown') refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: a surface of kind unknown lowers no fact (its kind selects every control)`);
+    const gated = gatedFactsOf(gates, s.kind);
+    const m = new Map();
+    for (const f of Object.keys(s.facts).sort()) {
+      const v = s.facts[f];
+      if (!vocab[f]) refuse('fact_out_of_vocabulary', `surface ${s.boundary_id}: unknown fact '${f}'`);
+      if (DERIVED.includes(f) || vocab[f].type !== 'bool') refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: ${f} is not a bool fact`);
+      if (v !== false) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: ${f} ${JSON.stringify(v)}: a surface may only lower a fact to false`);
+      if (facts[f] !== true) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: ${f} is ${JSON.stringify(facts[f])} for the change; only a true change fact can be lowered (never unknown)`);
+      if (!gated.has(f)) refuse('surface_fact_ungated', `surface ${s.boundary_id}: no catalog not_applicable gate for kind ${s.kind} names ${f}`);
+      const why = citationProblem(s.evidence[f]);
+      if (why) refuse('fact_uncited', `surface ${s.boundary_id}: ${f}: ${why}`);
+      m.set(f, s.evidence[f]);
+    }
+    lower.set(s.boundary_id, m);
+  }
+  for (const f of uniqSorted([...lower.values()].flatMap((m) => [...m.keys()]))) {
+    if (surfaces.every((s) => lower.get(s.boundary_id)?.has(f))) refuse('surface_fact_reinflates', `every surface lowers ${f}, so the change-level ${f}=true has no surface (the change fact is the OR of its surfaces)`);
+  }
+  return lower;
+}
+
+/** The path-only signal kinds of `path` (no added line): what reassess will see whenever that file changes. */
+const pathSignalKinds = (path) => {
+  const p = String(path).toLowerCase(), b = p.split('/').pop();
+  return RULES.filter(([kind, pathTest]) => !(SURFACE_SIGNALS.includes(kind) && isTestPath(p)) && pathTest(p, b)).map(([kind]) => kind);
+};
+
+function buildSelection(reg, catalog, digest, facts, surfaces, lower = null) {
+  const core = compute(reg, facts, surfaces, { lower });
   if (core.unpaired.length) refuse('control_unpaired', `selected with no surface to pair with: ${core.unpaired.join(', ')}`);
+  if (lower) {
+    // Defence in depth: the effective and the dropped pairs partition exactly the pairs the same facts select without any surface fact.
+    const legacy = compute(reg, facts, surfaces).pairs.map((p) => p.pair_id);
+    const now = [...core.pairs.map((p) => p.pair_id), ...core.na_pairs.map((p) => p.pair_id)].sort();
+    if (canon(now) !== canon(legacy)) refuse('surface_fact_reinflates', 'the surface facts change the pairs beyond dropping some (effective + dropped must equal the pairs without surface facts)');
+    for (const [bid, m] of lower) for (const f of m.keys()) {
+      if (!core.na_pairs.some((p) => p.boundary_id === bid && p.facts.includes(f))) refuse('surface_fact_ungated', `surface ${bid}: lowering ${f} drops no pair (another gate fact still holds)`);
+    }
+    for (const p of core.na_pairs) {
+      const s = surfaces.find((x) => x.boundary_id === p.boundary_id);
+      const hit = pathSignalKinds(s.path).find((k) => (SIGNAL_CLASS[k] ?? []).includes(p.control_id));
+      if (hit) refuse('surface_fact_not_lowerable', `surface ${p.boundary_id}: its own path raises a ${hit} signal whose class includes ${p.control_id}, so every reassessment would reopen the pair`);
+    }
+  }
   const facts_digest = sha(canon(facts));
   const ids = core.controls.map((c) => c.control_id);
+  const v3 = lower ? { surfaces, pairs: core.pairs.map((p) => p.pair_id), na_pairs: blockNa(core.na_pairs) } : undefined;
   const sel = {
     ok: true, code: 'selected', reasons: [], tool: 'security-plan', v: 1, security_policy: 2,
     catalog_version: catalog.catalog_version, catalog_digest: digest, facts_digest,
-    selection_digest: selectionDigest({ catalog_digest: digest, facts_digest, controls: ids }),
+    selection_digest: selectionDigest({ catalog_digest: digest, facts_digest, controls: ids, v3 }),
     controls: core.controls, pairs: core.pairs, excluded: core.excluded, unknown_facts: core.unknown_facts,
-    facts, surfaces,
-    config_fragment: { securityPolicy: 2, catalogDigest: digest, securityControls: ids,
+    facts, surfaces, ...(lower ? { block_format: 3, na_pairs: core.na_pairs } : {}),
+    // Only DAG config keys (validateEngineDag CONFIG_FIELDS): the selected control ids are `controls` above.
+    config_fragment: { securityPolicy: 2, catalogDigest: digest,
       controlCoverage: core.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: null, specs: [] })) },
   };
   sel.rows_md = renderSection3a(sel);
   return sel;
 }
+
+/** A dropped pair as the block records it: its id, the lowered fact(s) and their citations. */
+const blockNa = (na) => na.map((p) => ({ pair_id: p.pair_id, facts: [...p.facts], evidence: { ...p.evidence } }));
 
 // ---------------------------------------------------------------------------------------------------- plan text
 /** `security-pairs sha256:<hex>` over canonical JSON {policy:2, catalog_digest, pairs: sorted pair ids}. */
@@ -292,6 +467,7 @@ const blockJson = (b) => canon(b).replace(/</g, '\\u003c').replace(/>/g, '\\u003
 export function renderSection3a(sel) {
   const verify = new Map((sel.controls ?? []).map((c) => [c.control_id, c.verify_type]));
   const pairs = sel.pairs.map((p) => p.pair_id);
+  if (sel.block_format === 3) return renderFormat3(sel, verify, pairs);
   const block = { policy: 2, catalog_digest: sel.catalog_digest, facts: sel.facts, surfaces: sel.surfaces,
     controls: sel.controls.map((c) => c.control_id), pairs, selection_digest: sel.selection_digest };
   if (!sel.pairs.length && !sel.controls.length) {
@@ -302,6 +478,31 @@ export function renderSection3a(sel) {
   const out = [`Security risk assessment: policy 2, catalog v${esc(sel.catalog_version)} \`${sel.catalog_digest}\`, selection \`${sel.selection_digest}\`.`, ''];
   out.push('| Boundary | Kind | Control | Tier | Verify | Paired by | Why it applies |', '|---|---|---|---|---|---|---|');
   for (const p of sel.pairs) out.push(`| \`${esc(p.boundary_id)}\` | ${esc(p.kind)} | ${p.control_id} | ${p.tier} | ${esc(verify.get(p.control_id) ?? '')} | ${p.paired_by} | ${esc(p.why)} |`);
+  out.push('');
+  if (sel.excluded?.length) { out.push('Excluded (predicates false for the cited facts):'); for (const e of sel.excluded) out.push(`- ${e.control_id}: ${esc(e.why)}`); out.push(''); }
+  out.push(`Unknown facts (their controls stay selected): ${sel.unknown_facts?.length ? sel.unknown_facts.join(', ') : 'none'}.`, '');
+  out.push(pairsLine({ catalogDigest: sel.catalog_digest, pairs }));
+  out.push(`<!-- security-plan: ${blockJson(block)} -->`);
+  return out.join('\n');
+}
+
+/**
+ * Block format 3 (surface-level facts): the effective pairs (each needs its own RED spec), the pairs dropped by a
+ * cited surface fact (each still needs one review row), exclusions, unknowns, the pairs line of the EFFECTIVE
+ * pairs only (so init binding keeps its meaning) and the machine block with `policy: 3` (an engine that predates
+ * format 3 refuses it outright: its parser accepts policy 2 only).
+ */
+function renderFormat3(sel, verify, pairs) {
+  const block = { policy: 3, catalog_digest: sel.catalog_digest, facts: sel.facts, surfaces: sel.surfaces,
+    controls: sel.controls.map((c) => c.control_id), pairs, na_pairs: blockNa(sel.na_pairs), selection_digest: sel.selection_digest };
+  const out = [`Security risk assessment: policy 2, block format 3 (surface-level facts), catalog v${esc(sel.catalog_version)} \`${sel.catalog_digest}\`, selection \`${sel.selection_digest}\`.`, ''];
+  if (sel.pairs.length) {
+    out.push('| Boundary | Kind | Control | Tier | Verify | Paired by | Why it applies |', '|---|---|---|---|---|---|---|');
+    for (const p of sel.pairs) out.push(`| \`${esc(p.boundary_id)}\` | ${esc(p.kind)} | ${p.control_id} | ${p.tier} | ${esc(verify.get(p.control_id) ?? '')} | ${p.paired_by} | ${esc(p.why)} |`);
+  } else out.push('No effective pair: every selected pair is dropped by a cited surface fact.');
+  out.push('', 'Dropped by a cited surface fact (not applicable; each still needs one review row, NOT_APPLICABLE citing the evidence, or FAIL to dispute it):', '');
+  out.push('| Boundary | Kind | Control | Tier | Lowered fact | Evidence |', '|---|---|---|---|---|---|');
+  for (const p of sel.na_pairs) out.push(`| \`${esc(p.boundary_id)}\` | ${esc(p.kind)} | ${p.control_id} | ${p.tier} | ${p.facts.join(', ')} | ${p.facts.map((f) => `\`${esc(p.evidence[f])}\``).join(', ')} |`);
   out.push('');
   if (sel.excluded?.length) { out.push('Excluded (predicates false for the cited facts):'); for (const e of sel.excluded) out.push(`- ${e.control_id}: ${esc(e.why)}`); out.push(''); }
   out.push(`Unknown facts (their controls stay selected): ${sel.unknown_facts?.length ? sel.unknown_facts.join(', ') : 'none'}.`, '');
@@ -331,6 +532,7 @@ export function parsePlanSecurityBlock(planText, opts = {}) {
   if (m.length !== 1) return null;
   let b;
   try { b = JSON.parse(m[0][1]); } catch { return null; }
+  if (isObj(b) && b.policy === 3) return parseFormat3(b, planText);
   if (!isObj(b) || b.policy !== 2 || typeof b.catalog_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(b.catalog_digest)) return null;
   if (!isObj(b.facts) || !Array.isArray(b.surfaces) || !Array.isArray(b.controls) || !Array.isArray(b.pairs) || typeof b.selection_digest !== 'string') return null;
   if (!b.surfaces.every((s) => isObj(s) && nonEmpty(s.boundary_id) && typeof s.kind === 'string' && nonEmpty(s.path) && Array.isArray(s.principals))) return null;
@@ -346,6 +548,52 @@ export function parsePlanSecurityBlock(planText, opts = {}) {
   return { policy: 2, catalog_digest: b.catalog_digest, facts: b.facts, surfaces: b.surfaces, controls: b.controls, pairs: b.pairs, selection_digest: b.selection_digest };
 }
 
+const BLOCK3_KEYS = ['catalog_digest', 'controls', 'facts', 'na_pairs', 'pairs', 'policy', 'selection_digest', 'surfaces'];
+/**
+ * Block format 3: exactly its keys; each surface's optional `facts` (every value false) cite a machine-checkable
+ * path each; `na_pairs` sorted and unique, disjoint from `pairs`, each on a listed surface with the facts it names
+ * lowered there and the same citations; every control of `controls` has an effective pair; the v3 selection
+ * digest recomputes; every pairs line equals the one of the EFFECTIVE pairs. Whether the drops follow from the
+ * catalog is checked where the catalog is loaded (reassess, obligationMatrix). Else null.
+ */
+function parseFormat3(b, planText) {
+  if (canon(Object.keys(b).sort()) !== canon(BLOCK3_KEYS) || typeof b.catalog_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(b.catalog_digest)) return null;
+  if (!isObj(b.facts) || !Array.isArray(b.surfaces) || !Array.isArray(b.controls) || !Array.isArray(b.pairs) || !Array.isArray(b.na_pairs) || typeof b.selection_digest !== 'string') return null;
+  const sids = new Map();
+  for (const s of b.surfaces) {
+    if (!isObj(s) || !nonEmpty(s.boundary_id) || typeof s.kind !== 'string' || !nonEmpty(s.path) || !Array.isArray(s.principals) || sids.has(s.boundary_id)) return null;
+    if (Object.keys(s).some((k) => !['boundary_id', 'kind', 'path', 'principals', 'facts', 'evidence'].includes(k))) return null;
+    if (s.facts !== undefined || s.evidence !== undefined) {
+      if (!isObj(s.facts) || !isObj(s.evidence) || !Object.keys(s.facts).length || canon(Object.keys(s.facts).sort()) !== canon(Object.keys(s.evidence).sort())) return null;
+      if (!Object.entries(s.facts).every(([f, v]) => v === false && citationProblem(s.evidence[f]) === null)) return null;
+    }
+    sids.set(s.boundary_id, s);
+  }
+  if (!b.controls.every((c) => typeof c === 'string' && CONTROL_ID.test(c)) || canon(b.controls) !== canon(uniqSorted(b.controls))) return null;
+  if (canon(b.pairs) !== canon(uniqSorted(b.pairs))) return null;
+  for (const p of b.pairs) { const q = parsePairId(p); if (!q || !sids.has(q.boundary_id) || !b.controls.includes(q.control_id)) return null; }
+  if (!b.controls.every((c) => b.pairs.some((p) => parsePairId(p).control_id === c))) return null;
+  const naIds = b.na_pairs.map((n) => n?.pair_id);
+  if (!naIds.length || canon(naIds) !== canon(uniqSorted(naIds)) || naIds.some((id) => b.pairs.includes(id))) return null;
+  for (const n of b.na_pairs) {
+    const q = parsePairId(n.pair_id), s = q && sids.get(q.boundary_id);
+    if (!s?.facts || canon(Object.keys(n).sort()) !== canon(['evidence', 'facts', 'pair_id']) || !Array.isArray(n.facts) || !n.facts.length
+      || canon(n.facts) !== canon(uniqSorted(n.facts)) || !isObj(n.evidence) || canon(Object.keys(n.evidence).sort()) !== canon(n.facts)) return null;
+    if (!n.facts.every((f) => s.facts[f] === false && n.evidence[f] === s.evidence[f])) return null;
+  }
+  const v3 = { surfaces: b.surfaces, pairs: b.pairs, na_pairs: b.na_pairs };
+  if (selectionDigest({ catalog_digest: b.catalog_digest, facts_digest: sha(canon(b.facts)), controls: b.controls, v3 }) !== b.selection_digest) return null;
+  const lines = planText.match(PAIRS_LINE_RE) ?? [];
+  const want = pairsLine({ catalogDigest: b.catalog_digest, pairs: b.pairs });
+  if (!lines.length || !lines.every((l) => l === want)) return null;
+  return { policy: 3, catalog_digest: b.catalog_digest, facts: b.facts, surfaces: b.surfaces, controls: b.controls, pairs: b.pairs,
+    na_pairs: b.na_pairs, selection_digest: b.selection_digest };
+}
+
+/** The lowering map of a block format 3 (null for format 2): Map(boundary_id -> Map(fact -> citation)). */
+const blockLowering = (block) => (block?.policy === 3
+  ? new Map(block.surfaces.filter((s) => s.facts).map((s) => [s.boundary_id, new Map(Object.keys(s.facts).sort().map((f) => [f, s.evidence[f]]))])) : null);
+
 /** Approved pairs united with every addendum's pairs: add-only by construction. Malformed pair ids throw. */
 export function effectiveSet(approvedBlock, addenda = []) {
   const all = [...(approvedBlock?.pairs ?? [])];
@@ -353,6 +601,94 @@ export function effectiveSet(approvedBlock, addenda = []) {
   for (const a of addenda) { if (!isObj(a) || !Array.isArray(a.pairs)) throw new TypeError('addendum needs pairs[]'); all.push(...a.pairs); }
   for (const p of all) if (!parsePairId(p)) throw new TypeError(`invalid pair id ${JSON.stringify(p)}`);
   return uniqSorted(all);
+}
+
+// ---------------------------------------------------------------------------------------------------- accountability (F12a)
+/**
+ * The dispositions of one surface x control cell. proven: an effective pair (approved or added by a trusted
+ * addendum; its own RED spec must prove it); waived: an effective pair a trusted SECURITY_WAIVER of the candidate
+ * accepts (the ONLY risk acceptance); dropped-by-fact: dropped by a cited surface-level fact (block format 3);
+ * dropped-by-kind: the control is selected for the change but the catalog's not_applicable reason excludes this
+ * surface's kind; excluded-by-change-fact: the change-level facts select no pair here (the control is in
+ * excluded[], or this kind's catalog gate names only facts that are false for the change).
+ */
+export const DISPOSITIONS = ['proven', 'waived', 'dropped-by-fact', 'dropped-by-kind', 'excluded-by-change-fact'];
+
+/**
+ * Check a matrix: exactly one cell per (surface, catalog control) and per extra effective pair, each with a
+ * disposition of DISPOSITIONS; a dropped-by-fact cell names its facts and their citations. Refusals:
+ * disposition_unknown, disposition_duplicate, disposition_missing (in that order). -> { ok:true } | refusal.
+ */
+export function verifyMatrix(matrix, { surfaces = [], controls = [] } = {}) {
+  return asResult(() => {
+    if (!Array.isArray(matrix)) refuse('disposition_missing', 'the matrix must be an array of cells');
+    const bad = matrix.filter((c) => !isObj(c) || !DISPOSITIONS.includes(c.disposition) || !nonEmpty(c.boundary_id) || typeof c.control_id !== 'string' || !CONTROL_ID.test(c.control_id)
+      || (c.disposition === 'dropped-by-fact' && !(Array.isArray(c.facts) && c.facts.length && isObj(c.evidence) && c.facts.every((f) => citationProblem(c.evidence[f]) === null))));
+    if (bad.length) refuse('disposition_unknown', ...bad.map((c) => `cell ${JSON.stringify(c)} has no known disposition (or a dropped-by-fact cell without cited facts)`));
+    const seen = new Map();
+    for (const c of matrix) seen.set(`${c.boundary_id}:${c.control_id}`, (seen.get(`${c.boundary_id}:${c.control_id}`) ?? 0) + 1);
+    const dup = [...seen].filter(([, n]) => n > 1).map(([k]) => k);
+    if (dup.length) refuse('disposition_duplicate', ...dup.map((k) => `${k} has more than one disposition`));
+    const missing = surfaces.flatMap((s) => controls.map((c) => `${s}:${c}`)).filter((k) => !seen.has(k));
+    if (missing.length) refuse('disposition_missing', ...missing.map((k) => `${k} has no disposition`));
+    return { ok: true, code: 'matrix_complete', reasons: [] };
+  });
+}
+
+/**
+ * The full surface x control obligation matrix of an approved block (format 2 or 3), standalone (no engine module,
+ * runnable in the manual flow): `addenda` are the pair ids trusted SECURITY_ADDENDUMs added, `waived` the pair ids
+ * trusted SECURITY_WAIVERs accept for the candidate (each must be effective, else ignored as waiverState does).
+ * Each cell is derived independently from the block and the catalog: a cell the block both pairs and drops, a
+ * dropped pair the catalog would not pair, or an obligated cell neither paired nor dropped fails closed.
+ * -> { ok:true, code:'obligations', matrix, counts } | refusal (catalog_*, plan_block_invalid, disposition_*).
+ */
+export function obligationMatrix(catalogArg, block, { addenda = [], waived = [] } = {}) {
+  const r = resolveCatalog(catalogArg);
+  if (r.refusal) return r.refusal;
+  const res = asResult(() => {
+    const { catalog, digest, evaluator: ev, gates } = r;
+    if (!isObj(block) || ![2, 3].includes(block.policy)) refuse('plan_block_invalid', 'obligationMatrix needs a parsed security-plan block');
+    if (block.catalog_digest !== digest) refuse('catalog_invalid', `the block was selected against ${block.catalog_digest}, the loaded catalog is ${digest}`);
+    try { checkFacts(ev, block.facts, catalog.fact_vocabulary); } catch { refuse('plan_block_invalid', 'block facts are outside the vocabulary'); }
+    if (!Array.isArray(addenda) || !Array.isArray(waived) || ![...addenda, ...waived].every((p) => parsePairId(p))) refuse('bad_input', 'addenda and waived are pair id lists');
+    if (block.policy === 3) replayFormat3(r, block);
+    const legacy = new Set(compute(r, block.facts, block.surfaces).pairs.map((p) => p.pair_id));
+    const change = new Set(ev.selected(catalog, block.facts));
+    const effective = new Set([...block.pairs, ...addenda]);
+    const waivedSet = new Set(waived.filter((p) => effective.has(p)));
+    const na = new Map((block.na_pairs ?? []).map((n) => [n.pair_id, n]));
+    const matrix = [];
+    const cellOf = (s, c) => {
+      const id = `${s.boundary_id}:${c.id}`;
+      if (effective.has(id)) {
+        if (na.has(id) && block.pairs.includes(id)) refuse('disposition_duplicate', `${id}: the block both pairs and drops it`);
+        return { disposition: waivedSet.has(id) ? 'waived' : 'proven', ...(na.has(id) ? { reopened: true } : {}) };
+      }
+      if (na.has(id)) {
+        if (!legacy.has(id)) refuse('disposition_duplicate', `${id}: dropped-by-fact, but the catalog never pairs it here (it is also dropped-by-kind or excluded)`);
+        const n = na.get(id);
+        return { disposition: 'dropped-by-fact', facts: [...n.facts], evidence: { ...n.evidence } };
+      }
+      if (legacy.has(id)) refuse('disposition_missing', `${id}: the catalog pairs it under the block facts, but it is neither effective nor dropped by a cited fact`);
+      if (!change.has(c.id)) return { disposition: 'excluded-by-change-fact', why: ev.why(c.applies_when, block.facts) };
+      const g = gates.get(c.id)?.get(s.kind);
+      if (g instanceof Set) return { disposition: 'excluded-by-change-fact', facts: [...g].sort(), why: `${s.kind} is gated by ${[...g].sort().join(' or ')}, false for the change` };
+      if (g === null) return { disposition: 'dropped-by-kind', why: `catalog not_applicable.${s.kind}` };
+      refuse('disposition_missing', `${id}: ${c.id} is selected for the change, not paired with ${s.kind}, and the catalog gives no not_applicable reason`);
+    };
+    for (const s of block.surfaces) for (const c of catalog.controls) matrix.push({ boundary_id: s.boundary_id, kind: s.kind, control_id: c.id, ...cellOf(s, c) });
+    const sids = new Set(block.surfaces.map((s) => s.boundary_id));
+    for (const id of [...effective].sort()) {
+      const q = parsePairId(id);
+      if (!sids.has(q.boundary_id)) matrix.push({ boundary_id: q.boundary_id, kind: null, control_id: q.control_id, disposition: waivedSet.has(id) ? 'waived' : 'proven', extra: true });
+    }
+    const check = verifyMatrix(matrix, { surfaces: [...sids], controls: catalog.controls.map((c) => c.id) });
+    if (!check.ok) refuse(check.code, ...check.reasons);
+    const counts = Object.fromEntries(DISPOSITIONS.map((d) => [d, matrix.filter((c) => c.disposition === d).length]));
+    return { ok: true, code: 'obligations', reasons: [], block_format: block.policy, matrix, counts, matrix_digest: sha(canon(matrix)) };
+  });
+  return res;
 }
 
 /** The approved-plan digest: sha256 of the plan with the RUN-STATE body removed (markers kept adjacent). */
@@ -363,6 +699,25 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
   'bun.lockb', 'bun.lock', 'deno.json', 'deno.lock', 'pipfile', 'pipfile.lock', 'poetry.lock', 'pyproject.toml', 'setup.py', 'setup.cfg', 'uv.lock',
   'go.mod', 'go.sum', 'cargo.toml', 'cargo.lock', 'gemfile', 'gemfile.lock', 'composer.json', 'composer.lock', 'pom.xml', 'build.gradle',
   'build.gradle.kts', 'packages.lock.json', 'directory.packages.props', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock', 'podfile', 'podfile.lock']);
+/**
+ * C5 (F12a): a test file is not deployed, so it cannot introduce a boundary: it never raises a
+ * surface-introducing signal (SURFACE_SIGNALS: new-route, auth-or-middleware-change, migration-or-rls-change), by
+ * path or by added line. A test file is ONLY: a basename `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.go|py|rb|ex|exs`,
+ * `*_spec.go|py|rb|ex|exs`, `test_*.py`, or a path under a `__tests__/`, `__mocks__/` or `__fixtures__/` directory.
+ * Deliberately NOT: a `test/`, `tests/`, `spec/` or `fixtures/` directory, or a `test.ts` / `ab-test.ts` basename,
+ * because file-system routers serve those as real routes (`app/test/route.ts`, `routes/fixtures.ts`).
+ */
+const TEST_FILE = /(^|\/)(__tests__|__mocks__|__fixtures__)\/|\.(test|spec|e2e-spec)\.[a-z0-9]+$|_(test|spec)\.(go|py|rb|ex|exs)$|(^|\/)test_[^/]+\.py$/;
+export const isTestPath = (p) => TEST_FILE.test(String(p).toLowerCase());
+/**
+ * C5 (F12a): an `api/` directory that is a workspace project folder (`apps/api/`, `packages/api/`, `services/api/`,
+ * `libs/api/`, `modules/api/`, `projects/api/`) is not a route directory: in a monorepo it holds the whole service
+ * (services, index.ts, config). Only that one segment stops counting; inside it `routes/`, `controllers/`,
+ * `handlers/`, `endpoints/`, `webhooks/`, a nested `api/` (`apps/api/src/api/x.ts`), an `api.*` basename and the
+ * added-line patterns still fire, as do a root `api/`, `pages/api/`, `app/api/`, `server/api/` and `src/api/`.
+ */
+const WORKSPACE_API = /(^|\/)(apps|packages|services|libs|modules|projects)\/api\//g;
+const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 /** [kind, path test, added-line test]: mechanical patterns only; a match creates a signal, never a control. */
 const RULES = [
   ['new-dependency', (p, b) => DEP_FILES.has(b) || /^requirements[\w.-]*\.txt$/.test(b) || /\.csproj$/.test(b), null],
@@ -374,7 +729,7 @@ const RULES = [
   ['env-or-secret-reference', (p, b) => /^\.env(\..*)?$/.test(b) || /(^|\/)secrets?(\/|\.)/.test(p),
     /\bprocess\.env\b|\bimport\.meta\.env\b|\bDeno\.env\b|\bos\.environ\b|\bgetenv\s*\(|\bENV\[|\$\{\{\s*secrets\.|\bsecrets\.[A-Z_]/],
   ['auth-or-middleware-change', (p) => /(^|\/)(auth|authn|authz|middlewares?|sessions?|guards?|policies|permissions|rbac|login|oauth)(\/|\.|-|_)/.test(p), null],
-  ['new-route', (p, b) => /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/.test(p) || /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/.test(b),
+  ['new-route', (p, b) => ROUTE_DIR.test(p.replace(WORKSPACE_API, '$1$2/')) || /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/.test(b),
     /\b(app|router|server|api|route)\.(get|post|put|patch|delete|all|route)\s*\(|@(Get|Post|Put|Patch|Delete|All|RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\s*\(|export\s+(async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b|export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/],
   ['mail-or-notification-send', (p, b) => /(mail|notif|sms|push)/.test(b),
     /\b(send_?mail|send_?email|send_?sms|send_?push|send_?notification|nodemailer|createTransport|resend\.emails|sgMail|sendgrid|mailgun|postmark|twilio|SendEmailCommand|ses\.send|messages\.create|web-?push)\b/i],
@@ -429,7 +784,9 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
   for (const f of files) {
     const b = f.path.split('/').pop().toLowerCase();
     const p = f.path.toLowerCase();
+    const testFile = isTestPath(p);
     for (const [kind, pathTest, lineTest] of RULES) {
+      if (testFile && SURFACE_SIGNALS.includes(kind)) continue; // C5: a test file introduces no boundary
       if (!(pathTest(p, b) || (lineTest && f.added.some((l) => lineTest.test(l))))) continue;
       const id = `${kind}@${f.path}`;
       const cls = SIGNAL_CLASS[kind];
@@ -442,6 +799,19 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
     }
   }
   return [...out.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+/**
+ * Surface-inventory completeness (C5, F12a): every non-test path of `files` (path strings, or {path, added[]})
+ * that raises a surface-introducing signal (SURFACE_SIGNALS, by path or added line) must be the path of a listed
+ * surface. Returns the gaps [{ path, kinds }] (empty when complete); callers refuse surface_inventory_incomplete.
+ */
+export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
+  const listed = new Set(surfacePaths.map(normPath));
+  const sigs = reassessSignals({ paths: files }).filter((s) => SURFACE_SIGNALS.includes(s.kind) && !listed.has(s.path));
+  const by = new Map();
+  for (const s of sigs) by.set(s.path, uniqSorted([...(by.get(s.path) ?? []), s.kind]));
+  return [...by].map(([path, kinds]) => ({ path, kinds })).sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
 // ---------------------------------------------------------------------------------------------------- reassess
@@ -487,6 +857,26 @@ function validateClassifications(ev, list, vocab) {
     checkCitations(ev, facts, evidence, vocab, Object.keys(facts));
     return { signal_id: c.signal_id, facts, reason: c.reason ?? null };
   });
+}
+
+/**
+ * Replay a block format 3 under the loaded catalog: select again from its own facts and surfaces (every
+ * surface-fact rule of lowerings() and buildSelection() re-applied) and require the same selection digest, so a
+ * hand-edited lowering (an unknown or false change fact, an ungated fact, a drop the evaluator does not make)
+ * never binds. Refusal -> plan_block_invalid naming the rule.
+ */
+function replayFormat3(r, block) {
+  const vocab = r.catalog.fact_vocabulary;
+  let again;
+  try {
+    const surfaces = validateSurfaces(block.surfaces, vocab, { allowFacts: true });
+    again = buildSelection(r, r.catalog, r.digest, block.facts, surfaces, lowerings(r, block.facts, surfaces));
+  } catch (e) {
+    if (e instanceof Refusal) refuse('plan_block_invalid', `block surface facts do not replay (${e.code}): ${e.reasons.join('; ')}`);
+    throw e;
+  }
+  if (again.selection_digest !== block.selection_digest || canon(again.pairs.map((p) => p.pair_id)) !== canon(block.pairs)
+    || canon(blockNa(again.na_pairs)) !== canon(block.na_pairs)) refuse('plan_block_invalid', 'block dropped pairs do not follow from its facts, surfaces and the catalog gates');
 }
 
 const surfaceKey = (s) => canon([s.kind, normPath(s.path), uniqSorted(s.principals)]);
@@ -542,21 +932,39 @@ export function reassess(input = {}) {
     // The approved block must still reproduce its own pairs under the same catalog.
     if (block.catalog_digest === digest) {
       try { checkFacts(ev, block.facts, vocab); } catch { refuse('plan_block_invalid', 'block facts are outside the vocabulary'); }
-      const again = compute(r, block.facts, block.surfaces);
+      const again = compute(r, block.facts, block.surfaces, { lower: blockLowering(block) });
       if (canon(again.pairs.map((p) => p.pair_id)) !== canon(block.pairs)) refuse('plan_block_invalid', 'block pairs do not follow from its facts and surfaces');
+      if (block.policy === 3) replayFormat3(r, block);
     }
 
+    // Block format 3: an approved dropped pair REOPENS (it stays out of `pairs`, so it becomes a delta pair) whenever
+    // a changed path of an approved surface raises a signal whose class names its control, whatever any
+    // classification says (`keep`, from the signal kinds alone), and whenever a used classification raises a
+    // lowered fact (true or unknown) or the merged change fact is no longer true (`lowerNow` below).
+    const lowerApproved = blockLowering(block);
+    let keep = null;
+    if (lowerApproved) {
+      keep = new Set();
+      for (const s of reassessSignals({ paths: files })) {
+        for (const a of block.surfaces) if (normPath(a.path) === s.path) for (const c of SIGNAL_CLASS[s.kind] ?? []) keep.add(`${a.boundary_id}:${c}`);
+      }
+    }
     // The pairs the inventory's surfaces select under the approved facts (classifications only add to these):
     // a new surface at a signal's path closes the signal, and its pairs not yet effective become delta_pairs.
     const surfaceFacts = (base) => normFacts(ev, { ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
       ...(vocab.principals ? { principals: ev.unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
-    const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces).pairs.map((p) => p.pair_id);
+    const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces, { lower: lowerApproved, keep }).pairs.map((p) => p.pair_id);
     const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs });
     const basis = [];
     if (block.catalog_digest !== digest) basis.push({ kind: 'catalog_digest_changed' });
     const outside = uniqSorted([...files.map((f) => f.path), ...surfaces.map((s) => s.path)].filter((p) => !contract.some((re) => re.test(p))));
     for (const p of outside) { basis.push({ kind: 'out-of-plan-path', path: p }); signals.push({ id: `out-of-plan-path@${p}`, kind: 'out-of-plan-path', path: p, class: null }); }
     signals.sort((a, b) => (a.id < b.id ? -1 : 1));
+    if (block.policy === 3 && !basis.length) {
+      // C5 inventory completeness: a signalling non-test path the plan writes must be a listed surface (typed, before classification).
+      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path) });
+      if (gaps.length) refuse('surface_inventory_incomplete', ...gaps.map((g) => `${g.path}: ${g.kinds.join(', ')} with no surface at its path (add one to the inventory)`));
+    }
 
     const classifications = validateClassifications(ev, input.classifications, vocab);
     const byId = new Map(classifications.map((c) => [c.signal_id, c]));
@@ -575,7 +983,12 @@ export function reassess(input = {}) {
     let merged = { ...block.facts };
     for (const c of used) merged = mergeFacts(ev, vocab, merged, c.facts);
     const facts = surfaceFacts(merged);
-    const core = compute(r, facts, surfaces);
+    let lowerNow = lowerApproved;
+    if (lowerApproved) {
+      const raised = new Set(used.flatMap((c) => Object.entries(c.facts).filter(([, v]) => v === true || ev.unknownish(v)).map(([f]) => f)));
+      lowerNow = new Map([...lowerApproved].map(([bid, m]) => [bid, new Map([...m].filter(([f]) => facts[f] === true && !raised.has(f)))]));
+    }
+    const core = compute(r, facts, surfaces, { lower: lowerNow, keep });
     const approvedControls = new Set(effective.map((p) => parsePairId(p).control_id));
     const newUnpaired = core.unpaired.filter((c) => !approvedControls.has(c));
     if (newUnpaired.length) refuse('control_unpaired', `selected with no inventory surface to pair with: ${newUnpaired.join(', ')}`);
@@ -591,6 +1004,7 @@ export function reassess(input = {}) {
       delta_pairs, merged_facts: facts, candidate_id, approved_plan_digest: planDigest(input.plan),
       catalog_digest: digest, approved_catalog_digest: block.catalog_digest,
       effective_addendum_digest: sha(canon(addendaPairs)),
+      ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)) } : {}),
     };
     if (outcome === 'ADD_CONTROLS') {
       out.addendum = { pairs: delta_pairs, controls: uniqSorted(delta_pairs.map((p) => parsePairId(p).control_id)), catalog_digest: digest, candidate_id,
@@ -622,9 +1036,10 @@ async function readJsonArg(name, path) {
   try { return JSON.parse(text); } catch (e) { refuse('bad_input', `--${name} ${path}: ${e.message}`); }
 }
 
-const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>]';
+const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>] | verify --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]';
 const FLAGS = { select: { required: ['facts'], optional: ['catalog'] },
-  reassess: { required: ['plan', 'inventory', 'changed'], optional: ['classifications', 'addenda', 'catalog'] } };
+  reassess: { required: ['plan', 'inventory', 'changed'], optional: ['classifications', 'addenda', 'catalog'] },
+  verify: { required: ['plan'], optional: ['addenda', 'waived', 'catalog'] } };
 
 export async function main(argv) {
   try {
@@ -643,6 +1058,13 @@ export async function main(argv) {
     if (cmd === 'select') return selectControls(loaded, await readJsonArg('facts', flags.facts));
     let plan;
     try { plan = readFileSync(flags.plan, 'utf8'); } catch (e) { refuse('bad_input', `--plan ${flags.plan}: ${e.code ?? e.message}`); }
+    if (cmd === 'verify') {
+      if (!countBlocks(plan)) refuse('plan_block_missing', 'the plan has no <!-- security-plan: --> block in §3a');
+      const block = parsePlanSecurityBlock(plan);
+      if (!block) refuse('plan_block_invalid', 'the security-plan block is malformed or inconsistent');
+      return obligationMatrix(loaded, block, { addenda: flags.addenda ? await readJsonArg('addenda', flags.addenda) : [],
+        waived: flags.waived ? await readJsonArg('waived', flags.waived) : [] });
+    }
     return reassess({ plan, catalog: loaded, inventory: await readJsonArg('inventory', flags.inventory), changed: await readJsonArg('changed', flags.changed),
       classifications: flags.classifications ? await readJsonArg('classifications', flags.classifications) : [],
       addenda: flags.addenda ? await readJsonArg('addenda', flags.addenda) : [] });
