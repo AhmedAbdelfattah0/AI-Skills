@@ -104,6 +104,7 @@ jobs:
           skills/ship-ticket/scripts/risk-floor.test.mjs
           skills/ship-ticket/scripts/test-kinds.test.mjs
           skills/ship-ticket/scripts/engine-test-kinds.test.mjs
+          skills/ship-ticket/scripts/engine-test-kinds-io.test.mjs
           skills/ship-ticket/scripts/eval.test.mjs
           skills/ship-ticket/scripts/engine-bench.test.mjs
           skills/ship-ticket/scripts/brief.test.mjs
