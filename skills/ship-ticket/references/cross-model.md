@@ -223,8 +223,8 @@ Route, in order:
 1. **Codex** in a fresh session, when available and within quota (preferred, on
    any host): `second_opinion: codex`, identity `codex:<model>`, 10-minute
    budget.
-2. Otherwise a fresh **Fable** session (`second_opinion: fable`, identity
-   `claude:fable`), on its own 10-minute budget, run after Codex is unavailable,
+2. Otherwise a fresh **Fable** session (`second_opinion: fable`, identity as
+   recorded under "Dispatching Fable" below), on its own 10-minute budget, run after Codex is unavailable,
    fails, times out or reports its usage limit. Record it accurately as a
    same-provider independent review, never as cross-provider or cross-model
    agreement. The gate accepts it because it differs from the Opus primary by

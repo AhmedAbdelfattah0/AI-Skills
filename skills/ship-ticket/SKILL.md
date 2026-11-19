@@ -378,7 +378,7 @@ critical.
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
 | selected counterpart or its PLAN carrier, when the debate is required | bounded recovery, then debate with a fresh Fable session recorded `plan_debate.status: DEGRADED` (same provider, not cross-model agreement); if Fable also cannot run, **WAIT_FOR_USER** for restored access or an explicit solo-planning waiver |
-| Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`, identity `claude:fable`); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route; because the engine requires a cross-provider second opinion for a risky unit, `config.unitReview` stays off when Codex is unavailable ([references/units.md](references/units.md)) |
+| Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`; identity as [references/cross-model.md](references/cross-model.md) "Dispatching Fable" records it); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route; because the engine requires a cross-provider second opinion for a risky unit, `config.unitReview` stays off when Codex is unavailable ([references/units.md](references/units.md)) |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | review concurrency | run the primary review and the second opinion one after the other; both are still required |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
@@ -714,11 +714,12 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   explicit advisory-only exception, a degraded harness at SHIP on an ELEVATED or
   security-sensitive run ([references/ship.md](references/ship.md)), an
   `ADD_CONTROLS` reassessment awaiting the owner's `SECURITY_ADDENDUM`, or a
-  security-plan refusal of `classification_missing`, `plan_block_missing` or
-  `plan_block_invalid` ([references/security-risk.md](references/security-risk.md));
+  security-plan refusal of `plan_block_missing` or `plan_block_invalid`
+  ([references/security-risk.md](references/security-risk.md));
 - **engine and gate safety refusals:** a nonzero `ship-ready-check` (a gate
   failure, never relabelled as harness degradation), a REPAIR the ledger does not
-  authorize, an engine judgment point that names the user, or an unresolved
+  authorize, an engine judgment point whose message names the user (the others
+  return to the orchestrator and are resolved in scope), or an unresolved
   `strong` model ([references/execution-harness.md](references/execution-harness.md));
 - **destructive or shared-state actions:** squashing, resetting or deleting work
   you did not create (unknown WIP history), a force-push, deleting a remote

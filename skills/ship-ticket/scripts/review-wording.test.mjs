@@ -128,7 +128,8 @@ test('gate accepts a Fable second opinion beside the Opus primary and refuses th
 test('the second-opinion policy names Codex then Fable and never requires CodeRabbit', () => {
   const flat = (text) => text.replace(/\s+/g, ' ');
   const x = flat(ref('cross-model.md'));
-  assert.ok(x.includes('`second_opinion: fable`, identity `claude:fable`'));
+  assert.ok(x.includes('Record the model id the carrier reports (`claude:fable-<version>`), or `claude:fable` when it reports none.'));
+  assert.ok(x.includes('if any builder ran on Fable, Fable cannot be the second opinion'));
   assert.ok(x.includes('**CodeRabbit is optional extra coverage**'));
   assert.ok(x.includes('start a new subagent with `model: fable`'), 'the Fable route has dispatch instructions');
   const skill = load(fileURLToPath(new URL('../SKILL.md', import.meta.url)));
@@ -169,10 +170,25 @@ test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the
   assert.ok(skill.includes('A chat reply, an `AskUserQuestion` answer or the gap question\'s answer is never that approval.'));
   assert.ok(plan.includes('### 3b. Impact and check applicability'));
   assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
-  assert.ok(plan.includes('**Status vocabulary:** `verified`, `partially verified`, `unverified`, `not applicable`'));
-  assert.ok(plan.includes('anything other than `verified` or `not applicable` (`planned`, `partially verified`, `unverified`) is a security exception: it blocks SHIP'));
+  assert.ok(plan.includes('**Status vocabulary:** `verified`, `partially verified`, `unverified`, `failed` (it ran and did not pass), `not applicable`'));
+  assert.ok(plan.includes('anything other than `verified` or `not applicable` (`planned`, `partially verified`, `unverified`, `failed`) is a security exception: it blocks SHIP'));
   assert.ok(flat(ref('ship.md')).includes('`SECURITY_WAIVER` event with `boundary: "plan-3b"`'));
   assert.ok(skill.includes('This list is the single owner of the stop points, by category'));
   assert.ok(skill.includes('Never force-push without explicit owner authority'));
   assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure, never relabelled as harness degradation)'));
+});
+
+test('RC-1 release and stop rules are pinned where they are executed: ship.md block list, the spine stop list, Resume', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const skill = flat(load(fileURLToPath(new URL('../SKILL.md', import.meta.url))));
+  const stops = skill.slice(skill.indexOf('## When execution may yield'), skill.indexOf('Use **FAIL** for:'));
+  assert.ok(stops.length > 500, 'the stop list section was found');
+  assert.ok(flat(ref('ship.md')).includes('Any other status (`planned`, `partially verified`, `unverified`, `failed`, or no status) needs the owner\'s explicit acceptance for this candidate, otherwise `WAIT_FOR_USER`.'));
+  assert.ok(flat(ref('plan.md')).includes('`failed` (it ran and did not pass)'));
+  assert.ok(stops.includes('an applicable security check in plan section 3b whose status is anything other than `verified` or `not applicable` at release'));
+  assert.ok(stops.includes('a degraded harness at SHIP on an ELEVATED or security-sensitive run'));
+  assert.ok(stops.includes('a REPAIR the ledger does not authorize'));
+  assert.ok(!stops.includes('classification_missing'), 'the engine reports reassess_unclassified; classifying is routine');
+  assert.ok(skill.includes('On Claude that means re-entering Plan Mode (`EnterPlanMode`), updating the plan file and presenting the revised plan with `ExitPlanMode`'));
+  assert.ok(skill.includes('Chat text, an `AskUserQuestion` answer and a typed "approve" are not plan approval'));
 });

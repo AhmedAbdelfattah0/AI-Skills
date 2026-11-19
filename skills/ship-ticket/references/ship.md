@@ -80,8 +80,9 @@ concurrently, then join once:
 - every applicable security row in plan section 3b has the latest recorded status
   `verified` or `not applicable`. Before this check, run any row whose "Runs
   when" came after PROVE (staging, a read-only external check) automatically when
-  its tooling and permission allow. Any other status (`planned`, `partially
-  verified`, `unverified`, or no status) needs the owner's explicit acceptance
+  its tooling and permission allow. A `not applicable` set after approval needs
+  its recorded reason. Any other status (`planned`, `partially verified`,
+  `unverified`, `failed`, or no status) needs the owner's explicit acceptance
   for this candidate, otherwise `WAIT_FOR_USER`. The acceptance is the owner
   authority of [security-risk.md](security-risk.md) section 5, recorded as a
   `SECURITY_WAIVER` event with `boundary: "plan-3b"`, `control: "<the 3b row's

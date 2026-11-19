@@ -12,8 +12,10 @@ Establish the first, then test the second.
 
 Run every check in plan section 3b whose "Runs when" has arrived, including an
 external check whose tooling and permission are available, and record each
-status (`verified`, `partially verified`, `unverified` with the reason, or
-`not applicable`) in the PROVE event.
+status (`verified`, `partially verified`, `unverified` with the reason, `failed`,
+or `not applicable`) in the PROVE event. A check that ran and did not pass is
+`failed`, never `unverified`. An approved row moves to `not applicable` only with
+a recorded one-line reason in that event.
 
 Build a ready set from declared inputs, writes and exclusive resources. Formatting,
 generation or snapshot-update nodes that mutate the candidate finish and join
@@ -405,10 +407,7 @@ another reader is still inspecting the old candidate.
 
 ### Test reliability and evidence
 
-On an Nx monorepo, the formatted RED runner is the direct Vitest command
-(`vitest-json`), not Nx: Nx prints banner lines before the JSON, so `gate red`
-refuses it `unsupported_output`. Nx still works as a PROVE command (measured on a
-dry run: direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted).
+On an Nx monorepo the RED runner is direct Vitest, not Nx ([execution-harness.md](execution-harness.md), `testCommands`).
 
 A test must not depend on wall-clock time, a sleep used as synchronisation, a shared temp name or scheduler
 order. A test that is red in the suite and green alone is a verification-reliability incident: record it.

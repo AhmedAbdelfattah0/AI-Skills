@@ -284,8 +284,10 @@ adds the checks the catalog does not hold.
   row names what it runs and what it proves; "covered by review" needs the
   review item that covers it.
 - **Status vocabulary:** `verified`, `partially verified`, `unverified`,
-  `not applicable`, plus `planned` before PROVE runs. Update the status in
-  RUN-STATE (`PROVE` event), never by editing the approved narrative.
+  `failed` (it ran and did not pass), `not applicable`, plus `planned` before
+  PROVE runs. Update the status in RUN-STATE (`PROVE` event), never by editing
+  the approved narrative. After approval a row may change to `not applicable`
+  only with a recorded one-line reason.
 
 **External checks.** Some checks need an environment the local run does not have:
 Cloudflare edge configuration (WAF, bot and edge rate-limiting rules), edge TLS
@@ -305,7 +307,7 @@ A check that cannot run now is `unverified` with the reason, in its 3b row and
 in the PROVE event, and is never reported as covered. A row whose "Runs when"
 comes after PROVE runs before SHIP when its tooling and permission allow. At
 release, an applicable security row whose status is anything other than
-`verified` or `not applicable` (`planned`, `partially verified`, `unverified`) is
+`verified` or `not applicable` (`planned`, `partially verified`, `unverified`, `failed`) is
 a security exception: it blocks SHIP (**WAIT_FOR_USER**) unless the owner
 explicitly accepts it for this candidate, recorded as the `SECURITY_WAIVER`
 record [ship.md](ship.md) defines for 3b rows (`boundary: "plan-3b"`). Record

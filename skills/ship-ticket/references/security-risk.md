@@ -105,7 +105,8 @@ close such a signal. That is intended: the owner approved that file as a surface
 plan, a mechanical signal can be a false alarm, and the classification is recorded and
 reviewed. An approved surface counts only at exactly the signal's path. Input `surfaces` are
 not stored: every later `gate reassess` call must supply them again, or the signal
-reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis.
+reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis
+(re-approval re-enters Plan Mode and presents the revised plan with `ExitPlanMode`).
 
 **Proving a pair spec (attribution rule).** Under TAP, a passing test carries no file
 location, so a pair spec counts as passed only when the formatted command runs exactly
@@ -157,7 +158,7 @@ whose `signal_id` matches no signal is ignored.
 |---|---|---|
 | `UNCHANGED` | no new pair follows | recorded as `SECURITY_REASSESSED` |
 | `ADD_CONTROLS` | new pairs inside the contract | an owner `SECURITY_ADDENDUM` adds them (add-only); `addendum_required` until then |
-| `REAPPROVAL` | catalog digest changed or a path outside the contract | new START and plan digest; `WAIT_FOR_USER`, `drive` stops |
+| `REAPPROVAL` | catalog digest changed or a path outside the contract | new START and plan digest after re-approval through `ExitPlanMode`; `WAIT_FOR_USER`, `drive` stops |
 
 A classification can only raise facts; it can never remove an approved pair.
 
