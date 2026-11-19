@@ -174,6 +174,7 @@ test('[seam R5] the REAL gateRunner result maps through sealedReport onto P4r bu
   const b = TKIO.buildRecord({ repo: r.dir, baseSha: r.base, entry, commandArgs: command.args, tests: { globs: [] }, dagDigest: dag, report: m.report });
   assert.equal(b.ok, true, J(b));
   assert.deepEqual(b.record.files.map(f => [f.file, f.credited]), [['test/a.test.ts', ['kind:negative']]]);
+  assert.deepEqual(Object.keys(b.record.files[0]).sort(), ['credited', 'file', 'outcome', 'unknown'], 'the simplified P4r row (no R-3 fields)');
   assert.equal(b.record.claim, 'L-ran');
   const u = TKR.recordUsable(b.record, { repo: r.dir, baseSha: r.base, dagDigest: dag, entry, command, tests: { globs: [] } });
   assert.deepEqual(u.ok && u.evidence.kinds, ['negative']);
@@ -371,6 +372,7 @@ test('[AC1] F1: a missing kind is refused after the evidence run, the five field
   const before = protectedOf(fx.readState());
   const r = refused(refreshThen(fx, 'review', passReview('rx-1', fx.candidate()), 'F1'), 'missing_test_kinds');
   assert.match(r.out.reasons[0], /kind:negative/);
+  assert.doesNotMatch(r.out.reasons[0], /undefined/, 'every reason field the verdict reports is one the verdict has');
   assert.equal(protectedOf(fx.readState()), before, 'F1 refusal: five fields and ship_ready unchanged');
   assert.equal(fx.evidenceAttempts().length, 1, 'the re-issued call reused the record (no second run)');
   const st = ok(fx.cli('status')).out.test_kinds;
@@ -405,14 +407,6 @@ test('[AC2] end to end: F1 passes; a repair deleting the test is refused at F4; 
   S = fx.readState();
   assert.equal(S.review_chain.at(-1).review_execution, 'rx-2');
   assert.ok(fx.evidenceAttempts().length <= runs + 1);
-});
-
-test('[AC1] F1: a credit offset elsewhere in P is withheld (r3_offset), the reason is explicit and the kind is missing', { skip: NOT_DARWIN }, (t) => {
-  const fx = ready(tkFx(t, { baseFiles: { 'src/old.md': 'an old note [kind:negative]\n' }, behaviour: { a: { write: { 'test/a.test.ts': NEG }, remove: ['src/old.md'] } } }));
-  const before = protectedOf(fx.readState());
-  const r = refused(refreshThen(fx, 'review', passReview('rx-1', fx.candidate()), 'F1'), 'missing_test_kinds');
-  assert.match(r.out.reasons[0], /"kind:negative":"r3_offset"/, 'the withheld reason is explicit');
-  assert.equal(protectedOf(fx.readState()), before);
 });
 
 // ------------------------------------------------------------------ AC3: a call that ran never decides

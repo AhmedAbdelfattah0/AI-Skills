@@ -438,7 +438,7 @@ function derive(E, M, point) {
   return { c, entry, command, v, classes: rf.floor_classes, digest: command && M.io.commandDigest(command.cmd, command.args) };
 }
 const verdictReasons = (v) => [`test kinds ${v.code}: missing ${[...v.missing_kinds.map(k => `kind:${k}`), ...v.unmapped_items.map(i => `plan:${i}`)].join(', ') || 'none'}`
-  + `; records ${JSON.stringify(v.records)}; withheld ${JSON.stringify(v.withheld)}; runner_uncovered ${v.voids?.runner_uncovered ?? 0}${v.detail ? `; ${v.detail}` : ''} (claim ${v.claim})`];
+  + `; records ${JSON.stringify(v.records)}; runner_uncovered ${v.voids?.runner_uncovered ?? 0}${v.detail ? `; ${v.detail}` : ''} (claim ${v.claim})`];
 
 /**
  * ensureEvidence(E, point[, expected]) -> null (inactive) | { ok: true, evidence_id } | a gate refusal. Run-then-return: when no
