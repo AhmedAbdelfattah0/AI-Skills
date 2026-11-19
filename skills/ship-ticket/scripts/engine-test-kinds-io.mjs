@@ -44,11 +44,19 @@
  * acceptance criteria is the reviewers' to judge (ship-ticket review), never this module's.
  * WHY "in P" STAYS (exact-candidate binding, not novelty): the identity hashes the bytes of exactly the paths of P, so a credited
  * file is always one whose bytes the identity holds. A file outside P is bound only through `base_sha` and git's view of it, which
- * a local clean filter or line-ending conversion can make differ from the bytes the runner read (the round 6-9 conversion checks
- * that closed this for R-3 are removed with R-3): such a file is `not_in_P` and never credits, whatever its bytes.
+ * a local clean filter can make differ from the bytes the runner read: such a file is `not_in_P` and never credits.
  * ACCEPTED (owner, SIMP section 6): a marker added to an unrelated test credits when that test passes; the diff review sees it.
- * RESIDUAL (reported, not decided here): an edit that git's diff does not list (a local clean filter, `core.autocrlf`) is outside
- * the identity, so it can influence a run without moving `evidence_id`; it can never be the credited file (it is not in P).
+ * THE IDENTITY IS THE WORKTREE, BY DESIGN (rev 5 section 1a): P is git's list of changed paths, and their WORKTREE bytes are hashed.
+ * That what is committed equals the evidenced worktree candidate is the ship step's and P5r's to enforce, not this module's.
+ * WHAT STILL HOLDS AGAINST A LOCAL GIT SETTING (`.git/config`, `.git/info/attributes`, `.git/info/exclude`, all untracked):
+ *   - CLOSED: a declared `config_paths` file must equal base AS BYTES (CRLF -> LF only), so an edit a clean filter hides from git's
+ *     diff is `runner_config_changed` (review of 40486a5, B1); hidden index flags are refused by `changedPaths`.
+ *   - RESIDUAL, owner-accepted class (same uid, `.git` write; R-TC, like editing `node_modules`): an edit a clean filter hides in
+ *     IMPORTED SOURCE is outside the identity and can make a credited test pass against bytes that would not be committed; and a
+ *     test `git rm --cached` + `info/exclude` keeps in the worktree is in P (deleted) and is credited while the commit deletes it.
+ *     The conversion refusals of rounds 4-9 closed the first; rounds 1-3 behaved as now.
+ * EMPTY CONFIG BINDING (documented, not refused): `config_paths: []` (which P5r INIT accepts) binds no config file; a changed config
+ * file is still a path of P, in the identity and in the reviewed diff, but `runner_config_changed` cannot fire for it.
  *
  * PATH IDENTITY (S2): every comparison of a declared, stored or report-derived path with a git path goes through ONE rule
  * (`pathIndex`/`under` in the base module): a spelling that shares a key (NFC, lower case) with a git path without being it is
@@ -62,14 +70,16 @@
  * on a case-sensitive filesystem, for an untracked `OLD.TEST.TS` beside a tracked `old.test.ts`. None of them can be committed.
  * TOCTOU (rests on P5r quiescence): files are read by path (lstat, then read) without `O_NOFOLLOW` or an fstat re-check; a writer
  * racing the identity is excluded by the caller's quiescence (`quiesced`), not here.
- * NOT A CHANGE (accepted; it cannot help a test pass): a `chmod +x` with `core.fileMode=false` (the raw comparison reads bytes, not
- * the executable bit, which Vitest ignores).
+ * NOT A CHANGE (accepted; it cannot help a test pass): a `chmod +x` with `core.fileMode=false` on an otherwise unchanged file is
+ * not listed by git, so it is not in P (for a path of P the identity hashes the executable bit; Vitest ignores it).
  * SUBMODULES (S3, kept for the BINDING): the identity hashes a nested repository as an empty directory, so its contents would be
  * outside `evidence_id`. V0 evidence is backend/library vitest (OD-2) and the reference repository has none, so ANY gitlink at
  * base or in the index (a name listing, no blob is read), and any changed path that is a directory holding a `.git`, is refused
  * with `evidence_unavailable` / detail `submodule_unsupported_v0`.
- * CONFIG AT BASE (D4, kept for the config binding): the same base listing says whether a declared config path existed at base; one
- * absent at base and present now is `runner_config_changed`, even when a local ignore rule keeps it out of git's diff.
+ * CONFIG AT BASE (D4 and B1, the config binding): a declared config path must equal base. The same base listing says whether it
+ * existed at base; if it did, its RAW base blob (`cat-file blob`, the one historical read left, for config files only) is compared
+ * with its working-tree bytes after CRLF -> LF on both sides, so a Windows autocrlf checkout is not refused. Absent at base and present
+ * now, or different bytes, is `runner_config_changed`, even when an ignore rule or clean filter keeps the change out of git's diff.
  *
  * PROVENANCE (supplied by the caller, section 1): `runner_id`, `runner_version`, `attempt_id`, `exit_code`, `report_sha256`
  * (checked against the text), `report_eof`, `sealed`, `quiesced`, `binding_verified` (all `true`), `evidence_id_before`.
@@ -204,6 +214,22 @@ export function configDigest(repo, paths) {
   } catch (e) { return { ok: false, ...refusalOf(e, 'evidence_unavailable') }; }
 }
 
+/** Line endings only: a CRLF checkout (core.autocrlf) of an LF blob is the same config. Latin1 maps every byte, so nothing else folds. */
+const lfText = (buf) => buf.toString('latin1').replace(/\r\n/g, '\n');
+/**
+ * A declared config path equals base (D4, B1): absent at base and absent now; or present at both with the same bytes up to CRLF -> LF,
+ * the working-tree file against the RAW base blob (`cat-file blob`, no filter). Config files only: no test or source file is compared
+ * with base (owner decision 2026-11-19). Throws a Refusal.
+ */
+function configEqualsBase(c, p) {
+  const st = stat(c.top, p);
+  if (!c.atBase.has(p)) return !st;
+  if (!st) return false; // deleted: git lists a deletion, so `inAll` refuses first (documented equivalent)
+  let blob;
+  try { blob = git(c.top, ['cat-file', 'blob', `${c.base_sha}:${p}`], LIMITS.maxConfigBytes + 1); } catch (e) { refuse(gitRefusal(e)); }
+  return lfText(blob) === lfText(readFileSync(join(c.top, p)));
+}
+
 // ---- THE current context (I-A, I-F): one derivation, one refusal order, for buildRecord, recordUsable and tkVerdict ----
 /**
  * currentContext({ repo, baseSha, exclusions, entries:[entry], commandOf(entry) -> {cmd,args}|undefined, needCommand(entry), globs }, ctx)
@@ -229,9 +255,9 @@ export function currentContext(input, ctx) {
   for (const { entry, command } of decl) {
     const cd = configDigest(c.top, entry.config_paths);
     if (!cd.ok) refuse(cd.code, cd.detail);
-    // D4: a config path must EQUAL base (design rev 6): absent at base and present now is a change, even when a local ignore rule keeps
-    // it out of git's diff (after the digest, so a symlinked or non-regular config path is still `evidence_unavailable`)
-    if (entry.config_paths.some((p) => !c.atBase.has(p) && stat(c.top, p))) refuse('runner_config_changed');
+    // D4 + review of 40486a5 (B1): a config path must EQUAL base (design rev 6) as BYTES, not only in git's view, which a local ignore
+    // rule or clean filter can hide (after the digest, so a symlinked or non-regular config path is still `evidence_unavailable`)
+    if (entry.config_paths.some((p) => !configEqualsBase(c, p))) refuse('runner_config_changed');
     per.set(entry.name, { entry, covers: matcher(entry.covers), command, command_digest: command && commandDigest(command.cmd, command.args), config_digest: cd.digest });
   }
   const testGlobs = matcher([...BUILTIN_TEST_GLOBS, ...globList(own(input, 'globs'), ctx)]);

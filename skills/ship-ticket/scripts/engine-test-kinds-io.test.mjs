@@ -970,6 +970,33 @@ test('[P4r-51] round 9 (Opus m1-m3): a quoted path name, a sha256 repository, an
     else assert.equal(v.code, 'missing_test_kinds', `a case-sensitive filesystem: the context accepts the absent variant, and with no record P2 reports the missing kind: ${JSON.stringify(v)}`); }
 });
 
+// ---- review of 40486a5 (Opus B1, Fable Minor 1): a declared config file must EQUAL base, as bytes, not only in git's view ----
+test('[P4r-52] a config_paths file edited under a local clean filter (git lists nothing) is runner_config_changed; a CRLF-only checkout is not', (t) => {
+  const hide = (r) => { put(r.dir, '.git/info/attributes', 'vitest.config.ts filter=hide\n'); git(r.dir, 'config', 'filter.hide.clean', 'git show HEAD:%f'); };
+  // the review probe: a hidden alias in the runner config, a sealed passing report for the new test
+  { const r = repo(t), rec = good(r);
+    hide(r); put(r.dir, 'vitest.config.ts', "export default { resolve: { alias: { './price': './stub' } } };\n");
+    assert.ok(!git(r.dir, 'diff', '--name-only', r.base).split('\n').includes('vitest.config.ts'), 'the fixture really hides the config edit from git');
+    assert.equal(code(build(r, passing(r.dir))), 'runner_config_changed', 'the builder');
+    assert.equal(recordUsable(rec, cur(r)).code, 'runner_config_changed', 'recordUsable');
+    assert.equal(verdict(r, rec).code, 'runner_config_changed', 'the verdict'); }
+  // the RAW base blob is the reference, never git's filtered view of it: a local smudge filter that turns the base blob into the
+  // edited bytes (and a clean filter that turns them back) is still a change
+  { const r = repo(t), evil = 'export default { test: { globalSetup: "./evil.ts" } };\n';
+    put(r.dir, '.git/info/attributes', 'vitest.config.ts filter=swap\n'); git(r.dir, 'config', 'filter.swap.clean', 'git show HEAD:%f');
+    git(r.dir, 'config', 'filter.swap.smudge', `cat >/dev/null; printf '%s' '${evil.trimEnd()}'; echo`); put(r.dir, 'vitest.config.ts', evil);
+    assert.equal(git(r.dir, 'cat-file', '--filters', `${r.base}:vitest.config.ts`), evil.trimEnd(), 'the fixture: git\'s filtered view of the base IS the edit');
+    assert.equal(code(build(r, passing(r.dir))), 'runner_config_changed', 'smudge'); }
+  // the control: the same filter with the config bytes unchanged builds and credits
+  { const r = repo(t); hide(r);
+    assert.deepEqual(credits(build(r, passing(r.dir))), ['kind:negative'], 'the control'); }
+  // a legitimate line-ending-only difference (core.autocrlf checkout: CRLF on disk, LF in the blob) is NOT a change
+  { const r = repo(t);
+    git(r.dir, 'config', 'core.autocrlf', 'true'); put(r.dir, 'vitest.config.ts', 'export default {};\r\n'); put(r.dir, 'package-lock.json', '{}\r\n');
+    assert.ok(!git(r.dir, 'diff', '--name-only', r.base).split('\n').includes('vitest.config.ts'), 'git sees no change under autocrlf');
+    assert.deepEqual(credits(build(r, passing(r.dir))), ['kind:negative'], 'CRLF-only'); }
+});
+
 test('[P4r-11] AC3 (L6): hostile inputs are refused, never thrown, and no getter or proxy trap runs', (t) => {
   const r = repo(t);
   let ran = 0;
@@ -1106,7 +1133,7 @@ test('[P4r-16] AC1/AC6: a record round-trips through JSON (state), has exactly t
   assert.deepEqual(Object.keys(rec).sort(), ['attempt_id', 'base_sha', 'claim', 'command_digest', 'config_digest', 'counts', 'dag_digest', 'entry', 'evidence_id', 'exit_code', 'files', 'integrity', 'report_len', 'report_sha256', 'runner'].sort());
 });
 
-test('[P4r-18] I1: a stored record never vouches for itself: the complete schema, void rows never credit, applicability is re-derived', (t) => {
+test('[P4r-18] I1: a stored record is checked against its schema and the candidate: the complete schema, void rows never credit, applicability is re-derived', (t) => {
   const r = repo(t), rec = good(r);
   put(r.dir, 'libs/money/helper.ts', '// [kind:race]\n');
   symlinkSync(join(r.dir, 'libs/money/new.test.ts'), join(r.dir, 'libs/money/link.test.ts'));
@@ -1269,6 +1296,16 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
   assert.equal(JSON.stringify(rec), JSON.stringify(mk({ buildRecord })));
   assert.equal(crlf.evidenceIdentity({ repo: r.dir, baseSha: r.base }).evidence_id, before);
   assert.equal(JSON.stringify(crlfReuse.tkVerdict(view(r, rec.record), 'F1')), JSON.stringify(tkVerdict(view(r, rec.record), 'F1')));
+  // B1 under the CRLF copy: a config edit hidden by a clean filter is refused, and a CRLF-only autocrlf config is accepted, as in the LF modules
+  const hidden = repo(t); put(hidden.dir, '.git/info/attributes', 'vitest.config.ts filter=hide\n'); git(hidden.dir, 'config', 'filter.hide.clean', 'git show HEAD:%f');
+  put(hidden.dir, 'vitest.config.ts', 'export default { test: { globalSetup: "./evil.ts" } };\n');
+  const crlfOnly = repo(t); git(crlfOnly.dir, 'config', 'core.autocrlf', 'true'); put(crlfOnly.dir, 'vitest.config.ts', 'export default {};\r\n');
+  for (const [x, want] of [[hidden, 'runner_config_changed'], [crlfOnly, true]]) {
+    const b4 = evidenceIdentity({ repo: x.dir, baseSha: x.base }).evidence_id;
+    const res = crlf.buildRecord({ repo: x.dir, baseSha: x.base, entry: ENTRY, commandArgs: ARGS, tests: { globs: [] }, dagDigest: DAG, report: prov(passing(x.dir), { evidence_id_before: b4 }) });
+    assert.equal(res.ok === true ? true : res.code, want);
+    assert.equal(JSON.stringify(res), JSON.stringify(build(x, passing(x.dir))), 'the CRLF copy and the LF modules agree');
+  }
 });
 
 // ---- mutation check (L1): a mutant counts as killed ONLY by an ERR_ASSERTION failure in the [P4r-n] test it names ----
@@ -1287,6 +1324,9 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 //   - (2026-11-19) the per-row CREDITED id cap in `capSlot`: with R-3 gone every passed id reaches the row, so `validRecord`'s
 //     `arr(credited, maxIds)` refuses the same record with the same code (`evidence_budget_exceeded`); P4r-10 and P4r-27 still pin
 //     the refusal. (Under R-3 the ids became `withheld`, whose validator returned another code, so the mutant was observable.)
+//   - (review of 40486a5) in `configEqualsBase`, `if (!st) return false` (a config deleted now): git always lists a deletion, so
+//     `inAll` refuses first (a hidden index flag is refused by `changedPaths`); and the `cat-file` failure: the path is in the base
+//     listing, so its blob exists.
 //   - round 5: the NFC step BEFORE folding in `segsOf` mirrors risk-floor; the NFC step after folding makes it unobservable for every
 //     input tried (composed and decomposed accents, U+0130, U+212B), so it carries no mutant.
 // Removed on 2026-11-19 with the code they mutated (owner decision, SIMP: R-3 and every historical Git comparison are gone): the R-3
@@ -1294,11 +1334,8 @@ test('[P4r-17] CRLF copy of every module in the closure gives the same verdict, 
 // attribute mutants (P4r-39, P4r-46, P4r-48 and P4r-50 went with them). New: `counting: a non-passed result credits` (P4r-4).
 // Removed in round 9 with the code they mutated: round 8's listed check (`gitConverts`, `hash-object --stdin-paths`) and its two
 // mutants (`R8: a listed file git converts is counted`, which survived once the base-attribute check caught every listed conversion, and
-// the m1/m2 mutants of its quoting and sha256 flag); P4r-46 and P4r-51 keep their cases as regressions.
-// Removed in round 6 with the code they mutated: the seven attribute-refusal mutants of rounds 4-5 (`check-attr` is gone; the
-// invariant is now raw bytes vs the base blob). Not mutated, documented: a base path git did NOT list whose file is MISSING is
-// reported as changed, but git always lists a missing tracked file unless an index flag hides it, which `changedPaths` refuses; and
-// the raw scan's byte budget (`maxIdentityBytes`) would need a 256 MiB tracked fixture.
+// the m1/m2 mutants of its quoting and sha256 flag).
+// Removed in round 6 with the code they mutated: the seven attribute-refusal mutants of rounds 4-5.
 // Removed in round 5: `file: a symlinked path is counted on reuse` (its check in `applicable` was deleted: `candidate` now refuses
 // any existing path of P reached through a symlinked directory, and `classify` names a file by its realpath, so it was redundant).
 // Removed in round 3 with the code they mutated: the relations over the round 2 result counts (S1: the counts are gone, the
@@ -1353,7 +1390,7 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-29', name: 'verdict: an absent record skips its command validation (C6)', from: 'commandOf: (en) => (has(commands, en.name) ? own(commands, en.name) : undefined)', to: 'commandOf: (en) => (has(commands, en.name) && has(records, en.name) ? own(commands, en.name) : undefined)' },
   { file: RE, tag: 'P4r-29', name: 'verdict: no entry needs a command', from: 'needCommand: (en) => has(records, en.name)', to: 'needCommand: () => false' },
   { file: IO, tag: 'P4r-26', name: 'context: a config path in P does not refuse (C3)', from: '  if (entries.some((en) => en.config_paths.some((p) => c.inAll(p, \'runner_config_changed\') !== null))) refuse(\'runner_config_changed\');\n', to: '' },
-  { file: IO, tag: 'P4r-7', name: 'context: config_paths are checked after the exclusions', from: 'c.inAll(p, \'runner_config_changed\')', to: 'c.inP(p, \'runner_config_changed\')' },
+  { file: IO, tag: 'P4r-26', name: 'context: config_paths are checked after the exclusions (since B1 only a staged change with restored bytes shows it)', from: 'c.inAll(p, \'runner_config_changed\')', to: 'c.inP(p, \'runner_config_changed\')' },
   { file: IO, tag: 'P4r-3', name: 'context: a config digest failure is ignored', from: '    if (!cd.ok) refuse(cd.code, cd.detail);\n', to: '' },
   { file: IO, tag: 'P4r-21', name: 'context: the declared args are hashed instead of the substituted ones', from: 'command_digest: command && commandDigest(command.cmd, command.args)', to: 'command_digest: command && commandDigest(entry.cmd, entry.args)' },
   // reuse: the verdict
@@ -1466,7 +1503,10 @@ const MUTANTS = [
   { file: RE, tag: 'P4r-45', name: 'R8: only records count, not declared entries (D3)', from: '  if (ctxt.per.size > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: '  if ([...ctxt.per.keys()].filter((name) => has(records, name)).length > 1) refuse(\'evidence_unavailable\', MULTI_ENTRY);' },
   { file: RE, tag: 'P4r-45', name: 'R7: the refusal does not name its cause', from: 'refuse(\'evidence_unavailable\', MULTI_ENTRY);', to: 'refuse(\'evidence_unavailable\');' },
   // round 8: the blind Fable review of e476cd5
-  { file: IO, tag: 'P4r-47', name: 'R8: a config path absent at base may appear (D4)', from: '    if (entry.config_paths.some((p) => !c.atBase.has(p) && stat(c.top, p))) refuse(\'runner_config_changed\');\n', to: '' },
+  { file: IO, tag: 'P4r-47', name: 'R8: a config path absent at base may appear (D4)', from: '  if (!c.atBase.has(p)) return !st;', to: '  if (!c.atBase.has(p)) return true;' },
+  { file: IO, tag: 'P4r-52', name: 'B1: a config path present at base is not compared as bytes', from: '  return lfText(blob) === lfText(readFileSync(join(c.top, p)));', to: '  return true;' },
+  { file: IO, tag: 'P4r-52', name: 'B1: CRLF is not normalised (an autocrlf checkout refuses)', from: "const lfText = (buf) => buf.toString('latin1').replace(/\\r\\n/g, '\\n');", to: "const lfText = (buf) => buf.toString('latin1');" },
+  { file: IO, tag: 'P4r-52', name: 'B1: the config is compared with the filtered view, not the raw blob', from: "['cat-file', 'blob', `${c.base_sha}:${p}`]", to: "['cat-file', '--filters', `${c.base_sha}:${p}`]" },
   { file: BA, tag: 'P4r-49', name: 'R8: a list over maxList is read (D9)', from: '  if (n > max) refuse(\'evidence_budget_exceeded\');\n', to: '' },
   { file: BA, tag: 'P4r-49', name: 'R8: a path over maxPathChars is repo-relative (D9)', from: 'p.length > 0 && p.length <= LIMITS.maxPathChars && ', to: 'p.length > 0 && ' },
   { file: BA, tag: 'P4r-49', name: 'R8: the scan-token cap is dropped (D9)', from: '    if (++tokens > LIMITS.maxScanTokens) refuse(\'evidence_budget_exceeded\');\n', to: '    ++tokens;\n' },
@@ -1522,7 +1562,7 @@ test('mutation: the control passes every tagged test; every mutant loads and is 
   const live = MUTANTS.filter((m) => !(m.posix && process.platform === 'win32'));
   const control = await runMutant(t, null), mutants = []; // the control alone first: it is the long run, and a failed control stops here
   assert.equal(control.code, 0, `the control passes every tagged test (timed out: ${control.timedOut}):\n${control.tail}`);
-  assert.ok(control.passed >= (process.platform === 'win32' ? 46 : 47), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
+  assert.ok(control.passed >= (process.platform === 'win32' ? 47 : 48), `the control ran the tagged tests (${control.passed}; P4r-12 is skipped on win32)`);
   for (let i = 0; i < live.length; i += 3) mutants.push(...await Promise.all(live.slice(i, i + 3).map(async (m) => ({ m, ...await runMutant(t, m) }))));
   for (const r of mutants) t.diagnostic(JSON.stringify({ name: r.m.name, invalid: r.invalid, exit: r.code, killed_by: uniq(r.killers ?? []) }));
   assert.deepEqual(mutants.filter((r) => r.invalid).map((r) => r.m.name), [], 'no mutant is INVALID (every patched module loads)');

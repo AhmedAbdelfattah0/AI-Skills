@@ -45,8 +45,10 @@ const per = (ctxt, name, dagDigest) => { const p = ctxt.per.get(name); return { 
 /**
  * recordUsable(R, cur) -> { ok:true, evidence:{kinds, items, unknown_markers} } | { ok:false, reason, code?, detail? }
  * cur = { repo, baseSha, exclusions?, dagDigest, entry, command:{cmd, args} (what would run NOW), tests:{globs} }.
- * reason: 'malformed' | 'identity' | 'integrity' | 'applicability' | 'freshness' | 'unavailable' (with the refusal `code`:
- * the same code tkVerdict refuses with on the same candidate, from the same `currentContext`). Never throws.
+ * reason: 'malformed' | 'identity' | 'integrity' | 'applicability' | 'freshness' | 'unavailable' (with the refusal `code`). An
+ * `unavailable` comes from the candidate (the same `currentContext`, so tkVerdict refuses with the same code) OR from the stored
+ * record itself: a row naming an alias of a path of P (`path_alias`) or a record over a cap (`evidence_budget_exceeded`) refuses
+ * instead of reading `stale`, in both interfaces alike. Never throws.
  */
 export function recordUsable(R, cur) {
   try {
