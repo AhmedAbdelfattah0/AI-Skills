@@ -253,7 +253,11 @@ are refused, never dropped.
   `.specs/plans/<TICKET>.md` and `session-log.md`, or absent; anything else is
   `dag_invalid` at `init`), `testCommands` (`{<name>: {cmd, args, format?}}`; an entry
   with `format` `tap|vitest-json|jest-json` is a RED runner, and `gate ship-ready`
-  runs every entry as the local proof), `base`, `riskLabels`
+  runs every entry as the local proof; On an Nx monorepo, the RED runner is the direct Vitest command (`vitest-json`), not
+  Nx: Nx prints banner lines before the JSON, so `gate red` refuses it
+  `unsupported_output`. Nx stays fine as a PROVE/proof command (measured on a dry run:
+  direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted). Choose it before
+  approval, because `DAG_BOUND` fixes the runner.), `base`, `riskLabels`
   (ticket-level labels from the closed risk vocabulary plus `ui`; unioned with
   node `risk` for `gate ship-ready`), `acceptanceIds`, `unitRecheckCeiling` and `unitReview` (opt-in; [units.md](units.md)). Billing is
   `subscription`: the engine CLI has no API-billing switch, so every dispatch of a DAG with

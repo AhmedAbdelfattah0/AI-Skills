@@ -8,7 +8,7 @@
  * Flags of a run: ui, security, elevated, codex (conditions of the load table), units (any DAG node has
  * `unit`: references/units.md at BUILD, PROVE and REVIEW), split (the plan chooses SPLIT: units.md at
  * PLAN) and internals (the operator card names references/harness-internals.md, which loads on demand
- * and is counted only then, never in the default run).
+ * and is counted only then, never in the default run), testkinds (the plan opts into test kinds: references/test-kinds.md at PROVE).
  *
  * Source of truth: the "Entering | Load" table in SKILL.md. A table row this script does not
  * declare in ENTERING makes it throw (CLI exit 1 with the row), so an edit of the table cannot be
@@ -34,7 +34,7 @@ const DEFAULT_SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Every phase of a full run, in order. 'START' is the "Workflow start" row. */
 export const PHASES = ['START', 'UNDERSTAND', 'PLAN', 'BUILD', 'PROVE', 'REVIEW', 'SHIP'];
-export const FLAGS = ['ui', 'security', 'elevated', 'codex', 'units', 'split', 'internals'];
+export const FLAGS = ['ui', 'security', 'elevated', 'codex', 'units', 'split', 'internals', 'testkinds'];
 
 /** The declared meaning of each "Entering" cell: the phases it applies to and the flag that gates it. */
 const ENTERING = {
@@ -49,6 +49,7 @@ const ENTERING = {
   'On demand, when the operator card names it': { phases: ['BUILD'], flag: 'internals' },
   PROVE: { phases: ['PROVE'], flag: null },
   'PROVE with UI': { phases: ['PROVE'], flag: 'ui' },
+  'PROVE when the plan opts into test kinds': { phases: ['PROVE'], flag: 'testkinds' },
   REVIEW: { phases: ['REVIEW'], flag: null },
   'PLAN, PROVE or REVIEW of security-relevant work': { phases: ['PLAN', 'PROVE', 'REVIEW'], flag: 'security' },
   'REVIEW with elevated counterpart': { phases: ['REVIEW'], flag: 'elevated' },

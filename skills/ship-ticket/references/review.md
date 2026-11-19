@@ -13,7 +13,7 @@ own bookkeeping.
 ```text
 preflight     prove the candidate and required reviewers are ready
 review        one independent checklist-backed review
-second        one mandatory opposite-model opinion (host counterpart; CodeRabbit fallback)
+second        one mandatory second opinion (Codex; else Fable, same-provider)
 clean         record PASS and continue to SHIP
 findings      reconcile once, then apply at most one repair batch
 confirmation  check only repaired findings and their affected closure
@@ -23,8 +23,8 @@ FAIL          end once with the exact evidence and required next decision
 
 A clean standard ticket has one primary workflow: one dispatch for a small or
 coupled diff, or one bounded concurrent coverage fan-out for a material full-stack
-diff, run by Opus. Every ticket also gets exactly one opposite-model second
-opinion, concurrently when possible. Only a
+diff, run by Opus. Every ticket also gets exactly one mandatory second opinion,
+concurrently when resources allow. Only a
 candidate repair or material cross-review disagreement creates confirmation.
 There is no generic signing review after a clean result and no full review after
 a repair.
@@ -55,18 +55,18 @@ Finish these checks before announcing REVIEW or appending its start event:
 - formatters, generators, comments and ticket-produced docs are already current;
 - one independent primary-reviewer route can enforce its deadline and cancel
   unfinished work, including all partitions;
-- the review profile, time ceilings and the second-opinion route (the host's
-  counterpart, else CodeRabbit) are recorded and preflighted.
+- the review profile, time ceilings and the second-opinion route (Codex, else
+  Fable) are recorded and preflighted.
 
 An unavailable primary reviewer is `WAIT_FOR_USER` here. Do not enter REVIEW and
 invalidate otherwise usable work merely to discover that required capability is
-missing. The second opinion is required too: the host's counterpart first (Codex
-for a Claude host, Claude for a Codex host); if it is unavailable or its usage
-limit is reached, CodeRabbit on the same candidate; if neither is available,
-`WAIT_FOR_USER`. Run CodeRabbit over the whole candidate, including untracked
-files (`coderabbit review --agent --include-untracked`, or the CLI's equivalent
-flag), and record the scope it reviewed. Missing concurrency only serializes the
-two reviews; it never removes one.
+missing. The second opinion is required too: Codex in a fresh session first; if
+it is unavailable or its usage limit is reached, a fresh Fable session on the
+same candidate; if neither is available, `WAIT_FOR_USER`. CodeRabbit is optional
+extra coverage, never required ([cross-model.md](cross-model.md)); when it runs,
+cover the whole candidate including untracked files and record the scope it
+reviewed. Missing concurrency only serializes the two reviews; it never removes
+one.
 
 A native timed wait only limits polling; it does not stop a reviewer. Verify the
 carrier's actual deadline/cancellation mechanism before dispatch. Prefer a native
@@ -135,7 +135,7 @@ short free-form counterpart prompt is not a substitute for primary coverage.
 - a migration, schema, public API, event or shared data contract;
 - a shared component or library surface with multiple consumers;
 - unusually broad cross-subsystem impact;
-- repository instructions or the user explicitly require a second opinion;
+- repository instructions or the user explicitly require ELEVATED review;
 - preflight records a material uncertainty that the review can resolve.
 
 Those triggers select `ELEVATED`. They change reviewer redundancy, not rule,
@@ -148,9 +148,10 @@ profile.
 | `ELEVATED` | the same, with partitioned primary coverage when the diff is material and the security outcome required |
 
 Both reviews run concurrently when possible, otherwise one after the other. A
-missing or timed-out counterpart route falls back to CodeRabbit on the same candidate;
-if CodeRabbit is also unavailable, `WAIT_FOR_USER`. Record which route ran
-(`second_opinion: codex | claude | coderabbit`).
+missing or timed-out Codex route falls back to a fresh Fable session on the same
+candidate; if Fable is also unavailable, `WAIT_FOR_USER`. Record which route ran
+(`second_opinion: codex | fable`, plus `coderabbit` when the optional extra pass
+ran) and record Fable as a same-provider independent review.
 
 ## The primary review workflow
 
@@ -210,16 +211,15 @@ with at most three minors. More than twelve blockers/majors returns
 `overflow: true` and `outcome: FAIL`; it does not spend time narrating an
 unbounded catalogue.
 
-## The mandatory opposite-model opinion
+## The mandatory second opinion
 
-On every ticket, start Codex for a Claude host or Claude for a Codex host,
-concurrently with the primary workflow in a fresh session. It is a free-form
-second opinion, not another rule pass or approver. The counterpart has a
-10-minute budget; the CodeRabbit fallback (used when the counterpart is
-unavailable, fails, times out or is out of quota) runs after it on its own
-10-minute budget. It is mandatory: when the primary finishes first, wait for it
-within its budget. Follow [cross-model.md](cross-model.md) for carrier, cancellation and
-fallback; do not import the PLAN debate into REVIEW.
+On every ticket, start Codex in a fresh session, concurrently with the primary
+workflow when resources allow. It is a free-form second opinion, not another rule
+pass or approver. Codex has a 10-minute budget; the Fable fallback (used when
+Codex is unavailable, fails, times out or is out of quota) runs after it on its
+own 10-minute budget. It is mandatory: when the primary finishes first, wait for
+it within its budget. Follow [cross-model.md](cross-model.md) for carrier,
+cancellation and fallback; do not import the PLAN debate into REVIEW.
 
 ## Output contract
 
@@ -245,10 +245,10 @@ outcome: PASS | FAIL
 
 Allow one schema-only correction using the completed analysis. A correction does
 not reopen the repository or restart review. A still-unusable primary result is
-`WAIT_FOR_USER`; a still-unusable second opinion falls back to CodeRabbit once,
+`WAIT_FOR_USER`; a still-unusable Codex second opinion falls back to Fable once,
 then `WAIT_FOR_USER`. A second opinion with `outcome: FAIL` and an empty
 `findings[]` is unusable: there is nothing to reconcile, so it follows the same
-single CodeRabbit fallback, then `WAIT_FOR_USER`.
+single Fable fallback, then `WAIT_FOR_USER`.
 
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
@@ -264,7 +264,7 @@ Give every finding one disposition:
 |---|---|---|
 | `fix` | a real in-scope defect | affected contract path and planned repair |
 | `reject — factually wrong` | its premise is false | cited code or ticket fact |
-| `reject — out of scope` | real but excluded from this ticket | approved exclusion, or the user's same-run answer: queued as its own ticket in this run, or explicitly deferred (a gap the user folds in becomes `fix`) |
+| `reject — out of scope` | real but excluded from this ticket | approved exclusion; a residual within the plan's recorded ship threshold plus the follow-up tracker item opened for it; or the user's same-run answer: queued as its own ticket in this run, or explicitly deferred (a gap the user folds in becomes `fix`) |
 | `not applicable` | a rule does not fire | named rule ID and applicability evidence |
 | `human waiver` | an `[NN]` invariant would bend | `WAIT_FOR_USER`; never self-approve |
 
@@ -283,14 +283,16 @@ parity must be included in the targeted confirmation even when no bytes change.
 **An in-scope minor is `fix`, not a follow-up.** A minor inside a Design Contract
 path that can be repaired without changing behavior (a false or stale comment, a
 formatting or escaping slip, a wrong count) goes into the one repair batch.
-"Follow-up" is reserved for work outside the Design Contract. Even then, the
-default is the spine's same-run question: fold it into this ticket, queue it as
+"Follow-up" is reserved for residuals within the plan's recorded ship threshold
+(a confirmation finding, or one outside the Design Contract): they ship with a
+recorded follow-up tracker item, without a question. Any other gap outside the
+Design Contract gets the spine's same-run question: fold it into this ticket, queue it as
 its own ticket in this run, or defer it. A gap the user folds in is re-dispositioned
-`fix` after the scope re-approval and joins the one repair batch if it is still
+`fix` after the scope re-approval through `ExitPlanMode` and joins the one repair batch if it is still
 unspent. It never opens another batch. Once the batch is spent, or if the
 confirmation finds the gap, the execution stays FAIL and the gap needs an
-authorized retry or a queued ticket. A deferred tracker item exists only when the user chooses to defer. It is never a line in the final report left for the user to
-pick up.
+authorized retry or a queued ticket. Outside the recorded ship threshold, a deferred tracker item exists only when the user chooses to defer. No follow-up is ever a line in the final report left for the user to
+pick up: each is a tracker item the report links.
 
 ## One repair batch
 
@@ -344,7 +346,7 @@ change is not allowed in this REVIEW execution.
 
 Use the same independent primary workflow, preserving its coordinator and
 partition sessions when possible.
-Give it the original findings and dispositions, the old and new candidate IDs,
+Give it the original findings and dispositions, the plan's recorded ship threshold, the old and new candidate IDs,
 the repair diff, affected callers/contracts, relevant command results, attack
 reruns and UI slice. It checks only:
 
@@ -360,9 +362,8 @@ satisfy the cap.
 
 Pass it only the captures of screens the repair changed. When the repair
 touches a `concurrency`-labelled node, or repairs a security or architecture
-finding (the security or architecture class of Repair routing in [units.md](units.md)), the second opinion on the repair (from a provider
-other than the primary's: Codex for the Opus primary; CodeRabbit if it is
-unavailable) runs before this confirmation and returns `PASS` or `FAIL`
+finding (the security or architecture class of Repair routing in [units.md](units.md)), the second opinion on the repair (Codex;
+Fable if it is unavailable) runs before this confirmation and returns `PASS` or `FAIL`
 with evidence. Record it as the confirmation's `second_opinion` (`route`,
 `reviewer_identity`, `candidate_id`, `checked_findings`, `outcome`, `evidence`): the
 gate counts a supplied one (the confirmation is PASS only when both are), and
@@ -371,7 +372,9 @@ labelled `concurrency` or `security`. A security or architecture finding on a no
 without such a label is not detectable by the gate: supplying the second opinion
 there stays the orchestrator's duty. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
-result for this execution, not the start of another review cycle.
+result for this execution, not the start of another review cycle. A residual
+within the plan's recorded ship threshold is not actionable here: the confirmation
+names it in its `evidence`, and it ships with a recorded follow-up tracker item.
 
 Apply the same preflighted watchdog/cancellation route to confirmation. Its
 ceiling covers partitions and synthesis together, not six minutes per worker.
@@ -385,8 +388,11 @@ With `config.unitReview`, the per-unit reviews, the unit repair routing and the 
 ## Tripwire: same defect class twice
 
 A failed confirmation is the terminal `FAIL` above. When it fails on the same defect class as the primary
-finding, the next decision also challenges the pattern: a stronger model or a fresh builder, and whether to
-simplify, replace or reuse instead of repairing. Preserve the unresolved findings, the primary review and the
+finding, do not keep patching: determine whether the cause is the plan, the implementation, the test or
+validation mechanism, the review finding itself, or the technical approach. Challenge a finding that is wrong
+with evidence (`reject — factually wrong`). The next decision also challenges the pattern: a stronger model or
+a fresh builder, and whether to simplify, replace or reuse instead of repairing; a revised plan returns to the
+one native approval, and a change beyond the approved scope needs the owner. Preserve the unresolved findings, the primary review and the
 confirmation in the record. Do not run a second repair batch to clear it.
 
 ## Packets and instances

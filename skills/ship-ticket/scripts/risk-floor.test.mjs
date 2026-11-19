@@ -361,9 +361,11 @@ test('docs: debate rule is consistent, the unrelated preflight paragraph is inta
     assert.doesNotMatch(t, /risk-floor\.mjs verify|verify --plan|best-effort lexical|--ticket <file/, f);
   }
   const ref = (f) => readFileSync(new URL(f, root), 'utf8').replace(/\s+/g, ' ');
-  assert.match(ref('SKILL.md'), /If the independent primary route or enforceable deadline is absent, follow the capability\/explicit-exception procedure in the review reference before REVIEW begins\. A missing counterpart falls back to CodeRabbit; if both are missing, use \*\*WAIT_FOR_USER\*\* — the second opinion is mandatory\. Missing concurrency only serializes the two reviews\./);
-  assert.match(ref('references/cross-model.md'), /both STANDARD/);
-  assert.match(ref('SKILL.md'), /risk floor or your own assessment is ELEVATED/); assert.match(ref('SKILL.md'), /your own assessment is also STANDARD/);
+  assert.match(ref('SKILL.md'), /If the independent primary route or enforceable deadline is absent, follow the capability\/explicit-exception procedure in the review reference before REVIEW begins\. Missing Codex falls back to a fresh Fable session; if neither can run, use \*\*WAIT_FOR_USER\*\* — the second opinion is mandatory\. Missing concurrency only serializes the two reviews\./);
+  // RC-1 (owner-approved): the PLAN debate is required for security-sensitive work only, not for every ELEVATED ticket.
+  assert.match(ref('references/cross-model.md'), /PLAN debate is required only for security-sensitive work .* not for every ELEVATED ticket/);
+  assert.match(ref('SKILL.md'), /Use the cross-model plan debate only for security-sensitive work/); assert.match(ref('SKILL.md'), /including other ELEVATED ones, skip it/);
+  for (const f of files) assert.doesNotMatch(readFileSync(new URL(f, root), 'utf8').replace(/\s+/g, ' '), /debate (?:is )?required when the risk floor|risk floor or your own assessment is ELEVATED/, f);
   for (const f of ['SKILL.md', 'references/plan.md']) { assert.match(ref(f), /not evidence of low risk/); assert.match(ref(f), /advisory, not enforced/i); }
   assert.match(ref('SKILL.md'), /no_risk_paths_declared/); assert.match(ref('SKILL.md'), /ignored/i); assert.match(ref('SKILL.md'), /Pin `--base`/); assert.match(ref('SKILL.md'), /--recorded-line <file\|->/); assert.match(ref('references/plan.md'), /risk_reassess/); assert.match(ref('scripts/risk-floor.mjs'), /worst-case/i); assert.match(ref('SKILL.md'), /outside release scope/); assert.match(ref('references/plan.md'), /outside release scope/); assert.match(ref('scripts/risk-floor.mjs'), /serves PLANNED and ACTUAL paths/); assert.doesNotMatch(ref('scripts/risk-floor.mjs'), /ONLY for PLANNED/);
   assert.doesNotMatch(ref('SKILL.md') + ref('scripts/risk-floor.mjs'), /never under-classify|is final: it forces/);

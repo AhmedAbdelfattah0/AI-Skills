@@ -274,11 +274,11 @@ Useful end metrics are:
 - REVIEW phase, per execution: `review_profile=standard|elevated`, `finding_count=<n>`,
   `repair_batches=0|1`, `confirmation_count=0|1`;
 - PLAN phase (or `native_plan_mode` end): `host_agent=claude|codex|other|unknown`,
-  `counterpart_agent=claude|codex|other|unavailable`, `debate_responses=0|1|2|3`,
+  `counterpart_agent=claude|codex|fable|other|unavailable`, `debate_responses=0|1|2|3`,
   `debate_calls=<n>` (includes failed attempts),
   `debate_status=converged|unresolved|degraded`, `debate_elapsed_ms=<n>`;
 - `primary_review`: `finding_count=<n>`;
-- `optional_review`: `counterpart_agent=claude|codex|other|unavailable`, outcome `pass`, `findings`, or `degraded` and metric
+- `optional_review` (the mandatory second opinion; the activity name is historical): `counterpart_agent=codex|fable|other|unavailable`, outcome `pass`, `findings`, or `degraded` and metric
   `reason=timeout|unavailable|no_concurrency|tool_error`;
 - PROVE phase: `repair_batches=0|1|2`;
 - CI wait: `poll_count=<n>`.

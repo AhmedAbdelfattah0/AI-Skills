@@ -267,7 +267,9 @@ test('load record: phases follow the SKILL.md table, with conditions as flags', 
   assert.ok(loads('PROVE').includes('design-parity.md') && loads('PROVE').includes('security-risk.md'));
   assert.deepEqual(rec.phases.find(p => p.phase === 'PROVE').loads.filter(l => l.condition).map(l => [l.file, l.condition]).sort(),
     [['references/design-parity.md', 'PROVE with UI'], ['references/security-risk.md', 'PLAN, PROVE or REVIEW of security-relevant work'],
+      ['references/test-kinds.md', 'PROVE when the plan opts into test kinds'],
       ['references/units.md', 'BUILD, PROVE or REVIEW when any DAG node has `unit`']]);
+  assert.equal(referenceBytes({ testkinds: true }, rec) - referenceBytes({}, rec), rec.references.find(r => r.file === 'references/test-kinds.md').bytes);
   const base = referenceBytes({}, rec);
   assert.equal(referenceBytes({ ui: true }, rec) - base, rec.references.find(r => r.file === 'references/design-parity.md').bytes);
   assert.equal(referenceBytes({ security: true }, rec) - base, rec.references.find(r => r.file === 'references/security-risk.md').bytes);

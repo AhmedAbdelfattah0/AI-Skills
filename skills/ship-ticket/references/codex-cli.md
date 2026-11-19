@@ -35,8 +35,8 @@ Read `finalMessage` and `threadId` from `result.json` after completion.
 For a delta or bounded timeout recovery, use that exact `--session <threadId>`
 and repeat directory, read-only and effort flags. Recovery requests completed
 findings only and consumes the debate's existing time and response budget.
-Without a usable session, record the degradation and follow the required PLAN
-counterpart pause in cross-model policy rather than restarting the repository read.
+Without a usable session, record the degradation and follow the Fable fallback in
+cross-model policy rather than restarting the repository read.
 
 ## REVIEW carrier
 
@@ -53,8 +53,8 @@ codex review -c model_reasoning_effort=high "<instructions including exact scope
 For bare binary commands, use the host's verified external watchdog within the
 second-opinion budget; these commands have no relay timeout flag. A native timed wait
 is not such a watchdog. Without enforcement/cancellation, treat Codex as
-unavailable: run the CodeRabbit fallback, and `WAIT_FOR_USER` if CodeRabbit
-cannot produce a result. The second opinion is never skipped; required primary
+unavailable: run the Fable fallback, and `WAIT_FOR_USER` if Fable cannot
+produce a result. The second opinion is never skipped; required primary
 handling is in [review.md](review.md).
 Supply the exact merge-base-to-working-tree retrieval recipe,
 all untracked candidate files, candidate ID, ACs and exclusions. Start fresh,

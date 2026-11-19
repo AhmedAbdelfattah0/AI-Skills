@@ -22,7 +22,9 @@ Required when any of these holds: the change is ELEVATED, security-sensitive, ha
 non-empty `riskLabels`, or a `vapt` trigger fires. Otherwise §3a is the three-line
 compact form `select` prints for an empty selection: the line
 `No security-relevant surface: <evidence>`, the `security-pairs sha256:<hex>` line
-and the machine block. Policy 2 itself (the DAG keys
+and the machine block. Plan §3b (impact and check applicability) names the
+business flows and data that §3a's facts cite, and lists the checks the catalog
+does not hold. Policy 2 itself (the DAG keys
 below) is required for every run approved after the cutoff (section 11), so a
 no-surface run still binds `controlCoverage: []`, an evidenced empty assessment.
 
@@ -52,8 +54,12 @@ selected controls and `<boundary>:<control>` pairs, the excluded controls with
 reasons, unknown facts, a `config_fragment`, and `rows_md`, the §3a body with the
 `security-pairs sha256:<hex>` line and the `<!-- security-plan: {...} -->` machine
 block. Exit 0 is a result; exit 2 a refusal (`catalog_missing`, `catalog_invalid`,
-`fact_uncited`, `control_unpaired`, ...); exit 1 malformed input. **Any refusal is
-`WAIT_FOR_USER`** with the code; a missing catalog is never an empty selection.
+`fact_uncited`, `control_unpaired`, ...); exit 1 malformed input. A refusal of your
+own input (`fact_uncited`, `control_unpaired`, `fact_out_of_vocabulary`,
+`surface_facts_mismatch`, `bad_input`) is corrected and rerun, not a user decision:
+cite the fact, pair the control, use the vocabulary or mark the fact
+`"unknown: <why>"`. **`catalog_missing` or `catalog_invalid` is `WAIT_FOR_USER`**
+with the code; a missing catalog is never an empty selection.
 If Node is unavailable the helper is a declared degradation: the plan says so
 and treats every `[NN]` control as applying.
 
@@ -99,7 +105,8 @@ close such a signal. That is intended: the owner approved that file as a surface
 plan, a mechanical signal can be a false alarm, and the classification is recorded and
 reviewed. An approved surface counts only at exactly the signal's path. Input `surfaces` are
 not stored: every later `gate reassess` call must supply them again, or the signal
-reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis.
+reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis
+(re-approval re-enters Plan Mode and presents the revised plan with `ExitPlanMode`).
 
 **Proving a pair spec (attribution rule).** Under TAP, a passing test carries no file
 location, so a pair spec counts as passed only when the formatted command runs exactly
@@ -151,7 +158,7 @@ whose `signal_id` matches no signal is ignored.
 |---|---|---|
 | `UNCHANGED` | no new pair follows | recorded as `SECURITY_REASSESSED` |
 | `ADD_CONTROLS` | new pairs inside the contract | an owner `SECURITY_ADDENDUM` adds them (add-only); `addendum_required` until then |
-| `REAPPROVAL` | catalog digest changed or a path outside the contract | new START and plan digest; `WAIT_FOR_USER`, `drive` stops |
+| `REAPPROVAL` | catalog digest changed or a path outside the contract | new START and plan digest after re-approval through `ExitPlanMode`; `WAIT_FOR_USER`, `drive` stops |
 
 A classification can only raise facts; it can never remove an approved pair.
 

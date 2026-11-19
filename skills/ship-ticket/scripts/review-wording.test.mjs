@@ -60,7 +60,16 @@ test('ship.md states the ship-ready check; brief.md holds the base-drift placeme
   assert.ok(!t.includes('Pin `config.base`'));
   assert.ok(t.includes('`ship-ready-check.mjs check\n--run-state <plan> --engine-log <log> --run-id <ID> --require-event`'));
   assert.ok(t.includes('nonzero stops (`WAIT_FOR_USER`)'));
-  assert.match(t, /Not applicable after degradation: record `harness degraded` and get explicit user approval\s+\(`WAIT_FOR_USER`\) before the commit/);
+  // Harness degradation: ELEVATED or security-sensitive runs still stop for explicit approval before the commit;
+  // STANDARD runs record it with the manual confirmations in SHIP_READY and the PR body and proceed.
+  const flat = t.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('A nonzero result is a gate failure, never relabelled as degradation.'));
+  assert.ok(flat.includes('Not applicable after degradation: record `harness degraded` and the results of the read-only confirmations above in the SHIP_READY event and the PR body.'));
+  assert.ok(flat.includes('On an ELEVATED or security-sensitive run this is an assurance exception: get explicit user approval (`WAIT_FOR_USER`) before the commit.'));
+  assert.ok(flat.includes('A STANDARD run then commits without a second approval.'));
+  assert.ok(!flat.includes('the one plan approval already covers it'));
+  const hi = ref('harness-internals.md').replace(/\s+/g, ' ');
+  assert.ok(hi.includes('On an ELEVATED or security-sensitive run, get explicit user approval (`WAIT_FOR_USER`) before the commit; a STANDARD run records it in the PR body and commits.'));
   const b = ref('brief.md');
   assert.ok(b.includes('leave `config.base` as is'));
   assert.ok(b.includes('base-drift.mjs check --repo <R> --base <SHA>'));
@@ -104,4 +113,82 @@ test('no ship-ticket instruction names or depends on a retired code-quality spec
   }
   assert.deepEqual(hits, []);
   assert.ok(load(join(dir, 'references/prove.md')).includes('`code-quality`\nor the applicable stack reference not installed'));
+});
+
+// RC-1 reviewer policy: Codex, else a fresh Fable session; CodeRabbit is optional. The final gate only
+// requires the two reviewers to differ by provider:model, so an Opus primary and a Fable second pass.
+test('gate accepts a Fable second opinion beside the Opus primary and refuses the same model twice', () => {
+  const opus = { reviewer_identity: 'claude:opus-5-5', coverage_partitions: [{ identity: 'claude:opus-5-5', owned: ['src/'], outcome: 'PASS' }] };
+  const fable = input({ primary: primary(opus), second_opinion: second({ route: 'fable', reviewer_identity: 'claude:fable' }) });
+  assert.equal(gateReview(fable).code, 'review_accepted');
+  const twin = input({ primary: primary(opus), second_opinion: second({ route: 'fable', reviewer_identity: 'claude:opus-5-5' }) });
+  assert.equal(gateReview(twin).code, 'reviewers_not_distinct');
+});
+
+test('the second-opinion policy names Codex then Fable and never requires CodeRabbit', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const x = flat(ref('cross-model.md'));
+  assert.ok(x.includes('Record the model id the carrier reports (`claude:fable-<version>`), or `claude:fable` when it reports none.'));
+  assert.ok(x.includes('if any builder ran on Fable, Fable cannot be the second opinion'));
+  assert.ok(x.includes('**CodeRabbit is optional extra coverage**'));
+  assert.ok(x.includes('start a new subagent with `model: fable`'), 'the Fable route has dispatch instructions');
+  const skill = load(fileURLToPath(new URL('../SKILL.md', import.meta.url)));
+  const texts = { 'SKILL.md': skill, ...Object.fromEntries(['review.md', 'cross-model.md', 'understand.md', 'codex-cli.md', 'plan.md', 'units.md'].map((n) => [n, ref(n)])) };
+  for (const [name, text] of Object.entries(texts)) {
+    assert.doesNotMatch(flat(text), /CodeRabbit (fallback|on the same candidate;)|falls back to CodeRabbit|run the CodeRabbit fallback|CodeRabbit is still a required route/, name);
+  }
+  // Risky unit reviews need a cross-provider second opinion (engine-enforced), so unitReview stays off without Codex.
+  assert.ok(flat(ref('units.md')).includes('leave `config.unitReview` off (it is opt-in, never defaulted) whenever Codex is unavailable at PLAN'));
+  assert.ok(flat(skill).includes('`config.unitReview` stays off when Codex is unavailable'));
+});
+
+test('a targeted confirmation accepts a Fable second opinion on the repair beside the Opus primary', () => {
+  const opus = 'claude:opus-5-5';
+  const chain = [
+    { review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', candidate_id: 'sha256:c1', reviewer_identity: opus, second_opinion_route: 'codex', fix_findings: ['F1'] },
+    { review_execution: 'rx-1', kind: 'repair', old_candidate: 'sha256:c1', new_candidate: 'sha256:c2', write_set: ['src/a.mjs'] },
+  ];
+  const confirmation = (soId) => ({
+    state: { frozen_candidate: 'sha256:c2', builders: [{ node: 'n', identity: 'claude:sonnet-5-5' }], review_chain: chain },
+    review_execution: 'rx-1', kind: 'confirmation',
+    primary: { reviewer_identity: opus, candidate_id: 'sha256:c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed at a.mjs:1' },
+    second_opinion: { route: 'fable', reviewer_identity: soId, candidate_id: 'sha256:c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed at a.mjs:1' },
+  });
+  const ok = gateReview(confirmation('claude:fable'), { confirmationSecondOpinion: 'required' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(gateReview(confirmation(opus), { confirmationSecondOpinion: 'required' }).code, 'reviewers_not_distinct');
+});
+
+test('RC-1 headline rules are pinned: native Plan Mode approval, section 3b, the stop-list owner', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const skill = flat(load(fileURLToPath(new URL('../SKILL.md', import.meta.url))));
+  const plan = flat(ref('plan.md'));
+  for (const [name, t] of [['SKILL.md', skill], ['plan.md', plan]]) {
+    assert.ok(t.includes('ToolSearch query `select:EnterPlanMode,ExitPlanMode`'), name);
+  }
+  assert.ok(plan.includes('**Only `ExitPlanMode` approves.** Chat text, an `AskUserQuestion` answer and a typed "approve" are not plan approval'));
+  assert.ok(skill.includes('A chat reply, an `AskUserQuestion` answer or the gap question\'s answer is never that approval.'));
+  assert.ok(plan.includes('### 3b. Impact and check applicability'));
+  assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
+  assert.ok(plan.includes('**Status vocabulary:** `verified`, `partially verified`, `unverified`, `failed` (it ran and did not pass), `not applicable`'));
+  assert.ok(plan.includes('anything other than `verified` or `not applicable` (`planned`, `partially verified`, `unverified`, `failed`) is a security exception: it blocks SHIP'));
+  assert.ok(flat(ref('ship.md')).includes('`SECURITY_WAIVER` event with `boundary: "plan-3b"`'));
+  assert.ok(skill.includes('This list is the single owner of the stop points, by category'));
+  assert.ok(skill.includes('Never force-push without explicit owner authority'));
+  assert.ok(skill.includes('a nonzero `ship-ready-check` (a gate failure, never relabelled as harness degradation)'));
+});
+
+test('RC-1 release and stop rules are pinned where they are executed: ship.md block list, the spine stop list, Resume', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const skill = flat(load(fileURLToPath(new URL('../SKILL.md', import.meta.url))));
+  const stops = skill.slice(skill.indexOf('## When execution may yield'), skill.indexOf('Use **FAIL** for:'));
+  assert.ok(stops.length > 500, 'the stop list section was found');
+  assert.ok(flat(ref('ship.md')).includes('Any other status (`planned`, `partially verified`, `unverified`, `failed`, or no status) needs the owner\'s explicit acceptance for this candidate, otherwise `WAIT_FOR_USER`.'));
+  assert.ok(flat(ref('plan.md')).includes('`failed` (it ran and did not pass)'));
+  assert.ok(stops.includes('an applicable security check in plan section 3b whose status is anything other than `verified` or `not applicable` at release'));
+  assert.ok(stops.includes('a degraded harness at SHIP on an ELEVATED or security-sensitive run'));
+  assert.ok(stops.includes('a REPAIR the ledger does not authorize'));
+  assert.ok(!stops.includes('classification_missing'), 'the engine reports reassess_unclassified; classifying is routine');
+  assert.ok(skill.includes('On Claude that means re-entering Plan Mode (`EnterPlanMode`), updating the plan file and presenting the revised plan with `ExitPlanMode`'));
+  assert.ok(skill.includes('Chat text, an `AskUserQuestion` answer and a typed "approve" are not plan approval'));
 });
