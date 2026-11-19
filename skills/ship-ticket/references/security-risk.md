@@ -344,7 +344,7 @@ refused. `SECURITY_REASSESSED` is engine-recorded.
 
 ## 12. The obligation matrix
 
-`node scripts/security-plan.mjs verify --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]`
+`node scripts/security-plan.mjs obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]`
 prints the full surface x control matrix of an approved block (format 2 or 3). It
 imports no engine module, so it runs in the manual flow too. Each cell is derived
 from the block and the catalog independently and gets exactly one of `proven`,

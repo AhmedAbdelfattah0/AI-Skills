@@ -3,6 +3,7 @@
 //
 //   select   --facts <file|-> [--catalog <controls.json>]
 //   reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <controls.json>]
+//   obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <controls.json>]
 //
 // stdout is always one JSON object with `code` and `reasons[]`. Exit 0: a result (selected; reassessed as
 // UNCHANGED or ADD_CONTROLS). Exit 2: a refusal or judgment point (catalog_missing, catalog_invalid,
@@ -394,8 +395,8 @@ function lowerings({ catalog, gates }, facts, surfaces) {
       if (v !== false) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: ${f} ${JSON.stringify(v)}: a surface may only lower a fact to false`);
       if (facts[f] !== true) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: ${f} is ${JSON.stringify(facts[f])} for the change; only a true change fact can be lowered (never unknown)`);
       if (!gated.has(f)) refuse('surface_fact_ungated', `surface ${s.boundary_id}: no catalog not_applicable gate for kind ${s.kind} names ${f}`);
-      const why = citationProblem(s.evidence[f]);
-      if (why) refuse('fact_uncited', `surface ${s.boundary_id}: ${f}: ${why}`);
+      const problem = citationProblem(s.evidence[f]);
+      if (problem) refuse('fact_uncited', `surface ${s.boundary_id}: ${f}: ${problem}`);
       m.set(f, s.evidence[f]);
     }
     lower.set(s.boundary_id, m);
@@ -1036,10 +1037,10 @@ async function readJsonArg(name, path) {
   try { return JSON.parse(text); } catch (e) { refuse('bad_input', `--${name} ${path}: ${e.message}`); }
 }
 
-const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>] | verify --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]';
+const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>] | obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]';
 const FLAGS = { select: { required: ['facts'], optional: ['catalog'] },
   reassess: { required: ['plan', 'inventory', 'changed'], optional: ['classifications', 'addenda', 'catalog'] },
-  verify: { required: ['plan'], optional: ['addenda', 'waived', 'catalog'] } };
+  obligations: { required: ['plan'], optional: ['addenda', 'waived', 'catalog'] } };
 
 export async function main(argv) {
   try {
@@ -1058,7 +1059,7 @@ export async function main(argv) {
     if (cmd === 'select') return selectControls(loaded, await readJsonArg('facts', flags.facts));
     let plan;
     try { plan = readFileSync(flags.plan, 'utf8'); } catch (e) { refuse('bad_input', `--plan ${flags.plan}: ${e.code ?? e.message}`); }
-    if (cmd === 'verify') {
+    if (cmd === 'obligations') {
       if (!countBlocks(plan)) refuse('plan_block_missing', 'the plan has no <!-- security-plan: --> block in §3a');
       const block = parsePlanSecurityBlock(plan);
       if (!block) refuse('plan_block_invalid', 'the security-plan block is malformed or inconsistent');

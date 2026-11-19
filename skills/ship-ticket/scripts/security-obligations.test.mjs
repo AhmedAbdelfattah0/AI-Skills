@@ -306,11 +306,11 @@ test('accountability over the REAL catalog: every legacy selection (format 2) ve
   }
 });
 
-test('security-plan.mjs verify CLI prints the matrix (manual flow, no engine module)', () => {
+test('security-plan.mjs obligations CLI prints the matrix (manual flow, no engine module)', () => {
   const dir = dirname(OB.GATED_PATH);
   const plan = join(dir, 'plan.md');
   writeFileSync(plan, OB.planOf(OB.approved3(GC)));
-  const r = spawnSync(process.execPath, [new URL('./security-plan.mjs', import.meta.url).pathname, 'verify', '--plan', plan, '--catalog', OB.GATED_PATH], { encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [new URL('./security-plan.mjs', import.meta.url).pathname, 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
   assert.equal(out.code, 'obligations');
@@ -468,7 +468,7 @@ test('ship-ready of a format-3 run reaches the matrix: a passing run prints its 
 
 test('config_fragment spreads into a DAG config that validates (no securityControls key)', () => {
   const s = ok(OB.sel3(REAL.ok ? GC : GC, [A_PW, KEEP]));
-  const cfg = { provider: 'claude', timeoutMs: 1000, testCommands: { unit: { cmd: 'node', args: [], format: 'tap' } }, ...s.config_fragment,
+  const cfg = { provider: 'claude', timeoutMs: 600000, testCommands: { unit: { cmd: 'node', args: [], format: 'tap' } }, ...s.config_fragment,
     controlCoverage: s.config_fragment.controlCoverage.map((c, i) => ({ ...c, node: 'api', specs: [{ file: 'spec/a.test.mjs', name: `t${i}` }] })) };
   const doc = { schema: DAG.DAG_SCHEMA, config: cfg, nodes: [{ id: 'api', promptFile: 'p', writes: ['spec'], redSpecs: cfg.controlCoverage.flatMap((c) => c.specs) }] };
   assert.doesNotThrow(() => DAG.validateEngineDag(doc));
