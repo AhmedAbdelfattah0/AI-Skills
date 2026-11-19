@@ -156,8 +156,8 @@ descendant cannot hold the attempt until its timeout). RED and proof runner atte
 launcher instead: its result (exit status, stdout, and on darwin an opt-in report channel) travels
 as one length-framed message on a pipe only the engine and the launcher hold, and `gateRunner`
 never reads the forensic `.out` or envelope files. In the runner's exit callback (POSIX) the
-launcher reads each channel once, non-blocking; a channel not at EOF then (another process still
-holds it) is refused `runner_survivor`, and malformed or disagreeing frames are refused
+launcher makes one latching read of each channel, non-blocking, then one EOF-check read; a channel not at EOF
+then (another process still holds it) or returning a byte after the latch (EAGAIN or a further byte) is refused `runner_survivor`, and malformed or disagreeing frames are refused
 `runner_output_tampered`. There is no drain on POSIX (win32 keeps a 1 s drain, a weaker boundary).
 Bytes a process wrote before that read are accepted: writers are not authenticated (the PR #94 residual, FX-R1). An attempt is
 recorded only after its **whole process group** is gone: surviving descendants are

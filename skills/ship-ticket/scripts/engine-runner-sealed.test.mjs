@@ -483,8 +483,11 @@ test('frame: a result pipe still open after the launcher exited (fd 1 handed to 
  * runner's bytes unread so that read exists) until resumeFile appears. The test publishes resumeFile only
  * once the survivor's late.wrote marker exists (written AFTER its write succeeded). The hold never changes
  * the outcome a row asserts: the survivor still holds the channel, so the next read sees EAGAIN or a
- * further byte and the channel is refused, exactly as without the hold; it only guarantees the write
- * happened first. If the survivor never writes, the hold lapses after 10 s and the guard fails.
+ * further byte and the channel is refused. The outcome is the same as without the hold but the launcher code branch
+ * differs: without it the read after the first sees EAGAIN (the catch in `drain`); with it the survivor's
+ * byte is read after the latch (the post-latch-byte check), so on Linux no row covers a stdout holder
+ * that goes silent after the latch (a coverage gap, S2b and (a) cover it on darwin). The hold only
+ * guarantees the write happened first. A row's wait is bounded (9 s for the marker, 10 s hold lapse). If the survivor never writes, the hold lapses after 10 s and the guard fails.
  */
 function holdHooks(w) { return { stopReads: true, pauseFile: join(w.dir, 'paused'), resumeFile: join(w.dir, 'resume') }; }
 async function resumeWhenWrote(w) {
@@ -536,8 +539,10 @@ test('(b) stdout writer injects after the runner exits and stays open through st
   assert.match(late.how, /^closed:/, J(late));
 });
 
-test('(c) Codex: a silent failing runner whose survivor writes a TAP failure after it exits and stays open through stdout\'s EOF check: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('(c) Codex: a near-silent failing runner (one blank line, no test line) whose survivor writes a TAP failure after it exits and stays open through stdout\'s EOF check: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n';
+  // Near-silent, not silent: with '' the first exit read hits EAGAIN (the survivor holds stdout) and refuses
+  // before the hold can engage. The truly silent case is covered by the unit-check and proof rows.
   const { r, late } = await lateWriter(t, { fd: '1', payload: tap, genuine: '\n', code: 1, fallback: 700 });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r));
@@ -627,6 +632,7 @@ test('gateRed through the real runner: a survivor-forged TAP failure is refused 
   const state = { run_id: 'run-1', seq: 2, nodes: { 'red-gate': { deps: [], phase: 'BUILD', role: 'builder' } },
     events: [{ seq: 1, type: 'DISPATCH', node: 'red-gate' }, { seq: 2, type: 'COMPLETE', node: 'red-gate' }], attempts: [], locks: {}, gates: { red: {} } };
   const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n1..1\n';
+  // The runner prints one blank line (near-silent, no test line): with '' the first exit read refuses before the hold engages (see row (c)).
   const r = await gateRed({ state, node: 'red-gate', command: { cmd: process.execPath, args: [w.fixture, 'late-writer', '1', tap, '\n', '1', w.dir, '700'] },
     format: 'tap', specs: [{ file: 'a.test.mjs', name: 'target' }], baselineCandidate: 'sha256:base', timeoutMs: WORKER_FAILURE_BOUND_MS, resources: [] }, deps);
   await resumed;
