@@ -212,7 +212,10 @@ async function reviewGate(E, input, candidate) {
     if (disputed) return disputed;
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
-    if (input.kind === 'original') disputes = naDisputes(input.primary, sec);
+    if (input.kind === 'original') disputes = naDisputes(input, sec);
+    // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review froze.
+    const cited = input.kind === 'original' ? sec.sp.verifyCitations(sec.block, { root: E.ctx.repoRoot }) : null;
+    if (cited && !cited.ok) return gateNo(cited.code, cited.reasons ?? []);
   }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
@@ -223,11 +226,7 @@ async function reviewGate(E, input, candidate) {
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
-  if (disputes.length) { // F12a: run-wide and add-only (a later review cannot launder it); disputedRefusal reads it
-    S.security ??= {};
-    S.security.disputed_na = [...new Set([...(S.security.disputed_na ?? []), ...disputes])].sort();
-    note(S, 'SECURITY_NA_DISPUTED', { review_execution: input.review_execution, pairs: disputes });
-  }
+  recordDisputes(S, disputes, input.review_execution); // F12a: run-wide and add-only; disputedRefusal reads it
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
   if (tk) S.test_kinds.freeze_evidence = tk.evidence_id; // informational: no decision reads it (F4/S1/S2 bind through the record)
   if (v.repair) {
@@ -321,8 +320,9 @@ async function shipReadyGate(E, input, candidate) {
     const refusal = shipSecurityRefusal(S, sec);
     if (refusal) return refusal;
     // F12a: a format-3 run ships only with a complete obligation matrix, which the decision prints.
-    obligations = obligationsOf(sec);
-    if (obligations && !obligations.ok) return gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true });
+    const shipped = shipObligations(sec);
+    obligations = shipped.obligations;
+    if (shipped.refusal) return shipped.refusal;
   }
   const tk = await ensureEvidence(E, 'S1');
   if (tk && !tk.ok) return tk;
@@ -360,8 +360,9 @@ async function shipReadyGate(E, input, candidate) {
     // RUN-STATE lines, so the pre-proof context is re-derived and its three refusals rerun before anything binds.
     if (sec) {
       sec = await securityContext(E, candidate); // post-proof security context
-      obligations = obligationsOf(sec);
-      const moved = shipSecurityRefusal(S, sec) ?? (obligations && !obligations.ok ? gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true }) : null);
+      const again = shipObligations(sec);
+      obligations = again.obligations;
+      const moved = shipSecurityRefusal(S, sec) ?? again.refusal;
       if (moved) {
         S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [moved.code] };
         return moved;
@@ -387,7 +388,7 @@ async function shipReadyGate(E, input, candidate) {
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   }
   return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
-    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
+    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix, c5_exempted: S.security?.reassessed?.c5_exempted ?? [] } } : {}) };
 }
 
 // ---- S-01b2 P5r: runner-backed test-kind evidence at freeze (design rev 6 sections 3 and 5.1) ----------------
@@ -550,14 +551,20 @@ export async function securityContext(E, candidate) {
     addendum_set: events.addenda.map(a => a.addendum_id).sort() };
   // F12a: the approved block (bound by the plan digest) and its dropped pairs still not effective (an addendum reopens one).
   const block = sp.parsePlanSecurityBlock(io.readIfExists(E.P.plan) ?? '');
-  const effective = new Set(events.pairs.map(pairKey));
-  const na = block?.policy === 3 ? block.na_pairs.filter(n => !effective.has(n.pair_id)) : [];
+  const na = pendingNa(block, events);
   const formatMismatch = (block?.policy === 3) !== (E.policy?.semantics?.securityObligations === true);
   return { sp, catalog, events, waived, unauthorized, tuple, block, na, formatMismatch };
 }
 const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendum_set: [...sec.tuple.addendum_set] });
 const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
   && JSON.stringify(a.addendum_set) === JSON.stringify(b.addendum_set);
+
+/** F12a: the approved dropped pairs no trusted addendum has made effective (a reopened pair needs a proof, not a NOT_APPLICABLE row). */
+export function pendingNa(block, events) {
+  if (block?.policy !== 3) return [];
+  const effective = new Set(events.pairs.map(pairKey));
+  return block.na_pairs.filter(n => !effective.has(n.pair_id));
+}
 
 /** Policy-2 event problems every security decision refuses on (judgment points: the owner resolves them). */
 export function securityRefusal(sec) {
@@ -626,15 +633,34 @@ function naRowsRefusal(p, sec) {
   const passed = na.filter(n => rowOf(n).outcome === 'PASS');
   if (passed.length) return gateNo('security_row_escape', passed.map(n => `${n.pair_id}: a dropped pair has no spec to PASS: NOT_APPLICABLE agrees with its cited fact, FAIL disputes it`));
   const paths = (n) => n.facts.map(f => String(n.evidence[f]).split(':')[0]);
-  const uncited = na.filter(n => rowOf(n).outcome === 'NOT_APPLICABLE' && !paths(n).some(x => rowOf(n).evidence.includes(x)));
+  const uncited = na.filter(n => rowOf(n).outcome === 'NOT_APPLICABLE' && !paths(n).some(x => citesPath(rowOf(n).evidence, x)));
   if (uncited.length) return gateNo('incomplete_contract', uncited.map(n => `${n.pair_id}: a NOT_APPLICABLE row of a dropped pair must cite its evidence (${paths(n).join(' or ')})`));
   if (p.security_outcome === 'NOT_TRIGGERED' && na.some(n => rowOf(n).outcome === 'FAIL'))
     return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while a dropped pair is disputed (its row is FAIL)']);
   return null;
 }
 
-/** The dropped pairs an original review disputes (its row FAIL). */
-const naDisputes = (p, sec) => (sec.na ?? []).filter(n => p.rule_rows.find(r => r.subject_id === n.pair_id)?.outcome === 'FAIL').map(n => n.pair_id);
+/** Whether review evidence names `path` as a whole token (so `a.ts` is not cited by `data.ts` or `lib/src/a.tsx`). */
+const citesPath = (evidence, path) => new RegExp(`(^|[\\s\`'"(\\[])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s\`'")\\]:,;])`).test(evidence);
+
+/**
+ * The dropped pairs an original review disputes: a primary row FAIL, or (F3) a second-opinion finding whose
+ * `subject_id` names the dropped pair. Either records the run-wide dispute; reconciliation cannot dismiss it.
+ */
+export const naDisputes = (input, sec) => {
+  const ids = new Set((sec.na ?? []).map(n => n.pair_id));
+  const primary = (input.primary?.rule_rows ?? []).filter(r => ids.has(r?.subject_id) && r.outcome === 'FAIL').map(r => r.subject_id);
+  const second = (Array.isArray(input.second_opinion?.findings) ? input.second_opinion.findings : []).filter(f => ids.has(f?.subject_id)).map(f => f.subject_id);
+  return [...new Set([...primary, ...second])].sort();
+};
+
+/** Add `disputes` to the run-wide dispute list: add-only, sorted, never replaced by a later review (a RETRY cannot launder one). */
+export function recordDisputes(S, disputes, reviewExecution) {
+  if (!disputes.length) return;
+  S.security ??= {};
+  S.security.disputed_na = [...new Set([...(S.security.disputed_na ?? []), ...disputes])].sort();
+  note(S, 'SECURITY_NA_DISPUTED', { review_execution: reviewExecution, pairs: disputes });
+}
 
 /**
  * F12a disputed-N/A hard stop: a dropped pair any accepted original review disputed (S.security.disputed_na, kept
@@ -653,6 +679,12 @@ export function disputedRefusal(S, sec) {
 function obligationsOf(sec) {
   if (sec.block?.policy !== 3) return null;
   return sec.sp.obligationMatrix(sec.catalog, sec.block, { addenda: sec.events.addenda.flatMap(a => a.pairs.map(pairKey)), waived: sec.waived });
+}
+
+/** Ship-ready's matrix decision: { obligations (null for format 2), refusal (a gate refusal when the matrix does not verify) }. */
+export function shipObligations(sec) {
+  const obligations = obligationsOf(sec);
+  return { obligations, refusal: obligations && !obligations.ok ? gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true }) : null };
 }
 
 /**
@@ -755,11 +787,11 @@ async function reassessGate(E, input, candidate) {
   if (res.outcome === 'ADD_CONTROLS') return gateNo('addendum_required', res.delta_pairs.map(p => `${p}: not in an effective pair or a trusted SECURITY_ADDENDUM`),
     { judgment_point: true, outcome: res.outcome, delta_pairs: res.delta_pairs, addendum: res.addendum });
   note(S, 'SECURITY_REASSESSED', { candidate_id: candidate, outcome: res.outcome });
-  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq };
+  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };
   S.outbox.push({ run_id: S.run_id, event: 'SECURITY_REASSESSED', event_id: `security-reassessed-${S.run_id}-${S.seq}`, candidate_id: candidate,
     outcome: res.outcome, plan_digest: sec.tuple.plan_digest, catalog_digest: sec.tuple.catalog_digest, addendum_set: sec.tuple.addendum_set,
     timestamp: new Date().toISOString() });
-  return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals };
+  return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };
 }
 
 /** View judgments of a policy-2 run (none for a legacy run): a recorded REAPPROVAL and unresolved event problems. */

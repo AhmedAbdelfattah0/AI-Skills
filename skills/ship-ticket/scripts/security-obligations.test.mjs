@@ -38,6 +38,7 @@ import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview } 
 import * as DAG from './engine-dag.mjs';
 import { preflight } from './run-engine.mjs';
 import { securityRowsRefusal, disputedRefusal } from './engine-gates.mjs';
+import * as G from './engine-gates.mjs';
 import * as POL from './engine-policy.mjs';
 import * as AUTH from './engine-authority.mjs';
 
@@ -122,6 +123,14 @@ test('(b) a surface fact needs a machine-checkable path[:symbol] citation (fact_
 test('[S51] (f) a fact lowered on EVERY surface is refused (the change fact is the OR of its surfaces), and a drop never re-inflates through paired_by change', () => {
   refused(OB.sel3(GC, [A_PW, OB.surf('K', 'request-handler', 'src/k.ts', ['persistent_write'])]), 'surface_fact_reinflates');
   refused(OB.sel3(GC, [A_PW]), 'surface_fact_reinflates');
+  // derived-OR alone (every control keeps an effective pair, so the B2 zero-pair rule does not fire): real catalog,
+  // persistent_write lowered on both surfaces; VAPT-API-04 stays effective on security-config (kind-universal there).
+  const V = REAL.catalog.fact_vocabulary, bools = Object.keys(V).filter((k) => V[k].type === 'bool');
+  const low = (id, kind, fs) => ({ boundary_id: id, kind, path: `src/${id}.ts`, principals: ['staff'], facts: Object.fromEntries(fs.map((f) => [f, false])), evidence: Object.fromEntries(fs.map((f) => [f, `src/${id}.ts:${f}`])) });
+  const r = SP.selectControls(REAL, { security_policy: 2, surfaces: [low('r', 'request-handler', ['persistent_write']), low('c', 'security-config', ['persistent_write', 'sensitive_field_write'])],
+    facts: { ...Object.fromEntries(bools.map((b) => [b, false])), persistent_write: true, sensitive_field_write: true }, evidence: Object.fromEntries(bools.map((b) => [b, 'src/x.ts:fn'])) });
+  refused(r, 'surface_fact_reinflates');
+  assert.ok(r.reasons.some((x) => x.startsWith('every surface lowers persistent_write')), 'refused by the derived-OR rule itself');
   // rendering-sink keeps persistent_write: API-04 stays paired by surface on R only; no change-level fallback pair appears
   const s = ok(OB.sel3(GC, [A_PW, OB.surf('R', 'rendering-sink', 'src/r.ts')]));
   assert.ok(s.pairs.every((p) => p.paired_by === 'surface'));
@@ -230,13 +239,16 @@ test('(d) reassess inventory surfaces cannot carry facts: the orchestrator canno
 });
 
 // ------------------------------------------------------------------ C5
-const routeSignal = (path, added = []) => SP.reassessSignals({ paths: [{ path, added }] }).some((s) => s.kind === 'new-route');
+// C5 applies to block format 3 only (c5: true); a format-2 run keeps origin/main's detector ([S59] pins it).
+const routeSignal = (path, added = []) => SP.reassessSignals({ paths: [{ path, added }], c5: true }).some((s) => s.kind === 'new-route');
 const ROUTES = ['src/routes/orders.ts', 'apps/api/src/routes/admin-shipments.ts', 'pages/api/orders.ts', 'app/api/orders/route.ts', 'app/test/route.ts',
   'src/routes/+server.ts', 'server/api/orders.ts', 'api/orders.ts', 'src/api/orders.ts', 'apps/api/src/api/orders.ts', 'app/controllers/orders_controller.rb',
   'internal/handlers/orders.go', 'src/webhooks/stripe.ts', 'src/endpoints/x.py', 'packages/api/routes.ts', 'src/routes/fixtures/index.ts', 'src/routes/ab-test.ts',
   'src/routes/test.ts', 'src/routes/latest.ts', 'src/lib/api.ts',
   // serve-everything router roots: a test-named file there may be a deployed route
-  'pages/api/orders.test.ts', 'pages/api/__tests__/x.ts', 'server/api/orders.spec.ts', 'api/orders.test.ts'];
+  'pages/api/orders.test.ts', 'pages/api/__tests__/x.ts', 'server/api/orders.spec.ts', 'api/orders.test.ts',
+  // R1 (owner B1b): a test-named file under any router root still fires
+  'apps/api/src/routes/admin-shipments.spec.ts', 'src/routes/orders.test.ts', 'src/routes/__mocks__/orders.ts', 'internal/handlers/orders_test.go', 'app/routes/admin.test.tsx'];
 
 test('[S47] [S48] C5: real route and handler files (repo fixtures and framework conventions) still raise new-route', () => {
   for (const p of ROUTES) assert.equal(routeSignal(p), true, p);
@@ -249,27 +261,33 @@ test('[S47] [S48] C5: real route and handler files (repo fixtures and framework 
   assert.equal(routeSignal('apps/api/src/index.ts', ["app.get('/health', h)"]), true);
 });
 
-test('[S47] [S48] C5: test, spec and mock files and workspace apps/api/ non-route modules no longer raise new-route (or any surface signal)', () => {
-  for (const p of ['apps/api/src/services/shipment.service.ts', 'apps/api/src/index.ts', 'packages/api/src/config.ts', 'services/api/src/db.ts', 'libs/api/src/client.ts']) assert.equal(routeSignal(p), false, p);
-  for (const p of ['apps/api/src/routes/admin-shipments.spec.ts', 'src/routes/orders.test.ts', 'src/__tests__/routes/x.ts', 'src/routes/__mocks__/orders.ts',
-    'test/e2e/app.e2e-spec.ts', 'internal/handlers/orders_test.go', 'spec/requests/orders_spec.rb', 'tests/test_routes.py']) {
-    assert.equal(routeSignal(p, ["app.get('/x', h)"]), false, p);
-    assert.deepEqual(SP.reassessSignals({ paths: [{ path: p, added: ['router.post("/x")'] }] }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)), [], p);
+test('[S47] [S48] C5 (format 3): test files outside every router root and workspace apps/api/ non-route modules raise no new-route, each exemption recorded', () => {
+  for (const p of ['apps/api/src/services/shipment.service.ts', 'apps/api/src/index.ts', 'packages/api/src/config.ts', 'services/api/src/db.ts', 'libs/api/src/client.ts']) {
+    const ex = [];
+    assert.equal(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).some((s) => s.kind === 'new-route'), false, p);
+    assert.deepEqual(ex, [{ path: p, kind: 'new-route', rule: 'workspace-api-folder' }], p);
+  }
+  for (const p of ['src/__tests__/lib/x.ts', 'test/e2e/app.e2e-spec.ts', 'spec/requests/orders_spec.rb', 'tests/test_routes.py', 'src/lib/util.test.ts']) {
+    const ex = [];
+    assert.deepEqual(SP.reassessSignals({ paths: [{ path: p, added: ['router.post("/x")'] }], c5: true, exempted: ex }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)), [], p);
+    assert.deepEqual(ex, [{ path: p, kind: 'new-route', rule: 'test-file' }], p);
   }
   assert.equal(SP.isTestPath('src/middleware/auth.spec.ts'), true);
-  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'] }), []);
+  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'], c5: true }), []);
+  assert.equal(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'] }).length > 0, true, 'format 2 (legacy): unchanged, it still signals');
   // a test file is still an out-of-plan path when outside the contract (reassess), and non-surface signals still fire
   assert.ok(SP.reassessSignals({ paths: [{ path: 'src/mail.test.ts', added: ['sendMail(x)'] }] }).some((s) => s.kind === 'mail-or-notification-send'));
 });
 
 test('[S49] C5 inventory completeness: a signalling non-test path written by the plan with no surface is surface_inventory_incomplete (format 3)', () => {
-  assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.ts', 'src/routes/new.test.ts', 'src/a.ts', 'README.md'], surfacePaths: ['src/a.ts'] }),
+  assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.ts', 'src/lib/new.test.ts', 'src/a.ts', 'README.md'], surfacePaths: ['src/a.ts'] }),
     [{ path: 'src/routes/new.ts', kinds: ['new-route'] }]);
+  assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.test.ts'], surfacePaths: [] }), [{ path: 'src/routes/new.test.ts', kinds: ['new-route'] }], 'a test name under a router root is no exemption');
   refused(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }] })), 'surface_inventory_incomplete');
   refused(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/x.ts', added: ["router.post('/x', h)"] }] })), 'surface_inventory_incomplete');
   const listed = SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }], inventory: [OB.surf('N', 'request-handler', 'src/routes/new.ts')] }));
   assert.equal(listed.ok, true, J(listed)); assert.equal(listed.outcome, 'ADD_CONTROLS');
-  ok(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.spec.ts' }] })));
+  ok(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/new.spec.ts', added: ["app.get('/x', h)"] }] })));
 });
 
 // ------------------------------------------------------------------ accountability
@@ -313,7 +331,9 @@ test('security-plan.mjs obligations CLI prints the matrix (manual flow, no engin
   const dir = dirname(OB.GATED_PATH);
   const plan = join(dir, 'plan.md');
   writeFileSync(plan, OB.planOf(OB.approved3(GC)));
-  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH], { encoding: 'utf8' });
+  const repo = dirname(OB.writeCatalog({}));
+  mkdirSync(join(repo, 'src'), { recursive: true }); writeFileSync(join(repo, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH, '--repo', repo], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
   assert.equal(out.code, 'obligations');
@@ -330,6 +350,7 @@ test('[S50] (h) review rows: a dropped pair needs exactly one row; NOT_APPLICABL
   assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'PASS', evidence: 'src/a.ts' }), sec())?.code, 'security_row_escape');
   assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'agreed' }), sec())?.code, 'incomplete_contract');
   assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'src/a.ts:saveNothing writes nothing' }), sec()), null);
+  assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'lib/src/a.tsx agrees' }), sec())?.code, 'incomplete_contract', 'the cited path must appear as a whole token');
   assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'FAIL', evidence: 'src/a.ts:42 writes the order' }), sec()), null, 'a dispute is a valid row');
   // all pairs dropped: NOT_TRIGGERED is accepted while nobody disputes, refused once a row disputes
   const allNa = sec({ events: { pairs: [] } });
@@ -377,12 +398,12 @@ function realSelection() {
 const SPEC = 'spec/sec.test.mjs';
 const specText = (list) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
   + `for (const id of ${J(list)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
-function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt } = {}) {
+function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' } } = {}) {
   const cov = coverage(sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, ...(startAt ? { startAt } : {}), narrativeExtra: narrative(sel) + '\n\n',
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } }, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov },
     nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }, ...nodes],
-    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done' } }, fix: { write: { 'src/impl.txt': 'fixed' } } } });
+    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: { 'src/impl.txt': 'fixed' } } } });
   const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
   g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
   return Object.assign(fx, { sel, ids: cov.map((c) => `${c.boundary}:${c.control}`) });
@@ -470,10 +491,150 @@ test('ship-ready of a format-3 run reaches the matrix: a passing run prints its 
 });
 
 test('config_fragment spreads into a DAG config that validates (no securityControls key)', () => {
-  const s = ok(OB.sel3(REAL.ok ? GC : GC, [A_PW, KEEP]));
+  const s = ok(OB.sel3(GC, [A_PW, KEEP]));
   const cfg = { provider: 'claude', timeoutMs: 600000, testCommands: { unit: { cmd: 'node', args: [], format: 'tap' } }, ...s.config_fragment,
     controlCoverage: s.config_fragment.controlCoverage.map((c, i) => ({ ...c, node: 'api', specs: [{ file: 'spec/a.test.mjs', name: `t${i}` }] })) };
   const doc = { schema: DAG.DAG_SCHEMA, config: cfg, nodes: [{ id: 'api', promptFile: 'p', writes: ['spec'], redSpecs: cfg.controlCoverage.flatMap((c) => c.specs) }] };
   assert.doesNotThrow(() => DAG.validateEngineDag(doc));
   assert.throws(() => DAG.validateEngineDag({ ...doc, config: { ...cfg, securityControls: [] } }), (e) => e.code === 'dag_invalid');
+});
+
+// ====================================================================================================================
+// Repair R1 (review of 5dbeffd: Opus B1-B3, Fable F1-F5). Written before the fixes; each was red on 5dbeffd.
+// ====================================================================================================================
+const LEGACY = JSON.parse(readFileSync(new URL('./security-plan-legacy.golden.json', import.meta.url), 'utf8'));
+
+test('[S59] B1(a) legacy (format 2) select AND reassess are byte-identical to the committed origin/main golden (C5 never touches a format-2 run)', async () => {
+  const { captureLegacy } = await import('./security-plan-legacy.capture.test-helper.mjs');
+  const got = await captureLegacy(fileURLToPath(new URL('./security-plan.mjs', import.meta.url)));
+  assert.equal(LEGACY.select.length, got.select.length);
+  assert.deepEqual(got.select, LEGACY.select);
+  assert.deepEqual(got.reassess, LEGACY.reassess);
+  assert.ok(LEGACY.reassess.every((r) => r.code === 'classification_missing'), 'every probe file still opens a signal on a legacy run');
+});
+
+const r3 = (files) => SP.reassess(OB.reIn3(GC, { files, contract: ['**'] }));
+test('[S60] B1(b) format 3: a migration-like path always raises migration-or-rls-change, test-named or not', () => {
+  for (const path of ['db/migrations/0001_rls.test.sql', 'supabase/migrations/20261119120000_orders_rls.spec.sql', 'db/migrate/20261119_add_rls_spec.rb', 'drizzle/0003_rls.test.sql']) {
+    const r = refused(r3([{ path, added: ['create policy p on t using (true);'] }]), 'surface_inventory_incomplete');
+    assert.ok(r.reasons.some((x) => x.includes(path) && x.includes('migration-or-rls-change')), path);
+  }
+});
+
+test('[S61] B1(b) format 3: a test-named file under a router root still raises new-route', () => {
+  for (const [path, added] of [['apps/web/app/routes/admin.test.tsx', ['export async function action() {}']], ['app/routes/api.users.spec.ts', []], ['src/routes/__mocks__/handler.ts', []],
+    ['src/routes/__tests__/+server.ts', ['export async function GET() {}']], ['src/routes/export.spec.ts', []], ['pages/api/x.test.ts', []], ['apps/web/api/orders.test.ts', []],
+    ['apps/api/src/routes/orders.spec.ts', []], ['server/api/orders.spec.ts', []]]) {
+    const r = refused(r3([{ path, added }]), 'surface_inventory_incomplete');
+    assert.ok(r.reasons.some((x) => x.includes(path) && x.includes('new-route')), path);
+  }
+});
+
+test('[S65] B1(c)(d) format 3: every C5 exemption that applies is listed (path, signal, rule); fastify and tRPC routes in a workspace api/ still signal', () => {
+  const ok3 = ok(r3([{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, { path: 'src/middleware/auth.spec.ts', added: [] }, { path: 'apps/api/src/services/x.ts', added: [] }]));
+  const ex = ok3.c5_exempted.map((e) => `${e.path}|${e.kind}|${e.rule}`).sort();
+  assert.deepEqual(ex, ['apps/api/src/services/x.ts|new-route|workspace-api-folder', 'src/lib/util.test.ts|new-route|test-file', 'src/middleware/auth.spec.ts|auth-or-middleware-change|test-file']);
+  for (const [path, line] of [['apps/api/src/plugins/users.ts', "fastify.get('/users', async () => db.all())"], ['apps/api/src/trpc/router.ts', 'deleteUser: protectedProcedure.mutation(() => 1),']]) {
+    refused(r3([{ path, added: [line] }]), 'surface_inventory_incomplete');
+  }
+  // the inventory helper uses the same detector and reports the exemptions it applied (it cannot be blinded silently)
+  const exempted = [];
+  assert.deepEqual(SP.inventoryGaps({ files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, 'src/routes/a.ts'], surfacePaths: [], exempted }), [{ path: 'src/routes/a.ts', kinds: ['new-route'] }]);
+  assert.deepEqual(exempted, [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }]);
+});
+
+test('[S62] B2 a selected control can never end with zero effective pairs because of a surface fact (a keeper whose kind cannot pair it is no keeper)', () => {
+  refused(OB.sel3(GC, [A_PW, OB.surf('K', 'outbound-data', 'src/k.ts')]), 'surface_fact_reinflates');
+  refused(OB.sel3(GC, [A_PW, OB.surf('B', 'request-handler', 'src/b.ts', ['persistent_write']), OB.surf('R', 'outbound-data', 'src/r.ts')]), 'surface_fact_reinflates');
+  ok(OB.sel3(GC, [A_PW, KEEP]));
+  ok(OB.sel3(GC, [A_PW, OB.surf('R', 'rendering-sink', 'src/r.ts')]));
+});
+
+test('[S63] B3 a cited path must exist (and contain its :symbol) in the tree checked; a file the plan will write is pending at plan time; an unreadable root fails closed', () => {
+  const root = dirname(OB.writeCatalog({}));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  ok(SP.verifyCitations(block, { root }));
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const other = 1;\n');
+  refused(SP.verifyCitations(block, { root }), 'citation_missing');
+  refused(SP.verifyCitations(block, { root: join(root, 'nope') }), 'citation_missing');
+  const empty = dirname(OB.writeCatalog({}));
+  refused(SP.verifyCitations(block, { root: empty }), 'citation_missing');
+  ok(SP.verifyCitations(block, { root: empty, pending: ['src'] }));
+  for (const c of ['app/api/orders/[id]/route.ts:GET', 'app/routes/orders.$id.tsx:loader', 'src/routes/(app)/orders/+page.server.ts:load']) assert.equal(SP.citationProblem(c), null, c);
+});
+
+test('B3 the obligations CLI checks citations against --repo (required): missing file refused, present file accepted', () => {
+  const dir = dirname(OB.GATED_PATH);
+  const plan = join(dir, 'plan-r1.md');
+  writeFileSync(plan, OB.planOf(OB.approved3(GC)));
+  const run = (repo) => spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH, ...(repo ? ['--repo', repo] : [])], { encoding: 'utf8' });
+  assert.equal(run(null).status, 1, 'no --repo is a usage error');
+  const repo = dirname(OB.writeCatalog({}));
+  assert.equal(JSON.parse(run(repo).stdout).code, 'citation_missing');
+  mkdirSync(join(repo, 'src'), { recursive: true }); writeFileSync(join(repo, 'src', 'a.ts'), 'persistent_writeFree');
+  assert.equal(JSON.parse(run(repo).stdout).code, 'obligations');
+});
+
+test('[S64] F3 a second-opinion finding naming a dropped pair records a dispute like a primary FAIL row', () => {
+  const input = { primary: prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'src/a.ts:saveNothing' }), second_opinion: { findings: [{ id: 'S1', subject_id: 'A:VAPT-API-04', severity: 'major' }] } };
+  assert.deepEqual(G.naDisputes(input, sec()), ['A:VAPT-API-04']);
+  assert.deepEqual(G.naDisputes({ ...input, second_opinion: { findings: [{ id: 'S1', severity: 'minor' }] } }, sec()), []);
+});
+
+test('F5 a malformed na_pairs entry is a null parse (typed refusal), never a TypeError', () => {
+  const plan = OB.planOf(OB.approved3(GC));
+  const line = plan.split('\n').find((l) => l.startsWith('<!-- security-plan: '));
+  const raw = JSON.parse(line.slice('<!-- security-plan: '.length, -' -->'.length));
+  for (const bad of [[null], [1], ['A:VAPT-API-04']]) {
+    const x = { ...raw, na_pairs: bad };
+    assert.equal(SP.parsePlanSecurityBlock(plan.replace(line, `<!-- security-plan: ${SP.canon(x)} -->`)), null, J(bad));
+  }
+});
+
+test('[S54] formatMismatch: a format-3 block under a run without obligations semantics (or the reverse) is refused at every security gate', () => {
+  const base = { catalog: { ok: true }, events: { conflicts: [], outside: [], forged: { addenda: [] }, addenda: [] }, unauthorized: [] };
+  assert.equal(G.securityRefusal({ ...base, formatMismatch: true })?.code, 'security_pairs_mismatch');
+  assert.equal(G.securityRefusal({ ...base, formatMismatch: false }), null);
+});
+
+test('[S55] ship-ready refuses a format-3 run whose obligation matrix does not verify', () => {
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  const s = { sp: SP, catalog: GC, block, events: { addenda: [] }, waived: [] };
+  assert.equal(G.shipObligations(s).refusal, null);
+  assert.equal(G.shipObligations({ ...s, block: { ...block, catalog_digest: 'sha256:' + '0'.repeat(64) } }).refusal?.code, 'catalog_invalid');
+  assert.equal(G.shipObligations({ ...s, block: { ...block, policy: 2 } }).obligations, null, 'format 2: no matrix at ship-ready');
+});
+
+test('[S56] the dispute list is add-only: a later review (a RETRY) never removes an earlier dispute', () => {
+  const S = { security: { disputed_na: ['A:VAPT-API-04'] }, seq: 0, events: [] };
+  G.recordDisputes(S, ['B:VAPT-CFG-04'], 'rx-2');
+  assert.deepEqual(S.security.disputed_na, ['A:VAPT-API-04', 'B:VAPT-CFG-04']);
+  G.recordDisputes(S, [], 'rx-3');
+  assert.deepEqual(S.security.disputed_na, ['A:VAPT-API-04', 'B:VAPT-CFG-04']);
+});
+
+test('[S57] a dropped pair an addendum made effective leaves the pending dropped set (it needs a proof, not a NOT_APPLICABLE row)', () => {
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  assert.deepEqual(G.pendingNa(block, { pairs: [] }).map((n) => n.pair_id), ['A:VAPT-API-04']);
+  assert.deepEqual(G.pendingNa(block, { pairs: [{ boundary: 'A', control: 'VAPT-API-04' }] }), []);
+  assert.deepEqual(G.pendingNa({ ...block, policy: 2 }, { pairs: [] }), []);
+});
+
+test('[S58] the obligation matrix refuses a block selected against another catalog', () => {
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  refused(SP.obligationMatrix(GC, { ...block, catalog_digest: 'sha256:' + '1'.repeat(64) }), 'catalog_invalid');
+});
+
+test('B3 end to end: the review gate refuses a dropped pair whose citation symbol is missing from the candidate (citation_missing)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const cookieSession = true;\n' } });
+  const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init (the cited file is a pending write)'); okc(fx.cli('drive'), 'api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'impl');
+  okc(fx.gate('reassess', {}), 'reassess');
+  const cand = fx.candidate();
+  const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
+  const r = fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }) }));
+  assert.equal(r.out?.code, 'citation_missing', r.stdout);
 });

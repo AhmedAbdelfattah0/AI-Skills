@@ -958,7 +958,10 @@ test('meta: SECURITY_CODES equals the codes with a refusing case, each with an a
       () => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }], { surfaces: ['A'], controls: ['VAPT-API-01'] })],
     disposition_missing: [() => SP.verifyMatrix([], { surfaces: ['A'], controls: ['VAPT-API-01'] }),
       () => SP.verifyMatrix([{ boundary_id: 'A', control_id: 'VAPT-API-01', disposition: 'proven' }], { surfaces: ['A'], controls: ['VAPT-API-01'] })],
-    surface_inventory_incomplete: [() => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }] })), () => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.test.ts' }] }))],
+    surface_inventory_incomplete: [() => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }] })),
+      () => SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }], inventory: [OB.surf('N', 'request-handler', 'src/routes/new.ts')] }))],
+    citation_missing: [() => SP.verifyCitations(SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))), { root: mkdtempSync(join(tmpdir(), 'cite-')) }),
+      () => SP.verifyCitations(SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))), { root: mkdtempSync(join(tmpdir(), 'cite-')), pending: ['src'] })],
   };
   assert.deepEqual([...SP.SECURITY_CODES].sort(), Object.keys(rows).sort());
   for (const [code, [refuse, accept]] of Object.entries(rows)) {

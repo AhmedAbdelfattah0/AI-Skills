@@ -190,7 +190,9 @@ and rule-catalogue work:
 - under security policy 2, return one primary `rule_row` per effective pair,
   `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
   dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
-  the cited fact holds, `FAIL` to dispute it (see
+  the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
+  gives its finding `subject_id: '<boundary>:<control>'`, which records the same
+  run-wide dispute (see
   [security-risk.md](security-risk.md) section 9).
 
 Coverage is still applicability-driven. Combining the checks removes duplicate

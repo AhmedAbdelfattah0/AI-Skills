@@ -55,9 +55,21 @@ surface**, under five rules, each refused when broken:
   (`gated by <fact>[ or <fact>]: ...`), and only where lowering it drops at least one
   pair (`surface_fact_ungated`);
 - with a machine-checkable citation: one repository-relative `path[:symbol]` naming
-  a file, no placeholder such as `TBD` or `n/a` (`fact_uncited`);
-- never on every surface: some surface must still hold the change fact
-  (`surface_fact_reinflates`);
+  a file, no placeholder such as `TBD` or `n/a` (`fact_uncited`). Brackets,
+  parentheses and `$` are allowed in the path (`app/api/orders/[id]/route.ts:GET`).
+  The cited file must **exist** and, with a `:symbol`, contain that text
+  (`citation_missing`):
+  - at `init` and `preflight`, in the repository working tree (the plan's base);
+    a path under a DAG node's `writes` (a file the change creates) is deferred;
+  - at `gate review` (original), in the candidate work tree, with nothing deferred;
+  - in the `obligations` CLI, in the `--repo` working tree.
+
+  An unreadable tree fails closed. The check proves that the cited text exists, not
+  that it supports the claim: that judgment is the review row (section 9).
+- never on every surface (`surface_fact_reinflates`), and never so that a control
+  the change selects is left with **no effective pair** (`surface_fact_reinflates`).
+  A surface that keeps the fact but whose kind cannot pair the control is no keeper;
+
 - never for a pair whose control is in the signal class of the surface's own path
   (`surface_fact_not_lowerable`), because every reassessment would reopen it.
 
@@ -239,35 +251,69 @@ approval, so the orchestrator cannot lower a fact mid-run (`bad_input`). An appr
 format-3 block is replayed under the installed catalog at every reassessment. A
 lowering that no longer follows from it is `plan_block_invalid`.
 
-**Test files and workspace folders (C5).** A test file is not deployed, so it raises
-no `new-route`, `auth-or-middleware-change` or `migration-or-rls-change` signal, by
-path or by added line. Its other signals (mail, payment, env, dependency) and its
-out-of-plan path still count. A test file is only one of these:
+**Test files and workspace folders (C5, block format 3 only).** A format-2 run keeps
+the original detector byte for byte (pinned by
+`scripts/security-plan-legacy.golden.json`, captured from origin/main). A format-3
+run narrows the three surface-introducing signals in exactly three places, and
+every narrowing that applies is **recorded**, never silent. It is listed as
+`c5_exempted` (`path`, `kind`, `rule`):
 
-- a `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|ex|exs>`,
-  `*_spec.<go|py|rb|ex|exs>` or `test_*.py` file;
-- a path under `__tests__/`, `__mocks__/` or `__fixtures__/`.
+- in the `gate reassess` output;
+- in the recorded reassessment;
+- in the ship-ready `obligations` print;
+- in the `preflight` output for DAG writes.
 
-A `test/`, `tests/`, `spec/` or `fixtures/` directory is deliberately **not** a test
-file, because file-system routers serve `app/test/route.ts` and
-`routes/fixtures.ts` as real routes. No file under a router root that serves every
-file is a test file either: `pages/` (the Next.js Pages Router serves
-`pages/api/x.test.ts` unless `pageExtensions` is narrowed), `server/api/`,
-`server/routes/`, `server/middleware/` and a root `api/`.
+| Rule | Signal | Narrowing |
+|---|---|---|
+| `test-file` | `auth-or-middleware-change` | a test-named file raises none |
+| `test-file` | `new-route` | a test-named file raises none, **unless** it is under a router root |
+| `workspace-api-folder` | `new-route` | a path whose only route evidence is a workspace project folder named `api` |
 
-A workspace project folder named `api` (`apps/api/`, `packages/api/`,
-`services/api/`, `libs/api/`, `modules/api/`, `projects/api/`) is no longer a route
-directory by itself. So `apps/api/src/services/x.ts` and `apps/api/src/index.ts`
-raise no path-only route signal. Everything else still fires:
+What these terms mean:
 
-- inside such a folder: `routes/`, `controllers/`, `handlers/`, `endpoints/`,
-  `webhooks/`, a nested `api/`, an `api.*` file, and every added route line;
-- outside it: a root `api/`, `pages/api/`, `app/api/`, `server/api/` and `src/api/`.
+- **Test-named file**: a `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|ex|exs>`,
+  `*_spec.<go|py|rb|ex|exs>` or `test_*.py` file, or a path under `__tests__/`,
+  `__mocks__/` or `__fixtures__/`.
+- **Router root**: any `routes/`, `route/`, `pages/`, `api/`, `controllers/`,
+  `handlers/`, `endpoints/`, `webhooks/` or `functions/` segment, or
+  `server/api|routes|middleware/`. File-system routers (React Router / Remix
+  `flatRoutes`, TanStack, SolidStart, SvelteKit, Next.js `pages/`, Nitro, Vercel
+  `api/`) serve every file there, test-named or not.
+- **Workspace project folder**: `apps|packages|services|libs|modules|projects/api/`.
+  Inside it, these still fire:
+  - `routes/`, `controllers/`, `handlers/`, `endpoints/` and `webhooks/` subfolders,
+    a nested `api/`, and an `api.*` file;
+  - every added route line. Format 3 adds fastify, hono and elysia verbs and tRPC
+    `...Procedure....query|mutation|subscription(` to the line patterns, so a
+    plugin or router module is not blinded.
 
-For a format-3 block, a changed non-test path inside the Design Contract that raises
-one of the three surface signals and has no surface at its path is refused
-`surface_inventory_incomplete` before classification. Add the surface to the
+`migration-or-rls-change` is **never** narrowed: migration runners select files by
+directory and name, not by import, so a test-named migration still signals. Other
+signals of a test file (mail, payment, env, dependency) and its out-of-plan path
+always count.
+
+For a format-3 block, a changed path inside the Design Contract that raises one of
+the three surface signals under this detector and has no surface at its path is
+refused `surface_inventory_incomplete` before classification. The same check runs
+at `init` and `preflight` over file-shaped DAG writes. Add the surface to the
 inventory.
+
+**What reopening does not cover (residuals, documented).**
+
+- A dropped pair reopens only through a signal at **its surface's own path**, or
+  through a classification that raises its fact. A change in another file the
+  surface imports reopens nothing by itself.
+- Four gated controls have **no signal tripwire** at all: `VAPT-API-04` (mass
+  assignment), `VAPT-WEB-04` (CSRF), `VAPT-ABUSE-01` and `VAPT-ABUSE-06`. No signal
+  class names them, so a later write that makes the dropped fact true again is
+  caught only by the mandatory review row of the dropped pair (section 9), on the
+  frozen candidate.
+- A surface the candidate adds after approval gets only its effective pairs in the
+  matrix (`extra` cells): its other controls have no cell. Its pairs are delta pairs
+  and need an addendum, so nothing is dropped, but the matrix is complete only for
+  the approved surfaces.
+- An open dispute is not a status judgment: `drive` still runs an enqueued repair,
+  and the stop shows at the confirmation gate.
 
 ## 8. Freshness
 
@@ -305,7 +351,9 @@ is installed, an update that carries a catalog change does this mid-run.
   (`incomplete_contract`). The row can be:
   - `NOT_APPLICABLE`, agreeing with the cited fact. Its evidence must name a cited
     path (`incomplete_contract` otherwise).
-  - `FAIL`, disputing the drop.
+  - `FAIL`, disputing the drop. A second-opinion finding carrying
+    `subject_id: '<boundary>:<control>'` of a dropped pair disputes it the same
+    way: reconciliation cannot dismiss it.
   - Never `PASS`: no spec proves a dropped pair (`security_row_escape`).
 - With every pair dropped or waived, `NOT_TRIGGERED` is accepted, unless a dropped
   pair is disputed (`security_outcome_escape`).
@@ -347,7 +395,7 @@ refused. `SECURITY_REASSESSED` is engine-recorded.
 
 ## 12. The obligation matrix
 
-`node scripts/security-plan.mjs obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]`
+`node scripts/security-plan.mjs obligations --plan <plan.md> --repo <dir> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]`
 prints the full surface x control matrix of an approved block (format 2 or 3). It
 imports no engine module, so it runs in the manual flow too. Each cell is derived
 from the block and the catalog independently and gets exactly one of `proven`,

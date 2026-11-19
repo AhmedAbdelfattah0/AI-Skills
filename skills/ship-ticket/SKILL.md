@@ -441,6 +441,11 @@ answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
 plan approval; `AskUserQuestion` may only resolve planning questions before
 `ExitPlanMode`. Do not exit Plan Mode before a required debate has been
 reconciled, and do not treat either model's agreement as human approval.
+Before `ExitPlanMode` on a policy-2 plan with an execution DAG, run
+`scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`.
+It checks the plan and DAG as `init` will, with no START and no write. Fix any
+refusal it prints before presenting the plan
+([references/security-risk.md](references/security-risk.md) section 6).
 
 There is exactly one plan approval. Once it is approved and the host permits
 implementation, transition to **CONTINUE** and execute after-approval actions immediately.

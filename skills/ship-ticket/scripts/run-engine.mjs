@@ -293,7 +293,7 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (!res.ok) throw coded('security_pairs_mismatch', `the approved §3a security-plan block cannot be reassessed (${res.code}): ${(res.reasons ?? []).join('; ')}`);
   const outside = res.reapproval_basis.filter(b => b.kind === 'out-of-plan-path').map(b => b.path);
   if (outside.length) throw coded('security_pairs_mismatch', `the approved §3a surface path(s) ${outside.join(', ')} lie outside every node's writes (the Design Contract); re-plan and re-approve`);
-  if (block.policy === 3) await bindObligations(sp, cat, block, nodes);
+  if (block.policy === 3) await bindObligations(sp, cat, block, nodes, ctx.repoRoot);
 }
 
 /** File-shaped DAG writes (a basename with an extension): the plan-time paths the surface inventory must cover. */
@@ -305,12 +305,16 @@ const writtenFiles = (nodes) => [...new Set(nodes.flatMap(n => n.writes ?? []).f
  * fact; its refusal code is thrown as is), and every file-shaped DAG write that raises a surface-introducing signal
  * (not a test) must be a listed surface (surface_inventory_incomplete). Format 2 blocks are not checked here (unchanged).
  */
-async function bindObligations(sp, cat, block, nodes) {
+async function bindObligations(sp, cat, block, nodes, root) {
   const m = sp.obligationMatrix(cat, block);
   if (!m.ok) throw coded(m.code, `the approved §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
-  const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path) });
+  const exempted = [];
+  const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
   if (gaps.length) throw coded('surface_inventory_incomplete', `DAG-written path(s) raise a surface signal but no §3a surface lists them: ${gaps.map(g => `${g.path} (${g.kinds.join(', ')})`).join('; ')}`);
-  return m;
+  // B3: plan time checks the repository tree; a cited file one of the nodes will write is deferred to gate review.
+  const cited = sp.verifyCitations(block, { root, pending: [...new Set(nodes.flatMap(n => n.writes ?? []))] });
+  if (!cited.ok) throw coded(cited.code, `a §3a surface-fact citation does not verify: ${(cited.reasons ?? []).join('; ')}`);
+  return { ...m, c5_exempted: exempted };
 }
 
 /**
@@ -333,8 +337,10 @@ export async function preflight(ctx) {
   const block = sp.parsePlanSecurityBlock(text);
   const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
   if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const exempted = [];
+  if (block.policy === 3) sp.inventoryGaps({ files: writtenFiles(dag.nodes), surfacePaths: block.surfaces.map(s => s.path), exempted }); // gaps already refused by bindSecurity
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
-    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix };
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix, c5_exempted: exempted };
 }
 
 /**

@@ -3,17 +3,17 @@
 //
 //   select   --facts <file|-> [--catalog <controls.json>]
 //   reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <controls.json>]
-//   obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <controls.json>]
+//   obligations --plan <plan.md> --repo <dir> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <controls.json>]
 //
 // stdout is always one JSON object with `code` and `reasons[]`. Exit 0: a result (selected; reassessed as
-// UNCHANGED or ADD_CONTROLS). Exit 2: a refusal or judgment point (catalog_missing, catalog_invalid,
-// fact_uncited, control_unpaired, classification_missing, plan_block_missing, plan_block_invalid, or the
-// outcome REAPPROVAL). Exit 1: malformed input (bad_input, fact_out_of_vocabulary, surface_facts_mismatch).
+// UNCHANGED or ADD_CONTROLS; obligations). Exit 2: a refusal or judgment point (every SECURITY_CODES code not
+// listed under exit 1, or the outcome REAPPROVAL). Exit 1: malformed input (bad_input, fact_out_of_vocabulary, surface_facts_mismatch).
 //
 // The catalog is skills/vapt/controls.json and its evaluator skills/vapt/controls.mjs (one definition of the
 // selection semantics). A standalone install without vapt refuses catalog_missing: never an empty selection.
 // Keyword matches on a diff only create signals; they never select a control. Imports no engine module.
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -27,12 +27,13 @@ try { DEFAULT_EVALUATOR = await import(EVALUATOR_URL); } catch { DEFAULT_EVALUAT
  * Every refusal code this module emits. Exit 1 for EXIT_ONE codes, 2 for the rest. F12a (block format 3) added
  * surface_fact_not_lowerable, surface_fact_ungated, surface_fact_reinflates (a refused surface-level fact),
  * disposition_missing, disposition_duplicate, disposition_unknown (the obligation matrix) and
- * surface_inventory_incomplete (a signalling non-test path written by the plan that no surface lists).
+ * surface_inventory_incomplete (a signalling non-test path written by the plan that no surface lists) and
+ * citation_missing (a surface-fact citation whose file, or `:symbol` text, is not in the tree checked).
  */
 export const SECURITY_CODES = ['catalog_missing', 'catalog_invalid', 'bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch',
   'fact_uncited', 'control_unpaired', 'classification_missing', 'plan_block_missing', 'plan_block_invalid',
   'surface_fact_not_lowerable', 'surface_fact_ungated', 'surface_fact_reinflates', 'disposition_missing', 'disposition_duplicate',
-  'disposition_unknown', 'surface_inventory_incomplete'];
+  'disposition_unknown', 'surface_inventory_incomplete', 'citation_missing'];
 const EXIT_ONE = new Set(['bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch']);
 export const OUTCOMES = ['UNCHANGED', 'ADD_CONTROLS', 'REAPPROVAL'];
 
@@ -350,7 +351,7 @@ export function selectControls(catalogArg, input) {
 }
 
 // ---------------------------------------------------------------------------------------------------- surface facts (F12a)
-const CITE_PATH = /^[A-Za-z0-9_@+.-]+(?:\/[A-Za-z0-9_@+.-]+)*$/;
+const CITE_PATH = /^[A-Za-z0-9_@+.$()[\]-]+(?:\/[A-Za-z0-9_@+.$()[\]-]+)*$/;
 const CITE_SYMBOL = /^[A-Za-z_$][\w$.#<>[\]-]*$/;
 const PLACEHOLDER = /^(tbd|tba|todo|fixme|n\/?a|na|none|null|nil|unknown|placeholder|example|path|file|symbol|xxx+|-+|\.+|\?+|\*+)$/i;
 /**
@@ -367,6 +368,39 @@ export function citationProblem(e) {
   if (PLACEHOLDER.test(path) || PLACEHOLDER.test(path.split('/').pop()) || PLACEHOLDER.test(path.split('/').pop().replace(/\.[^.]*$/, ''))) return `${JSON.stringify(path)} is a placeholder`;
   if (sym !== null && (!CITE_SYMBOL.test(sym) || PLACEHOLDER.test(sym))) return `symbol ${JSON.stringify(sym)} is not an identifier`;
   return null;
+}
+
+/**
+ * B3 (F12a): every surface-fact citation of a format-3 block must name a file that EXISTS under `root` and, when it
+ * has a `:symbol`, whose text contains that symbol. `root` is the tree the caller checks: the repository working tree
+ * at init and preflight (the plan's base), the candidate work tree at gate review, `--repo` for the obligations CLI.
+ * At plan time (init, preflight) a cited path under one of `pending` (the DAG nodes' writes: a file the change will
+ * create) is deferred; gate review checks it with no pending set. An unreadable root, a missing or non-file path, or a
+ * missing symbol -> citation_missing (fail closed). A format-2 block has no surface facts: nothing to check.
+ */
+export function verifyCitations(block, { root, pending = [] } = {}) {
+  return asResult(() => {
+    if (!isObj(block) || block.policy !== 3) return { ok: true, code: 'citations_verified', reasons: [], checked: [] };
+    let dir = false;
+    try { dir = typeof root === 'string' && root.length > 0 && statSync(root).isDirectory(); } catch { dir = false; }
+    if (!dir) refuse('citation_missing', `the repository root ${JSON.stringify(root)} cannot be read, so no citation can be verified`);
+    const cites = uniqSorted(block.surfaces.filter((x) => isObj(x.evidence)).flatMap((x) => Object.values(x.evidence)));
+    const under = (p) => pending.some((w) => p === w || p.startsWith(String(w).replace(/\/+$/, '') + '/'));
+    const bad = [], checked = [];
+    for (const c of cites) {
+      if (citationProblem(c) !== null) { bad.push(`${c}: not a path[:symbol] citation`); continue; }
+      const i = c.indexOf(':');
+      const path = i < 0 ? c : c.slice(0, i), sym = i < 0 ? null : c.slice(i + 1);
+      if (under(path)) continue;
+      let text = null;
+      try { if (statSync(join(root, path)).isFile()) text = readFileSync(join(root, path), 'utf8'); } catch { text = null; }
+      if (text === null) { bad.push(`${c}: ${path} is not a file in ${root}`); continue; }
+      if (sym !== null && !text.includes(sym)) { bad.push(`${c}: ${path} does not contain ${JSON.stringify(sym)}`); continue; }
+      checked.push(c);
+    }
+    if (bad.length) refuse('citation_missing', ...bad);
+    return { ok: true, code: 'citations_verified', reasons: [], checked };
+  });
 }
 
 /** The facts any control's catalog gate names for boundary kind `kind` (what a surface of that kind may lower). */
@@ -408,10 +442,7 @@ function lowerings({ catalog, gates }, facts, surfaces) {
 }
 
 /** The path-only signal kinds of `path` (no added line): what reassess will see whenever that file changes. */
-const pathSignalKinds = (path) => {
-  const p = String(path).toLowerCase(), b = p.split('/').pop();
-  return RULES.filter(([kind, pathTest]) => !(SURFACE_SIGNALS.includes(kind) && isTestPath(p)) && pathTest(p, b)).map(([kind]) => kind);
-};
+const pathSignalKinds = (path) => fileKinds({ path: normPath(path), added: [] }, true, null);
 
 function buildSelection(reg, catalog, digest, facts, surfaces, lower = null) {
   const core = compute(reg, facts, surfaces, { lower });
@@ -421,6 +452,11 @@ function buildSelection(reg, catalog, digest, facts, surfaces, lower = null) {
     const legacy = compute(reg, facts, surfaces).pairs.map((p) => p.pair_id);
     const now = [...core.pairs.map((p) => p.pair_id), ...core.na_pairs.map((p) => p.pair_id)].sort();
     if (canon(now) !== canon(legacy)) refuse('surface_fact_reinflates', 'the surface facts change the pairs beyond dropping some (effective + dropped must equal the pairs without surface facts)');
+    // B2: a control the change selects keeps at least one effective pair. Every surface that pairs it lowering its gate is
+    // the change fact held by no surface that matters (a "keeper" whose kind cannot pair the control is no keeper).
+    const effectiveControls = new Set(core.pairs.map((p) => p.control_id));
+    const emptied = uniqSorted(core.na_pairs.map((p) => p.control_id).filter((c) => !effectiveControls.has(c)));
+    if (emptied.length) refuse('surface_fact_reinflates', ...emptied.map((c) => `${c} is selected for the change but every pair of it is dropped by a surface fact: some surface that pairs ${c} must keep the fact (else the change-level fact is not true)`));
     for (const [bid, m] of lower) for (const f of m.keys()) {
       if (!core.na_pairs.some((p) => p.boundary_id === bid && p.facts.includes(f))) refuse('surface_fact_ungated', `surface ${bid}: lowering ${f} drops no pair (another gate fact still holds)`);
     }
@@ -577,6 +613,7 @@ function parseFormat3(b, planText) {
   const naIds = b.na_pairs.map((n) => n?.pair_id);
   if (!naIds.length || canon(naIds) !== canon(uniqSorted(naIds)) || naIds.some((id) => b.pairs.includes(id))) return null;
   for (const n of b.na_pairs) {
+    if (!isObj(n)) return null;
     const q = parsePairId(n.pair_id), s = q && sids.get(q.boundary_id);
     if (!s?.facts || canon(Object.keys(n).sort()) !== canon(['evidence', 'facts', 'pair_id']) || !Array.isArray(n.facts) || !n.facts.length
       || canon(n.facts) !== canon(uniqSorted(n.facts)) || !isObj(n.evidence) || canon(Object.keys(n.evidence).sort()) !== canon(n.facts)) return null;
@@ -701,31 +738,31 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
   'go.mod', 'go.sum', 'cargo.toml', 'cargo.lock', 'gemfile', 'gemfile.lock', 'composer.json', 'composer.lock', 'pom.xml', 'build.gradle',
   'build.gradle.kts', 'packages.lock.json', 'directory.packages.props', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock', 'podfile', 'podfile.lock']);
 /**
- * C5 (F12a): a test file is not deployed, so it cannot introduce a boundary: it never raises a
- * surface-introducing signal (SURFACE_SIGNALS: new-route, auth-or-middleware-change, migration-or-rls-change), by
- * path or by added line. A test file is ONLY: a basename `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.go|py|rb|ex|exs`,
- * `*_spec.go|py|rb|ex|exs`, `test_*.py`, or a path under a `__tests__/`, `__mocks__/` or `__fixtures__/` directory.
- * Deliberately NOT: a `test/`, `tests/`, `spec/` or `fixtures/` directory, or a `test.ts` / `ab-test.ts` basename,
- * because file-system routers serve those as real routes (`app/test/route.ts`, `routes/fixtures.ts`); and never a
- * file under a serve-everything router root (FS_ROUTER: `pages/`, `server/api|routes|middleware/`, a root `api/`).
+ * C5 (F12a, block format 3 ONLY: a format-2 run keeps origin/main's detector byte for byte, pinned by
+ * security-plan-legacy.golden.json). A format-3 run narrows the surface-introducing signals in exactly three
+ * places, and every narrowing that applies is RECORDED (`c5_exempted`: path, signal, rule), never silent:
+ * - rule `test-file`, auth-or-middleware-change: a test-named file (TEST_FILE) raises none;
+ * - rule `test-file`, new-route: a test-named file raises none, unless its path is under a router root
+ *   (ROUTER_ROOT: any `routes/`, `route/`, `pages/`, `api/`, `controllers/`, `handlers/`, `endpoints/`, `webhooks/`,
+ *   `functions/` segment, or `server/api|routes|middleware/`): file-system routers (React Router / Remix flatRoutes,
+ *   TanStack, SolidStart, SvelteKit, Next.js pages/, Nitro, Vercel api/) serve every file there, test-named or not;
+ * - rule `workspace-api-folder`, new-route: a path whose only route evidence is a workspace project folder named
+ *   `api` (`apps|packages|services|libs|modules|projects/api/`); its routes/, controllers/, ... subfolders, a nested
+ *   api/, an `api.*` file and every added route line (format 3 adds fastify/hono/elysia verbs and tRPC procedures)
+ *   still fire.
+ * migration-or-rls-change is NEVER narrowed: migration runners select by directory and name, not by import.
+ * A test-named file is ONLY: `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test|_spec.<go|py|rb|ex|exs>`, `test_*.py`,
+ * or a path under `__tests__/`, `__mocks__/` or `__fixtures__/`.
  */
 const TEST_FILE = /(^|\/)(__tests__|__mocks__|__fixtures__)\/|\.(test|spec|e2e-spec)\.[a-z0-9]+$|_(test|spec)\.(go|py|rb|ex|exs)$|(^|\/)test_[^/]+\.py$/;
-/**
- * File-system routers that serve EVERY file under their root, test-named or not (Next.js Pages Router `pages/`
- * unless pageExtensions is narrowed; Nuxt/Nitro `server/api|routes|middleware/`; Vercel root `api/` functions):
- * a test-named file there may be a deployed route, so the exemption never applies under them.
- */
-const FS_ROUTER = /(^|\/)pages\/|(^|\/)server\/(api|routes|middleware)\/|^api\//;
-export const isTestPath = (p) => { const q = String(p).toLowerCase(); return TEST_FILE.test(q) && !FS_ROUTER.test(q); };
-/**
- * C5 (F12a): an `api/` directory that is a workspace project folder (`apps/api/`, `packages/api/`, `services/api/`,
- * `libs/api/`, `modules/api/`, `projects/api/`) is not a route directory: in a monorepo it holds the whole service
- * (services, index.ts, config). Only that one segment stops counting; inside it `routes/`, `controllers/`,
- * `handlers/`, `endpoints/`, `webhooks/`, a nested `api/` (`apps/api/src/api/x.ts`), an `api.*` basename and the
- * added-line patterns still fire, as do a root `api/`, `pages/api/`, `app/api/`, `server/api/` and `src/api/`.
- */
+const ROUTER_ROOT = /(^|\/)(routes?|pages|api|controllers?|handlers?|endpoints?|webhooks?|functions)\/|(^|\/)server\/(api|routes|middleware)\//;
+/** A test-named file outside every router root (format 3: such a file raises no new-route or auth signal; recorded). */
+export const isTestPath = (p) => { const q = String(p).toLowerCase(); return TEST_FILE.test(q) && !ROUTER_ROOT.test(q); };
 const WORKSPACE_API = /(^|\/)(apps|packages|services|libs|modules|projects)\/api\//g;
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
+const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
+/** Format-3 extra route registrations (fastify / hono / elysia verbs, tRPC procedures): so the workspace-api narrowing cannot blind them. */
+const ROUTE_LINE_V3 = /\b(fastify|instance|hono|elysia)\.(get|post|put|patch|delete|all|route|head|options)\s*\(|[Pp]rocedure\b.*\.(query|mutation|subscription)\s*\(/;
 /** [kind, path test, added-line test]: mechanical patterns only; a match creates a signal, never a control. */
 const RULES = [
   ['new-dependency', (p, b) => DEP_FILES.has(b) || /^requirements[\w.-]*\.txt$/.test(b) || /\.csproj$/.test(b), null],
@@ -737,7 +774,7 @@ const RULES = [
   ['env-or-secret-reference', (p, b) => /^\.env(\..*)?$/.test(b) || /(^|\/)secrets?(\/|\.)/.test(p),
     /\bprocess\.env\b|\bimport\.meta\.env\b|\bDeno\.env\b|\bos\.environ\b|\bgetenv\s*\(|\bENV\[|\$\{\{\s*secrets\.|\bsecrets\.[A-Z_]/],
   ['auth-or-middleware-change', (p) => /(^|\/)(auth|authn|authz|middlewares?|sessions?|guards?|policies|permissions|rbac|login|oauth)(\/|\.|-|_)/.test(p), null],
-  ['new-route', (p, b) => ROUTE_DIR.test(p.replace(WORKSPACE_API, '$1$2/')) || /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/.test(b),
+  ['new-route', (p, b) => ROUTE_DIR.test(p) || ROUTE_FILE.test(b),
     /\b(app|router|server|api|route)\.(get|post|put|patch|delete|all|route)\s*\(|@(Get|Post|Put|Patch|Delete|All|RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\s*\(|export\s+(async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b|export\s+const\s+(GET|POST|PUT|PATCH|DELETE)\s*=/],
   ['mail-or-notification-send', (p, b) => /(mail|notif|sms|push)/.test(b),
     /\b(send_?mail|send_?email|send_?sms|send_?push|send_?notification|nodemailer|createTransport|resend\.emails|sgMail|sendgrid|mailgun|postmark|twilio|SendEmailCommand|ses\.send|messages\.create|web-?push)\b/i],
@@ -780,7 +817,7 @@ export const SURFACE_SIGNALS = ['new-route', 'auth-or-middleware-change', 'migra
  * path selects every such control (its pairs are computed, and reported as delta_pairs when not yet effective);
  * else null (open: `reassess` decides whether a classification may close it).
  */
-export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfaces = [], catalog, inventorySurfaces = [], inventoryPairs = [] } = {}) {
+export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfaces = [], catalog, inventorySurfaces = [], inventoryPairs = [], c5 = false, exempted = null } = {}) {
   const files = asResult(() => normFiles(paths));
   if (files.ok === false) throw new TypeError(files.reasons.join('; '));
   const ids = new Set((catalog?.controls ?? []).map((c) => c.id));
@@ -790,12 +827,7 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
   const carries = (surfaces, set, cls) => surfaces.length > 0 && cls.every((c) => surfaces.some((s) => set.has(`${s.boundary_id}:${c}`)));
   const out = new Map();
   for (const f of files) {
-    const b = f.path.split('/').pop().toLowerCase();
-    const p = f.path.toLowerCase();
-    const testFile = isTestPath(p);
-    for (const [kind, pathTest, lineTest] of RULES) {
-      if (testFile && SURFACE_SIGNALS.includes(kind)) continue; // C5: a test file introduces no boundary
-      if (!(pathTest(p, b) || (lineTest && f.added.some((l) => lineTest.test(l))))) continue;
+    for (const kind of fileKinds(f, c5, exempted)) {
       const id = `${kind}@${f.path}`;
       const cls = SIGNAL_CLASS[kind];
       const mechanical = Array.isArray(cls) && cls.every((c) => ids.has(c));
@@ -810,13 +842,41 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
 }
 
 /**
- * Surface-inventory completeness (C5, F12a): every non-test path of `files` (path strings, or {path, added[]})
- * that raises a surface-introducing signal (SURFACE_SIGNALS, by path or added line) must be the path of a listed
- * surface. Returns the gaps [{ path, kinds }] (empty when complete); callers refuse surface_inventory_incomplete.
+ * The signal kinds one changed file raises, in RULES order. `c5` false: origin/main's detector, unchanged. `c5` true
+ * (block format 3): the same detector plus ROUTE_LINE_V3, minus the C5 narrowings, each one pushed onto `exempted`
+ * ({ path, kind, rule }) when given.
  */
-export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
+function fileKinds(f, c5, exempted) {
+  const b = f.path.split('/').pop().toLowerCase();
+  const p = f.path.toLowerCase();
+  const kinds = [];
+  for (const [kind, pathTest, lineTest] of RULES) {
+    const byPath = pathTest(p, b), byLine = Boolean(lineTest) && f.added.some((l) => lineTest.test(l));
+    const byLineV3 = c5 && kind === 'new-route' && f.added.some((l) => ROUTE_LINE_V3.test(l));
+    if (!(byPath || byLine || byLineV3)) continue;
+    if (c5) {
+      const test = TEST_FILE.test(p);
+      const rule = kind === 'auth-or-middleware-change' && test ? 'test-file'
+        : kind === 'new-route' && test && !ROUTER_ROOT.test(p) ? 'test-file'
+          : kind === 'new-route' && !byLine && !byLineV3 && !ROUTE_DIR.test(p.replace(WORKSPACE_API, '$1$2/')) && !ROUTE_FILE.test(b) ? 'workspace-api-folder' : null;
+      if (rule) { exempted?.push({ path: f.path, kind, rule }); continue; }
+    }
+    kinds.push(kind);
+  }
+  return kinds;
+}
+
+/** Exemption records, unique and sorted by path, signal kind. */
+const dedupExempt = (xs) => [...new Map(xs.map((e) => [`${e.path}\u0000${e.kind}`, e])).values()].sort((a, b) => (a.path + a.kind < b.path + b.kind ? -1 : 1));
+
+/**
+ * Surface-inventory completeness (C5, F12a, block format 3): every path of `files` (path strings, or {path, added[]})
+ * that raises a surface-introducing signal under the format-3 detector (the one reassess uses) must be the path of a
+ * listed surface. Returns the gaps [{ path, kinds }]; the C5 narrowings it applied go to `exempted` (never silent).
+ */
+export function inventoryGaps({ files = [], surfacePaths = [], exempted = null } = {}) {
   const listed = new Set(surfacePaths.map(normPath));
-  const sigs = reassessSignals({ paths: files }).filter((s) => SURFACE_SIGNALS.includes(s.kind) && !listed.has(s.path));
+  const sigs = reassessSignals({ paths: files, c5: true, exempted }).filter((s) => SURFACE_SIGNALS.includes(s.kind) && !listed.has(s.path));
   const by = new Map();
   for (const s of sigs) by.set(s.path, uniqSorted([...(by.get(s.path) ?? []), s.kind]));
   return [...by].map(([path, kinds]) => ({ path, kinds })).sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -953,7 +1013,7 @@ export function reassess(input = {}) {
     let keep = null;
     if (lowerApproved) {
       keep = new Set();
-      for (const s of reassessSignals({ paths: files })) {
+      for (const s of reassessSignals({ paths: files, c5: true })) {
         for (const a of block.surfaces) if (normPath(a.path) === s.path) for (const c of SIGNAL_CLASS[s.kind] ?? []) keep.add(`${a.boundary_id}:${c}`);
       }
     }
@@ -962,7 +1022,8 @@ export function reassess(input = {}) {
     const surfaceFacts = (base) => normFacts(ev, { ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
       ...(vocab.principals ? { principals: ev.unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
     const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces, { lower: lowerApproved, keep }).pairs.map((p) => p.pair_id);
-    const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs });
+    const c5 = block.policy === 3, c5_exempted = [];
+    const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs, c5, exempted: c5 ? c5_exempted : null });
     const basis = [];
     if (block.catalog_digest !== digest) basis.push({ kind: 'catalog_digest_changed' });
     const outside = uniqSorted([...files.map((f) => f.path), ...surfaces.map((s) => s.path)].filter((p) => !contract.some((re) => re.test(p))));
@@ -970,7 +1031,7 @@ export function reassess(input = {}) {
     signals.sort((a, b) => (a.id < b.id ? -1 : 1));
     if (block.policy === 3 && !basis.length) {
       // C5 inventory completeness: a signalling non-test path the plan writes must be a listed surface (typed, before classification).
-      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path) });
+      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path), exempted: [] });
       if (gaps.length) refuse('surface_inventory_incomplete', ...gaps.map((g) => `${g.path}: ${g.kinds.join(', ')} with no surface at its path (add one to the inventory)`));
     }
 
@@ -1012,7 +1073,7 @@ export function reassess(input = {}) {
       delta_pairs, merged_facts: facts, candidate_id, approved_plan_digest: planDigest(input.plan),
       catalog_digest: digest, approved_catalog_digest: block.catalog_digest,
       effective_addendum_digest: sha(canon(addendaPairs)),
-      ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)) } : {}),
+      ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)), c5_exempted: dedupExempt(c5_exempted) } : {}),
     };
     if (outcome === 'ADD_CONTROLS') {
       out.addendum = { pairs: delta_pairs, controls: uniqSorted(delta_pairs.map((p) => parsePairId(p).control_id)), catalog_digest: digest, candidate_id,
@@ -1044,10 +1105,10 @@ async function readJsonArg(name, path) {
   try { return JSON.parse(text); } catch (e) { refuse('bad_input', `--${name} ${path}: ${e.message}`); }
 }
 
-const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>] | obligations --plan <plan.md> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]';
+const USAGE = 'usage: security-plan.mjs select --facts <file|-> [--catalog <path>] | reassess --plan <plan.md> --inventory <json> --changed <json> [--classifications <json>] [--addenda <json>] [--catalog <path>] | obligations --plan <plan.md> --repo <dir> [--addenda <pair ids json>] [--waived <pair ids json>] [--catalog <path>]';
 const FLAGS = { select: { required: ['facts'], optional: ['catalog'] },
   reassess: { required: ['plan', 'inventory', 'changed'], optional: ['classifications', 'addenda', 'catalog'] },
-  obligations: { required: ['plan'], optional: ['addenda', 'waived', 'catalog'] } };
+  obligations: { required: ['plan', 'repo'], optional: ['addenda', 'waived', 'catalog'] } };
 
 export async function main(argv) {
   try {
@@ -1070,8 +1131,11 @@ export async function main(argv) {
       if (!countBlocks(plan)) refuse('plan_block_missing', 'the plan has no <!-- security-plan: --> block in §3a');
       const block = parsePlanSecurityBlock(plan);
       if (!block) refuse('plan_block_invalid', 'the security-plan block is malformed or inconsistent');
-      return obligationMatrix(loaded, block, { addenda: flags.addenda ? await readJsonArg('addenda', flags.addenda) : [],
+      const m = obligationMatrix(loaded, block, { addenda: flags.addenda ? await readJsonArg('addenda', flags.addenda) : [],
         waived: flags.waived ? await readJsonArg('waived', flags.waived) : [] });
+      if (!m.ok) return m;
+      const cited = verifyCitations(block, { root: flags.repo }); // the working tree of --repo (no pending: what exists now)
+      return cited.ok ? { ...m, citations_checked: cited.checked } : cited;
     }
     return reassess({ plan, catalog: loaded, inventory: await readJsonArg('inventory', flags.inventory), changed: await readJsonArg('changed', flags.changed),
       classifications: flags.classifications ? await readJsonArg('classifications', flags.classifications) : [],

@@ -54,8 +54,8 @@ export const approved3 = (catalog) => {
   return s;
 };
 /** A reassess input over approved3: `changed` files, Design Contract src/**, optional classifications/inventory/addenda. */
-export const reIn3 = (catalog, { files = [], classifications = [], inventory = [], addenda = [], plan } = {}) => ({ plan: plan ?? planOf(approved3(catalog)), catalog,
-  inventory: { surfaces: inventory }, changed: { contract_paths: ['src/**'], files }, classifications, addenda });
+export const reIn3 = (catalog, { files = [], classifications = [], inventory = [], addenda = [], plan, contract = ['src/**'] } = {}) => ({ plan: plan ?? planOf(approved3(catalog)), catalog,
+  inventory: { surfaces: inventory }, changed: { contract_paths: contract, files }, classifications, addenda });
 
 /** The bool facts a catalog gate names for `kind` (read from the catalog grammar, as the planner does). */
 export function gatedFacts(catalog, kind) {
