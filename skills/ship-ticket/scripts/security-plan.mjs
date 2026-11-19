@@ -706,10 +706,17 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * path or by added line. A test file is ONLY: a basename `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.go|py|rb|ex|exs`,
  * `*_spec.go|py|rb|ex|exs`, `test_*.py`, or a path under a `__tests__/`, `__mocks__/` or `__fixtures__/` directory.
  * Deliberately NOT: a `test/`, `tests/`, `spec/` or `fixtures/` directory, or a `test.ts` / `ab-test.ts` basename,
- * because file-system routers serve those as real routes (`app/test/route.ts`, `routes/fixtures.ts`).
+ * because file-system routers serve those as real routes (`app/test/route.ts`, `routes/fixtures.ts`); and never a
+ * file under a serve-everything router root (FS_ROUTER: `pages/`, `server/api|routes|middleware/`, a root `api/`).
  */
 const TEST_FILE = /(^|\/)(__tests__|__mocks__|__fixtures__)\/|\.(test|spec|e2e-spec)\.[a-z0-9]+$|_(test|spec)\.(go|py|rb|ex|exs)$|(^|\/)test_[^/]+\.py$/;
-export const isTestPath = (p) => TEST_FILE.test(String(p).toLowerCase());
+/**
+ * File-system routers that serve EVERY file under their root, test-named or not (Next.js Pages Router `pages/`
+ * unless pageExtensions is narrowed; Nuxt/Nitro `server/api|routes|middleware/`; Vercel root `api/` functions):
+ * a test-named file there may be a deployed route, so the exemption never applies under them.
+ */
+const FS_ROUTER = /(^|\/)pages\/|(^|\/)server\/(api|routes|middleware)\/|^api\//;
+export const isTestPath = (p) => { const q = String(p).toLowerCase(); return TEST_FILE.test(q) && !FS_ROUTER.test(q); };
 /**
  * C5 (F12a): an `api/` directory that is a workspace project folder (`apps/api/`, `packages/api/`, `services/api/`,
  * `libs/api/`, `modules/api/`, `projects/api/`) is not a route directory: in a monorepo it holds the whole service

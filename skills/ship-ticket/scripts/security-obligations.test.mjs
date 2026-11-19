@@ -29,6 +29,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as SP from './security-plan.mjs';
@@ -233,7 +234,9 @@ const routeSignal = (path, added = []) => SP.reassessSignals({ paths: [{ path, a
 const ROUTES = ['src/routes/orders.ts', 'apps/api/src/routes/admin-shipments.ts', 'pages/api/orders.ts', 'app/api/orders/route.ts', 'app/test/route.ts',
   'src/routes/+server.ts', 'server/api/orders.ts', 'api/orders.ts', 'src/api/orders.ts', 'apps/api/src/api/orders.ts', 'app/controllers/orders_controller.rb',
   'internal/handlers/orders.go', 'src/webhooks/stripe.ts', 'src/endpoints/x.py', 'packages/api/routes.ts', 'src/routes/fixtures/index.ts', 'src/routes/ab-test.ts',
-  'src/routes/test.ts', 'src/routes/latest.ts', 'src/lib/api.ts'];
+  'src/routes/test.ts', 'src/routes/latest.ts', 'src/lib/api.ts',
+  // serve-everything router roots: a test-named file there may be a deployed route
+  'pages/api/orders.test.ts', 'pages/api/__tests__/x.ts', 'server/api/orders.spec.ts', 'api/orders.test.ts'];
 
 test('[S47] [S48] C5: real route and handler files (repo fixtures and framework conventions) still raise new-route', () => {
   for (const p of ROUTES) assert.equal(routeSignal(p), true, p);
@@ -310,7 +313,7 @@ test('security-plan.mjs obligations CLI prints the matrix (manual flow, no engin
   const dir = dirname(OB.GATED_PATH);
   const plan = join(dir, 'plan.md');
   writeFileSync(plan, OB.planOf(OB.approved3(GC)));
-  const r = spawnSync(process.execPath, [new URL('./security-plan.mjs', import.meta.url).pathname, 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH], { encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
   assert.equal(out.code, 'obligations');
@@ -418,7 +421,7 @@ test('init: an engine whose semantics lack version 3 refuses a format-3 run (pol
   // without a RUN-STATE block or START (a plan still in Plan Mode)
   const draft = join(fx.root, 'draft.md');
   writeFileSync(draft, readFileSync(fx.planFile, 'utf8').split(DAG.BEGIN)[0]);
-  const cli = spawnSync(process.execPath, [new URL('./run-engine.mjs', import.meta.url).pathname, 'preflight', '--repo', fx.repo, '--ticket', 'T-1', '--dag', fx.dagFile, '--plan', draft], { encoding: 'utf8' });
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL('./run-engine.mjs', import.meta.url)), 'preflight', '--repo', fx.repo, '--ticket', 'T-1', '--dag', fx.dagFile, '--plan', draft], { encoding: 'utf8' });
   assert.equal(cli.status, 0, cli.stderr); assert.equal(JSON.parse(cli.stdout).code, 'preflight_ok');
   // a dropped pair still in the DAG: the same refusal init gives
   const bad = obFx(t, { coverage: (c) => [...c, { boundary: 'orders', control: fx.sel.na_pairs[0].control_id, node: 'api', specs: [{ file: SPEC, name: 'dropped' }] }] });

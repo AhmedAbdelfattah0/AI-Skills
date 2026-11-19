@@ -250,7 +250,10 @@ out-of-plan path still count. A test file is only one of these:
 
 A `test/`, `tests/`, `spec/` or `fixtures/` directory is deliberately **not** a test
 file, because file-system routers serve `app/test/route.ts` and
-`routes/fixtures.ts` as real routes.
+`routes/fixtures.ts` as real routes. No file under a router root that serves every
+file is a test file either: `pages/` (the Next.js Pages Router serves
+`pages/api/x.test.ts` unless `pageExtensions` is narrowed), `server/api/`,
+`server/routes/`, `server/middleware/` and a root `api/`.
 
 A workspace project folder named `api` (`apps/api/`, `packages/api/`,
 `services/api/`, `libs/api/`, `modules/api/`, `projects/api/`) is no longer a route
