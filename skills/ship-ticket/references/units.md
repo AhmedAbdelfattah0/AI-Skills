@@ -247,8 +247,10 @@ records it.
   carries a risk label, or the ticket has `config.riskLabels`) also needs a
   second opinion from a provider other than the primary's (Codex for the Opus
   primary, whatever the host: on a Codex host the counterpart Claude would share
-  the primary's provider and is refused), on its review and on its confirmation. If the counterpart is unavailable or its usage limit is
-  reached, run CodeRabbit on the unit's paths and record it as route `coderabbit`
+  the primary's provider and is refused), on its review and on its confirmation. The
+  engine refuses a Fable second opinion here (`reviewers_same_provider`), so this is the
+  one place CodeRabbit is still a required route: if Codex is unavailable or its usage
+  limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit`
   with identity `coderabbit:<model>`. If neither can run, stop and ask
   (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the
   gate requires the second opinion to come from a different provider than the
@@ -316,7 +318,7 @@ it. The write set of the repair and what must be reviewed again follow the class
 | Local defect inside one unit | that unit's declared writes (a unit FAIL: `gate unit-review`) | that unit's checks and its one targeted confirmation |
 | Shared contract (schema, API shape, event, generated client) | the contract's owner node plus the readers' closure (inside one unit: a unit repair; across units: the final review's repair) | the contract unit and every unit that reads it (their evidence goes stale), then their unit reviews |
 | Integration defect (the units are each right, the join is wrong) | the integration node and the affected tests (the final review's repair) | the integration node's checks and the final review's targeted confirmation |
-| Security or architecture | the full affected closure, through the final review's repair | the full closure, plus the opposite-model second opinion on the repair before the confirmation |
+| Security or architecture | the full affected closure, through the final review's repair | the full closure, plus the second opinion (Codex, else Fable) on the repair before the confirmation |
 
 A finding whose write set leaves the unit is `repair_outside_unit` at the unit
 gate: leave it to the final review, whose one repair batch may cross units (record
@@ -328,9 +330,8 @@ repair still spends the run's ceilings; routing never adds a repair round.
 
 When unit reviews exist (`config.unitReview`), the final review in [review.md](review.md) is
 mandatory and runs on the exact assembled candidate, with the same Opus primary,
-the mandatory opposite-model second opinion (Codex for a Claude host; CodeRabbit
-if it is unavailable or out of quota; if none can run, stop and ask with
-`WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
+the mandatory second opinion (Codex; a fresh Fable session if it is unavailable
+or out of quota; if neither can run, stop and ask with `WAIT_FOR_USER`), and the same reconcile, one-repair, targeted-confirmation and
 owner-RETRY policy. Unit reviews do not replace it, and aggregated unit PASSes are
 never accepted in its place.
 

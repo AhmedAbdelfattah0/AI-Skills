@@ -34,7 +34,7 @@ const DEFAULT_SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Every phase of a full run, in order. 'START' is the "Workflow start" row. */
 export const PHASES = ['START', 'UNDERSTAND', 'PLAN', 'BUILD', 'PROVE', 'REVIEW', 'SHIP'];
-export const FLAGS = ['ui', 'security', 'elevated', 'codex', 'units', 'split', 'internals'];
+export const FLAGS = ['ui', 'security', 'elevated', 'codex', 'units', 'split', 'internals', 'testkinds'];
 
 /** The declared meaning of each "Entering" cell: the phases it applies to and the flag that gates it. */
 const ENTERING = {
@@ -49,6 +49,7 @@ const ENTERING = {
   'On demand, when the operator card names it': { phases: ['BUILD'], flag: 'internals' },
   PROVE: { phases: ['PROVE'], flag: null },
   'PROVE with UI': { phases: ['PROVE'], flag: 'ui' },
+  'PROVE when the plan opts into test kinds': { phases: ['PROVE'], flag: 'testkinds' },
   REVIEW: { phases: ['REVIEW'], flag: null },
   'PLAN, PROVE or REVIEW of security-relevant work': { phases: ['PLAN', 'PROVE', 'REVIEW'], flag: 'security' },
   'REVIEW with elevated counterpart': { phases: ['REVIEW'], flag: 'elevated' },

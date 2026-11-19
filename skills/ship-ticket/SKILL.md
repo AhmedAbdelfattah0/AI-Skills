@@ -48,6 +48,18 @@ Do not ask whether to continue work the approved plan already authorizes. A
 recoverable timeout or optional companion failure invokes its fallback and
 continues; reporting the degradation is not a pause.
 
+**The approved plan is scoped authorization.** It authorizes that ticket's (or
+that wave's) approved scope only, never later tickets and never permanently.
+After the native approval, run implementation, tests, review, repair,
+verification and PR preparation without routine questions. For a routine
+decision inside the approved scope, apply the recommended default and record it
+in the plan's RUN-STATE; a minor complementary change inside the Design Contract
+that the ticket needs to be complete is allowed and recorded the same way. Stop
+with **WAIT_FOR_USER** only for the cases listed in "When execution may yield":
+a material scope change or Design Contract expansion, a security or assurance
+exception, a destructive action, an unresolved blocker, or a decision that needs
+explicit owner authority.
+
 ## Measurement
 
 Load [references/observability.md](references/observability.md) at workflow start.
@@ -68,10 +80,10 @@ and execution continues; measurement must never become a new blocker.
 | Phase | Outcome |
 |---|---|
 | **UNDERSTAND** | full tracker specification, startable ticket, detected stack and commands, pinned UI design, review capability preflight |
-| **PLAN** | cross-model debated, human-approved plan and Design Contract |
+| **PLAN** | one native-approved, complete plan (cross-model debated when security-sensitive) and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
-| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory opposite-model second opinion (host counterpart, CodeRabbit fallback); at most one repair and targeted confirmation |
+| **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory second opinion (Codex, else Fable); at most one repair and targeted confirmation |
 | **SHIP** | one commit, one push, one PR, green CI and completed tracker item |
 
 Phases are ordered, but independent work inside every phase is dependency-driven
@@ -86,14 +98,14 @@ Load a phase reference only when entering that phase:
 | Entering | Load |
 |---|---|
 | Workflow start | [references/observability.md](references/observability.md) |
-| UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) |
-| PLAN | [references/plan.md](references/plan.md) and [references/cross-model.md](references/cross-model.md) |
+| UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) (load it once; PLAN and REVIEW reuse it, reloading only after a context compaction) |
+| PLAN | [references/plan.md](references/plan.md) |
 | BUILD | this spine and [references/brief.md](references/brief.md) |
 | PROVE | [references/prove.md](references/prove.md) |
+| PROVE when the plan opts into test kinds | [references/test-kinds.md](references/test-kinds.md) |
 | PROVE with UI | [references/design-parity.md](references/design-parity.md) |
 | REVIEW | [references/review.md](references/review.md) |
 | PLAN, PROVE or REVIEW of security-relevant work | [references/security-risk.md](references/security-risk.md) |
-| REVIEW with elevated counterpart | [references/cross-model.md](references/cross-model.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 | PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |
 | BUILD, PROVE or REVIEW when any DAG node has `unit` | [references/units.md](references/units.md) |
@@ -212,10 +224,11 @@ table, and an in-flight worker is not one of them.
   any new or changed `false`/disabled feature switch and blocks on it, unless
   the human asked for that switch to be off (record the request in the plan).
 - Coverage is applicability-driven. Every ticket checks every applicable rule,
-  screen and trust boundary, and every ticket gets the mandatory opposite-model
-  second opinion (the host's counterpart — Codex for a Claude host, Claude for a
-  Codex host; CodeRabbit when it is unavailable or out of quota) —
-  a second opinion, not a second rule catalogue.
+  screen and trust boundary, and every ticket gets the mandatory second opinion
+  (Codex in a fresh session when available and within quota; otherwise a fresh
+  Fable session, recorded as a same-provider independent review; CodeRabbit is
+  optional extra coverage, never required) — a second opinion, not a second rule
+  catalogue.
 - Runtime attacks target only a local disposable instance. Never production or
   shared staging.
 - One ticket produces one branch, one final commit and one PR. The only
@@ -233,9 +246,9 @@ Determine these during UNDERSTAND and record them in the plan:
 
 - a primary reviewer independent from the builder is available;
 - whether **STANDARD** or **ELEVATED** applies;
-- host identity and the opposite-model counterpart: Claude host → Codex;
-  Codex host → Claude, following [references/cross-model.md](references/cross-model.md);
-- whether that counterpart and its fallback are available;
+- host identity, the PLAN counterpart and the REVIEW second-opinion route
+  (Codex, else Fable), following [references/cross-model.md](references/cross-model.md);
+- whether Codex is available and within quota, and whether Fable is available;
 - whether the orchestrator can run that mandatory second opinion concurrently
   with the primary review;
 - the available concurrent worker width and whether the carrier safely supports
@@ -249,7 +262,12 @@ broad cross-subsystem changes, or an explicit repository/user requirement. The
 preflight may also select it when the reviewed scope has a material, explicitly
 recorded uncertainty.
 
-A structural path floor runs alongside your own judgement. The repository declares its
+A structural path floor runs alongside your own judgement, only when the repository declares
+it. When `.ship-ticket/risk-paths.json` does not exist at the base commit and the plan does not
+opt into test kinds, skip `risk-floor.mjs` and record the single plan line `risk_floor: not
+declared`; your assessment is then the only protection. An opted-in test-kinds plan still runs
+`check` and records its strict record line (`declaration=none`), because test kinds require it. The
+repository declares its
 sensitive paths in `.ship-ticket/risk-paths.json` (read from the base commit; see
 [references/risk-paths.example.json](references/risk-paths.example.json); a pattern also covers
 everything below a match). `node scripts/risk-floor.mjs check --base <c> --planned-paths <json>
@@ -274,7 +292,7 @@ Text/keyword matching was evaluated and dropped; a measured corpus experiment is
 
 If the independent primary route or enforceable deadline is absent, follow the
 capability/explicit-exception procedure in the review reference before REVIEW
-begins. A missing counterpart falls back to CodeRabbit; if both are missing, use
+begins. Missing Codex falls back to a fresh Fable session; if neither can run, use
 **WAIT_FOR_USER** — the second opinion is mandatory. Missing concurrency only
 serializes the two reviews.
 
@@ -355,8 +373,8 @@ critical.
 | vapt | run the family-appropriate reduced attacks from [references/prove.md](references/prove.md), commit them as tests, and name omitted families |
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
-| selected counterpart or its PLAN carrier | bounded recovery, then **WAIT_FOR_USER** for restored CLI access or an explicit solo-planning waiver; never silently present solo work as a completed debate |
-| selected counterpart during REVIEW (unavailable, failed, or usage limit reached) | run CodeRabbit on the same candidate; if CodeRabbit is also unavailable, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped |
+| selected counterpart or its PLAN carrier, when the debate is required | bounded recovery, then debate with a fresh Fable session recorded `plan_debate.status: DEGRADED` (same provider, not cross-model agreement); if Fable also cannot run, **WAIT_FOR_USER** for restored access or an explicit solo-planning waiver |
+| Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`, identity `claude:fable`); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | review concurrency | run the primary review and the second opinion one after the other; both are still required |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
@@ -394,24 +412,31 @@ becomes a plan risk, **WAIT_FOR_USER**, or **FAIL**; it does not create another 
 
 > Preparing a buildable plan and asking for approval.
 
-Load [references/plan.md](references/plan.md) and
-[references/cross-model.md](references/cross-model.md).
+Load [references/plan.md](references/plan.md); cross-model.md is already loaded
+from UNDERSTAND.
 
-Use the host-specific native mode procedure in the plan reference before PLAN
-research: Claude uses `EnterPlanMode`; Codex uses its actual Plan collaboration
-mode. Interactive Codex in Default mode must request the client's `/plan` switch
-when no native transition tool is exposed, not silently take the headless path.
-Calling this phase PLAN is not a substitute for changing the host mode. Keep
-native Plan Mode active through research, drafting, deterministic prechecks, the
-bounded read-only Claude–Codex debate, and reconciliation. The host responds to
-findings and the counterpart checks revisions; stop at convergence or the recorded
-response/time budget, then present unresolved decisions honestly.
+In an interactive session the orchestrator owns the Plan Mode lifecycle; follow
+the host-specific procedure in the plan reference. On Claude, `EnterPlanMode` and
+`ExitPlanMode` are deferred tools: the first action of PLAN is to load them, when
+they are not already callable, with ToolSearch query
+`select:EnterPlanMode,ExitPlanMode`, then enter Plan Mode before any PLAN
+research. Codex uses its actual Plan collaboration mode; interactive Codex in
+Default mode must request the client's `/plan` switch when no native transition
+tool is exposed, not silently take the headless path. Calling this phase PLAN is
+not a substitute for changing the host mode. Research subagents (Plan, Explore,
+Opus planning agents) work inside the orchestrator's Plan Mode and return
+findings; they never enter or exit it. Keep native Plan Mode active through
+research, drafting, deterministic prechecks, the bounded read-only debate when it
+is required, and reconciliation.
 
-Present the reconciled plan through the host's native approval handoff:
-`ExitPlanMode` on Claude, the host-prescribed final plan format on Codex.
-Hold `WAIT_FOR_USER` until answered. Do not exit Plan
-Mode before the debate result has been reconciled, and do not treat either model's
-agreement as human approval.
+The orchestrator writes the complete plan (every template section filled, no
+stubs or placeholders) to the native plan file and presents it through the host's
+native approval handoff: `ExitPlanMode` on Claude, the host-prescribed final plan
+format on Codex. A wave uses one `ExitPlanMode`. Hold `WAIT_FOR_USER` until
+answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
+plan approval; `AskUserQuestion` may only resolve planning questions before
+`ExitPlanMode`. Do not exit Plan Mode before a required debate has been
+reconciled, and do not treat either model's agreement as human approval.
 
 There is exactly one plan approval. Once it is approved and the host permits
 implementation, transition to **CONTINUE** and execute after-approval actions immediately.
@@ -419,9 +444,11 @@ Never ask the user to also say “go”, “continue”, or “confirm”. In th
 fallback, the first explicit approval of the presented reconciled plan has the
 same effect and must not be followed by another approval prompt.
 
-Only for a genuinely headless carrier or explicit user opt-out, follow the
-headless fallback below and make
-the ordinary approval request **WAIT_FOR_USER**.
+Native Plan Mode is unavailable only when the ToolSearch query returns neither
+tool (a genuinely headless carrier) or the user explicitly opted out of Plan
+Mode. Only then follow the headless fallback below, record
+`native_plan_mode: unavailable` with the reason, and make the ordinary approval
+request **WAIT_FOR_USER**.
 
 After approval:
 
@@ -537,8 +564,9 @@ Load [references/review.md](references/review.md).
 Compute the candidate ID. Dispatch one checklist-backed independent primary
 workflow. For a material full-stack diff, partition frontend, backend and shared
 contract coverage as defined in the review reference; otherwise use one reviewer.
-On **ELEVATED**, start the selected opposite-model opinion concurrently in a fresh
-session when available. Keep the planning debate out of the bounded code review.
+On every ticket, start the mandatory second opinion (Codex, else Fable)
+concurrently in a fresh session when resources allow. Keep the planning debate
+out of the bounded code review.
 
 Reconcile once. A clean primary PASS continues directly to SHIP. Accepted
 findings receive one consolidated repair batch and one targeted confirmation by
@@ -571,8 +599,10 @@ dependencies:
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
 - **Survey and planning.** Use one survey agent. Use the cross-model plan debate
-  when the risk floor or your own assessment is ELEVATED, or the ticket is money or auth. Skip it, and
-  record the skip, only when the floor is STANDARD, your own assessment is also STANDARD and the ticket is neither money nor auth. The REVIEW second opinion is never skipped (see REVIEW).
+  only for security-sensitive work (spine "Security sensitivity": auth,
+  multi-tenancy, billing, payments, money, secrets). For every other ticket,
+  including other ELEVATED ones, skip it and record `plan_debate.status: SKIPPED`
+  with the reason. The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
@@ -588,16 +618,18 @@ dependencies:
   session model). Planning, review and reconciliation run as `strong` (Opus)
   subagents.
 - **Ship threshold.** The plan records up front which residual findings ship
-  with a follow-up ticket instead of another round. Default: display-only
-  stale-state or cosmetic issues of medium severity or lower, with server data
-  correct, ship with a follow-up; anything touching data integrity, security,
-  tenancy or money blocks. Reconciliation applies the recorded threshold
-  without asking the human.
+  with a follow-up ticket instead of another round. A residual is a finding this
+  execution can no longer fix: one the confirmation reports, or one outside the
+  Design Contract. An in-scope finding found while the repair batch is unspent is
+  always `fix`. Default: display-only stale-state, cosmetic or test-hygiene issues
+  of medium severity or lower, with server data correct, ship with a recorded
+  follow-up tracker item; anything touching data integrity, security, tenancy or
+  money blocks. Reconciliation applies the recorded threshold without asking the
+  human.
 - **Concurrency routing.** A node that changes client or server async state
   ordering (state machines, optimistic concurrency or CAS, request ordering,
   client-side async state with races) carries the `concurrency` risk label and
-  routes `strong`. Its repair gets the second opinion from the host's counterpart
-  (Codex for a Claude host, Claude for a Codex host; CodeRabbit fallback) before
+  routes `strong`. Its repair gets the second opinion (Codex, else Fable) before
   the primary confirmation, not after it; it returns `PASS` or `FAIL`. Record it as
   the confirmation's `second_opinion`: `gate review` requires it when the repair
   overlaps a `concurrency`- or `security`-labelled node, and counts it whenever supplied.
@@ -663,24 +695,38 @@ any candidate-byte change is **FAIL** and never silently reopens REVIEW.
 
 ## When execution may yield
 
-Use **WAIT_FOR_USER** only for:
+This list is the single owner of the stop points. Use **WAIT_FOR_USER** only for:
 
-- plan approval or approval of changed scope;
-- a required native host mode transition that has no agent-callable control;
-- a required PLAN counterpart that failed after bounded recovery, unless the user explicitly waived cross-model planning;
-- missing acceptance criteria or unresolved product behavior;
-- a live blocker, ownership conflict or unknown WIP history;
-- an uncommitted or missing UI design reference;
-- no safe local environment for required attacks;
-- an explicit [NN] waiver;
-- absence of the required independent primary reviewer;
-- absence of enforceable primary-review deadlines without an explicit advisory-only exception;
-- credentials, permissions or external authority only the user can provide.
+- **plan approval and material scope change:** the one native plan approval, a
+  Design Contract expansion, or changed scope;
+- **security or assurance exceptions:** an explicit [NN] waiver, an applicable
+  security check left unverified at release, no safe local environment for
+  required attacks, or enforceable primary-review deadlines missing without an
+  explicit advisory-only exception;
+- **destructive actions:** squashing, resetting or deleting work you did not
+  create (unknown WIP history), or a production-changing operation;
+- **unresolved blockers after bounded recovery:** a required native host mode
+  transition that has no agent-callable control, no independent primary
+  reviewer, no usable second opinion from Codex or Fable, a required PLAN debate
+  that neither Codex nor Fable could hold (unless the user waived it), an
+  uncommitted or missing UI design reference, or a refusal of a missing or
+  invalid security catalog;
+- **explicit owner authority:** missing acceptance criteria or unresolved
+  product behavior, a live blocker or ownership conflict (including another
+  actor changing the worktree or a base move that overlaps owned paths), an
+  unproven subscription-billing route, or credentials, permissions and external
+  authority only the user can provide.
+
+Everything else inside the approved scope takes the recommended default and is
+recorded: for example, a fixable input refusal is corrected and rerun, a Codex
+outage switches to Fable, and a manual ship-ready confirmation replaces a
+degraded harness check.
 
 Use **FAIL** for:
 
 - a PROVE third repair batch would be required;
-- REVIEW confirmation fails or requests another candidate change;
+- REVIEW confirmation fails or requests another candidate change (a residual
+  within the plan's recorded ship threshold is a follow-up, not a failure);
 - a reviewer result overflows with blockers or majors;
 - candidate identity changes unexpectedly during REVIEW or before commit;
 - deterministic CI fails after the reviewed commit;
@@ -702,6 +748,13 @@ message look like completion.
   that stopped. Do not repeat the planning debate. When an engine state file
   exists, run `run-engine.mjs resume`: it reconciles attempts, staleness and
   pending events, and never starts a second writer.
+- Repeated failure: when a finding or failure repeats, do not keep patching.
+  Determine whether the cause is the plan, the implementation, the test or
+  validation mechanism, the review finding itself, or the technical approach.
+  Challenge a wrong finding with evidence (`reject — factually wrong`) and
+  reconsider the approach. A revised plan goes back through the one native
+  approval (changed plan, below); a change beyond the approved scope needs the
+  owner. This adds no repair batch or review round.
 - Failed REVIEW: preserve its event. A user-authorized retry reuses the approved
   plan when scope is unchanged, reruns affected PROVE evidence, and starts one new
   bounded REVIEW execution with a new `review_execution` ID and predecessor under
@@ -723,10 +776,13 @@ This skill orchestrates; companion skills own their rule catalogues and detailed
 methods. Repository instructions outrank this skill. Read both AGENTS.md and
 CLAUDE.md when present and follow pointers rather than duplicating them.
 
-**Close gaps in the same run, don't defer them by default.** When PLAN, PROVE or
-REVIEW confirms a real gap outside the Design Contract, ask the user once, as soon
-as it is confirmed. Batch every open gap into one `WAIT_FOR_USER` question, and
-offer these options, recommending the first:
+**Close gaps in the same run, don't defer them by default.** A residual within
+the plan's recorded ship threshold is not a gap question: it ships with a
+recorded follow-up tracker item (REVIEW, Ship threshold). When PLAN, PROVE or
+REVIEW confirms any other real gap outside the Design Contract, closing it is a
+material scope change: ask the user once, as soon as it is confirmed. Batch every
+open gap into one `WAIT_FOR_USER` question, and offer these options, recommending
+the first:
 
 1. **Fold it into this ticket.** This is a Design Contract expansion and returns
    to human approval as the Resume rules require. After approval, route the gap
@@ -750,10 +806,12 @@ offer these options, recommending the first:
 
 Never file a follow-up silently. Do not expand the Design Contract without that
 approval. **A defect
-inside a Design Contract path is never a follow-up**: fix it before the freeze
-(REVIEW's repair batch fixes the whole defect class, not the cited line). The
-COMPLETE report carries no "follow-ups" list for the user to pick up; if an
-in-scope residue is found after merge, ship the fix, then report it.
+inside a Design Contract path is never a follow-up while the repair batch is
+unspent**: fix it before the freeze (REVIEW's repair batch fixes the whole defect
+class, not the cited line). The COMPLETE report carries no untracked
+"follow-ups" for the user to pick up: it links each follow-up tracker item the
+ship threshold opened; if an in-scope residue is found after merge, ship the fix,
+then report it.
 
 The user merges the PR and runs any requested context compaction; this skill
 does neither.

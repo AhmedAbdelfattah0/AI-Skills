@@ -19,7 +19,7 @@ node scripts/brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--re
 - `--t0` is optional and only for a repository that declares T0 fast checks (`references/prove.md`). It adds
   the instruction to run `scripts/fast-checks.mjs run` and report the result as a fifth key `t0`. Without it the
   brief is byte-identical to what it was before T0 existed. `--out` may not be the `--t0` file.
-- `--test-kinds` is optional: the output of `scripts/test-kinds.mjs require` for the plan (`references/prove.md`,
+- `--test-kinds` is optional: the output of `scripts/test-kinds.mjs require` for the plan (`references/test-kinds.md`,
   risk-triggered test kinds). It lists the required kinds and plan lifecycle items under Required tests and asks for
   a report key `test_titles`. A `not_declared` requirement changes nothing; a refused one refuses the brief.
 - `--out` is the brief file. For an engine node, point the node's `promptFile` at it.

@@ -41,24 +41,44 @@ approved plan immediately once the host permits implementation.
 
 ### Claude
 
-When `EnterPlanMode` and `ExitPlanMode` are available, use them. After the
-predeclared PLAN timing markers, invoke `EnterPlanMode` before PLAN research or
-critique unless the session is already in that mode. The PLAN phase name, a
-read-only promise, and a model debate are not replacements for the host
-permission mode: Plan Mode mechanically restricts Claude to read-only
-exploration.
+In an interactive session the orchestrator owns the Plan Mode lifecycle.
+`EnterPlanMode` and `ExitPlanMode` are deferred tools in the main session, so
+the first action of PLAN is to load them, when they are not already callable,
+with ToolSearch query `select:EnterPlanMode,ExitPlanMode`. Then write the
+predeclared PLAN timing markers and invoke `EnterPlanMode` before any PLAN
+research or critique, unless the session is already in that mode. The tools are
+unavailable only when that query returns neither tool (a headless carrier) or
+the user explicitly opted out of Plan Mode; a tool that is merely not loaded yet
+is not unavailable. The PLAN phase name, a read-only promise, and a model debate
+are not replacements for the host permission mode: Plan Mode mechanically
+restricts Claude to read-only exploration.
 
-Read-only Plan or Explore subagents are research tools used *inside* Plan Mode;
-they never replace it, and an approval typed in chat is not the `ExitPlanMode`
-approval. If you notice you drafted without entering Plan Mode, enter it now,
-present the plan through `ExitPlanMode`, and record the miss in the run state.
+Research subagents (Plan, Explore, Opus planning or architecture agents) work
+*inside* the orchestrator's Plan Mode: brief them read-only, tell them never to
+call `EnterPlanMode` or `ExitPlanMode`, and take back their findings. They never
+replace Plan Mode and never present the plan. The orchestrator writes the
+complete plan to the native plan file and presents it with `ExitPlanMode`. If
+you notice you drafted without entering Plan Mode, enter it now, present the plan
+through `ExitPlanMode`, and record the miss in the run state.
+
+**Only `ExitPlanMode` approves.** Chat text, an `AskUserQuestion` answer and a
+typed "approve" are not plan approval; never ask the user to type one.
+`AskUserQuestion` is allowed only to resolve planning questions before
+`ExitPlanMode`, and its answers are clarification. The headless fallback below
+is the only exception.
+
+**The plan is complete before it is presented.** Every template section is
+filled with repository facts: real paths, the DAG, the risks, section 3b and the
+routing. No stub, "TBD", "to be decided" or placeholder remains; an open product
+question is either resolved first or stated in Outstanding decisions with a
+recommendation.
 
 **Waves.** For several tickets handed over together, enter Plan Mode once,
 draft every ticket's plan there (one section per ticket, each with its own
 scope, contract and risks), and present them in a single `ExitPlanMode` call.
 On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
 its own START event and digest. A ticket whose plan must wait for a sibling
-(an ELEVATED-floor or money/auth debate, an unmerged dependency) goes through Plan Mode again when
+(a security-sensitive debate, an unmerged dependency) goes through Plan Mode again when
 its turn comes; never start BUILD on a wave ticket whose plan was not in an
 approved `ExitPlanMode`.
 
@@ -78,15 +98,16 @@ before the complete plan was presented is not plan approval.
 
 ### Genuinely headless fallback
 
-Use this only when the carrier has no native interactive planning surface (for
-example, a non-interactive execution), or the user explicitly authorizes plain
-approval instead. An interactive Codex session without Claude's tool names does
+Use this only when the carrier has no native interactive planning surface (the
+ToolSearch query returned neither tool, for example a non-interactive
+execution), or the user explicitly opted out of Plan Mode. An interactive Codex session without Claude's tool names does
 not qualify. If native mode was explicitly requested and is genuinely unsupported,
 report that limitation and ask for a supported host or explicit fallback choice.
 Otherwise use the spine's headless fallback:
-keep research read-only, run the bounded debate, create the ticket branch before saving
-the pending artifact, and request human approval without implementing. Record
-`native_plan_mode: unavailable` in the plan metadata.
+keep research read-only, run the bounded debate when it is required, create the
+ticket branch before saving the pending artifact, and request human approval
+without implementing. Record `native_plan_mode: unavailable` and its reason in
+the plan metadata.
 
 ## The template
 
@@ -101,7 +122,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      native_plan_mode: active|already_active|unavailable
      plan_mode_carrier: codex|claude|headless
      host_agent: claude|codex|other|unknown
-     counterpart_agent: codex|claude|other|unavailable
+     counterpart_agent: codex|claude|fable|other|unavailable
      plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED|SKIPPED}
      worker_width: <available concurrent workers>
      parallelism_degradations: []
@@ -110,8 +131,8 @@ Use it exactly — same headings, same order, so every plan reads the same way.
      ui_required: <bool>                 contract owns a screen OR diff touches the view layer
      review_profile: STANDARD|ELEVATED
      review_profile_reasons: [<evidence-backed trigger>]
-     risk_floor: <the `risk-floor.mjs check` record_line (planned paths); `reassess` reads exactly this line>
-     risk_reassess: <the `reassess` record_line (actual changed paths), recorded before release>
+     risk_floor: <the `risk-floor.mjs check` record_line (planned paths), or `not declared` when the base has no `.ship-ticket/risk-paths.json` and the plan does not opt into test kinds>
+     risk_reassess: <the `reassess` record_line (actual changed paths), recorded before release; omitted when risk_floor is `not declared`>
      review_timeouts: {primary: 12m, optional: 10m, confirmation: 6m}
      owned_screens:                      one entry per screen:
        - impl: <path>
@@ -123,7 +144,7 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
-<The structural path floor (`risk-floor.mjs`, project paths from `.ship-ticket/risk-paths.json` at base) and your semantic assessment both apply: the review profile is the higher of the two and of the recorded claim. A floor of ELEVATED requires review ELEVATED and the bounded §7 debate. A floor only raises, and an unmatched path is not evidence of low risk. Git-ignored untracked files are outside release scope (a force-added one appears in the index/HEAD diffs); release-gating `reassess` should use `--head <final commit sha>`, since WORKTREE is a snapshot. Advisory, not enforced until the driver wiring (S-23/S-24). Deferred: a plan-record check (exactly one strict floor-record header line, final >= floor and claim, review_profile >= final, debate-status allowlist, duplicate keys fail) and a measured text-matching corpus experiment (findings of the dropped keyword floor: lowerCamel, digit-adjacent, single-character separators, encodings, inflections).>
+<The structural path floor (`risk-floor.mjs`, project paths from `.ship-ticket/risk-paths.json` at base) and your semantic assessment both apply: the review profile is the higher of the two and of the recorded claim. A floor of ELEVATED requires review ELEVATED; the bounded §7 debate runs only for security-sensitive work. A floor only raises, and an unmatched path is not evidence of low risk. Git-ignored untracked files are outside release scope (a force-added one appears in the index/HEAD diffs); release-gating `reassess` should use `--head <final commit sha>`, since WORKTREE is a snapshot. Advisory, not enforced until the driver wiring (S-23/S-24). Deferred: a plan-record check (exactly one strict floor-record header line, final >= floor and claim, review_profile >= final, debate-status allowlist, duplicate keys fail) and a measured text-matching corpus experiment (findings of the dropped keyword floor: lowerCamel, digit-adjacent, single-character separators, encodings, inflections).>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 
@@ -188,6 +209,16 @@ Excluded: <control: reason from the catalog, or none>.
 security-pairs sha256:<hex>
 <!-- security-plan: {...} -->
 
+### 3b. Impact and check applicability
+<Always required. One row per component, flow or dependency the change touches. 3a's facts cite the business flows and data named here. Rules below the template.>
+
+| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |
+|---|---|---|---|---|---|
+| <checkout total calculation> | <business · data-integrity: wrong charge> | <unit + `[kind:negative]` test; VAPT-ABUSE-04; primary review> | <PROVE> | <a repair touches pricing> | <planned> |
+| <edge rate limit on /login> | <security: credential stuffing> | <Cloudflare rate-limiting rule, read-only API check (`cloudflare` skill)> | <external — needs: read-only Cloudflare API token scoped to the zone> | <the rule or route changes> | <unverified: no token in this run> |
+
+Not applicable: <check>: <one-line reason>, ...
+
 ## 4. How I'll prove it works
 - <one bullet per build step: the test or check that shows it's done>
 - <security-sensitive: the failing test that comes FIRST>
@@ -200,8 +231,9 @@ security-pairs sha256:<hex>
 <one line: the other approach considered, and why not>
 
 ## 7. Cross-model planning debate
+<Security-sensitive work only; otherwise one line: `SKIPPED: <reason>`.>
 **Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
-**Result:** <CONVERGED / UNRESOLVED / DEGRADED and why>
+**Result:** <CONVERGED / UNRESOLVED / DEGRADED (Fable stood in for Codex: same provider, not cross-model agreement) and why>
 **Draft:** <final version; last version actually checked by counterpart>
 **Timing:** <start/end UTC, calls attempted, responses received, total budget>
 
@@ -218,9 +250,9 @@ needed; or none>. Model agreement is advice, not approval.
 | parity | <reference-backed screen paths, or not triggered> | primary workflow's frontend partition performs one complete comparison; a repair gets only a targeted affected-slice confirmation |
 | attack inventory + design | <trust boundaries, or not triggered> | inventory may fan out; live attacks stay serial per shared environment, while already-isolated environments may overlap |
 | rule coverage | <frontend/backend/shared families and stack references selected> | one primary workflow; material full-stack coverage partitions by ownership and joins at the contract seam |
-| second opinion (mandatory) | every ticket | host counterpart (CodeRabbit fallback), concurrent with the primary workflow when possible |
+| second opinion (mandatory) | every ticket | Codex in a fresh session when available and within quota, else a fresh Fable session (same-provider independent review); CodeRabbit optional extra coverage; concurrent with the primary workflow when resources allow |
 
-**Ship threshold:** <which residual findings ship with a follow-up ticket instead of another round. Default: display-only stale-state or cosmetic issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. Reconciliation applies this without asking the human.>
+**Ship threshold:** <which residual findings (found by the confirmation, or outside the Design Contract) ship with a recorded follow-up tracker item instead of another round. Default: display-only stale-state, cosmetic or test-hygiene issues of medium severity or lower, with server data correct, ship with a follow-up; anything touching data integrity, security, tenancy or money blocks. In-scope findings found while the repair batch is unspent are fixed. Reconciliation applies this without asking the human.>
 
 <!-- RUN-STATE:BEGIN -->
 <!-- Append one compact JSON object per execution event; never edit or reorder
@@ -234,6 +266,43 @@ When the human approves an execution, append `START` before another event using
 the run ID already created by workflow telemetry. A later execution of the same
 ticket gets a new `run_id`; it never edits or clears prior entries. Approval
 without the matching start event is not executable.
+
+## Section 3b: impact and check applicability
+
+Section 3b is the plan's applicability ledger. Name every component, user or
+business flow, data set and dependency the change touches, the risk it carries,
+and the check that covers it: a test type (including a required test kind), a
+`vapt` control or pair from 3a, a review skill, or a gate. Section 3a stays the
+catalog-bound security selection; 3b names the flows and data its facts cite and
+adds the checks the catalog does not hold.
+
+- **The plan is not complete** when an applicable check is missing from the
+  table or silently skipped. Every check considered and not applicable is listed
+  under `Not applicable:` with a one-line reason.
+- **Never claim equivalent coverage without evidence.** A check that covers a
+  row names what it runs and what it proves; "covered by review" needs the
+  review item that covers it.
+- **Status vocabulary:** `verified`, `partially verified`, `unverified`,
+  `not applicable`, plus `planned` before PROVE runs. Update the status in
+  RUN-STATE (`PROVE` event), never by editing the approved narrative.
+
+**External checks.** Some checks need an environment the local run does not have:
+Cloudflare edge configuration (WAF, bot and edge rate-limiting rules), edge TLS
+and HSTS, DNS and email authentication (SPF, DKIM, DMARC), Access policies and
+origin exposure, public preview URLs. Record them in 3b with `Runs when:
+external — needs: <tooling and permission>`, preferring the earliest stage that
+can verify them: a static review of the committed configuration
+(`wrangler.toml`/`wrangler.jsonc`), `wrangler deploy --dry-run`, a staging
+environment, then a read-only Cloudflare API check with a least-privilege token.
+Use the existing `cloudflare`, `wrangler`, `workers-best-practices`,
+`cloudflare-one` and `security-audit` skills where they apply. Run an applicable
+external check automatically when its tooling and permission are available; ask
+the owner only for a missing token or permission or a production-changing action.
+A check that cannot run now is `unverified` with the reason, in its 3b row and
+in the PROVE event, and is never reported as covered. An applicable security
+check still `unverified` at release is a security exception: it blocks SHIP
+(**WAIT_FOR_USER**) unless the owner explicitly accepts it for this candidate,
+recorded in RUN-STATE. This is orchestrator-enforced; no gate reads 3b yet.
 
 ## Contract convergence before debate
 
@@ -251,7 +320,8 @@ whose contract surface changed. If the two sides still cannot accept one shape,
 record the disagreement in Risks and use `WAIT_FOR_USER` for the missing product
 decision. That answer is clarification, not approval of an unfinished plan.
 After resolving it, send the
-semantically complete plan to the selected counterpart for the broader debate.
+semantically complete plan to the selected counterpart for the broader debate
+when the work is security-sensitive.
 If that debate changes the contract, refresh affected compatibility checks before
 calling the revised plan converged; the debate budget does not reset.
 

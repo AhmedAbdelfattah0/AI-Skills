@@ -350,8 +350,8 @@ test('worker report: 4- and 5-key reports are unchanged; test_titles is validate
   assert.equal(parseWorkerReport(block(base), { t0Declared: true }).failure, 'fast_check_missing');
 });
 
-test('invariant: the table in references/prove.md equals TAGS row for row', () => {
-  const md = readFileSync(new URL('../references/prove.md', import.meta.url), 'utf8');
+test('invariant: the table in references/test-kinds.md equals TAGS row for row', () => {
+  const md = readFileSync(new URL('../references/test-kinds.md', import.meta.url), 'utf8');
   const sec = md.slice(md.indexOf('## Risk-triggered test kinds (T1-S)'));
   const doc = {};
   for (const m of sec.matchAll(/^\| (`[^|]+`) \| (`[^|]+`) \|$/gm)) {
@@ -930,7 +930,7 @@ test('P3 L1: kindsForClasses refuses a declaration map over 64 entries, a proxie
   assert.deepEqual(TK.kindsForClasses({ classes: [] }), { ok: true, tags: [], kinds: [], provenance: {}, errors: [] }, 'the real empty set stays accepted');
 });
 
-// The origin table, written from references/prove.md (the ten tags and their kinds) and SURFACE_TAGS (the eleven boundary kinds), not
+// The origin table, written from references/test-kinds.md (the ten tags and their kinds) and SURFACE_TAGS (the eleven boundary kinds), not
 // derived from the implementation: a class named like a tag is that tag, and a surface adds its tags; each carries its own origin.
 const TAG_KINDS = { 'async-state': ['stale-N2', 'error-twin', 'negative'], 'ui-lifecycle': ['lifecycle-destroy'], concurrency: ['race'], money: ['negative', 'race'], tenancy: ['negative', 'ownership'],
   auth: ['negative', 'ownership'], 'input-path': ['negative'], 'shared-contract': ['contract-producer', 'contract-consumer'], entrypoint: ['real-entrypoint'], repair: ['regression'] };

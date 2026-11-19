@@ -60,7 +60,9 @@ test('ship.md states the ship-ready check; brief.md holds the base-drift placeme
   assert.ok(!t.includes('Pin `config.base`'));
   assert.ok(t.includes('`ship-ready-check.mjs check\n--run-state <plan> --engine-log <log> --run-id <ID> --require-event`'));
   assert.ok(t.includes('nonzero stops (`WAIT_FOR_USER`)'));
-  assert.match(t, /Not applicable after degradation: record `harness degraded` and get explicit user approval\s+\(`WAIT_FOR_USER`\) before the commit/);
+  // Harness degradation is recorded with the manual confirmations; it is not a second approval.
+  assert.match(t, /Not applicable after degradation: record `harness degraded` and the\s+results of the read-only confirmations above in the SHIP_READY event, then commit/);
+  assert.ok(!/get explicit user approval\s+\(`WAIT_FOR_USER`\) before the commit/.test(t));
   const b = ref('brief.md');
   assert.ok(b.includes('leave `config.base` as is'));
   assert.ok(b.includes('base-drift.mjs check --repo <R> --base <SHA>'));
@@ -104,4 +106,23 @@ test('no ship-ticket instruction names or depends on a retired code-quality spec
   }
   assert.deepEqual(hits, []);
   assert.ok(load(join(dir, 'references/prove.md')).includes('`code-quality`\nor the applicable stack reference not installed'));
+});
+
+// RC-1 reviewer policy: Codex, else a fresh Fable session; CodeRabbit is optional. The final gate only
+// requires the two reviewers to differ by provider:model, so an Opus primary and a Fable second pass.
+test('gate accepts a Fable second opinion beside the Opus primary and refuses the same model twice', () => {
+  const opus = { reviewer_identity: 'claude:opus-5-5', coverage_partitions: [{ identity: 'claude:opus-5-5', owned: ['src/'], outcome: 'PASS' }] };
+  const fable = input({ primary: primary(opus), second_opinion: second({ route: 'fable', reviewer_identity: 'claude:fable' }) });
+  assert.equal(gateReview(fable).code, 'review_accepted');
+  const twin = input({ primary: primary(opus), second_opinion: second({ route: 'fable', reviewer_identity: 'claude:opus-5-5' }) });
+  assert.equal(gateReview(twin).code, 'reviewers_not_distinct');
+});
+
+test('the second-opinion policy names Codex then Fable and never requires CodeRabbit', () => {
+  const x = ref('cross-model.md');
+  assert.ok(x.includes('`second_opinion: fable`, identity\n   `claude:fable`'));
+  assert.ok(x.includes('**CodeRabbit is optional extra coverage**'));
+  for (const name of ['review.md', 'cross-model.md', 'understand.md', 'codex-cli.md', 'plan.md']) {
+    assert.doesNotMatch(ref(name), /CodeRabbit (fallback|on the same candidate;)|falls back to CodeRabbit|run the CodeRabbit fallback/, name);
+  }
 });

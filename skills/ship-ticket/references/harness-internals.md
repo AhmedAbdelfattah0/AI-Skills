@@ -217,8 +217,8 @@ matches on the pair (`run_id`, candidate); a SHIP_READY without `run_id` is unma
 `--run-id` restricts the check to that run. It fails for any SHIP_READY without a `GATE ship-ready ok` line of the
 same candidate. There is no hand-written exception: editing the plan narrative changes
 the approved-plan digest. When the engine cannot write the pair, record `harness degraded`
-([execution-harness.md](execution-harness.md)) and get explicit user approval
-(`WAIT_FOR_USER`) before the commit.
+([execution-harness.md](execution-harness.md)) with the results of SHIP's read-only
+confirmations ([ship.md](ship.md)); the one plan approval covers the commit.
 
 ### `mark`
 

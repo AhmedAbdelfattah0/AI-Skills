@@ -81,8 +81,14 @@ concurrently, then join once:
 
 Re-run `base-drift.mjs check` (brief.md) before SHIP. With the engine, after
 SHIP_READY is appended and before the commit, run `ship-ready-check.mjs check
---run-state <plan> --engine-log <log> --run-id <ID> --require-event`; nonzero stops (`WAIT_FOR_USER`). Not applicable after degradation: record `harness degraded` and get explicit user approval
-(`WAIT_FOR_USER`) before the commit.
+--run-state <plan> --engine-log <log> --run-id <ID> --require-event`; nonzero stops (`WAIT_FOR_USER`). Not applicable after degradation: record `harness degraded` and the
+results of the read-only confirmations above in the SHIP_READY event, then commit; the
+one plan approval already covers it, so no second approval is requested.
+
+**Reuse valid evidence.** After a green run, a docs-only or otherwise unaffected delta
+re-runs only the gates whose inputs it changes; unchanged evidence is reused. A run
+made with a dirty-tree override (a repository gate's `--allow-dirty` or equivalent) is
+never final evidence, and the final validation still runs on the delivered candidate. Record timing through the existing run log only.
 
 Append SHIP_READY and the one predeclared ticket-keyed session-log entry. Those two
 recording writes are excluded from candidate identity. No code, test, comment,

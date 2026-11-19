@@ -350,7 +350,8 @@ the application of the `vapt` control catalog to a ticket (policy 2) in `securit
 execution harness is split by use: `execution-harness` is the operator card (what the
 orchestrator must and must not do, loaded before BUILD), `harness-internals` holds mechanism
 and rationale and is opened only when the card names it, `units` holds the opt-in unit rules
-and loads only when the plan chooses a split or a DAG node has `unit`, and `brief` (BUILD)
+and loads only when the plan chooses a split or a DAG node has `unit`, `test-kinds` holds the
+opt-in risk-triggered test kinds and loads at PROVE only when the plan opts in, and `brief` (BUILD)
 describes `scripts/brief.mjs`, which builds and lints the worker brief. A rule the
 orchestrator must follow belongs in the card; when unsure, put it there. **Keep
 it that way.** It was a 2359-line monolith and the length was
@@ -376,7 +377,7 @@ joins and barriers.
 
 For full-stack work, PLAN drafts one Integration Contract and concurrently checks
 it from frontend-consumer and backend-provider perspectives before the host and
-opposite-model counterpart debate the whole plan. Human approval pins that contract. BUILD materializes its source
+counterpart debate the whole plan when it is security-sensitive. Human approval pins that contract. BUILD materializes its source
 artifact, then frontend and backend workers depend on the same contract ID—not on
 each other's implementation—and run concurrently. The join verifies the digest,
 ownership, generated output, provider conformance and consumer conformance before
@@ -387,14 +388,15 @@ are different decisions*: every applicable rule, owned screen, trust boundary an
 attack class is checked. Reviewer redundancy is evidence-based: a standard ticket
 gets one independent checklist-backed semantic review workflow; a material
 full-stack diff may partition frontend, backend and shared-contract coverage
-inside that one workflow. Elevated risk adds one concurrent opposite-model opinion when
-available. Security-sensitive work is elevated and
+inside that one workflow. Every ticket, standard or elevated, also gets one mandatory
+second opinion: Codex in a fresh session when available, else a fresh Fable session
+recorded as a same-provider review; CodeRabbit is optional extra coverage. Security-sensitive work is elevated and
 requires explicit attack and security outcomes, but attack applicability still
 comes from the changed trust boundaries.
 
 *Review is bounded*: PROVE finishes formatters, generators, tests, docs and
-evidence before REVIEW. A clean standard candidate needs one primary workflow.
-An elevated candidate may add one concurrent optional opinion. Accepted findings
+evidence before REVIEW. A clean candidate needs one primary workflow plus the
+mandatory second opinion, concurrent when resources allow. Accepted findings
 form at most one consolidated repair batch and only that repair's affected closure
 receives one targeted confirmation. A failed confirmation is the result, never a
 new review cycle. The exhaustive prose inventory, copied byte preimages,
@@ -405,10 +407,16 @@ deleted because they made workflow bookkeeping cost more than code review.
 same turn. Only `WAIT_FOR_USER`, `FAIL` and final `COMPLETE` end the assistant turn.
 A phase announcement, finding, tool result, timeout fallback or degradation report
 is not a stopping condition. Required capability is preflighted before REVIEW;
-optional counterpart/concurrency loss degrades instead of serializing or ending the run.
+Codex loss falls back to Fable and concurrency loss serializes, neither ends the run.
+The approved plan is scoped authorization for that ticket or wave: routine
+decisions inside it take the recommended default and are recorded, and the spine's
+"When execution may yield" list is the single owner of the stop points.
 
 *PLAN means native Plan Mode when the host provides it*: Claude uses
-`EnterPlanMode`/`ExitPlanMode`; Codex uses the host's Plan collaboration mode and
+`EnterPlanMode`/`ExitPlanMode`, which are deferred tools the orchestrator loads
+first with ToolSearch `select:EnterPlanMode,ExitPlanMode`; only `ExitPlanMode`
+approves (never chat text or `AskUserQuestion`), and research subagents work inside
+the orchestrator's Plan Mode. Codex uses the host's Plan collaboration mode and
 native final-plan handoff. If interactive Codex is in Default mode with no
 agent-callable transition, request the client's `/plan` switch before PLAN research.
 Absence of Claude tools is not evidence that Codex is headless. A phase heading
@@ -471,7 +479,8 @@ detectors, the command selection, and any wave partitioning all derive from the
 repository — they must never harden into fixed globs or an assumed runner.
 
 **`ship-ticket` selects the opposite-model counterpart from the host.** Claude
-uses Codex; Codex uses Claude. PLAN is a bounded debate: the host drafts and
+uses Codex; Codex uses Claude. PLAN debate runs only for security-sensitive work
+(Fable stands in, recorded `DEGRADED`, when Codex is unavailable) and is a bounded debate: the host drafts and
 responds, the counterpart challenges and checks revisions, with at most three
 counterpart calls and 20 minutes total by default (failed attempts count).
 Same-final-draft agreement ends it;
@@ -481,14 +490,14 @@ approval, never manufactured consensus or an endless loop.
 Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
 with a verified watchdog/cancellation route, or the existing relay. Claude uses
 `claude-delegate`'s read-only relay for both. Discover delegates
-by name and check CLI versions; missing optional REVIEW capability degrades.
-PLAN counterpart failure pauses after bounded recovery unless the user explicitly
-waives cross-model planning. Claude runs through its CLI relay using verified
+by name and check CLI versions. A missing Codex falls back to Fable in both PLAN
+and REVIEW; only when Fable cannot run either does the run pause, unless the user
+explicitly waives cross-model planning. Claude runs through its CLI relay using verified
 subscription authentication: omit API-key/token overrides from the child process
 only and use normal host escalation when Keychain access is blocked. Claude's
 read-only carrier cannot run Git, so supply the actual diff and repository
-instructions. REVIEW uses a fresh counterpart session concurrently only for an
-elevated profile and never inherits the PLAN debate loop. The counterpart
+instructions. REVIEW uses a fresh second-opinion session on every ticket and never
+inherits the PLAN debate loop. The counterpart
 contributes findings and never approves the plan or change. The independent
 primary workflow owns acceptance-criteria,
 behavioral, applicable-rule and triggered parity/security outcomes. A full-stack
@@ -579,10 +588,10 @@ command exits during argument parsing. So a Codex pass is either *instructed*
 instructions, and its findings arrive as `[P1]`/`[P2]` prose with no quoted
 line). Both routes print their final report **twice** and emit **absolute
 worktree paths**, so dedupe and strip the prefix before quoting it.
-**The elevated Codex opinion carries the same constraint:** it states the scope in the
+**The Codex second opinion carries the same constraint:** it states the scope in the
 prompt, because `codex review --uncommitted "<instructions>"` exits during argument
 parsing on 0.145.0.
-**That optional opinion always sets `-c model_reasoning_effort=` explicitly rather than
+**That second opinion always sets `-c model_reasoning_effort=` explicitly rather than
 inheriting the account's global default** — measured on this repo, same diff and
 prompt, `xhigh` took 384s against `medium`'s 177s (2.2x) — and asks for
 severity-ordered findings rather than unbounded enumeration.
