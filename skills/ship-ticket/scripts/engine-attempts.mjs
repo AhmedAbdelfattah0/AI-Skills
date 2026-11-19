@@ -20,7 +20,7 @@ import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-re
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
-const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check'];
+const RUNNER_KINDS = ['gate-red', 'proof', 'unit-check', 'evidence'];
 const itemOf = (S, a) => (a.kind === 'repair' ? S.repairs.find(r => r.id === a.node) : S.nodes[a.node]);
 const pushJudgment = (S, code, node, reason) => { if (!S.judgments.some(j => j.code === code && j.node === node)) S.judgments.push(judgment(code, node, reason)); };
 const transientOnce = (list, code, node, reason) => { if (!list.some(j => j.code === code && j.node === node)) list.push(judgment(code, node, reason)); };

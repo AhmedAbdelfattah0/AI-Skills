@@ -42,7 +42,7 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds'];
 
 /**
  * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
@@ -50,6 +50,14 @@ const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'wid
  * changes a gate decision. Absent or false, every record, event and log line is as before.
  */
 export const auditOn = (S) => S?.config?.auditRecord === true;
+
+/**
+ * S-01b2 P5r: `config.testKinds` ({ policy: 1 }, opt-in, bound by the DAG digest) activates the test-kind freeze gate,
+ * and a testCommands entry with `evidence: { report: 'fd', covers: [glob], files: bool, config_paths: [path] }` is the
+ * runner that provides its evidence (`files` true exactly when args hold `{files}`). P4r's entry is FLAT: this is the map.
+ */
+export const evidenceEntries = (config) => Object.entries(config?.testCommands ?? {}).filter(([, e]) => e.evidence !== undefined);
+export const flatEntry = (name, e) => ({ name, format: e.format, cmd: e.cmd, args: [...(e.args ?? [])], covers: [...e.evidence.covers], config_paths: [...e.evidence.config_paths] });
 
 // ---- security policy 2 (AIS-HARNESS-4 Wave B) -------------------------------------------------
 
@@ -178,10 +186,18 @@ export function validateEngineDag(doc, { ticket } = {}) {
   if (!isObj(c.testCommands ?? {})) bad('config.testCommands must map name -> { cmd, args, format? }');
   for (const [name, e] of Object.entries(c.testCommands ?? {})) {
     if (!SAFE_NAME.test(name) || !isObj(e)) bad(`config.testCommands.${name} must be a { cmd, args, format? } entry with a safe name`);
-    only(e, ['cmd', 'args', 'format'], `testCommands.${name}`);
+    only(e, ['cmd', 'args', 'format', 'evidence'], `testCommands.${name}`);
     if (typeof e.cmd !== 'string' || !e.cmd || !strings(e.args ?? [])) bad(`config.testCommands.${name} needs cmd and args: [string]`);
     if (e.format !== undefined && !RUNNER_FORMATS.includes(e.format)) bad(`config.testCommands.${name}.format must be ${RUNNER_FORMATS.join('|')}`);
+    const v = e.evidence;
+    if (v === undefined) continue;
+    if (!isObj(v)) bad(`config.testCommands.${name}.evidence must be an object`);
+    only(v, ['report', 'covers', 'files', 'config_paths'], `testCommands.${name}.evidence`);
+    if (c.testKinds === undefined || !e.format || v.report !== 'fd' || !strings(v.covers) || !v.covers.length || !strings(v.config_paths)
+      || typeof v.files !== 'boolean' || v.files !== (e.args ?? []).includes('{files}'))
+      bad(`config.testCommands.${name}.evidence needs config.testKinds, a format, report 'fd', non-empty covers, config_paths, and files true exactly when args hold {files}`);
   }
+  if (c.testKinds !== undefined && !(isObj(c.testKinds) && Object.keys(c.testKinds).join() === 'policy' && c.testKinds.policy === 1)) bad('config.testKinds must be exactly { policy: 1 }');
   if (!Array.isArray(doc.nodes) || !doc.nodes.length) bad('nodes must be a non-empty array');
   const nodes = doc.nodes.map(n => {
     if (!isObj(n)) bad('node must be an object');
@@ -245,6 +261,7 @@ function validateUnits(nodes, c, bad) {
       if (n.unit === undefined) bad(`node ${n.id}: checks need a unit`);
       const unknown = n.checks.filter(x => !cmds.includes(x));
       if (unknown.length) bad(`node ${n.id}: unknown check(s) ${unknown} (not in config.testCommands)`);
+      if (n.checks.some(x => c.testCommands[x].evidence)) bad(`node ${n.id}: a unit check cannot be an evidence runner (it needs the report channel)`);
     }
     if (n.acceptance !== undefined && !strings(n.acceptance)) bad(`node ${n.id}: acceptance must be acceptance criterion ids`);
   }

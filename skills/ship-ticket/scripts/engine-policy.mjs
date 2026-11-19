@@ -18,8 +18,15 @@ import { spawnSync } from 'node:child_process';
 /** The version `init` records for a new run. */
 export const ENGINE_POLICY_VERSION = 1;
 
-/** Supported version -> capability flags. Version 1 is the engine as it was before the field: no flags. */
-export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}) });
+/**
+ * Supported version -> capability flags. Version 1 is the engine as it was before the field: no flags.
+ * Version 2 (S-01b2 P5r) adds the test-kind freeze gate; `init` records it ONLY for a run that activates
+ * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
+ */
+export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }) });
+
+/** The version `init` records for a run that activates test kinds (design rev 5 section 5). */
+export const TEST_KINDS_POLICY_VERSION = 2;
 
 /** The version a state without the key is read as: the oldest supported one. */
 export const LEGACY_POLICY_VERSION = 1;

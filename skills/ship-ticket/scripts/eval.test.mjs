@@ -540,7 +540,12 @@ test('T-C1 legacy golden: eval, run-summary and run-log summary output for old l
   assert.equal(golden.base_sha, BASE_SHA);
   assert.equal(BASE_SHA, '752371eb91a2df5568bf7a455d1ccb3d635dd687', 'the baseline is origin/main 752371e (ASTF-21 merge), never re-pointed to candidate code');
   const got = await capture(dirname(fileURLToPath(import.meta.url)));
-  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(golden.data, null, 1));
+  // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
+  // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2;';
+  assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');
+  expected.policy_refusal.stderr = expected.policy_refusal.stderr.replace(V1, V12);
+  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(expected, null, 1));
   // The fixtures really exercise the figures (a golden of unknowns would pass vacuously).
   const t1 = got.library.runs.find((r) => r.ticket === 'T1');
   assert.ok(t1.units && Object.keys(t1.units).length === 2 && t1.peak_rss_mb === 640 && t1.attempt_timing[0].api_ms === 60000);

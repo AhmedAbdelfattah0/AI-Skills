@@ -896,7 +896,12 @@ test('T-C2 / T-C3 / T-C6: with every event kind added (and an events-only ticket
   const golden = JSON.parse(readFileSync(GOLDEN, 'utf8'));
   let injected;
   const got = await capture(SCRIPTS, { injectLogs: (logs) => (injected = instrumented(logs)) });
-  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(golden.data, null, 1));
+  // S-01b2 P5r (AMD-P5r-2): the ONE intended difference from the pinned base capture. Policy v2 makes the refusal of the
+  // policy_version:99 fixture name both supported versions; the golden itself stays the pure origin/main capture.
+  const expected = structuredClone(golden.data), V1 = 'supports policy_version 1;', V12 = 'supports policy_version 1, 2;';
+  assert.equal(expected.policy_refusal.stderr.split(V1).length, 2, 'the base capture names version 1 exactly once');
+  expected.policy_refusal.stderr = expected.policy_refusal.stderr.replace(V1, V12);
+  assert.equal(JSON.stringify(got, null, 1), JSON.stringify(expected, null, 1));
   // The control: the injected rows really reach the CLIs and would move the legacy figures if they were not stripped.
   const rows = injected.T1.flatMap((r) => (typeof r === 'string' ? r.split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [r])).filter((r) => r.run_id === 'run-1');
   const strip = (rs) => rs.filter((r) => !ev.isEventName(r.name));
