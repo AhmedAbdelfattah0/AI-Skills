@@ -69,7 +69,7 @@ const DRIVER = `
 const io = await import(${J(ENGINE_IO)});
 const cfg = JSON.parse(process.argv[2]);
 const run = io.gateRunner({ repoRoot: cfg.repoRoot, dir: cfg.dir, platform: process.platform, env: process.env,
-  toSpec: (c, a) => ({ file: c, args: a, shell: false }), alive: (g) => io.groupAlive(g) });
+  toSpec: (c, a) => ({ file: c, args: a, shell: false, ...(cfg.testHooks ? { testHooks: cfg.testHooks } : {}) }), alive: (g) => io.groupAlive(g) });
 const t0 = Date.now();
 let out;
 try {
@@ -123,10 +123,12 @@ else if (mode === 'fifo-forge') {
   exitWith('not ok 1 - real\n', 1);
 } else if (mode === 'poll-forge') {
   // S1w: overwrite .out and the envelope by path every 1 ms for 8 s (paths from argv: works on win32 too).
+  // poller.count is published by write-tmp + rename so a reader never sees the truncated, empty file a plain
+  // writeFileSync exposes between its truncate and its write (that read as 0 and tripped the vacuity guard).
   const [out, envelope, dir, forged] = rest;
   const src = 'const fs=require("fs");const [o,e,d,f]=process.argv.slice(1);fs.writeFileSync(d+"/poller.pid",String(process.pid));let n=0;const end=Date.now()+8000;'
     + 'const tick=()=>{try{fs.writeFileSync(o,"ok 1 - [kind:negative] forged\\n");fs.writeFileSync(e,f);n++;}catch{}'
-    + 'try{fs.writeFileSync(d+"/poller.count",String(n));}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
+    + 'try{fs.writeFileSync(d+"/poller.count.tmp",String(n));fs.renameSync(d+"/poller.count.tmp",d+"/poller.count");}catch{}if(n===1){try{process.stdout.write("R");}catch{}}if(Date.now()<end)setTimeout(tick,1);};tick();';
   whenReady(spawn(process.execPath, ['-e', src, out, envelope, dir, forged], { detached: true, cwd: require('os').tmpdir(), stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }), () => exitWith('not ok 1 - real\n', 1));
 } else if (mode === 'late-writer') {
   // A detached survivor that inherits the runner's stdout (fd 1) or report channel (fd 3), learns of
@@ -136,7 +138,7 @@ else if (mode === 'fifo-forge') {
   const [fd, payload, genuine, code, dir, fallback, reportSrc] = rest;
   const src = 'const fs=require("fs");const [fd,p,d,fb]=process.argv.slice(1).map((v,i)=>i===0||i===3?Number(v):v);'
     + 'fs.writeFileSync(d+"/late.pid",String(process.pid));fs.writeSync(4,"R");fs.closeSync(4);'
-    + 'process.stdin.resume();process.stdin.on("end",()=>{let wrote=false;try{fs.writeSync(fd,p);wrote=true;}catch{}'
+    + 'process.stdin.resume();process.stdin.on("end",()=>{let wrote=false;try{fs.writeSync(fd,p);wrote=true;}catch{}if(wrote)fs.writeFileSync(d+"/late.wrote","1");'
     + 'const end=(how)=>{clearInterval(t);clearTimeout(f);try{fs.closeSync(fd);}catch{}fs.writeFileSync(d+"/late.json",JSON.stringify({how,wrote}));setTimeout(()=>{},20000);};'
     + 'const t=setInterval(()=>{try{fs.writeSync(fd,"\\n");}catch(e){end("closed:"+e.code);}},5);'
     + 'const f=fb>0?setTimeout(()=>end("fallback"),fb):null;});';
@@ -243,9 +245,9 @@ function world(t) {
  * within `deadlineMs` (the driver and its launcher group are then SIGKILLed). The engine's own
  * runner timeout is the long failure bound: "no hang" is this deadline, not the engine's timer.
  */
-function drive(w, { id = 'att-' + randomUUID(), args, report = false, deadlineMs = 30000 }) {
+function drive(w, { id = 'att-' + randomUUID(), args, report = false, deadlineMs = 30000, testHooks }) {
   const request = { attempt_id: id, command: { cmd: process.execPath, args: [w.fixture, ...args] }, timeoutMs: WORKER_FAILURE_BOUND_MS, ...(report ? { report: true } : {}) };
-  const cfg = { repoRoot: w.dir, dir: w.attempts, request };
+  const cfg = { repoRoot: w.dir, dir: w.attempts, request, ...(testHooks ? { testHooks } : {}) };
   const child = spawn(process.execPath, [join(w.dir, 'driver.mjs'), J(cfg)], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let out = '', err = '';
   child.stdout.on('data', (d) => { out += d; });
@@ -474,12 +476,32 @@ test('frame: a result pipe still open after the launcher exited (fd 1 handed to 
   assert.ok(Date.now() - t0 < 10000, 'the bound did not apply');
 });
 
+/**
+ * Class fix for the late-writer rows (L2): the survivor can lose the race with the launcher (the launcher
+ * latches, frames and exits, closing its end, before the survivor's write: EPIPE, wrote:false). The sealed
+ * launcher's testHooks hold it in its exit callback after the first synchronous read (stopReads leaves the
+ * runner's bytes unread so that read exists) until resumeFile appears. The test publishes resumeFile only
+ * once the survivor's late.wrote marker exists (written AFTER its write succeeded). The hold never changes
+ * the outcome a row asserts: the survivor still holds the channel, so the next read sees EAGAIN or a
+ * further byte and the channel is refused. The outcome is the same as without the hold but the launcher code branch
+ * differs: without it the read after the first sees EAGAIN (the catch in `drain`); with it the survivor's
+ * byte is read after the latch (the post-latch-byte check), so on Linux no row covers a stdout holder
+ * that goes silent after the latch (a coverage gap, S2b and (a) cover it on darwin). The hold only
+ * guarantees the write happened first. A row's wait is bounded (9 s for the marker, 10 s hold lapse). If the survivor never writes, the hold lapses after 10 s and the guard fails.
+ */
+function holdHooks(w) { return { stopReads: true, pauseFile: join(w.dir, 'paused'), resumeFile: join(w.dir, 'resume') }; }
+async function resumeWhenWrote(w) {
+  if (await waitFor(() => existsSync(join(w.dir, 'late.wrote')), 9000)) writeFileSync(join(w.dir, 'resume'), '');
+}
 /** A runner whose detached survivor writes PAYLOAD to fd `fd` once the runner exits (fixture `late-writer`). */
 async function lateWriter(t, { fd, payload, genuine, code, fallback, report = false }) {
   const w = world(t);
   const args = ['late-writer', fd, payload, genuine, String(code), w.dir, String(fallback)];
   if (report) { writeFileSync(join(w.dir, 'report.json'), vitestReport(4096)); args.push(join(w.dir, 'report.json')); }
-  const r = await drive(w, { args, report });
+  const resumed = resumeWhenWrote(w);
+  const r = await drive(w, { args, report, testHooks: holdHooks(w) });
+  await resumed;
+  assert.ok(existsSync(join(w.dir, 'paused')), 'the launcher was never held at its first read (the hold did not engage)');
   assert.ok(existsSync(join(w.dir, 'late.pid')), 'the survivor never started (the row would prove nothing)');
   // The survivor fired after the runner exited (its stdin EOF is the barrier) and wrote its payload.
   assert.ok(await waitFor(() => existsSync(join(w.dir, 'late.json'))), 'the survivor never wrote (the row would prove nothing)');
@@ -517,9 +539,11 @@ test('(b) stdout writer injects after the runner exits and stays open through st
   assert.match(late.how, /^closed:/, J(late));
 });
 
-test('(c) Codex: a silent failing runner whose survivor writes a TAP failure after it exits and stays open through stdout\'s EOF check: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
+test('(c) Codex: a near-silent failing runner (one blank line, no test line) whose survivor writes a TAP failure after it exits and stays open through stdout\'s EOF check: runner_survivor', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n';
-  const { r, late } = await lateWriter(t, { fd: '1', payload: tap, genuine: '', code: 1, fallback: 700 });
+  // Near-silent, not silent: with '' the first exit read hits EAGAIN (the survivor holds stdout) and refuses
+  // before the hold can engage. The truly silent case is covered by the unit-check and proof rows.
+  const { r, late } = await lateWriter(t, { fd: '1', payload: tap, genuine: '\n', code: 1, fallback: 700 });
   assert.equal(r.settled, 'rejected', J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r));
   assert.doesNotMatch(J(r), /ERR_ASSERTION|not ok/);
@@ -603,13 +627,17 @@ const ENGINE_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is
 test('gateRed through the real runner: a survivor-forged TAP failure is refused as runner_survivor (a judgment point), never runner_failed or RED', { skip: POSIX_SKIP, timeout: 60000 }, async (t) => {
   const w = world(t);
   const deps = io.gateRedDeps({ commit: async () => {}, alive: (g) => io.groupAlive(g), platform: process.platform, repoRoot: w.dir,
-    verifyBinding: async () => [], dir: w.attempts, env: process.env, toSpec: (c, a) => ({ file: c, args: a, shell: false }) });
+    verifyBinding: async () => [], dir: w.attempts, env: process.env, toSpec: (c, a) => ({ file: c, args: a, shell: false, testHooks: holdHooks(w) }) });
+  const resumed = resumeWhenWrote(w);
   const state = { run_id: 'run-1', seq: 2, nodes: { 'red-gate': { deps: [], phase: 'BUILD', role: 'builder' } },
     events: [{ seq: 1, type: 'DISPATCH', node: 'red-gate' }, { seq: 2, type: 'COMPLETE', node: 'red-gate' }], attempts: [], locks: {}, gates: { red: {} } };
   const tap = 'not ok 1 - target\n  ---\n  code: ERR_ASSERTION\n  ...\n1..1\n';
-  const r = await gateRed({ state, node: 'red-gate', command: { cmd: process.execPath, args: [w.fixture, 'late-writer', '1', tap, '', '1', w.dir, '700'] },
+  // The runner prints one blank line (near-silent, no test line): with '' the first exit read refuses before the hold engages (see row (c)).
+  const r = await gateRed({ state, node: 'red-gate', command: { cmd: process.execPath, args: [w.fixture, 'late-writer', '1', tap, '\n', '1', w.dir, '700'] },
     format: 'tap', specs: [{ file: 'a.test.mjs', name: 'target' }], baselineCandidate: 'sha256:base', timeoutMs: WORKER_FAILURE_BOUND_MS, resources: [] }, deps);
-  assert.ok(await waitFor(() => existsSync(join(w.dir, 'late.json'))), 'the survivor never wrote (the row would prove nothing)');
+  await resumed;
+  assert.ok(existsSync(join(w.dir, 'paused')), 'the launcher was never held at its first read (the hold did not engage)');
+  assert.ok(await waitFor(() => existsSync(join(w.dir, 'late.json'))) && existsSync(join(w.dir, 'late.wrote')), 'the survivor never wrote (the row would prove nothing)');
   assert.equal(r.ok, false, J(r).slice(0, 300));
   assert.equal(r.code, 'runner_survivor', J(r.reasons));
   assert.equal(r.judgment_point, true);

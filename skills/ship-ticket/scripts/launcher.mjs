@@ -212,8 +212,10 @@ ${SAMPLER}  const nap = new Int32Array(new SharedArrayBuffer(4));
     const first = setTimeout(sample, ${FIRST_SAMPLE_MS}), every = setInterval(sample, ${SAMPLE_MS});
     first.unref(); every.unref(); sm.timers.push(first, every);
   }
-  // Decision bytes are only those read by each channel's latching read in the exit callback (the
-  // boundary): each channel's EOF state is latched there and nothing read later is kept.
+  // Decision bytes are those read before the latch (data events while the runner ran, kept by takeOut
+  // and takeRep) plus those of each channel's latching read in the exit callback (the boundary):
+  // each channel's EOF state is latched there and nothing read later is kept. If a channel's 'end'
+  // fired before the exit, it is already at EOF and no latching read of it happens.
   const takeOut = (c) => { if (latched) return; size += c.length; if (size <= ${STDOUT_CAP}) out.push(c); };
   const takeRep = (c) => { if (latched) return; rsize += c.length; if (rsize <= ${STDOUT_CAP}) rep.push(c); };
   cli.stdout.on('data', takeOut);

@@ -150,16 +150,25 @@ duplicates an event.
 pre_snapshot_digest}` is committed; a launcher is spawned in its own process
 group and blocks on a release byte; `{pid, pgid}` is committed; only then is the
 byte sent. If the engine dies first the launcher's stdin closes and the worker
-never runs. Once the provider exits the completion envelope is written atomically (after its
+never runs. Worker attempts: once the provider exits, the completion envelope is written atomically (after its
 stdout closes, or after a 1 s drain when a descendant still holds stdout open, so a lingering
-descendant cannot hold the attempt until its timeout). An attempt is
+descendant cannot hold the attempt until its timeout). RED and proof runner attempts use the sealed
+launcher instead: its result (exit status, stdout, and on darwin an opt-in report channel) travels
+as one length-framed message on a pipe only the engine and the launcher hold, and `gateRunner`
+never reads the forensic `.out` or envelope files. In the runner's exit callback (POSIX) the
+launcher makes one latching read of each channel, non-blocking, then one EOF-check read; a channel not at EOF
+then (another process still holds it) or returning a byte after the latch (EAGAIN or a further byte) is refused `runner_survivor`, and malformed or disagreeing frames are refused
+`runner_output_tampered`. There is no drain on POSIX (win32 keeps a 1 s drain, a weaker boundary).
+Bytes a process wrote before that read are accepted: writers are not authenticated (the PR #94 residual, FX-R1). An attempt is
 recorded only after its **whole process group** is gone: surviving descendants are
 killed and awaited first; quiescence that cannot be proven (always on Windows) is
 `quiescence_unknown` and the node is not done. `resume` and `drive` reconcile each
-attempt, RED and proof runners included: envelope present → recorded; any process in the group
+attempt. A worker: envelope present → recorded; any process in the group
 alive → wait or refuse (never a second writer); group gone with no envelope →
 compare with the pre-snapshot: no relevant writes → re-queue, writes → judgment
-point. Quiescence means the whole group is gone (POSIX `kill(-pgid, 0)` returns
+point. A RED or proof runner (`settleRunner`) reads no envelope: group alive → live;
+liveness unknown → `quiescence_unknown` judgment; group gone → retired `abandoned`
+and the gate can simply run again. Quiescence means the whole group is gone (POSIX `kill(-pgid, 0)` returns
 `ESRCH`). One function, `engine-quiesce.mjs` `retire()`, is the only way any attempt
 (worker, RED runner or proof runner) reaches a terminal status or releases its locks, on
 every path (exit, timeout, crash, exception, reconcile): it kills and awaits the group, or
