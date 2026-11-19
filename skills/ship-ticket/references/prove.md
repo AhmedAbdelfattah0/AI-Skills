@@ -10,6 +10,11 @@ Establish the first, then test the second.
 
 ## The proof DAG and its barriers
 
+Run every check in plan section 3b whose "Runs when" has arrived, including an
+external check whose tooling and permission are available, and record each
+status (`verified`, `partially verified`, `unverified` with the reason, or
+`not applicable`) in the PROVE event.
+
 Build a ready set from declared inputs, writes and exclusive resources. Formatting,
 generation or snapshot-update nodes that mutate the candidate finish and join
 before readers consume the final snapshot. Whole-repo commands are not assumed

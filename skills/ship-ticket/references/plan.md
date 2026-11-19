@@ -77,10 +77,11 @@ recommendation.
 draft every ticket's plan there (one section per ticket, each with its own
 scope, contract and risks), and present them in a single `ExitPlanMode` call.
 On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
-its own START event and digest. A ticket whose plan must wait for a sibling
-(a security-sensitive debate, an unmerged dependency) goes through Plan Mode again when
-its turn comes; never start BUILD on a wave ticket whose plan was not in an
-approved `ExitPlanMode`.
+its own START event and digest. A required debate runs inside the same Plan Mode
+before that one `ExitPlanMode`. A ticket whose plan cannot be completed yet (an
+unmerged dependency) is left out of this approval and becomes its own later wave;
+never start BUILD on a wave ticket whose plan was not in an approved
+`ExitPlanMode`.
 
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
 Reconcile its result there, then invoke `ExitPlanMode` with the final plan.
@@ -302,7 +303,9 @@ A check that cannot run now is `unverified` with the reason, in its 3b row and
 in the PROVE event, and is never reported as covered. An applicable security
 check still `unverified` at release is a security exception: it blocks SHIP
 (**WAIT_FOR_USER**) unless the owner explicitly accepts it for this candidate,
-recorded in RUN-STATE. This is orchestrator-enforced; no gate reads 3b yet.
+recorded in RUN-STATE (the owner authority of [security-risk.md](security-risk.md)
+section 5; the `SECURITY_WAIVER` event itself stays for catalog pairs). This is
+orchestrator-enforced; no gate reads 3b yet.
 
 ## Contract convergence before debate
 

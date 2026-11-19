@@ -264,7 +264,7 @@ Give every finding one disposition:
 |---|---|---|
 | `fix` | a real in-scope defect | affected contract path and planned repair |
 | `reject — factually wrong` | its premise is false | cited code or ticket fact |
-| `reject — out of scope` | real but excluded from this ticket | approved exclusion, or the user's same-run answer: queued as its own ticket in this run, or explicitly deferred (a gap the user folds in becomes `fix`) |
+| `reject — out of scope` | real but excluded from this ticket | approved exclusion; a residual within the plan's recorded ship threshold plus the follow-up tracker item opened for it; or the user's same-run answer: queued as its own ticket in this run, or explicitly deferred (a gap the user folds in becomes `fix`) |
 | `not applicable` | a rule does not fire | named rule ID and applicability evidence |
 | `human waiver` | an `[NN]` invariant would bend | `WAIT_FOR_USER`; never self-approve |
 
@@ -291,8 +291,8 @@ its own ticket in this run, or defer it. A gap the user folds in is re-dispositi
 `fix` after the scope re-approval and joins the one repair batch if it is still
 unspent. It never opens another batch. Once the batch is spent, or if the
 confirmation finds the gap, the execution stays FAIL and the gap needs an
-authorized retry or a queued ticket. A deferred tracker item exists only when the user chooses to defer. It is never a line in the final report left for the user to
-pick up.
+authorized retry or a queued ticket. Outside the recorded ship threshold, a deferred tracker item exists only when the user chooses to defer. No follow-up is ever a line in the final report left for the user to
+pick up: each is a tracker item the report links.
 
 ## One repair batch
 
@@ -346,7 +346,7 @@ change is not allowed in this REVIEW execution.
 
 Use the same independent primary workflow, preserving its coordinator and
 partition sessions when possible.
-Give it the original findings and dispositions, the old and new candidate IDs,
+Give it the original findings and dispositions, the plan's recorded ship threshold, the old and new candidate IDs,
 the repair diff, affected callers/contracts, relevant command results, attack
 reruns and UI slice. It checks only:
 

@@ -77,6 +77,11 @@ concurrently, then join once:
 - every candidate path remains inside the Design Contract;
 - all required locally runnable commands remain green or have unchanged reusable
   evidence;
+- no applicable security check in plan section 3b is still `unverified` without
+  the owner's explicit acceptance for this candidate, recorded in RUN-STATE (the
+  owner authority of [security-risk.md](security-risk.md) section 5; the
+  `SECURITY_WAIVER` event itself stays for catalog pairs); otherwise
+  `WAIT_FOR_USER`;
 - no unrelated user changes would enter the commit.
 
 Re-run `base-drift.mjs check` (brief.md) before SHIP. With the engine, after

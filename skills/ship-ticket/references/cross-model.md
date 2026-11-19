@@ -1,7 +1,8 @@
 # Cross-model planning and review
 
 Load once, during UNDERSTAND; PLAN (debate) and REVIEW (second opinion) reuse
-it, reloading only after a context compaction. [codex-cli.md](codex-cli.md) owns Codex transport details.
+it, reloading only if it is no longer in context (a fresh session resuming at
+PLAN or REVIEW, or after a compaction). [codex-cli.md](codex-cli.md) owns Codex transport details.
 
 ## Select from the host
 
@@ -30,7 +31,9 @@ actual counterpart participation. If Codex is unavailable or fails after bounded
 recovery, hold the same bounded debate with a fresh Fable session and record
 `plan_debate.status: DEGRADED`, `counterpart_agent: fable`: a same-provider
 challenge, never cross-model agreement. Only if Fable cannot run either is it
-`WAIT_FOR_USER`, unless the user explicitly authorizes solo planning. Never treat
+`WAIT_FOR_USER`, unless the user explicitly authorizes solo planning. On a Codex
+host the counterpart is already a Claude session (Fable qualifies); if no Claude
+session can run, that is `WAIT_FOR_USER` likewise. Never treat
 `DEGRADED` as permission to skip a required debate. Both profiles get two
 reviewers: the primary workflow plus the mandatory second opinion; ELEVATED
 changes partitioning and the required security outcome, not the reviewer count.

@@ -126,3 +126,20 @@ test('the second-opinion policy names Codex then Fable and never requires CodeRa
     assert.doesNotMatch(ref(name), /CodeRabbit (fallback|on the same candidate;)|falls back to CodeRabbit|run the CodeRabbit fallback/, name);
   }
 });
+
+test('a targeted confirmation accepts a Fable second opinion on the repair beside the Opus primary', () => {
+  const opus = 'claude:opus-5-5';
+  const chain = [
+    { review_execution: 'rx-1', kind: 'original', outcome: 'FAIL', candidate_id: 'sha256:c1', reviewer_identity: opus, second_opinion_route: 'codex', fix_findings: ['F1'] },
+    { review_execution: 'rx-1', kind: 'repair', old_candidate: 'sha256:c1', new_candidate: 'sha256:c2', write_set: ['src/a.mjs'] },
+  ];
+  const confirmation = (soId) => ({
+    state: { frozen_candidate: 'sha256:c2', builders: [{ node: 'n', identity: 'claude:sonnet-5-5' }], review_chain: chain },
+    review_execution: 'rx-1', kind: 'confirmation',
+    primary: { reviewer_identity: opus, candidate_id: 'sha256:c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed at a.mjs:1' },
+    second_opinion: { route: 'fable', reviewer_identity: soId, candidate_id: 'sha256:c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed at a.mjs:1' },
+  });
+  const ok = gateReview(confirmation('claude:fable'), { confirmationSecondOpinion: 'required' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(gateReview(confirmation(opus), { confirmationSecondOpinion: 'required' }).code, 'reviewers_not_distinct');
+});

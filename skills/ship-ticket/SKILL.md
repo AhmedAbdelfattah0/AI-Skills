@@ -53,7 +53,8 @@ that wave's) approved scope only, never later tickets and never permanently.
 After the native approval, run implementation, tests, review, repair,
 verification and PR preparation without routine questions. For a routine
 decision inside the approved scope, apply the recommended default and record it
-in the plan's RUN-STATE; a minor complementary change inside the Design Contract
+in the current phase's next execution event in RUN-STATE (for BUILD, the PROVE
+event); a minor complementary change inside the Design Contract
 that the ticket needs to be complete is allowed and recorded the same way. Stop
 with **WAIT_FOR_USER** only for the cases listed in "When execution may yield":
 a material scope change or Design Contract expansion, a security or assurance
@@ -98,7 +99,7 @@ Load a phase reference only when entering that phase:
 | Entering | Load |
 |---|---|
 | Workflow start | [references/observability.md](references/observability.md) |
-| UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) (load it once; PLAN and REVIEW reuse it, reloading only after a context compaction) |
+| UNDERSTAND | [references/understand.md](references/understand.md) and [references/cross-model.md](references/cross-model.md) (load it once; PLAN and REVIEW reuse it, reloading only if it is no longer in context) |
 | PLAN | [references/plan.md](references/plan.md) |
 | BUILD | this spine and [references/brief.md](references/brief.md) |
 | PROVE | [references/prove.md](references/prove.md) |
