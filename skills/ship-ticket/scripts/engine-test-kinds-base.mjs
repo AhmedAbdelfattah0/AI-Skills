@@ -1,12 +1,13 @@
 /**
  * S-01b2 P4r: the bottom layer of the runner-evidence modules (design rev 6 sections 1 and 4): PURE primitives with no I/O
- * (owner amendment 2026-11-18): the named limits, the typed refusal, the hostile-input readers, the ONE path identity, the
- * marker counter and the strict report scan. It imports nothing from its siblings.
- * `engine-test-kinds-io.mjs` holds the shared rules (identity, R-3, the declared entry, the current context, the record schema)
- * and builds records; `engine-test-kinds-reuse.mjs` reuses them and gives the verdict. The header of the io module states the claim.
+ * (owner amendment 2026-11-18): the named limits, the typed refusal, the hostile-input readers, the ONE path identity and the
+ * strict report scan. It imports nothing from its siblings.
+ * `engine-test-kinds-io.mjs` holds the shared rules (identity, the declared entry, the current context, the record schema) and
+ * builds records; `engine-test-kinds-reuse.mjs` reuses them and gives the verdict. The header of the io module states the claim.
  *
  * REFUSE, NEVER DROP (I-C): an input over any cap here (bytes, depth, scan tokens, results, title length) is a typed refusal of
- * the whole report. Nothing is skipped to stay under a cap, because a skipped non-passing result is a subtraction R-3 then misses.
+ * the whole report. Nothing is skipped to stay under a cap: a report is believed whole or not at all, so what was not read can
+ * never decide what was.
  */
 import { types } from 'node:util';
 import { compileGlob, matchSegments } from './risk-floor.mjs';
@@ -90,15 +91,6 @@ export const matches = (compiled, rel, ctx) => {
   charge(ctx);
   try { const segs = segsOf(rel); return compiled.some((g) => matchSegments(g, segs, ctx.glob)); } catch { return refuse('evidence_budget_exceeded'); }
 };
-
-// ---- marker counting (R-3): the same grammar as P3 `markers` ----
-const MARKER = /\[(kind|plan):([A-Za-z0-9][A-Za-z0-9_-]{0,63})\]/g;
-/** Occurrences of every `[kind:x]` / `[plan:x]` marker (latin1 view: markers are ASCII, line endings do not matter). */
-export function countMarkers(text, out = new Map()) {
-  for (const m of text.matchAll(MARKER)) out.set(`${m[1]}:${m[2]}`, (out.get(`${m[1]}:${m[2]}`) ?? 0) + 1);
-  return out;
-}
-export const bufMarkers = (buf) => countMarkers(buf.toString('latin1'));
 
 // ---- the report: a strict JSON shape scan (duplicate keys, depth, work), then the whole-run pre-pass ----
 /** Throws a Refusal: evidence_unavailable for malformed/duplicate-key/too-deep JSON (at most 65 nested levels: `d` counts from 0 to
