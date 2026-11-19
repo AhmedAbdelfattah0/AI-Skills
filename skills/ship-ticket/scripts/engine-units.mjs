@@ -283,7 +283,7 @@ async function runCheck(E, u, name, resources) {
     await io.boundary(E.ctx.hooks, 'unit-check-running', { attempt_id: a.attempt_id, unit: u, check: name });
     launch.release();
     result = await launch.done;
-  } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, quiescent: true }; } // retire() decides
+  } catch (e) { result = { exitCode: null, timedOut: false, error: e.message, ...(io.RUNNER_REFUSALS.has(e?.code) ? { error_code: e.code } : {}), quiescent: true }; } // retire() decides
   if (result.quiescent !== true || !(await retire(E.S, a, E.alive, 'exited'))) {
     a.status = 'unknown';
     pushJudgment(E.S, 'quiescence_unknown', u, `cannot prove unit-check runner group ${a.pgid ?? a.pid} (${u}/${name}) has exited; no check evidence recorded`);
@@ -291,7 +291,7 @@ async function runCheck(E, u, name, resources) {
     return { refusal: true };
   }
   a.envelope = { exitCode: result.exitCode, timedOut: result.timedOut, ...truncation(result) };
-  return { name, exit_code: result.exitCode, result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}) };
+  return { name, exit_code: result.exitCode, result: result.exitCode === 0 && !result.timedOut ? 'pass' : 'fail', ...(result.error ? { error: result.error } : {}), ...(result.error_code ? { error_code: result.error_code } : {}) };
 }
 
 /** The judgments `verifyBinding` returns: while one is held (transient), nothing more runs in this drive. */
@@ -304,8 +304,8 @@ export const bindingHeld = (transient) => transient.some(j => BINDING_CODES.has(
  * invalidation (unitDrift), so a re-check inside one drive counts toward the storm guard, and every
  * re-check spends the run's parent-wide ceiling (ceilingReached). A check whose runner failed to
  * start is retried once (UNIT_CHECK_RETRY, an infra retry: it spends no re-check); a failing exit
- * is never retried. Checks that change the declared paths of ANY node (unit-less upstream
- * generators included) or move the config.base commit fail with that cause. Evidence is bound to
+ * is never retried, nor is a typed runner refusal (io.RUNNER_REFUSALS: a recorded fail that keeps
+ * its code). Checks that change the declared paths of ANY node (unit-less upstream generators included) or move the config.base commit fail with that cause. Evidence is bound to
  * the binding taken after the checks, so a failure stays bound (never re-run by itself). A failure
  * before the freeze marks the unit's nodes failed. Checks ran repository code: when they drifted the
  * approval binding (plan narrative, DAG bytes) nothing is recorded (UNIT_CHECK_DROPPED, the drift
@@ -335,7 +335,7 @@ export async function runUnitChecks(E, transient = []) {
     const pre = io.fingerprints(E.ctx.repoRoot, watched), results = [];
     for (const name of U.checks) {
       let r = await runCheck(E, u, name, U.resources);
-      if (!r.refusal && r.error) { note(E.S, 'UNIT_CHECK_RETRY', { unit: u, check: name, cause: r.error }); r = await runCheck(E, u, name, U.resources); }
+      if (!r.refusal && r.error && !r.error_code) { note(E.S, 'UNIT_CHECK_RETRY', { unit: u, check: name, cause: r.error }); r = await runCheck(E, u, name, U.resources); }
       if (r.refusal) return progressed;
       results.push(r);
     }

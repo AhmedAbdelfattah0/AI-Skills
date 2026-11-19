@@ -11,7 +11,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSy
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { launcherArgs, RELEASE_BYTE } from './launcher.mjs';
+import { launcherArgs, RELEASE_BYTE, SEALED_SCHEMA, STDOUT_CAP } from './launcher.mjs';
 import { sha, coded } from './engine-dag.mjs';
 import { END, parseRunState, malformedReason, eventLine } from './run-state.mjs';
 import { killGroup, quiesce, processInfo } from './engine-quiesce.mjs';
@@ -138,10 +138,12 @@ export function readIfExists(file) {
 /**
  * Start the carrier's launcher in durable mode (own process group on POSIX, blocked on the release
  * byte, envelope written atomically on exit). `files`: { promptFile, outFile, envelopeFile, attemptId }.
+ * `sealed` (runner attempts only: `{ report }`) starts the sealed launcher instead, with its stdout
+ * a pipe that carries the result frame; without it (workers) the launch is unchanged.
  */
-export function startLauncher({ spawnFn = spawn, spec, cwd, env, platform, files }) {
-  return spawnFn(process.execPath, launcherArgs({ ...spec, ...files }),
-    { cwd, env, detached: platform !== 'win32', stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+export function startLauncher({ spawnFn = spawn, spec, cwd, env, platform, files, sealed }) {
+  return spawnFn(process.execPath, launcherArgs({ ...spec, ...files, ...(sealed ? { sealed: true, report: sealed.report === true } : {}) }),
+    { cwd, env, detached: platform !== 'win32', stdio: ['pipe', sealed ? 'pipe' : 'ignore', 'ignore'], windowsHide: true });
 }
 export const RELEASE = RELEASE_BYTE;
 
@@ -182,20 +184,94 @@ export function gateRedDeps({ commit, alive, platform, repoRoot, verifyBinding, 
 export const artifactDigests = (repoRoot, artifacts = {}) =>
   Object.fromEntries(Object.entries(artifacts).map(([k, p]) => [k, repoFileDigest(repoRoot, p)]));
 
+/** The typed refusals gateRunner rejects with: callers keep the code and never retry them automatically. */
+export const RUNNER_REFUSALS = new Set(['runner_output_tampered', 'runner_survivor', 'channel_unsupported']);
+
+/** Upper bound on a sealed result frame: its header plus the capped stdout and the capped report. */
+const FRAME_CAP = 2 * STDOUT_CAP + 1024 * 1024;
+/** How long the result pipe may stay open after the launcher exited (it closes it right after the frame). */
+export const FRAME_CLOSE_MS = 5000;
+
 /**
- * `gateRed` deps.spawnRunner (also the ship-ready proof runner): the command through the carrier's
- * launcher (own process group, blocked on the release byte, envelope written atomically); `done`
- * reads the envelope and output after the whole group was killed and awaited, and reports
- * `quiescent: true` only when the group is proven gone (false: survived or unknowable).
+ * Decode the sealed launcher's result: exactly one frame (SEALED_SCHEMA header line, then
+ * `out_len` stdout bytes, then `report_len` report bytes, nothing after) for `attemptId`.
+ * Returns `{ head, stdout, report }` or `{ reason }`.
  */
-export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnFn }) {
-  return async ({ attempt_id: id, command, timeoutMs }) => {
+export function decodeSealedFrame(buf, attemptId) {
+  const nl = buf.indexOf(0x0a);
+  if (nl < 0 || nl > 65536) return { reason: 'no result frame header' };
+  let h;
+  try { h = JSON.parse(buf.subarray(0, nl).toString('utf8')); } catch { return { reason: 'result frame header is not JSON' }; }
+  if (h === null || typeof h !== 'object' || h.schema !== SEALED_SCHEMA) return { reason: 'result frame has the wrong schema' };
+  if (h.attempt_id !== attemptId) return { reason: `result frame is for attempt ${JSON.stringify(h.attempt_id)}, not ${attemptId}` };
+  const len = (v) => Number.isSafeInteger(v) && v >= 0;
+  const flags = ['truncated', 'out_eof', 'report', 'report_truncated', 'report_eof'].every(k => typeof h[k] === 'boolean');
+  if (!(h.exit_code === null || Number.isSafeInteger(h.exit_code)) || !(h.signal === null || typeof h.signal === 'string')
+    || !(h.spawn_error === null || typeof h.spawn_error === 'string') || !flags
+    || ![h.out_len, h.report_len, h.stdout_bytes, h.report_bytes].every(len)) return { reason: 'result frame header is malformed' };
+  if (buf.length !== nl + 1 + h.out_len + h.report_len) return { reason: `result is ${buf.length} bytes, its frame declares ${nl + 1 + h.out_len + h.report_len}` };
+  return { head: h, stdout: buf.subarray(nl + 1, nl + 1 + h.out_len), report: buf.subarray(nl + 1 + h.out_len) };
+}
+
+/**
+ * `gateRed` deps.spawnRunner (also the ship-ready proof runner and unit checks): the command
+ * through the sealed launcher (own process group, blocked on the release byte). Every byte and
+ * exit status `done` returns arrives over the launcher's stdout pipe, which only the engine and
+ * the launcher hold (probed on darwin and Linux, reasoned on win32): one result frame
+ * (decodeSealedFrame) whose exit_code must agree with the launcher's own exit status (0 iff 0),
+ * read to EOF. No file is read: the `.out` and envelope files are forensic only.
+ * `done` reports `quiescent: true` only when the group is proven gone (false: survived or
+ * unknowable). It rejects with `runner_output_tampered` (no well-formed frame for this attempt,
+ * a disagreeing or abnormal launcher exit, an oversized frame, a frame not latched at the
+ * runner's exit (POSIX), or a result pipe still open `frameCloseMs` after the launcher exited)
+ * unless the run timed out, which returns a result with `timedOut: true` and no exit code.
+ * It rejects with `runner_survivor` when stdout (or, with `report`, the report channel) was not
+ * at EOF at the boundary. In the exit callback the launcher reads each channel in turn with ONE
+ * read of up to STDOUT_CAP + 1 bytes, larger than any socket queue, so that single read empties the
+ * queue whatever is left unread at exit: it is the channel's latch point (a full read is refused).
+ * It is refused when a later read returns any byte (written after the latch point; not kept) or
+ * EAGAIN (another process still holds it).
+ * Claim (exact): the decision predicate is the OBSERVED EOF/open/read-error state of each
+ * channel at its latching read in the exit callback, per channel, platform and read cap (runner
+ * stdout on POSIX; plus the report channel on darwin, whose latching read comes after stdout's).
+ * A channel still open there (EAGAIN), returning bytes after that read, or failing to read is
+ * refused. Writes made earlier, or during earlier reads before the latch, are accepted, including
+ * those of a process handed the descriptor by an in-run holder; no additional verdict manipulation
+ * has been demonstrated under the current adapters and the tested threat model (see the in-run
+ * injection risk R-T2). This is not an atomic snapshot and writers are not authenticated. (R-T2: design §6.1.)
+ * Measured on PR #94
+ * head 4180cbc, a fast write-then-close survivor is accepted: Linux Node 18 100/100, Node 22
+ * 91/100; darwin Node 18 84/100, Node 22 6/100. RECOMMENDED for temporary risk acceptance; the
+ * owner's decision is PENDING (HANDOVER OD-D4 reverted on 2026-11-18). Recommended conditions:
+ * macOS harness 18/22 + engine-properties green on the final head; both independent reviews on the
+ * final head, no waiver; append-after-exit case in the adapter-qualification series; sandbox
+ * isolation (S-03/S-18) remains the real closure, as remediation item FX-R1: runner execution
+ * isolation (sandbox/pid-namespace) to close the post-exit window; Linux is stdout only.
+ * `report` must be a boolean (anything else rejects `bad_input`). `report: true` adds the report
+ * channel (the runner's fd 3, reached as /dev/fd/3; measured on darwin only, so any other
+ * platform rejects `channel_unsupported` before anything starts): the result then carries
+ * `report` (bytes) and `report_eof: true`.
+ */
+export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnFn, frameCloseMs = FRAME_CLOSE_MS }) {
+  return async ({ attempt_id: id, command, timeoutMs, report = false }) => {
+    if (typeof report !== 'boolean') throw coded('bad_input', `report must be true or false, not ${JSON.stringify(report)}`);
+    if (report === true && platform !== 'darwin') {
+      throw coded('channel_unsupported', `the runner report channel (/dev/fd/3) is unsupported on ${platform} (Linux: /dev/fd/N on a socketpair is ENXIO; win32: no /dev/fd)`);
+    }
     mkdirSync(dir, { recursive: true });
-    const promptFile = join(dir, id + '.stdin'), outFile = join(dir, id + '.out'), envelopeFile = join(dir, id + '.envelope.json');
-    writeFileSync(promptFile, '', { mode: 0o600 });
+    const outFile = join(dir, id + '.out'), envelopeFile = join(dir, id + '.envelope.json');
     const child = startLauncher({ spawnFn, spec: toSpec(command.cmd, command.args ?? []), cwd: repoRoot, env, platform,
-      files: { promptFile, outFile, envelopeFile, attemptId: id } });
-    const exited = new Promise(r => { child.on('exit', r); child.on('error', r); });
+      files: { outFile, envelopeFile, attemptId: id }, sealed: { report: report === true } });
+    const chunks = [];
+    let got = 0;
+    // Read the result pipe from the start: a large frame must never block the launcher's write.
+    const closed = new Promise(r => {
+      if (!child.stdout) return r();
+      child.stdout.on('data', c => { got += c.length; if (got <= FRAME_CAP) chunks.push(c); });
+      child.stdout.on('error', () => r());
+      child.stdout.on('close', () => r());
+    });
+    const exited = new Promise(r => { child.on('exit', (code, signal) => r({ code, signal })); child.on('error', () => r({ code: null, signal: null })); });
     child.stdin.on('error', () => {});
     if (!child.pid) { await exited; throw new Error('runner launcher failed to spawn'); }
     const pgid = platform === 'win32' ? null : child.pid;
@@ -205,15 +281,38 @@ export function gateRunner({ repoRoot, dir, platform, env, toSpec, alive, spawnF
         timedOut = true;
         killing = platform === 'win32' ? spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) : killGroup(pgid, alive);
       }, timeoutMs);
-      await exited;
+      const status = await exited;
       clearTimeout(timer);
       await killing;
+      let grace;
+      const pipeClosed = await Promise.race([closed.then(() => true), new Promise(r => { grace = setTimeout(() => r(false), frameCloseMs); })]);
+      clearTimeout(grace);
+      if (!pipeClosed) child.stdout.destroy();
       // Whole-group quiescence, checked: true only when the group is proven gone (Windows/no pgid: unknown).
       const quiescent = (pgid ? await quiesce(pgid, alive) : null) === false;
-      const envelope = readJson(envelopeFile);
-      if (quiescent && envelope?.spawn_error) throw Object.assign(new Error(`command failed to start (${envelope.spawn_error})`), { quiescent });
-      return { exitCode: envelope?.exit_code ?? null, stdout: readIfExists(outFile) ?? '', stderr: '', timedOut, quiescent,
-        ...(envelope?.truncated === true ? { truncated: true, stdout_bytes: envelope.stdout_bytes } : {}) };
+      const frame = !pipeClosed ? { reason: `the result pipe was still open ${frameCloseMs} ms after the launcher exited` }
+        : got > FRAME_CAP ? { reason: `the result exceeds ${FRAME_CAP} bytes` } : decodeSealedFrame(Buffer.concat(chunks), id);
+      const h = frame.head;
+      const agrees = h !== undefined && status.signal === null && status.code !== null && (status.code === 0) === (h.exit_code === 0);
+      if (!agrees) {
+        if (timedOut) return { exitCode: null, stdout: '', stderr: '', timedOut, quiescent };
+        const why = frame.reason ?? `launcher exit ${status.signal ?? status.code} disagrees with the frame's exit_code ${h.exit_code}`;
+        throw Object.assign(coded('runner_output_tampered', `runner result refused: ${why}`), { quiescent });
+      }
+      if (quiescent && h.spawn_error) throw Object.assign(new Error(`command failed to start (${h.spawn_error})`), { quiescent });
+      if (!h.spawn_error) {
+        // The boundary is the launcher's observed runner exit (win32: the weaker drain, see launcher.mjs).
+        if (h.boundary !== 'exit' && !(platform === 'win32' && h.boundary === 'drain')) {
+          throw Object.assign(coded('runner_output_tampered', `runner result refused: boundary ${JSON.stringify(h.boundary)} on ${platform}`), { quiescent });
+        }
+        const open = [!h.out_eof && 'stdout', report === true && !h.report_eof && 'the report channel'].filter(Boolean);
+        if (open.length) {
+          throw Object.assign(coded('runner_survivor', `${open.join(' and ')} still open when the runner exited: another process held it, so its bytes are not the runner's alone`), { quiescent });
+        }
+      }
+      return { exitCode: h.exit_code, stdout: frame.stdout.toString('utf8'), stderr: '', timedOut, quiescent,
+        ...(h.truncated ? { truncated: true, stdout_bytes: h.stdout_bytes } : {}),
+        ...(report === true ? { report: frame.report, report_eof: true, ...(h.report_truncated ? { report_truncated: true, report_bytes: h.report_bytes } : {}) } : {}) };
     })();
     done.catch(() => {});
     return { pid: child.pid, pgid, release: () => child.stdin.end(RELEASE), done };
