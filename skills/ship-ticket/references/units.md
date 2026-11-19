@@ -118,7 +118,7 @@ also not through unit-less nodes.
   every `gateReview` refusal. A unit is risky when a member node carries a risk label or the ticket
   has `config.riskLabels`. Its review and its confirmation then need a second opinion
   (`missing_second_opinion`) from a provider other than the primary's (`reviewers_same_provider`;
-  a CodeRabbit fallback is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a
+  a CodeRabbit stand-in is route `coderabbit` with identity `coderabbit:<model>`). Otherwise a
   second opinion is optional and validated when given. The record carries each reviewer's provider
   and model; model-name roles are the orchestrator's duty. The record (in `S.unit_reviews.<u>.chain`) binds the plan and DAG
   digests, the unit, the evidence id, its base commit and whole-tree candidate (`tree_candidate`),
@@ -248,11 +248,13 @@ records it.
   second opinion from a provider other than the primary's (Codex for the Opus
   primary, whatever the host: on a Codex host the counterpart Claude would share
   the primary's provider and is refused), on its review and on its confirmation. The
-  engine refuses a Fable second opinion here (`reviewers_same_provider`), so this is the
-  one place CodeRabbit is still a required route: if Codex is unavailable or its usage
-  limit is reached, run CodeRabbit on the unit's paths and record it as route `coderabbit`
-  with identity `coderabbit:<model>`. If neither can run, stop and ask
-  (`WAIT_FOR_USER`); never record the risky unit without it. For a risky unit the
+  engine refuses a Fable second opinion here (`reviewers_same_provider`). So that
+  CodeRabbit never becomes required, leave `config.unitReview` off (it is opt-in, never
+  defaulted) whenever Codex is unavailable at PLAN; the final review then carries the
+  Codex-else-Fable second opinion. If Codex is lost after a plan with `config.unitReview`
+  was approved, CodeRabbit may stand in when it is available (route `coderabbit`,
+  identity `coderabbit:<model>`); otherwise stop and ask (`WAIT_FOR_USER`); never record
+  the risky unit without it. For a risky unit the
   gate requires the second opinion to come from a different provider than the
   primary (`reviewers_same_provider`) and records each reviewer's provider and
   model. It does not check model names: assigning Opus as primary and Codex as

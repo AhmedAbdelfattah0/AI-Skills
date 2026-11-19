@@ -298,14 +298,19 @@ environment, then a read-only Cloudflare API check with a least-privilege token.
 Use the existing `cloudflare`, `wrangler`, `workers-best-practices`,
 `cloudflare-one` and `security-audit` skills where they apply. Run an applicable
 external check automatically when its tooling and permission are available; ask
-the owner only for a missing token or permission or a production-changing action.
+the owner only for a missing token or permission or a production-changing action,
+and ask for a missing token or permission as a planning question before
+`ExitPlanMode`.
 A check that cannot run now is `unverified` with the reason, in its 3b row and
-in the PROVE event, and is never reported as covered. An applicable security
-check still `unverified` at release is a security exception: it blocks SHIP
-(**WAIT_FOR_USER**) unless the owner explicitly accepts it for this candidate,
-recorded in RUN-STATE (the owner authority of [security-risk.md](security-risk.md)
-section 5; the `SECURITY_WAIVER` event itself stays for catalog pairs). This is
-orchestrator-enforced; no gate reads 3b yet.
+in the PROVE event, and is never reported as covered. A row whose "Runs when"
+comes after PROVE runs before SHIP when its tooling and permission allow. At
+release, an applicable security row whose status is anything other than
+`verified` or `not applicable` (`planned`, `partially verified`, `unverified`) is
+a security exception: it blocks SHIP (**WAIT_FOR_USER**) unless the owner
+explicitly accepts it for this candidate, recorded as the `SECURITY_WAIVER`
+record [ship.md](ship.md) defines for 3b rows (`boundary: "plan-3b"`). Record
+only the external checks the change touches. This is orchestrator-enforced; no
+gate reads 3b yet.
 
 ## Contract convergence before debate
 

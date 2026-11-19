@@ -8,7 +8,7 @@
  * Flags of a run: ui, security, elevated, codex (conditions of the load table), units (any DAG node has
  * `unit`: references/units.md at BUILD, PROVE and REVIEW), split (the plan chooses SPLIT: units.md at
  * PLAN) and internals (the operator card names references/harness-internals.md, which loads on demand
- * and is counted only then, never in the default run).
+ * and is counted only then, never in the default run), testkinds (the plan opts into test kinds: references/test-kinds.md at PROVE).
  *
  * Source of truth: the "Entering | Load" table in SKILL.md. A table row this script does not
  * declare in ENTERING makes it throw (CLI exit 1 with the row), so an edit of the table cannot be

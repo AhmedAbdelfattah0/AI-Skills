@@ -105,7 +105,7 @@ Load a phase reference only when entering that phase:
 | PROVE | [references/prove.md](references/prove.md) |
 | PROVE when the plan opts into test kinds | [references/test-kinds.md](references/test-kinds.md) |
 | PROVE with UI | [references/design-parity.md](references/design-parity.md) |
-| REVIEW | [references/review.md](references/review.md) |
+| REVIEW | [references/review.md](references/review.md); [references/cross-model.md](references/cross-model.md) only if it is not in context |
 | PLAN, PROVE or REVIEW of security-relevant work | [references/security-risk.md](references/security-risk.md) |
 | SHIP | [references/ship.md](references/ship.md) |
 | PLAN when the plan chooses SPLIT | [references/units.md](references/units.md) |
@@ -215,7 +215,7 @@ table, and an in-flight worker is not one of them.
 - Branch before the first repository write, including the plan artifact. Never
   implement on the default branch.
 - The approved Design Contract names every file that may change. Needing another
-  path is a material divergence and requires user approval.
+  path is a material divergence and requires the owner's re-approval: re-enter Plan Mode and present the revised plan with `ExitPlanMode` (Resume, changed plan).
 - Apply repository and code-quality rules while writing. REVIEW verifies work; it
   is not where routine engineering begins.
 - Never ship a feature switched off. A flag, env var or rollout fence that gates
@@ -228,8 +228,9 @@ table, and an in-flight worker is not one of them.
   screen and trust boundary, and every ticket gets the mandatory second opinion
   (Codex in a fresh session when available and within quota; otherwise a fresh
   Fable session, recorded as a same-provider independent review; CodeRabbit is
-  optional extra coverage, never required) — a second opinion, not a second rule
-  catalogue.
+  optional extra coverage, never required; leave `config.unitReview` off when
+  Codex is unavailable, see [references/units.md](references/units.md)) — a
+  second opinion, not a second rule catalogue.
 - Runtime attacks target only a local disposable instance. Never production or
   shared staging.
 - One ticket produces one branch, one final commit and one PR. The only
@@ -265,7 +266,8 @@ recorded uncertainty.
 
 A structural path floor runs alongside your own judgement, only when the repository declares
 it. When `.ship-ticket/risk-paths.json` does not exist at the base commit and the plan does not
-opt into test kinds, skip `risk-floor.mjs` and record the single plan line `risk_floor: not
+opt into test kinds (a `test-triggers:` plan line, or a repository
+`.ship-ticket/test-triggers.json` at base), skip `risk-floor.mjs` and record the single plan line `risk_floor: not
 declared`; your assessment is then the only protection. An opted-in test-kinds plan still runs
 `check` and records its strict record line (`declaration=none`), because test kinds require it. The
 repository declares its
@@ -300,7 +302,7 @@ serializes the two reviews.
 ## Security sensitivity
 
 Read an explicit ticket marker, then independently classify the change. Auth,
-multi-tenancy, billing, payments and secrets are security-sensitive regardless of
+multi-tenancy, billing, payments, money and secrets are security-sensitive regardless of
 labels. Record the result in the plan.
 
 Security-sensitive work:
@@ -344,7 +346,8 @@ PROVE and REVIEW have separate limits:
   cycle.
 
 Read-only checks and execution-record appends do not spend either limit. A Design
-Contract expansion is never counted as a repair; it is **WAIT_FOR_USER**.
+Contract expansion is never counted as a repair; it is **WAIT_FOR_USER** for the
+re-approval through `ExitPlanMode` (Resume, changed plan).
 
 These limits apply per ticket and REVIEW execution, including multi-ticket
 orchestration. An explicitly authorized retry follows Resume; it is never started
@@ -375,7 +378,7 @@ critical.
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
 | selected counterpart or its PLAN carrier, when the debate is required | bounded recovery, then debate with a fresh Fable session recorded `plan_debate.status: DEGRADED` (same provider, not cross-model agreement); if Fable also cannot run, **WAIT_FOR_USER** for restored access or an explicit solo-planning waiver |
-| Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`, identity `claude:fable`); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route |
+| Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`, identity `claude:fable`); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route; because the engine requires a cross-provider second opinion for a risky unit, `config.unitReview` stays off when Codex is unavailable ([references/units.md](references/units.md)) |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | review concurrency | run the primary review and the second opinion one after the other; both are still required |
 | implementation/proof fan-out | execute the same dependency DAG serially, record `parallelism: DEGRADED` with the missing carrier/resource reason, and continue |
@@ -524,7 +527,7 @@ At the full-stack join, verify the contract digest is unchanged, every changed
 path has exactly one owner, generated clients/types are current, and both provider
 and consumer conformance checks pass. Only then run real endpoint integration,
 end-to-end checks, and attacks. Contract drift pauses both sides and returns to
-PLAN approval; it is never repaired independently by one worker.
+PLAN approval through `ExitPlanMode`; it is never repaired independently by one worker.
 
 Continue until implementation is complete. Report progress without yielding.
 
@@ -595,7 +598,9 @@ dependencies:
     together) and for designing money, auth or security logic. A Sonnet primary
     reviewer missed design and validation defects that a later Opus pass caught
     (StoreCraft SCRUM-140/96, 2026-11-05); one strong review costs less than a
-    cheap one plus a fix ticket on merged code.
+    cheap one plus a fix ticket on merged code;
+  - `fable` for the fresh second-opinion session when Codex is unavailable
+    ([references/cross-model.md](references/cross-model.md)).
 
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
@@ -696,16 +701,29 @@ any candidate-byte change is **FAIL** and never silently reopens REVIEW.
 
 ## When execution may yield
 
-This list is the single owner of the stop points. Use **WAIT_FOR_USER** only for:
+This list is the single owner of the stop points, by category: a stop named in a
+reference (a gate or engine refusal, an owner-authority event) belongs to one of
+these categories and still stops. Use **WAIT_FOR_USER** only for:
 
 - **plan approval and material scope change:** the one native plan approval, a
   Design Contract expansion, or changed scope;
 - **security or assurance exceptions:** an explicit [NN] waiver, an applicable
-  security check left unverified at release, no safe local environment for
-  required attacks, or enforceable primary-review deadlines missing without an
-  explicit advisory-only exception;
-- **destructive actions:** squashing, resetting or deleting work you did not
-  create (unknown WIP history), or a production-changing operation;
+  security check in plan section 3b whose status is anything other than
+  `verified` or `not applicable` at release, no safe local environment for
+  required attacks, enforceable primary-review deadlines missing without an
+  explicit advisory-only exception, a degraded harness at SHIP on an ELEVATED or
+  security-sensitive run ([references/ship.md](references/ship.md)), an
+  `ADD_CONTROLS` reassessment awaiting the owner's `SECURITY_ADDENDUM`, or a
+  security-plan refusal of `classification_missing`, `plan_block_missing` or
+  `plan_block_invalid` ([references/security-risk.md](references/security-risk.md));
+- **engine and gate safety refusals:** a nonzero `ship-ready-check` (a gate
+  failure, never relabelled as harness degradation), a REPAIR the ledger does not
+  authorize, an engine judgment point that names the user, or an unresolved
+  `strong` model ([references/execution-harness.md](references/execution-harness.md));
+- **destructive or shared-state actions:** squashing, resetting or deleting work
+  you did not create (unknown WIP history), a force-push, deleting a remote
+  branch, changing shared staging or a shared database, or a production-changing
+  operation. Never force-push without explicit owner authority;
 - **unresolved blockers after bounded recovery:** a required native host mode
   transition that has no agent-callable control, no independent primary
   reviewer, no usable second opinion from Codex or Fable, a required PLAN debate
@@ -720,8 +738,8 @@ This list is the single owner of the stop points. Use **WAIT_FOR_USER** only for
 
 Everything else inside the approved scope takes the recommended default and is
 recorded: for example, a fixable input refusal is corrected and rerun, a Codex
-outage switches to Fable, and a manual ship-ready confirmation replaces a
-degraded harness check.
+outage switches to Fable, and on a STANDARD run a degraded harness is recorded
+with SHIP's manual confirmations in the SHIP_READY event and the PR body.
 
 Use **FAIL** for:
 
@@ -764,6 +782,10 @@ message look like completion.
 - REVIEW PASS, SHIP incomplete: verify the same candidate ID and resume only the
   missing idempotent external operation. Never rerun REVIEW.
 - Changed scope, Design Contract or approved plan: return to human approval.
+  On Claude that means re-entering Plan Mode (`EnterPlanMode`), updating the plan
+  file and presenting the revised plan with `ExitPlanMode`; on Codex, the host's
+  native plan handoff. A chat reply, an `AskUserQuestion` answer or the gap
+  question's answer is never that approval.
 - Existing attack or parity evidence may be reused only when its inputs and
   candidate paths are unchanged; otherwise rerun the affected proof, not the
   entire workflow.
@@ -786,7 +808,8 @@ open gap into one `WAIT_FOR_USER` question, and offer these options, recommendin
 the first:
 
 1. **Fold it into this ticket.** This is a Design Contract expansion and returns
-   to human approval as the Resume rules require. After approval, route the gap
+   to human approval through `ExitPlanMode` as the Resume rules require; the
+   user's choice of this option is routing, not the approval. After approval, route the gap
    by the phase that found it:
    - **Before REVIEW** (PLAN, BUILD or PROVE): it returns to the matching
      implementation and proof work like any other contract path.

@@ -77,20 +77,29 @@ concurrently, then join once:
 - every candidate path remains inside the Design Contract;
 - all required locally runnable commands remain green or have unchanged reusable
   evidence;
-- no applicable security check in plan section 3b is still `unverified` without
-  the owner's explicit acceptance for this candidate, recorded in RUN-STATE (the
-  owner authority of [security-risk.md](security-risk.md) section 5; the
-  `SECURITY_WAIVER` event itself stays for catalog pairs); otherwise
-  `WAIT_FOR_USER`;
+- every applicable security row in plan section 3b has the latest recorded status
+  `verified` or `not applicable`. Before this check, run any row whose "Runs
+  when" came after PROVE (staging, a read-only external check) automatically when
+  its tooling and permission allow. Any other status (`planned`, `partially
+  verified`, `unverified`, or no status) needs the owner's explicit acceptance
+  for this candidate, otherwise `WAIT_FOR_USER`. The acceptance is the owner
+  authority of [security-risk.md](security-risk.md) section 5, recorded as a
+  `SECURITY_WAIVER` event with `boundary: "plan-3b"`, `control: "<the 3b row's
+  check>"`, `candidate`, `policy_version: 2`, `authorized_by` and `reason`, and
+  appended only while nothing dispatched is live. It matches no catalog pair, so
+  the engine waives nothing with it; the orchestrator reads it here. The PR body
+  lists every applicable row that is not `verified`;
 - no unrelated user changes would enter the commit.
 
 Re-run `base-drift.mjs check` (brief.md) before SHIP. With the engine, after
 SHIP_READY is appended and before the commit, run `ship-ready-check.mjs check
---run-state <plan> --engine-log <log> --run-id <ID> --require-event`; nonzero stops (`WAIT_FOR_USER`). Not applicable after degradation: record `harness degraded` and the
-results of the read-only confirmations above in the SHIP_READY event, then commit; the
-one plan approval already covers it, so no second approval is requested.
+--run-state <plan> --engine-log <log> --run-id <ID> --require-event`; nonzero stops (`WAIT_FOR_USER`). A nonzero result is a gate failure, never relabelled as degradation. Not applicable after degradation: record `harness degraded` and the
+results of the read-only confirmations above in the SHIP_READY event and the PR body.
+On an ELEVATED or security-sensitive run this is an assurance exception: get explicit
+user approval (`WAIT_FOR_USER`) before the commit. A STANDARD run then commits without
+a second approval.
 
-**Reuse valid evidence.** After a green run, a docs-only or otherwise unaffected delta
+**Reuse valid evidence** (before REVIEW freezes the candidate). After a green run, a docs-only or otherwise unaffected delta
 re-runs only the gates whose inputs it changes; unchanged evidence is reused. A run
 made with a dirty-tree override (a repository gate's `--allow-dirty` or equivalent) is
 never final evidence, and the final validation still runs on the delivered candidate. Record timing through the existing run log only.

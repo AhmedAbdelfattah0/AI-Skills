@@ -405,6 +405,11 @@ another reader is still inspecting the old candidate.
 
 ### Test reliability and evidence
 
+On an Nx monorepo, the formatted RED runner is the direct Vitest command
+(`vitest-json`), not Nx: Nx prints banner lines before the JSON, so `gate red`
+refuses it `unsupported_output`. Nx still works as a PROVE command (measured on a
+dry run: direct Vitest RED accepted, Nx RED refused, Nx PROVE accepted).
+
 A test must not depend on wall-clock time, a sleep used as synchronisation, a shared temp name or scheduler
 order. A test that is red in the suite and green alone is a verification-reliability incident: record it.
 Passing alone is diagnostic, not proof. Record the incident in the PROVE record. Do not fix it with a longer timeout, a retry or less parallelism;

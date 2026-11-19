@@ -135,7 +135,7 @@ short free-form counterpart prompt is not a substitute for primary coverage.
 - a migration, schema, public API, event or shared data contract;
 - a shared component or library surface with multiple consumers;
 - unusually broad cross-subsystem impact;
-- repository instructions or the user explicitly require a second opinion;
+- repository instructions or the user explicitly require ELEVATED review;
 - preflight records a material uncertainty that the review can resolve.
 
 Those triggers select `ELEVATED`. They change reviewer redundancy, not rule,
@@ -288,7 +288,7 @@ formatting or escaping slip, a wrong count) goes into the one repair batch.
 recorded follow-up tracker item, without a question. Any other gap outside the
 Design Contract gets the spine's same-run question: fold it into this ticket, queue it as
 its own ticket in this run, or defer it. A gap the user folds in is re-dispositioned
-`fix` after the scope re-approval and joins the one repair batch if it is still
+`fix` after the scope re-approval through `ExitPlanMode` and joins the one repair batch if it is still
 unspent. It never opens another batch. Once the batch is spent, or if the
 confirmation finds the gap, the execution stays FAIL and the gap needs an
 authorized retry or a queued ticket. Outside the recorded ship threshold, a deferred tracker item exists only when the user chooses to defer. No follow-up is ever a line in the final report left for the user to

@@ -454,12 +454,13 @@ do not grant authorization. Limits are per execution, not per ticket history.
 Native timed waits do not cancel reviewers. Preflight reliable deadline and
 cancellation support, or use an existing read-only relay watchdog with the full
 primary coverage packet. Without either, request an explicit advisory-only
-exception rather than silently weakening enforcement. Optional review degrades.
+exception rather than silently weakening enforcement. A missing Codex second opinion falls back to Fable.
 
 PROVE may use two consolidated repair batches. REVIEW may use one repair batch and
 one targeted confirmation. Read-only checks and compact append-only execution
 events spend neither limit. A Design Contract expansion always returns to human
-approval rather than being disguised as a repair.
+approval (re-entering Plan Mode and presenting the revised plan with `ExitPlanMode`,
+never a chat reply) rather than being disguised as a repair.
 
 It is also a **delegator**: it owns the workflow and routes every
 language/framework judgment to the code-quality family and to the repo's own

@@ -233,6 +233,18 @@ Route, in order:
 3. If neither Codex nor Fable produces a usable result, `WAIT_FOR_USER`. Never
    continue on primary coverage alone.
 
+**Dispatching Fable.** On a Claude host, start a new subagent with `model: fable`
+and no PLAN, BUILD or primary-review context: the same frozen scope packet,
+read-only, on its own 10-minute budget. Elsewhere use the `claude-delegate`
+read-only relay with the Fable model selected. Record the model id the carrier
+reports (`claude:fable-<version>`), or `claude:fable` when it reports none. The
+identity must differ from every builder identity, and the gate compares
+`provider:model`, so an unversioned `claude:fable` does not catch a builder
+recorded as `claude:fable-<version>`: if any builder ran on Fable, Fable cannot be
+the second opinion (use Codex, or `WAIT_FOR_USER`). Likewise on a Codex host whose builders ran
+Codex, the Codex second opinion must be a model no builder used; otherwise use
+Fable.
+
 **CodeRabbit is optional extra coverage**: it may run on the same candidate
 (`coderabbit review --agent --include-untracked` or the CLI's equivalent), and
 its findings are reconciled like any other's, but it is never required and never
