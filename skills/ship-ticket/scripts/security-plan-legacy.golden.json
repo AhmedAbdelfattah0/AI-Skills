@@ -1,5 +1,6 @@
 {
  "base": "origin/main be63aea",
+ "catalog_digest": "sha256:ed41751ae3b4392d197d98aff78bbd0f6c0461ae7fe6c3f224bf32718899e5b4",
  "select": [
   {
    "selection_digest": "sha256:943da22ab1f900d740e8f0b2563a54ffefed86960547a10a2d4cba212b4c477a",

@@ -4,8 +4,11 @@
 // under all-false / all-true / all-unknown facts, multi-surface mixes, an empty selection, and a format-2 reassess of
 // changed files that F12a's C5 narrowing must NOT change for legacy runs (test-named files in router roots, workspace
 // api/ modules, migrations, auth specs). `config_fragment` is excluded (F12a removes its stray securityControls key).
-// Regenerate (owner-approved baseline change only):
-//   git archive origin/main skills/ship-ticket/scripts skills/vapt | tar -x -C <dir>
+// The golden depends on the catalog bytes (every selection digest embeds catalog_digest, recorded in the file). It was
+// captured from the FROZEN base be63aea (never "origin/main" after this merges). If S59 fails because controls.json
+// changed, regenerate from a tree whose security-plan.mjs is be63aea's and whose catalog is the NEW controls.json
+// (that pins legacy behaviour under the new catalog); never from candidate code. Recipe (owner-approved baseline change only):
+//   git archive be63aea skills/ship-ticket/scripts | tar -x -C <dir>; git archive HEAD skills/vapt | tar -x -C <dir>
 //   node -e "import('./security-plan-legacy.capture.test-helper.mjs').then(async m => console.log(JSON.stringify(await m.captureLegacy('<dir>/skills/ship-ticket/scripts/security-plan.mjs'), null, 1)))"
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -55,5 +58,5 @@ export async function captureLegacy(securityPlanPath) {
     const r = SP.reassess({ plan: plan(approved), catalog: cat, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files: [f] }, classifications: [] });
     return { path: f.path, ok: r.ok, code: r.code, outcome: r.outcome ?? null, signals: r.signals ?? null, unclassified: r.unclassified ?? null, delta_pairs: r.delta_pairs ?? null };
   });
-  return { base: 'origin/main be63aea', select, reassess };
+  return { base: 'origin/main be63aea', catalog_digest: cat.digest, select, reassess };
 }

@@ -57,15 +57,22 @@ surface**, under five rules, each refused when broken:
 - with a machine-checkable citation: one repository-relative `path[:symbol]` naming
   a file, no placeholder such as `TBD` or `n/a` (`fact_uncited`). Brackets,
   parentheses and `$` are allowed in the path (`app/api/orders/[id]/route.ts:GET`).
-  The cited file must **exist** and, with a `:symbol`, contain that text
-  (`citation_missing`):
+  A citation is never a docs-only file (`README.md`, `CLAUDE.md`, `AGENTS.md`,
+  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`), a path inside `.git/` or
+  `node_modules/`, or a `:symbol` shorter than 3 characters (`fact_uncited`).
+  The cited file must **exist** with exactly that case on every OS, must not be
+  gitignored, and, with a `:symbol`, must contain that text (`citation_missing`):
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
-  - at `gate review` (original), in the candidate work tree, with nothing deferred;
+  - at `gate review`, both original and confirmation, in the candidate work tree,
+    with nothing deferred;
+  - at `gate ship-ready`, before and after the proof, in the candidate work tree.
+    A repair that removes the cited file or symbol never ships;
   - in the `obligations` CLI, in the `--repo` working tree.
 
-  An unreadable tree fails closed. The check proves that the cited text exists, not
-  that it supports the claim: that judgment is the review row (section 9).
+  An unreadable tree fails closed. Outside a git repository no ignore rule applies.
+  The check proves that the cited text exists, not that it supports the claim: that
+  judgment is the review row (section 9).
 - never on every surface (`surface_fact_reinflates`), and never so that a control
   the change selects is left with **no effective pair** (`surface_fact_reinflates`).
   A surface that keeps the fact but whose kind cannot pair the control is no keeper;
@@ -252,40 +259,60 @@ format-3 block is replayed under the installed catalog at every reassessment. A
 lowering that no longer follows from it is `plan_block_invalid`.
 
 **Test files and workspace folders (C5, block format 3 only).** A format-2 run keeps
-the original detector byte for byte (pinned by
-`scripts/security-plan-legacy.golden.json`, captured from origin/main). A format-3
-run narrows the three surface-introducing signals in exactly three places, and
-every narrowing that applies is **recorded**, never silent. It is listed as
-`c5_exempted` (`path`, `kind`, `rule`):
+the original detector byte for byte. This is pinned by
+`scripts/security-plan-legacy.golden.json`, captured from be63aea under the catalog
+digest the file records.
 
-- in the `gate reassess` output;
-- in the recorded reassessment;
-- in the ship-ready `obligations` print;
-- in the `preflight` output for DAG writes.
+A format-3 run changes the detector in three ways, and none of them silences a
+production file:
 
-| Rule | Signal | Narrowing |
-|---|---|---|
-| `test-file` | `auth-or-middleware-change` | a test-named file raises none |
-| `test-file` | `new-route` | a test-named file raises none, **unless** it is under a router root |
-| `workspace-api-folder` | `new-route` | a path whose only route evidence is a workspace project folder named `api` |
+- **`test-file` exemption, `new-route`.** A test-named file raises no `new-route`,
+  unless it sits under a **router root**.
+- **`test-file` exemption, `auth-or-middleware-change`.** A test-named file raises
+  no auth signal, unless it sits under a router root or a **middleware root**. A
+  test-named file under `server/middleware/`, `middleware/`, `middlewares/` or
+  `plugins/` still signals. Nitro loads every file in `middleware/`, and
+  @fastify/autoload loads every file in `plugins/`.
+- **Workspace `api/` folder: an open `possible-route` signal, not an exemption.**
+  A file whose only route evidence is a workspace project folder named `api`
+  (`apps|packages|services|libs|modules|projects/api/`) raises `possible-route`
+  instead of `new-route`.
+  - It always needs a classification.
+  - A reason alone may close it, and the classification is recorded in
+    `classifications_used`.
+  - It needs no inventory surface.
 
-What these terms mean:
+  This is how multi-line tRPC procedures, `usersRouter.post(...)`, Hono and Elysia
+  sub-apps, a renamed fastify instance and GraphQL resolvers stay visible without a
+  longer pattern list. A real route line in such a file still raises `new-route`.
+  That covers the original patterns, plus fastify, hono and elysia verbs and tRPC
+  procedures on one line.
 
-- **Test-named file**: a `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|ex|exs>`,
-  `*_spec.<go|py|rb|ex|exs>` or `test_*.py` file, or a path under `__tests__/`,
-  `__mocks__/` or `__fixtures__/`.
-- **Router root**: any `routes/`, `route/`, `pages/`, `api/`, `controllers/`,
+Every exemption that applies is **recorded** as `c5_exempted` (`path`, `kind`,
+`rule`). The record appears in:
+
+- the `gate reassess` output;
+- the recorded reassessment;
+- the ship-ready `obligations` print;
+- the `preflight` output for DAG writes.
+
+Every record is also **consumed**. Reassess, `init` and `preflight` refuse
+`surface_inventory_incomplete` if any record names a file that is not test-named. So
+only test files can ever be narrowed.
+
+Definitions:
+
+- **Test-named file.** A `*.test.*`, `*.spec.*` or `*.e2e-spec.*` file, a
+  `*_test.<go|py|rb|exs>` or `*_spec.rb` file, a `test_*.py` file, or a path under
+  `__tests__/`, `__mocks__/` or `__fixtures__/`. Go and Elixir `_spec` files are
+  production code.
+- **Router root.** Any `routes/`, `route/`, `pages/`, `api/`, `controllers/`,
   `handlers/`, `endpoints/`, `webhooks/` or `functions/` segment, or
   `server/api|routes|middleware/`. File-system routers (React Router / Remix
   `flatRoutes`, TanStack, SolidStart, SvelteKit, Next.js `pages/`, Nitro, Vercel
   `api/`) serve every file there, test-named or not.
-- **Workspace project folder**: `apps|packages|services|libs|modules|projects/api/`.
-  Inside it, these still fire:
-  - `routes/`, `controllers/`, `handlers/`, `endpoints/` and `webhooks/` subfolders,
-    a nested `api/`, and an `api.*` file;
-  - every added route line. Format 3 adds fastify, hono and elysia verbs and tRPC
-    `...Procedure....query|mutation|subscription(` to the line patterns, so a
-    plugin or router module is not blinded.
+- **Accepted residual.** A test-named file outside every router and middleware root
+  stays exempt. It is recorded, never silent.
 
 `migration-or-rls-change` is **never** narrowed: migration runners select files by
 directory and name, not by import, so a test-named migration still signals. Other
@@ -293,10 +320,26 @@ signals of a test file (mail, payment, env, dependency) and its out-of-plan path
 always count.
 
 For a format-3 block, a changed path inside the Design Contract that raises one of
-the three surface signals under this detector and has no surface at its path is
+the three surface signals under this detector, and has no surface at its path, is
 refused `surface_inventory_incomplete` before classification. The same check runs
 at `init` and `preflight` over file-shaped DAG writes. Add the surface to the
 inventory.
+
+**The LF pin on `controls.json` (side effect).** The catalog digest is the sha256 of
+`skills/vapt/controls.json`'s raw bytes. `.gitattributes` now pins that file to LF,
+so every OS checks out the same bytes and gets the same digest. Before the pin, a
+Windows `core.autocrlf` checkout had CRLF bytes and a different digest. A plan
+approved from such a checkout records the old digest, so the pinned catalog refuses
+it (`catalog_unavailable`). Re-select and re-approve it.
+
+**Follow-ups (not done in S1).**
+
+- The legacy golden embeds the catalog digest. A legitimate catalog change fails
+  `[S59]`, whose message explains how to regenerate from be63aea's
+  `security-plan.mjs` under the new catalog (see the capture helper).
+- A second-opinion dispute counts only with a `subject_id`.
+- Some route shapes are left to `possible-route` rather than to a precise pattern.
+- `isTestPath` is exported but unused outside tests.
 
 **What reopening does not cover (residuals, documented).**
 

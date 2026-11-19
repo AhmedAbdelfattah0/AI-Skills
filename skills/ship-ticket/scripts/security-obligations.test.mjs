@@ -34,7 +34,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as SP from './security-plan.mjs';
 import * as OB from './security-obligations.test-helper.mjs';
-import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview } from './engine-test-fixture.mjs';
+import { POSIX, fixture, passReview, failReview, confirmReview, primaryReview, secondOpinion } from './engine-test-fixture.mjs';
 import * as DAG from './engine-dag.mjs';
 import { preflight } from './run-engine.mjs';
 import { securityRowsRefusal, disputedRefusal } from './engine-gates.mjs';
@@ -102,7 +102,7 @@ test('(a) an applicable control wrongly marked N/A is refused or stays effective
   const bools = Object.keys(REAL.catalog.fact_vocabulary).filter((k) => REAL.catalog.fact_vocabulary[k].type === 'bool');
   const t = Object.fromEntries(bools.map((b) => [b, true]));
   const ev = Object.fromEntries(bools.map((b) => [b, 'src/x.ts:fn']));
-  const rh = (facts) => ({ boundary_id: 'r', kind: 'request-handler', path: 'src/r.ts', principals: ['staff'], facts, evidence: Object.fromEntries(Object.keys(facts).map((f) => [f, 'src/r.ts:fn'])) });
+  const rh = (facts) => ({ boundary_id: 'r', kind: 'request-handler', path: 'src/r.ts', principals: ['staff'], facts, evidence: Object.fromEntries(Object.keys(facts).map((f) => [f, 'src/r.ts:handler'])) });
   const keeper = { boundary_id: 'k', kind: 'business-invariant', path: 'src/k.ts', principals: ['staff'] };
   refused(SP.selectControls(REAL, { security_policy: 2, surfaces: [rh({ spends_or_reserves_value: false }), keeper], facts: t, evidence: ev }), 'surface_fact_ungated');
   // the surface's own path raises a mail signal whose class names the dropped ABUSE-02: every reassessment would reopen it
@@ -261,19 +261,19 @@ test('[S47] [S48] C5: real route and handler files (repo fixtures and framework 
   assert.equal(routeSignal('apps/api/src/index.ts', ["app.get('/health', h)"]), true);
 });
 
-test('[S47] [S48] C5 (format 3): test files outside every router root and workspace apps/api/ non-route modules raise no new-route, each exemption recorded', () => {
+test('[S47] [S48] C5 (format 3): test files outside every router root raise no new-route (exemption recorded); workspace apps/api/ modules raise an open possible-route instead', () => {
   for (const p of ['apps/api/src/services/shipment.service.ts', 'apps/api/src/index.ts', 'packages/api/src/config.ts', 'services/api/src/db.ts', 'libs/api/src/client.ts']) {
     const ex = [];
-    assert.equal(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).some((s) => s.kind === 'new-route'), false, p);
-    assert.deepEqual(ex, [{ path: p, kind: 'new-route', rule: 'workspace-api-folder' }], p);
+    assert.deepEqual(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).map((s) => s.kind), ['possible-route'], p);
+    assert.deepEqual(ex, [], p);
   }
   for (const p of ['src/__tests__/lib/x.ts', 'test/e2e/app.e2e-spec.ts', 'spec/requests/orders_spec.rb', 'tests/test_routes.py', 'src/lib/util.test.ts']) {
     const ex = [];
     assert.deepEqual(SP.reassessSignals({ paths: [{ path: p, added: ['router.post("/x")'] }], c5: true, exempted: ex }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)), [], p);
     assert.deepEqual(ex, [{ path: p, kind: 'new-route', rule: 'test-file' }], p);
   }
-  assert.equal(SP.isTestPath('src/middleware/auth.spec.ts'), true);
-  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'], c5: true }), []);
+  assert.deepEqual(SP.reassessSignals({ paths: ['src/lib/auth.spec.ts'], c5: true }), []); // exempt (recorded): no router or middleware root
+  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'], c5: true }).map((x) => x.kind), ['auth-or-middleware-change'], 'R2: a middleware/ root is never exempt');
   assert.equal(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'] }).length > 0, true, 'format 2 (legacy): unchanged, it still signals');
   // a test file is still an out-of-plan path when outside the contract (reassess), and non-surface signals still fire
   assert.ok(SP.reassessSignals({ paths: [{ path: 'src/mail.test.ts', added: ['sendMail(x)'] }] }).some((s) => s.kind === 'mail-or-notification-send'));
@@ -398,12 +398,12 @@ function realSelection() {
 const SPEC = 'spec/sec.test.mjs';
 const specText = (list) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
   + `for (const id of ${J(list)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
-function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' } } = {}) {
+function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles } = {}) {
   const cov = coverage(sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, ...(startAt ? { startAt } : {}), narrativeExtra: narrative(sel) + '\n\n',
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } }, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov },
     nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }, ...nodes],
-    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: { 'src/impl.txt': 'fixed' } } } });
+    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: fixFiles ?? { 'src/impl.txt': 'fixed' } } } });
   const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
   g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
   return Object.assign(fx, { sel, ids: cov.map((c) => `${c.boundary}:${c.control}`) });
@@ -433,11 +433,14 @@ test('[S53] (j) init binds a format-3 plan with controlCoverage = the effective 
   assert.equal(initCode(extra.cli('init', { dag: extra.dagFile })), 'security_pairs_mismatch');
 });
 
-test('init: an engine whose semantics lack version 3 refuses a format-3 run (policy_version_unsupported); preflight checks the plan with no START and writes nothing', { skip: WIN_SKIP }, async (t) => {
+test('[S76] init: an engine whose semantics lack version 3 refuses a format-3 run (policy_version_unsupported); preflight checks the plan with no START and writes nothing', { skip: WIN_SKIP }, async (t) => {
   const fx = obFx(t);
   await assert.rejects(async () => (await import('./run-engine.mjs')).init(fx.ctx({ policy: { current: 1, semantics: { 1: {}, 2: { testKinds: true } } } })), (e) => e.code === 'policy_version_unsupported');
   const pf = await preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile });
   assert.equal(pf.code, 'preflight_ok'); assert.equal(pf.block_format, 3); assert.equal(pf.dropped_pairs, fx.sel.na_pairs.length);
+  // [S76] the C5 exemption record of a DAG write reaches the preflight output
+  const ax = obFx(t, { nodes: [{ id: 'web', deps: ['impl'], writes: ['lib/auth.spec.ts'] }] });
+  assert.deepEqual((await preflight({ repoRoot: ax.repo, ticket: 'T-1', dagFile: ax.dagFile })).c5_exempted, [{ path: 'lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]);
   assert.equal(existsSync(fx.stateFile()), false, 'preflight wrote no state');
   // without a RUN-STATE block or START (a plan still in Plan Mode)
   const draft = join(fx.root, 'draft.md');
@@ -474,11 +477,15 @@ test('[S46] (h) end to end: a reviewer FAIL on a dropped pair cannot be cleared 
   assert.equal(s.out?.code, 'security_na_disputed', s.stdout);
 });
 
-test('ship-ready of a format-3 run reaches the matrix: a passing run prints its obligation matrix', { skip: WIN_SKIP }, (t) => {
-  const fx = obFx(t);
+test('[S73] [S74] [S75] ship-ready of a format-3 run prints its obligation matrix, and the C5 exemption record reaches reassess output, the recorded reassessment and ship-ready', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const bearerOnly = true;\n', 'src/lib/util.test.ts': "app.get('/x', h)\n" } });
   const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
   okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive impl');
-  okc(fx.gate('reassess', {}), 'reassess');
+  const re = fx.gate('reassess', {});
+  okc(re, 'reassess');
+  const EX = [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }];
+  assert.deepEqual(re.out.c5_exempted, EX, 'reassess output');
+  assert.deepEqual(fx.readState().security.reassessed.c5_exempted, EX, 'recorded reassessment');
   const cand = fx.candidate();
   const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
     ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
@@ -488,6 +495,7 @@ test('ship-ready of a format-3 run reaches the matrix: a passing run prints its 
   assert.equal(r.out?.code, 'ship_ready', r.stdout);
   assert.equal(r.out.obligations.counts['dropped-by-fact'], fx.sel.na_pairs.length);
   assert.equal(r.out.obligations.matrix.length, 2 * REAL.catalog.controls.length);
+  assert.deepEqual(r.out.obligations.c5_exempted, [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }], 'ship-ready obligations print');
 });
 
 test('config_fragment spreads into a DAG config that validates (no securityControls key)', () => {
@@ -531,9 +539,10 @@ test('[S61] B1(b) format 3: a test-named file under a router root still raises n
 });
 
 test('[S65] B1(c)(d) format 3: every C5 exemption that applies is listed (path, signal, rule); fastify and tRPC routes in a workspace api/ still signal', () => {
-  const ok3 = ok(r3([{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, { path: 'src/middleware/auth.spec.ts', added: [] }, { path: 'apps/api/src/services/x.ts', added: [] }]));
+  const ok3 = ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, { path: 'apps/api/src/services/x.ts', added: [] }],
+    classifications: [{ signal_id: 'possible-route@apps/api/src/services/x.ts', reason: 'a service module, no handler' }] })));
   const ex = ok3.c5_exempted.map((e) => `${e.path}|${e.kind}|${e.rule}`).sort();
-  assert.deepEqual(ex, ['apps/api/src/services/x.ts|new-route|workspace-api-folder', 'src/lib/util.test.ts|new-route|test-file', 'src/middleware/auth.spec.ts|auth-or-middleware-change|test-file']);
+  assert.deepEqual(ex, ['src/lib/util.test.ts|new-route|test-file']); // R2: middleware/ is never exempt; a workspace module is a signal
   for (const [path, line] of [['apps/api/src/plugins/users.ts', "fastify.get('/users', async () => db.all())"], ['apps/api/src/trpc/router.ts', 'deleteUser: protectedProcedure.mutation(() => 1),']]) {
     refused(r3([{ path, added: [line] }]), 'surface_inventory_incomplete');
   }
@@ -637,4 +646,158 @@ test('B3 end to end: the review gate refuses a dropped pair whose citation symbo
     ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
   const r = fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }) }));
   assert.equal(r.out?.code, 'citation_missing', r.stdout);
+});
+
+// ====================================================================================================================
+// Repair R2 (review of 9c8bc16: Opus R1/N0-N4, Fable N1-N4). Written before the fixes; red on d39a0fc.
+// ====================================================================================================================
+const WORKSPACE_FORMS = [
+  ['apps/api/src/trpc/user.ts', ['deleteUser: protectedProcedure', '  .input(z.string())', '  .mutation(({ input }) => db.user.delete(input)),']],
+  ['apps/api/src/modules/users/users.router.ts', ["usersRouter.post('/', h)"]],
+  ['apps/api/src/app.ts', ["users.post('/x', h)"]],
+  ['apps/api/src/server.ts', ["export const api = new Elysia().post('/x', h)"]],
+  ['apps/api/src/plugins/users.ts', ["f.get('/users', h)"]],
+  ['apps/api/src/users/users.resolver.ts', ['@Mutation(() => User)']],
+];
+
+test('[S69] R2.1 format 3: a workspace api/ module is never silent: it raises an open possible-route signal a reason closes (no surface needed); format 2 is unchanged', () => {
+  for (const [path, added] of WORKSPACE_FORMS) {
+    const r = refused(r3([{ path, added }]), 'classification_missing');
+    assert.deepEqual(r.unclassified, [`possible-route@${path}`], path);
+    const closed = ok(SP.reassess(OB.reIn3(GC, { files: [{ path, added }], contract: ['**'], classifications: [{ signal_id: `possible-route@${path}`, reason: 'an internal module, no handler is registered here' }] })));
+    assert.deepEqual(closed.classifications_used, [`possible-route@${path}`], path);
+    assert.ok(!closed.c5_exempted.some((e) => e.path === path), `${path} is a signal, not an exemption`);
+    // format 2 (legacy): unchanged, the path-only new-route signal opens as on origin/main
+    const approved = SP.selectControls(GC, { security_policy: 2, surfaces: [OB.surf('H', 'request-handler', 'src/h.ts')], facts: OB.TRUE3, evidence: OB.cite3(OB.TRUE3) });
+    const legacy = SP.reassess({ plan: OB.planOf(approved), catalog: GC, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files: [{ path, added }] }, classifications: [] });
+    refused(legacy, 'classification_missing');
+    assert.ok(legacy.unclassified.includes(`new-route@${path}`), path);
+  }
+});
+
+test('[S68] R2.2 format 3: the auth test-file exemption never applies under a router or middleware/plugins root; Go/Elixir _spec files are production', () => {
+  for (const path of ['server/middleware/auth.test.ts', 'server/middleware/__mocks__/session.ts', 'server/middleware/__tests__/00.bypass.ts', 'plugins/auth.test.js',
+    'src/middleware/auth.spec.ts', 'app/routes/auth.test.tsx', 'internal/auth/session_spec.go', 'lib/my_app/auth/session_spec.ex']) {
+    const r = refused(r3([{ path, added: [] }]), 'surface_inventory_incomplete');
+    assert.ok(r.reasons.some((x) => x.includes(path) && x.includes('auth-or-middleware-change')), path);
+  }
+  const ex = ok(r3([{ path: 'src/lib/auth.spec.ts', added: [] }])).c5_exempted;
+  assert.deepEqual(ex, [{ path: 'src/lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]);
+});
+
+test('[S71] R2.1 every recorded exemption is consumed: an exemption record for a non-test path is refused (fail closed)', () => {
+  assert.equal(SP.exemptionRefusal([{ path: 'src/lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]), null);
+  assert.equal(SP.exemptionRefusal([{ path: 'apps/api/src/app.ts', kind: 'new-route', rule: 'workspace-api-folder' }])?.code, 'surface_inventory_incomplete');
+  // and the detector never produces one: every exemption over a wide corpus is a test-named file
+  const corpus = ['apps/api/src/services/x.ts', 'apps/api/src/index.ts', 'src/lib/util.test.ts', 'src/middleware/auth.spec.ts', 'server/middleware/a.test.ts', 'tests/test_routes.py',
+    'packages/api/src/config.ts', 'src/auth/session.ts', 'spec/requests/orders_spec.rb', 'internal/auth/x_spec.go'];
+  const exempted = [];
+  SP.reassessSignals({ paths: corpus.map((path) => ({ path, added: ["app.get('/x', h)"] })), c5: true, exempted });
+  assert.ok(exempted.length > 0);
+  assert.equal(SP.exemptionRefusal(exempted), null, J(exempted));
+});
+
+test('[S70] R2.4 citations: .git paths, docs-only files, symbols shorter than 3 and a case-variant path are refused', () => {
+  for (const c of ['.git/HEAD:ref', 'sub/.git/config', 'README.md', 'docs/README.md:install', 'CLAUDE.md:rules', 'AGENTS.md', 'src/a.ts:fn', 'src/a.ts:e']) assert.notEqual(SP.citationProblem(c), null, c);
+  for (const c of ['src/a.ts:saveOrder', 'docs/api.md:auth', 'src/a.ts']) assert.equal(SP.citationProblem(c), null, c);
+  const root = dirname(OB.writeCatalog({}));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'A.ts'), 'export const persistent_writeFree = 1;\n');
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))); // cites src/a.ts:persistent_writeFree
+  refused(SP.verifyCitations(block, { root }), 'citation_missing'); // only src/A.ts exists: case-exact on every OS
+});
+
+test('[S67] R2.4 ship-ready re-verifies citations on the candidate (a repair that deleted the cited symbol does not ship)', () => {
+  const root = dirname(OB.writeCatalog({}));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  const s = { sp: SP, block, root };
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  assert.equal(G.citationRefusal(s), null);
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const cookieSession = 1;\n');
+  assert.equal(G.citationRefusal(s)?.code, 'citation_missing');
+  assert.equal(G.citationRefusal({ ...s, block: { ...block, policy: 2 } }), null, 'format 2: nothing to check');
+});
+
+test('R2.4 a NOT_APPLICABLE row may end its sentence with the cited path; a longer file name is still not a citation', () => {
+  assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'nothing is written, see src/a.ts.' }), sec()), null);
+  assert.equal(securityRowsRefusal(prim({ subject_id: 'A:VAPT-API-04', outcome: 'NOT_APPLICABLE', evidence: 'see src/a.ts.bak' }), sec())?.code, 'incomplete_contract');
+});
+
+test('[S66] R2.4 init and preflight refuse a citation outside every DAG write that does not exist at base (not deferred); present at base it binds', { skip: WIN_SKIP }, async (t) => {
+  const sel = (cite) => {
+    const bools = Object.keys(REAL.catalog.fact_vocabulary).filter((k) => REAL.catalog.fact_vocabulary[k].type === 'bool');
+    const facts = { ...Object.fromEntries(bools.map((b) => [b, false])), session_context: true };
+    return ok(SP.selectControls(REAL, { security_policy: 2, facts, evidence: Object.fromEntries(bools.map((b) => [b, 'src/orders.ts:handler'])),
+      surfaces: [{ boundary_id: 'orders', kind: 'request-handler', path: 'src/orders.ts', principals: ['staff'], facts: { session_context: false }, evidence: { session_context: cite } },
+        { boundary_id: 'forms', kind: 'server-input', path: 'src/forms.ts', principals: ['staff'] }] }));
+  };
+  const missing = obFx(t, { sel: sel('config/auth.ts:bearerOnly') });
+  await assert.rejects(() => preflight({ repoRoot: missing.repo, ticket: 'T-1', dagFile: missing.dagFile }), (e) => e.code === 'citation_missing');
+  assert.equal(initCode(missing.cli('init', { dag: missing.dagFile })), 'citation_missing');
+  const present = obFx(t, { sel: sel('docs/in.txt:input') }); // the fixture's base has docs/in.txt = 'input v1'
+  assert.equal((await preflight({ repoRoot: present.repo, ticket: 'T-1', dagFile: present.dagFile })).code, 'preflight_ok');
+});
+
+test('R2 N3: the legacy golden names the catalog it was captured under; a catalog change fails with how to regenerate', () => {
+  assert.equal(LEGACY.catalog_digest, REAL.digest, 'security-plan-legacy.golden.json was captured under another controls.json: regenerate it from the pre-change catalog commit (see security-plan-legacy.capture.test-helper.mjs)');
+});
+
+test('[S78] R2 supplement: node_modules, .git and gitignored files are never citations', () => {
+  for (const c of ['node_modules/pkg/index.js:bearerOnly', 'apps/web/node_modules/x/a.js']) assert.notEqual(SP.citationProblem(c), null, c);
+  const root = dirname(OB.writeCatalog({}));
+  const g = (...a) => spawnSync('git', a, { cwd: root, encoding: 'utf8' });
+  assert.equal(g('init', '-q').status, 0);
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
+  ok(SP.verifyCitations(block, { root }));
+  writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
+  refused(SP.verifyCitations(block, { root }), 'citation_missing');
+});
+
+test('[S77] R2 supplement: confirmation re-verifies citations: a repair that removed the cited symbol is refused (citation_missing)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { fixFiles: { 'src/orders.ts': 'export const cookieSession = true; // now sets a session cookie\n' } });
+  const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'impl');
+  okc(fx.gate('reassess', {}), 'reassess');
+  const cand = fx.candidate();
+  const review = failReview('rx-1', cand, 'src/orders.ts', fx.prompt('fix'));
+  review.primary = { ...review.primary, rule_rows: [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))] };
+  okc(fx.gate('review', review), 'original FAIL');
+  okc(fx.cli('drive'), 'repair');
+  okc(fx.gate('reassess', {}), 'reassess after repair');
+  const c = fx.gate('review', confirmReview('rx-1', fx.candidate()));
+  assert.equal(c.out?.code, 'citation_missing', c.stdout);
+});
+
+test('[S72] R2 supplement: the reviewGate call site passes the second opinion to the dispute check (a counterpart finding naming a drop is recorded end to end)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t);
+  const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'impl');
+  okc(fx.gate('reassess', {}), 'reassess');
+  const cand = fx.candidate(), naId = fx.sel.na_pairs[0].pair_id;
+  const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
+  const so = { ...secondOpinion(cand), outcome: 'FAIL', findings: [{ id: 'S1', severity: 'major', subject_id: naId }] };
+  okc(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }), second_opinion: so,
+    reconciliation: { dispositions: [{ finding_id: 'S1', source: so.route, disposition: 'reject' }] } })), 'original (counterpart dispute rejected in reconciliation)');
+  assert.deepEqual(fx.readState().security.disputed_na, [naId]);
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed');
+});
+
+test('[S67] R2 end to end: ship-ready re-verifies citations on the candidate (a cited file that left the candidate after the review is refused)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t);
+  const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'impl');
+  okc(fx.gate('reassess', {}), 'reassess');
+  const cand = fx.candidate();
+  const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
+  okc(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }) })), 'review');
+  // an edit of a node's output is post_freeze_drift; a file that leaves the candidate (now excluded, work tree unchanged) is not
+  writeFileSync(join(fx.repo, '.git', 'info', 'exclude'), 'src/orders.ts\n');
+  okc(fx.gate('reassess', {}), 'reassess on the changed candidate');
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'citation_missing');
 });

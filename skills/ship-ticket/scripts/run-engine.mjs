@@ -311,6 +311,8 @@ async function bindObligations(sp, cat, block, nodes, root) {
   const exempted = [];
   const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
   if (gaps.length) throw coded('surface_inventory_incomplete', `DAG-written path(s) raise a surface signal but no §3a surface lists them: ${gaps.map(g => `${g.path} (${g.kinds.join(', ')})`).join('; ')}`);
+  const ex = sp.exemptionRefusal(exempted); // R2: every exemption is consumed: only test-named files may be narrowed
+  if (ex) throw coded(ex.code, ex.reasons.join('; '));
   // B3: plan time checks the repository tree; a cited file one of the nodes will write is deferred to gate review.
   const cited = sp.verifyCitations(block, { root, pending: [...new Set(nodes.flatMap(n => n.writes ?? []))] });
   if (!cited.ok) throw coded(cited.code, `a §3a surface-fact citation does not verify: ${(cited.reasons ?? []).join('; ')}`);

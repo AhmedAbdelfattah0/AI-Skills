@@ -213,9 +213,9 @@ async function reviewGate(E, input, candidate) {
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
     if (input.kind === 'original') disputes = naDisputes(input, sec);
-    // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review froze.
-    const cited = input.kind === 'original' ? sec.sp.verifyCitations(sec.block, { root: E.ctx.repoRoot }) : null;
-    if (cited && !cited.ok) return gateNo(cited.code, cited.reasons ?? []);
+    // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review (or its confirmation) judges.
+    const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null; // R2: a repair may have removed it
+    if (cited) return cited;
   }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
@@ -299,7 +299,18 @@ function unitShipRefusal(E) {
 }
 
 /** Ship-ready's security conjuncts on one security context (checked before the proof and again after it). */
-const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? coverageRefusal(S, sec);
+const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? citationRefusal(sec) ?? coverageRefusal(S, sec);
+
+/**
+ * B3/R2: a format-3 block's citations must exist (with their :symbol) in the candidate work tree (`sec.root`). Run at the
+ * original review and again at ship-ready (before and after the proof), so a repair that deletes a cited file or symbol
+ * never ships. Null for a format-2 block.
+ */
+export function citationRefusal(sec) {
+  if (sec.block?.policy !== 3) return null;
+  const cited = sec.sp.verifyCitations(sec.block, { root: sec.root });
+  return cited.ok ? null : gateNo(cited.code, cited.reasons ?? []);
+}
 
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
@@ -553,7 +564,7 @@ export async function securityContext(E, candidate) {
   const block = sp.parsePlanSecurityBlock(io.readIfExists(E.P.plan) ?? '');
   const na = pendingNa(block, events);
   const formatMismatch = (block?.policy === 3) !== (E.policy?.semantics?.securityObligations === true);
-  return { sp, catalog, events, waived, unauthorized, tuple, block, na, formatMismatch };
+  return { sp, catalog, events, waived, unauthorized, tuple, block, na, formatMismatch, root: E.ctx.repoRoot };
 }
 const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendum_set: [...sec.tuple.addendum_set] });
 const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
@@ -641,7 +652,7 @@ function naRowsRefusal(p, sec) {
 }
 
 /** Whether review evidence names `path` as a whole token (so `a.ts` is not cited by `data.ts` or `lib/src/a.tsx`). */
-const citesPath = (evidence, path) => new RegExp(`(^|[\\s\`'"(\\[])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s\`'")\\]:,;])`).test(evidence);
+const citesPath = (evidence, path) => new RegExp(`(^|[\\s\`'"(\\[])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s\`'")\\]:,;]|\\.(?:$|\\s))`).test(evidence);
 
 /**
  * The dropped pairs an original review disputes: a primary row FAIL, or (F3) a second-opinion finding whose
