@@ -31,7 +31,7 @@ the second section is the engine's own plan digest, over the plan file as it is,
 run-state block is refused. A DAG or recon field that holds a newline, another control character or,
 where it is shown in backticks, a backtick is refused with the field named (exit 2). Free text (the
 plan step, recon answers, notes) is shown as a quotation, and `lint` also fails on a repeated section or
-one outside the list. `build` will not write to a symbolic link or over its own input files.
+one outside the list. `plan-digest --plan <plan>` prints that digest as `sha256:<hex>` (the value START binds), and `start-check --plan <plan> --run-id <id>` validates a START read-only (exit 0 ok, 1 refusal with typed JSON, 2 usage). `build` will not write to a symbolic link or over its own input files.
 
 ## What the brief contains
 

@@ -258,8 +258,9 @@ needed; or none>. Model agreement is advice, not approval.
 <!-- RUN-STATE:BEGIN -->
 <!-- Append one compact JSON object per execution event; never edit or reorder
      an existing entry. The event vocabulary is defined in ship.md. -->
-<!-- After approval, append START with the workflow run_id and
-     approved_plan_digest. Every later event carries the same run_id. -->
+<!-- After approval, append START with the workflow run_id,
+     approved_plan_digest, approved_at (ISO-8601) and approved_by (the human
+     approver, required). Every later event carries the same run_id. -->
 <!-- RUN-STATE:END -->
 ```
 
@@ -267,6 +268,19 @@ When the human approves an execution, append `START` before another event using
 the run ID already created by workflow telemetry. A later execution of the same
 ticket gets a new `run_id`; it never edits or clears prior entries. Approval
 without the matching start event is not executable.
+
+Write the START only after the narrative is final. Compute `approved_plan_digest`
+with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
+`sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
+with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
+`approved_at` (not `at`) and `approved_by` (the human approver, never an agent or a
+placeholder). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
+before dispatching any worker (`--run-id` is required); it refuses a malformed
+RUN-STATE block, a stale or malformed digest, a missing approval time or approver.
+Its `ok` is necessary but not sufficient: it cannot see the engine's trusted-START
+rule. The approver check is guidance against honest mistakes, not a security boundary. Never edit the narrative after START: the digest no
+longer matches and the run is not executable. A CRLF plan and its LF twin have
+different digests; the tool does not normalise line ends.
 
 ## Section 3b: impact and check applicability
 
