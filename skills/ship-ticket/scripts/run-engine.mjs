@@ -16,6 +16,9 @@
  *      run-engine.mjs gate red|review|ship-ready|unit-review|reassess --repo <dir> --ticket <key> --run-id <id> --input <json-file> [--unit <unit>]
  *        prints { gate, ok, code, judgment_point, reasons, candidate_id, ... }; exit 0 accepted,
  *        2 refused or judgment point (incl. lock_held), 1 usage error (incl. an invalid input file).
+ *      run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]
+ *        plan-time dry run of init's plan and DAG checks (no START, state or write); exit 0 with the
+ *        obligation matrix, 1 with `run-engine: <code>: ...` (F12a).
  */
 import { readFileSync, existsSync, mkdirSync, copyFileSync, writeFileSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -34,7 +37,7 @@ import { observeAuthority, trustedEvents, malformedRunState } from './engine-aut
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, runPolicy, skillCommit } from './engine-policy.mjs';
+import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit } from './engine-policy.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -290,15 +293,67 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (!res.ok) throw coded('security_pairs_mismatch', `the approved §3a security-plan block cannot be reassessed (${res.code}): ${(res.reasons ?? []).join('; ')}`);
   const outside = res.reapproval_basis.filter(b => b.kind === 'out-of-plan-path').map(b => b.path);
   if (outside.length) throw coded('security_pairs_mismatch', `the approved §3a surface path(s) ${outside.join(', ')} lie outside every node's writes (the Design Contract); re-plan and re-approve`);
+  if (block.policy === 3) await bindObligations(sp, cat, block, nodes, ctx.repoRoot, ctx.c5ExtraExempted ?? []);
+}
+
+/** File-shaped DAG writes (a basename with an extension): the plan-time paths the surface inventory must cover. */
+const writtenFiles = (nodes) => [...new Set(nodes.flatMap(n => n.writes ?? []).filter(w => /.\.[A-Za-z0-9]+$/.test(w.split('/').pop())))].sort();
+
+/**
+ * Block format 3 (F12a) at init and preflight: the full surface x control obligation matrix must be complete
+ * (security-plan.mjs obligationMatrix: every cell exactly one disposition, every dropped pair a cited, catalog-gated
+ * fact; its refusal code is thrown as is), and every file-shaped DAG write that raises a surface-introducing signal
+ * (not a test) must be a listed surface (surface_inventory_incomplete). Format 2 blocks are not checked here (unchanged).
+ */
+async function bindObligations(sp, cat, block, nodes, root, extraExempted) {
+  const m = sp.obligationMatrix(cat, block);
+  if (!m.ok) throw coded(m.code, `the approved §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const exempted = [...extraExempted]; // ctx.c5ExtraExempted: an in-process test seam (no CLI flag), to reach this call site
+  const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
+  if (gaps.length) throw coded('surface_inventory_incomplete', `DAG-written path(s) raise a surface signal but no §3a surface lists them: ${gaps.map(g => `${g.path} (${g.kinds.join(', ')})`).join('; ')}`);
+  const ex = sp.exemptionRefusal(exempted); // R2: every exemption is consumed: only test-named files may be narrowed
+  if (ex) throw coded(ex.code, ex.reasons.join('; '));
+  // B3: plan time checks the repository tree; a cited file one of the nodes will write is deferred to gate review.
+  const cited = sp.verifyCitations(block, { root, pending: [...new Set(nodes.flatMap(n => n.writes ?? []))] });
+  if (!cited.ok) throw coded(cited.code, `a §3a surface-fact citation does not verify: ${(cited.reasons ?? []).join('; ')}`);
+}
+
+/**
+ * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
+ * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
+ * START and no write. A DAG without config.securityPolicy is refused (security_policy_required: no START approves it).
+ * ctx: { repoRoot, ticket, dagFile, planFile?, catalogFile?, c5ExtraExempted? (test seam) }. Returns the obligation matrix and
+ * the recorded C5 exemptions, or throws a coded refusal.
+ */
+export async function preflight(ctx) {
+  if (!SAFE_ID.test(ctx?.ticket ?? '') || typeof ctx.repoRoot !== 'string') throw coded('bad_context', 'repoRoot and a safe ticket required');
+  const planFile = ctx.planFile ?? join(ctx.repoRoot, '.specs', 'plans', ctx.ticket + '.md');
+  let text, doc;
+  try { text = readFileSync(planFile, 'utf8'); } catch { throw coded('plan_invalid', `plan ${planFile} unreadable`); }
+  try { doc = JSON.parse(readFileSync(ctx.dagFile, 'utf8')); } catch { throw coded('dag_invalid', 'dagFile unreadable or not JSON'); }
+  const dag = validateEngineDag(doc, { ticket: ctx.ticket });
+  const b = text.indexOf(BEGIN), e = text.indexOf(END);
+  const narrative = b >= 0 && e > b ? text.slice(0, b) + text.slice(e) : text;
+  await bindSecurity(ctx, dag.config, dag.nodes, null, text, narrative);
+  const sp = await securityPlan();
+  const block = sp.parsePlanSecurityBlock(text);
+  const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
+  if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
+  const exempted = []; // for the print only: bindSecurity already refused gaps and non-test exemptions
+  if (block.policy === 3) sp.inventoryGaps({ files: writtenFiles(dag.nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
+  return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix, c5_exempted: exempted };
 }
 
 /**
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false) {
+function newRunPolicy(ctx, active = false, obligations = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
-  return { policy_version: runPolicy({ policy_version: active ? TEST_KINDS_POLICY_VERSION : engine.current }, engine).version,
+  // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
+  const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
+  return { policy_version: runPolicy({ policy_version: version }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -344,6 +399,7 @@ export async function init(ctx) {
     const dagDigest = sha(raw);
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
+    const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
     const testKinds = await bindTestKinds(ctx, dag.config, text);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
@@ -359,7 +415,7 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null), ...(testKinds ? { test_kinds: testKinds } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations), ...(testKinds ? { test_kinds: testKinds } : {}) };
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -646,6 +702,11 @@ async function main(argv) {
   for (let i = 0; i < rest.length; i += 2) {
     if (!rest[i]?.startsWith('--') || rest[i + 1] === undefined || Object.hasOwn(flags, rest[i].slice(2))) throw new Error('bad or repeated flag: ' + rest[i]);
     flags[rest[i].slice(2)] = rest[i + 1];
+  }
+  if (cmd === 'preflight') { // F12a: plan-time, before approval: no run id, no state, no write
+    const extra = Object.keys(flags).filter(k => !['repo', 'ticket', 'dag', 'plan'].includes(k));
+    if (extra.length || !flags.repo || !flags.ticket || !flags.dag) throw new Error('Usage: run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> [--plan <file>]');
+    return preflight({ repoRoot: resolve(flags.repo), ticket: flags.ticket, dagFile: resolve(flags.dag), ...(flags.plan ? { planFile: resolve(flags.plan) } : {}) });
   }
   const allowed = ['repo', 'ticket', 'run-id', 'dag', 'until', 'node', 'transition', 'reason', 'input', 'unit'];
   const unknown = Object.keys(flags).filter(k => !allowed.includes(k));

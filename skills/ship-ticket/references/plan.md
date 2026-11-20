@@ -84,7 +84,10 @@ never start BUILD on a wave ticket whose plan was not in an approved
 `ExitPlanMode`.
 
 Remain in Plan Mode while drafting and throughout the host/counterpart debate.
-Reconcile its result there, then invoke `ExitPlanMode` with the final plan.
+Reconcile its result there. For a policy-2 plan with an execution DAG, run
+`scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`
+on the final draft. It runs init's plan checks with no START and no write. Fix
+every refusal before you invoke `ExitPlanMode` with the final plan.
 That tool presents the approval surface and exits only through the host's approval
 flow. Do not emit a separate approval message and end the turn before calling it.
 The pending tool approval is the PLAN phase's `WAIT_FOR_USER` state.

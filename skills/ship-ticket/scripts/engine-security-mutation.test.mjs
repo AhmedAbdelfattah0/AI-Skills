@@ -3,7 +3,7 @@
  * of the repository layout the engine needs (skills/ship-ticket/scripts and skills/vapt, for the
  * catalog and its evaluator) in a temp dir with ONE guard patched out by an exact string replacement
  * that must match exactly once (the repo is never edited). For mutant S#, the tests tagged [S#] in
- * gate-security.test.mjs, run-engine-security.test.mjs and security-plan.test.mjs must FAIL with a failing test carrying that
+ * gate-security.test.mjs, run-engine-security.test.mjs, security-plan.test.mjs and security-obligations.test.mjs must FAIL with a failing test carrying that
  * tag; the unpatched copy (the control) must PASS every tagged test, or the result would say nothing.
  *
  * Runs with ENGINE_MUTATION=1 (the engine-properties CI job) or ENGINE_SECURITY_MUTATION=1.
@@ -23,7 +23,7 @@ const VAPT = join(HERE, '..', '..', 'vapt');
 const SKIP = !POSIX ? 'POSIX process groups (known limit D4)'
   : process.env.ENGINE_MUTATION !== '1' && process.env.ENGINE_SECURITY_MUTATION !== '1'
     ? 'slow: runs with ENGINE_MUTATION=1 (engine-properties CI job) or ENGINE_SECURITY_MUTATION=1' : false;
-const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs', 'security-plan.test.mjs'];
+const TESTS = ['gate-security.test.mjs', 'run-engine-security.test.mjs', 'security-plan.test.mjs', 'security-obligations.test.mjs'];
 const CONCURRENCY = 4;
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -111,6 +111,123 @@ export const SECURITY_MUTANTS = [
     from: "  if (outside.length) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
   { tag: 'S40', name: 'init: a reassess refusal of the approved block is taken for "no surface outside the contract"', file: 'run-engine.mjs',
     from: "  if (!res.ok) throw coded('security_pairs_mismatch',", to: "  if (false) throw coded('security_pairs_mismatch'," },
+  // ---- F12a (block format 3: surface-level facts, dropped pairs, accountability, C5) ----
+  { tag: 'S41', name: 'matrix: a dropped (not applicable) pair is counted as proven', file: 'security-plan.mjs',
+    from: '    const effective = new Set([...block.pairs, ...addenda]);\n', to: '    const effective = new Set([...block.pairs, ...addenda, ...(block.na_pairs ?? []).map((n) => n.pair_id)]);\n' },
+  { tag: 'S42', name: 'block format 3: the selection digest does not cover the surfaces (facts, citations, path, principals)', file: 'security-plan.mjs',
+    from: 'surfaces: v3.surfaces, ', to: '' },
+  { tag: 'S43', name: 'select: an unknown (or false) change fact is lowered by a surface', file: 'security-plan.mjs',
+    from: "      if (facts[f] !== true) refuse('surface_fact_not_lowerable',", to: "      if (false) refuse('surface_fact_not_lowerable'," },
+  { tag: 'S44', name: 'reassess: a signal at an approved surface path never reopens a dropped pair', file: 'security-plan.mjs',
+    from: 'for (const c of SIGNAL_CLASS[s.kind] ?? []) keep.add(', to: 'for (const c of []) keep.add(' },
+  { tag: 'S45', name: 'reassess: a classification that raises a lowered fact never reopens its dropped pairs', file: 'security-plan.mjs',
+    from: '.filter(([f]) => facts[f] === true && !raised.has(f))', to: '.filter(([f]) => facts[f] === true)' },
+  { tag: 'S46', name: 'review: repair + confirmation (and ship-ready) clear a disputed dropped pair', file: 'engine-gates.mjs',
+    from: 'export function disputedRefusal(S, sec) {\n', to: 'export function disputedRefusal(S, sec) {\n  return null;\n' },
+  { tag: 'S47', name: 'C5 too wide: a test/ or fixtures/ directory is taken for a test file (real routes there stop firing)', file: 'security-plan.mjs',
+    from: '(__tests__|__mocks__|__fixtures__)\\/|', to: '(__tests__|__mocks__|__fixtures__|tests?|fixtures?)\\/|' },
+  { tag: "S48", name: "C5 too wide: a hyphen-named production file (ab-test.ts) is taken for a test file", file: "security-plan.mjs",
+    from: "|\\.(test|spec|e2e-spec)\\.[a-z0-9]+$|", to: "|[.-](test|spec|e2e-spec)\\.[a-z0-9]+$|" },
+  { tag: 'S49', name: 'C5: a signalling non-test path with no surface is left to classification (no inventory refusal)', file: 'security-plan.mjs',
+    from: "      if (gaps.length) refuse('surface_inventory_incomplete',", to: "      if (false) refuse('surface_inventory_incomplete'," },
+  { tag: 'S50', name: 'review: dropped pairs need no row (and PASS / uncited NOT_APPLICABLE / NOT_TRIGGERED with a dispute pass)', file: 'engine-gates.mjs',
+    from: '  return naRowsRefusal(p, sec);\n', to: '  return null;\n' },
+  { tag: 'S51', name: 'select: a fact lowered on every surface is accepted (derived-OR re-inflation)', file: 'security-plan.mjs',
+    from: '    if (surfaces.every((s) => lower.get(s.boundary_id)?.has(f))) refuse(', to: '    if (false) refuse(' },
+  { tag: 'S52', name: 'reassess/matrix: a hand-edited format-3 block is not replayed under the catalog', file: 'security-plan.mjs',
+    from: 'function replayFormat3(r, block) {\n', to: 'function replayFormat3(r, block) {\n  return;\n' },
+  { tag: 'S53', name: 'init: a format-3 run records the legacy policy version (an engine without F12a would resume it)', file: 'run-engine.mjs',
+    from: '  const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;',
+    to: '  const version = active ? TEST_KINDS_POLICY_VERSION : engine.current;' },
+  // ---- F12a repair R1 (review of 5dbeffd) ----
+  { tag: "S54", name: "gates: a block format that disagrees with the run policy version is not refused (formatMismatch)", file: "engine-gates.mjs",
+    from: "  if (sec.formatMismatch) return gateNo(", to: "  if (false) return gateNo(" },
+  { tag: "S55", name: "ship-ready: an obligation matrix that does not verify is not refused", file: "engine-gates.mjs",
+    from: "  return { obligations, refusal: obligations && !obligations.ok ? gateNo(", to: "  return { obligations, refusal: false ? gateNo(" },
+  { tag: "S56", name: "review: a later review replaces the dispute list (a RETRY launders a dispute)", file: "engine-gates.mjs",
+    from: "  S.security.disputed_na = [...new Set([...(S.security.disputed_na ?? []), ...disputes])].sort();", to: "  S.security.disputed_na = [...disputes].sort();" },
+  { tag: "S57", name: "review: a dropped pair an addendum made effective is still treated as dropped", file: "engine-gates.mjs",
+    from: "  return block.na_pairs.filter(n => !effective.has(n.pair_id));", to: "  return block.na_pairs;" },
+  { tag: "S58", name: "matrix: a block selected against another catalog is accepted", file: "security-plan.mjs",
+    from: "    if (block.catalog_digest !== digest) refuse('catalog_invalid',", to: "    if (false) refuse('catalog_invalid'," },
+  { tag: "S59", name: "C5 applies to format-2 (legacy) runs too", file: "security-plan.mjs",
+    from: "    const c5 = block.policy === 3, c5_exempted = [];", to: "    const c5 = true, c5_exempted = [];" },
+  { tag: "S60", name: "C5 exempts test-named migration files", file: "security-plan.mjs",
+    from: "      const rule = kind === 'auth-or-middleware-change' && test", to: "      const rule = kind === 'migration-or-rls-change' && test ? 'test-file' : kind === 'auth-or-middleware-change' && test" },
+  { tag: "S61", name: "C5 exempts test-named files under a router root", file: "security-plan.mjs",
+    from: "        : kind === 'new-route' && test && !ROUTER_ROOT.test(p) ? 'test-file'", to: "        : kind === 'new-route' && test ? 'test-file'" },
+  { tag: "S62", name: "select: a selected control may end with zero effective pairs (a keeper that cannot pair it)", file: "security-plan.mjs",
+    from: "    if (emptied.length) refuse('surface_fact_reinflates',", to: "    if (false) refuse('surface_fact_reinflates'," },
+  { tag: "S63", name: "citations: a missing cited file or symbol is accepted", file: "security-plan.mjs",
+    from: "    if (bad.length) refuse('citation_missing', ...bad);", to: "    if (false) refuse('citation_missing', ...bad);" },
+  { tag: "S64", name: "review: a second-opinion finding against a drop records no dispute", file: "engine-gates.mjs",
+    from: "  const second = (Array.isArray(input.second_opinion?.findings) ? input.second_opinion.findings : []).filter(f => ids.has(f?.subject_id)).map(f => f.subject_id);", to: "  const second = [];" },
+  { tag: "S65", name: "C5: an exemption that applies leaves no record", file: "security-plan.mjs",
+    from: "      if (rule) { exempted?.push({ path: f.path, kind, rule }); continue; }", to: "      if (rule) continue;" },  // ---- F12a repair R2 (review of 9c8bc16) ----
+  { tag: "S66", name: "init/preflight: a non-deferred citation that does not exist binds", file: "run-engine.mjs",
+    from: "  if (!cited.ok) throw coded(cited.code, `a \u00a73a surface-fact citation does not verify", to: "  if (false) throw coded(cited.code, `a \u00a73a surface-fact citation does not verify" },
+  { tag: "S67", name: "ship-ready: citations are not re-verified on the candidate", file: "engine-gates.mjs",
+    from: "?? citationRefusal(sec) ?? coverageRefusal(S, sec);", to: "?? coverageRefusal(S, sec);" },
+  { tag: "S68", name: "C5: the auth test-file exemption applies under router and middleware roots", file: "security-plan.mjs",
+    from: "kind === 'auth-or-middleware-change' && test && !ROUTER_ROOT.test(p) && !MIDDLEWARE_ROOT.test(p) ? 'test-file'", to: "kind === 'auth-or-middleware-change' && test ? 'test-file'" },
+  { tag: "S69", name: "C5: the plan-time inventory check narrows workspace api/ modules (a route file needs no surface at plan time)", file: "security-plan.mjs",
+    from: "  const sigs = reassessSignals({ paths: files, c5: true, exempted }).filter(", to: "  const sigs = reassessSignals({ paths: files.filter((f) => !/(^|\\/)(apps|packages|services|libs|modules|projects)\\/api\\//.test(typeof f === 'string' ? f : f.path)), c5: true, exempted }).filter(" },
+  { tag: "S70", name: "citations: a path inside .git is accepted", file: "security-plan.mjs",
+    from: "  if (path.split('/').includes('.git')) return", to: "  if (false) return" },
+  { tag: "S71", name: "C5: an exemption record of a non-test file is not refused", file: "security-plan.mjs",
+    from: "  const bad = (records ?? []).filter((e) => !TEST_FILE.test(", to: "  const bad = [].filter((e) => !TEST_FILE.test(" },
+  { tag: "S72", name: "review: the call site passes only the primary to the dispute check", file: "engine-gates.mjs",
+    from: "    if (input.kind === 'original') disputes = naDisputes(input, sec);", to: "    if (input.kind === 'original') disputes = naDisputes({ primary: input.primary }, sec);" },
+  { tag: "S73", name: "gate reassess: the output omits c5_exempted", file: "engine-gates.mjs",
+    from: "outcome: res.outcome, signals: res.signals, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };", to: "outcome: res.outcome, signals: res.signals };" },
+  { tag: "S74", name: "gate reassess: the recorded reassessment omits c5_exempted", file: "engine-gates.mjs",
+    from: "seq: S.seq, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };", to: "seq: S.seq };" },
+  { tag: "S75", name: "ship-ready: the obligations print drops c5_exempted", file: "engine-gates.mjs",
+    from: "c5_exempted: S.security?.reassessed?.c5_exempted ?? [] } }", to: "c5_exempted: [] } }" },
+  { tag: "S76", name: "preflight: the output drops c5_exempted", file: "run-engine.mjs",
+    from: "matrix: m.matrix, c5_exempted: exempted };", to: "matrix: m.matrix, c5_exempted: [] };" },
+  { tag: "S77", name: "confirmation: citations are not re-verified after a repair", file: "engine-gates.mjs",
+    from: "const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null;", to: "const cited = input.kind === 'original' ? citationRefusal(sec) : null;" },
+  { tag: "S78", name: "citations: a gitignored file is accepted", file: "security-plan.mjs",
+    from: "const ign = ignoredState(gitBin, root, path);\n      if (ign !== 'not-ignored')", to: "const ign = ignoredState(gitBin, root, path);\n      if (ign === 'never')" },
+  // ---- F12a repair R3 (strategy change, review of 55784b9) ----
+  { tag: "S79", name: "C5: a reason-only closable signal replaces new-route for a workspace api/ module (the R2 hole)", file: "security-plan.mjs",
+    from: "    kinds.push(kind);\n  }\n  return kinds;", to: "    if (c5 && kind === 'new-route' && !byLine && !byLineV3 && /(^|\\/)(apps|packages|services|libs|modules|projects)\\/api\\//.test(p) && !ROUTE_FILE.test(b)) { kinds.push('possible-route'); continue; }\n    kinds.push(kind);\n  }\n  return kinds;" },
+  { tag: "S80", name: "reassess: recorded exemptions are not consumed (no exemptionRefusal)", file: "security-plan.mjs",
+    from: "    if (block.policy === 3) { const ex = exemptionRefusal([...c5_exempted, ...(input.c5_extra_exempted ?? [])]); if (ex) refuse(ex.code, ...ex.reasons); }", to: "" },
+  { tag: "S81", name: "init/preflight: recorded exemptions are not consumed (no exemptionRefusal)", file: "run-engine.mjs",
+    from: "  if (ex) throw coded(ex.code, ex.reasons.join('; '));", to: "" },
+  { tag: "S84", name: "citations: the :symbol matches as a substring", file: "security-plan.mjs",
+    from: "if (sym !== null && !hasIdentifier(text, sym))", to: "if (sym !== null && !text.includes(sym))" },
+  { tag: "S85", name: "citations: a symlink leaving the repository is accepted", file: "security-plan.mjs",
+    from: "if (real === top || !real.startsWith(top + sep)) outside = true;", to: "if (false) outside = true;" },
+  { tag: "S86", name: "citations: an unanswerable git check-ignore is taken as not ignored", file: "security-plan.mjs",
+    from: "  return 'unknown';\n}", to: "  return 'not-ignored';\n}" },
+  // ---- F12a repair R4 (review of edcadf4, citation class) ----
+  { tag: "S87", name: "citations: git exit 128 inside a repository (wrong GIT_DIR, dubious ownership) is taken as not ignored", file: "security-plan.mjs",
+    from: "  if (r.status === 128 && !insideRepository(root)) return 'not-ignored';", to: "  if (r.status === 128) return 'not-ignored';" },
+  { tag: "S88", name: "citations: the :symbol leading boundary is dropped (a longer identifier ending in it verifies)", file: "security-plan.mjs",
+    from: "new RegExp(`(^|[^A-Za-z0-9_$])${sym", to: "new RegExp(`${sym" },
+  { tag: "S89", name: "citations: an in-repo symlink is not judged by its resolved target", file: "security-plan.mjs",
+    from: "      if (resolved !== path) {", to: "      if (false) {" },
+  { tag: "S90", name: "citations: the symlink guard compares a raw string prefix (a sibling repo-evil directory passes)", file: "security-plan.mjs",
+    from: "!real.startsWith(top + sep)", to: "!real.startsWith(top)" },
+  { tag: "S91", name: "paths: a . or .. segment is accepted in format 3 (a path borrows a test name)", file: "security-plan.mjs",
+    from: "  if (bad.length) refuse('bad_input', ...bad.map((p) => `${what}", to: "  if (false) refuse('bad_input', ...bad.map((p) => `${what}" },
+  // ---- F12a repair R5 (review of eeec626) ----
+  { tag: "S92", name: "citations: the ignore check inherits GIT_DIR/GIT_WORK_TREE (another repository answers)", file: "security-plan.mjs",
+    from: "{ cwd: root, env, stdio: 'ignore', timeout: 15000 }", to: "{ cwd: root, stdio: 'ignore', timeout: 15000 }" },
+  { tag: "S93", name: "citations: repository detection follows symlinks (a dangling .git symlink reads as no repository)", file: "security-plan.mjs",
+    from: "const hasEntry = (p) => { try { lstatSync(p); return true; }", to: "const hasEntry = (p) => { try { statSync(p); return true; }" },
+  { tag: "S94", name: "paths: the format-3 . / .. refusal also applies to format-2 reassess (legacy no longer byte-identical)", file: "security-plan.mjs",
+    from: "    if (block.policy === 3) dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');", to: "    dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');" },
+  // ---- F12a repair R6 (review of ad09947) ----
+  { tag: "S95", name: "replay: a hand-built format-3 block object with a dot-segment surface path is not refused", file: "security-plan.mjs",
+    from: "    dotSegmentRefusal(surfaces.map((s) => s.path), 'surface path'); // R6", to: "    // R6" },
+  { tag: "S96", name: "parse: a format-3 block with a dot-segment surface path parses", file: "security-plan.mjs",
+    from: "    if (normPath(s.path).split('/').some((x) => x === '.' || x === '..')) return null; // R6", to: "    // R6" },
+  { tag: "S97", name: "citations: only GIT_DIR is dropped (an inherited GIT_WORK_TREE still redirects git)", file: "security-plan.mjs",
+    from: "filter(([k]) => !/^GIT_/i.test(k))", to: "filter(([k]) => !/^GIT_DIR$/i.test(k))" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

@@ -101,6 +101,7 @@ jobs:
           skills/ship-ticket/scripts/engine-authority-test-kinds.test.mjs
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs
+          skills/ship-ticket/scripts/security-obligations.test.mjs
           skills/ship-ticket/scripts/risk-floor.test.mjs
           skills/ship-ticket/scripts/test-kinds.test.mjs
           skills/ship-ticket/scripts/engine-test-kinds.test.mjs

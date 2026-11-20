@@ -23,10 +23,22 @@ export const ENGINE_POLICY_VERSION = 1;
  * Version 2 (S-01b2 P5r) adds the test-kind freeze gate; `init` records it ONLY for a run that activates
  * test kinds (config.testKinds), so every other run is still version 1, byte for byte.
  */
-export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }) });
+export const POLICY_SEMANTICS = Object.freeze({ 1: Object.freeze({}), 2: Object.freeze({ testKinds: true }),
+  3: Object.freeze({ securityObligations: true }), 4: Object.freeze({ testKinds: true, securityObligations: true }) });
 
 /** The version `init` records for a run that activates test kinds (design rev 5 section 5). */
 export const TEST_KINDS_POLICY_VERSION = 2;
+
+/**
+ * F12a: a run whose approved §3a block is format 3 (surface-level facts, dropped pairs that need a review row and
+ * reopen on a signal) records version 3, or 4 with test kinds. An engine that predates F12a supports neither, so it
+ * refuses such a run outright (policy_version_unsupported) instead of reading its dropped pairs as absent. Every
+ * other run keeps version 1 or 2, byte for byte.
+ */
+export const SECURITY_OBLIGATIONS_POLICY_VERSION = 3;
+/** The version `init` records: test kinds and/or a format-3 security block. */
+export const recordedVersion = ({ testKinds = false, obligations = false } = {}, current = ENGINE_POLICY_VERSION) =>
+  (obligations ? (testKinds ? 4 : SECURITY_OBLIGATIONS_POLICY_VERSION) : testKinds ? TEST_KINDS_POLICY_VERSION : current);
 
 /** The version a state without the key is read as: the oldest supported one. */
 export const LEGACY_POLICY_VERSION = 1;

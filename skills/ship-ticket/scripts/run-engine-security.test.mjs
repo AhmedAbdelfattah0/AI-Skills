@@ -39,7 +39,7 @@ import * as DAG from './engine-dag.mjs';
 const SECURITY_POLICY_CUTOFF = DAG.SECURITY_POLICY_CUTOFF;
 const ENGINE_SECURITY_CODES = DAG.ENGINE_SECURITY_CODES ?? [];
 import { init, gate as gateCmd } from './run-engine.mjs';
-import { securityRefusal, reassessRefusal, coverageRefusal, securityRowsRefusal } from './engine-gates.mjs';
+import { securityRefusal, reassessRefusal, coverageRefusal, securityRowsRefusal, disputedRefusal } from './engine-gates.mjs';
 import * as AUTH from './engine-authority.mjs';
 import { gateShipReady } from './gate.mjs';
 import * as SP from './security-plan.mjs';
@@ -681,6 +681,9 @@ const C1_ROWS = {
     () => securityRowsRefusal(rowsPrimary({ rule_rows: [{ subject_id: 'GET /a/:id:VAPT-API-01', outcome: 'NOT_APPLICABLE', evidence: 'e' }] }), pureSec(pureS({ trusted: [PWAIVE] })))],
   security_outcome_escape: [() => securityRowsRefusal(rowsPrimary({ security_outcome: 'NOT_TRIGGERED' }), pureSec(pureS())),
     () => securityRowsRefusal(rowsPrimary({ security_outcome: 'PASS' }), pureSec(pureS()))],
+  // F12a: a disputed dropped pair; the twin differs by one trusted SECURITY_ADDENDUM that makes it effective again.
+  security_na_disputed: [() => disputedRefusal({ ...pureS(), security: { disputed_na: ['POST /b:VAPT-API-02'] } }, pureSec(pureS())),
+    () => disputedRefusal({ ...pureS({ trusted: [PADD()] }), security: { disputed_na: ['POST /b:VAPT-API-02'] } }, pureSec(pureS({ trusted: [PADD()] })))],
 };
 const shipS = () => ({ ticket: 'AIS-1', pinned_exclusions: ['.specs/plans/AIS-1.md', 'session-log.md'], review_chain: [{ review_execution: 'rx-1', kind: 'original', outcome: 'PASS', candidate_id: 'c1' }],
   local_proof: { candidate_id: 'c1', commands: [{ cmd: 'node', result: 'pass' }] } });
