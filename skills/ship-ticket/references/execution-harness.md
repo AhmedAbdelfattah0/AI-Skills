@@ -19,7 +19,9 @@ them inside native Plan Mode. REVIEW keeps its own read-only relay
 **Unavailable is not refused.** If a helper is *unavailable* (no Node, missing
 file, a provider with no adapter), report `harness degraded: <reason>` and
 continue under the ordinary `SKILL.md` rules, which keep the same approval and
-ownership controls. A *safety refusal* blocks and is never bypassed by falling
+ownership controls. On an ELEVATED or security-sensitive run, falling
+back to the manual flow after plan approval is **WAIT_FOR_USER** at fallback time
+(SKILL.md); a STANDARD run records `harness degraded` with a warning. A *safety refusal* blocks and is never bypassed by falling
 back:
 
 | Refusal | Outcome |
@@ -502,7 +504,8 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   collection errors do not count. A runner that rewrites a named
   spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before
   the runner starts. Unsupported output cannot establish RED: that
-  is a judgment point and the manual flow applies, marked degraded. Evidence is
+  is a judgment point and the manual flow applies, marked degraded (on an ELEVATED or security-sensitive run
+  that is **WAIT_FOR_USER** at fallback time, SKILL.md stop list). Evidence is
   bound to the spec files' content digests, the baseline candidate and the resolved
   `config.base` commit, ordered by event sequence, and is refused if recorded after a
   dependent production dispatch. Before a drive dispatches a dependent (or repair) that
