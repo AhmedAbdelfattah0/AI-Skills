@@ -623,6 +623,37 @@ matching pattern when extending them:
   checker in place*. It reads current/prior manifests without writing to the
   audited repositories; structural accounting does not replace evidence review.
 
+## Reuse first, with a value test
+
+Before building any new mechanism, script, check or abstraction, look at what already
+exists: the skills in this repository, and the upstream implementation the research
+already names (the DeepSeek harness, pinned commit
+`39163dd30f703a79079e2d2446545cff3c453738`). Then:
+
+1. **Take it, do not rewrite it.** If an existing or upstream implementation does the
+   job, adopt it with the smallest change that makes it work here. Do not write the
+   same thing from scratch.
+2. **Do not copy blindly either.** Adoption has to pass a value test, stated in the plan
+   before any design:
+   - the concrete problem it fixes in this repository, with evidence from this
+     repository's own history (a reproduced case, a review finding, measured lost
+     time, or the file and line of the gap on `main`), and what is better after;
+   - whether this repository already has it fully, partly or not at all;
+   - whether the upstream version fits this architecture (the engine, candidate
+     identity, approved-plan authority) or only looks similar;
+   - its cost and risk against that value, and the risk to any existing assurance.
+3. **Record a verdict:** ADOPT, ADOPT PARTIALLY, SKIP, or ASK THE OWNER. Weak or
+   unevidenced value means SKIP or DEFER, even when upstream has it and even when
+   earlier research said Adopt. Rank candidates by value for effort, not by
+   availability.
+4. **A substantial rewrite is a stop.** If adoption needs one, classify it
+   not adoptable as is and ask the owner. Do not design a replacement.
+
+This rule exists because re-deriving already-researched mechanisms cost days, and
+because byte-level and Git-semantics detours on a small evidence requirement cost many
+review rounds. When the same class of review finding fails twice, stop patching and
+challenge the design.
+
 ## Adding or editing a skill
 
 1. Create `skills/<name>/SKILL.md` (or edit an existing one) — with the symlink install, edits are
