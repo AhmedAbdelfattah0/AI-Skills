@@ -440,7 +440,8 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
 /**
  * `git check-ignore` of `path` in `root`: 'ignored' (exit 0), 'not-ignored' (exit 1, or exit 128 when the FILESYSTEM shows
  * no git repository at or above `root`: no ignore rule applies there), else 'unknown' (no git, a timeout, exit 128 inside a
- * repository such as a wrong GIT_DIR or a "dubious ownership" refusal, any other error): the caller fails closed on it.
+ * repository such as a broken .git or a "dubious ownership" refusal, any other error): the caller fails closed on it.
+ * Every inherited GIT_* variable is dropped first, so GIT_DIR / GIT_WORK_TREE never redirect it.
  */
 function ignoredState(gitBin, root, path) {
   // R5 L1: inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE, ...) would point git at another repository: drop them all.
@@ -673,6 +674,7 @@ function parseFormat3(b, planText) {
   for (const s of b.surfaces) {
     if (!isObj(s) || !nonEmpty(s.boundary_id) || typeof s.kind !== 'string' || !nonEmpty(s.path) || !Array.isArray(s.principals) || sids.has(s.boundary_id)) return null;
     if (Object.keys(s).some((k) => !['boundary_id', 'kind', 'path', 'principals', 'facts', 'evidence'].includes(k))) return null;
+    if (normPath(s.path).split('/').some((x) => x === '.' || x === '..')) return null; // R6: no '.'/'..' surface path in format 3
     if (s.facts !== undefined || s.evidence !== undefined) {
       if (!isObj(s.facts) || !isObj(s.evidence) || !Object.keys(s.facts).length || canon(Object.keys(s.facts).sort()) !== canon(Object.keys(s.evidence).sort())) return null;
       if (!Object.entries(s.facts).every(([f, v]) => v === false && citationProblem(s.evidence[f]) === null)) return null;
@@ -1020,6 +1022,7 @@ function replayFormat3(r, block) {
   let again;
   try {
     const surfaces = validateSurfaces(block.surfaces, vocab, { allowFacts: true });
+    dotSegmentRefusal(surfaces.map((s) => s.path), 'surface path'); // R6: a hand-built block object bypasses the parse
     again = buildSelection(r, r.catalog, r.digest, block.facts, surfaces, lowerings(r, block.facts, surfaces));
   } catch (e) {
     if (e instanceof Refusal) refuse('plan_block_invalid', `block surface facts do not replay (${e.code}): ${e.reasons.join('; ')}`);

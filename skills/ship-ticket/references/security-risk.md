@@ -70,7 +70,9 @@ surface**, under five rules, each refused when broken:
   gitignored is refused. A citation with a `.` or `..` segment, or with a leading
   `./`, is refused `fact_uncited`. In a format-3 run, a surface or changed path with
   a `.` or `..` segment is refused `bad_input`; a leading `./` is normalized. A
-  format-2 run takes such paths as be63aea did. Where each check runs:
+  format-2 run takes such paths as it did before F12a. Every format-3 entry refuses
+  them: select, reassess, the block parse and its replay (so `init`, `preflight`,
+  the gates and the `obligations` CLI). Where each check runs:
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
   - at `gate review`, both original and confirmation, in the candidate work tree,
@@ -86,6 +88,10 @@ surface**, under five rules, each refused when broken:
   tree is inside a repository is decided from the filesystem: a `.git` entry,
   including a dangling symlink, at the root or any directory above it. Outside every
   repository no ignore rule applies.
+  Residual: a repository reachable only through `GIT_DIR` or `GIT_WORK_TREE`, with
+  no `.git` entry at or above the root, has no ignore rules this check can see. That
+  arrangement exists only in the operator's process environment, which the plan
+  author and the workers cannot set.
   The check proves that the cited text exists, not that it supports the claim: that
   judgment is the review row (section 9).
 - never on every surface (`surface_fact_reinflates`), and never so that a control

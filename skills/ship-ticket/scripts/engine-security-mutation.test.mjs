@@ -221,6 +221,13 @@ export const SECURITY_MUTANTS = [
     from: "const hasEntry = (p) => { try { lstatSync(p); return true; }", to: "const hasEntry = (p) => { try { statSync(p); return true; }" },
   { tag: "S94", name: "paths: the format-3 . / .. refusal also applies to format-2 reassess (legacy no longer byte-identical)", file: "security-plan.mjs",
     from: "    if (block.policy === 3) dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');", to: "    dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');" },
+  // ---- F12a repair R6 (review of ad09947) ----
+  { tag: "S95", name: "replay: a hand-built format-3 block object with a dot-segment surface path is not refused", file: "security-plan.mjs",
+    from: "    dotSegmentRefusal(surfaces.map((s) => s.path), 'surface path'); // R6", to: "    // R6" },
+  { tag: "S96", name: "parse: a format-3 block with a dot-segment surface path parses", file: "security-plan.mjs",
+    from: "    if (normPath(s.path).split('/').some((x) => x === '.' || x === '..')) return null; // R6", to: "    // R6" },
+  { tag: "S97", name: "citations: only GIT_DIR is dropped (an inherited GIT_WORK_TREE still redirects git)", file: "security-plan.mjs",
+    from: "filter(([k]) => !/^GIT_/i.test(k))", to: "filter(([k]) => !/^GIT_DIR$/i.test(k))" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

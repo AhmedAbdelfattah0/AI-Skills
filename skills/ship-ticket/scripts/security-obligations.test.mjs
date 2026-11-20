@@ -1012,3 +1012,43 @@ test('[S93] R5 I1: a dangling .git symlink still marks a repository (lstat, not 
   const out = refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
   assert.ok(out.reasons.some((x) => x.includes('cannot be checked against .gitignore')), J(out.reasons));
 });
+
+// ====================================================================================================================
+// Repair R6 (review of ad09947): a forged format-3 block whose surface path has a '.'/'..' segment. Red on ad09947.
+// ====================================================================================================================
+/** A digest-consistent format-3 plan whose surface A sits at `src/__tests__/../auth/orders.ts` (as a hostile planner forges it). */
+function forgedDotPlan() {
+  // selected at a clean path, then moved: the dot path borrows `__tests__` to evade the own-path auth tripwire select would apply
+  const base = ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/lib/orders.ts', ['session_context'], () => 'src/orders.ts:bearerOnly'), KEEP]));
+  const surfaces = base.surfaces.map((s) => (s.boundary_id === 'A' ? { ...s, path: 'src/__tests__/../auth/orders.ts' } : s));
+  const v3 = { surfaces, pairs: ids(base.pairs), na_pairs: base.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: n.evidence })) };
+  const selection_digest = sha(SP.canon({ policy: 3, catalog_digest: base.catalog_digest, facts_digest: base.facts_digest, controls: base.controls.map((c) => c.control_id), ...v3 }));
+  return OB.planOf({ ...base, surfaces, selection_digest });
+}
+
+test('[S95] [S96] R6 L4: a forged format-3 block with a dot-segment surface path is refused by the plan-block parse, obligationMatrix (replay) and the obligations CLI', () => {
+  const plan = forgedDotPlan();
+  assert.equal(SP.parsePlanSecurityBlock(plan), null, 'the parse refuses it (plan_block_invalid at every consumer)');
+  // obligationMatrix on the block object itself (a caller that bypasses the parse): the replay refuses it
+  const line = plan.split('\n').find((l) => l.startsWith('<!-- security-plan: '));
+  const raw = JSON.parse(line.slice('<!-- security-plan: '.length, -' -->'.length));
+  refused(SP.obligationMatrix(GC, raw), 'plan_block_invalid');
+  // the CLI (manual flow)
+  const dir = dirname(OB.writeCatalog({}));
+  writeFileSync(join(dir, 'forged.md'), plan);
+  mkdirSync(join(dir, 'src'), { recursive: true }); writeFileSync(join(dir, 'src', 'orders.ts'), 'export const bearerOnly = 1;\n');
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', join(dir, 'forged.md'), '--catalog', OB.GATED_PATH, '--repo', dir], { encoding: 'utf8' });
+  assert.equal(JSON.parse(r.stdout).code, 'plan_block_invalid', r.stdout);
+  // reassess (and so the gate and init's bindSecurity reassess) refuses it too
+  refused(SP.reassess(OB.reIn3(GC, { plan, files: [{ path: 'src/a.ts' }], contract: ['**'] })), 'plan_block_invalid');
+});
+
+test('[S97] R6 I6: a lone inherited GIT_WORK_TREE is dropped too (the root repository answers for its own ignore rules)', () => {
+  const root = gitRepo(), other = gitRepo();
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
+  mkdirSync(join(other, 'src'), { recursive: true });
+  const out = withEnv('GIT_WORK_TREE', other, () => SP.verifyCitations(CITE_BLOCK(), { root }));
+  refused(out, 'citation_missing');
+  assert.ok(out.reasons.some((x) => x.includes('gitignored')), J(out.reasons));
+});
