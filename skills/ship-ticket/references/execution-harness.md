@@ -19,7 +19,9 @@ them inside native Plan Mode. REVIEW keeps its own read-only relay
 **Unavailable is not refused.** If a helper is *unavailable* (no Node, missing
 file, a provider with no adapter), report `harness degraded: <reason>` and
 continue under the ordinary `SKILL.md` rules, which keep the same approval and
-ownership controls. A *safety refusal* blocks and is never bypassed by falling
+ownership controls. On an ELEVATED or security-sensitive run, falling
+back to the manual flow after plan approval is **WAIT_FOR_USER** at fallback time
+(SKILL.md); a STANDARD run records `harness degraded` with a warning. A *safety refusal* blocks and is never bypassed by falling
 back:
 
 | Refusal | Outcome |

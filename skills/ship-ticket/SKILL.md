@@ -485,7 +485,11 @@ Read the plan and Design Contract from disk before writing.
   which the next `drive` dispatches. When any node has `unit` or the DAG sets `config.unitReview`, follow
   [units.md](references/units.md); unit reviews do not replace the final review, which stays mandatory. Judgment points (`status.judgments`) come back to you or the
   user. The manual flow below is the documented fallback when the engine or gate
-  module is unavailable (record `harness degraded`). A run that falls back after
+  module is unavailable (record `harness degraded`). On an ELEVATED or
+  security-sensitive run, falling back to the manual (engine-less) flow after plan
+  approval is an assurance exception at fallback time: **WAIT_FOR_USER** for the
+  owner's recorded approval; a STANDARD run records the degraded path with a
+  warning and continues. A run that falls back after
   `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`
   it again, since its ledger no longer reflects the work. While that state file
   exists the carrier still treats it as REPAIR authority, so a REPAIR the ledger does
@@ -711,7 +715,8 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   security check in plan section 3b whose status is anything other than
   `verified` or `not applicable` at release, no safe local environment for
   required attacks, enforceable primary-review deadlines missing without an
-  explicit advisory-only exception, a degraded harness at SHIP on an ELEVATED or
+  explicit advisory-only exception, a fallback to the manual flow after plan
+  approval on an ELEVATED or security-sensitive run, a degraded harness at SHIP on an ELEVATED or
   security-sensitive run ([references/ship.md](references/ship.md)), an
   `ADD_CONTROLS` reassessment awaiting the owner's `SECURITY_ADDENDUM`, or a
   security-plan refusal of `plan_block_missing` or `plan_block_invalid`
@@ -787,6 +792,12 @@ message look like completion.
   file and presenting the revised plan with `ExitPlanMode`; on Codex, the host's
   native plan handoff. A chat reply, an `AskUserQuestion` answer or the gap
   question's answer is never that approval.
+- Approved plan that fails the Factory's own prerequisites (an internal defect,
+  such as a missing security-plan block): re-enter Plan Mode, fix only the
+  defective section, re-present with `ExitPlanMode` (native approval, never typed)
+  and record the evidence. Renewed approval is needed only if the pairs, DAG,
+  surfaces or review profile change; even a deterministic completion goes through
+  `ExitPlanMode`, and derived sections are never auto-approved.
 - Existing attack or parity evidence may be reused only when its inputs and
   candidate paths are unchanged; otherwise rerun the affected proof, not the
   entire workflow.
