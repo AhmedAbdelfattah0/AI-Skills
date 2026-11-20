@@ -197,14 +197,20 @@ test('S3c: manual-flow fallback stops at fallback time on ELEVATED runs, and an 
   const flat = (text) => text.replace(/\s+/g, ' ');
   const skill = flat(load(fileURLToPath(new URL('../SKILL.md', import.meta.url))));
   const stops = skill.slice(skill.indexOf('## When execution may yield'), skill.indexOf('Use **FAIL** for:'));
+  const assurance = stops.slice(stops.indexOf('- **security or assurance exceptions:**'), stops.indexOf('- **engine and gate safety refusals:**'));
   const resume = skill.slice(skill.indexOf('## Resume'), skill.indexOf('## Scope boundary'));
-  assert.ok(stops.length > 500 && resume.length > 500, 'the stop list and Resume sections were found');
-  // Fallback-time stop: spine execution-harness bullet, the stop list, and the reference.
-  assert.ok(skill.includes('falling back to the manual (engine-less) flow after plan approval is an assurance exception at fallback time: **WAIT_FOR_USER** for the owner\'s recorded approval; a STANDARD run records the degraded path with a warning and continues.'));
-  assert.ok(stops.includes('a fallback to the manual flow after plan approval on an ELEVATED or security-sensitive run'));
-  assert.ok(flat(ref('execution-harness.md')).includes('falling back to the manual flow after plan approval is **WAIT_FOR_USER** at fallback time (SKILL.md); a STANDARD run records `harness degraded` with a warning.'));
+  assert.ok(assurance.length > 300 && resume.length > 500, 'the stop category and Resume sections were found');
+  const exh = flat(ref('execution-harness.md'));
+  // Fallback-time stop, with the ELEVATED qualifier inside each pinned string.
+  assert.ok(skill.includes('On an ELEVATED or security-sensitive run, falling back to the manual (engine-less) flow after plan approval is an assurance exception at fallback time: **WAIT_FOR_USER** for the owner\'s recorded approval (approve the manual flow, or restore the engine and resume on it); a STANDARD run records the degraded path with a warning and continues.'));
+  assert.ok(assurance.includes('a fallback to the manual flow after plan approval on an ELEVATED or security-sensitive run'));
+  assert.ok(exh.includes('On an ELEVATED or security-sensitive run, falling back to the manual flow after plan approval is **WAIT_FOR_USER** at fallback time (SKILL.md); a STANDARD run records `harness degraded` with a warning.'));
+  assert.ok(exh.includes('on an ELEVATED or security-sensitive run that is **WAIT_FOR_USER** at fallback time, SKILL.md stop list'));
+  assert.ok(flat(ref('review.md')).includes('on an ELEVATED or security-sensitive run that is **WAIT_FOR_USER** at fallback time, SKILL.md stop list'));
   // Internal Factory plan defect recovery, in Resume.
   assert.ok(resume.includes('Approved plan that fails the Factory\'s own prerequisites'));
-  assert.ok(resume.includes('re-enter Plan Mode, fix only the defective section, re-present with `ExitPlanMode` (native approval, never typed) and record the evidence.'));
-  assert.ok(resume.includes('Renewed approval is needed only if the pairs, DAG, surfaces or review profile change; even a deterministic completion goes through `ExitPlanMode`, and derived sections are never auto-approved.'));
+  assert.ok(resume.includes('and `init` has not run: this bullet takes precedence over the one above.'));
+  assert.ok(resume.includes('(native approval, never typed; accepting it records the new START, which the orchestrator then appends) and record the evidence in the plan\'s RUN-STATE.'));
+  assert.ok(resume.includes('Renewed approval of the substance is needed only if the pairs, DAG, surfaces or review profile change; even a deterministic completion goes through `ExitPlanMode`, and derived sections are never auto-approved.'));
+  assert.ok(resume.includes('After `init`, any narrative change needs a new approved START/run'));
 });

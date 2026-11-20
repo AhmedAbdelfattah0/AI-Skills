@@ -504,7 +504,8 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   collection errors do not count. A runner that rewrites a named
   spec file (a snapshot update) is refused as `spec_rewritten`: the spec digests are taken before
   the runner starts. Unsupported output cannot establish RED: that
-  is a judgment point and the manual flow applies, marked degraded. Evidence is
+  is a judgment point and the manual flow applies, marked degraded (on an ELEVATED or security-sensitive run
+  that is **WAIT_FOR_USER** at fallback time, SKILL.md stop list). Evidence is
   bound to the spec files' content digests, the baseline candidate and the resolved
   `config.base` commit, ordered by event sequence, and is refused if recorded after a
   dependent production dispatch. Before a drive dispatches a dependent (or repair) that

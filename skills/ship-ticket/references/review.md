@@ -48,7 +48,7 @@ Finish these checks before announcing REVIEW or appending its start event:
   barrier on a manual event, so `drive` keeps every dependent of that node blocked:
   either fix the runner format and re-run `gate red`, or continue the rest of the
   ticket in the manual workflow (record `harness degraded`, stop calling `drive`
-  for it) and never present the engine's blocked state as a pass;
+  for it; on an ELEVATED or security-sensitive run that is **WAIT_FOR_USER** at fallback time, SKILL.md stop list) and never present the engine's blocked state as a pass;
 - test-quality, docs-accuracy, applicable static security rows and runtime attack
   work are complete or carry a named degradation;
 - UI metadata and the parity artifact are complete when UI is in scope;

@@ -488,7 +488,8 @@ Read the plan and Design Contract from disk before writing.
   module is unavailable (record `harness degraded`). On an ELEVATED or
   security-sensitive run, falling back to the manual (engine-less) flow after plan
   approval is an assurance exception at fallback time: **WAIT_FOR_USER** for the
-  owner's recorded approval; a STANDARD run records the degraded path with a
+  owner's recorded approval (approve the manual flow, or restore the engine and
+  resume on it); a STANDARD run records the degraded path with a
   warning and continues. A run that falls back after
   `init` stays manual for the rest of the ticket: do not `resume`, `drive` or `gate`
   it again, since its ledger no longer reflects the work. While that state file
@@ -793,11 +794,17 @@ message look like completion.
   native plan handoff. A chat reply, an `AskUserQuestion` answer or the gap
   question's answer is never that approval.
 - Approved plan that fails the Factory's own prerequisites (an internal defect,
-  such as a missing security-plan block): re-enter Plan Mode, fix only the
-  defective section, re-present with `ExitPlanMode` (native approval, never typed)
-  and record the evidence. Renewed approval is needed only if the pairs, DAG,
-  surfaces or review profile change; even a deterministic completion goes through
-  `ExitPlanMode`, and derived sections are never auto-approved.
+  such as a missing security-plan block) and `init` has not run: this bullet takes
+  precedence over the one above. Re-enter Plan Mode (on Codex, the host's native
+  plan handoff), fix only the defective section, re-present with `ExitPlanMode`
+  (native approval, never typed; accepting it records the new START, which the
+  orchestrator then appends) and record the evidence in the plan's RUN-STATE.
+  Renewed approval of the substance is needed only if the pairs, DAG, surfaces or
+  review profile change; even a deterministic completion goes through
+  `ExitPlanMode`, and derived sections are never auto-approved. After `init`, any
+  narrative change needs a new approved START/run (the engine refuses
+  `approval_mismatch`; [execution-harness.md](references/execution-harness.md)),
+  so the bullet above applies.
 - Existing attack or parity evidence may be reused only when its inputs and
   candidate paths are unchanged; otherwise rerun the affected proof, not the
   entire workflow.
