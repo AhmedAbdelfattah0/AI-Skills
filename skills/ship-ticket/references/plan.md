@@ -275,8 +275,10 @@ with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
 `approved_at` (not `at`) and `approved_by` (the human approver, never an agent or a
 placeholder). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
-before dispatching any worker; it refuses a stale or malformed digest, a missing
-approval time or approver. Never edit the narrative after START: the digest no
+before dispatching any worker (`--run-id` is required); it refuses a malformed
+RUN-STATE block, a stale or malformed digest, a missing approval time or approver.
+Its `ok` is necessary but not sufficient: it cannot see the engine's trusted-START
+rule. The approver check is guidance against honest mistakes, not a security boundary. Never edit the narrative after START: the digest no
 longer matches and the run is not executable. A CRLF plan and its LF twin have
 different digests; the tool does not normalise line ends.
 
