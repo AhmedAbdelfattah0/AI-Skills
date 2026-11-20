@@ -12,8 +12,8 @@
 // The catalog is skills/vapt/controls.json and its evaluator skills/vapt/controls.mjs (one definition of the
 // selection semantics). A standalone install without vapt refuses catalog_missing: never an empty selection.
 // Keyword matches on a diff only create signals; they never select a control. Imports no engine module.
-import { readFileSync, realpathSync, statSync, readdirSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { readFileSync, realpathSync, statSync, readdirSync, existsSync } from 'node:fs';
+import { join, sep, relative, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -52,7 +52,10 @@ const normPath = (p) => String(p).replace(/^(\.\/)+/, '');
  */
 function inputPath(p, what) {
   if (String(p).includes('\\')) refuse('bad_input', `${what} ${JSON.stringify(p)} contains a backslash; use forward slashes`);
-  return normPath(p);
+  const n = normPath(p);
+  // R4: a '.' or '..' segment would let a path borrow another's name (src/__tests__/../auth/session.ts); git never reports one.
+  if (n.split('/').some((x) => x === '.' || x === '..')) refuse('bad_input', `${what} ${JSON.stringify(p)} has a '.' or '..' segment; give the normalized path`);
+  return n;
 }
 /** Canonical JSON: object keys sorted recursively, no whitespace, undefined dropped. */
 export function canon(v) {
@@ -400,12 +403,12 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
       const i = c.indexOf(':');
       const path = i < 0 ? c : c.slice(0, i), sym = i < 0 ? null : c.slice(i + 1);
       if (under(path)) continue;
-      let text = null, outside = false;
+      let text = null, outside = false, resolved = null;
       try {
         if (exactCase(root, path) && statSync(join(root, path)).isFile()) {
           const real = realpathSync(join(root, path)), top = realpathSync(root);
           if (real === top || !real.startsWith(top + sep)) outside = true; // a symlink that leaves the repository
-          else text = readFileSync(real, 'utf8');
+          else { text = readFileSync(real, 'utf8'); resolved = relative(top, real).split(sep).join('/'); }
         }
       } catch { text = null; }
       if (outside) { bad.push(`${c}: ${path} resolves outside the repository (symlink)`); continue; }
@@ -414,6 +417,11 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
       // (exit 128: no ignore rules apply) the file is taken as it is.
       const ign = ignoredState(gitBin, root, path);
       if (ign !== 'not-ignored') { bad.push(`${c}: ${path} ${ign === 'ignored' ? 'is gitignored, not part of the candidate' : 'cannot be checked against .gitignore (fail closed)'}`); continue; }
+      // R4: a symlink is judged by what it resolves to as well (docs-only, .git, node_modules, gitignored targets refused)
+      if (resolved !== path) {
+        const rp = citationProblem(resolved), ri = rp ? null : ignoredState(gitBin, root, resolved);
+        if (rp || ri !== 'not-ignored') { bad.push(`${c}: ${path} resolves to ${resolved}, ${rp ?? (ri === 'ignored' ? 'which is gitignored' : 'which cannot be checked against .gitignore')}`); continue; }
+      }
       if (sym !== null && !hasIdentifier(text, sym)) { bad.push(`${c}: ${path} does not contain the identifier ${JSON.stringify(sym)}`); continue; }
       checked.push(c);
     }
@@ -423,15 +431,28 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
 }
 
 /**
- * `git check-ignore` of `path` in `root`: 'ignored' (exit 0), 'not-ignored' (exit 1, or exit 128 outside any git work tree,
- * where no ignore rule applies), else 'unknown' (no git, a timeout, any other error): the caller fails closed on it.
+ * `git check-ignore` of `path` in `root`: 'ignored' (exit 0), 'not-ignored' (exit 1, or exit 128 when the FILESYSTEM shows
+ * no git repository at or above `root`: no ignore rule applies there), else 'unknown' (no git, a timeout, exit 128 inside a
+ * repository such as a wrong GIT_DIR or a "dubious ownership" refusal, any other error): the caller fails closed on it.
  */
 function ignoredState(gitBin, root, path) {
   const r = spawnSync(gitBin, ['check-ignore', '-q', '--', path], { cwd: root, stdio: 'ignore', timeout: 15000 });
   if (r.status === 0) return 'ignored';
   if (r.status === 1) return 'not-ignored';
-  if (r.status === 128 && spawnSync(gitBin, ['rev-parse', '--is-inside-work-tree'], { cwd: root, stdio: 'ignore', timeout: 15000 }).status === 128) return 'not-ignored';
+  if (r.status === 128 && !insideRepository(root)) return 'not-ignored';
   return 'unknown';
+}
+
+/** Whether a `.git` entry (directory, or a worktree's `.git` file) exists at `root` or any directory above it. */
+function insideRepository(root) {
+  let dir;
+  try { dir = realpathSync(root); } catch { return true; } // unreadable: assume a repository, so the caller fails closed
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) return true;
+    const up = dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
 }
 
 /** Whether `text` contains `sym` as a whole identifier token (`exp` does not match `export`; `a.b` must stand alone too). */

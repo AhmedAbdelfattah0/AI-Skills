@@ -193,7 +193,9 @@ and rule-catalogue work:
   the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
   gives its finding `subject_id: '<boundary>:<control>'`, which records the same
   run-wide dispute (see
-  [security-risk.md](security-risk.md) section 9).
+  [security-risk.md](security-risk.md) section 9). For each `c5_exempted`
+  test-named file in the recorded reassessment, confirm that no production code
+  imports it and no loader or deploy config serves it.
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule

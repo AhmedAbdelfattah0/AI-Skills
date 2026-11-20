@@ -27,7 +27,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -911,7 +911,75 @@ test('[S84] [S85] [S86] R3 citations: the :symbol matches a whole identifier; a 
   writeFileSync(join(outside, 'a.ts'), 'export const persistent_writeFree = 1;\n');
   rmSync(join(root, 'src', 'a.ts'));
   symlinkSync(join(outside, 'a.ts'), join(root, 'src', 'a.ts'));
-  refused(SP.verifyCitations(block, { root }), 'citation_missing'); // resolves outside the repository
+  const out1 = refused(SP.verifyCitations(block, { root }), 'citation_missing'); // resolves outside the repository
+  assert.ok(out1.reasons.some((x) => x.includes('resolves outside the repository')), J(out1.reasons));
   for (const c of ['docs/api.md:auth', 'docs/guide/security.mdx:session', 'packages/x/docs/notes.md:auth']) assert.notEqual(SP.citationProblem(c), null, c);
   assert.equal(SP.citationProblem('docs/schema.sql:orders'), null);
+});
+
+// ====================================================================================================================
+// Repair R4 (review of edcadf4, citation class only; C5 untouched). Written before the fixes; red on edcadf4.
+// ====================================================================================================================
+const CITE_BLOCK = () => SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))); // cites src/a.ts:persistent_writeFree
+const gitRepo = () => {
+  const root = realpathSync(dirname(OB.writeCatalog({})));
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: root }).status, 0);
+  mkdirSync(join(root, 'src'), { recursive: true });
+  return root;
+};
+const withEnv = (k, v, fn) => { const old = process.env[k]; process.env[k] = v; try { return fn(); } finally { if (old === undefined) delete process.env[k]; else process.env[k] = old; } };
+
+test('[S87] R4 F1: inside a repository, a git that cannot answer (GIT_DIR=/nonexistent) fails closed; outside any repository no ignore rule applies', () => {
+  const root = gitRepo();
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
+  refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing'); // control: gitignored
+  refused(withEnv('GIT_DIR', '/nonexistent', () => SP.verifyCitations(CITE_BLOCK(), { root })), 'citation_missing'); // git broken inside a repo
+  rmSync(join(root, '.gitignore'));
+  refused(withEnv('GIT_DIR', '/nonexistent', () => SP.verifyCitations(CITE_BLOCK(), { root })), 'citation_missing'); // even when not ignored: unanswerable
+  const plain = realpathSync(dirname(OB.writeCatalog({})));
+  mkdirSync(join(plain, 'src'), { recursive: true });
+  writeFileSync(join(plain, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  ok(SP.verifyCitations(CITE_BLOCK(), { root: plain })); // no .git at or above it: as documented
+});
+
+test('[S88] R4 F2: the :symbol leading boundary is pinned (a longer identifier ending in the symbol does not verify it)', () => {
+  const root = realpathSync(dirname(OB.writeCatalog({})));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const xpersistent_writeFree = 1;\n');
+  refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const x = persistent_writeFree;\n');
+  ok(SP.verifyCitations(CITE_BLOCK(), { root }));
+});
+
+test('[S89] R4 F3: an in-repo symlink is judged by what it resolves to (gitignored, node_modules, docs-only, .git targets refused)', () => {
+  for (const [target, setup] of [['build/gen.ts', (r) => writeFileSync(join(r, '.gitignore'), 'build/\n')], ['node_modules/x/i.js', () => {}], ['README.md', () => {}], ['.git/description', () => {}]]) {
+    const root = gitRepo();
+    setup(root);
+    mkdirSync(dirname(join(root, target)), { recursive: true });
+    writeFileSync(join(root, target), 'export const persistent_writeFree = 1;\n');
+    symlinkSync(join(root, target), join(root, 'src', 'a.ts'));
+    refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+  }
+  const root = gitRepo(); // a symlink to an ordinary tracked-path file inside the repo is fine
+  writeFileSync(join(root, 'src', 'impl.ts'), 'export const persistent_writeFree = 1;\n');
+  symlinkSync(join(root, 'src', 'impl.ts'), join(root, 'src', 'a.ts'));
+  ok(SP.verifyCitations(CITE_BLOCK(), { root }));
+});
+
+test('[S90] R4 N3: the symlink guard compares path-segment boundaries (a sibling directory sharing the prefix is outside)', () => {
+  const base = realpathSync(dirname(OB.writeCatalog({})));
+  const root = join(base, 'repo'), evil = join(base, 'repo-evil');
+  mkdirSync(join(root, 'src'), { recursive: true }); mkdirSync(evil, { recursive: true });
+  writeFileSync(join(evil, 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  symlinkSync(join(evil, 'a.ts'), join(root, 'src', 'a.ts'));
+  const out2 = refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+  assert.ok(out2.reasons.some((x) => x.includes('resolves outside the repository')), J(out2.reasons));
+});
+
+test('[S91] R4 N1: a changed or surface path with a "." or ".." segment is refused (bad_input), so it cannot borrow a test name', () => {
+  refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/__tests__/../auth/session.ts' }] })), 'bad_input');
+  refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/./auth/session.ts' }] })), 'bad_input');
+  refused(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/x/../a.ts'), KEEP]), 'bad_input');
+  ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: './src/a.ts' }] }))); // a leading ./ is normalized, as before
 });

@@ -203,6 +203,17 @@ export const SECURITY_MUTANTS = [
     from: "if (real === top || !real.startsWith(top + sep)) outside = true;", to: "if (false) outside = true;" },
   { tag: "S86", name: "citations: an unanswerable git check-ignore is taken as not ignored", file: "security-plan.mjs",
     from: "  return 'unknown';\n}", to: "  return 'not-ignored';\n}" },
+  // ---- F12a repair R4 (review of edcadf4, citation class) ----
+  { tag: "S87", name: "citations: git exit 128 inside a repository (wrong GIT_DIR, dubious ownership) is taken as not ignored", file: "security-plan.mjs",
+    from: "  if (r.status === 128 && !insideRepository(root)) return 'not-ignored';", to: "  if (r.status === 128) return 'not-ignored';" },
+  { tag: "S88", name: "citations: the :symbol leading boundary is dropped (a longer identifier ending in it verifies)", file: "security-plan.mjs",
+    from: "new RegExp(`(^|[^A-Za-z0-9_$])${sym", to: "new RegExp(`${sym" },
+  { tag: "S89", name: "citations: an in-repo symlink is not judged by its resolved target", file: "security-plan.mjs",
+    from: "      if (resolved !== path) {", to: "      if (false) {" },
+  { tag: "S90", name: "citations: the symlink guard compares a raw string prefix (a sibling repo-evil directory passes)", file: "security-plan.mjs",
+    from: "!real.startsWith(top + sep)", to: "!real.startsWith(top)" },
+  { tag: "S91", name: "paths: a . or .. segment is accepted (a path borrows a test name)", file: "security-plan.mjs",
+    from: "  if (n.split('/').some((x) => x === '.' || x === '..')) refuse(", to: "  if (false) refuse(" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

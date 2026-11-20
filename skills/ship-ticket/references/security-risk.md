@@ -61,9 +61,14 @@ surface**, under five rules, each refused when broken:
   `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, or any markdown under a `docs/`
   folder), a path inside `.git/` or `node_modules/`, or a `:symbol` shorter than 3
   characters (`fact_uncited`). The cited file must **exist** with exactly that case
-  on every OS, must resolve inside the repository (no symlink out), must not be
+  on every OS, must resolve inside the repository (a symlink out, including into a
+  sibling directory that shares the name prefix, is refused), must not be
   gitignored, and, with a `:symbol`, must contain it as a whole identifier
-  (`exp` does not match `export`) (`citation_missing`):
+  (`exp` does not match `export`, `xexport` does not match `export`)
+  (`citation_missing`). A symlink inside the repository is also judged by the file
+  it resolves to: a target that is docs-only, inside `.git/` or `node_modules/`, or
+  gitignored is refused. A cited, surface or changed path with a `.` or `..` segment
+  is refused `bad_input`. Where each check runs:
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
   - at `gate review`, both original and confirmation, in the candidate work tree,
@@ -73,8 +78,10 @@ surface**, under five rules, each refused when broken:
   - in the `obligations` CLI, in the `--repo` working tree.
 
   An unreadable tree fails closed. So does a `git check-ignore` that cannot answer:
-  no git, a timeout, or an error inside a work tree. Outside a git repository no
-  ignore rule applies.
+  no git, a timeout, or exit 128 inside a repository (a wrong `GIT_DIR`, a "dubious
+  ownership" refusal). Whether the tree is inside a repository is decided from the
+  filesystem: a `.git` entry at the root or any directory above it. Outside every
+  repository no ignore rule applies.
   The check proves that the cited text exists, not that it supports the claim: that
   judgment is the review row (section 9).
 - never on every surface (`surface_fact_reinflates`), and never so that a control
@@ -308,7 +315,11 @@ recorded test-file exemption set. A mutant that re-adds any narrowing or reason-
 closure (the earlier workspace rule, at reassess or at plan time) is killed by it.
 
 **Accepted friction.** A production file under `apps/api/` that raises `new-route`
-needs a surface, at plan time and at reassess, as on format 2. That is correct: a
+needs a surface, at plan time and at reassess, as on format 2. So does a **test-named**
+file under a workspace folder named `api` (`apps/api/`, `packages/api/`,
+`services/api/`, for example `apps/api/src/services/order.service.spec.ts` or
+`apps/api/test/orders.e2e-spec.ts`). `api/` is a router root wherever it appears, so
+no test-file exemption applies there. This is identical to format 2. That is correct: a
 service that holds credentials is a boundary, and an `index.ts` that registers routes
 is a route surface. The S2 catalog entries and per-surface facts reduce the pair cost
 of such surfaces generically.
@@ -344,6 +355,16 @@ directory and name, not by import, so a test-named migration still signals. Othe
 signals of a test file (mail, payment, env, dependency) and its out-of-plan path
 always count.
 
+**Accepted residuals of the test-file exemption.** It is a name rule, so these cases
+stay with the reviewer, who sees the `c5_exempted` record:
+
+- production code that imports a test-named file (an import wiring a spec into the
+  app);
+- a glob or `readdir` loader that registers every file of a folder outside the
+  router and middleware roots;
+- a `__mocks__/` or `__fixtures__/` module imported by production code;
+- an unchanged deploy or build config that names a test file.
+
 For a format-3 block, a changed path inside the Design Contract that raises one of
 the three surface signals under this detector, and has no surface at its path, is
 refused `surface_inventory_incomplete` before classification. The same check runs
@@ -372,6 +393,11 @@ Windows, CI runs every pure test of the file:
 The end-to-end paths are covered by the ubuntu and macOS harness legs.
 
 **Follow-ups (not done in S1).**
+
+- **F4, spec files under a workspace folder named `api`.** Under the current
+  behaviour (accepted friction above), such specs need a surface, as on format 2.
+  Whether to reduce this friction is pending a quantified assessment at the
+  SCRUM-422 re-plan. It is not authorized for implementation.
 
 - The legacy golden embeds the catalog digest. A legitimate catalog change fails
   `[S59]`, whose message explains how to regenerate from be63aea's
