@@ -13,7 +13,7 @@
 // selection semantics). A standalone install without vapt refuses catalog_missing: never an empty selection.
 // Keyword matches on a diff only create signals; they never select a control. Imports no engine module.
 import { readFileSync, realpathSync, statSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -356,6 +356,7 @@ const CITE_PATH = /^[A-Za-z0-9_@+.$()[\]-]+(?:\/[A-Za-z0-9_@+.$()[\]-]+)*$/;
 const CITE_SYMBOL = /^[A-Za-z_$][\w$.#<>[\]-]*$/;
 const PLACEHOLDER = /^(tbd|tba|todo|fixme|n\/?a|na|none|null|nil|unknown|placeholder|example|path|file|symbol|xxx+|-+|\.+|\?+|\*+)$/i;
 /** Repository docs that state intent, never the code's behaviour: a citation of them proves nothing (R2). */
+const DOCS_DIR_MD = /(^|\/)docs\/(.+\/)?[^/]+\.mdx?$/i;
 const DOCS_ONLY = new Set(['readme.md', 'readme', 'claude.md', 'agents.md', 'changelog.md', 'contributing.md', 'license', 'license.md', 'code_of_conduct.md']);
 /**
  * A machine-checkable citation of a surface-level fact: one `path[:symbol]`, repository-relative (no leading '/',
@@ -373,7 +374,7 @@ export function citationProblem(e) {
   if (sym !== null && sym.length < 3) return `symbol ${JSON.stringify(sym)} is shorter than 3 characters (it would match almost any file)`;
   if (path.split('/').includes('.git')) return `${JSON.stringify(path)} is inside .git, not the repository's code`;
   if (path.split('/').includes('node_modules')) return `${JSON.stringify(path)} is inside node_modules, a dependency, not the repository's code`;
-  if (DOCS_ONLY.has(path.split('/').pop().toLowerCase())) return `${JSON.stringify(path)} is a docs-only file (README, CLAUDE.md, ...): cite the code that makes the fact false`;
+  if (DOCS_ONLY.has(path.split('/').pop().toLowerCase()) || DOCS_DIR_MD.test(path)) return `${JSON.stringify(path)} is a docs-only file (README, CLAUDE.md, ...): cite the code that makes the fact false`;
   return null;
 }
 
@@ -385,7 +386,7 @@ export function citationProblem(e) {
  * create) is deferred; gate review checks it with no pending set. An unreadable root, a missing or non-file path, or a
  * missing symbol -> citation_missing (fail closed). A format-2 block has no surface facts: nothing to check.
  */
-export function verifyCitations(block, { root, pending = [] } = {}) {
+export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = {}) {
   return asResult(() => {
     if (!isObj(block) || block.policy !== 3) return { ok: true, code: 'citations_verified', reasons: [], checked: [] };
     let dir = false;
@@ -399,19 +400,42 @@ export function verifyCitations(block, { root, pending = [] } = {}) {
       const i = c.indexOf(':');
       const path = i < 0 ? c : c.slice(0, i), sym = i < 0 ? null : c.slice(i + 1);
       if (under(path)) continue;
-      let text = null;
-      try { if (exactCase(root, path) && statSync(join(root, path)).isFile()) text = readFileSync(join(root, path), 'utf8'); } catch { text = null; }
+      let text = null, outside = false;
+      try {
+        if (exactCase(root, path) && statSync(join(root, path)).isFile()) {
+          const real = realpathSync(join(root, path)), top = realpathSync(root);
+          if (real === top || !real.startsWith(top + sep)) outside = true; // a symlink that leaves the repository
+          else text = readFileSync(real, 'utf8');
+        }
+      } catch { text = null; }
+      if (outside) { bad.push(`${c}: ${path} resolves outside the repository (symlink)`); continue; }
       if (text === null) { bad.push(`${c}: ${path} is not a file in ${root}`); continue; }
       // R2: a gitignored file is not part of the candidate. `git check-ignore` exit 0 = ignored; outside a git repository
       // (exit 128: no ignore rules apply) the file is taken as it is.
-      if (spawnSync('git', ['check-ignore', '-q', '--', path], { cwd: root, stdio: 'ignore', timeout: 15000 }).status === 0) { bad.push(`${c}: ${path} is gitignored, not part of the candidate`); continue; }
-      if (sym !== null && !text.includes(sym)) { bad.push(`${c}: ${path} does not contain ${JSON.stringify(sym)}`); continue; }
+      const ign = ignoredState(gitBin, root, path);
+      if (ign !== 'not-ignored') { bad.push(`${c}: ${path} ${ign === 'ignored' ? 'is gitignored, not part of the candidate' : 'cannot be checked against .gitignore (fail closed)'}`); continue; }
+      if (sym !== null && !hasIdentifier(text, sym)) { bad.push(`${c}: ${path} does not contain the identifier ${JSON.stringify(sym)}`); continue; }
       checked.push(c);
     }
     if (bad.length) refuse('citation_missing', ...bad);
     return { ok: true, code: 'citations_verified', reasons: [], checked };
   });
 }
+
+/**
+ * `git check-ignore` of `path` in `root`: 'ignored' (exit 0), 'not-ignored' (exit 1, or exit 128 outside any git work tree,
+ * where no ignore rule applies), else 'unknown' (no git, a timeout, any other error): the caller fails closed on it.
+ */
+function ignoredState(gitBin, root, path) {
+  const r = spawnSync(gitBin, ['check-ignore', '-q', '--', path], { cwd: root, stdio: 'ignore', timeout: 15000 });
+  if (r.status === 0) return 'ignored';
+  if (r.status === 1) return 'not-ignored';
+  if (r.status === 128 && spawnSync(gitBin, ['rev-parse', '--is-inside-work-tree'], { cwd: root, stdio: 'ignore', timeout: 15000 }).status === 128) return 'not-ignored';
+  return 'unknown';
+}
+
+/** Whether `text` contains `sym` as a whole identifier token (`exp` does not match `export`; `a.b` must stand alone too). */
+const hasIdentifier = (text, sym) => new RegExp(`(^|[^A-Za-z0-9_$])${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_$])`).test(text);
 
 /** Whether every segment of `path` exists under `root` with exactly that case (case-insensitive file systems agree with Linux). */
 function exactCase(root, path) {
@@ -755,25 +779,21 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
   'go.mod', 'go.sum', 'cargo.toml', 'cargo.lock', 'gemfile', 'gemfile.lock', 'composer.json', 'composer.lock', 'pom.xml', 'build.gradle',
   'build.gradle.kts', 'packages.lock.json', 'directory.packages.props', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock', 'podfile', 'podfile.lock']);
 /**
- * C5 (F12a, block format 3 ONLY: a format-2 run keeps origin/main's detector byte for byte, pinned by
- * security-plan-legacy.golden.json). A format-3 run narrows the surface-introducing signals in exactly three
- * places, and every narrowing that applies is RECORDED (`c5_exempted`: path, signal, rule), never silent:
- * - rule `test-file`, auth-or-middleware-change: a test-named file (TEST_FILE) raises none, unless its path is under a
- *   router root or a middleware/plugins root (MIDDLEWARE_ROOT: Nitro loads every file in middleware/, @fastify/autoload
- *   every file in plugins/);
- * - rule `test-file`, new-route: a test-named file raises none, unless its path is under a router root
- *   (ROUTER_ROOT: any `routes/`, `route/`, `pages/`, `api/`, `controllers/`, `handlers/`, `endpoints/`, `webhooks/`,
- *   `functions/` segment, or `server/api|routes|middleware/`): file-system routers (React Router / Remix flatRoutes,
- *   TanStack, SolidStart, SvelteKit, Next.js pages/, Nitro, Vercel api/) serve every file there, test-named or not;
- * - a path whose only route evidence is a workspace project folder named `api` (`apps|packages|services|libs|
- *   modules|projects/api/`) raises an OPEN `possible-route` signal instead of `new-route` (R2): it is never silent and
- *   needs a classification (a reason may close it, recorded in classifications_used), but no inventory surface. Its
- *   routes/, controllers/, ... subfolders, a nested api/, an `api.*` file and every added route line (format 3 adds
- *   fastify/hono/elysia verbs and tRPC procedures) still raise `new-route`.
- * After R2 every exemption that applies is a test-named file; exemptionRefusal() refuses any other record (fail closed).
- * migration-or-rls-change is NEVER narrowed: migration runners select by directory and name, not by import.
- * A test-named file is ONLY: `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test|_spec.<go|py|rb|ex|exs>`, `test_*.py`,
- * or a path under `__tests__/`, `__mocks__/` or `__fixtures__/`.
+ * C5 (F12a, final rule after R3). A format-2 run keeps origin/main's detector byte for byte (pinned by
+ * security-plan-legacy.golden.json). A format-3 REASSESS uses the same detector, the same signal kinds and the same
+ * closure rule (a new-route, auth or migration signal off every approved surface closes only through a surface, then
+ * ADD_CONTROLS and an owner addendum), with exactly two differences:
+ * - additive: ROUTE_LINE_V3 (fastify / hono / elysia verbs, one-line tRPC procedures) raises new-route on more lines;
+ * - the ONLY narrowing, rule `test-file`, RECORDED in `c5_exempted` (path, signal, rule): a test-named file (TEST_FILE)
+ *   raises no new-route unless it is under a router root (ROUTER_ROOT), and no auth-or-middleware-change unless it is
+ *   under a router root or a middleware/plugins root (MIDDLEWARE_ROOT). migration-or-rls-change is never narrowed.
+ * Every exemption record is consumed: exemptionRefusal() refuses any record that is not a test-named file.
+ * The same detector serves reassess AND the plan-time inventory check (init, preflight): nothing else is narrowed
+ * anywhere (no workspace-folder or other path narrowing). Invariant, property-tested against format 2: a format-3
+ * reassess or inventory check never closes or omits a signal format 2 would require a surface for, except the
+ * recorded test-file exemption set.
+ * Test-named: `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|exs>`, `*_spec.rb`, `test_*.py`, or a path under
+ * `__tests__/`, `__mocks__/` or `__fixtures__/`.
  */
 const TEST_FILE = /(^|\/)(__tests__|__mocks__|__fixtures__)\/|\.(test|spec|e2e-spec)\.[a-z0-9]+$|_test\.(go|py|rb|exs)$|_spec\.rb$|(^|\/)test_[^/]+\.py$/;
 /** Directories whose files a framework loads as middleware or plugins (Nitro middleware/, @fastify/autoload plugins/): never exempt. */
@@ -781,10 +801,9 @@ const MIDDLEWARE_ROOT = /(^|\/)(middlewares?|plugins)\//;
 const ROUTER_ROOT = /(^|\/)(routes?|pages|api|controllers?|handlers?|endpoints?|webhooks?|functions)\/|(^|\/)server\/(api|routes|middleware)\//;
 /** A test-named file outside every router root (format 3: such a file raises no new-route or auth signal; recorded). */
 export const isTestPath = (p) => { const q = String(p).toLowerCase(); return TEST_FILE.test(q) && !ROUTER_ROOT.test(q); };
-const WORKSPACE_API = /(^|\/)(apps|packages|services|libs|modules|projects)\/api\//g;
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
-/** Format-3 extra route registrations (fastify / hono / elysia verbs, tRPC procedures): so the workspace-api narrowing cannot blind them. */
+/** Format-3 extra route registrations (fastify / hono / elysia verbs, one-line tRPC procedures): additive only, nothing relies on them. */
 const ROUTE_LINE_V3 = /\b(fastify|instance|hono|elysia)\.(get|post|put|patch|delete|all|route|head|options)\s*\(|[Pp]rocedure\b.*\.(query|mutation|subscription)\s*\(/;
 /** [kind, path test, added-line test]: mechanical patterns only; a match creates a signal, never a control. */
 const RULES = [
@@ -814,7 +833,6 @@ const SIGNAL_CLASS = {
   'new-route': ['VAPT-API-01', 'VAPT-API-02', 'VAPT-API-03'],
   'new-dependency': null,
   'infra-or-ci-config': null,
-  'possible-route': null, // format 3 only (R2): never mechanical, a classification (a reason suffices) closes it
 };
 
 function normFiles(files) {
@@ -883,8 +901,6 @@ function fileKinds(f, c5, exempted) {
       const rule = kind === 'auth-or-middleware-change' && test && !ROUTER_ROOT.test(p) && !MIDDLEWARE_ROOT.test(p) ? 'test-file'
         : kind === 'new-route' && test && !ROUTER_ROOT.test(p) ? 'test-file' : null;
       if (rule) { exempted?.push({ path: f.path, kind, rule }); continue; }
-      // R2: a workspace api/ folder alone is no route directory, but the file is never silent: an open possible-route signal.
-      if (kind === 'new-route' && !byLine && !byLineV3 && !ROUTE_DIR.test(p.replace(WORKSPACE_API, '$1$2/')) && !ROUTE_FILE.test(b)) { kinds.push('possible-route'); continue; }
     }
     kinds.push(kind);
   }
@@ -1063,7 +1079,8 @@ export function reassess(input = {}) {
     const outside = uniqSorted([...files.map((f) => f.path), ...surfaces.map((s) => s.path)].filter((p) => !contract.some((re) => re.test(p))));
     for (const p of outside) { basis.push({ kind: 'out-of-plan-path', path: p }); signals.push({ id: `out-of-plan-path@${p}`, kind: 'out-of-plan-path', path: p, class: null }); }
     signals.sort((a, b) => (a.id < b.id ? -1 : 1));
-    if (block.policy === 3) { const ex = exemptionRefusal(c5_exempted); if (ex) refuse(ex.code, ...ex.reasons); }
+    // R3: every exemption record is consumed (c5_extra_exempted: an in-process test seam only; the engine and the CLI never set it).
+    if (block.policy === 3) { const ex = exemptionRefusal([...c5_exempted, ...(input.c5_extra_exempted ?? [])]); if (ex) refuse(ex.code, ...ex.reasons); }
     if (block.policy === 3 && !basis.length) {
       // C5 inventory completeness: a signalling non-test path the plan writes must be a listed surface (typed, before classification).
       const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path), exempted: [] });

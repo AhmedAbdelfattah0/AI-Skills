@@ -1952,6 +1952,85 @@
     "new-route@apps/api/src/routes/orders.spec.ts"
    ],
    "delta_pairs": null
+  },
+  {
+   "path": "src/lib/util.test.ts",
+   "ok": false,
+   "code": "classification_missing",
+   "outcome": null,
+   "signals": [
+    {
+     "id": "new-route@src/lib/util.test.ts",
+     "kind": "new-route",
+     "path": "src/lib/util.test.ts",
+     "class": null
+    }
+   ],
+   "unclassified": [
+    "new-route@src/lib/util.test.ts"
+   ],
+   "delta_pairs": null
+  },
+  {
+   "path": "src/lib/auth.spec.ts",
+   "ok": false,
+   "code": "classification_missing",
+   "outcome": null,
+   "signals": [
+    {
+     "id": "auth-or-middleware-change@src/lib/auth.spec.ts",
+     "kind": "auth-or-middleware-change",
+     "path": "src/lib/auth.spec.ts",
+     "class": null
+    }
+   ],
+   "unclassified": [
+    "auth-or-middleware-change@src/lib/auth.spec.ts"
+   ],
+   "delta_pairs": null
+  },
+  {
+   "path": "tests/test_routes.py",
+   "ok": false,
+   "code": "classification_missing",
+   "outcome": null,
+   "signals": [
+    {
+     "id": "new-route@tests/test_routes.py",
+     "kind": "new-route",
+     "path": "tests/test_routes.py",
+     "class": null
+    }
+   ],
+   "unclassified": [
+    "new-route@tests/test_routes.py"
+   ],
+   "delta_pairs": null
+  },
+  {
+   "path": "src/__tests__/session.ts",
+   "ok": false,
+   "code": "classification_missing",
+   "outcome": null,
+   "signals": [
+    {
+     "id": "auth-or-middleware-change@src/__tests__/session.ts",
+     "kind": "auth-or-middleware-change",
+     "path": "src/__tests__/session.ts",
+     "class": null
+    },
+    {
+     "id": "new-route@src/__tests__/session.ts",
+     "kind": "new-route",
+     "path": "src/__tests__/session.ts",
+     "class": null
+    }
+   ],
+   "unclassified": [
+    "auth-or-middleware-change@src/__tests__/session.ts",
+    "new-route@src/__tests__/session.ts"
+   ],
+   "delta_pairs": null
   }
  ]
 }

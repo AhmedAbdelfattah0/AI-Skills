@@ -28,6 +28,11 @@ export const REASSESS_FILES = [
   { path: 'apps/api/src/services/shipment.service.ts', added: [] },
   { path: 'apps/api/src/index.ts', added: [] },
   { path: 'apps/api/src/routes/orders.spec.ts', added: [] },
+  // files a FORMAT-3 run exempts (test-named, outside every router/middleware root): a format-2 run must still signal them
+  { path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] },
+  { path: 'src/lib/auth.spec.ts', added: [] },
+  { path: 'tests/test_routes.py', added: ["router.post('/x', h)"] },
+  { path: 'src/__tests__/session.ts', added: ["export async function GET() {}"] },
 ];
 
 export async function captureLegacy(securityPlanPath) {

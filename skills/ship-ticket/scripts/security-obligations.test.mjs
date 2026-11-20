@@ -27,7 +27,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -261,12 +261,15 @@ test('[S47] [S48] C5: real route and handler files (repo fixtures and framework 
   assert.equal(routeSignal('apps/api/src/index.ts', ["app.get('/health', h)"]), true);
 });
 
-test('[S47] [S48] C5 (format 3): test files outside every router root raise no new-route (exemption recorded); workspace apps/api/ modules raise an open possible-route instead', () => {
+test('[S47] [S48] C5 (format 3): test files outside every router root raise no new-route (exemption recorded); workspace apps/api/ modules are never narrowed', () => {
   for (const p of ['apps/api/src/services/shipment.service.ts', 'apps/api/src/index.ts', 'packages/api/src/config.ts', 'services/api/src/db.ts', 'libs/api/src/client.ts']) {
     const ex = [];
-    assert.deepEqual(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).map((s) => s.kind), ['possible-route'], p);
+    assert.deepEqual(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).map((s) => s.kind), ['new-route'], `${p}: format 3 keeps format 2's signal`);
     assert.deepEqual(ex, [], p);
+    assert.deepEqual(SP.inventoryGaps({ files: [p] }), [{ path: p, kinds: ['new-route'] }], `${p}: a plan-time inventory gap too`);
   }
+  // only a dot-separated test name is a test file: a production file named ab-test with a route line still signals
+  assert.equal(routeSignal('src/lib/ab-test.ts', ["app.get('/x', h)"]), true);
   for (const p of ['src/__tests__/lib/x.ts', 'test/e2e/app.e2e-spec.ts', 'spec/requests/orders_spec.rb', 'tests/test_routes.py', 'src/lib/util.test.ts']) {
     const ex = [];
     assert.deepEqual(SP.reassessSignals({ paths: [{ path: p, added: ['router.post("/x")'] }], c5: true, exempted: ex }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)), [], p);
@@ -539,10 +542,9 @@ test('[S61] B1(b) format 3: a test-named file under a router root still raises n
 });
 
 test('[S65] B1(c)(d) format 3: every C5 exemption that applies is listed (path, signal, rule); fastify and tRPC routes in a workspace api/ still signal', () => {
-  const ok3 = ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, { path: 'apps/api/src/services/x.ts', added: [] }],
-    classifications: [{ signal_id: 'possible-route@apps/api/src/services/x.ts', reason: 'a service module, no handler' }] })));
+  const ok3 = ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }] })));
   const ex = ok3.c5_exempted.map((e) => `${e.path}|${e.kind}|${e.rule}`).sort();
-  assert.deepEqual(ex, ['src/lib/util.test.ts|new-route|test-file']); // R2: middleware/ is never exempt; a workspace module is a signal
+  assert.deepEqual(ex, ['src/lib/util.test.ts|new-route|test-file']); // middleware/ is never exempt; a workspace module keeps its signal
   for (const [path, line] of [['apps/api/src/plugins/users.ts', "fastify.get('/users', async () => db.all())"], ['apps/api/src/trpc/router.ts', 'deleteUser: protectedProcedure.mutation(() => 1),']]) {
     refused(r3([{ path, added: [line] }]), 'surface_inventory_incomplete');
   }
@@ -660,13 +662,12 @@ const WORKSPACE_FORMS = [
   ['apps/api/src/users/users.resolver.ts', ['@Mutation(() => User)']],
 ];
 
-test('[S69] R2.1 format 3: a workspace api/ module is never silent: it raises an open possible-route signal a reason closes (no surface needed); format 2 is unchanged', () => {
+test('[S69] R3 format 3: a workspace api/ module raises new-route exactly as format 2 does, at reassess AND at plan time (no workspace narrowing anywhere)', () => {
   for (const [path, added] of WORKSPACE_FORMS) {
-    const r = refused(r3([{ path, added }]), 'classification_missing');
-    assert.deepEqual(r.unclassified, [`possible-route@${path}`], path);
-    const closed = ok(SP.reassess(OB.reIn3(GC, { files: [{ path, added }], contract: ['**'], classifications: [{ signal_id: `possible-route@${path}`, reason: 'an internal module, no handler is registered here' }] })));
-    assert.deepEqual(closed.classifications_used, [`possible-route@${path}`], path);
-    assert.ok(!closed.c5_exempted.some((e) => e.path === path), `${path} is a signal, not an exemption`);
+    const r = refused(r3([{ path, added }]), 'surface_inventory_incomplete');
+    assert.ok(r.reasons.some((x) => x.includes(path) && x.includes('new-route')), path);
+    // plan time (init, preflight: DAG writes, path only): an inventory gap like any route file
+    assert.deepEqual(SP.inventoryGaps({ files: [path], surfacePaths: [] }), [{ path, kinds: ['new-route'] }], path);
     // format 2 (legacy): unchanged, the path-only new-route signal opens as on origin/main
     const approved = SP.selectControls(GC, { security_policy: 2, surfaces: [OB.surf('H', 'request-handler', 'src/h.ts')], facts: OB.TRUE3, evidence: OB.cite3(OB.TRUE3) });
     const legacy = SP.reassess({ plan: OB.planOf(approved), catalog: GC, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files: [{ path, added }] }, classifications: [] });
@@ -699,7 +700,7 @@ test('[S71] R2.1 every recorded exemption is consumed: an exemption record for a
 
 test('[S70] R2.4 citations: .git paths, docs-only files, symbols shorter than 3 and a case-variant path are refused', () => {
   for (const c of ['.git/HEAD:ref', 'sub/.git/config', 'README.md', 'docs/README.md:install', 'CLAUDE.md:rules', 'AGENTS.md', 'src/a.ts:fn', 'src/a.ts:e']) assert.notEqual(SP.citationProblem(c), null, c);
-  for (const c of ['src/a.ts:saveOrder', 'docs/api.md:auth', 'src/a.ts']) assert.equal(SP.citationProblem(c), null, c);
+  for (const c of ['src/a.ts:saveOrder', 'docs/schema.sql:orders', 'src/a.ts']) assert.equal(SP.citationProblem(c), null, c);
   const root = dirname(OB.writeCatalog({}));
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, 'src', 'A.ts'), 'export const persistent_writeFree = 1;\n');
@@ -800,4 +801,117 @@ test('[S67] R2 end to end: ship-ready re-verifies citations on the candidate (a 
   writeFileSync(join(fx.repo, '.git', 'info', 'exclude'), 'src/orders.ts\n');
   okc(fx.gate('reassess', {}), 'reassess on the changed candidate');
   assert.equal(fx.gate('ship-ready', {}).out?.code, 'citation_missing');
+});
+
+// ====================================================================================================================
+// Repair R3 (strategy change, review of 55784b9): format 3 closes signals EXACTLY as format 2 does. The only permitted
+// format-2 vs format-3 difference is the recorded test-file exemption set (plus format 3's additive route lines, which
+// only ever ADD signals). Property-tested over a random corpus; red on 55784b9.
+// ====================================================================================================================
+function prng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; }; }
+const DIRS = ['apps/api/src', 'packages/api/src', 'apps/api/src/trpc', 'apps/web/app/routes', 'src', 'src/lib', 'src/routes', 'src/services', 'server/middleware',
+  'server/middleware/__mocks__', 'middleware', 'plugins', 'src/__tests__', 'db/migrations', 'supabase/migrations', 'pages/api', 'internal/auth', 'lib/auth', 'tests', 'app/api/orders'];
+const BASES = ['index.ts', 'users.ts', 'user.ts', 'auth.ts', 'session.ts', 'router.ts', 'x.test.ts', 'x.spec.ts', 'auth.spec.ts', 'auth.test.ts', 'session_spec.go', 'x_test.go',
+  '0001_rls.sql', '0002_rls.test.sql', 'route.ts', '+server.ts', 'mailer.ts', 'handler.ts', 'users.resolver.ts', 'service.ts'];
+const LINES = [[], ["app.get('/x', h)"], ["usersRouter.post('/', h)"], ["fastify.get('/users', h)"], ['deleteUser: protectedProcedure', '  .mutation(({ input }) => 1),'],
+  ['@Mutation(() => User)'], ['create policy p on t using (true);'], ['await sendMail(x)'], ['const k = process.env.KEY'], ['export async function GET() {}'], ['const a = 1;']];
+const legacyPlan = () => OB.planOf(ok(SP.selectControls(GC, { security_policy: 2, surfaces: [OB.surf('A', 'request-handler', 'src/a.ts'), KEEP], facts: OB.TRUE3, evidence: OB.cite3(OB.TRUE3) })));
+const reasonAll = (sigs) => sigs.filter((s) => s.class === null).map((s) => ({ signal_id: s.id, reason: 'reason-only dismissal (property probe)' }));
+/** reassess with a reason-only classification of every signal it raises (the strongest reason-only attempt). */
+function reasonOnly(plan, files) {
+  const base = { plan, catalog: GC, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files } };
+  const first = SP.reassess({ ...base, classifications: [] });
+  const sigs = first.signals ?? [];
+  return { first, final: SP.reassess({ ...base, classifications: reasonAll(sigs) }) };
+}
+const kindsOf = (sigs) => new Set((sigs ?? []).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)).map((s) => `${s.path}|${s.kind}`));
+
+test('[S79] R3 property (reassess AND plan-time inventory, >= 4000 random inputs): format 3 never closes or omits what format 2 requires a surface for; the only difference is the recorded test-file exemptions', () => {
+  const rnd = prng(20261120), pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const p2 = legacyPlan(), p3 = OB.planOf(OB.approved3(GC));
+  let checked = 0, exemptedSeen = 0, refusedBoth = 0;
+  const fixed = [...WORKSPACE_FORMS.map(([path, added]) => [{ path, added }]),
+    [{ path: 'server/middleware/__mocks__/session.ts', added: [] }], [{ path: 'server/middleware/auth.test.ts', added: [] }], [{ path: 'server/middleware/__tests__/00.bypass.ts', added: [] }],
+    [{ path: 'db/migrations/0002_rls.test.sql', added: ['create policy p on t using (true);'] }], [{ path: 'supabase/migrations/20261120_orders_rls.spec.sql', added: [] }],
+    [{ path: 'apps/api/src/services/shipment.service.ts', added: [] }], [{ path: 'apps/api/src/index.ts', added: [] }]];
+  const random = Array.from({ length: 4200 }, () => Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => ({ path: `${pick(DIRS)}/${pick(BASES)}`, added: pick(LINES) })));
+  for (const files of [...fixed, ...random]) {
+    const uniq = [...new Map(files.map((f) => [f.path, f])).values()];
+    const s2 = SP.reassessSignals({ paths: uniq });
+    const ex = [];
+    const s3 = SP.reassessSignals({ paths: uniq, c5: true, exempted: ex });
+    const k2 = kindsOf(s2), k3 = kindsOf(s3), exSet = new Set(ex.map((e) => `${e.path}|${e.kind}`));
+    // (1) format 3 loses exactly the recorded exemptions of signals format 2 raised (an exemption of a signal only the
+    // additive format-3 route lines raise loses nothing format 2 had), each of a test-named file
+    assert.deepEqual([...k2].filter((k) => !k3.has(k)).sort(), [...exSet].filter((k) => k2.has(k)).sort(), J(uniq));
+    for (const k of [...exSet].filter((x) => !k2.has(x))) assert.ok(k.endsWith('|new-route'), `${k} ${J(uniq)}`);
+    assert.equal(SP.exemptionRefusal(ex), null, J(ex));
+    // (2) anything format 3 adds is a new-route (an additive route line), never a weaker signal
+    for (const k of [...k3].filter((x) => !k2.has(x))) assert.ok(k.endsWith('|new-route'), `${k} ${J(uniq)}`);
+    assert.ok(s3.every((s) => !['possible-route'].includes(s.kind)), 'no reason-closable route signal exists');
+    // (2b) plan-time inventory (init, preflight): with lines, and path-only as DAG writes are; the format-3 gaps differ from the
+    // format-2 detector's surface signals only by the recorded exemptions (and additive route lines)
+    for (const fs of [uniq, uniq.map((f) => f.path)]) {
+      const exI = [];
+      const g3 = new Set(SP.inventoryGaps({ files: fs, surfacePaths: [], exempted: exI }).flatMap((g) => g.kinds.map((k) => `${g.path}|${k}`)));
+      const g2 = kindsOf(SP.reassessSignals({ paths: fs }));
+      const exI2 = new Set(exI.map((e) => `${e.path}|${e.kind}`));
+      assert.deepEqual([...g2].filter((k) => !g3.has(k)).sort(), [...exI2].filter((k) => g2.has(k)).sort(), `inventory ${J(fs)}`);
+      for (const k of [...g3].filter((x) => !g2.has(x))) assert.ok(k.endsWith('|new-route'), `inventory ${k}`);
+    }
+    // (3) end to end: if format 2 cannot reach `reassessed` with reason-only classifications because of a surface signal on a
+    // path format 3 did not exempt, format 3 cannot either
+    const r2 = reasonOnly(p2, uniq).final, r3 = reasonOnly(p3, uniq).final;
+    const surfaceOnly = (r2.unclassified ?? []).map((id) => { const s = s2.find((x) => x.id === id); return `${s.path}|${s.kind}`; }).filter((k) => !exSet.has(k));
+    if (surfaceOnly.length) { assert.equal(r3.ok, false, `format 3 reached ${r3.code} with reason-only classifications: ${J(uniq)}`); refusedBoth++; }
+    checked++; exemptedSeen += ex.length;
+  }
+  assert.ok(checked >= 4000 && exemptedSeen > 100 && refusedBoth > 1000, J({ checked, exemptedSeen, refusedBoth }));
+});
+
+test('[S79] R3 fixed examples: the six workspace route forms and server/middleware test files are never closed by a reason in format 3', () => {
+  const p3 = OB.planOf(OB.approved3(GC));
+  for (const files of [...WORKSPACE_FORMS.map(([path, added]) => [{ path, added }]), [{ path: 'server/middleware/__mocks__/session.ts', added: [] }]]) {
+    const { first, final } = reasonOnly(p3, files);
+    assert.equal(final.ok, false, `${files[0].path}: ${final.code}`);
+    assert.ok(['surface_inventory_incomplete', 'classification_missing'].includes(first.code), first.code);
+    if (files[0].path.startsWith('server/')) continue; // auth signals are not mechanical in this test catalog (no ABUSE-08)
+    // a surface at the path closes it the way format 2 does: ADD_CONTROLS, then an owner addendum
+    const listed = ok(SP.reassess({ plan: p3, catalog: GC, inventory: { surfaces: [OB.surf('N', 'request-handler', files[0].path)] }, changed: { contract_paths: ['**'], files }, classifications: [] }));
+    assert.equal(listed.outcome, 'ADD_CONTROLS', files[0].path);
+  }
+});
+
+test('[S80] R3 a recorded exemption naming a non-test file is refused at the reassess call site', () => {
+  ok(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }) }));
+  refused(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }), c5_extra_exempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] }), 'surface_inventory_incomplete');
+  ok(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }), c5_extra_exempted: [{ path: 'src/lib/x.test.ts', kind: 'new-route', rule: 'test-file' }] }));
+});
+
+test('[S81] R3 a recorded exemption naming a non-test file is refused at the init/preflight call site (bindObligations)', { skip: WIN_SKIP }, async (t) => {
+  const fx = obFx(t);
+  assert.equal((await preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile, c5ExtraExempted: [{ path: 'src/lib/x.test.ts', kind: 'new-route', rule: 'test-file' }] })).code, 'preflight_ok');
+  await assert.rejects(() => preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile, c5ExtraExempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] }),
+    (e) => e.code === 'surface_inventory_incomplete');
+  const { init: initCmd } = await import('./run-engine.mjs');
+  await assert.rejects(() => initCmd(fx.ctx({ c5ExtraExempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] })), (e) => e.code === 'surface_inventory_incomplete');
+  assert.equal(existsSync(fx.stateFile()), false);
+});
+
+test('[S84] [S85] [S86] R3 citations: the :symbol matches a whole identifier; a symlink leaving the repo, docs/** markdown and an unanswerable git check-ignore are refused', () => {
+  const root = dirname(OB.writeCatalog({}));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))); // cites src/a.ts:persistent_writeFree
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFreeAndMore = 1;\n');
+  refused(SP.verifyCitations(block, { root }), 'citation_missing'); // a longer identifier is not the symbol
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  ok(SP.verifyCitations(block, { root }));
+  refused(SP.verifyCitations(block, { root, gitBin: join(root, 'no-such-git') }), 'citation_missing'); // check-ignore cannot answer: fail closed
+  const outside = dirname(OB.writeCatalog({}));
+  writeFileSync(join(outside, 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  rmSync(join(root, 'src', 'a.ts'));
+  symlinkSync(join(outside, 'a.ts'), join(root, 'src', 'a.ts'));
+  refused(SP.verifyCitations(block, { root }), 'citation_missing'); // resolves outside the repository
+  for (const c of ['docs/api.md:auth', 'docs/guide/security.mdx:session', 'packages/x/docs/notes.md:auth']) assert.notEqual(SP.citationProblem(c), null, c);
+  assert.equal(SP.citationProblem('docs/schema.sql:orders'), null);
 });

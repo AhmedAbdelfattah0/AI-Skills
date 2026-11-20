@@ -58,10 +58,12 @@ surface**, under five rules, each refused when broken:
   a file, no placeholder such as `TBD` or `n/a` (`fact_uncited`). Brackets,
   parentheses and `$` are allowed in the path (`app/api/orders/[id]/route.ts:GET`).
   A citation is never a docs-only file (`README.md`, `CLAUDE.md`, `AGENTS.md`,
-  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`), a path inside `.git/` or
-  `node_modules/`, or a `:symbol` shorter than 3 characters (`fact_uncited`).
-  The cited file must **exist** with exactly that case on every OS, must not be
-  gitignored, and, with a `:symbol`, must contain that text (`citation_missing`):
+  `CHANGELOG.md`, `CONTRIBUTING.md`, `LICENSE`, or any markdown under a `docs/`
+  folder), a path inside `.git/` or `node_modules/`, or a `:symbol` shorter than 3
+  characters (`fact_uncited`). The cited file must **exist** with exactly that case
+  on every OS, must resolve inside the repository (no symlink out), must not be
+  gitignored, and, with a `:symbol`, must contain it as a whole identifier
+  (`exp` does not match `export`) (`citation_missing`):
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
   - at `gate review`, both original and confirmation, in the candidate work tree,
@@ -70,7 +72,9 @@ surface**, under five rules, each refused when broken:
     A repair that removes the cited file or symbol never ships;
   - in the `obligations` CLI, in the `--repo` working tree.
 
-  An unreadable tree fails closed. Outside a git repository no ignore rule applies.
+  An unreadable tree fails closed. So does a `git check-ignore` that cannot answer:
+  no git, a timeout, or an error inside a work tree. Outside a git repository no
+  ignore rule applies.
   The check proves that the cited text exists, not that it supports the claim: that
   judgment is the review row (section 9).
 - never on every surface (`surface_fact_reinflates`), and never so that a control
@@ -263,30 +267,51 @@ the original detector byte for byte. This is pinned by
 `scripts/security-plan-legacy.golden.json`, captured from be63aea under the catalog
 digest the file records.
 
-A format-3 run changes the detector in three ways, and none of them silences a
-production file:
+**The final C5 rule (after R3).** A format-3 **reassess** uses the format-2 detector,
+the same signal kinds and the same closure rule. A `new-route`,
+`auth-or-middleware-change` or `migration-or-rls-change` signal on a path that is not
+an approved surface closes only through a surface at that path, which leads to
+`ADD_CONTROLS` and then an owner `SECURITY_ADDENDUM`. A reason never closes it, in
+either format. There are exactly two differences, and neither silences a production
+file:
 
-- **`test-file` exemption, `new-route`.** A test-named file raises no `new-route`,
-  unless it sits under a **router root**.
-- **`test-file` exemption, `auth-or-middleware-change`.** A test-named file raises
-  no auth signal, unless it sits under a router root or a **middleware root**. A
-  test-named file under `server/middleware/`, `middleware/`, `middlewares/` or
-  `plugins/` still signals. Nitro loads every file in `middleware/`, and
-  @fastify/autoload loads every file in `plugins/`.
-- **Workspace `api/` folder: an open `possible-route` signal, not an exemption.**
-  A file whose only route evidence is a workspace project folder named `api`
-  (`apps|packages|services|libs|modules|projects/api/`) raises `possible-route`
-  instead of `new-route`.
-  - It always needs a classification.
-  - A reason alone may close it, and the classification is recorded in
-    `classifications_used`.
-  - It needs no inventory surface.
+- **Additive route lines.** Format 3 also raises `new-route` on fastify, hono and
+  elysia verbs and on one-line tRPC procedures. This only adds signals; nothing
+  relies on it.
+- **The one narrowing, rule `test-file`.**
+  - A test-named file raises no `new-route` unless it sits under a **router root**.
+  - A test-named file raises no `auth-or-middleware-change` unless it sits under a
+    router root or a **middleware root** (`middleware/`, `middlewares/`,
+    `plugins/`, `server/middleware/`). Nitro loads every file in `middleware/`, and
+    @fastify/autoload loads every file in `plugins/`.
+  - `migration-or-rls-change` is never narrowed.
 
-  This is how multi-line tRPC procedures, `usersRouter.post(...)`, Hono and Elysia
-  sub-apps, a renamed fastify instance and GraphQL resolvers stay visible without a
-  longer pattern list. A real route line in such a file still raises `new-route`.
-  That covers the original patterns, plus fastify, hono and elysia verbs and tRPC
-  procedures on one line.
+A property test pins this. Over a random corpus of changed files and lines, plus fixed
+examples, format 3 loses exactly the recorded test-file exemptions of signals
+format 2 raised, and nothing else, at reassess and in the plan-time inventory. Anything format 2 leaves closable only by a surface
+cannot reach `reassessed` in format 3 through reason-only classifications. The fixed
+examples are:
+
+- multi-line tRPC, `usersRouter.post`, a Hono sub-app, `new Elysia().post`, a renamed
+  fastify instance and a GraphQL `@Mutation`, all under `apps/api/`;
+- `server/middleware/` test and mock files;
+- test-named migrations;
+- workspace production files (`apps/api/src/services/...`, `apps/api/src/index.ts`).
+
+**No other narrowing, anywhere.** The same detector serves reassess and the plan-time
+inventory check at `init` and `preflight`. No workspace folder (`apps/api/`,
+`packages/api/` and the like) and no other path is narrowed at either point. The
+invariant is property-tested against format 2, over at least 4000 random inputs for
+reassess and for the plan-time inventory: a format-3 reassess or inventory check
+never closes or omits a signal format 2 would require a surface for, except the
+recorded test-file exemption set. A mutant that re-adds any narrowing or reason-only
+closure (the earlier workspace rule, at reassess or at plan time) is killed by it.
+
+**Accepted friction.** A production file under `apps/api/` that raises `new-route`
+needs a surface, at plan time and at reassess, as on format 2. That is correct: a
+service that holds credentials is a boundary, and an `index.ts` that registers routes
+is a route surface. The S2 catalog entries and per-surface facts reduce the pair cost
+of such surfaces generically.
 
 Every exemption that applies is **recorded** as `c5_exempted` (`path`, `kind`,
 `rule`). The record appears in:
@@ -332,13 +357,26 @@ Windows `core.autocrlf` checkout had CRLF bytes and a different digest. A plan
 approved from such a checkout records the old digest, so the pinned catalog refuses
 it (`catalog_unavailable`). Re-select and re-approve it.
 
+**Windows coverage.** The engine end-to-end tests in `security-obligations.test.mjs`
+(init, preflight, review, confirmation and ship-ready through the real engine) skip
+on Windows. POSIX process groups are needed for quiescence (known limit N7). On
+Windows, CI runs every pure test of the file:
+
+- selection, block format 3, replay and digests;
+- the C5 detector and its property test;
+- the legacy golden;
+- the obligation matrix;
+- citation checks;
+- row and dispute rules.
+
+The end-to-end paths are covered by the ubuntu and macOS harness legs.
+
 **Follow-ups (not done in S1).**
 
 - The legacy golden embeds the catalog digest. A legitimate catalog change fails
   `[S59]`, whose message explains how to regenerate from be63aea's
   `security-plan.mjs` under the new catalog (see the capture helper).
 - A second-opinion dispute counts only with a `subject_id`.
-- Some route shapes are left to `possible-route` rather than to a precise pattern.
 - `isTestPath` is exported but unused outside tests.
 
 **What reopening does not cover (residuals, documented).**
