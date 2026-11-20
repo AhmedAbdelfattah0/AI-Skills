@@ -1727,6 +1727,44 @@
    "controls": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
    "excluded": "sha256:7dbc7ff330958b5ae7351e2ea1bc2528381c042ae1b96476d353dc4df203ba13",
    "parsed": "sha256:af5edee00d4186e8c1e09a69730c20b5c4913d37a1093951cd75c04b5b2b321a"
+  },
+  {
+   "selection_digest": "sha256:4d570023227325e815661265de74dfdd63242f243925986572290d1535a88a21",
+   "facts_digest": "sha256:60b189a6a5010852844ca4a40c94becbc2bcce87c6d3f0efd5308eaec58d4ff5",
+   "pairs": [
+    "dot2:VAPT-API-01",
+    "dot2:VAPT-API-02",
+    "dot2:VAPT-API-03",
+    "dot2:VAPT-API-05",
+    "dot2:VAPT-API-06",
+    "dot2:VAPT-API-07",
+    "dot2:VAPT-API-08",
+    "dot2:VAPT-CFG-03",
+    "dot2:VAPT-WEB-01",
+    "dot2:VAPT-WEB-02",
+    "dot2:VAPT-WEB-03",
+    "dot2:VAPT-WEB-05",
+    "dot:VAPT-API-01",
+    "dot:VAPT-API-02",
+    "dot:VAPT-API-03",
+    "dot:VAPT-API-05",
+    "dot:VAPT-API-06",
+    "dot:VAPT-API-07",
+    "dot:VAPT-API-08",
+    "dot:VAPT-CFG-01",
+    "dot:VAPT-CFG-02",
+    "dot:VAPT-CFG-03",
+    "dot:VAPT-WEB-01",
+    "dot:VAPT-WEB-02",
+    "dot:VAPT-WEB-03",
+    "dot:VAPT-WEB-05"
+   ],
+   "unknown_facts": [],
+   "pairsLine": "security-pairs sha256:6fa15f79468a97d51fecec7eb4228fbe7fa458ed92fbb4cbcd6fb969796b019e",
+   "rows_md": "sha256:91f9321228e3e214855443ff57e7fc22fe6f6dd4bf6b4c835f1a1170fefa043b",
+   "controls": "sha256:ff2daeca5d220dbc9d0e5d363b36eac8a3adb961ed166586bf582eb4c39e4ed5",
+   "excluded": "sha256:ffe960fcb12f4e8e1b92b174bbd5ef1408492825cdb42d735ea94938b534ecdc",
+   "parsed": "sha256:093994652dfb8457b914665ecb03f318fb4a03cb509940e5387b990e0e3bddf5"
   }
  ],
  "reassess": [
@@ -2031,6 +2069,42 @@
     "new-route@src/__tests__/session.ts"
    ],
    "delta_pairs": null
+  },
+  {
+   "path": "src/../a.ts",
+   "ok": true,
+   "code": "reassessed",
+   "outcome": "UNCHANGED",
+   "signals": [],
+   "unclassified": null,
+   "delta_pairs": []
+  },
+  {
+   "path": "src/./routes/x.ts",
+   "ok": false,
+   "code": "classification_missing",
+   "outcome": null,
+   "signals": [
+    {
+     "id": "new-route@src/./routes/x.ts",
+     "kind": "new-route",
+     "path": "src/./routes/x.ts",
+     "class": null
+    }
+   ],
+   "unclassified": [
+    "new-route@src/./routes/x.ts"
+   ],
+   "delta_pairs": null
+  },
+  {
+   "path": "../a.ts",
+   "ok": true,
+   "code": "reassessed",
+   "outcome": "UNCHANGED",
+   "signals": [],
+   "unclassified": null,
+   "delta_pairs": []
   }
  ]
 }

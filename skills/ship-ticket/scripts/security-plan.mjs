@@ -12,7 +12,7 @@
 // The catalog is skills/vapt/controls.json and its evaluator skills/vapt/controls.mjs (one definition of the
 // selection semantics). A standalone install without vapt refuses catalog_missing: never an empty selection.
 // Keyword matches on a diff only create signals; they never select a control. Imports no engine module.
-import { readFileSync, realpathSync, statSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync, readdirSync, lstatSync } from 'node:fs';
 import { join, sep, relative, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -52,10 +52,16 @@ const normPath = (p) => String(p).replace(/^(\.\/)+/, '');
  */
 function inputPath(p, what) {
   if (String(p).includes('\\')) refuse('bad_input', `${what} ${JSON.stringify(p)} contains a backslash; use forward slashes`);
-  const n = normPath(p);
-  // R4: a '.' or '..' segment would let a path borrow another's name (src/__tests__/../auth/session.ts); git never reports one.
-  if (n.split('/').some((x) => x === '.' || x === '..')) refuse('bad_input', `${what} ${JSON.stringify(p)} has a '.' or '..' segment; give the normalized path`);
-  return n;
+  return normPath(p);
+}
+/**
+ * Block format 3 only (R4 N1, scoped by R5 L2 so format 2 stays byte-identical to be63aea): a surface or changed path
+ * with a '.' or '..' segment is refused, so it cannot borrow another path's name (src/__tests__/../auth/session.ts) for
+ * the test-file exemption. Git never reports such a path.
+ */
+function dotSegmentRefusal(paths, what) {
+  const bad = paths.filter((p) => normPath(p).split('/').some((x) => x === '.' || x === '..'));
+  if (bad.length) refuse('bad_input', ...bad.map((p) => `${what} ${JSON.stringify(p)} has a '.' or '..' segment; give the normalized path`));
 }
 /** Canonical JSON: object keys sorted recursively, no whitespace, undefined dropped. */
 export function canon(v) {
@@ -349,6 +355,7 @@ export function selectControls(catalogArg, input) {
     }
     checkCitations(ev, input.facts, input.evidence, vocab, Object.keys(vocab).filter((k) => !DERIVED.includes(k)));
     const facts = normFacts(ev, { ...input.facts, ...(vocab.principals ? derived : { boundaries: derived.boundaries }) }, vocab);
+    if (surfaces.some((s) => s.facts)) dotSegmentRefusal(surfaces.map((s) => s.path), 'surface path');
     const lower = surfaces.some((s) => s.facts) ? lowerings(r, facts, surfaces) : null;
     return buildSelection(r, catalog, digest, facts, surfaces, lower);
   });
@@ -436,19 +443,23 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
  * repository such as a wrong GIT_DIR or a "dubious ownership" refusal, any other error): the caller fails closed on it.
  */
 function ignoredState(gitBin, root, path) {
-  const r = spawnSync(gitBin, ['check-ignore', '-q', '--', path], { cwd: root, stdio: 'ignore', timeout: 15000 });
+  // R5 L1: inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE, ...) would point git at another repository: drop them all.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+  const r = spawnSync(gitBin, ['check-ignore', '-q', '--', path], { cwd: root, env, stdio: 'ignore', timeout: 15000 });
   if (r.status === 0) return 'ignored';
   if (r.status === 1) return 'not-ignored';
   if (r.status === 128 && !insideRepository(root)) return 'not-ignored';
   return 'unknown';
 }
 
-/** Whether a `.git` entry (directory, or a worktree's `.git` file) exists at `root` or any directory above it. */
+/** Whether a filesystem entry exists at `p` without following a symlink (a dangling link is an entry). */
+const hasEntry = (p) => { try { lstatSync(p); return true; } catch { return false; } };
+/** Whether a `.git` entry (directory, a worktree's `.git` file, or a symlink, even dangling) exists at `root` or any directory above it. */
 function insideRepository(root) {
   let dir;
   try { dir = realpathSync(root); } catch { return true; } // unreadable: assume a repository, so the caller fails closed
   for (;;) {
-    if (existsSync(join(dir, '.git'))) return true;
+    if (hasEntry(join(dir, '.git'))) return true; // R5 I1: lstat, so a dangling .git symlink still marks a repository
     const up = dirname(dir);
     if (up === dir) return false;
     dir = up;
@@ -881,7 +892,7 @@ export const SURFACE_SIGNALS = ['new-route', 'auth-or-middleware-change', 'migra
  * else null (open: `reassess` decides whether a classification may close it).
  */
 export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfaces = [], catalog, inventorySurfaces = [], inventoryPairs = [], c5 = false, exempted = null } = {}) {
-  const files = asResult(() => normFiles(paths));
+  const files = asResult(() => { const fs = normFiles(paths); if (c5) dotSegmentRefusal(fs.map((f) => f.path), 'changed path'); return fs; });
   if (files.ok === false) throw new TypeError(files.reasons.join('; '));
   const ids = new Set((catalog?.controls ?? []).map((c) => c.id));
   const idOf = (p) => (typeof p === 'string' ? p : p?.pair_id);
@@ -1063,6 +1074,7 @@ export function reassess(input = {}) {
       refuse('bad_input', 'changed.contract_paths (the Design Contract paths) is required');
     }
     const files = normFiles(changed.files);
+    if (block.policy === 3) dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');
     const contract = changed.contract_paths.map(globRe);
     const addenda = input.addenda ?? [];
     let effective;

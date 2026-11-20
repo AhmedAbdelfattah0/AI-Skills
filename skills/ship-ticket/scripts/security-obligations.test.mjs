@@ -521,7 +521,7 @@ test('[S59] B1(a) legacy (format 2) select AND reassess are byte-identical to th
   assert.equal(LEGACY.select.length, got.select.length);
   assert.deepEqual(got.select, LEGACY.select);
   assert.deepEqual(got.reassess, LEGACY.reassess);
-  assert.ok(LEGACY.reassess.every((r) => r.code === 'classification_missing'), 'every probe file still opens a signal on a legacy run');
+  assert.ok(LEGACY.reassess.filter((r) => !r.path.split('/').some((x) => x === '.' || x === '..')).every((r) => r.code === 'classification_missing'), 'every probe file still opens a signal on a legacy run');
 });
 
 const r3 = (files) => SP.reassess(OB.reIn3(GC, { files, contract: ['**'] }));
@@ -929,14 +929,18 @@ const gitRepo = () => {
 };
 const withEnv = (k, v, fn) => { const old = process.env[k]; process.env[k] = v; try { return fn(); } finally { if (old === undefined) delete process.env[k]; else process.env[k] = old; } };
 
-test('[S87] R4 F1: inside a repository, a git that cannot answer (GIT_DIR=/nonexistent) fails closed; outside any repository no ignore rule applies', () => {
+test('[S87] R4 F1: inside a repository, a git that cannot answer (exit 128) fails closed; outside any repository no ignore rule applies', () => {
   const root = gitRepo();
   writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
   writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
   refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing'); // control: gitignored
-  refused(withEnv('GIT_DIR', '/nonexistent', () => SP.verifyCitations(CITE_BLOCK(), { root })), 'citation_missing'); // git broken inside a repo
+  // git exits 128 inside a repository (here a .git file naming a missing gitdir; in the field a dubious-ownership refusal):
+  // unanswerable, so refused even though nothing says the file is ignored. (An inherited GIT_DIR is stripped: [S92].)
   rmSync(join(root, '.gitignore'));
-  refused(withEnv('GIT_DIR', '/nonexistent', () => SP.verifyCitations(CITE_BLOCK(), { root })), 'citation_missing'); // even when not ignored: unanswerable
+  rmSync(join(root, '.git'), { recursive: true, force: true });
+  writeFileSync(join(root, '.git'), 'gitdir: /nonexistent/gitdir\n');
+  const broken = refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+  assert.ok(broken.reasons.some((x) => x.includes('cannot be checked against .gitignore')), J(broken.reasons));
   const plain = realpathSync(dirname(OB.writeCatalog({})));
   mkdirSync(join(plain, 'src'), { recursive: true });
   writeFileSync(join(plain, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
@@ -977,9 +981,34 @@ test('[S90] R4 N3: the symlink guard compares path-segment boundaries (a sibling
   assert.ok(out2.reasons.some((x) => x.includes('resolves outside the repository')), J(out2.reasons));
 });
 
-test('[S91] R4 N1: a changed or surface path with a "." or ".." segment is refused (bad_input), so it cannot borrow a test name', () => {
+test('[S91] [S94] R4 N1 / R5 L2: in format 3 a changed or surface path with a "." or ".." segment is refused (bad_input); format 2 keeps be63aea behaviour', () => {
   refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/__tests__/../auth/session.ts' }] })), 'bad_input');
   refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/./auth/session.ts' }] })), 'bad_input');
-  refused(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/x/../a.ts'), KEEP]), 'bad_input');
+  refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/a.ts' }], inventory: [OB.surf('N', 'request-handler', 'src/x/../n.ts')] })), 'bad_input');
+  refused(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/x/../a.ts', ['persistent_write']), KEEP]), 'bad_input');
+  assert.throws(() => SP.reassessSignals({ paths: ['src/../a.ts'], c5: true }), TypeError);
+  // format 2 (no surface fact, a legacy block): accepted verbatim, as be63aea did ([S59] pins the exact outputs)
+  ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/x/../a.ts'), KEEP]));
+  const legacy = SP.reassess({ plan: legacyPlan(), catalog: GC, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files: [{ path: 'src/../a.ts' }] }, classifications: [] });
+  assert.notEqual(legacy.code, 'bad_input');
+  assert.ok(SP.reassessSignals({ paths: ['src/./routes/x.ts'] }).some((x) => x.kind === 'new-route'));
   ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: './src/a.ts' }] }))); // a leading ./ is normalized, as before
+});
+
+test('[S92] R5 L1: the ignore check runs git with GIT_* stripped (an inherited GIT_DIR/GIT_WORK_TREE cannot answer for another repository)', () => {
+  const root = gitRepo(), other = gitRepo();
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
+  const out = withEnv('GIT_DIR', join(other, '.git'), () => withEnv('GIT_WORK_TREE', other, () => SP.verifyCitations(CITE_BLOCK(), { root })));
+  refused(out, 'citation_missing');
+  assert.ok(out.reasons.some((x) => x.includes('gitignored')), J(out.reasons));
+});
+
+test('[S93] R5 I1: a dangling .git symlink still marks a repository (lstat, not exists): an unanswerable ignore check fails closed', () => {
+  const root = realpathSync(dirname(OB.writeCatalog({})));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  symlinkSync(join(root, 'no-such-gitdir'), join(root, '.git'));
+  const out = refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+  assert.ok(out.reasons.some((x) => x.includes('cannot be checked against .gitignore')), J(out.reasons));
 });

@@ -33,6 +33,10 @@ export const REASSESS_FILES = [
   { path: 'src/lib/auth.spec.ts', added: [] },
   { path: 'tests/test_routes.py', added: ["router.post('/x', h)"] },
   { path: 'src/__tests__/session.ts', added: ["export async function GET() {}"] },
+  // '.' / '..' segments: be63aea takes them verbatim; F12a refuses them in format 3 only (format 2 stays byte-identical)
+  { path: 'src/../a.ts', added: [] },
+  { path: 'src/./routes/x.ts', added: [] },
+  { path: '../a.ts', added: [] },
 ];
 
 export async function captureLegacy(securityPlanPath) {
@@ -49,6 +53,7 @@ export async function captureLegacy(securityPlanPath) {
   inputs.push(mk(kinds.map((k, i) => ({ boundary_id: `b${i}:x`, kind: k, path: `apps/api/src/${k}/index.ts`, principals: ['anonymous', 'service'] })), Object.fromEntries(bools.map((b, i) => [b, i % 2 === 0]))));
   inputs.push(mk(kinds.slice(0, 5).map((k, i) => ({ boundary_id: `m${i}`, kind: k, path: `pkg/m${i}.ts`, principals: ['staff'] })), { ...all(false), persistent_write: true, session_context: true, state_transitions: true, sensitive_field_write: true }));
   inputs.push(mk([], all(false)));
+  inputs.push(mk([{ boundary_id: 'dot', kind: 'request-handler', path: 'src/../a.ts', principals: ['staff'] }, { boundary_id: 'dot2', kind: 'server-input', path: 'src/./b.ts', principals: ['staff'] }], all(false)));
   const plan = (s) => `# P\n\n${s.rows_md}\n\n<!-- RUN-STATE:BEGIN -->\n<!-- RUN-STATE:END -->\n`;
   const select = inputs.map((inp) => {
     const s = SP.selectControls(cat, inp);

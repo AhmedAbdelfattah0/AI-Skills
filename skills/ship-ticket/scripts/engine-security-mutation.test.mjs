@@ -212,8 +212,15 @@ export const SECURITY_MUTANTS = [
     from: "      if (resolved !== path) {", to: "      if (false) {" },
   { tag: "S90", name: "citations: the symlink guard compares a raw string prefix (a sibling repo-evil directory passes)", file: "security-plan.mjs",
     from: "!real.startsWith(top + sep)", to: "!real.startsWith(top)" },
-  { tag: "S91", name: "paths: a . or .. segment is accepted (a path borrows a test name)", file: "security-plan.mjs",
-    from: "  if (n.split('/').some((x) => x === '.' || x === '..')) refuse(", to: "  if (false) refuse(" },
+  { tag: "S91", name: "paths: a . or .. segment is accepted in format 3 (a path borrows a test name)", file: "security-plan.mjs",
+    from: "  if (bad.length) refuse('bad_input', ...bad.map((p) => `${what}", to: "  if (false) refuse('bad_input', ...bad.map((p) => `${what}" },
+  // ---- F12a repair R5 (review of eeec626) ----
+  { tag: "S92", name: "citations: the ignore check inherits GIT_DIR/GIT_WORK_TREE (another repository answers)", file: "security-plan.mjs",
+    from: "{ cwd: root, env, stdio: 'ignore', timeout: 15000 }", to: "{ cwd: root, stdio: 'ignore', timeout: 15000 }" },
+  { tag: "S93", name: "citations: repository detection follows symlinks (a dangling .git symlink reads as no repository)", file: "security-plan.mjs",
+    from: "const hasEntry = (p) => { try { lstatSync(p); return true; }", to: "const hasEntry = (p) => { try { statSync(p); return true; }" },
+  { tag: "S94", name: "paths: the format-3 . / .. refusal also applies to format-2 reassess (legacy no longer byte-identical)", file: "security-plan.mjs",
+    from: "    if (block.policy === 3) dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');", to: "    dotSegmentRefusal([...files.map((f) => f.path), ...surfaces.map((s) => s.path)], 'changed or surface path');" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

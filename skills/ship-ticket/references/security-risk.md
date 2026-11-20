@@ -67,8 +67,10 @@ surface**, under five rules, each refused when broken:
   (`exp` does not match `export`, `xexport` does not match `export`)
   (`citation_missing`). A symlink inside the repository is also judged by the file
   it resolves to: a target that is docs-only, inside `.git/` or `node_modules/`, or
-  gitignored is refused. A cited, surface or changed path with a `.` or `..` segment
-  is refused `bad_input`. Where each check runs:
+  gitignored is refused. A citation with a `.` or `..` segment, or with a leading
+  `./`, is refused `fact_uncited`. In a format-3 run, a surface or changed path with
+  a `.` or `..` segment is refused `bad_input`; a leading `./` is normalized. A
+  format-2 run takes such paths as be63aea did. Where each check runs:
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
   - at `gate review`, both original and confirmation, in the candidate work tree,
@@ -78,9 +80,11 @@ surface**, under five rules, each refused when broken:
   - in the `obligations` CLI, in the `--repo` working tree.
 
   An unreadable tree fails closed. So does a `git check-ignore` that cannot answer:
-  no git, a timeout, or exit 128 inside a repository (a wrong `GIT_DIR`, a "dubious
-  ownership" refusal). Whether the tree is inside a repository is decided from the
-  filesystem: a `.git` entry at the root or any directory above it. Outside every
+  no git, a timeout, or exit 128 inside a repository (a broken `.git`, a "dubious
+  ownership" refusal). Git runs with every inherited `GIT_*` variable dropped, so
+  `GIT_DIR` or `GIT_WORK_TREE` cannot point it at another repository. Whether the
+  tree is inside a repository is decided from the filesystem: a `.git` entry,
+  including a dangling symlink, at the root or any directory above it. Outside every
   repository no ignore rule applies.
   The check proves that the cited text exists, not that it supports the claim: that
   judgment is the review row (section 9).
