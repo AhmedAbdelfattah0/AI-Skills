@@ -628,7 +628,8 @@ matching pattern when extending them:
 Before building any new mechanism, script, check or abstraction, look at what already
 exists: the skills in this repository, and the upstream implementation the research
 already names (the DeepSeek harness, pinned commit
-`39163dd30f703a79079e2d2446545cff3c453738`). Then:
+`39163dd30f703a79079e2d2446545cff3c453738`, see
+`skills/ship-ticket/THIRD_PARTY_NOTICES.md`). Then:
 
 1. **Take it, do not rewrite it.** If an existing or upstream implementation does the
    job, adopt it with the smallest change that makes it work here. Do not write the
@@ -643,16 +644,19 @@ already names (the DeepSeek harness, pinned commit
      identity, approved-plan authority) or only looks similar;
    - its cost and risk against that value, and the risk to any existing assurance.
 3. **Record a verdict:** ADOPT, ADOPT PARTIALLY, SKIP, or ASK THE OWNER. Weak or
-   unevidenced value means SKIP or DEFER, even when upstream has it and even when
+   unevidenced value means SKIP, even when upstream has it and even when
    earlier research said Adopt. Rank candidates by value for effort, not by
    availability.
 4. **A substantial rewrite is a stop.** If adoption needs one, classify it
-   not adoptable as is and ask the owner. Do not design a replacement.
+   NOT-ADOPTABLE-AS-IS and ask the owner. Do not design a replacement.
+5. **Exact bytes means the bytes written.** An exact-bytes requirement (for example a
+   worker brief) hashes the bytes the orchestrator writes, nothing more; it never
+   involves Git semantics.
 
 This rule exists because re-deriving already-researched mechanisms cost days, and
 because byte-level and Git-semantics detours on a small evidence requirement cost many
-review rounds. When the same class of review finding fails twice, stop patching and
-challenge the design.
+review rounds. When the same class of review finding fails twice, stop patching, challenge the
+design, and escalate to the owner.
 
 ## Adding or editing a skill
 
