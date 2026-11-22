@@ -273,12 +273,11 @@ Write the START only after the narrative is final. Compute `approved_plan_digest
 with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 `sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
 with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
-`approved_at` (not `at`) and `approved_by` (the approver, never an agent name or a
-placeholder; start-check refuses only those honest mistakes, it cannot prove a human, and authority is Plan Mode approval plus the digest binding). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
+`approved_at` (not `at`) and `approved_by` (descriptive metadata only: it is presence-checked, not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
 before dispatching any worker (`--run-id` is required); it refuses a malformed
-RUN-STATE block, a stale or malformed digest, a missing approval time or approver.
+RUN-STATE block, a stale or malformed digest, a missing approval time or a missing `approved_by`.
 Its `ok` is necessary but not sufficient: it cannot see the engine's trusted-START
-rule. The approver check is guidance against honest mistakes, not a security boundary. Never edit the narrative after START: the digest no
+rule. Never edit the narrative after START: the digest no
 longer matches and the run is not executable. A CRLF plan and its LF twin have
 different digests; the tool does not normalise line ends.
 

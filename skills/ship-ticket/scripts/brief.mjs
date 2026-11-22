@@ -68,25 +68,6 @@ const DIGEST_FORMAT = /^sha256:[0-9a-f]{64}$/;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const ISO_8601 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 const SKEW_MS = 5 * 60 * 1000;
-/**
- * approved_by check. LIMIT, stated plainly: this refuses obvious honest mistakes (agent names, placeholders); it does not
- * detect a human; authority is native Plan Mode approval and the engine digest binding. A determined writer can type any
- * name, so do not extend this list in response to bypass reports; extend the tables below only for honest mistakes.
- * AGENT_TOKENS match as a prefix of each alphanumeric run, trailing digits allowed (claude3, GPT5, ClaudeCode,
- * chatgpt-5). Generic role words are not prefix triggers: "Agent Smith" is a person.
- */
-export const AGENT_TOKENS = ['claude', 'codex', 'fable', 'opus', 'sonnet', 'haiku', 'gpt', 'orchestrator', 'chatgpt', 'copilot', 'gemini'];
-/** Refused when the whole normalized value equals one (so "Li Na" is accepted although "na" is listed). */
-const PLACEHOLDER_VALUES = new Set(['tbd', 'todo', 'tba', 'placeholder', 'unknown', 'none', 'na', 'n/a', 'null', 'undefined', 'nobody',
-  'agent', 'assistant', 'bot', 'ai', 'subagent', 'orchestration agent', 'main session', 'user', 'owner', 'human']);
-/** Refused as a whole token anywhere in the value ("TBD (pending owner)"). */
-const PLACEHOLDER_TOKENS = new Set(['tbd', 'todo', 'tba', 'placeholder']);
-
-/** Lower-case, drop zero-width characters, collapse whitespace, strip surrounding punctuation (a trailing period included). */
-function normalizeApprover(by) {
-  return by.replace(/[\u200b-\u200d\u2060\ufeff]/g, '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
-}
-
 /** True when the ISO-8601 string is a real calendar instant (rejects 2026-02-30 and hour 25). */
 function realInstant(at) {
   const m = ISO_8601.exec(at);
@@ -154,16 +135,10 @@ export function startCheck(planText, { runId, now = Date.now() } = {}) {
       start.at !== undefined ? 'START uses `at`; the field is `approved_at`' : 'START has no approved_at');
   } else if (typeof at !== 'string' || !realInstant(at)) add('start_approved_at_invalid', 'approved_at must be a real ISO-8601 timestamp with a time zone');
   else if (Date.parse(at) > now + SKEW_MS) add('start_approved_at_future', 'approved_at is in the future (more than 5 minutes of clock skew)');
-  // approver: honest-mistake guard only (see AGENT_TOKENS); it cannot prove a human
+  // approved_by: descriptive metadata, presence-checked only. Its content is never inspected and never evidence of
+  // authorization; authority is native Plan Mode approval plus the approved-plan digest binding (checked above).
   const by = start.approved_by;
-  if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (the person who approved the plan)');
-  else {
-    const whole = normalizeApprover(by);
-    const words = whole.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-    const runs = words.map((r) => r.replace(/\d+$/, ''));
-    if (!/\p{L}/u.test(by) || /^<.*>$/.test(by.trim()) || PLACEHOLDER_VALUES.has(whole) || words.some((w) => PLACEHOLDER_TOKENS.has(w))) add('start_approver_placeholder', 'approved_by is a placeholder; name the approver');
-    else if (runs.some((r) => AGENT_TOKENS.some((t) => r.startsWith(t)))) add('start_approver_agent', 'approved_by names an agent; name the person who approved');
-  }
+  if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (descriptive metadata: who approved the plan)');
   return { ok: errors.length === 0, errors, warnings, run_id: runId, digest };
 }
 

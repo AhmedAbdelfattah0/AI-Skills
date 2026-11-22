@@ -169,21 +169,34 @@ test('start-check: approved_at missing, not ISO-8601, in the future', () => {
   for (const bad of ['yesterday', '2026-11-01', '2026-13-45T10:00:00Z', 12345]) assert.deepEqual(codes(chk(withStart({ approved_at: bad }))), ['start_approved_at_invalid'], String(bad));
   assert.deepEqual(codes(chk(withStart({ approved_at: '2999-01-01T00:00:00Z' }))), ['start_approved_at_future']);
 });
-test('start-check: approved_by placeholders and agent identities are refused, a human name is not', () => {
-  for (const by of ['<owner>', '<owner name>', 'TBD', 'todo', 'N/A', ' ']) {
-    assert.ok(['start_approver_placeholder', 'start_approver_missing'].includes(codes(chk(withStart({ approved_by: by })))[0]), by);
-  }
-  for (const by of ['claude', 'Claude Opus', 'codex', 'Fable', 'orchestrator', 'sonnet-5.5', 'GPT-5', 'claude3', 'GPT5', 'ClaudeCode', 'opus4.1']) {
-    assert.deepEqual(codes(chk(withStart({ approved_by: by }))), ['start_approver_agent'], by);
-  }
-  for (const by of ['Ahmed Abdelfatah', 'Li Na', 'Agent Smith', 'Bot Jones', 'Ana Todorova', 'Ian None']) assert.equal(chk(withStart({ approved_by: by })).ok, true, by);
+const NAMES = ['Claude', 'agent', 'TBD', 'Ahmed', '-'];
+test('start-check: approved_by presence is checked (missing, empty, whitespace, non-string refused); content is not', () => {
+  for (const by of [undefined, '', '   ', 42, null, ['Ahmed']]) assert.deepEqual(codes(chk(withStart({ approved_by: by }))), ['start_approver_missing'], String(by));
 });
-test('start-check: approver table (refuse honest mistakes, accept real names; the field cannot prove a human)', () => {
-  const REFUSE = ['agent', 'assistant', 'bot', 'AI', 'ChatGPT', 'chatgpt-5', 'Copilot', 'Gemini', 'subagent', 'orchestration agent',
-    'main session', '-', '?', '\u200b', 'TBD.', 'TBD (pending owner)', 'null', 'owner', 'claude3', 'GPT5', 'ClaudeCode', 'orchestrator'];
-  const ACCEPT = ['Ahmed', 'Li Na', 'Agent Smith', 'Gupta', 'Opal Jones', 'Claudio Ranieri'];
-  for (const by of REFUSE) assert.equal(chk(withStart({ approved_by: by })).ok, false, `refuse: ${JSON.stringify(by)}`);
-  for (const by of ACCEPT) assert.equal(chk(withStart({ approved_by: by })).ok, true, `accept: ${JSON.stringify(by)}`);
+test('approved_by is descriptive: changing the name cannot change ok-ness or the digest', () => {
+  const base = chk(withStart());
+  assert.equal(base.ok, true);
+  for (const by of NAMES) {
+    const r = chk(withStart({ approved_by: by }));
+    assert.equal(r.ok, base.ok, by);
+    assert.deepEqual(r.errors, base.errors, by);
+    assert.equal(r.digest, base.digest, by);
+  }
+});
+test('approved_by cannot grant authority: with a wrong digest every name is still refused with the digest code', () => {
+  const bare = planDigest(plan()).slice('sha256:'.length);
+  for (const by of NAMES) {
+    assert.deepEqual(codes(chk(withStart({ approved_by: by, approved_plan_digest: `sha256:${hex('other')}` }))), ['start_digest_stale'], by);
+    assert.deepEqual(codes(chk(withStart({ approved_by: by, approved_plan_digest: bare }))), codes(chk(withStart({ approved_plan_digest: bare }))), by);
+    assert.ok(codes(chk(withStart({ approved_by: by, approved_plan_digest: bare }))).every((c) => c.startsWith('start_digest_')), by);
+    assert.equal(chk(withStart({ approved_by: by, approved_plan_digest: bare })).ok, false, by);
+    assert.deepEqual(codes(chk(withStart({ approved_by: by, approved_plan_digest: undefined }))), ['start_digest_missing'], by);
+  }
+});
+test('plan-digest is byte-identical for plans that differ only in approved_by inside the RUN-STATE block', () => {
+  const digests = NAMES.map((by) => planDigest(withStart({ approved_by: by })));
+  assert.equal(new Set(digests).size, 1);
+  assert.equal(digests[0], planDigest(plan()));
 });
 test('start-check: no START, wrong run id, and a missing digest field', () => {
   assert.deepEqual(codes(chk(plan([]))), ['start_missing']);
@@ -192,7 +205,7 @@ test('start-check: no START, wrong run id, and a missing digest field', () => {
   assert.throws(() => chk('no block'), /plan_invalid/);
 });
 test('start-check: the last START of the run is the one checked', () => {
-  const t = plan([{ ...good(plan()), approved_by: 'claude' }, good(plan())]);
+  const t = plan([{ ...good(plan()), approved_by: undefined }, good(plan())]);
   assert.equal(chk(t).ok, true);
 });
 
@@ -212,12 +225,6 @@ test('mutation: removing the stale-digest comparison lets the edited-narrative S
   const edited = withStart().replace('Do the thing.', 'Do a different thing.');
   assert.equal(m.startCheck(edited, { runId: 'r1' }).ok, true);
   assert.equal(chk(edited).ok, false);
-});
-test('mutation: removing the agent-identity check lets approved_by "claude" through', async () => {
-  const m = await mutant('else if (runs.some((r) => AGENT_TOKENS.some((t) => r.startsWith(t))))', 'else if (false)');
-  const t = withStart({ approved_by: 'claude' });
-  assert.equal(m.startCheck(t, { runId: 'r1' }).ok, true);
-  assert.equal(chk(t).ok, false);
 });
 test('mutation: dropping the `at` distinction collapses its code into the generic missing-field code', async () => {
   const m = await mutant("start.at !== undefined ? 'start_at_not_approved_at'", "false ? 'start_at_not_approved_at'");
@@ -266,11 +273,6 @@ test('M1: a timestamp-only START is accepted with a start_timestamp_legacy warni
   assert.deepEqual(codes(chk(withStart({ approved_at: undefined, timestamp: 'junk' }))), ['start_approved_at_invalid']);
   assert.deepEqual(codes(chk(withStart({ approved_at: undefined, at: '2026-11-01T10:00:00Z' }))), ['start_at_not_approved_at']);
 });
-test('L1: placeholders match the whole value; agent identities by prefix of each run, with digits', () => {
-  assert.equal(chk(withStart({ approved_by: 'Li Na' })).ok, true);
-  assert.deepEqual(codes(chk(withStart({ approved_by: 'tbd' }))), ['start_approver_placeholder']);
-  assert.deepEqual(codes(chk(withStart({ approved_by: 'Claude3' }))), ['start_approver_agent']);
-});
 test('L2: 5 minutes of clock skew is allowed, more is the future; impossible dates are invalid', () => {
   const now = Date.parse('2026-11-01T10:00:00Z');
   assert.equal(chk(withStart({ approved_at: '2026-11-01T10:04:00Z' }), { now }).ok, true);
@@ -311,7 +313,7 @@ test('differential: start-check ok implies the engine accepts; they differ only 
     crlf: withStart({}, NARRATIVE, '\r\n'),
     'trailing whitespace on the START line': good1.replace('}\n' + E, '}   \n' + E),
     'non-JSON START text': `${NARRATIVE}${B}\nSTART run r1\n${E}\n`,
-    'two STARTs same run, last wins': plan([{ ...good(), approved_by: 'claude' }, good()]),
+    'two STARTs same run, last wins': plan([{ ...good(), approved_by: undefined }, good()]),
     'two STARTs same run, last bad': plan([good(), { ...good(), approved_plan_digest: 'sha256:' + hex('x') }]),
     'STARTs across runs': plan([{ ...good(), run_id: 'r2', approved_plan_digest: 'sha256:' + hex('x') }, good()]),
     'legacy sha256-': S({ approved_plan_digest: dg.replace('sha256:', 'sha256-') }),
