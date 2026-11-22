@@ -279,3 +279,33 @@ test("S5 repair 2 (5) N1: a legacy start colliding with another worktree's start
   const again = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates');
   assert.equal(JSON.parse(again.stdout.trim()).excluded, 0, 'idempotent');
 });
+
+// ---- S5 review repair 3 (A): every reader applies the same exclusion/union reading.
+test('S5 repair 3 (A) reader parity: summary, check, writer view, eval, the integrity line and lostSignal agree after --resolve-duplicates', async (t) => {
+  const fx = worktrees(t);
+  const T = Date.now() - 10000;
+  seed(fx.wt2Legacy, [legacyRow('start', 'a', new Date(T - 60000).toISOString())]);
+  assert.equal(fx.cli(fx.main, ...iv('start', 'a', ['--started-at', new Date(T).toISOString()])).status, 0);
+  const r = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates');
+  assert.equal(JSON.parse(r.stdout.trim()).excluded, 1, r.stderr);
+  const e = fx.cli(fx.wt2, ...iv('end', 'a', ['--ended-at', new Date(T + 1000).toISOString()]));
+  assert.equal(e.status, 0, e.stderr);
+  const want = [{ event_id: 'a', duration_ms: 1000 }];
+  for (const repo of [fx.main, fx.wt2]) {
+    const s = summary(fx, repo);
+    assert.deepEqual(s.runs.flatMap((x) => x.intervals.map((i) => ({ event_id: i.event_id, duration_ms: i.duration_ms }))), want, `summary from ${repo}`);
+    assert.deepEqual(s.integrity_warnings, []);
+    const c = fx.cli(repo, 'check', '--ticket', 'T1');
+    assert.equal(c.status, 0, c.stdout);
+    const ev = spawnSync(process.execPath, [fileURLToPath(new URL('../eval.mjs', import.meta.url)), 'report', '--repo', repo, '--ticket', 'T1'], { encoding: 'utf8' });
+    assert.equal(ev.status, 0, ev.stderr);
+    assert.deepEqual(JSON.parse(ev.stdout).runs.map((x) => x.wall_ms_by_phase), [{ Pa: 1000 }], `eval from ${repo} honours the exclusion`);
+    const { integritySummary } = await import('../run-log.mjs');
+    const integ = integritySummary(repo, 'T1');
+    assert.deepEqual([integ.events, integ.open_phases, integ.warnings], [2, 0, 0], `integrity from ${repo}`);
+  }
+  assert.match(fx.cli(fx.wt2, ...iv('end', 'a')).stderr, /already ended/, 'the writer view sees the same closed pair');
+  const { lostSignal } = await import('../eval.mjs');
+  const lost = lostSignal([commonLogDir(fx.wt2), legacyLogDirs(fx.wt2).own], 'T1');
+  assert.equal(lost.invalid_events + lost.malformed_lines + lost.torn_bytes, 0, 'lostSignal sees no damage either');
+});

@@ -221,8 +221,19 @@ word-split, so `--` and spaces survive verbatim. A metric key must be a plain na
 a key containing `=` is refused, never re-split. A numeric value must be finite (a
 400-digit number is refused, never stored as Infinity). Every op is validated before the
 first write; the ops then run in order and the first failure stops the batch. A
-batch is not atomic: ops already applied stay. stdout is one JSON line,
-`{"applied": n}` or `{"applied": n, "failed": {"index": i, "reason": "..."}}` (exit 1).
+batch is not atomic: ops already applied stay. A REVIEW start also needs its
+per-worktree authority copy: if that file (or its nearest existing directory) is not
+writable, the whole batch is refused before the first write, by the same decision
+`check` uses. stdout is one JSON line, `{"applied": n}` or `{"applied": n, "failed":
+{"index": i, "reason": "...", "committed_shared": true|false, "authority_copy"?:
+"failed"|"pending"}}` (exit 1). `applied` counts every op whose row committed to the
+shared log, including a REVIEW start whose authority copy then failed
+(`committed_shared: true`, `authority_copy: "failed"`). Do not retry that op: its shared
+row exists, so a retry is refused as a duplicate. Record a fresh REVIEW start with a new
+event id instead. No command re-copies the authority row from the shared log, because the
+shared log does not record which worktree wrote a row, so a re-copy would be a new
+authority source. A single `start` reports the same case on stderr
+(`committed_shared=true authority_copy=failed`).
 
 ### Supplied timestamps (estimated)
 
@@ -273,11 +284,18 @@ not computed inside run-log-io.
   authentic. A deleted or missing log prints `unavailable`, never zero events.
 - Shared observability is not shared authority. The common log never authorises a
   REPAIR; only this worktree's own gitdir does (see above).
+- One reading for every reader: `summary`, `check`, the writers, the integrity line and
+  `eval.mjs report` join a ticket's files through the same function
+  (`lib/run-log-paths.mjs` `unionLogRows`). Exclusions, verbatim copies and time order are
+  therefore the same everywhere. Only the per-line parsing differs: eval's legacy figures
+  read lines leniently, as before S5.
 - Known limits: a writer reads only this worktree's own old log, so a start recorded
   by a pre-S5 version in another worktree can be ended only from that worktree. The
   duplicate legacy start of the upgrade window needs the explicit
-  `migrate --resolve-duplicates` from the affected worktree. A hand edit of any log file is
-  outside these guarantees.
+  `migrate --resolve-duplicates` from the affected worktree. A REVIEW start whose authority
+  copy failed after its shared row committed (a residual failure the writability check
+  cannot foresee, such as a directory where the file should be) needs a fresh REVIEW start
+  with a new event id. A hand edit of any log file is outside these guarantees.
 - Telemetry never gates a ship decision. The integrity line never changes
   `ship-ready-check`'s exit code, and a failed `check` is a recorded degradation.
 

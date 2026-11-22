@@ -123,3 +123,48 @@ export function readLogRows(dirs, ticket, parse = (bytes) => bytes) {
   }
   return out;
 }
+
+/**
+ * THE union reading of one ticket's run-log rows over several files (S5 repair 3): run-log (summary, check, writers, the
+ * integrity line) and eval.mjs all call these, so every reader sees the same rows.
+ * - `excludedRows(dir, ticket)`: the rows `migrate --resolve-duplicates` recorded in `<dir>/excluded/<ticket>.jsonl`.
+ * - `subtractRows(rows, minus)`: `rows` without one verbatim occurrence per row of `minus`.
+ * - `excuseCopies(lists)`: rows of `lists` in order, a later list's row dropped once per verbatim occurrence kept in an
+ *   earlier list (a migrated copy is one row; a row written twice to the shared log stays a duplicate).
+ * - `mergeLogRows(lists)`: excuseCopies, then a stable sort by timestamp when more than one list has rows.
+ * - `unionLogRows(sources, ticket, commonDir)`: `sources` = `[{ dir, rows }]` (readLogRows order); every source that is not
+ *   the common dir loses its excluded rows; legacy sources first, the common log last, merged.
+ * Rows are compared by their JSON text (same key order: a verbatim copy is the same text). Parsing stays with the caller.
+ */
+const keyOf = (row) => JSON.stringify(row);
+export function excludedRows(dir, ticket) {
+  let text;
+  try { text = readFileSync(join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`), 'utf8'); } catch { return []; }
+  return text.split('\n').flatMap((line) => { if (!line.trim()) return []; try { return [JSON.parse(line)]; } catch { return []; } });
+}
+export function subtractRows(rows, minus) {
+  if (!minus.length) return rows;
+  const debt = new Map();
+  for (const row of minus) debt.set(keyOf(row), (debt.get(keyOf(row)) ?? 0) + 1);
+  return rows.filter((row) => { const n = debt.get(keyOf(row)) ?? 0; if (n > 0) { debt.set(keyOf(row), n - 1); return false; } return true; });
+}
+export function excuseCopies(lists) {
+  const credit = new Map();
+  return lists.flatMap((list) => {
+    const kept = list.filter((row) => { const n = credit.get(keyOf(row)) ?? 0; if (n > 0) { credit.set(keyOf(row), n - 1); return false; } return true; });
+    for (const row of kept) credit.set(keyOf(row), (credit.get(keyOf(row)) ?? 0) + 1);
+    return kept;
+  });
+}
+export function mergeLogRows(lists) {
+  const nonEmpty = lists.filter((l) => l.length);
+  if (nonEmpty.length <= 1) return nonEmpty[0] ?? [];
+  return excuseCopies(nonEmpty).map((row, i) => [row, i])
+    .sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([row]) => row);
+}
+export function unionLogRows(sources, ticket, commonDir) {
+  const isCommon = (s) => commonDir !== undefined && samePath(s.dir, commonDir);
+  const legacy = sources.filter((s) => !isCommon(s)).map((s) => subtractRows(s.rows, excludedRows(s.dir, ticket)));
+  const common = sources.filter(isCommon).map((s) => s.rows);
+  return mergeLogRows([...legacy, ...common]);
+}

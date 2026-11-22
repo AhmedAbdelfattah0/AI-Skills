@@ -51,7 +51,7 @@ import { withReviews } from './engine-unit-review.mjs';
 import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } from './review-intervals.mjs';
 import { runPolicy } from './engine-policy.mjs';
 import { legacyRows, readEvents } from './measure/events.mjs';
-import { readLogRows, reportLogDirs } from './lib/run-log-paths.mjs';
+import { readLogRows, reportLogDirs, unionLogRows } from './lib/run-log-paths.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -432,21 +432,16 @@ function report(options) {
   const runs = [];
   const states = {};
   for (const ticket of tickets) {
-    const logs = readLogRows(logDirs, ticket).map((source) => source.path).reverse(); // legacy files first, the common log last
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
-    // A row migrated verbatim into the shared log (S5) is one row: one later copy is excused per occurrence in an earlier
-    // file, so a row written twice to the shared log still counts twice (and is reported by buildRun).
-    const credit = new Map();
-    const once = (rows) => { const kept = rows.filter((r) => { const k = JSON.stringify(r); const n = credit.get(k) ?? 0; if (n > 0) { credit.set(k, n - 1); return false; } return true; });
-      for (const r of kept) { const k = JSON.stringify(r); credit.set(k, (credit.get(k) ?? 0) + 1); } return kept; };
-    for (const row of logs.flatMap((log) => once(legacyRows(readJsonl(log))))) {
+    // S5: the rows of several files are joined by lib/run-log-paths unionLogRows, the SAME reading run-log uses: exclusions
+    // recorded by `migrate --resolve-duplicates` are honoured, a verbatim migrated copy is one row, rows are in time order.
+    const sources = readLogRows(logDirs, ticket).map(({ dir: from, path: log }) => ({ dir: from, rows: legacyRows(readJsonl(log)) }));
+    for (const row of unionLogRows(sources, ticket, logDirs[0])) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
     }
-    // Rows of one run from several files (a start in a legacy log, its end in the common log) in time order (stable).
-    if (logs.length > 1) for (const [runId, rows] of byRun) byRun.set(runId, rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([r]) => r));
     for (const [runId, rows] of byRun) runs.push(buildRun(ticket, runId, rows));
     const statePath = join(dir, `${ticket}.state.json`);
     if (existsSync(statePath)) { try { states[ticket] = JSON.parse(readFileSync(statePath, 'utf8')); } catch { /* unreadable state stays unknown */ } }

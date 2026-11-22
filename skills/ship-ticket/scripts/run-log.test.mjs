@@ -628,7 +628,7 @@ test('batch: every op is validated before the first write; a later runtime failu
   }
   const r = batch([ok, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'b1' }, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'zz' }, { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
   assert.equal(r.status, 1);
-  assert.deepEqual(JSON.parse(r.stdout.trim()), { applied: 2, failed: { index: 2, reason: 'event zz has no start in run run-1' } });
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { applied: 2, failed: { index: 2, reason: 'event zz has no start in run run-1', committed_shared: false } });
   assert.deepEqual(rowsOf(f).map((x) => `${x.event}:${x.event_id}`), ['start:b1', 'end:b1'], 'not atomic: applied ops stay, later ops never run');
 });
 
@@ -893,4 +893,39 @@ test('S5 repair 2 (4) batch validates EVERY op, including what encoding would re
   const single = f.cli(...phaseArgs('start', 'z'), '--metric', `n=${big}`);
   assert.equal(single.status, 1, 'a 400-digit metric is refused on start too (never Infinity)');
   assert.equal(bytesOf(f), before);
+});
+
+// ------------------------------------------------------------------ S5 review repair 3 (B): batch and the authority copy
+const reviewOp = (id) => ({ op: 'start', kind: 'phase', name: 'REVIEW', event_id: id, metrics: { candidate_id: 'sha-1', review_execution: `review-${id}` } });
+const runBatch = (f, ops) => spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'], { encoding: 'utf8', input: JSON.stringify(ops) });
+test('S5 repair 3 (B) batch refuses the WHOLE batch, zero rows, when a REVIEW op\'s authority copy is not writable', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const f = fixture(t);
+  const auth = join(dirname(f.path), 'review-auth');
+  mkdirSync(auth);
+  chmodSyncSafe(auth, 0o500);
+  let r;
+  try { r = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r')]); } finally { chmodSyncSafe(auth, 0o700); }
+  assert.equal(r.status, 1);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.applied, 0);
+  assert.equal(out.failed.index, 1);
+  assert.match(out.failed.reason, /not writable/);
+  assert.equal(bytesOf(f), '', 'zero rows: nothing reached the shared log');
+});
+
+test('S5 repair 3 (B) a residual authority-copy failure is reported truthfully: committed shared rows counted, no retry of the shared row', (t) => {
+  const f = fixture(t);
+  mkdirSync(join(dirname(f.path), 'review-auth', 'T1.jsonl'), { recursive: true }); // writable path, but appending to it fails (a directory)
+  const r = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r'), { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
+  assert.equal(r.status, 1);
+  const out = JSON.parse(r.stdout.trim());
+  assert.equal(out.applied, 2, 'BUILD and the REVIEW start both committed to the shared log');
+  assert.deepEqual({ ...out.failed, reason: undefined }, { index: 1, reason: undefined, committed_shared: true, authority_copy: 'failed' });
+  assert.match(out.failed.reason, /new event id/, 'the recovery is named');
+  assert.deepEqual(rowsOf(f).map((x) => x.event_id), ['b', 'r'], 'op c never ran');
+  const single = f.cli(...phaseArgs('start', 'x').map((a) => (a === 'Px' ? 'REVIEW' : a)), '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-x');
+  assert.equal(single.status, 1);
+  assert.match(single.stderr, /committed_shared=true/, 'the single start path says the shared row committed');
+  const notCommitted = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }]);
+  assert.deepEqual(JSON.parse(notCommitted.stdout.trim()).failed.committed_shared, false, 'a refused op did not commit');
 });

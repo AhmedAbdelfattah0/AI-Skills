@@ -16,7 +16,8 @@ import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
 import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
-import { AUTH_SUBDIR, EXCLUDED_SUBDIR, commonLogDir, isReservedTicket, legacyLogDirs, ownLogDir, readLogRows, reportLogDirs } from './lib/run-log-paths.mjs';
+import { AUTH_SUBDIR, EXCLUDED_SUBDIR, commonLogDir, excludedRows, isReservedTicket, legacyLogDirs, mergeLogRows, ownLogDir, readLogRows,
+  reportLogDirs, subtractRows, unionLogRows } from './lib/run-log-paths.mjs';
 import { processInfo } from './engine-quiesce.mjs';
 import { hostname } from 'node:os';
 import { isTimestamp } from './lib/shape.mjs';
@@ -256,42 +257,8 @@ function pairWarnings(rows) {
   return warnings;
 }
 
-/**
- * One row set from several files of a ticket (legacy files first, the common file last). With rows from more than one
- * file they are ordered by timestamp (stable: at an equal instant the earlier file's row stays first), so a start in a
- * legacy file pairs with its end in the common file.
- */
-function mergeRows(lists) {
-  const nonEmpty = lists.filter((l) => l.length);
-  if (nonEmpty.length <= 1) return nonEmpty[0] ?? [];
-  // A row migrated verbatim from a legacy log into the shared log is one row, not a duplicate of itself. Only ONE later
-  // copy is excused per occurrence in an earlier file: a row written twice to the shared log stays a duplicate.
-  const unique = excuseCopies(nonEmpty);
-  return unique.map((row, i) => [row, i]).sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([row]) => row);
-}
-
-/** Rows of `lists` in order, dropping from each later list at most one verbatim copy per occurrence in the earlier lists. */
-function excuseCopies(lists) {
-  const credit = new Map();
-  return lists.flatMap((list) => {
-    const kept = list.filter((row) => {
-      const key = JSON.stringify(row);
-      const n = credit.get(key) ?? 0;
-      if (n > 0) { credit.set(key, n - 1); return false; }
-      return true;
-    });
-    for (const row of kept) { const key = JSON.stringify(row); credit.set(key, (credit.get(key) ?? 0) + 1); }
-    return kept;
-  });
-}
-/** `rows` minus the verbatim rows recorded in `<dir>/excluded/<ticket>.jsonl` (one removal per recorded copy). */
-function withoutExcluded(rows, dir, ticket) {
-  const path = join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`);
-  if (!existsSync(path)) return rows;
-  const debt = new Map();
-  for (const row of rowsFromText(readFileSync(path, 'utf8'), path).rows) { const k = JSON.stringify(row); debt.set(k, (debt.get(k) ?? 0) + 1); }
-  return rows.filter((row) => { const k = JSON.stringify(row); const n = debt.get(k) ?? 0; if (n > 0) { debt.set(k, n - 1); return false; } return true; });
-}
+/** One row set from several files (legacy first, the common log last): lib/run-log-paths mergeLogRows, shared with eval. */
+const mergeRows = mergeLogRows;
 
 /** Pairing warnings of `merged` that the read-only `context` rows did not already have: what a write would introduce. */
 function newPairWarnings(context, merged) {
@@ -309,7 +276,7 @@ function legacyContext(loc, ticket) {
   const path = loc.legacy ? logPath(loc.legacy, ticket) : null;
   const legacyBuf = path && existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
   const all = legacyBuf.length ? rowsFromText(legacyBuf.subarray(0, committedLength(legacyBuf)).toString('utf8'), path).rows : [];
-  return { context: path ? withoutExcluded(all, loc.legacy, ticket) : all, legacyBuf };
+  return { context: path ? subtractRows(all, excludedRows(loc.legacy, ticket)) : all, legacyBuf };
 }
 
 /**
@@ -595,11 +562,23 @@ async function appendStamped(attempt) {
 }
 
 /** S5 repair: the per-worktree REVIEW authority copy of a REVIEW phase start (carrier REPAIR reads only this, never the shared log). */
+/** What the next append to `path` needs: the file itself when it exists, else its nearest existing directory, writable.
+ *  null when it is; else the reason. Shared by `check` and batch prevalidation (one decision). */
+function writableTarget(path) {
+  let probe = path;
+  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+  try { accessSync(probe, fsConstants.W_OK); return null; } catch { return `${probe} is not writable`; }
+}
+const isReviewStart = (op) => op.op === 'start' && op.kind === 'phase' && op.name === 'REVIEW';
+const authorityPath = (loc, ticket) => join(loc.authDir, AUTH_SUBDIR, `${ticket}.jsonl`);
+
 async function writeAuthority(loc, row) {
   if (row.kind !== 'phase' || row.name !== 'REVIEW' || row.event !== 'start') return;
   try { await appendRows(join(loc.authDir, AUTH_SUBDIR), row.ticket, [row]); }
   catch (error) {
-    fail(`the REVIEW start is in the shared log, but its per-worktree authority copy failed (${error.message}); REPAIR stays unauthorised: record a new REVIEW start (new event id, same review_execution)`);
+    // Truthful accounting (repair 3): the shared row HAS committed. It is not retried (a retry would be a duplicate), and no
+    // step re-copies it: which worktree wrote a shared row is not recorded, so a re-copy would be a new authority source.
+    throw Object.assign(new RunLogError(`committed_shared=true authority_copy=failed: the REVIEW start ${row.event_id} is in the shared log, but its per-worktree authority copy failed (${error.message}); REPAIR stays unauthorised: record a fresh REVIEW start with a new event id (same review_execution)`), { committedShared: true });
   }
 }
 
@@ -819,9 +798,8 @@ function ticketsIn(dirs) {
  */
 function reportRows(dirs, ticket) {
   const sources = readLogRows(dirs, ticket, (bytes, path) => rowsFromText(bytes.toString('utf8'), path));
-  if (sources.length <= 1) return { ...(sources[0]?.parsed ?? { rows: [], warnings: [] }), sources };
-  const lists = sources.map((source, i) => (i === 0 ? source.parsed.rows : withoutExcluded(source.parsed.rows, source.dir, ticket)));
-  const rows = mergeRows([...lists.slice(1), lists[0]]);
+  const rows = unionLogRows(sources.map((source) => ({ dir: source.dir, rows: source.parsed.rows })), ticket, dirs[0]);
+  if (sources.length <= 1 && !sources.some((source) => excludedRows(source.dir, ticket).length)) return { ...(sources[0]?.parsed ?? { rows: [], warnings: [] }), sources };
   const warnings = [...sources.flatMap((source) => source.parsed.warnings.filter((w) => w.run_id === undefined)), ...pairWarnings(rows)];
   return { rows, warnings, sources };
 }
@@ -937,11 +915,7 @@ function checkCommand(options) {
   try { loc = locations(repo); } catch (error) { return finish(`not a git repository: ${error.message}`); }
   out.resolved_dir = loc.directory;
   /** The next append needs: the file itself when it exists (it is opened for writing), else its nearest existing directory. */
-  const writable = (path) => {
-    let probe = path;
-    while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
-    try { accessSync(probe, fsConstants.W_OK); return null; } catch { return `${probe} is not writable`; }
-  };
+  const writable = writableTarget;
   const dirProblem = writable(loc.directory);
   if (dirProblem) return finish(dirProblem);
   let legacyDirs = [];
@@ -978,9 +952,14 @@ const BATCH_KEYS = new Set(['op', 'kind', 'name', 'event_id', 'outcome', 'metric
 const BATCH_MAX_BYTES = 1024 * 1024;
 async function batchCommand(options) {
   let applied = 0;
-  const stop = (index, error) => {
+  // `applied` counts every op whose shared row committed, including a REVIEW start whose authority copy then failed.
+  const stop = (index, error, op) => {
     if (!(error instanceof RunLogError) && !(error instanceof Error)) throw error;
-    process.stdout.write(`${JSON.stringify({ applied, failed: { index, reason: error.message } })}\n`);
+    const committed = error?.committedShared === true;
+    if (committed) applied += 1;
+    const failed = { index, reason: error.message, committed_shared: committed,
+      ...(op && isReviewStart(op) ? { authority_copy: committed ? 'failed' : 'pending' } : {}) };
+    process.stdout.write(`${JSON.stringify({ applied, failed })}\n`);
     process.exit(1);
   };
   let ops;
@@ -1021,13 +1000,16 @@ async function batchCommand(options) {
       // Everything execution-time encoding would refuse is refused now, before the first write (repair 2).
       encodeRecords([{ schema: SCHEMA, ticket: interval.ticket, run_id: interval.runId, event: op.op, event_id: interval.eventId, kind: interval.kind,
         name: interval.name, timestamp: new Date().toISOString(), ...(op.op === 'end' ? { duration_ms: 0, outcome: op.outcome ?? 'complete' } : {}), metrics }]);
-      prepared.push({ op: op.op, opts });
-    } catch (error) { quiet = false; return stop(index, error); }
+      // A REVIEW start also writes its authority copy: refuse the whole batch now if that path is not writable, before any
+      // shared row exists (same decision as `check`).
+      if (isReviewStart(op)) { const why = writableTarget(authorityPath(loc, interval.ticket)); if (why) fail(`the REVIEW authority copy cannot be written: ${why}`); }
+      prepared.push({ op: op.op, opts, raw: op });
+    } catch (error) { quiet = false; return stop(index, error, op && typeof op === 'object' ? op : null); }
   }
   quiet = false;
-  for (const [index, { op, opts }] of prepared.entries()) {
+  for (const [index, { op, opts, raw }] of prepared.entries()) {
     try { await (op === 'start' ? start : end)(opts, { print: false, loc }); }
-    catch (error) { return stop(index, error); }
+    catch (error) { return stop(index, error, raw); }
     applied += 1;
   }
   process.stdout.write(`${JSON.stringify({ applied })}\n`);
