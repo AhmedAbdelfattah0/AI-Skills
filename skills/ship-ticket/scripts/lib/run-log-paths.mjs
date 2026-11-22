@@ -19,6 +19,19 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
 export const LOG_SUBDIR = join('ai-skills', 'ship-ticket');
+/** Per-worktree subdirectory of REVIEW authority records (`<git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl`). No
+ *  ticket name can address it: a ticket id has no `/`, so every shared write is a FILE directly in the log directory. */
+export const AUTH_SUBDIR = 'review-auth';
+/** Per-worktree subdirectory recording legacy rows excluded by `migrate --resolve-duplicates` (verbatim copies). */
+export const EXCLUDED_SUBDIR = 'excluded';
+/**
+ * Ticket ids that are refused, compared case-insensitively (APFS and NTFS fold case): a `.engine` or `.review-auth` suffix
+ * (the run engine's file, the pre-repair authority file name) and the two subdirectory names.
+ */
+export function isReservedTicket(ticket) {
+  const t = String(ticket).toLowerCase();
+  return t.endsWith('.engine') || t.endsWith('.review-auth') || t === AUTH_SUBDIR || t === EXCLUDED_SUBDIR;
+}
 
 const coded = (code, message) => Object.assign(new Error(message), { code });
 

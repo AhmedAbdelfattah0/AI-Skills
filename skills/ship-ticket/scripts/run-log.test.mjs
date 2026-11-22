@@ -848,3 +848,49 @@ test('S5 (7c) batch refuses a metric key containing "=" instead of re-splitting 
   assert.equal(r.status, 1);
   assert.equal(bytesOf(f), '');
 });
+
+// ------------------------------------------------------------------ S5 review repair 2: check lock health, complete batch prevalidation
+test('S5 repair 2 (3) check judges <log>.lock exactly as the append would: foreign host refuses, dead pid recoverable, live pid waits; nothing written', (t) => {
+  const f = fixture(t, [legacyStart('a', new Date(Date.now() - 1000).toISOString())]);
+  const check = () => { const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }); return { status: c.status, out: JSON.parse(c.stdout) }; };
+  const lock = (o) => writeFileSync(`${f.path}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'x', nonce: 'n', ...o }));
+  t.after(() => releaseLock(f));
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }).stdout;
+  lock({ host: 'another-host.invalid' });
+  const foreign = check();
+  assert.equal(foreign.status, 1, JSON.stringify(foreign.out));
+  assert.match(foreign.out.reason, /lock_foreign_host|another host|held by host/);
+  lock({ pid: Number(dead) });
+  const recoverable = check();
+  assert.equal(recoverable.status, 0, JSON.stringify(recoverable.out));
+  assert.ok(recoverable.out.degraded.includes('stale_lock_recoverable'));
+  lock({});
+  const live = check();
+  assert.equal(live.status, 0, JSON.stringify(live.out));
+  assert.ok(live.out.degraded.includes('lock_held'), 'a live holder: the next write waits for it (up to 10 s)');
+  writeFileSync(`${f.path}.lock.recovery`, '{}');
+  assert.equal(check().status, 0, 'a recovery marker is irrelevant while a live holder owns the lock (the append waits)');
+  lock({ pid: Number(dead) });
+  const recovering = check();
+  assert.equal(recovering.status, 1, 'a stale lock with an existing recovery marker: the append would refuse, so check says so');
+  rmSync(`${f.path}.lock.recovery`, { force: true });
+  releaseLock(f);
+  assert.deepEqual(readdirSyncSafe(dirname(f.path)), ['T1.jsonl'], 'check wrote nothing');
+});
+
+test('S5 repair 2 (4) batch validates EVERY op, including what encoding would refuse, before the first write: zero bytes on a bad later op', (t) => {
+  const f = fixture(t, [legacyStart('pre', new Date(Date.now() - 5000).toISOString())]);
+  const before = bytesOf(f);
+  const big = '9'.repeat(400);
+  const ok = { op: 'start', kind: 'phase', name: 'B', event_id: 'b' };
+  for (const bad of [{ n: big }, { n: `-${big}` }, { n: '9'.repeat(309) + '.5' }, { s: 'x'.repeat(513) }]) {
+    const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+      { encoding: 'utf8', input: JSON.stringify([ok, { op: 'start', kind: 'phase', name: 'C', event_id: 'c', metrics: bad }]) });
+    assert.equal(r.status, 1, JSON.stringify(bad).slice(0, 60));
+    assert.equal(JSON.parse(r.stdout.trim()).applied, 0);
+    assert.equal(bytesOf(f), before, `byte-identical log: ${JSON.stringify(bad).slice(0, 40)}`);
+  }
+  const single = f.cli(...phaseArgs('start', 'z'), '--metric', `n=${big}`);
+  assert.equal(single.status, 1, 'a 400-digit metric is refused on start too (never Infinity)');
+  assert.equal(bytesOf(f), before);
+});

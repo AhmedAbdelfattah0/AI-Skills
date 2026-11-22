@@ -35,7 +35,7 @@ import { parseRunState, malformedReason, workerRunStateAppend } from './run-stat
 import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
 import { finalMessage, parseWorkerReport } from './worker-report.mjs';
 import { runPolicy } from './engine-policy.mjs';
-import { ownDirIsShared } from './lib/run-log-paths.mjs';
+import { AUTH_SUBDIR, ownDirIsShared } from './lib/run-log-paths.mjs';
 
 export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
@@ -164,20 +164,24 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
   }
   // S5: the shared run log (<git-common-dir>/ai-skills/ship-ticket/<ticket>.jsonl) is telemetry and NEVER authorises: any
   // worktree writes it. Authority is read only from THIS worktree's own gitdir (the --git-path dir above): the
-  // <ticket>.review-auth.jsonl copy run-log.mjs writes for each REVIEW start recorded here, and, in a linked worktree, its
+  // review-auth/<ticket>.jsonl copy run-log.mjs writes for each REVIEW start recorded here, and, in a linked worktree, its
   // own pre-S5 <ticket>.jsonl (no other worktree writes it). In the main checkout the --git-path dir IS the common dir,
   // so its <ticket>.jsonl is the shared log and is not read (transitional: record a fresh REVIEW start after the upgrade).
+  // Repair 2: authority records live in the dedicated per-worktree subdirectory review-auth/ (no ticket name can address
+  // it; the pre-repair <ticket>.review-auth.jsonl files are NOT read), and a row counts only for EXACTLY this ticket
+  // (case-sensitive), so a case-folding filesystem cannot alias another ticket's or worktree's records into this one.
+  if (typeof approval.ticket !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(approval.ticket)) fail('REPAIR needs a safe ticket id');
   let shared = true;
   try { shared = ownDirIsShared(repoRoot); } catch { /* unknown: treat the own log as shared (fail closed) */ }
   let text = '';
-  for (const file of [approval.ticket + '.review-auth.jsonl', ...(shared ? [] : [approval.ticket + '.jsonl'])]) {
+  for (const file of [join(AUTH_SUBDIR, approval.ticket + '.jsonl'), ...(shared ? [] : [approval.ticket + '.jsonl'])]) {
     try { text += readFileSync(join(dir, file), 'utf8') + '\n'; } catch { /* absent: rejected below */ }
   }
   const found = text.split(/\r?\n/).some(line => {
     if (!line.trim()) return false;
     try {
       const row = JSON.parse(line);
-      return row.event === 'start' && row.kind === 'phase' && row.name === 'REVIEW'
+      return row.ticket === approval.ticket && row.event === 'start' && row.kind === 'phase' && row.name === 'REVIEW'
         && row.run_id === approval.run_id && row.metrics?.review_execution === reviewExecution;
     } catch { return false; }
   });

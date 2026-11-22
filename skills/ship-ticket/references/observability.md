@@ -38,18 +38,41 @@ It appends every start/end row of the worktree's own old log that the common log
 not already hold, verbatim and in file order, in one locked and validated append, and
 prints `{"migrated": n, "skipped_events": m}` (S-04 measurement rows are not copied). It
 is idempotent and never changes the old log; in the main checkout it does nothing. Migrated
-rows keep their original timestamps, so for them file order is not time order. Without it,
+rows keep their original timestamps, so for them file order is not time order. Which rows
+to copy is decided from the shared log as read and checked again under the lock against
+the exact bytes the copy follows; a concurrent `migrate` or end-time migration makes the
+later one re-select, so each legacy row has exactly one copy. One shared copy accounts for
+one legacy row: a row written twice to the shared log is still reported as a duplicate.
+Without it,
 removing the worktree loses that history (closed intervals and open starts), but never
 breaks the common log.
 
+**Duplicate legacy start (upgrade window).** If the same run and event id was started in a
+worktree's pre-S5 log and, from another worktree, in the shared log, every write from the
+first worktree is refused with `duplicate_start`, and plain `migrate` refuses too. Recover
+from the affected worktree with
+`run-log.mjs migrate --repo <WORKTREE> --ticket <TICKET> --resolve-duplicates`. It records
+the conflicting rows of that worktree's own old log (the start, and its end if the old log
+has one) verbatim in `git rev-parse --git-path ai-skills/ship-ticket/excluded/<TICKET>.jsonl`.
+Readers then leave exactly those rows out, and the shared start stands. The old log is not
+changed, nothing is deleted, and no other worktree's log is read. The trade-off is that the
+excluded legacy interval no longer counts in this worktree's view; it stays on disk as
+evidence.
+
 **REPAIR authority stays per worktree.** The common log is telemetry and never authorises
-a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its row
-to this worktree's own gitdir, `git rev-parse --git-path
-ai-skills/ship-ticket/<TICKET>.review-auth.jsonl`, a name no shared write uses. Without
-engine state, the carrier reads a REVIEW start only from that file and, in a linked worktree,
-from its own pre-S5 `<TICKET>.jsonl` (no other worktree writes it). The ticket suffix
-`.review-auth` is reserved. If the copy cannot be written, `start` exits 1 after the shared
-row is written, and REPAIR stays unauthorised.
+a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its
+row into a dedicated subdirectory of this worktree's own gitdir, `git rev-parse --git-path
+ai-skills/ship-ticket/review-auth/<TICKET>.jsonl`. No ticket name can address that
+directory: a ticket id has no `/`, so every shared write is a file directly in the log
+directory. Without engine state, the carrier reads a REVIEW start only from that file and,
+in a linked worktree, from its own pre-S5 `<TICKET>.jsonl` (no other worktree writes it).
+A row counts only when its `ticket` is exactly the requested ticket (case-sensitive), so a
+case-folding filesystem (APFS, NTFS) cannot alias one ticket's records into another's.
+Ticket ids ending in `.engine` or `.review-auth`, or equal to `review-auth` or `excluded`,
+are refused, compared case-insensitively. The earlier `<TICKET>.review-auth.jsonl` files
+of this branch's first repair are not read by anything and keep no authority. If the copy
+cannot be written, `start` exits 1 after the shared row is written, and REPAIR stays
+unauthorised.
 
 **Transitional upgrade note.** In the main checkout the old per-worktree path IS the common
 dir, so a REVIEW start that a pre-S5 version recorded there does not authorise a run-log
@@ -166,13 +189,17 @@ It writes nothing (no probe file, no directory, no lock) and prints one JSON lin
 written to `resolved_dir`. Exit 1, with `reason`: not a Git repository; a file the
 next append needs is not writable (the existing `<TICKET>.jsonl` itself, else its
 nearest existing directory, where `<TICKET>.jsonl.lock` is also created, and this
-worktree's `<TICKET>.review-auth.jsonl` or its directory); the lock file is
-unreadable or malformed; or the existing log would refuse writes (for example a torn tail,
+worktree's `review-auth/<TICKET>.jsonl` or its directory); the lock file is
+unreadable, malformed, held by another host (`lock_foreign_host`), or stale with an
+existing `<lock>.recovery` marker. These follow the same decision the next append's lock
+takes, using the same process probe; check mirrors it read-only, because the lock module
+has no read-only form. Exit 1 also when the existing log would refuse writes (for example a torn tail,
 `incomplete_tail`; the next write or `quarantine` moves it aside). An exit 1 is a
 declared degradation of the run's telemetry: record it (`harness degraded`) and
 continue. It never blocks the ticket. `degraded` lists notes that do not stop
 writes: `legacy_logs_read_only` (old per-worktree logs exist and are read),
-`stale_lock_recoverable` (a dead writer's lock the next write recovers), and
+`stale_lock_recoverable` (a dead writer's lock the next write recovers), `lock_held` (a
+live holder: the next write waits for it, up to 10 s), and
 `future_history` (a row of a run is more than 5 s in the future, see below).
 
 ### Several intervals at once: `batch`
@@ -191,7 +218,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs batch \
 `{"op": "start"|"end", "kind", "name", "event_id", "outcome"?, "metrics"?: {"key": value}}`.
 Metric values are typed exactly as `--metric key=value` types them and are never
 word-split, so `--` and spaces survive verbatim. A metric key must be a plain name;
-a key containing `=` is refused, never re-split. Every op is validated before the
+a key containing `=` is refused, never re-split. A numeric value must be finite (a
+400-digit number is refused, never stored as Infinity). Every op is validated before the
 first write; the ops then run in order and the first failure stops the batch. A
 batch is not atomic: ops already applied stay. stdout is one JSON line,
 `{"applied": n}` or `{"applied": n, "failed": {"index": i, "reason": "..."}}` (exit 1).
@@ -246,8 +274,10 @@ not computed inside run-log-io.
 - Shared observability is not shared authority. The common log never authorises a
   REPAIR; only this worktree's own gitdir does (see above).
 - Known limits: a writer reads only this worktree's own old log, so a start recorded
-  by a pre-S5 version in another worktree can be ended only from that worktree; and a
-  hand edit of any log file is outside these guarantees.
+  by a pre-S5 version in another worktree can be ended only from that worktree. The
+  duplicate legacy start of the upgrade window needs the explicit
+  `migrate --resolve-duplicates` from the affected worktree. A hand edit of any log file is
+  outside these guarantees.
 - Telemetry never gates a ship decision. The integrity line never changes
   `ship-ready-check`'s exit code, and a failed `check` is a recorded degradation.
 

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn as spawnAsync } from 'node:child_process';
 import { commonLogDir, legacyLogDirs, ownLogDir, readLogRows } from './run-log-paths.mjs';
 
 const RUN_LOG = fileURLToPath(new URL('../run-log.mjs', import.meta.url));
@@ -210,4 +210,72 @@ test('S5 migrate: copies the own legacy log (open starts and closed pairs) verba
   assert.deepEqual(s.integrity_warnings, []);
   const none = fx.cli(fx.main, 'migrate', '--ticket', 'T1');
   assert.deepEqual(JSON.parse(none.stdout.trim()), { migrated: 0, skipped_events: 0 }, 'the main checkout has no separate legacy log');
+});
+
+// ---- S5 review repair 2
+test('S5 repair 2 (1) reserved ticket names are refused case-insensitively (pure rule)', async () => {
+  const { isReservedTicket } = await import('./run-log-paths.mjs');
+  assert.equal(typeof isReservedTicket, 'function');
+  for (const n of ['T.engine', 'T.ENGINE', 'T.review-auth', 'T.REVIEW-AUTH', 'T.Review-Auth', 'review-auth', 'REVIEW-AUTH', 'excluded', 'EXCLUDED']) assert.equal(isReservedTicket(n), true, n);
+  for (const n of ['T', 'T-1', 'review', 'engine', 'auth.T', 'T.review']) assert.equal(isReservedTicket(n), false, n);
+});
+
+const spawnRunLog = (repo, ...args) => new Promise((done) => {
+  const child = spawnAsync(process.execPath, [RUN_LOG, ...args, '--repo', repo]);
+  let out = '', err = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { err += d; });
+  child.on('close', (status) => done({ status, out, err }));
+});
+const sharedRows = (fx) => readFileSync(join(fx.common, 'T1.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+const copies = (rows, id, event = 'start') => rows.filter((r) => r.event_id === id && r.event === event).length;
+
+test('S5 repair 2 (2) concurrent migrate/migrate and migrate/end-time migration leave exactly ONE verbatim copy', async (t) => {
+  for (let round = 0; round < 4; round += 1) {
+    const fx = worktrees(t);
+    const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+    const [ta, tb] = [ago(30), ago(20)];
+    seed(fx.wt2Legacy, [legacyRow('start', 'a', ta), legacyRow('start', 'b', tb)]);
+    const results = await Promise.all(round % 2 === 0
+      ? [spawnRunLog(fx.wt2, 'migrate', '--ticket', 'T1'), spawnRunLog(fx.wt2, 'migrate', '--ticket', 'T1')]
+      : [spawnRunLog(fx.wt2, 'migrate', '--ticket', 'T1'), spawnRunLog(fx.wt2, ...iv('end', 'a'))]);
+    for (const r of results) assert.equal(r.status, 0, r.err);
+    const rows = sharedRows(fx);
+    assert.equal(copies(rows, 'a'), 1, `round ${round}: one copy of start a`);
+    assert.equal(copies(rows, 'b'), 1, `round ${round}: one copy of start b`);
+    assert.deepEqual(summary(fx, fx.wt2).integrity_warnings, [], `round ${round}`);
+  }
+});
+
+test('S5 repair 2 (2) a verbatim row written TWICE to the shared log is a duplicate, even when a legacy copy exists', (t) => {
+  const fx = worktrees(t);
+  const row = legacyRow('start', 'a', new Date(Date.now() - 1000).toISOString());
+  seed(fx.wt2Legacy, [row]);
+  seed(fx.common, [row, row]);
+  const s = summary(fx, fx.wt2);
+  assert.ok(s.integrity_warnings.some((w) => w.code === 'duplicate_start'), JSON.stringify(s.integrity_warnings));
+  assert.match(fx.cli(fx.wt2, ...iv('start', 'z')).stderr, /duplicate_start/, 'writers refuse it too');
+});
+
+test("S5 repair 2 (5) N1: a legacy start colliding with another worktree's start of the same id is recoverable from the affected worktree, keeping all evidence", (t) => {
+  const fx = worktrees(t);
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  seed(fx.wt2Legacy, [legacyRow('start', 'a', ago(60))]);
+  const legacyBytes = readFileSync(join(fx.wt2Legacy, 'T1.jsonl'));
+  assert.equal(fx.cli(fx.main, ...iv('start', 'a')).status, 0, 'the same run and event id started from the main checkout after the upgrade');
+  const locked = fx.cli(fx.wt2, ...iv('start', 'z'));
+  assert.equal(locked.status, 1, 'wt2 is locked out by duplicate_start');
+  const plain = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1');
+  assert.equal(plain.status, 1, 'plain migrate refuses to copy a conflicting start');
+  const r = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout.trim()).excluded, 1);
+  assert.deepEqual(readFileSync(join(fx.wt2Legacy, 'T1.jsonl')), legacyBytes, 'the legacy log is never changed');
+  const excluded = readFileSync(join(fx.wt2Legacy, 'excluded', 'T1.jsonl'), 'utf8');
+  assert.equal(excluded, legacyBytes.toString('utf8'), 'the excluded row is recorded verbatim');
+  assert.equal(fx.cli(fx.wt2, ...iv('start', 'z')).status, 0, 'wt2 can write again');
+  assert.equal(fx.cli(fx.wt2, ...iv('end', 'a')).status, 0, 'and end the shared start a');
+  assert.deepEqual(summary(fx, fx.main).integrity_warnings, []);
+  const again = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates');
+  assert.equal(JSON.parse(again.stdout.trim()).excluded, 0, 'idempotent');
 });

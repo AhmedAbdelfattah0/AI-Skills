@@ -16,15 +16,17 @@ import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
 import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
-import { commonLogDir, legacyLogDirs, ownLogDir, readLogRows, reportLogDirs } from './lib/run-log-paths.mjs';
+import { AUTH_SUBDIR, EXCLUDED_SUBDIR, commonLogDir, isReservedTicket, legacyLogDirs, ownLogDir, readLogRows, reportLogDirs } from './lib/run-log-paths.mjs';
+import { processInfo } from './engine-quiesce.mjs';
+import { hostname } from 'node:os';
 import { isTimestamp } from './lib/shape.mjs';
 import { isEntrypoint } from './harness.mjs';
 
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
 /**
- * S5 repair: REVIEW authority stays per worktree. `<git-path>/ai-skills/ship-ticket/<ticket>.review-auth.jsonl` (this
- * worktree's own gitdir, a name no shared telemetry write ever uses) receives a copy of every REVIEW phase start this
- * worktree records; carrier.mjs reads REPAIR authority from it, never from the shared log.
+ * S5 repair: REVIEW authority stays per worktree, in `<git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl`
+ * (lib/run-log-paths AUTH_SUBDIR; no ticket name can address a subdirectory). `.review-auth` is only the suffix of the first
+ * repair's files: they are skipped as tickets and read by nothing.
  */
 const AUTH_TAG = '.review-auth';
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -45,7 +47,7 @@ function usage() {
   run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>] [--ended-at <iso>]
   run-log.mjs batch --repo <path> --ticket <key> --run-id <id> --ops-file <path|->
   run-log.mjs check --repo <path> [--ticket <key>]
-  run-log.mjs migrate --repo <path> [--ticket <key>]
+  run-log.mjs migrate --repo <path> [--ticket <key>] [--resolve-duplicates]
   run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> [--event-id <id>] [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>]
   run-log.mjs close --repo <path> --ticket <key> --run-id <id> --through <iso> --final true|false --count-source orchestrator_tally|posthoc --count <kind>=<n> ...
   run-log.mjs quarantine --repo <path> --ticket <key>
@@ -57,7 +59,8 @@ per-worktree log (git rev-parse --git-path ai-skills/ship-ticket) is read, never
 batch: JSON ops [{op:"start"|"end", kind, name, event_id, outcome?, metrics?:{k:v}}], validated first, applied in order, not atomic.
 check: read-only preflight, one JSON line {ok, resolved_dir, legacy_logs, degraded?, reason?}; exit 1 is a declared degradation.
 migrate: copy this worktree's pre-S5 log into the shared log (run it before git worktree remove); end does it per interval.
-A REVIEW phase start is also written to <git-path>/ai-skills/ship-ticket/<ticket>.review-auth.jsonl (REPAIR authority, per worktree).
+A REVIEW phase start is also written to <git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl (REPAIR authority, per worktree).
+migrate --resolve-duplicates: record this worktree's legacy rows that collide with a different shared start in excluded/<ticket>.jsonl.
 --started-at/--ended-at on start/end: strict UTC ISO, within now+5s..now-24h, never earlier than a recorded row of the run;
 the row is labelled timestamp_source=supplied, label=estimated. event --started-at/--ended-at take the same now-window bounds.
 Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${CLI_EVENT_NAMES.join(', ')}.
@@ -89,6 +92,10 @@ function parseArgs(argv) {
     const token = argv[index];
     if (token === '--all') {
       options.all = true;
+      continue;
+    }
+    if (token === '--resolve-duplicates') {
+      options.resolveDuplicates = true;
       continue;
     }
     if (!token.startsWith('--')) fail(`unexpected argument: ${token}`);
@@ -129,12 +136,16 @@ function validateId(label, value) {
   }
   // <ticket>.engine.jsonl is the run engine's event file: ticket X.engine's timing log would be ticket X's.
   if (label === 'ticket' && value.endsWith('.engine')) fail('ticket must not end in .engine (reserved for the run engine event file)');
-  if (label === 'ticket' && value.endsWith(AUTH_TAG)) fail(`ticket must not end in ${AUTH_TAG} (reserved for the per-worktree REVIEW authority file)`);
+  if (label === 'ticket' && isReservedTicket(value)) fail('ticket is reserved (compared case-insensitively: a .engine or .review-auth suffix, review-auth, excluded)');
   return value;
 }
 
 function parseMetricValue(raw) {
-  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) return Number(raw);
+  if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) fail('a numeric metric value must be a finite number');
+    return n;
+  }
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   if (raw === 'null') return null;
@@ -253,15 +264,33 @@ function pairWarnings(rows) {
 function mergeRows(lists) {
   const nonEmpty = lists.filter((l) => l.length);
   if (nonEmpty.length <= 1) return nonEmpty[0] ?? [];
-  // A row migrated verbatim from a legacy log into the shared log is one row, not a duplicate of itself: a row equal to a
-  // row of an EARLIER file is dropped. Duplicates inside one file are kept, so they are still reported.
-  const firstFile = new Map();
-  const unique = nonEmpty.flatMap((list, file) => list.filter((row) => {
-    const key = JSON.stringify(row);
-    if (!firstFile.has(key)) { firstFile.set(key, file); return true; }
-    return firstFile.get(key) === file;
-  }));
+  // A row migrated verbatim from a legacy log into the shared log is one row, not a duplicate of itself. Only ONE later
+  // copy is excused per occurrence in an earlier file: a row written twice to the shared log stays a duplicate.
+  const unique = excuseCopies(nonEmpty);
   return unique.map((row, i) => [row, i]).sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([row]) => row);
+}
+
+/** Rows of `lists` in order, dropping from each later list at most one verbatim copy per occurrence in the earlier lists. */
+function excuseCopies(lists) {
+  const credit = new Map();
+  return lists.flatMap((list) => {
+    const kept = list.filter((row) => {
+      const key = JSON.stringify(row);
+      const n = credit.get(key) ?? 0;
+      if (n > 0) { credit.set(key, n - 1); return false; }
+      return true;
+    });
+    for (const row of kept) { const key = JSON.stringify(row); credit.set(key, (credit.get(key) ?? 0) + 1); }
+    return kept;
+  });
+}
+/** `rows` minus the verbatim rows recorded in `<dir>/excluded/<ticket>.jsonl` (one removal per recorded copy). */
+function withoutExcluded(rows, dir, ticket) {
+  const path = join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`);
+  if (!existsSync(path)) return rows;
+  const debt = new Map();
+  for (const row of rowsFromText(readFileSync(path, 'utf8'), path).rows) { const k = JSON.stringify(row); debt.set(k, (debt.get(k) ?? 0) + 1); }
+  return rows.filter((row) => { const k = JSON.stringify(row); const n = debt.get(k) ?? 0; if (n > 0) { debt.set(k, n - 1); return false; } return true; });
 }
 
 /** Pairing warnings of `merged` that the read-only `context` rows did not already have: what a write would introduce. */
@@ -279,8 +308,8 @@ function newPairWarnings(context, merged) {
 function legacyContext(loc, ticket) {
   const path = loc.legacy ? logPath(loc.legacy, ticket) : null;
   const legacyBuf = path && existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
-  const context = legacyBuf.length ? rowsFromText(legacyBuf.subarray(0, committedLength(legacyBuf)).toString('utf8'), path).rows : [];
-  return { context, legacyBuf };
+  const all = legacyBuf.length ? rowsFromText(legacyBuf.subarray(0, committedLength(legacyBuf)).toString('utf8'), path).rows : [];
+  return { context: path ? withoutExcluded(all, loc.legacy, ticket) : all, legacyBuf };
 }
 
 /**
@@ -414,9 +443,10 @@ async function appendRows(directory, ticket, records, check, { context = [], leg
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${ticket}${suffix}`), now = new Date().toISOString();
   const { lost } = await appendLocked(path, encodeRecords(records), { marker: (info) => encodeRecords([encodeLoss(ticket, info, now)]),
-    check: (after, before) => { assertCleanLog(after, path, context);
+    // The guard (stamp, window, migration selection) runs first, so a decision overtaken by a concurrent writer re-selects
+    // instead of surfacing as the duplicate it would create; then the whole resulting file is validated.
+    check: (after, before) => { if (guard) guard(before); assertCleanLog(after, path, context);
       if (check) check([...legacyEnds, ...readEvents(before).events.map((e) => e.end)]);
-      if (guard) guard(before);
     } });
   if (lost) process.stderr.write(`run-log: moved ${lost.bytes} byte(s) of a torn tail to ${sidecarPath(path, lost)} and recorded log_loss\n`);
 }
@@ -567,7 +597,7 @@ async function appendStamped(attempt) {
 /** S5 repair: the per-worktree REVIEW authority copy of a REVIEW phase start (carrier REPAIR reads only this, never the shared log). */
 async function writeAuthority(loc, row) {
   if (row.kind !== 'phase' || row.name !== 'REVIEW' || row.event !== 'start') return;
-  try { await appendRows(loc.authDir, row.ticket, [row], undefined, { suffix: `${AUTH_TAG}.jsonl` }); }
+  try { await appendRows(join(loc.authDir, AUTH_SUBDIR), row.ticket, [row]); }
   catch (error) {
     fail(`the REVIEW start is in the shared log, but its per-worktree authority copy failed (${error.message}); REPAIR stays unauthorised: record a new REVIEW start (new event id, same review_execution)`);
   }
@@ -666,7 +696,14 @@ async function end(options, { print = true, loc: given } = {}) {
     // S5 repair, end-time migration: a start found only in this worktree's legacy log is copied verbatim into the shared
     // log in the same append, before its end, so removing the worktree never leaves an end without its start.
     const inShared = view.sharedRows.some((r) => r.event === 'start' && r.run_id === interval.runId && r.event_id === interval.eventId);
-    return { directory, ticket: interval.ticket, records: inShared ? [next] : [started, next], context: view.context, guard: stamp.guard, after: () => next };
+    // Decided again UNDER the lock: a concurrent `migrate` may have copied the start meanwhile; then re-select (retry).
+    const guard = inShared ? stamp.guard : (before) => {
+      if (lockedRows(before, view.path).some((r) => r.event === 'start' && r.run_id === interval.runId && r.event_id === interval.eventId)) {
+        throw Object.assign(new Error(`the start of ${interval.eventId} was migrated meanwhile; re-selecting`), { code: RESTAMP });
+      }
+      stamp.guard(before);
+    };
+    return { directory, ticket: interval.ticket, records: inShared ? [next] : [started, next], context: view.context, guard, after: () => next };
   });
   if (print) process.stdout.write(`${JSON.stringify(replay ?? row)}\n`);
   return replay ?? row;
@@ -783,7 +820,7 @@ function ticketsIn(dirs) {
 function reportRows(dirs, ticket) {
   const sources = readLogRows(dirs, ticket, (bytes, path) => rowsFromText(bytes.toString('utf8'), path));
   if (sources.length <= 1) return { ...(sources[0]?.parsed ?? { rows: [], warnings: [] }), sources };
-  const lists = sources.map((source) => source.parsed.rows);
+  const lists = sources.map((source, i) => (i === 0 ? source.parsed.rows : withoutExcluded(source.parsed.rows, source.dir, ticket)));
   const rows = mergeRows([...lists.slice(1), lists[0]]);
   const warnings = [...sources.flatMap((source) => source.parsed.warnings.filter((w) => w.run_id === undefined)), ...pairWarnings(rows)];
   return { rows, warnings, sources };
@@ -860,6 +897,29 @@ export function integritySummary(repo, ticket) {
  * One JSON line `{ ok, resolved_dir, legacy_logs, degraded?, reason? }`; exit 0 when telemetry can be written, else 1.
  * A failure is a declared degradation for the run (record it), never a blocker for the ticket.
  */
+/**
+ * How the next append's acquireLock (lib/durable-io.mjs, used through run-log-io) would treat an existing `<log>.lock`,
+ * read-only. It mirrors that decision table with the SAME process probe (engine-quiesce processInfo) and host name;
+ * durable-io exposes no read-only form of it, and it is not changed here. `refuse` = the append would fail (malformed,
+ * foreign host, a stale lock whose recovery marker exists); `degraded` = it would proceed (`lock_held`: waits for a live holder up to
+ * 10 s; `stale_lock_recoverable`: a dead or reused pid it recovers).
+ */
+function lockHealth(lockFile) {
+  if (!existsSync(lockFile)) return {};
+  let held;
+  try { held = JSON.parse(readFileSync(lockFile, 'utf8')); } catch { return { refuse: `lock_malformed: ${lockFile} is unreadable; remove it by hand when no writer runs` }; }
+  if (!held || typeof held.pid !== 'number' || typeof held.host !== 'string' || !Number.isInteger(held.pid) || held.pid <= 0 || held.pid > 0x7fffffff) {
+    return { refuse: `lock_malformed: ${lockFile} is malformed; remove it by hand when no writer runs` };
+  }
+  if (held.host !== hostname()) return { refuse: `lock_foreign_host: ${lockFile} is held by host ${held.host}; release it on that host` };
+  const other = processInfo(held.pid) ?? { alive: false, startTime: null };
+  const reused = other.startTime !== null && (held.process_start_time ?? null) !== null && other.startTime !== held.process_start_time;
+  if (other.alive && !reused) return { degraded: 'lock_held' };
+  // A stale lock is recovered through <lock>.recovery; an existing marker makes that recovery refuse.
+  if (existsSync(`${lockFile}.recovery`)) return { refuse: `lock_held: a recovery of a stale ${lockFile} is in progress or was abandoned (${lockFile}.recovery); if no writer runs, remove the marker by hand` };
+  return { degraded: 'stale_lock_recoverable' };
+}
+
 function checkCommand(options) {
   const out = { ok: false, resolved_dir: null, legacy_logs: 0 };
   const degraded = [];
@@ -872,7 +932,7 @@ function checkCommand(options) {
   const repo = options.repo;
   if (!repo) return finish('--repo is required');
   const ticket = options.ticket;
-  if (ticket !== undefined && (!SAFE_ID.test(ticket) || ticket.endsWith('.engine') || ticket.endsWith(AUTH_TAG))) return finish('invalid --ticket');
+  if (ticket !== undefined && (!SAFE_ID.test(ticket) || isReservedTicket(ticket))) return finish('invalid --ticket');
   let loc;
   try { loc = locations(repo); } catch (error) { return finish(`not a git repository: ${error.message}`); }
   out.resolved_dir = loc.directory;
@@ -890,15 +950,10 @@ function checkCommand(options) {
     out.legacy_logs = legacyDirs.filter((d) => existsSync(logPath(d, ticket))).length;
     const path = logPath(loc.directory, ticket);
     // The shared log, the directory its <log>.lock is created in, and this worktree's REVIEW authority file.
-    for (const target of [path, join(loc.authDir, `${ticket}${AUTH_TAG}.jsonl`)]) { const why = writable(target); if (why) return finish(why); }
-    if (existsSync(`${path}.lock`)) {
-      let held = null;
-      try { held = JSON.parse(readFileSync(`${path}.lock`, 'utf8')); } catch { return finish(`${path}.lock is unreadable (remove it by hand when no writer runs)`); }
-      if (!held || !Number.isInteger(held.pid) || held.pid <= 0 || typeof held.host !== 'string') return finish(`${path}.lock is malformed`);
-      let alive = true;
-      try { process.kill(held.pid, 0); } catch (e) { alive = e.code === 'EPERM'; }
-      if (!alive) degraded.push('stale_lock_recoverable');
-    }
+    for (const target of [path, join(loc.authDir, AUTH_SUBDIR, `${ticket}.jsonl`)]) { const why = writable(target); if (why) return finish(why); }
+    const lock = lockHealth(`${path}.lock`);
+    if (lock.refuse) return finish(lock.refuse);
+    if (lock.degraded) degraded.push(lock.degraded);
     if (existsSync(path)) {
       const { context } = legacyContext(loc, ticket);
       try { assertCleanLog(readFileSync(path), path, context); } catch (error) { return finish(error.message); }
@@ -963,6 +1018,9 @@ async function batchCommand(options) {
       const interval = intervalOptions(opts);
       const metrics = parseMetrics(metric, { lenientGap: op.op === 'end' });
       if (op.op === 'start') validateReviewStart(interval, metrics);
+      // Everything execution-time encoding would refuse is refused now, before the first write (repair 2).
+      encodeRecords([{ schema: SCHEMA, ticket: interval.ticket, run_id: interval.runId, event: op.op, event_id: interval.eventId, kind: interval.kind,
+        name: interval.name, timestamp: new Date().toISOString(), ...(op.op === 'end' ? { duration_ms: 0, outcome: op.outcome ?? 'complete' } : {}), metrics }]);
       prepared.push({ op: op.op, opts });
     } catch (error) { quiet = false; return stop(index, error); }
   }
@@ -984,21 +1042,65 @@ async function batchCommand(options) {
  */
 async function migrateCommand(options) {
   const loc = locations(requireOption(options, 'repo'));
-  const out = { migrated: 0, skipped_events: 0 };
+  const out = { migrated: 0, skipped_events: 0, ...(options.resolveDuplicates ? { excluded: 0 } : {}) };
   if (loc.legacy) {
     const tickets = options.ticket !== undefined ? [validateId('ticket', options.ticket)] : ticketsIn([loc.legacy]);
     for (const ticket of tickets) {
+      if (options.resolveDuplicates) out.excluded += await excludeConflicts(loc, ticket);
       const { context, legacyBuf } = legacyContext(loc, ticket);
       if (!legacyBuf.length) continue;
       out.skipped_events += readEvents(legacyBuf).events.length;
-      const shared = new Set(readRows(logPath(loc.directory, ticket), false, { pairing: false }).rows.map((r) => JSON.stringify(r)));
-      const records = context.filter((r) => !shared.has(JSON.stringify(r)));
-      if (!records.length) continue;
-      await failOnError(appendRows(loc.directory, ticket, records, undefined, { context }));
-      out.migrated += records.length;
+      const path = logPath(loc.directory, ticket);
+      // Selection is made from the shared log as read and checked again UNDER the lock against the exact bytes the copy is
+      // appended after: a concurrent migrate or end-time migration that copied a row meanwhile makes this one re-select.
+      let migrated = 0;
+      for (let attempt = 1; ; attempt += 1) {
+        const shared = readRows(path, false, { pairing: false }).rows;
+        const records = notYetCopied(context, shared);
+        if (!records.length) break;
+        try {
+          await appendRows(loc.directory, ticket, records, undefined, { context, guard: (before) => {
+            if (notYetCopied(context, lockedRows(before, path)).length !== records.length) {
+              throw Object.assign(new Error('the shared log changed meanwhile; re-selecting'), { code: RESTAMP });
+            }
+          } });
+          migrated = records.length;
+          break;
+        } catch (error) {
+          if (error?.code === RESTAMP && attempt < STAMP_ATTEMPTS) continue;
+          fail(`${error.message}${/duplicate_start/.test(error.message) ? ' (a legacy start collides with a different start of the same id: run-log.mjs migrate --resolve-duplicates)' : ''}`);
+        }
+      }
+      out.migrated += migrated;
     }
   }
   process.stdout.write(`${JSON.stringify(out)}\n`);
+}
+
+/** The legacy rows (in order) with no verbatim copy in `shared`: one shared copy accounts for one legacy occurrence. */
+function notYetCopied(legacy, shared) {
+  const have = new Map();
+  for (const row of shared) { const k = JSON.stringify(row); have.set(k, (have.get(k) ?? 0) + 1); }
+  return legacy.filter((row) => { const k = JSON.stringify(row); const n = have.get(k) ?? 0; if (n > 0) { have.set(k, n - 1); return false; } return true; });
+}
+
+/**
+ * `migrate --resolve-duplicates` (S5 repair 2, N1). During the upgrade window the same run and event id may be started in
+ * this worktree's pre-S5 log AND (by another worktree) in the shared log; the union then has duplicate_start and every
+ * write from this worktree is refused. This records the conflicting legacy rows of THIS worktree's own old log (that start,
+ * and its end if the old log has one), verbatim, in `<own legacy dir>/excluded/<ticket>.jsonl`; readers then leave exactly
+ * those rows out. The old log itself is not changed and nothing is deleted. No sibling log is read. Returns the count.
+ */
+async function excludeConflicts(loc, ticket) {
+  const { context } = legacyContext(loc, ticket);
+  const shared = readRows(logPath(loc.directory, ticket), false, { pairing: false }).rows;
+  const sharedKeys = new Set(shared.map((r) => JSON.stringify(r)));
+  const clash = new Set(context.filter((r) => r.event === 'start' && !sharedKeys.has(JSON.stringify(r))
+    && shared.some((x) => x.event === 'start' && x.run_id === r.run_id && x.event_id === r.event_id)).map((r) => JSON.stringify([r.run_id, r.event_id])));
+  const rows = context.filter((r) => clash.has(JSON.stringify([r.run_id, r.event_id])));
+  if (!rows.length) return 0;
+  await failOnError(appendRows(join(loc.legacy, EXCLUDED_SUBDIR), ticket, rows));
+  return rows.length;
 }
 
 async function main(argv) {

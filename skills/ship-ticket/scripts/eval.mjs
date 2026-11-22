@@ -435,10 +435,12 @@ function report(options) {
     const logs = readLogRows(logDirs, ticket).map((source) => source.path).reverse(); // legacy files first, the common log last
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
-    // A row migrated verbatim into the shared log (S5) is one row: a row equal to one of an earlier file is dropped.
-    const seen = new Map();
-    const once = (row, file) => { const k = JSON.stringify(row); if (!seen.has(k)) seen.set(k, file); return seen.get(k) === file; };
-    for (const row of logs.flatMap((log, file) => legacyRows(readJsonl(log)).filter((r) => once(r, file)))) {
+    // A row migrated verbatim into the shared log (S5) is one row: one later copy is excused per occurrence in an earlier
+    // file, so a row written twice to the shared log still counts twice (and is reported by buildRun).
+    const credit = new Map();
+    const once = (rows) => { const kept = rows.filter((r) => { const k = JSON.stringify(r); const n = credit.get(k) ?? 0; if (n > 0) { credit.set(k, n - 1); return false; } return true; });
+      for (const r of kept) { const k = JSON.stringify(r); credit.set(k, (credit.get(k) ?? 0) + 1); } return kept; };
+    for (const row of logs.flatMap((log) => once(legacyRows(readJsonl(log))))) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);

@@ -331,7 +331,7 @@ test('structural: one module holds the row schema literal, only run-log.mjs impo
   assert.equal((runLog.match(/\bappendLocked\(/g) ?? []).length, 1);
   assert.match(runLog, /await appendLocked\(path, encodeRecords\(records\), \{ marker: \(info\) => encodeRecords\(\[encodeLoss\(/);
   assert.equal((runLog.match(/\bquarantineLocked\(/g) ?? []).length, 1);
-  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?assertCleanLog\(after, path(, context)?\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
+  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?(?:if \(guard\) guard\(before\); )?assertCleanLog\(after, path(, context)?\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
 });
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
