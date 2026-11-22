@@ -544,6 +544,9 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   checked_findings, outcome, evidence}`): when supplied it is validated and counted (the record is
   PASS only when both are), and it is required (`missing_second_opinion`) when the repair's write
   set overlaps a node labelled `concurrency` or `security` (review.md, Targeted confirmation).
+  Only an original review records a dispute of a dropped pair (`security_na_disputed` at
+  confirmation and ship-ready); a confirmation records none, and a RETRY is not bound to a
+  confirmation FAIL (security-risk.md section 13, L2 and L3).
   A repair dispatch is routed like the nodes whose writes it overlaps (their risk labels, and high
   complexity if any is high), so a repair of a risk-labelled node gets the strong tier.
 

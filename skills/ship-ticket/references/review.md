@@ -188,8 +188,14 @@ and rule-catalogue work:
   evidence without rerunning attacks;
 - return an explicit `security_outcome` for a security-sensitive ticket;
 - under security policy 2, return one primary `rule_row` per effective pair,
-  `subject_id` `<boundary>:<control>`, with the pair's spec evidence (see
-  [security-risk.md](security-risk.md)).
+  `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
+  dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
+  the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
+  gives its finding `subject_id: '<boundary>:<control>'`, which records the same
+  run-wide dispute (see
+  [security-risk.md](security-risk.md) section 9). No file is exempted by its
+  name: a test file that registers a route or sits on an auth path is a §3a
+  surface with its own pairs, like any other file.
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
@@ -253,8 +259,10 @@ single Fable fallback, then `WAIT_FOR_USER`.
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
 passing and `overflow: false`. Under security policy 2, `NOT_TRIGGERED` for
-`security_outcome` is rejected while unwaived pairs are effective, and
-`NOT_APPLICABLE` is rejected for a pair without a trusted `SECURITY_WAIVER`.
+`security_outcome` is rejected while unwaived pairs are effective or a dropped pair
+is disputed, `NOT_APPLICABLE` is rejected for an effective pair without a trusted
+`SECURITY_WAIVER`, and `PASS` is rejected for a dropped pair. A disputed dropped pair
+is never cleared by repair and confirmation (`security_na_disputed`).
 
 ## Reconcile once
 
@@ -370,7 +378,9 @@ gate counts a supplied one (the confirmation is PASS only when both are), and
 requires it (`missing_second_opinion`) when the repair's write set overlaps a node
 labelled `concurrency` or `security`. A security or architecture finding on a node
 without such a label is not detectable by the gate: supplying the second opinion
-there stays the orchestrator's duty. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
+there stays the orchestrator's duty. A confirmation records no dispute of a dropped
+pair, whatever its rows, findings or evidence say: only an original review does
+([security-risk.md](security-risk.md) section 13, L2). Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle. A residual
 within the plan's recorded ship threshold is not actionable here: the confirmation

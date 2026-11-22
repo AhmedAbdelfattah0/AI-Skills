@@ -80,7 +80,7 @@ export const securityOn = (S) => S?.config?.securityPolicy === 2;
 /** Every refusal code the engine half of Wave B introduced (security-plan.mjs keeps its own SECURITY_CODES). */
 export const ENGINE_SECURITY_CODES = Object.freeze(['security_policy_required', 'security_pairs_mismatch', 'catalog_unavailable', 'control_unproven',
   'waiver_unauthorized', 'addendum_conflict', 'addendum_outside_contract', 'addendum_required', 'reassess_unclassified', 'reassess_stale',
-  'security_review_stale', 'security_row_escape', 'security_outcome_escape', 'security_reapproval']);
+  'security_review_stale', 'security_row_escape', 'security_outcome_escape', 'security_reapproval', 'security_na_disputed']);
 /** A boundary id: printable (no control character or line break), no edge whitespace, at most 200 characters; ':' allowed. */
 export const BOUNDARY_ID = /^[^\s\x00-\x1f\x7f\x85\u2028\u2029](?:[^\x00-\x1f\x7f\x85\u2028\u2029]{0,198}[^\s\x00-\x1f\x7f\x85\u2028\u2029])?$/;
 /** The pair id '<boundary>:<control>' (review rule_rows subject_id). */

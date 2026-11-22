@@ -139,7 +139,7 @@ test('[S2] no fixture or harness builds a START from the current clock without p
 
 test('ENGINE_SECURITY_CODES lists exactly the new engine refusal codes', () => {
   assert.deepEqual([...D.ENGINE_SECURITY_CODES].sort(), ['addendum_conflict', 'addendum_outside_contract', 'addendum_required', 'catalog_unavailable',
-    'control_unproven', 'reassess_stale', 'reassess_unclassified', 'security_outcome_escape', 'security_pairs_mismatch', 'security_policy_required',
+    'control_unproven', 'reassess_stale', 'reassess_unclassified', 'security_na_disputed', 'security_outcome_escape', 'security_pairs_mismatch', 'security_policy_required',
     'security_reapproval', 'security_review_stale', 'security_row_escape', 'waiver_unauthorized']);
   assert.ok(Object.isFrozen(D.ENGINE_SECURITY_CODES));
 });
