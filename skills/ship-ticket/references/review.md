@@ -199,8 +199,10 @@ and rule-catalogue work:
   in a confirmation, with `candidate_id` the reviewed candidate. Read the file
   itself, because its name alone is not enough. Return `PASS` when it registers
   no production route or auth/middleware change, no production code imports it
-  and no loader or deploy config serves it. Return `FAIL` when it does, which is
-  a run-wide dispute. The evidence cites the path and states the conclusion. The
+  and no loader or deploy config serves it. Also return `PASS` when the path is
+  an approved §3a surface whose pairs carry that obligation, and cite the
+  surface. Return `FAIL` otherwise, which is a run-wide dispute. The evidence
+  cites the path and states the conclusion. The
   gate refuses a missing, duplicate, unknown, stale, unevidenced or
   `NOT_APPLICABLE` row.
 

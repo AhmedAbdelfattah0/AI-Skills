@@ -389,7 +389,9 @@ add-only dispute list, the same one a disputed dropped pair uses. Confirmation a
 ship-ready then refuse `security_na_disputed`. A repair, a confirmation or a RETRY
 review cannot clear it, and neither can an addendum or a waiver, because those
 address pairs, not files. Only a re-approved plan that names the file as a surface
-clears it, which means a new run.
+clears it, which means a new run. The detector still records the exemption there,
+so the file still needs its `c5:` row. That row is `PASS` with the surface cited,
+because the surface's pairs now carry the obligation.
 
 **Limit (manual flow).** The engine-less `security-plan.mjs reassess` prints
 `c5_exempted`, but no gate checks the review rows there. In that flow the rows are
