@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkShipReady } from './ship-ready-check.mjs';
@@ -142,4 +142,36 @@ test('--engine-log may repeat: a gate line in any file matches', () => {
   const r = cliMulti(p, [log([gate('c1')]), log([gate('c2')])]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(cliMulti(p, [log([gate('c1')]), log([])]).status, 1);
+});
+
+// ---- S5 (F05): the run-log integrity line. Informational only: it never changes the exit code.
+test('AC7 integrity line: printed after the pass line with --repo/--ticket, "unavailable" without a log, absent without the flags; exit code unchanged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'srcheck-s5-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q', dir]).status, 0);
+    writeFileSync(join(dir, 'plan.md'), plan([ready('c1')]));
+    writeFileSync(join(dir, 'engine.log'), log([gate('c1')]));
+    writeFileSync(join(dir, 'bad.log'), log([]));
+    const run = (engineLog, ...extra) => spawnSync(process.execPath, [CLI, 'check', '--run-state', join(dir, 'plan.md'), '--engine-log', join(dir, engineLog), ...extra], { encoding: 'utf8' });
+    const absent = run('engine.log');
+    assert.equal(absent.status, 0);
+    assert.doesNotMatch(absent.stdout, /run-log integrity/);
+    const missing = run('engine.log', '--repo', dir, '--ticket', 'T1');
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.match(missing.stdout, /^ship-ready-check: ok .*\nrun-log integrity: unavailable \(no run log for T1\)\n$/);
+    const logDir = join(dir, '.git', 'ai-skills', 'ship-ticket');
+    mkdirSync(logDir, { recursive: true });
+    const row = (event, id, ts, extra = {}) => JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T1', run_id: 'run-1', event, event_id: id, kind: 'phase',
+      name: 'P' + id, timestamp: ts, metrics: {}, ...extra }) + '\n';
+    writeFileSync(join(logDir, 'T1.jsonl'), row('start', 'a', '2026-01-01T00:00:00Z') + row('end', 'a', '2026-01-01T00:00:01Z', { duration_ms: 1000, outcome: 'pass' })
+      + row('start', 'b', '2026-01-01T00:00:02Z') + '{"torn"');
+    const present = run('engine.log', '--repo', dir, '--ticket', 'T1');
+    assert.equal(present.status, 0, present.stderr);
+    assert.match(present.stdout, /\nrun-log integrity: events=3 runs=1 open_phases=1 warnings=2 loss_records=0\n$/);
+    const failing = run('bad.log', '--repo', dir, '--ticket', 'T1');
+    assert.equal(failing.status, 1, 'a failing check still fails; the integrity line never turns it green');
+    const notRepo = run('engine.log', '--repo', join(dir, 'nope'), '--ticket', 'T1');
+    assert.equal(notRepo.status, 0);
+    assert.match(notRepo.stdout, /run-log integrity: unavailable \(/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

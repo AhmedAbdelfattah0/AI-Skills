@@ -331,13 +331,14 @@ test('structural: one module holds the row schema literal, only run-log.mjs impo
   assert.equal((runLog.match(/\bappendLocked\(/g) ?? []).length, 1);
   assert.match(runLog, /await appendLocked\(path, encodeRecords\(records\), \{ marker: \(info\) => encodeRecords\(\[encodeLoss\(/);
   assert.equal((runLog.match(/\bquarantineLocked\(/g) ?? []).length, 1);
-  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?assertCleanLog\(after, path\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
+  assert.equal((runLog.match(/check: \(after(, before)?\) => \{? ?(?:if \(guard\) guard\(before\); )?assertCleanLog\(after, path(, context)?\)/g) ?? []).length, 2, 'both write paths validate the whole resulting file');
 });
 
 // ---- CLI ---------------------------------------------------------------------------------------------------------------
 /** The CLI child's clock is pinned (a preloaded `Date` whose no-argument constructor and `now()` return FIXED_NOW), so neither a real
- *  clock before T0 nor one beyond year 2999 can change an outcome. FIXED_NOW is after T1 and before the 2999 "future" the tests use. */
-const FIXED_NOW = '2026-06-01T00:00:00.000Z';
+ *  clock before T0 nor one beyond year 2999 can change an outcome. FIXED_NOW is after T1 and before the 2999 "future" the tests use,
+ *  and within the 24 h window run-log.mjs (S5) allows a supplied --started-at/--ended-at. */
+const FIXED_NOW = '2026-01-01T00:02:00.000Z';
 const PIN_CLOCK = `data:text/javascript,${encodeURIComponent(`const R = Date, F = ${Date.parse(FIXED_NOW)};
 globalThis.Date = class extends R { constructor(...a) { if (a.length) super(...a); else super(F); } static now() { return F; } };`)}`;
 function repo(t) {

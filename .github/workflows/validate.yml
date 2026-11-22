@@ -129,6 +129,7 @@ jobs:
           skills/ship-ticket/scripts/lib/shape.test.mjs
           skills/ship-ticket/scripts/lib/mutation-harness.test.mjs
           skills/ship-ticket/scripts/measure/events.test.mjs
+          skills/ship-ticket/scripts/lib/run-log-paths.test.mjs
           skills/ship-ticket/scripts/check-pr-scope.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about

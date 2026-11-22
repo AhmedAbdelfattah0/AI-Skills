@@ -44,7 +44,10 @@ approved plan immediately once the host permits implementation.
 In an interactive session the orchestrator owns the Plan Mode lifecycle.
 `EnterPlanMode` and `ExitPlanMode` are deferred tools in the main session, so
 the first action of PLAN is to load them, when they are not already callable,
-with ToolSearch query `select:EnterPlanMode,ExitPlanMode`. Then write the
+with ToolSearch query `select:EnterPlanMode,ExitPlanMode`. Then run the read-only
+telemetry preflight `run-log.mjs check --repo <TARGET_REPO> --ticket <TICKET>`
+([observability.md](observability.md); an exit 1 is a recorded degradation, never a
+blocker), write the
 predeclared PLAN timing markers and invoke `EnterPlanMode` before any PLAN
 research or critique, unless the session is already in that mode. The tools are
 unavailable only when that query returns neither tool (a headless carrier) or
