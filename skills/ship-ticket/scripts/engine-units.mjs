@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSpec } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
-import { note, judgment, closure, clampTimeout, coded } from './engine-dag.mjs';
+import { note, judgment, closure, clampTimeout, coded, baseRef } from './engine-dag.mjs';
 import { trustedEvents, untrustedEvents } from './engine-authority.mjs';
 
 /** Verified evidence invalidated more often than this in one run is an invalidation storm. */
@@ -81,7 +81,7 @@ export function units(S) {
 
 /** What the evidence of unit `u` would be bound to now. `cache` holds the resolved base commit for one command. */
 function binding(S, root, u, U, cache) {
-  if (!('base' in cache)) cache.base = io.resolveCommit(root, S.config.base ?? 'HEAD');
+  if (!('base' in cache)) cache.base = io.resolveCommit(root, baseRef(S));
   return { fps: io.fingerprints(root, U.paths), base_commit: cache.base,
     attempts: Object.fromEntries(U.nodes.map(id => [id, S.nodes[id].attempts ?? 0])),
     deps: Object.fromEntries(U.deps.map(d => [d, S.unit_checks[d]?.evidence?.id ?? null])),
@@ -331,7 +331,7 @@ export async function runUnitChecks(E, transient = []) {
     E.unitChecked.add(u);
     // Every node's declared paths (unit-less upstream generators included) and the base commit.
     const watched = [...new Set(Object.values(S.nodes).flatMap(n => [...n.reads, ...n.writes]))].sort();
-    const preBase = io.resolveCommit(E.ctx.repoRoot, S.config.base ?? 'HEAD');
+    const preBase = io.resolveCommit(E.ctx.repoRoot, baseRef(S));
     const pre = io.fingerprints(E.ctx.repoRoot, watched), results = [];
     for (const name of U.checks) {
       let r = await runCheck(E, u, name, U.resources);
@@ -348,9 +348,9 @@ export async function runUnitChecks(E, transient = []) {
     }
     const post = io.fingerprints(E.ctx.repoRoot, watched);
     const touched = watched.filter(p => post[p] !== pre[p]);
-    const moved = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD') !== preBase;
+    const moved = io.resolveCommit(E.ctx.repoRoot, baseRef(E.S)) !== preBase;
     const passed = !touched.length && !moved && results.every(r => r.result === 'pass');
-    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const c = io.candidateId(E.ctx.repoRoot, baseRef(E.S), E.S.pinned_exclusions);
     note(E.S, 'UNIT_CHECKED', { unit: u, state: passed ? 'verified' : 'failed', checks: results.map(r => ({ name: r.name, result: r.result })) });
     const reason = passed ? null : touched.length ? `checks changed declared files: ${touched.join(', ')}`
       : moved ? 'checks moved the config.base commit'

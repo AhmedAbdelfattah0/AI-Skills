@@ -42,7 +42,18 @@ export function planNarrativeDigest(text) {
 export const DAG_SCHEMA = 'ship-ticket-engine-dag-v1';
 const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'width', 'memoryBudgetMb', 'timeoutMs', 'budget',
   'candidateExclusions', 'testCommands', 'base', 'riskLabels', 'acceptanceIds', 'unitRecheckCeiling', 'unitReview',
-  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds'];
+  'securityPolicy', 'catalogDigest', 'controlCoverage', 'auditRecord', 'testKinds', 'pinnedBase'];
+
+/**
+ * S-12 (ASTF-6): `config.pinnedBase` ({ remote: <remote name> }, opt-in, never defaulted, bound by the DAG digest) pins the
+ * run's base at init to the commit the REMOTE names for the base branch (run-engine.mjs init; S.base { remote, identity, ref,
+ * sha, merge_base, pinned_at_seq }). Every engine base read goes through baseRef(S): the pinned merge base when the run has
+ * one, else config.base (default HEAD), today's read byte for byte. One accessor, so no site reads a local ref while another
+ * reads the pin (a partial switch would fire RED_INVALIDATED base_moved).
+ */
+export const pinnedBaseOn = (S) => S?.config?.pinnedBase !== undefined;
+export const baseRef = (S) => S?.base?.merge_base ?? S?.config?.base ?? 'HEAD';
+const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * `config.auditRecord` (W3-record, boolean, opt-in, never defaulted, so the DAG digest covers it only
@@ -232,6 +243,10 @@ export function validateEngineDag(doc, { ticket } = {}) {
   validateUnits(nodes, c, bad);
   validateSecurity(nodes, c, bad);
   if (c.auditRecord !== undefined && typeof c.auditRecord !== 'boolean') bad('config.auditRecord must be a boolean');
+  if (c.pinnedBase !== undefined && !(isObj(c.pinnedBase) && Object.keys(c.pinnedBase).join() === 'remote' && typeof c.pinnedBase.remote === 'string'
+    && SAFE_REMOTE.test(c.pinnedBase.remote))) bad('config.pinnedBase must be exactly { remote: <remote name> }');
+  if (c.pinnedBase !== undefined && c.base !== undefined && !(typeof c.base === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/.test(c.base) && !c.base.includes('..')))
+    bad('config.pinnedBase needs config.base to be absent, HEAD or a branch name');
   return { schema: DAG_SCHEMA, nodes,
     config: { billing: 'subscription', width: 1, modelMap: {}, riskLabels: [], testCommands: {}, ...c, candidateExclusions: [...(ex ?? pinned ?? [])] } };
 }

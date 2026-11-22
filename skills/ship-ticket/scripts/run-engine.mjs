@@ -30,14 +30,17 @@ import { eventLine } from './run-state.mjs';
 import { childEnv, verifySubscription as cliSubscription } from './carrier.mjs';
 import * as io from './engine-io.mjs';
 import { planNarrativeDigest, validateEngineDag, closure, coded, judgment, note, normDigest, sha, runStateEvents, gateInput,
-  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry } from './engine-dag.mjs';
+  BEGIN, END, legacyApproval, securityOn, pairKey, auditOn, evidenceEntries, flatEntry, baseRef, pinnedBaseOn } from './engine-dag.mjs';
 import { reconcile, dispatchNodes, runRepairs, budgetVerdict, redPending, clearSpent } from './engine-attempts.mjs';
 import { GATES, gateNo, refreshRed, redInvalidJudgments, securityPlan, catalogOptions, securityJudgments, designContract, testKindsModules, testKindsOn, testKindsStatus } from './engine-gates.mjs';
 import { observeAuthority, trustedEvents, malformedRunState } from './engine-authority.mjs';
 import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
-import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit } from './engine-policy.mjs';
+import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
+import { verifyBase, authGit } from './engine-base.mjs';
+import { remoteIdentity, resolveBaseRef } from './remote-identity.mjs';
+import { localMergeBase, baseStatus } from './engine-gates.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -120,6 +123,9 @@ function open(ctx) {
       // V0 single-entry invariant (R1), re-checked on every load: P4r refuses two RECORDS, not two DECLARED entries
       if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
         throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
+      // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
+      if (new Set([E.policy.semantics.pinnedBase === true, E.S.base !== undefined, pinnedBaseOn(E.S)]).size !== 1)
+        throw coded('base_state_missing', `policy_version ${E.S.policy_version}, the pinned base state and config.pinnedBase disagree: a partial pin is never resumed`);
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -345,11 +351,13 @@ export async function preflight(ctx) {
  * S-27-min: the policy version a new run is pinned to (this engine's, or the injected ctx.policy of a
  * test simulating another engine) and the commit of the skill checkout this module runs from.
  */
-function newRunPolicy(ctx, active = false, obligations = false) {
+function newRunPolicy(ctx, active = false, obligations = false, pinned = false) {
   const engine = ctx.policy ?? { current: ENGINE_POLICY_VERSION, semantics: POLICY_SEMANTICS };
   // F12a: a format-3 security block pins version 3 (4 with test kinds); an engine whose semantics lack it refuses here.
   const version = obligations ? recordedVersion({ testKinds: active, obligations }) : active ? TEST_KINDS_POLICY_VERSION : engine.current;
-  return { policy_version: runPolicy({ policy_version: version }, engine).version,
+  // S-12: a pinned base adds its flag to the version of the other flags (engine-policy.mjs PINNED_BASE_VERSION_OF)
+  const recorded = pinned ? pinnedVersion(version) : version;
+  return { policy_version: runPolicy({ policy_version: recorded }, engine).version,
     skill_commit: skillCommit(dirname(fileURLToPath(import.meta.url))) };
 }
 
@@ -361,10 +369,10 @@ function newRunPolicy(ctx, active = false, obligations = false) {
  * ONE runner entry) and runner_unsupported (P4r readEntry: an unsupported runner is reported, never bypassed; commands
  * without `evidence` are untouched and still run in the proof). Without config.testKinds an unresolvable base is "no declaration".
  */
-async function bindTestKinds(ctx, config, text) {
+async function bindTestKinds(ctx, config, text, base = config.base ?? 'HEAD') {
   const tk = await import('./test-kinds.mjs'); // the opt-in probe only: an inactive run never loads the evidence modules
   let declaration = null, baseSha = null;
-  try { ({ declaration, baseSha } = tk.readDeclaration(ctx.repoRoot, config.base ?? 'HEAD')); }
+  try { ({ declaration, baseSha } = tk.readDeclaration(ctx.repoRoot, base)); }
   catch (e) { if (config.testKinds !== undefined || !['base_invalid', 'repo_unavailable'].includes(e.code)) throw coded(e.code ?? 'declaration_invalid', e.message); }
   const opted = tk.optIn({ planText: text, declaration });
   if (config.testKinds === undefined) { if (opted) throw coded('test_kinds_policy_required', 'the plan or the base declaration opts in to test kinds, but the DAG has no config.testKinds'); return null; }
@@ -382,6 +390,28 @@ async function bindTestKinds(ctx, config, text) {
     floor: { line, claimed: rec.claimed, ai: rec.ai }, tests: { globs: declaration?.tests?.globs ?? [] }, records: {}, refused: null, freeze_evidence: null };
 }
 
+/**
+ * S-12 (ASTF-6) init with config.pinnedBase { remote }: the base of record is the commit the REMOTE names for the base branch
+ * (config.base when it names a branch, else the remote's default branch, `ls-remote --symref`), read once here; its merge base
+ * with HEAD is what every base read of the run uses (baseRef). Refusals (nothing is written): remote_ambiguous (several fetch or
+ * push URLs, or a push URL of another repository), base_unverified (HEAD detached, or no history shared with the remote base),
+ * base_remote_unavailable (offline, no such remote or branch, no default branch, or the remote commit not fetched). A local
+ * config.base branch whose merge base differs is reported (BASE_LOCAL_DIVERGED, advisory): the run proceeds on the pinned base
+ * and gate reassess refuses base_moved_local until the local ref agrees.
+ */
+function pinBase(root, config) {
+  const remote = config.pinnedBase.remote;
+  const id = remoteIdentity(root, remote);
+  if (!id.ok) throw coded(id.code, id.reasons.join('; '));
+  if (authGit(root, ['symbolic-ref', '-q', 'HEAD']).status !== 0)
+    throw coded('base_unverified', 'HEAD is detached: a pinned base is recorded for a branch, so check out the ticket branch, then init');
+  const ref = resolveBaseRef({ config }, root, remote);
+  if (!ref.ok) throw coded(ref.code, ref.reasons.join('; '));
+  const v = verifyBase(root, { ref: ref.ref, remote, identity: id.identity });
+  if (!v.ok) throw coded(v.code, v.reasons.join('; '));
+  return { base: { remote, identity: v.base.identity, ref: v.base.ref, sha: v.base.sha, merge_base: v.base.merge_base }, local: localMergeBase(root, config) };
+}
+
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
 export async function init(ctx) {
   return locked(ctx, async (E) => {
@@ -396,7 +426,8 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
-    const testKinds = await bindTestKinds(ctx, dag.config, text);
+    const pin = pinnedBaseOn(dag) ? pinBase(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
+    const testKinds = await bindTestKinds(ctx, dag.config, text, baseRef({ base: pin?.base, config: dag.config }));
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
@@ -411,7 +442,13 @@ export async function init(ctx) {
         .map(u => [u, { evidence: null, stale: false, invalidations: 0, causes: [] }])) } : {}),
       ...(dag.config.unitReview === true ? { unit_reviews: Object.fromEntries([...new Set(dag.nodes.map(n => n.unit).filter(u => u !== undefined))]
         .map(u => [u, { chain: [] }])) } : {}),
-      ...newRunPolicy(ctx, testKinds !== null, obligations), ...(testKinds ? { test_kinds: testKinds } : {}) };
+      ...newRunPolicy(ctx, testKinds !== null, obligations, pin !== null), ...(testKinds ? { test_kinds: testKinds } : {}) };
+    if (pin) {
+      note(E.S, 'BASE_PINNED', { ...pin.base });
+      E.S.base = { ...pin.base, pinned_at_seq: E.S.seq };
+      if (pin.local !== undefined && pin.local !== pin.base.merge_base)
+        note(E.S, 'BASE_LOCAL_DIVERGED', { advisory: true, ref: dag.config.base, expected: pin.base.merge_base, observed: pin.local });
+    }
     E.observe(); // no attempt exists yet: every authority line present at init is trusted
     await E.commit();
     return { state_file: E.P.state, run_id: ctx.runId, plan_digest: digest, dag_digest: dagDigest, binding };
@@ -425,6 +462,7 @@ export async function status(ctx) {
   reconcileReviews(E); // in memory only: status writes nothing
   const out = view(E, drift(E, { mutate: false }));
   if (testKindsOn(E)) out.test_kinds = await testKindsStatus(E);
+  if (E.S.base) out.base = baseStatus(E); // S-12: advisory only (never a judgment), and only for a pinned run
   return out;
 }
 
@@ -560,7 +598,7 @@ export async function rebind(ctx) {
     if (hasUnits(S)) throw coded('rebind_units', 'rebind does not cover runs with units (their evidence bindings are not re-bound)');
     const live = S.attempts.filter(a => LIVE.includes(a.status)).map(a => a.attempt_id);
     if (live.length) throw coded('rebind_attempts_live', `attempts still live: ${live.join(', ')}`);
-    const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    const c = io.candidateId(ctx.repoRoot, baseRef(S), S.pinned_exclusions);
     if (!c.candidate_id || c.candidate_id !== S.freeze.candidate)
       throw coded('rebind_not_frozen_tree', `work tree is ${c.candidate_id ?? c.reason}, frozen is ${S.freeze.candidate}: revert the edit or record an owner RETRY for a new review`);
     const nodes = [];
@@ -624,7 +662,7 @@ export async function archive(ctx) {
   }, { load: false });
 }
 
-const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0']);
+const GATE_REFUSALS = new Set(['lock_held', 'lock_foreign_host', 'lock_malformed', 'no_state', 'policy_version_unsupported', 'test_kinds_state_missing', 'multi_entry_unsupported_v0', 'base_state_missing']);
 
 /** W3-record GATE line bounds: reasons keeps its first AUDIT_REASONS_MAX strings, each cut to AUDIT_TEXT_MAX characters. */
 export const AUDIT_REASONS_MAX = 20;
@@ -668,7 +706,7 @@ export async function gate(ctx) {
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
       await deliver(E);
       reconcileReviews(E);
-      const c = io.candidateId(ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+      const c = io.candidateId(ctx.repoRoot, baseRef(E.S), E.S.pinned_exclusions);
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];

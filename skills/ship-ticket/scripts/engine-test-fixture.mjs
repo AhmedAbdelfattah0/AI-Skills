@@ -218,6 +218,36 @@ export function fixture(t, { nodes = [{ id: 'a', writes: ['src/a.txt'] }], confi
   return fx;
 }
 
+/**
+ * S-12: give a fixture repo a real remote. Commits the work tree as the base, names its branch `branch`
+ * (never init.defaultBranch), clones it bare to <root>/origin.git as remote `origin` and fetches it. `upstream(n, prefix)`
+ * pushes `n` commits (one file each, `<prefix>/f<i>.txt`) to origin from a separate clone, as another developer would;
+ * the fixture repo's own refs do not move until `fetch()`. `git(...args)` runs in the fixture repo.
+ */
+export function withOrigin(fx, { branch = 'main' } = {}) {
+  const run = (cwd, ...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd, encoding: 'utf8' });
+  const must = (cwd, ...a) => { const r = run(cwd, ...a); assert.equal(r.status, 0, `git ${a.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  const origin = join(fx.root, 'origin.git'), up = join(fx.root, 'upstream');
+  must(fx.repo, 'add', '-A');
+  must(fx.repo, 'commit', '-q', '--allow-empty', '-m', 'base');
+  must(fx.repo, 'branch', '-M', branch);
+  must(fx.root, 'clone', '-q', '--bare', fx.repo, origin);
+  must(fx.repo, 'remote', 'add', 'origin', origin);
+  must(fx.repo, 'fetch', '-q', 'origin');
+  must(fx.root, 'clone', '-q', '--branch', branch, origin, up);
+  let seq = 0;
+  return { origin, branch, git: (...a) => must(fx.repo, ...a), gitRaw: (...a) => run(fx.repo, ...a), sha: (ref) => must(fx.repo, 'rev-parse', ref),
+    fetch: () => must(fx.repo, 'fetch', '-q', 'origin'),
+    upstream(n, prefix = 'upstream') {
+      mkdirSync(join(up, prefix), { recursive: true });
+      for (let i = 0; i < n; i++) { const f = `${prefix}/f${++seq}.txt`; writeFileSync(join(up, f), `upstream ${seq}\n`); must(up, 'add', f); must(up, 'commit', '-q', '-m', `upstream ${seq}`); }
+      must(up, 'push', '-q', 'origin', `HEAD:refs/heads/${branch}`);
+      return must(up, 'rev-parse', 'HEAD');
+    },
+    /** Rewind origin's branch to `sha` (a force-push below what was pinned). */
+    rewind: (sha) => { must(up, 'push', '-q', '--force', 'origin', `${sha}:refs/heads/${branch}`); } };
+}
+
 export function spawnSpy() {
   const calls = [];
   return { calls, fn: (...args) => { calls.push(args); return spawn(...args); } };

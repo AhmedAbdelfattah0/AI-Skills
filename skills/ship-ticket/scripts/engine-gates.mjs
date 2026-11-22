@@ -14,7 +14,8 @@ import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
 import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry } from './engine-dag.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry, baseRef } from './engine-dag.mjs';
+import { verifyBase, authGit } from './engine-base.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
@@ -89,7 +90,7 @@ async function redGate(E, input, candidate) {
   }
   const pin = pinnedSpecs(node, input.specs, addendumSpecs);
   if (pin.code) return gateNo(pin.code, [pin.reason]);
-  const baseCommit = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD');
+  const baseCommit = io.resolveCommit(E.ctx.repoRoot, baseRef(E.S));
   const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
     specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) }, runnerDeps(E));
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
@@ -129,7 +130,7 @@ export async function refreshRed(E, transient) {
       continue;
     }
     const before = E.S.attempts.length;
-    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const c = io.candidateId(E.ctx.repoRoot, baseRef(E.S), E.S.pinned_exclusions);
     const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
       : gateNo('candidate_unavailable', [c.reason]);
     const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
@@ -363,7 +364,7 @@ async function shipReadyGate(E, input, candidate) {
     }
     // ...and the tree must be the one the commands ran on: a proof that changed it (codegen, --fix)
     // tested neither tree, so it is bound to none (a RETRY review of the new tree needs a new proof).
-    const after = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    const after = io.candidateId(E.ctx.repoRoot, baseRef(S), S.pinned_exclusions);
     if (after.candidate_id !== candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
@@ -742,10 +743,14 @@ export function addedLinesByFile(text) {
 }
 
 const MAX_ADDED_BYTES = 1024 * 1024;
-/** The candidate's changed paths with their added lines (git diff from config.base; a path not in the diff is read whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only). */
+/**
+ * The candidate's changed paths with their added lines (git diff from baseRef: config.base, or a pinned run's merge base, so a
+ * branch made from an older local base never shows the upstream commits reversed as added lines; a path not in the diff is read
+ * whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only).
+ */
 function changedFiles(E, paths) {
   const root = E.ctx.repoRoot, added = new Map();
-  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', baseRef(E.S), '--'],
     { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
   if (r.status === 0) for (const [p, lines] of addedLinesByFile(r.stdout)) added.set(p, lines);
   return paths.map(p => {
@@ -776,6 +781,8 @@ export function designContract(nodes) {
  */
 async function reassessGate(E, input, candidate) {
   const S = E.S;
+  const baseNo = pinnedBaseRefusal(E); // S-12: a pinned base is verified first; its refusals never latch
+  if (baseNo) return baseNo;
   const sec = await securityContext(E, candidate);
   const refusal = securityRefusal(sec);
   if (refusal) return refusal;
@@ -806,6 +813,62 @@ async function reassessGate(E, input, candidate) {
     outcome: res.outcome, plan_digest: sec.tuple.plan_digest, catalog_digest: sec.tuple.catalog_digest, addendum_set: sec.tuple.addendum_set,
     timestamp: new Date().toISOString() });
   return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals };
+}
+
+// ---- S-12 (ASTF-6) pinned remote base ---------------------------------------------------------
+
+/**
+ * merge-base(HEAD, refs/heads/<config.base>) when config.base names a local branch that exists; undefined when there is no
+ * local base branch to compare (config.base absent or HEAD, or no such branch); null when the two share no history.
+ */
+export function localMergeBase(root, config) {
+  const b = config?.base;
+  if (!b || b === 'HEAD') return undefined;
+  const ref = authGit(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}^{commit}`]);
+  if (ref.status !== 0) return undefined;
+  const mb = authGit(root, ['merge-base', 'HEAD', ref.stdout.trim()]);
+  return mb.status === 0 ? mb.stdout.trim() : null;
+}
+
+/**
+ * gate reassess on a pinned run (S.base): the remote base is read again (engine-base.mjs verifyBase against the recorded base)
+ * before any security decision. null when it holds. Every refusal is a judgment point that NEVER latches (no S.security
+ * write): base_remote_unavailable (offline, the branch gone, or the remote commit not fetched: fetch and retry),
+ * base_moved_remote (the remote base no longer descends from the pinned commit: a force-push or rewind), base_moved_local with
+ * `expected` (the pinned merge base) and `observed`: the local config.base branch gives another merge base (reset it to the
+ * remote base, or the owner decides, then retry), or the branch itself now has another merge base with the remote base (it
+ * merged or rebased onto another base mid-run: archive and start a new run, which pins again; never re-pinned silently).
+ */
+export function pinnedBaseRefusal(E) {
+  const B = E.S.base;
+  if (!B) return null;
+  const root = E.ctx.repoRoot;
+  const v = verifyBase(root, { ref: B.ref, remote: B.remote, recorded: B });
+  if (!v.ok) return gateNo(v.code, v.reasons, { judgment_point: true });
+  const moved = (observed, reason) => gateNo('base_moved_local', [reason], { judgment_point: true, expected: B.merge_base, observed });
+  if (v.base.merge_base !== B.merge_base) return moved(v.base.merge_base, `merge-base(HEAD, ${B.remote}/${B.ref}) is ${v.base.merge_base}, not the pinned `
+    + `${B.merge_base}: the branch merged or rebased onto another base during the run; archive the run and start a new one (it pins the new base)`);
+  const local = localMergeBase(root, E.S.config);
+  if (local !== undefined && local !== B.merge_base) return moved(local, `merge-base(HEAD, local ${E.S.config.base}) is ${local ?? 'none'}, not the pinned `
+    + `${B.merge_base}: the local base branch was not moved with the remote (or carries local-only commits); reset it (git fetch ${B.remote}; `
+    + `git branch -f ${E.S.config.base} ${B.remote}/${B.ref}) or the owner decides, then retry`);
+  return null;
+}
+
+/**
+ * The `base` block of a pinned run's status: the pin and advisories, never a judgment (status writes nothing). `base_advanced`
+ * { pinned, remote_now }: the remote base moved on (no effect on the run: its merge base is pinned); `base_moved_local`
+ * { expected, observed }: what gate reassess will refuse; a failed ls-remote is reported as its code.
+ */
+export function baseStatus(E) {
+  const B = E.S.base, root = E.ctx.repoRoot, advisory = [];
+  const ls = authGit(root, ['ls-remote', B.remote, `refs/heads/${B.ref}`], { timeout: 15000 });
+  const now = ls.status === 0 ? ls.stdout.split('\n').map(l => l.split(/\s+/)).find(([, name]) => name === `refs/heads/${B.ref}`)?.[0] ?? null : null;
+  if (!now) advisory.push({ code: 'base_remote_unavailable', reason: `ls-remote ${B.remote} refs/heads/${B.ref} gave no commit` });
+  else if (now !== B.sha) advisory.push({ code: 'base_advanced', pinned: B.sha, remote_now: now });
+  const local = localMergeBase(root, E.S.config);
+  if (local !== undefined && local !== B.merge_base) advisory.push({ code: 'base_moved_local', expected: B.merge_base, observed: local });
+  return { ...structuredClone(B), advisory };
 }
 
 /** View judgments of a policy-2 run (none for a legacy run): a recorded REAPPROVAL and unresolved event problems. */
