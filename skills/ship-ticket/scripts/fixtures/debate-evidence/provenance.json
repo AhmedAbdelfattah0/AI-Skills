@@ -1,0 +1,59 @@
+{
+  "note": "Real relay output with privacy redactions; tests substitute @REPO@ (the test repository) and @SCRATCH@ (a scratch directory). Redacted bytes differ from the originals, so original_sha256 is provenance only and never verified.",
+  "sets": {
+    "auth-2026-11-22": {
+      "files": [
+        "brief.txt",
+        "result.json",
+        "events.jsonl"
+      ],
+      "original_sha256": {
+        "brief.txt": "sha256:79499294a07f775e8f3abb13bbb9e410b1223705e5fa1ba84c982a7eda7463ba",
+        "result.json": "sha256:9b6545e3bc1e1bb81bba8056773f0ae0f9aa4b16cb2c3e21b9b282ef7c48bd46",
+        "events.jsonl": "sha256:7e75e9a3ddd622786f59d720634242d036fbb93d3d5915a1849e174f206c2e41"
+      },
+      "real_fields": [
+        "status",
+        "exitCode",
+        "sandbox",
+        "threadId",
+        "codexVersion",
+        "finalMessage",
+        "startedAt",
+        "finishedAt",
+        "events (thread.started, agent_message, turn.completed)",
+        "brief text"
+      ],
+      "test_composed": [
+        "workdir and *Path values: redacted to @REPO@ / @SCRATCH@ and rebound to the test repository at test time",
+        "the attestation, plan, ledger and the final digest-confirmation round (the real brief carried no plan_digest, so this real response cannot be a final confirmation)"
+      ]
+    },
+    "s4-r5-historical": {
+      "files": [
+        "brief.txt",
+        "result.json"
+      ],
+      "original_sha256": {
+        "brief.txt": "sha256:7953ba9639075092e3a6eb3c208c98e57e6611a20764c0d351000854d3439823",
+        "result.json": "sha256:849e84785dcd1fefe835dd961360fe332b9f199f21ebbff500582e2df24ee3d3"
+      },
+      "real_fields": [
+        "status",
+        "exitCode",
+        "sandbox",
+        "threadId",
+        "finalMessage",
+        "brief text"
+      ],
+      "test_composed": [
+        "workdir and *Path values: redacted to @SCRATCH@ and rebound to a scratch directory that is NOT the repository (the original debate ran in a snapshot copy)",
+        "events.jsonl omitted (23 KB of reasoning output); the negative test composes a placeholder"
+      ]
+    }
+  },
+  "produced_at": {
+    "auth-2026-11-22": "2026-11-22, orchestrator, one read-only codex-delegate relay dispatch outside native Plan Mode, --cd the repository worktree, --effort low",
+    "s4-r5-historical": "2026-11-22, the S4 Planning Debate final round (thread 01a203e5-728a-78e3-8b69-d2227aa9ce76), --cd a snapshot copy"
+  }
+}

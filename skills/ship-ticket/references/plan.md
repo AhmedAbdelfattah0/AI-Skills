@@ -239,7 +239,7 @@ Not applicable: <check>: <one-line reason>, ...
 ## 7. Cross-model planning debate
 <Every implementation plan; the debate rules live in cross-model.md "PLAN debate". Freeze this section before the final confirmation request.>
 **Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
-**Result:** <CONVERGED / UNRESOLVED / LIMIT_REACHED / SKIPPED (only with the owner exception below) as the first word, then why; it must equal the attestation outcome; a substitute carrier is stated as `carrier.degraded: true`, never as an outcome>
+**Result:** <CONVERGED / UNRESOLVED / LIMIT_REACHED / SKIPPED (only with the owner exception below) as the first word, then why; exactly one such line, equal to the attestation outcome; keep section 7 free of code fences; a substitute carrier is stated as `carrier.degraded: true`, never as an outcome>
 **Draft:** <final version; last version actually checked by counterpart>
 **Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported; budget none unless overridden> (information only)
 Attestation: <debate-<ticket>-<yyyymmddThhmmZ>, predeclared; the attestation line itself lives in the RUN-STATE body>

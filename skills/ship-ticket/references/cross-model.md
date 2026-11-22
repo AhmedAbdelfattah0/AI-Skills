@@ -230,10 +230,10 @@ reasoning. Send the revised full draft or unambiguous versioned delta, every
 finding's disposition and evidence, and host counterproposals to the **same**
 counterpart session. Ask it to defend or concede disputed points and verify the
 changed design and affected seams, without rereading the whole repository. The
-counterpart marks each closed finding with an anchored line
-`finding <ID>: conceded` or `finding <ID>: confirmed` (column 1, outside code
-fences); a blocker or major counts as closed by the counterpart only when the round
-it cites carries that line.
+counterpart marks each closed finding in its response header (below) with a line
+`finding <ID>: conceded` or `finding <ID>: confirmed`, nothing after the keyword; a
+blocker or major counts as closed by the counterpart only when the round it cites
+carries that line for the finding's own canonical ID (an alias never closes it).
 Agreement on an older draft never transfers automatically to a revised one.
 
 If the Integration Contract changes, recheck affected provider/consumer
@@ -242,11 +242,15 @@ occur during debate.
 
 ### Responses, outcomes and the attestation
 
-Each counterpart response begins with four anchored lines, each exactly once:
-`verdict: AGREE` or `verdict: CHANGES_REQUESTED`, `request_id: <id from the brief>`,
-`plan_version: <v>` and `plan_digest: <digest>` (the digest line is required when
-the brief carried one), each from column 1 and outside code fences. Prose such as
-"AGREE for v4", or an echo inside a fence or indented, is not an echo. Findings
+Each counterpart response begins with a header: every line before its first blank
+line, and only those, is parsed. The header holds `verdict: AGREE` or
+`verdict: CHANGES_REQUESTED`, `request_id: <id from the brief>`, `plan_version: <v>`
+and `plan_digest: <digest>` (the digest line is required when the brief carried
+one), each exactly once from column 1, plus the `finding <ID>: conceded|confirmed`
+lines. Any other header line (a fence, an indented or quoted line, prose, a hedged
+concession) refuses the response; everything after the first blank line is prose
+and never counts as an echo or a concession, so "AGREE for v4" in prose is not an
+echo. Findings
 follow, at most twelve (blockers and majors first, at most three minors), each with
 a stable ID, severity, plan section, repository evidence, consequence and proposed
 change; delta responses explicitly concede or defend previous findings, and excess
@@ -286,7 +290,10 @@ and per round `n`, `plan_version`, `request_id`, `status` (the actual
 relay out-dir as provenance only, bundle-relative `files` with their `sha256`
 (`brief.txt`, `result.json`, `events.jsonl` for a relay; the returned message for a
 native session), or `dispatch_error: {class, text}` when no result exists. Keep the
-relay out-dirs under one scratch bundle root (`--out-dir <bundle root>/r<n>`).
+relay out-dirs under one scratch bundle root (`--out-dir <bundle root>/r<n>`), and run
+every relay with `--cd` set to the repository itself or a linked worktree of it (a
+worktree of the base created for the debate is fine; the sandbox is read-only, so the
+counterpart cannot change it). A snapshot copy never qualifies.
 
 Run `node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`
 at PLAN preflight, before `ExitPlanMode`. It verifies the evidence hashes (every
@@ -294,17 +301,16 @@ evidence file a regular file inside the bundle, no symbolic link), the relay
 `status`, exit code (0 for a completed round, in the record and the result), the
 non-empty thread or session id bound to the result, read-only on every round (the
 Claude relay also needs `authMethod: claude.ai`), the brief and response
-`request_id` binding, the outcome rules (the first word of section 7's
-`**Result:**` line must be the attestation outcome) and the frozen exception and
-degradation acknowledgements. It binds the relay workdir to `--repo`, never to a
-path the attestation merely names: `workdir_kind: repo` means the relay ran in the
-repository itself (realpath of the workdir equals the repository top level);
-`workdir_kind: snapshot` means it ran in a read-only Git snapshot copy, recorded as
-`snapshot: {base: <commit>, entries: {<top-level path>: <object id>}}`, where every
-entry must equal the repository's entry at `base` and, while the snapshot exists,
-its HEAD must hold exactly those entries with no tracked change. Once the scratch
-snapshot is deleted, `start-check` can check only the repository side of that
-binding. It prints `outcome`, `debate_qualified`, `outstanding`, `pending`,
+`request_id` binding, the outcome rules (section 7 holds exactly one `**Result:**`
+line, whose first word must be the attestation outcome) and the frozen exception
+and degradation acknowledgements. Section 7 must be fence-free, and its machine-read
+lines (`**Result:**`, `Attestation:`, the carrier bullets, the disposition table)
+start at column 1. It binds the relay workdir to `--repo`, never to a path the
+attestation merely names: the workdir must exist when checked, be the top level of
+a Git work tree, and be either the repository's own top level or a linked worktree
+of the same git common dir. There is one binding and no snapshot kind: a snapshot
+copy, a subdirectory, a missing directory or another repository with identical
+content is `debate_workdir_unbound`. It prints `outcome`, `debate_qualified`, `outstanding`, `pending`,
 `carrier`, `diversity` (PLAN-side evidence, same_provider or cross_provider from
 `provider:model`; the separate gateReview diversity field, item G, was withdrawn
 by owner decision D-15 as optional telemetry outside closure), `attestation_sha256`
@@ -316,7 +322,9 @@ security or scope decisions must be explicit in that request. Never invent
 consensus or promise an objectively best plan.
 
 After approval and before START, copy the bundle byte-for-byte to the retained
-locator `<git-common-dir>/ai-skills/ship-ticket/debate/<TICKET>/<debate-id>/` with
+locator `<git-common-dir>/ai-skills/ship-ticket/debate/<TICKET>/<debate-id>/` (every
+component from the git common dir down is a real directory, never a symbolic link;
+`debate-retain` and `start-check` both check it with lstat) with
 `node scripts/brief.mjs debate-retain --plan <plan> --bundle <bundle root> --repo <repo>`.
 References inside the attestation are relative to the bundle root; the original
 out-dir paths are provenance only and never locate evidence, so `start-check` in a
