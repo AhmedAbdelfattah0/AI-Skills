@@ -824,8 +824,9 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * check at init and preflight, path-only over file-shaped DAG writes (L4), the own-path lowering guard, the reopen keep set). Invariant, property-tested
  * ([S103]): for every input, with lines and path-only, the format-3 signals are a superset of the format-2 signals, and
  * path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
- * like any other file (a route line is first seen at reassess, L4); a test with no route line and no signalling path
- * raises no surface signal.
+ * like any other file (a route line is first seen at reassess, L4): a test file raises exactly the signals its path and
+ * lines would raise in any file (a describe/it/expect-only file raises none; a describe title that matches a RULES line
+ * pattern, such as 'row level security', raises that signal).
  */
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;

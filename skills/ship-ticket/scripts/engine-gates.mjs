@@ -739,7 +739,7 @@ export function addedLinesByFile(text) {
 }
 
 const MAX_ADDED_BYTES = 1024 * 1024;
-/** The candidate's changed paths with their added lines (git diff from config.base; an unlisted path is read whole: more signals, never fewer). */
+/** The candidate's changed paths with their added lines (git diff from config.base; a path not in the diff is read whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only). */
 function changedFiles(E, paths) {
   const root = E.ctx.repoRoot, added = new Map();
   const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
