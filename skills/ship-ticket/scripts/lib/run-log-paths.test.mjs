@@ -3,7 +3,7 @@
 // realpathSync.native, git identities are passed per command, and nothing here needs a POSIX shell.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -378,54 +378,6 @@ const spawnRunLog = (repo, ...args) => new Promise((done) => {
   child.stderr.on('data', (d) => { err += d; });
   child.on('close', (status) => done({ status, out, err }));
 });
-const RUNBOOK = (() => {
-  const doc = readFileSync(fileURLToPath(new URL('../../references/observability.md', import.meta.url)), 'utf8');
-  const block = doc.slice(doc.indexOf('<!-- s5-retention-runbook:begin -->'), doc.indexOf('<!-- s5-retention-runbook:end -->'));
-  return block.slice(block.indexOf('```bash\n') + 8, block.lastIndexOf('```'));
-})();
-const haveShasum = spawnSync('sh', ['-c', 'command -v shasum && command -v bash'], { encoding: 'utf8' }).status === 0;
-test('repair 7 (1) the retention runbook, run literally: guards refuse before copying; a good run copies raw bytes and verifies them', { skip: (process.platform === 'win32' || !haveShasum) && 'needs bash and shasum' }, (t) => {
-  const base = real(mkdtempSync(join(tmpdir(), 's5 runbook ')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const main = join(base, 'main repo'), wt = join(base, 'wt two');
-  mkdirSync(main);
-  git(main, 'init', '-q');
-  git(main, 'commit', '-q', '--allow-empty', '-m', 'init');
-  git(main, 'worktree', 'add', '-q', '-b', 'wt2', wt);
-  const common = join(main, '.git', 'ai-skills', 'ship-ticket');
-  const legacy = git(wt, 'rev-parse', '--path-format=absolute', '--git-path', 'ai-skills/ship-ticket');
-  const run = (WT, NAME = 'wt2') => spawnSync('bash', ['-c', RUNBOOK], { encoding: 'utf8', env: { ...process.env, WT, NAME, SKILL: fileURLToPath(new URL('../..', import.meta.url)) } });
-  const nothingCopied = (why) => assert.equal(existsSync(join(common, 'archive-legacy', 'wt2')), false, why);
-  const bad = run(join(base, 'no such worktree'));
-  assert.notEqual(bad.status, 0, 'a wrong WT path exits non-zero');
-  nothingCopied('wrong WT: nothing copied');
-  mkdirSync(common, { recursive: true });
-  writeFileSync(join(common, 'T1.jsonl'), 'shared\n');
-  const m = run(main);
-  assert.notEqual(m.status, 0);
-  assert.match(m.stderr, /main checkout/);
-  nothingCopied('WT = main: refused');
-  const empty = run(wt);
-  assert.notEqual(empty.status, 0, 'no per-worktree log directory: refused');
-  nothingCopied('no source');
-  mkdirSync(legacy, { recursive: true });
-  const files = { 'T1.jsonl': '{"a":1}\n{"torn"', 'T1.jsonl.lost-0-abc.json': '{"x":1}\n', 'sub dir/f': 'y' };
-  mkdirSync(join(legacy, 'sub dir'));
-  for (const [f, c] of Object.entries(files)) writeFileSync(join(legacy, f), c);
-  const ok = run(wt);
-  assert.equal(ok.status, 0, ok.stderr);
-  for (const [f, c] of Object.entries(files)) assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2', f), 'utf8'), c, `${f} copied raw`);
-  assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2.SHA256SUMS'), 'utf8').trim().split('\n').length, 3);
-  assert.match(ok.stdout, /OK/);
-  assert.equal(existsSync(wt), false, 'the worktree was removed only after verification');
-  git(main, 'worktree', 'add', '-q', wt, 'wt2');
-  mkdirSync(legacy, { recursive: true });
-  writeFileSync(join(legacy, 'T1.jsonl'), 'z\n');
-  const again = run(wt);
-  assert.notEqual(again.status, 0, 'an existing destination is refused');
-  assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2', 'T1.jsonl'), 'utf8'), files['T1.jsonl'], 'the earlier copy is untouched');
-});
-
 const sharedStart = (fx, repo, run, outcome) => {
   for (const [cmd, o] of [['start'], ['end', outcome]]) {
     if (cmd === 'end' && !outcome) break;
@@ -502,4 +454,36 @@ test('repair 7 (5) an inaccessible shared directory is unavailable with errno in
   }
   assert.match(integ.unavailable ?? '', /EACCES/);
   assert.equal(lost.log_unreadable, 'EACCES');
+});
+
+test('repair 8 (2) eval: an unreadable shared T1.jsonl (mode 000) is degraded shared_log_unavailable, never a crash', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const fx = three(t);
+  sharedStart(fx, fx.main, 'live', 'complete');
+  const log = join(fx.common, 'T1.jsonl');
+  chmodSync(log, 0o000);
+  t.after(() => { try { chmodSync(log, 0o600); } catch { /* gone */ } });
+  for (const sel of [['--ticket', 'T1'], ['--all']]) {
+    const r = spawnSync(process.execPath, [EVAL, 'report', '--repo', fx.main, ...sel], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${sel}: ${r.stderr.slice(0, 200)}`);
+    const out = JSON.parse(r.stdout);
+    assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable' && d.errno === 'EACCES'), JSON.stringify(out.degraded));
+    assert.deepEqual(out.runs, []);
+  }
+});
+
+test('repair 8 (2b) eval: an inaccessible shared log with readable engine state yields no synthetic run, only the degradation', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const fx = three(t);
+  sharedStart(fx, fx.main, 'live', 'complete');
+  mkdirSync(fx.wt2Legacy, { recursive: true });
+  writeFileSync(join(fx.wt2Legacy, 'T1.state.json'), JSON.stringify({ run_id: 'run-9' }));
+  for (const mode of ['dir', 'file']) {
+    const target = mode === 'dir' ? fx.common : join(fx.common, 'T1.jsonl');
+    chmodSync(target, 0o000);
+    let r;
+    try { r = spawnSync(process.execPath, [EVAL, 'report', '--repo', fx.wt2, '--ticket', 'T1'], { encoding: 'utf8' }); } finally { chmodSync(target, mode === 'dir' ? 0o700 : 0o600); }
+    assert.equal(r.status, 0, `${mode}: ${r.stderr.slice(0, 200)}`);
+    const out = JSON.parse(r.stdout);
+    assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable'), `${mode}: ${JSON.stringify(out.degraded)}`);
+    assert.deepEqual(out.runs, [], `${mode}: no empty synthetic run from the engine state`);
+  }
 });

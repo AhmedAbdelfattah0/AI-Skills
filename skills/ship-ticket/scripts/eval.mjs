@@ -452,8 +452,12 @@ function report(options) {
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
     let log = logDir ? join(logDir, `${ticket}.jsonl`) : null;
     // Only ENOENT is "no log"; any other error degrades this ticket's figures to unknown, never empty (repair 7).
-    if (log) { try { statSync(log); } catch (e) { if (e?.code !== 'ENOENT') degraded.push({ code: 'shared_log_unavailable', ticket, errno: e?.code ?? String(e), figures: 'unknown' }); log = null; } }
-    for (const row of log ? legacyRows(readJsonl(log)) : []) {
+    let unavailable = false;
+    if (log) { try { statSync(log); } catch (e) { if (e?.code !== 'ENOENT') { unavailable = true; degraded.push({ code: 'shared_log_unavailable', ticket, errno: e?.code ?? String(e), figures: 'unknown' }); } log = null; } }
+    let timing = [];
+    // The read itself can fail after a successful stat (a file at mode 000): degraded, never a crash (repair 8).
+    if (log) { try { timing = legacyRows(readJsonl(log)); } catch (e) { unavailable = true; degraded.push({ code: 'shared_log_unavailable', ticket, errno: e?.code ?? String(e), figures: 'unknown' }); } }
+    for (const row of timing) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
@@ -465,7 +469,8 @@ function report(options) {
     // S-27-min: a run this install cannot interpret refuses the whole report (fail closed, like every engine command).
     if (states[ticket] !== undefined) { try { runPolicy(states[ticket]); } catch (e) { fail(`${ticket}: ${e.message}`); } }
     const stateRun = states[ticket]?.run_id;
-    if (logDir && typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
+    // No synthetic run from engine state when this ticket's shared log is unavailable: its figures are unknown (repair 8).
+    if (logDir && !unavailable && typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
   }
   const skipped = { lines: 0 };
   const records = dedupeUsage(options.usage.flatMap((f) => readUsage(f, skipped)));

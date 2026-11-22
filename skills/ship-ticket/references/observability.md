@@ -98,47 +98,17 @@ That JSON is a READABLE COMPANION only. It does not preserve the history:
 - invalid or torn lines are dropped;
 - a file over the limit is truncated.
 
-**Before `git worktree remove`, copy the RAW files and verify the copy.** Set `WT` (the
-linked worktree), `NAME` (a label for the copy) and `SKILL` (the directory holding this
-skill's `SKILL.md`), then run the block with bash. It stops at the first problem, and it
-refuses before copying anything when:
-- `WT` is not a git worktree;
-- `WT` is the main checkout (its old path IS the shared log);
-- the source is not a directory;
-- source and destination overlap;
-- the destination already exists;
-- there is no file to copy;
-- `find` or `shasum` fails.
+**Before `git worktree remove` (interim rule).** A linked worktree that holds a pre-S5 log
+must not be removed until its history is preserved. Until an archive helper is approved,
+do one of the following:
+- leave the worktree in place; or
+- save its audit output with `run-log.mjs legacy --repo <wt> --ticket <T> > <file>`, where
+  the operator names a file OUTSIDE the git directory.
 
-<!-- s5-retention-runbook:begin -->
-```bash
-set -eu
-: "${WT:?set WT}" "${NAME:?set NAME}" "${SKILL:?set SKILL}"
-SRC="$(git -C "$WT" rev-parse --path-format=absolute --git-path ai-skills/ship-ticket)"
-COMMON="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/ai-skills/ship-ticket"
-DST="$COMMON/archive-legacy/$NAME"
-[ -n "$SRC" ] && [ -d "$SRC" ] || { echo "refusing: no per-worktree log directory for $WT" >&2; exit 1; }
-[ "$SRC" != "$COMMON" ] || { echo "refusing: $WT is the main checkout; its log is the shared log" >&2; exit 1; }
-case "$DST/" in "$SRC/"*) echo "refusing: destination inside source" >&2; exit 1;; esac
-case "$SRC/" in "$DST/"*) echo "refusing: source inside destination" >&2; exit 1;; esac
-[ ! -e "$DST" ] && [ ! -e "$DST.SHA256SUMS" ] || { echo "refusing: $DST already exists" >&2; exit 1; }
-mkdir -p "$COMMON/archive-legacy"
-(cd "$SRC" && find . -type f -exec shasum -a 256 {} +) > "$DST.SHA256SUMS.tmp"   # fails on any find/shasum error
-[ -s "$DST.SHA256SUMS.tmp" ] || { rm -f "$DST.SHA256SUMS.tmp"; echo "refusing: nothing to copy in $SRC" >&2; exit 1; }
-mv "$DST.SHA256SUMS.tmp" "$DST.SHA256SUMS"
-mkdir -p "$DST"
-cp -Rp "$SRC/." "$DST/"   # every file: <T>.jsonl, <T>.jsonl.lost-*.json sidecars, torn bytes, engine files
-(cd "$DST" && shasum -a 256 -c "$DST.SHA256SUMS")   # every line must say OK, else set -e stops here
-node "$SKILL/scripts/run-log.mjs" legacy --repo "$WT" > "$DST.readable.json"   # companion only
-git -C "$COMMON" worktree remove "$WT"
-```
-<!-- s5-retention-runbook:end -->
-
-- Remove the worktree only after every checksum line says `OK`.
-- The copy is inert. No run-log command reads `archive-legacy/`: tickets are only the
-  files directly in the log directory, and REPAIR authority is read only from a
-  worktree's own `review-auth/`. Any other location works as well.
-- Without the raw copy, removing the worktree deletes that history.
+That output is a readable companion only: S-04 rows, invalid lines and data over the
+limit are NOT in it. For a raw-copy export, wait for the approved archive helper. No
+hand-written copy procedure is documented, because a shell copy of git metadata could not
+be made safe by construction.
 
 **REPAIR authority stays per worktree.** The common log is telemetry and never authorises
 a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its
@@ -394,8 +364,8 @@ not computed inside run-log-io.
   - `lostSignal` sets `log_unreadable`.
 - Known limits:
   - Pre-S5 history of LINKED worktrees is in no figure. It is visible only through
-    `run-log.mjs legacy` while the worktree exists, or through its export (the runbook
-    above).
+    `run-log.mjs legacy` while the worktree exists, or through its saved audit output (the
+    interim rule above; a readable companion, not a raw copy).
   - A run spanning the upgrade is split. It is labelled `partial_legacy` only when some of
     its S5 rows were written in the worktree that holds the archive. Rows written from the
     main checkout, or from any worktree without an archive of the ticket, carry no
