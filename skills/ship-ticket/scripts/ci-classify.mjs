@@ -30,8 +30,14 @@
  * R1, R3, R4 and R5, and a code failure always executes steps. Re-measure at the next real billing incident before
  * changing it; the test pins the value so a change is a deliberate edit.
  *
- * CLI exit: 0 only for `no_failure_observed` (which is NOT a pass), 1 for every other classification or unreadable input,
- * 2 usage. The exit code is never a merge signal.
+ * CLI exit: NEVER 0. Every ci-classification-v1 classification exits 1 (so `ci-classify ... && next` can never proceed), 2 is
+ * usage, 3 is unreadable input (not JSON, duplicate JSON keys, too deep) or an internal error; the stdout line carries the data.
+ * Every output carries `note`: "Required checks unverified; no gate decision." The exit code is never a merge signal.
+ * Input hardening: JSON text is parsed by parseStrictJson, which refuses duplicate keys at parse time; rows with a duplicate
+ * or malformed id, a status other than completed, a conclusion that disagrees with their job, or a snapshot without a 64-hex
+ * provider_snapshot_sha256 are `unavailable`. A non-Actions check beside billing rows may only be cancelled or non-failing;
+ * a failed, timed_out, action_required, startup_failure or stale one makes the result `unavailable`. A failure that EXECUTED
+ * steps and was superseded by a failing attempt is still reported (it is never hidden behind a billing-shaped retry).
  */
 import { readFileSync } from 'node:fs';
 import { isEntrypoint } from './harness.mjs';
@@ -52,7 +58,8 @@ export const CLASSIFICATIONS = Object.freeze({
   no_failure_observed: Object.freeze({ ci_state: 'NOT_CLASSIFIED', code: 'no_failure_observed' }),
 });
 export const CI_STATES = Object.freeze(['FAIL', 'UNAVAILABLE', 'NOT_CLASSIFIED']);
-export const NOT_ASSERTED = Object.freeze(['CI_PASSED', 'required_check_policy', 'LOCAL_CI_VERIFIED', 'fallback_eligibility']);
+export const NOT_ASSERTED = Object.freeze(['required_check_policy', 'merge_basis', 'local_evidence', 'fallback_decision']);
+export const NOTE = 'Required checks unverified; no gate decision.';
 
 const NOT_FAILURE = ['success', 'neutral', 'skipped'];
 const BILLING_CONCLUSIONS = ['failure', 'startup_failure'];
@@ -63,24 +70,92 @@ const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 export function durationSeconds(start, end) {
   if (typeof start !== 'string' || typeof end !== 'string' || !TS.test(start) || !TS.test(end)) return null;
   const a = Date.parse(start), b = Date.parse(end);
-  return Number.isFinite(a) && Number.isFinite(b) && b >= a ? (b - a) / 1000 : null;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || new Date(a).toISOString().slice(0, 19) !== start.slice(0, 19) || new Date(b).toISOString().slice(0, 19) !== end.slice(0, 19)) return null;
+  return b >= a ? (b - a) / 1000 : null;
+}
+
+/** JSON.parse that THROWS on a duplicate object key (checked while parsing the raw text, which JSON.parse cannot do), on depth > 64 and on trailing text. */
+export function parseStrictJson(text) {
+  let i = 0;
+  const fail = (m) => { throw new Error(m); };
+  const ws = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++; };
+  const str = () => {
+    const start = i++;
+    while (i < text.length && text[i] !== '"') { if (text[i] === '\\') i++; i++; }
+    if (i >= text.length) fail('unterminated_string');
+    return JSON.parse(text.slice(start, ++i));
+  };
+  const value = (depth) => {
+    if (depth > 64) fail('too_deep');
+    ws();
+    const c = text[i];
+    if (c === '{') {
+      i++; ws();
+      const o = {}, seen = new Set();
+      if (text[i] === '}') { i++; return o; }
+      for (;;) {
+        ws();
+        if (text[i] !== '"') fail('key_expected');
+        const k = str();
+        if (seen.has(k)) fail('duplicate_key');
+        seen.add(k); ws();
+        if (text[i++] !== ':') fail('colon_expected');
+        Object.defineProperty(o, k, { value: value(depth + 1), enumerable: true, writable: true, configurable: true });
+        ws();
+        const d = text[i++];
+        if (d === '}') return o;
+        if (d !== ',') fail('comma_expected');
+      }
+    }
+    if (c === '[') {
+      i++; ws();
+      const a = [];
+      if (text[i] === ']') { i++; return a; }
+      for (;;) {
+        a.push(value(depth + 1)); ws();
+        const d = text[i++];
+        if (d === ']') return a;
+        if (d !== ',') fail('comma_expected');
+      }
+    }
+    if (c === '"') return str();
+    const m = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(i, i + 64));
+    if (!m) fail('value_expected');
+    i += m[0].length;
+    return JSON.parse(m[0]);
+  };
+  const v = value(0);
+  ws();
+  if (i !== text.length) fail('trailing_text');
+  return v;
 }
 
 const verdictRow = (row, verdict, reasons = [], evidence = null) => ({ id: row?.id ?? null, name: row?.name ?? null, app: row?.app ?? null, verdict, reasons, evidence });
 
-function evaluateRow(row) {
+function evaluateRow(row, all) {
   if (!isObj(row)) return verdictRow(null, 'unknown', ['row_not_an_object']);
+  if (typeof row.id !== 'string' || !/^(0|[1-9]\d*)$/.test(row.id)) return verdictRow(row, 'unknown', ['row_id_invalid']);
+  if (row.status !== 'completed') return verdictRow(row, 'unknown', ['row_not_completed']);
   if (row.binding === 'external') {
-    return NOT_FAILURE.includes(row.conclusion) ? verdictRow(row, 'outside_classifier') : verdictRow(row, 'outside_classifier', ['external_check_not_success']);
+    if (typeof row.app !== 'string' || row.app === '' || row.app === 'github-actions') return verdictRow(row, 'unknown', ['external_app_invalid']);
+    if (NOT_FAILURE.includes(row.conclusion)) return verdictRow(row, 'outside_classifier');
+    if (row.conclusion === 'cancelled') return verdictRow(row, 'outside_classifier', ['external_check_cancelled']);
+    return verdictRow(row, 'unclassified_failure', [`external_check_${String(row.conclusion)}`]);
   }
   if (row.binding !== 'bound') return verdictRow(row, 'unknown', ['row_not_bound']);
   if (row.input_status === 'outside_r3') return row.conclusion === 'skipped' ? verdictRow(row, 'outside_r3') : verdictRow(row, 'unknown', ['outside_r3_not_skipped']);
   if (row.input_status !== 'ok') return verdictRow(row, 'unknown', [`input_status_${String(row.input_status)}`]);
   if (typeof row.conclusion !== 'string') return verdictRow(row, 'unknown', ['conclusion_missing']);
-  if (NOT_FAILURE.includes(row.conclusion)) return verdictRow(row, 'ok');
+  if (!isObj(row.job_inputs) || row.job_inputs.conclusion !== row.conclusion) return verdictRow(row, 'unknown', ['conclusion_inconsistent']);
+  if (NOT_FAILURE.includes(row.conclusion)) return verdictRow(row, 'not_failed');
   if (row.supersession === 'superseded') {
-    return Number.isSafeInteger(row.superseded_by_attempt) && Number.isSafeInteger(row.run_attempt) && row.superseded_by_attempt > row.run_attempt
-      ? verdictRow(row, 'superseded') : verdictRow(row, 'unknown', ['supersession_unproven']);
+    if (!(Number.isSafeInteger(row.superseded_by_attempt) && Number.isSafeInteger(row.run_attempt) && row.superseded_by_attempt > row.run_attempt)) return verdictRow(row, 'unknown', ['supersession_unproven']);
+    const by = all.find((r) => isObj(r) && r.binding === 'bound' && r.run_id === row.run_id && r.name === row.name && r.run_attempt === row.superseded_by_attempt);
+    if (!by) return verdictRow(row, 'unknown', ['superseding_row_missing']);
+    if (NOT_FAILURE.includes(by.conclusion)) return verdictRow(row, 'superseded');
+    const old = row.job_inputs, listed = isObj(old) && old.steps_state === 'array' && Array.isArray(old.steps) && old.steps.every((s) => isObj(s) && s.malformed !== true);
+    if (!listed) return verdictRow(row, 'unknown', ['superseded_failure_steps_unknown']);
+    return old.steps.some((s) => s.conclusion !== 'skipped') ? verdictRow(row, 'executed_failure', ['superseded_executed_failure_not_cleared']) : verdictRow(row, 'superseded');
   }
   const inp = row.job_inputs;
   if (!isObj(inp) || inp.steps_state !== 'array' || !Array.isArray(inp.steps) || inp.steps.some((s) => !isObj(s) || s.malformed === true)) return verdictRow(row, 'unknown', ['steps_unknown']);
@@ -104,7 +179,7 @@ function evaluateRow(row) {
 function finish(classification, reasons, rows, snapshot) {
   const { ci_state, code } = CLASSIFICATIONS[classification];
   return { schema: SCHEMA, advisory: true, classification, ci_state, code, reasons, snapshot_sha256: typeof snapshot?.provider_snapshot_sha256 === 'string' ? snapshot.provider_snapshot_sha256 : null,
-    billing_allowlist_version: BILLING_ALLOWLIST_VERSION, billing_max_seconds: BILLING_MAX_SECONDS, not_asserted: NOT_ASSERTED.slice(), rows };
+    billing_allowlist_version: BILLING_ALLOWLIST_VERSION, billing_max_seconds: BILLING_MAX_SECONDS, not_asserted: NOT_ASSERTED.slice(), note: NOTE, rows };
 }
 
 /** The pure core: one snapshot object -> one advisory classification. Anything but a snapshot_valid snapshot is `unavailable`. */
@@ -113,7 +188,10 @@ export function classifySnapshot(snapshot) {
   if (snapshot.schema !== SNAPSHOT_SCHEMA) return finish('unavailable', ['snapshot_schema_unknown'], [], snapshot);
   if (snapshot.state !== 'snapshot_valid' || snapshot.internally_consistent !== true) return finish('unavailable', [`snapshot_state_${String(snapshot.state)}`], [], snapshot);
   if (!Array.isArray(snapshot.check_runs) || snapshot.check_runs.length === 0) return finish('unavailable', ['snapshot_has_no_check_runs'], [], snapshot);
-  const rows = snapshot.check_runs.map(evaluateRow);
+  if (!/^[0-9a-f]{64}$/.test(String(snapshot.provider_snapshot_sha256))) return finish('unavailable', ['snapshot_hash_invalid'], [], snapshot);
+  const ids = snapshot.check_runs.map((r) => (isObj(r) ? r.id : null));
+  if (new Set(ids).size !== ids.length) return finish('unavailable', ['snapshot_duplicate_row_id'], [], snapshot);
+  const rows = snapshot.check_runs.map((r) => evaluateRow(r, snapshot.check_runs));
   const by = (v) => rows.filter((r) => r.verdict === v);
   const executed = by('executed_failure'), billing = by('billing');
   const bad = rows.filter((r) => r.verdict === 'unknown' || r.verdict === 'unclassified_failure');
@@ -134,11 +212,14 @@ export function main(argv, { readStdin = () => readFileSync(0, 'utf8') } = {}) {
     process.stderr.write('Usage: ci-classify.mjs classify --snapshot-json <file|->\n');
     return 2;
   }
-  let snapshot = null, problem = null;
-  try { snapshot = JSON.parse(file === '-' ? readStdin() : readFileSync(file, 'utf8')); } catch { problem = 'snapshot_json_unreadable'; }
-  const result = problem ? finish('unavailable', [problem], [], null) : classifySnapshot(snapshot);
+  let result, status = 1;
+  try {
+    let snapshot = null;
+    try { snapshot = parseStrictJson(file === '-' ? readStdin() : readFileSync(file, 'utf8')); } catch (e) { result = finish('unavailable', [`snapshot_json_unreadable:${/^[a-z_]+$/.test(String(e?.message)) ? e.message : 'invalid_json'}`], [], null); status = 3; }
+    result ??= classifySnapshot(snapshot);
+  } catch { result = finish('unavailable', ['classifier_internal_error'], [], null); status = 3; }
   process.stdout.write(JSON.stringify(result) + '\n');
-  return result.classification === 'no_failure_observed' ? 0 : 1;
+  return status;
 }
 
 if (isEntrypoint(import.meta.url)) process.exitCode = main(process.argv.slice(2));

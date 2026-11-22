@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, mkdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSnapshot, readSnapshot } from './ci-snapshot.mjs';
-import { classifySnapshot, durationSeconds, main, BILLING_MAX_SECONDS, BILLING_ALLOWLIST_VERSION, BILLING_ANNOTATION_ALLOWLIST, CLASSIFICATIONS, CI_STATES, SCHEMA } from './ci-classify.mjs';
+import { classifySnapshot, durationSeconds, parseStrictJson, main, NOTE, BILLING_MAX_SECONDS, BILLING_ALLOWLIST_VERSION, BILLING_ANNOTATION_ALLOWLIST, CLASSIFICATIONS, CI_STATES, SCHEMA } from './ci-classify.mjs';
 import { classify as classifyMutant, loadMutationSource, runMutant as runTreeMutant } from './lib/mutation.test-helper.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -130,6 +130,64 @@ test('6: duration 11 s is never billing; a non-Actions app (CodeRabbit cancelled
   const mixed = classifySnapshot(snap([...six(), { id: 7, name: 'review', app: 'coderabbitai', conclusion: 'cancelled', steps: undefined, ann: [], secs: 3 }]));
   assert.equal(mixed.classification, 'billing_blocked');
   assert.ok(mixed.reasons.includes('outside_classifier:7'));
+  for (const c of ['success', 'neutral', 'skipped']) assert.equal(classifySnapshot(snap([...six(), { id: 7, name: 'review', app: 'coderabbitai', conclusion: c, steps: undefined, ann: [], secs: 3 }])).classification, 'billing_blocked', c);
+});
+
+test('M1: a non-Actions check that FAILED beside billing rows is never billing_blocked (one case per failing conclusion)', () => {
+  for (const c of ['failure', 'timed_out', 'action_required', 'startup_failure', 'stale']) {
+    const r = classifySnapshot(snap([...six(), { id: 7, name: 'review', app: 'coderabbitai', conclusion: c, steps: undefined, ann: [], secs: 3 }]));
+    assert.equal(r.classification, 'unavailable', c);
+    assert.equal(r.ci_state, 'UNAVAILABLE', c);
+    assert.ok(r.reasons.includes('not_classified:7'), c);
+    assert.deepEqual(rowOf(r, 7).reasons, [`external_check_${c}`], c);
+    assert.equal(classifySnapshot(snap([{ id: 7, name: 'review', app: 'coderabbitai', conclusion: c, steps: undefined, ann: [], secs: 3 }])).classification, 'unavailable', `${c} alone`);
+  }
+  // an executed Actions failure still decides FAIL
+  assert.equal(classifySnapshot(snap([{ id: 1, steps: [STEP], secs: 60 }, { id: 7, name: 'review', app: 'coderabbitai', conclusion: 'failure', steps: undefined, ann: [], secs: 3 }])).classification, 'failed_code');
+});
+
+test('M2: an executed failure superseded by a billing-shaped retry is never hidden behind billing_blocked', () => {
+  const hidden = snap([{ id: 1, attempt: 1, steps: [STEP], secs: 80 }, { id: 2, attempt: 2, secs: 2 }]);
+  assert.equal(hidden.state, 'snapshot_valid');
+  assert.equal(hidden.check_runs[0].supersession, 'superseded');
+  const r = classifySnapshot(hidden);
+  assert.equal(r.classification, 'ci_mixed_execution');
+  assert.equal(r.ci_state, 'FAIL');
+  assert.equal(rowOf(r, 1).verdict, 'executed_failure');
+  assert.deepEqual(rowOf(r, 1).reasons, ['superseded_executed_failure_not_cleared']);
+  // superseded by a failing executed retry: still failed_code
+  assert.equal(classifySnapshot(snap([{ id: 1, attempt: 1, steps: [STEP], secs: 80 }, { id: 2, attempt: 2, steps: [STEP], secs: 70 }])).classification, 'failed_code');
+  // a zero-step billing attempt superseded by another billing attempt: the earlier one is excluded, the latest decides
+  const twice = classifySnapshot(snap([{ id: 1, attempt: 1 }, { id: 2, attempt: 2 }]));
+  assert.equal(twice.classification, 'billing_blocked');
+  assert.equal(rowOf(twice, 1).verdict, 'superseded');
+  // steps of the superseded failure not listed: unknown, never superseded
+  const s = snap([{ id: 1, attempt: 1, steps: [STEP], secs: 80 }, { id: 2, attempt: 2, secs: 2 }]);
+  const noSteps = { ...s, check_runs: [{ ...s.check_runs[0], job_inputs: { ...s.check_runs[0].job_inputs, steps_state: 'null', steps: null } }, s.check_runs[1]] };
+  assert.equal(classifySnapshot(noSteps).classification, 'unavailable');
+  assert.deepEqual(rowOf(classifySnapshot(noSteps), 1).reasons, ['superseded_failure_steps_unknown']);
+  const gone = { ...s, check_runs: [s.check_runs[0]] };
+  assert.deepEqual(rowOf(classifySnapshot(gone), 1).reasons, ['superseding_row_missing']);
+});
+
+test('defence in depth: duplicate row ids, a missing or malformed snapshot hash, inconsistent rows and an external row claiming github-actions are unavailable', () => {
+  const g = snap(six());
+  const dup = classifySnapshot({ ...g, check_runs: [...g.check_runs, g.check_runs[0]] });
+  assert.deepEqual(dup.reasons, ['snapshot_duplicate_row_id']);
+  assert.equal(dup.classification, 'unavailable');
+  for (const h of [null, 'abc', 'A'.repeat(64), 'g'.repeat(64), undefined]) assert.deepEqual(classifySnapshot({ ...g, provider_snapshot_sha256: h }).reasons, ['snapshot_hash_invalid']);
+  const patch = (o) => classifySnapshot({ ...g, check_runs: [{ ...g.check_runs[0], ...o }, ...g.check_runs.slice(1)] }).rows[0].reasons;
+  assert.deepEqual(patch({ conclusion: 'success' }), ['conclusion_inconsistent']);
+  assert.deepEqual(patch({ status: 'in_progress' }), ['row_not_completed']);
+  assert.deepEqual(patch({ id: '007' }), ['row_id_invalid']);
+  assert.deepEqual(patch({ id: 7 }), ['row_id_invalid']);
+  assert.deepEqual(patch({ binding: 'external', app: 'github-actions' }), ['external_app_invalid']);
+  assert.deepEqual(patch({ binding: 'external', app: null }), ['external_app_invalid']);
+});
+
+test('impossible calendar dates are not durations (30 Feb, month 13, hour 24)', () => {
+  for (const [a, b] of [['2026-02-30T00:00:00Z', '2026-02-30T00:00:05Z'], ['2026-13-01T00:00:00Z', '2026-13-01T00:00:05Z'], ['2026-01-01T24:00:00Z', '2026-01-01T24:00:05Z'], ['2026-02-29T00:00:00Z', '2026-02-29T00:00:05Z']]) assert.equal(durationSeconds(a, b), null, a);
+  assert.equal(durationSeconds('2028-02-29T00:00:00Z', '2028-02-29T00:00:05Z'), 5);
 });
 
 test('7: refuse and report unavailable (never pass) for a snapshot that is not snapshot_valid, or a row that is not fully known', () => {
@@ -211,7 +269,9 @@ test('10: a success-only snapshot -> no_failure_observed / NOT_CLASSIFIED; no bi
   assert.equal(r.code, 'no_failure_observed');
   assert.deepEqual(r.reasons, []);
   assert.ok(!r.rows.some((x) => x.verdict === 'billing'));
-  assert.ok(r.not_asserted.includes('CI_PASSED') && r.not_asserted.includes('required_check_policy'));
+  assert.ok(r.not_asserted.includes('required_check_policy') && r.not_asserted.includes('merge_basis'));
+  assert.equal(r.note, NOTE);
+  assert.equal(r.rows[0].verdict, 'not_failed');
 });
 
 test('11: a failed attempt superseded by a later attempt of the SAME run is excluded; a cross-run same-name success does not supersede', () => {
@@ -234,16 +294,16 @@ const ALL_CASES = () => [
 test('advisory: over every case ci_state is in {FAIL, UNAVAILABLE, NOT_CLASSIFIED}; the key set is closed and has no pass/waive/eligible field', () => {
   assert.deepEqual([...CI_STATES], ['FAIL', 'UNAVAILABLE', 'NOT_CLASSIFIED']);
   assert.deepEqual(Object.keys(CLASSIFICATIONS).sort(), ['billing_blocked', 'ci_mixed_execution', 'failed_code', 'no_failure_observed', 'unavailable']);
-  const keys = ['advisory', 'billing_allowlist_version', 'billing_max_seconds', 'ci_state', 'classification', 'code', 'not_asserted', 'reasons', 'rows', 'schema', 'snapshot_sha256'];
+  const keys = ['advisory', 'billing_allowlist_version', 'billing_max_seconds', 'ci_state', 'classification', 'code', 'not_asserted', 'note', 'reasons', 'rows', 'schema', 'snapshot_sha256'];
   for (const s of ALL_CASES()) {
     const r = classifySnapshot(s);
     assert.ok(CI_STATES.includes(r.ci_state));
     assert.deepEqual(Object.keys(r).sort(), keys);
     assert.equal(r.ci_state, CLASSIFICATIONS[r.classification].ci_state);
     const text = JSON.stringify(r);
-    assert.ok(!/"(eligible|waived|passed|pass|fallback_eligible|local_ci_verified)"\s*:/i.test(text));
-    assert.ok(!/"(ci_state|classification|code)":"[^"]*(pass|waive|LOCAL_CI_VERIFIED|eligible)/i.test(text));
-    assert.ok(r.not_asserted.includes('LOCAL_CI_VERIFIED') && r.not_asserted.includes('fallback_eligibility'));
+    // the FULL serialized output (keys, values, rows, not_asserted, note) names none of the forbidden words
+    assert.ok(!/pass|waive|eligib|CI_PASSED|LOCAL_CI_VERIFIED/i.test(text), text.slice(0, 200));
+    assert.equal(r.note, 'Required checks unverified; no gate decision.');
   }
 });
 
@@ -333,28 +393,54 @@ test('synthetic replica with CRLF line endings (a Windows checkout) classifies i
 
 // ---- CLI ----
 const cli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', input });
-test('CLI: a snapshot file and stdin ("-") give one JSON line; exit 1 for billing_blocked, 0 only for no_failure_observed, 2 for usage', () => {
+test('parseStrictJson: equals JSON.parse on valid text and refuses duplicate keys (also nested), trailing text, depth and broken text', () => {
+  const ok = '{"a":[1,2.5,-3e2,true,false,null,"x\\"y\\\\"],"b":{"c":{}},"d":[],"__proto__":{"k":1}}';
+  assert.deepEqual(parseStrictJson(ok), JSON.parse(ok));
+  assert.equal(Object.keys(parseStrictJson(ok)).includes('__proto__'), true);
+  for (const bad of ['{"a":1,"a":2}', '{"x":{"a":1,"b":2,"a":3}}', '[{"a":1,"a":1}]', '{"a":1} x', '{"a":1', '{"a" 1}', '[1,]', '{"a":01}', '"abc', '{a:1}', '', '[' .repeat(70) + ']'.repeat(70)]) assert.throws(() => parseStrictJson(bad), undefined, bad);
+  assert.equal(JSON.parse('{"conclusion":"failure","conclusion":"success"}').conclusion, 'success', 'JSON.parse silently takes the last duplicate: the reason this parser exists');
+});
+test('CLI: every classification exits 1 (never 0), with the data and the note on one stdout line; usage 2; unreadable input 3', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ci-classify-cli-'));
   try {
-    const bill = join(dir, 'bill.json'), ok = join(dir, 'ok.json');
-    writeFileSync(bill, JSON.stringify(snap(six())));
-    writeFileSync(ok, JSON.stringify(snap([{ id: 1, conclusion: 'success', steps: [STEP], ann: [] }])));
-    const a = cli(['classify', '--snapshot-json', bill]);
-    assert.equal(a.status, 1);
-    assert.equal(a.stdout.trim().split('\n').length, 1);
-    assert.equal(JSON.parse(a.stdout).classification, 'billing_blocked');
-    const b = cli(['classify', '--snapshot-json', '-'], readFileSync(ok, 'utf8'));
-    assert.equal(b.status, 0);
+    const seen = new Set();
+    ALL_CASES().forEach((c, i) => {
+      const f = join(dir, `c${i}.json`);
+      writeFileSync(f, JSON.stringify(c));
+      const a = cli(['classify', '--snapshot-json', f]);
+      assert.equal(a.status, 1, `case ${i}`);
+      assert.equal(a.stdout.trim().split('\n').length, 1);
+      const out = JSON.parse(a.stdout);
+      assert.equal(out.note, 'Required checks unverified; no gate decision.');
+      seen.add(out.classification);
+    });
+    assert.deepEqual([...seen].sort(), ['billing_blocked', 'ci_mixed_execution', 'failed_code', 'no_failure_observed', 'unavailable']);
+    // stdin
+    const b = cli(['classify', '--snapshot-json', '-'], JSON.stringify(snap([{ id: 1, conclusion: 'success', steps: [STEP], ann: [] }])));
+    assert.equal(b.status, 1);
     assert.equal(JSON.parse(b.stdout).classification, 'no_failure_observed');
+    // unreadable input and duplicate keys: exit 3 with an unavailable line
     writeFileSync(join(dir, 'bad.json'), '{not json');
     const c = cli(['classify', '--snapshot-json', join(dir, 'bad.json')]);
-    assert.equal(c.status, 1);
-    assert.deepEqual(JSON.parse(c.stdout).reasons, ['snapshot_json_unreadable']);
-    assert.equal(JSON.parse(cli(['classify', '--snapshot-json', join(dir, 'missing.json')]).stdout).classification, 'unavailable');
-    for (const args of [[], ['classify'], ['classify', '--snapshot-json'], ['check', '--snapshot-json', bill], ['classify', '--snapshot-json', bill, 'extra']]) assert.equal(cli(args).status, 2, args.join(' '));
+    assert.equal(c.status, 3);
+    assert.equal(JSON.parse(c.stdout).classification, 'unavailable');
+    assert.match(JSON.parse(c.stdout).reasons[0], /^snapshot_json_unreadable:/);
+    const dupText = JSON.stringify(snap(six())).replace('"conclusion":"failure"', '"conclusion":"failure","conclusion":"success"');
+    assert.notEqual(dupText, JSON.stringify(snap(six())));
+    writeFileSync(join(dir, 'dup.json'), dupText);
+    const d = cli(['classify', '--snapshot-json', join(dir, 'dup.json')]);
+    assert.equal(d.status, 3);
+    assert.deepEqual(JSON.parse(d.stdout).reasons, ['snapshot_json_unreadable:duplicate_key']);
+    assert.equal(JSON.parse(d.stdout).classification, 'unavailable');
+    const m = cli(['classify', '--snapshot-json', join(dir, 'missing.json')]);
+    assert.equal(m.status, 3);
+    assert.equal(JSON.parse(m.stdout).classification, 'unavailable');
+    const ok = join(dir, 'ok.json');
+    writeFileSync(ok, '{}');
+    for (const args of [[], ['classify'], ['classify', '--snapshot-json'], ['check', '--snapshot-json', ok], ['classify', '--snapshot-json', ok, 'extra']]) assert.equal(cli(args).status, 2, args.join(' '));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-test('CLI main(): the injected stdin reader is used for "-"', () => {
+test('CLI main(): the injected stdin reader is used for "-" and the status is 1, never 0', () => {
   const orig = process.stdout.write;
   let out = '';
   process.stdout.write = (c) => { out += c; return true; };
@@ -383,7 +469,20 @@ const MUTANTS = [
   ['snapshot state refusal dropped', "if (snapshot.state !== 'snapshot_valid' || snapshot.internally_consistent !== true) return finish('unavailable', [`snapshot_state_${String(snapshot.state)}`], [], snapshot);\n", ''],
   ['schema refusal dropped', "if (snapshot.schema !== SNAPSHOT_SCHEMA) return finish('unavailable', ['snapshot_schema_unknown'], [], snapshot);\n", ''],
   ['executed-step count counts skipped steps too', "inp.steps.filter((s) => s.conclusion !== 'skipped').length", 'inp.steps.length'],
-  ['supersession trusted without proof', "return Number.isSafeInteger(row.superseded_by_attempt) && Number.isSafeInteger(row.run_attempt) && row.superseded_by_attempt > row.run_attempt\n      ? verdictRow(row, 'superseded') : verdictRow(row, 'unknown', ['supersession_unproven']);", "return verdictRow(row, 'superseded');"],
+  ['supersession trusted without proof', "if (!(Number.isSafeInteger(row.superseded_by_attempt) && Number.isSafeInteger(row.run_attempt) && row.superseded_by_attempt > row.run_attempt)) return verdictRow(row, 'unknown', ['supersession_unproven']);\n", ''],
+  ['M2: superseded executed failure hidden behind the retry', "return old.steps.some((s) => s.conclusion !== 'skipped') ? verdictRow(row, 'executed_failure', ['superseded_executed_failure_not_cleared']) : verdictRow(row, 'superseded');", "return verdictRow(row, 'superseded');"],
+  ['M2: a failing superseder treated as clearing', "if (NOT_FAILURE.includes(by.conclusion)) return verdictRow(row, 'superseded');\n", "return verdictRow(row, 'superseded');\n"],
+  ['M2: superseding row not required', "if (!by) return verdictRow(row, 'unknown', ['superseding_row_missing']);\n", "if (!by) return verdictRow(row, 'superseded');\n"],
+  ['M1: external failure tolerated beside billing', "return verdictRow(row, 'unclassified_failure', [`external_check_${String(row.conclusion)}`]);", "return verdictRow(row, 'outside_classifier', ['external_check_failed']);"],
+  ['M1: external timed_out and others treated as cancelled', "if (row.conclusion === 'cancelled') return", "if (row.conclusion !== 'success') return"],
+  ['M3: duplicate JSON keys accepted', "if (seen.has(k)) fail('duplicate_key');", ''],
+  ['M3: duplicate row ids accepted', "  if (new Set(ids).size !== ids.length) return finish('unavailable', ['snapshot_duplicate_row_id'], [], snapshot);\n", ''],
+  ['M3: snapshot hash not required', "  if (!/^[0-9a-f]{64}$/.test(String(snapshot.provider_snapshot_sha256))) return finish('unavailable', ['snapshot_hash_invalid'], [], snapshot);\n", ''],
+  ['M3: row/job conclusion disagreement ignored', "  if (!isObj(row.job_inputs) || row.job_inputs.conclusion !== row.conclusion) return verdictRow(row, 'unknown', ['conclusion_inconsistent']);\n", ''],
+  ['M3: row status not required completed', "  if (row.status !== 'completed') return verdictRow(row, 'unknown', ['row_not_completed']);\n", ''],
+  ['M3: external row may claim github-actions', "typeof row.app !== 'string' || row.app === '' || row.app === 'github-actions'", "typeof row.app !== 'string'"],
+  ['M3: row id shape not required', "typeof row.id !== 'string' || !/^(0|[1-9]\\d*)$/.test(row.id)", 'false'],
+  ['M4: every output without the no-gate note', 'not_asserted: NOT_ASSERTED.slice(), note: NOTE, rows };', 'not_asserted: NOT_ASSERTED.slice(), rows };'],
   ['outside_r3 accepted for any conclusion', "return row.conclusion === 'skipped' ? verdictRow(row, 'outside_r3') : verdictRow(row, 'unknown', ['outside_r3_not_skipped']);", "return verdictRow(row, 'outside_r3');"],
   ['external failure ignored when nothing else fails', "  if (external.length) return finish('unavailable', note('external_check_not_success', external), rows, snapshot);\n", ''],
   ['bad rows ignored when billing exists', "  if (bad.length) return finish('unavailable', note('not_classified', bad), rows, snapshot);\n", ''],
@@ -391,9 +490,10 @@ const MUTANTS = [
   ['classification FAIL mapped to a pass-like state', "failed_code: Object.freeze({ ci_state: 'FAIL'", "failed_code: Object.freeze({ ci_state: 'PASS'"],
   ['billing_blocked mapped to NOT_CLASSIFIED', "billing_blocked: Object.freeze({ ci_state: 'UNAVAILABLE'", "billing_blocked: Object.freeze({ ci_state: 'NOT_CLASSIFIED'"],
   ['an eligibility field added to the output', "advisory: true, classification,", "advisory: true, eligible: classification === 'billing_blocked', classification,"],
-  ['timestamps not validated (any string parses)', "if (typeof start !== 'string' || typeof end !== 'string' || !TS.test(start) || !TS.test(end)) return null;\n", ''],
-  ['negative duration accepted', 'Number.isFinite(b) && b >= a ? (b - a) / 1000 : null', 'Number.isFinite(b) ? (b - a) / 1000 : null'],
-  ['CLI exits 0 for billing_blocked', "return result.classification === 'no_failure_observed' ? 0 : 1;", "return result.classification === 'no_failure_observed' || result.classification === 'billing_blocked' ? 0 : 1;"],
+  // Equivalent by design, no mutant listed: the typeof guard and TS regex are redundant with the calendar round-trip for every shape Date.parse accepts (date-only, offsets, spaces, non-strings), kept as defence in depth.
+  ['impossible calendar dates accepted', "new Date(a).toISOString().slice(0, 19) !== start.slice(0, 19) || new Date(b).toISOString().slice(0, 19) !== end.slice(0, 19)", 'false'],
+  ['M4: CLI exits 0 for no_failure_observed', "  return status;\n}", "  return result.classification === 'no_failure_observed' ? 0 : status;\n}"],
+  ['M4: unreadable input exits 1 instead of 3', "snapshot_json_unreadable:${/^[a-z_]+$/.test(String(e?.message)) ? e.message : 'invalid_json'}`], [], null); status = 3; }", "snapshot_json_unreadable:${/^[a-z_]+$/.test(String(e?.message)) ? e.message : 'invalid_json'}`], [], null); status = 1; }"],
   ['billing conclusion list widened to cancelled', "const BILLING_CONCLUSIONS = ['failure', 'startup_failure'];", "const BILLING_CONCLUSIONS = ['failure', 'startup_failure', 'cancelled'];"],
 ];
 const CHILD_ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT')), CLASSIFY_MUTANT_RUN: '1' };
