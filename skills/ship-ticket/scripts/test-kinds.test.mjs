@@ -671,6 +671,58 @@ test('[R8] FR-1a: a plan key opts in only from the start of a line (after Markdo
   assert.equal(TK.optIn({ planText: '# Plan\n\nno triggers here', declaration: TK.validateDeclaration({ version: 1 }) }), true);
 });
 
+test('[R9] FR-1a repair 1: every Markdown list / outline / checkbox / table decoration before a plan key still opts in; only the D1 label and prose forms read as absent', (t) => {
+  // the pre-FR-1a recogniser (origin/main 3b7792c): the oracle the new one is compared with
+  const OLD = (a, b) => new RegExp(`(?<![a-z0-9])(?:${a}\\s*-+\\s*${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`);
+  const OLD_KEYS = [OLD('test', 'triggers'), OLD('lifecycle', 'item'), OLD('test', 'waiver')];
+  const oldOpts = (l) => OLD_KEYS.some((re) => re.test(TK.normaliseForDetection(l)));
+  const newOpts = (l) => TK.MARKERS.some((m) => m.opt_in && TK.carriers(l, m).length > 0);
+  const DECOS = ['', '- ', '* ', '+ ', '- [x] ', '- [X] ', '- [ ] ', '* [x] ', '1. [x] ', '1. ', '12) ', '1.2 ', '1.2.3. ', '## 2.1 ', '### 1.2. ', '1: ', '1 - ', '1 — ', '#1 ', '1000. ', '123456) ',
+    'a. ', 'a) ', 'iv. ', 'IV. ', 'B) ', 'xii) ', '| 3 | ', '| ', '|  | ', '> ', '> > ', '> - [x] ', '`', '``', '**', '__', '_', '- **', '1. **', '١. ', '✅ ', '→ ', '  ', '\t', ' ', '﻿', '&gt; ', '<b>', '<li>', '(1) ', '[1] ', '• ', '● '];
+  const D1 = ['Declaration: ', '**Declared:** ', 'Note: ', 'Step 1: ', 'Plan key -> ', '- key: ', 'Waiver: ', 'The ', 'See ', 'e.g. ', 'Section 1.2 and ', '\u2139\ufe0f ' /* NFKC folds the information-source symbol to the letter i, so it reads as a word */];
+  const KEYS = ['test-triggers: money', 'lifecycle-item: L1 x', 'test-waiver: race n/a', 'Test triggers: x', 'test_triggers: x', 'Lifecycle item: L1 x', 'Test waiver: n/a'];
+  let compared = 0;
+  for (const d of DECOS) for (const k of KEYS) {
+    const line = `${d}${k}`, plan = `# Plan\n\n${line}\n${RS}`;
+    assert.equal(oldOpts(line), true, `${JSON.stringify(line)} opts in on the old recogniser`);
+    assert.equal(newOpts(line), true, `${JSON.stringify(line)} still opts in`);
+    assert.equal(TK.optIn({ planText: plan }), true, line); assert.notEqual(req(plan).status, 'not_declared', line);
+    assert.equal(req(`# Plan\r\n\r\n${line}\r\n${RS}`).status, req(plan).status, `${line} (CRLF)`);
+    if (d !== '') assert.equal(req(plan).status, 'refused', `${JSON.stringify(line)}: a decorated key line is not the strict line`);
+    compared++;
+  }
+  // the D1 allowlist: the ONLY lines the old code opted in that the new code reads as absent are prose or label forms
+  let lost = 0;
+  for (const d of D1) for (const k of KEYS) {
+    const line = `${d}${k}`;
+    assert.equal(oldOpts(line), true, line); assert.equal(newOpts(line), false, `${JSON.stringify(line)} is a D1 loss`);
+    assert.equal(req(`# Plan\n\n${line}\n${RS}`).status, 'not_declared', line); lost++;
+  }
+  // in an opted-in plan a decorated lifecycle-item / test-waiver / test-triggers line is refused exactly as before, never dropped
+  for (const [id, code] of [['lifecycle-item', 'plan_line_invalid'], ['test-waiver', 'waiver_invalid'], ['test-triggers', 'plan_line_invalid']]) {
+    const line = SITES[id].line;
+    for (const d of ['- [x] ', '- [X] ', '1.2 ', '## 2.1 ', 'a. ', 'IV) ', '| 3 | ', '#1 ', '1000. ', '١. ', '✅ ']) {
+      const r = req(swapOnce(FULL, line, `${d}${line}`));
+      assert.equal(r.status, 'refused', `${d}${id}`); assert.ok(r.errors.includes(code), `${d}${id}: ${r.errors}`);
+    }
+    assert.equal(req(swapOnce(FULL, line, `- [ ] ${line}`)).status, 'refused', `- [ ] ${id}`);
+  }
+  // a sole decorated carrier is refused, never not_declared
+  for (const l of ['- [x] test-triggers: money', '- [X] test-triggers: money', '- [x] lifecycle-item: L1 x', '- [x] test-waiver: race n/a', '1.2 test-triggers: money', '## 2.1 Test triggers: money', '| 3 | test-triggers: x |', 'iv. test-triggers: x']) {
+    assert.equal(req(`# Plan\n\n${l}\n${RS}`).status, 'refused', l);
+  }
+  // boundary (m3 residual): a prose line that BEGINS with a backticked key still opts in
+  assert.notEqual(req('# Plan\n\n`test-triggers` is not used here.\n' + RS).status, 'not_declared');
+  // ReDoS: long lead runs stay linear
+  const t0 = process.hrtime.bigint();
+  for (const lead of ['[ ]'.repeat(33333), '[x]'.repeat(33333), '1.'.repeat(50000), 'a. '.repeat(33333), ' '.repeat(100000), 'ℹ️'.repeat(50000), '- [x] '.repeat(16666), '[x'.repeat(50000), '1.2'.repeat(33333)]) {
+    for (const tail of ['z', 'test-triggers: x']) newOpts(lead + tail);
+  }
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  t.diagnostic(`FR-1a ReDoS: 9 leads of 10^5 chars x 2 tails in ${ms.toFixed(0)} ms; ${compared} decoration twins, ${lost} D1 losses`);
+  assert.ok(ms < 5000, `lead scan took ${ms} ms`);
+});
+
 // ---- S-01b2 P3: requirement provenance (optIn, provenance, kindsForClasses, PROTECTED_TAGS, the declaration `tests` key) ----
 // None of these tests is tagged [R#]: test-kinds-mutation.test.mjs runs only the #83 tagged tests against its mutants.
 /** Every plan the #83 tests build (the full fixture, every near-miss mutant, the RUN-STATE split corpus, near-miss lines added to FULL, and small plans). */

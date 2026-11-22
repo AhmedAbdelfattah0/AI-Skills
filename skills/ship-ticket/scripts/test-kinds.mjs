@@ -144,7 +144,7 @@ export function validateDeclaration(d) {
 // inline HTML tags (`<b>`, `</code>`) removed; a Markdown backslash escape before ASCII punctuation removed; lower case;
 // every dash (\p{Pd}, U+2212) and `_` folded to `-`. A token starts at a word boundary (`latest waiver:` and
 // `attest-triggers` carry none) and is the marker's words joined by one or more dashes, with optional whitespace around them; the
-// three plan keys must also LEAD their line, after Markdown decoration only (FR-1a: `No test-triggers line is needed` is prose and
+// three plan keys must also LEAD their line, after Markdown decoration only (non-letters, task boxes, list markers like `a.`; FR-1a: `No test-triggers line is needed` is prose and
 // reads as absent; `- test-triggers: x`, `**Test triggers**:` and `TEST-TRIGGERS x` lead their line and are caught). Plain
 // whitespace or nothing never joins words, so prose ("this test triggers a reload", "the risk floor") and camelCase
 // identifiers (`runState`, `testTriggers`) carry no token; snake_case ones (`test_triggers`, `run_state`) do. The three
@@ -172,9 +172,12 @@ const JOIN = '\\s*-+\\s*';
 const EDGE = '(?<![a-z0-9])'; // a token starts a word
 const token = (...words) => new RegExp(EDGE + words.join(JOIN));
 // a plan key: its words joined by dashes, or by whitespace when a colon follows closely (0 such lines in 650 real plans).
-// FR-1a: it must LEAD its line, after Markdown decoration only (any run of non-letter, non-digit characters, or a list number
-// `1.` / `12)`), so prose that merely mentions the key ("No test-triggers line is needed") neither opts in nor refuses.
-const KEY_LEAD = '^(?:[^\\p{L}\\p{N}]|\\d{1,3}[.)])*';
+// FR-1a: it must LEAD its line. The lead is DECORATION only: any run of non-letters (spaces, `>`, `-`, `*`, backticks, `#`, `|`,
+// emoji, any digit in any script: `1.`, `1.2`, `1:`, `#1`, `| 3 |`), a task box `[x]` (`[ ]` is non-letters), or a letter list marker
+// of up to 4 letters then `.` or `)` and a space (`a.`, `iv)`). A letter anywhere else (`Note:`, `Step 1:`, a sentence) is prose, so a
+// mention ("No test-triggers line is needed") neither opts in nor refuses. Every alternative starts with a different character class
+// (non-letter / `[x]` is the one two-way start and dies at `x`), so the loop is linear: no catastrophic backtracking.
+const KEY_LEAD = '^(?:[^\\p{L}]|\\[x\\]|[a-z]{1,4}[.)](?=\\s))*';
 const keyToken = (a, b) => new RegExp(`${KEY_LEAD}(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`, 'u');
 const KEY_LINE = (key) => new RegExp(`^\\s*${key}:(?!:)(.*)$`); // the strict plan-key line (a doubled colon is a near miss)
 const keyLine = (key) => (l) => KEY_LINE(key).test(l);
