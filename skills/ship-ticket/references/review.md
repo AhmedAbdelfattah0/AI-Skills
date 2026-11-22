@@ -34,6 +34,14 @@ a repair.
 Finish these checks before announcing REVIEW or appending its start event:
 
 - the approved plan and Design Contract still match the intended change;
+  run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]`
+  on the candidate before announcing REVIEW (manual flow too: without `--dag` it
+  reads the plan's one `Files touched` table and its `scope-envelope:` line) and
+  give the scope record to the primary reviewer. It classifies every candidate
+  path as planned, supporting or material. Exit 1 (a material path) is a Design
+  Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.
+  Exit 2 or 3 means fix the input and rerun; never proceed. Exit 0 proves only
+  the path set, not the behaviour inside a planned file;
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;

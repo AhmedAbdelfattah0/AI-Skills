@@ -75,6 +75,12 @@ concurrently, then join once:
 - the approved-plan digest still matches;
 - the recomputed candidate ID matches the reviewed ID;
 - every candidate path remains inside the Design Contract;
+  Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.
+  The pre-REVIEW run is recorded in the PROVE event as
+  `scope: {outcome, material[], record_sha}` (`record_sha` is the sha256 of the
+  record it printed), and the PR body lists the supporting and flagged paths.
+  **Exit 0 is never a commit or freeze permission.** It proves the path set
+  against the approved roots, nothing more, and no gate reads the record;
 - all required locally runnable commands remain green or have unchanged reusable
   evidence;
 - every applicable security row in plan section 3b has the latest recorded status

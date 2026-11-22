@@ -184,6 +184,8 @@ no producer/consumer boundary changes.>
 | frontend | frontend worker | Build consumer and consumer tests | <real paths> | contract | <output dir/none> |
 | integration | orchestrator | Join and verify the real integration | <real paths> | backend, frontend | local app + datastore |
 
+scope-envelope: <optional: comma-separated directories under a Files touched directory (or a DAG write) where unlisted test, fixture and docs files count as supporting, e.g. `tests/checkout/`; omit the line for none>
+
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
 rationale: <independent boundaries · shared contracts · acceptance criteria per
 unit · file ownership · expected size and risk · overhead vs value>. <If split:
@@ -217,6 +219,7 @@ security-pairs sha256:<hex>
 |---|---|---|---|---|---|
 | <checkout total calculation> | <business · data-integrity: wrong charge> | <unit + `[kind:negative]` test; VAPT-ABUSE-04; primary review> | <PROVE> | <a repair touches pricing> | <planned> |
 | <edge rate limit on /login> | <security: credential stuffing> | <Cloudflare rate-limiting rule, read-only API check (`cloudflare` skill)> | <external — needs: read-only Cloudflare API token scoped to the zone> | <the rule or route changes> | <unverified: no token in this run> |
+| <old consumers · cached clients · deploy order of the changed shared contract> | <regression · data-integrity: a deployed or cached client still sends/expects the previous shape> | <`contract-consumer` test kind against the previous shape (`shared-contract` tag); Integration Contract frontend compatibility> | <PROVE> | <the contract shape or deploy order changes> | <planned> |
 
 Not applicable: <check>: <one-line reason>, ...
 
@@ -296,6 +299,12 @@ adds the checks the catalog does not hold.
 - **Never claim equivalent coverage without evidence.** A check that covers a
   row names what it runs and what it proves; "covered by review" needs the
   review item that covers it.
+- **Old consumers, cached clients and deploy order.** When the change touches a
+  shared contract (the Integration Contract is triggered, or the `shared-contract`
+  risk label or test-trigger tag applies), section 3b has a row for old
+  consumers, cached clients and deploy order, or lists it under `Not applicable:`
+  with the reason. Enforcement is the orchestrator-enforced 3b completeness rule
+  above; no script checks it.
 - **Status vocabulary:** `verified`, `partially verified`, `unverified`,
   `failed` (it ran and did not pass), `not applicable`, plus `planned` before
   PROVE runs. Update the status in RUN-STATE (`PROVE` event), never by editing
