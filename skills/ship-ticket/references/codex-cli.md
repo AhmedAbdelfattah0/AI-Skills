@@ -50,23 +50,32 @@ refuses an untrusted directory unless `--skip-git-repo-check`, which the probe
 never passes):
 
 ```bash
-node <SHIP_TICKET_SKILL>/scripts/brief.mjs debate-probe \
+node <SHIP_TICKET_SKILL>/scripts/brief.mjs debate-probe --carrier codex \
   --relay "<installed-codex-delegate>/scripts/relay.mjs" \
   --repo "<target-repo>" --out-dir "<session scratch>/plan-probe"
 ```
 
-It runs `codex --version` and `codex login status`, then three relay dispatches
-(each with `--cd <repo> --read-only --effort high`) and prints one JSON object
-whose `codex_route` goes into the plan header. Pass criteria, each recorded
+On a Codex host, probe the Claude relay instead: `--carrier claude --relay
+"<installed-claude-delegate>/scripts/relay.mjs"`. The probe then runs `claude
+--version` and `claude auth status` with `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` removed from the child environment, and binds `sessionId` and
+`readOnly: true` instead of `threadId` and `sandbox: read-only`. `--cli <bin>` names
+the CLI binary; `--probe-timeout` (default `20m`) bounds the whole probe. SIGINT,
+SIGTERM or that timeout stops the relay's own process group and its observed child
+groups before the probe exits.
+
+It runs the carrier's version and authentication checks, then three relay
+dispatches (each with `--cd <repo> --read-only --effort high`), and prints one JSON
+object whose `codex_route` goes into the plan header. Pass criteria, each recorded
 separately as pass or fail with a class (`permission_denied`, `auth`, `provider`,
 `relay`):
 
 | Capability | Pass when |
 |---|---|
-| `dispatch` | the relay file exists, `codex --version` and `codex login status` exit 0, and a no-op read-only dispatch writes a `result.json` with `status: completed` |
-| `fresh_result` | that `result.json` is readable, has a new non-empty `threadId` and answers the probe's nonce |
-| `resume` | a second no-op turn with `--session <threadId>` completes and returns the same `threadId` |
-| `cancellation` | a busy brief with a valid `--timeout` (default `30s`): a child process of the relay is observed, the relay reports `status: timeout`, and no process of that child's process group survives; a relay that returns before a child starts is a dispatch failure, never a cancellation pass |
+| `dispatch` | the relay file exists, the version and authentication checks exit 0 (`codex login status`; `claude auth status` reporting `authMethod: claude.ai`), and a no-op read-only dispatch writes a `result.json` with `status: completed` |
+| `fresh_result` | that `result.json` is readable, read-only (`sandbox: read-only` for Codex, `readOnly: true` for Claude), has a new non-empty `threadId` (Codex) or `sessionId` (Claude) and answers the probe's nonce |
+| `resume` | a second no-op turn with `--session <id>` completes and returns the same id |
+| `cancellation` | a busy brief with a valid `--timeout` (default `30s`): a child of the relay that leads its own process group is observed (the relay's ordinary helpers in the relay's group do not count), the relay reports `status: timeout`, and no process of that child's process group survives; a relay that returns before a child starts is a dispatch failure, and a failed process listing (`ps`) is a failure, never a cancellation pass |
 | `coverage` | `candidate-id.mjs` identity (tracked diff, untracked file content, modes, symlinks) and the `git status --porcelain --ignored` listing are unchanged before and after; reported as "candidate identity and untracked-content hash unchanged; ignored files out of coverage" |
 
 The output's `relay_kind_verified` is always `false`: the script cannot tell

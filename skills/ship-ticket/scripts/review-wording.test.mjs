@@ -273,7 +273,12 @@ test('S4: the restored default, the stopping policy, the checker and the restora
   assert.ok(x.includes('`LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.'));
   assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));
   assert.ok(x.includes('Evolution (owner-requested, 2026-11-22): evidence-driven stopping instead of the old call/minute cap, the checkpoint, the plan-resident attestation and digest cycle, the `debate-check` checker and the separate carrier field.'));
-  assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root>`'));
+  assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`'));
+  // review repair 1: the workdir binding, the degraded-carrier wording and the backdating residual are stated where they execute
+  assert.ok(x.includes('It binds the relay workdir to `--repo`, never to a path the attestation merely names'));
+  assert.ok(x.includes('the degraded carrier does not by itself resolve or waive any finding'));
+  assert.ok(x.includes('Host-trust residual, the same property as `SECURITY_POLICY_CUTOFF` in engine-dag.mjs'));
+  assert.ok(!/resolves no finding/.test(x + skill + plan), 'the stronger degraded-carrier claim is gone');
   assert.ok(plan.includes('debate_policy: 2'));
   assert.ok(plan.includes('the §7 Planning Debate runs for every implementation plan, whatever the review profile'));
   assert.ok(plan.includes('### Debate carrier and exceptions requested'));

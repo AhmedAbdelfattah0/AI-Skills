@@ -13,10 +13,10 @@
  *   brief.mjs lint <brief>
  *   brief.mjs plan-digest --plan <plan.md>            prints `sha256:<64 hex>`, the narrative digest START binds
  *   brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>]   read-only START validation, typed JSON on stdout
- *   brief.mjs debate-check --plan <plan.md> --bundle <dir>   read-only Planning Debate check before ExitPlanMode (S4)
+ *   brief.mjs debate-check --plan <plan.md> --bundle <dir> --repo <dir>   read-only Planning Debate check before ExitPlanMode (S4)
  *   brief.mjs debate-serialize --attestation <json>      prints the plan-resident attestation line and its sha256
  *   brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir>   copies the debate bundle to the retained locator
- *   brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--codex <bin>] [--busy-timeout <dur>]
+ *   brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--carrier codex|claude] [--cli <bin>] [--busy-timeout <dur>] [--probe-timeout <dur>]
  *                                                     PLAN carrier probe: dispatch, fresh_result, resume, cancellation, coverage
  * Output is deterministic for build and plan-digest: no randomness, no absolute path (start-check reads the clock only for the
  * approved_at skew test). The last line is
@@ -30,8 +30,8 @@
  */
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync, copyFileSync, mkdirSync, existsSync, renameSync, rmSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { readFileSync, writeFileSync, lstatSync, statSync, realpathSync, copyFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, constants as fsConstants } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RISK_EVIDENCE, isEntrypoint } from './harness.mjs';
 import { validateDeclaration } from './fast-checks.mjs';
@@ -99,7 +99,7 @@ function wholeFileHashes(planText) {
  * a block the engine calls malformed is `run_state_malformed`, CRLF is not normalised (a CRLF plan and its LF twin differ).
  * `ok` is NECESSARY, NOT SUFFICIENT: the engine also applies its trusted-START (quiescence) rule, which this check cannot see.
  */
-export function startCheck(planText, { runId, now = Date.now(), bundleDir = null } = {}) {
+export function startCheck(planText, { runId, now = Date.now(), bundleDir = null, repo = null } = {}) {
   if (typeof runId !== 'string' || !SAFE_RUN_ID.test(runId)) throw Object.assign(new Error('start-check needs a safe --run-id'), { usage: true });
   const digest = planDigest(planText); // throws plan_invalid
   const errors = [], warnings = [];
@@ -147,7 +147,7 @@ export function startCheck(planText, { runId, now = Date.now(), bundleDir = null
   const by = start.approved_by;
   if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (descriptive metadata: who approved the plan)');
   // S4 debate fields: checked only on a valid approval time, so an invalid START keeps its one exact code.
-  if (!errors.some((e) => /^start_(approved_at|at_not)/.test(e.code))) debateStartCheck(planText, start, { bundleDir, digest, add });
+  if (!errors.some((e) => /^start_(approved_at|at_not)/.test(e.code))) debateStartCheck(planText, start, { bundleDir, repo, digest, add });
   return { ok: errors.length === 0, errors, warnings, run_id: runId, digest };
 }
 
@@ -171,9 +171,9 @@ export const DEBATE_OUTCOMES = Object.freeze(['CONVERGED', 'UNRESOLVED', 'LIMIT_
 export const DEBATE_CODES = Object.freeze(['debate_policy_missing', 'debate_attestation_missing', 'debate_attestation_invalid', 'debate_attestation_changed',
   'debate_evidence_missing', 'debate_evidence_mismatch', 'debate_digest_mismatch', 'debate_request_mismatch', 'debate_echo_invalid', 'debate_carrier_invalid',
   'debate_degradation_unacknowledged', 'debate_open_finding', 'debate_outcome_invalid', 'debate_limit_invalid', 'debate_exception_missing',
-  'debate_disposition_pending', 'debate_reconfirm_required']);
+  'debate_disposition_pending', 'debate_reconfirm_required', 'debate_workdir_unbound']);
 /** The frozen acknowledgement sentences of section 7 "Debate carrier and exceptions requested" (exact text). */
-export const DEGRADED_ACK = 'The owner accepts this degraded debate carrier for this ticket: it is not cross-model agreement and it resolves no finding.';
+export const DEGRADED_ACK = 'The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply.';
 export const SKIP_ACK = 'The owner approves skipping the Planning Debate for this ticket only.';
 export const WAIVE_ACK = 'The owner waives the listed debate findings for this ticket only.';
 const ATTEST_HEAD = '<!-- debate-attestation-v1 ';
@@ -188,6 +188,7 @@ const SEVERITIES = ['blocker', 'major', 'minor'];
 const CONCRETE = new Set(['accept_risk', 'decided', 'waived']);
 const ECHO_LINE = /^(verdict|request_id|plan_version|plan_digest): (\S+)$/;
 const BRIEF_LINE = /^(request_id|plan_version|plan_digest): (\S+)$/;
+const CONCEDE_LINE = /^finding (\S+): (conceded|confirmed)\b/;
 const sha256Of = (bytes) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -295,18 +296,36 @@ function dispositionRows(sec7) {
   return rows;
 }
 
-/** The anchored echo lines of a counterpart response: `verdict:`, `request_id:`, `plan_version:`, `plan_digest:`. */
+/** The lines of a response outside code fences (``` or ~~~): a fenced line is quoted text, never an echo or a concession. */
+function unfencedLines(text) {
+  const out = [];
+  let fence = false;
+  for (const l of normalise(text).split('\n')) {
+    if (/^\s*(```|~~~)/.test(l)) { fence = !fence; continue; }
+    if (!fence) out.push(l);
+  }
+  return out;
+}
+
+/** The anchored echo lines of a counterpart response, from column 1 and outside fences: `verdict:`, `request_id:`, `plan_version:`, `plan_digest:`. */
 function parseEcho(text) {
   const fields = {};
-  for (const l of normalise(text).split('\n')) {
+  for (const l of unfencedLines(text)) {
     const m = ECHO_LINE.exec(l.trimEnd());
     if (!m) continue;
     if (Object.hasOwn(fields, m[1])) return { ok: false, why: `the response repeats the echo line ${m[1]}:` };
     fields[m[1]] = m[2];
   }
-  for (const k of ['verdict', 'request_id', 'plan_version']) if (!Object.hasOwn(fields, k)) return { ok: false, why: `the response has no anchored \`${k}: <value>\` line` };
+  for (const k of ['verdict', 'request_id', 'plan_version']) if (!Object.hasOwn(fields, k)) return { ok: false, why: `the response has no anchored \`${k}: <value>\` line (indented or fenced lines do not count)` };
   if (!['AGREE', 'CHANGES_REQUESTED'].includes(fields.verdict)) return { ok: false, why: `verdict ${fields.verdict} is neither AGREE nor CHANGES_REQUESTED` };
   return { ok: true, ...fields };
+}
+
+/** Finding ids a response concedes or confirms: anchored `finding <ID>: conceded|confirmed` lines outside fences. */
+function concessionsOf(text) {
+  const out = new Set();
+  for (const l of unfencedLines(text)) { const m = CONCEDE_LINE.exec(l.trimEnd()); if (m) out.add(m[1]); }
+  return out;
 }
 
 /** The first `request_id:`, `plan_version:` and `plan_digest:` lines of the brief that was sent. */
@@ -323,6 +342,34 @@ function briefFields(text) {
 const relativeEvidence = (p) => typeof p === 'string' && p.length > 0 && !isAbsolute(p) && !/^[A-Za-z]:/.test(p) && !p.includes('\\')
   && p.split('/').every((s) => s && s !== '.' && s !== '..');
 
+/**
+ * `{ path }` of a bundle-relative evidence file, or `{ code, why }`: no component (the root included) may be a symbolic
+ * link, the file must be a regular file and its real path must lie inside the root's real path. This keeps a retained
+ * bundle self-contained: a link back into the original scratch directory is refused, not followed.
+ */
+function containedFile(root, rel) {
+  let p = root;
+  try {
+    if (lstatSync(root).isSymbolicLink()) return { code: 'debate_evidence_mismatch', why: 'the bundle root is a symbolic link' };
+    for (const part of rel.split('/')) {
+      p = join(p, part);
+      if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch', why: `${rel} passes through a symbolic link` };
+    }
+    if (!lstatSync(p).isFile()) return { code: 'debate_evidence_mismatch', why: `${rel} is not a regular file` };
+    if (!realpathSync(p).startsWith(realpathSync(root) + sep)) return { code: 'debate_evidence_mismatch', why: `${rel} resolves outside the bundle` };
+  } catch (err) { return { code: 'debate_evidence_missing', why: `${rel} is not readable in the bundle (${err.code ?? err.message})` }; }
+  return { path: p };
+}
+
+/** Whether any entry below `dir` is a symbolic link. */
+function symlinkInside(dir) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isSymbolicLink()) return true;
+    if (e.isDirectory() && symlinkInside(join(dir, e.name))) return true;
+  }
+  return false;
+}
+
 /** The retained locator `<git-common-dir>/ai-skills/ship-ticket/debate/<TICKET>/<debate-id>/`. */
 export function debateLocator(commonDir, ticket, debateId) {
   if (!SAFE_SEGMENT.test(String(ticket)) || !DEBATE_ID_FORMAT.test(String(debateId))) throw fail('debate_attestation_invalid: unsafe ticket or debate id for the retained locator');
@@ -332,13 +379,82 @@ export function debateLocator(commonDir, ticket, debateId) {
 /** Every evidence file an attestation references (bundle-relative). */
 const evidencePaths = (att) => asList(att?.rounds).flatMap((r) => Object.values(isObject(r?.files) ? r.files : {}));
 
+const realOr = (p) => { try { return realpathSync.native(String(p)); } catch { return resolve(String(p)); } };
+/** Trimmed stdout of `git -C dir ...`, or null. Read-only git queries only. */
+function gitOut(dir, args) {
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+/** `{ name: object id }` of the top-level entries of HEAD in `dir`, or null. */
+function headEntries(dir) {
+  const out = gitOut(dir, ['ls-tree', 'HEAD']);
+  if (out === null) return null;
+  return Object.fromEntries(out.split('\n').filter(Boolean).map((l) => { const [meta, name] = l.split('\t'); return [name, meta.split(' ')[2]]; }));
+}
+const sortedJson = (o) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
+
 /**
- * The full Planning Debate verification of a plan against a bundle root. Read-only. Never forces agreement: UNRESOLVED and
- * LIMIT_REACHED are valid presentation states (`ok`), never refused merely because the counterpart did not AGREE; only
- * CONVERGED is debate-qualified. Documented limit: this detects inconsistency, replay and stale or unrelated results; it
- * cannot authenticate against a host able to fabricate every input.
+ * Bind the relay workdir to the target repository (`repo`, the repository root the caller names; never assumed). Two
+ * mechanically checkable kinds: `workdir_kind: repo` (the relay ran in the repository itself: realpath of the workdir
+ * equals the repository top level) and `workdir_kind: snapshot` (the relay ran in a read-only Git snapshot copy:
+ * `snapshot: {base, entries}` names a commit of the repository and the top-level object ids the snapshot holds; every
+ * entry must equal the repository's entry at base, and while the snapshot still exists its HEAD must hold exactly those
+ * entries with no tracked change). After the scratch snapshot is deleted only the repository side remains checkable.
  */
-function verifyDebate(planText, { bundleDir }) {
+function bindWorkdir(att, repo, add, warnings) {
+  const unbound = (why) => add('debate_workdir_unbound', why);
+  const top = repo ? gitOut(repo, ['rev-parse', '--show-toplevel']) : null;
+  if (!top) { unbound('pass --repo <target repository>: the relay workdir is bound to it, never assumed'); return; }
+  const root = realOr(top);
+  if (att.workdir_kind === 'repo') {
+    if (realOr(att.workdir) !== root) add('debate_workdir_unbound', `the relay workdir ${att.workdir} is not the repository ${root}`);
+  } else if (att.workdir_kind === 'snapshot') {
+    const sn = isObject(att.snapshot) ? att.snapshot : {};
+    const entries = isObject(sn.entries) ? sn.entries : {};
+    const list = Object.entries(entries);
+    if (!/^[0-9a-f]{40}$/.test(String(sn.base)) || !list.length || !list.every(([p, oid]) => SAFE_SEGMENT.test(p) && /^[0-9a-f]{40}$/.test(String(oid)))) {
+      unbound('snapshot must be {base: <commit of the repository>, entries: {<top-level path>: <object id>}}');
+      return;
+    }
+    for (const [p, oid] of list) if (gitOut(root, ['rev-parse', '--verify', '--quiet', `${sn.base}:${p}`]) !== oid) unbound(`snapshot entry ${p} is not the repository's ${p} at ${sn.base}`);
+    if (existsSync(String(att.workdir))) {
+      const held = headEntries(att.workdir);
+      if (!held || sortedJson(held) !== sortedJson(entries)) unbound(`the snapshot workdir ${att.workdir} does not hold exactly the recorded entries at HEAD`);
+      else if (spawnSync('git', ['-C', att.workdir, 'diff', '--quiet', 'HEAD']).status !== 0) unbound(`the snapshot workdir ${att.workdir} has tracked changes against its HEAD`);
+    } else warnings.push({ code: 'debate_snapshot_gone', message: 'the snapshot workdir no longer exists: only the repository side of the binding was checked' });
+  } else unbound('workdir_kind must be repo or snapshot');
+}
+
+/** Whether the last completed round reconfirms `digest`: AGREE for it, under a plan_version no earlier round used. */
+function reconfirmed(rounds, digest) {
+  const list = rounds.filter(isObject);
+  const lc = list.filter((r) => r.status === 'completed').at(-1);
+  return Boolean(lc) && lc.plan_digest === digest && lc.verdict === 'AGREE' && list.every((r) => r === lc || r.plan_version !== lc.plan_version);
+}
+
+/**
+ * `[code, message]` when a disposition row does not authorize, else null: a concrete kind with its text, `waived` only
+ * with the frozen exception, a Design change cell of exactly yes or no (anything else fails closed), and yes only after
+ * a new plan_version and the counterpart's AGREE for the current digest.
+ */
+function dispositionProblem(id, row, sec, rounds, digest) {
+  if (!row) return ['debate_disposition_pending', `outstanding ${id} has no disposition row in section 7 (accept_risk, decided or waived with its text)`];
+  if (!CONCRETE.has(row.disposition) || placeholder(row.resolution)) return ['debate_disposition_pending', `${id}: ${row.disposition || '(empty)'} without a concrete resolution blocks START (decide and re-debate are pending)`];
+  if (row.disposition === 'waived' && !exceptionOk(sec, 'WAIVED') && !exceptionOk(sec, 'SKIPPED')) return ['debate_disposition_pending', `${id}: waived needs the owner exception frozen in section 7`];
+  const design = row.design.trim().toLowerCase();
+  if (design !== 'yes' && design !== 'no') return ['debate_disposition_pending', `${id}: the Design change cell must be exactly yes or no, not ${JSON.stringify(row.design)}`];
+  if (design === 'yes' && !reconfirmed(rounds, digest)) return ['debate_reconfirm_required', `${id}: a design-changing disposition needs a new plan_version, the counterpart's AGREE for the new digest, then native approval again`];
+  return null;
+}
+
+/**
+ * The full Planning Debate verification of a plan against a bundle root and the target repository. Read-only. Never
+ * forces agreement: UNRESOLVED and LIMIT_REACHED are valid presentation states (`ok`), never refused merely because the
+ * counterpart did not AGREE; only CONVERGED is debate-qualified. A degraded carrier is a transport label: the same checks
+ * apply to it, and a substitute's verified concession counts exactly like any other. Documented limit: this detects
+ * inconsistency, replay and stale or unrelated results; it cannot authenticate against a host able to fabricate every input.
+ */
+function verifyDebate(planText, { bundleDir, repo = null }) {
   const digest = planDigest(planText); // throws plan_invalid
   const errors = [], warnings = [];
   const add = (code, message) => errors.push({ code, message });
@@ -369,6 +485,8 @@ function verifyDebate(planText, { bundleDir }) {
     return done();
   }
   base.outcome = outcome;
+  const declared = /^\*\*Result:\*\*\s*`?([A-Z_]+)/m.exec(sec7)?.[1];
+  if (declared !== outcome) add('debate_outcome_invalid', declared ? `section 7 states **Result:** ${declared}, but the attestation outcome is ${outcome}` : 'section 7 must state the outcome as the first word of its **Result:** line');
   if (Object.hasOwn(att, 'debate_qualified')) add('debate_outcome_invalid', 'an attestation never declares debate_qualified: the checker computes it');
   const host = isObject(att.host) ? att.host : {};
   const carrier = isObject(att.carrier) ? att.carrier : {};
@@ -393,31 +511,41 @@ function verifyDebate(planText, { bundleDir }) {
   }
   if (sec.present && sec.degraded !== String(carrier.degraded)) add('debate_carrier_invalid', 'the frozen carrier section of section 7 disagrees with the attestation carrier.degraded');
   if (att.carrier.degraded && !(sec.degraded === 'true' && sec.degradationAck === DEGRADED_ACK)) add('debate_degradation_unacknowledged', 'a degraded carrier needs the frozen acknowledgement in section 7 "Debate carrier and exceptions requested"');
-  if (carrier.kind !== 'native_session' && !(typeof att.workdir === 'string' && isAbsolute(att.workdir))) add('debate_attestation_invalid', 'workdir (the repository root the relay ran in) must be an absolute path');
+  if (carrier.kind !== 'native_session') {
+    if (!(typeof att.workdir === 'string' && isAbsolute(att.workdir))) add('debate_attestation_invalid', 'workdir (the directory the relay ran in) must be an absolute path');
+    else bindWorkdir(att, repo, add, warnings);
+  }
   // ---- rounds and their retained evidence
   const seen = new Set();
   const completedNumbers = new Set();
+  const perRound = new Map();
   rounds.forEach((r, i) => {
     if (!isObject(r) || r.n !== i + 1) { add('debate_attestation_invalid', `round ${i + 1} is not an object numbered n: ${i + 1}`); return; }
     if (!ROUND_STATUS.includes(r.status)) { add('debate_attestation_invalid', `round ${r.n} status ${JSON.stringify(r.status)} is not one of ${ROUND_STATUS.join(', ')}`); return; }
     if (!SAFE_SEGMENT.test(String(r.request_id))) add('debate_attestation_invalid', `round ${r.n} needs a safe request_id`);
     if (seen.has(r.request_id)) add('debate_request_mismatch', `round ${r.n} reuses request_id ${r.request_id} (a replayed request)`);
     seen.add(r.request_id);
-    verifyRound(r, att, bundleDir, add);
+    perRound.set(r.n, verifyRound(r, att, bundleDir, add));
     if (r.status === 'completed') completedNumbers.add(r.n);
   });
   // ---- the canonical ledger
   const ids = new Map();
   for (const f of findings) {
     if (!isObject(f) || !nonEmpty(f.id) || !SEVERITIES.includes(f.severity) || !['open', 'resolved'].includes(f.status)) { add('debate_attestation_invalid', `finding ${JSON.stringify(f?.id)} needs id, severity (${SEVERITIES.join('|')}) and status (open|resolved)`); continue; }
-    for (const name of [f.id, ...asList(f.aliases)]) {
+    const names = [f.id, ...asList(f.aliases)];
+    for (const name of names) {
       if (ids.has(name)) add('debate_attestation_invalid', `finding id or alias ${name} is used twice in the canonical ledger`);
       ids.set(name, f.id);
     }
     if (f.status === 'resolved' && f.severity !== 'minor') {
-      const byCounterpart = f.closed_by === 'counterpart' && completedNumbers.has(f.closed_round) && nonEmpty(f.evidence);
-      const byOwner = f.closed_by === 'owner' && CONCRETE.has(rows.get(f.id)?.disposition) && !placeholder(rows.get(f.id)?.resolution);
-      if (!byCounterpart && !byOwner) add('debate_attestation_invalid', `${f.severity} ${f.id} is closed without a counterpart concession in a verified round (with evidence) or an owner disposition`);
+      if (f.closed_by === 'owner') {
+        const p = dispositionProblem(f.id, rows.get(f.id), sec, rounds, digest);
+        if (p) add(p[0], `${f.severity} ${f.id} closed by the owner: ${p[1]}`);
+      } else {
+        const conceded = perRound.get(f.closed_round)?.concessions;
+        const byCounterpart = f.closed_by === 'counterpart' && completedNumbers.has(f.closed_round) && nonEmpty(f.evidence) && names.some((n) => conceded?.has(n));
+        if (!byCounterpart) add('debate_attestation_invalid', `${f.severity} ${f.id} is closed without a verified round whose response concedes it (\`finding ${f.id}: conceded|confirmed\`) with evidence, or an owner disposition`);
+      }
     }
   }
   const open = findings.filter((f) => isObject(f) && f.status === 'open');
@@ -445,7 +573,7 @@ function verifyDebate(planText, { bundleDir }) {
       if (final !== null && final !== undefined) add('debate_outcome_invalid', 'UNRESOLVED carries no final confirmation');
     } else if (outcome === 'LIMIT_REACHED') {
       if (att.final !== null) add('debate_outcome_invalid', 'LIMIT_REACHED is never converted to CONVERGED: final must be null');
-      checkLimit(att, last, add);
+      checkLimit(att, last, last ? perRound.get(last.n)?.diag : null, add);
       if (!findings.length && att.incomplete_review !== true) add('debate_limit_invalid', 'a limit reached with no findings must say incomplete_review: true');
     } else if (outcome === 'SKIPPED') {
       if (rounds.length || findings.length || (final !== null && final !== undefined)) add('debate_outcome_invalid', 'SKIPPED records no round, finding or confirmation');
@@ -455,17 +583,22 @@ function verifyDebate(planText, { bundleDir }) {
   const resolveId = (id) => ids.get(id) ?? id;
   const byId = new Map([...rows].map(([id, row]) => [resolveId(id), row]));
   const need = [...base.outstanding, ...(outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
-  base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => !CONCRETE.has(byId.get(id)?.disposition) || placeholder(byId.get(id)?.resolution));
+  base.pending = outcome === 'CONVERGED' || outcome === 'SKIPPED' ? [] : need.filter((id) => dispositionProblem(id, byId.get(id), sec, rounds, digest));
   base.debate_qualified = outcome === 'CONVERGED' && errors.length === 0;
   const m = (k, v) => (v === null || v === undefined ? [] : [`${k}=${v}`]);
   base.run_log_metrics = [...m('debate_outcome', outcome.toLowerCase()), ...m('debate_carrier', carrier.agent), ...m('debate_carrier_degraded', carrier.degraded),
     ...m('debate_rounds', metrics.rounds), ...m('debate_calls', metrics.calls), ...m('debate_minutes', metrics.minutes),
     ...m('plan_debate_started_at', metrics.started_at), ...m('plan_debate_ended_at', metrics.ended_at), ...(typeof metrics.tokens === 'number' ? [`debate_tokens=${metrics.tokens}`] : [])];
-  return done({ attestation: att, line: got.line, byId, sec, lastCompleted: rounds.filter((r) => isObject(r) && r.status === 'completed').at(-1) ?? null });
+  return done({ attestation: att, line: got.line, byId, sec, rounds });
 }
 
-/** The limit record: kind, kind-specific evidence (the configured value, or the provider/relay error of the last attempt). */
-function checkLimit(att, last, add) {
+/**
+ * The limit record: kind and kind-specific evidence. configured_budget names the configured value it reached; a
+ * provider or resource limit quotes text that occurs in the last attempt's RETAINED diagnostics (relay result, events
+ * or dispatch error), and that text must be of the limit's class: a provider limit needs provider, quota or rate-limit
+ * diagnostics; EPERM or EACCES is a permission or resource limit, never a provider limit.
+ */
+function checkLimit(att, last, lastDiag, add) {
   const L = att.limit;
   if (!isObject(L) || !LIMIT_KINDS.includes(L.kind) || !nonEmpty(L.evidence)) { add('debate_limit_invalid', `limit must be {kind: ${LIMIT_KINDS.join(' | ')}, evidence}`); return; }
   if (L.kind === 'configured_budget') {
@@ -475,19 +608,35 @@ function checkLimit(att, last, add) {
     if (!configured.length) add('debate_limit_invalid', 'configured_budget needs a configured max_rounds or max_minutes (an owner or repository override)');
     else if (!configured.some(([v, u]) => typeof u === 'number' && u >= v && L.evidence.includes(String(v)))) add('debate_limit_invalid', 'the configured budget was not reached, or the evidence does not name the configured value');
   } else if (!last || last.status === 'completed') add('debate_limit_invalid', `${L.kind} needs a last attempt with its actual status (failed, timeout, aborted or unavailable) and diagnostics`);
+  else {
+    const d = lastDiag ?? '';
+    if (!d.includes(L.evidence.trim())) add('debate_limit_invalid', 'the limit evidence is not quoted from the retained diagnostics of the last attempt');
+    const providerish = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i.test(d) || last.dispatch_error?.class === 'provider';
+    const resourceish = /\b(EPERM|EACCES|ENOMEM|ENOSPC|EMFILE|out of memory|killed|timed? ?out)\b/i.test(d) || ['timeout', 'aborted'].includes(last.status) || ['permission_denied', 'resource'].includes(last.dispatch_error?.class);
+    if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid', 'provider_limit needs provider, quota or rate-limit diagnostics; EPERM or EACCES is a permission or resource limit');
+    if (L.kind === 'resource_limit' && !resourceish) add('debate_limit_invalid', 'resource_limit needs permission, resource, kill or timeout diagnostics');
+  }
 }
 
-/** One round's retained evidence, by carrier kind. Failed or limited attempts keep their actual status; a success is never fabricated. */
+/**
+ * One round's retained evidence, by carrier kind. Failed or limited attempts keep their actual status; a success is
+ * never fabricated: a completed relay round needs exit code 0 in the record and the result, every round is read-only,
+ * and a completed round carries a non-empty session id bound to the result. Returns { diag, concessions }.
+ */
 function verifyRound(r, att, bundleDir, add) {
+  const out = { diag: '', concessions: new Set() };
   const kind = att.carrier.kind;
   const files = isObject(r.files) ? r.files : {};
   const hashes = isObject(r.sha256) ? r.sha256 : {};
+  if (r.read_only !== true) add('debate_carrier_invalid', `round ${r.n} is not recorded read_only: true`);
+  if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a completed round needs its non-empty session or thread id`);
   const read = (name) => {
     const rel = files[name];
     if (!relativeEvidence(rel)) { add('debate_attestation_invalid', `round ${r.n} ${name}: evidence paths are bundle-relative (no absolute path, no ..); out_dir is provenance only`); return null; }
     if (!bundleDir) { add('debate_evidence_missing', `round ${r.n} ${name}: no bundle root to resolve ${rel}`); return null; }
-    let bytes;
-    try { bytes = readFileSync(join(bundleDir, ...rel.split('/'))); } catch (err) { add('debate_evidence_missing', `round ${r.n} ${name}: ${rel} is not readable in the bundle (${err.code ?? err.message})`); return null; }
+    const c = containedFile(bundleDir, rel);
+    if (!c.path) { add(c.code, `round ${r.n} ${name}: ${c.why}`); return null; }
+    const bytes = readFileSync(c.path);
     const want = hashes[name];
     if (sha256Of(bytes) !== want) add('debate_evidence_mismatch', `round ${r.n} ${name}: ${rel} does not match its recorded sha256`);
     return bytes;
@@ -498,14 +647,17 @@ function verifyRound(r, att, bundleDir, add) {
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
+    else out.diag = `${e.class} ${e.text}`;
   }
   let text = null;
   if (got.result) {
     let res;
-    try { res = JSON.parse(got.result.toString('utf8')); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not JSON`); return; }
+    try { res = JSON.parse(got.result.toString('utf8')); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not JSON`); return out; }
+    out.diag = [res.error, res.finalMessage, got.events ? got.events.toString('utf8') : ''].filter((x) => typeof x === 'string').join('\n');
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
     if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
-    if (r.exit_code !== undefined && res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
+    if (res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
+    if (r.status === 'completed' && (r.exit_code !== 0 || res.exitCode !== 0)) add('debate_evidence_mismatch', `round ${r.n}: a completed round needs exit code 0 in the record and in the relay result`);
     if (kind === 'codex_relay') {
       if (r.status === 'completed' && res.threadId !== r.session_id) add('debate_carrier_invalid', `round ${r.n}: thread ${res.threadId} answered, not ${r.session_id}`);
       if (res.sandbox !== 'read-only') add('debate_carrier_invalid', `round ${r.n}: the relay ran with sandbox ${res.sandbox}, not read-only`);
@@ -514,10 +666,9 @@ function verifyRound(r, att, bundleDir, add) {
       if (res.readOnly !== true) add('debate_carrier_invalid', `round ${r.n}: the Claude relay did not run read-only`);
       if (r.auth_method !== 'claude.ai') add('debate_carrier_invalid', `round ${r.n}: the Claude relay needs verified subscription authentication (authMethod claude.ai), not ${r.auth_method}`);
     }
-    if (resolve(String(res.workdir)) !== resolve(String(att.workdir))) add('debate_carrier_invalid', `round ${r.n}: the relay ran in ${res.workdir}, not the debate repository ${att.workdir}`);
+    if (resolve(String(res.workdir)) !== resolve(String(att.workdir))) add('debate_carrier_invalid', `round ${r.n}: the relay ran in ${res.workdir}, not the debate workdir ${att.workdir}`);
     text = typeof res.finalMessage === 'string' ? res.finalMessage : '';
   } else if (got.message) {
-    if (!nonEmpty(r.session_id)) add('debate_carrier_invalid', `round ${r.n}: a native session needs its retained session id`);
     text = got.message.toString('utf8');
   }
   if (got.brief) {
@@ -526,17 +677,19 @@ function verifyRound(r, att, bundleDir, add) {
       add('debate_request_mismatch', `round ${r.n}: the brief that was sent carries request_id ${b.request_id}, plan_version ${b.plan_version}${r.plan_digest ? `, plan_digest ${b.plan_digest}` : ''}`);
     }
   }
-  if (r.status !== 'completed' || text === null) return;
+  if (r.status !== 'completed' || text === null) return out;
   const echoed = parseEcho(text);
-  if (!echoed.ok) { add('debate_echo_invalid', `round ${r.n}: ${echoed.why}`); return; }
+  if (!echoed.ok) { add('debate_echo_invalid', `round ${r.n}: ${echoed.why}`); return out; }
   if (echoed.verdict !== r.verdict) add('debate_echo_invalid', `round ${r.n} records verdict ${r.verdict}, the response says ${echoed.verdict}`);
   if (echoed.request_id !== r.request_id) add('debate_request_mismatch', `round ${r.n}: the response echoes request_id ${echoed.request_id}, not ${r.request_id} (a stale or foreign response)`);
   if (echoed.plan_version !== r.plan_version || (r.plan_digest && echoed.plan_digest !== r.plan_digest)) add('debate_request_mismatch', `round ${r.n}: the response echoes another plan_version or plan_digest`);
+  out.concessions = concessionsOf(text);
+  return out;
 }
 
-/** PREAPPROVAL: `debate-check`, run at PLAN preflight on the frozen plan before ExitPlanMode. */
-export function debateCheck(planText, { bundleDir = null } = {}) {
-  const v = verifyDebate(planText, { bundleDir });
+/** PREAPPROVAL: `debate-check`, run at PLAN preflight on the frozen plan before ExitPlanMode. `repo` binds the relay workdir. */
+export function debateCheck(planText, { bundleDir = null, repo = null } = {}) {
+  const v = verifyDebate(planText, { bundleDir, repo });
   return {
     ok: v.ok, phase: 'preapproval', outcome: v.outcome, debate_qualified: v.debate_qualified, presentable: v.ok, outstanding: v.outstanding, pending: v.pending,
     carrier: v.carrier, diversity: v.diversity, attestation_sha256: v.attestation_sha256, digest: v.digest, run_log_metrics: v.run_log_metrics, errors: v.errors, warnings: v.warnings,
@@ -545,11 +698,12 @@ export function debateCheck(planText, { bundleDir = null } = {}) {
 
 /**
  * POSTAPPROVAL: the debate fields of a START, for NEW runs. A plan without `debate_policy` is legacy only when approved
- * before DEBATE_POLICY_CUTOFF; a `debate_policy: 2` plan needs START.debate_attestation_sha256, the unchanged attestation
- * line, the retained bundle (never the original scratch paths) and, unless CONVERGED or SKIPPED, a concrete disposition
- * for every outstanding canonical finding in the approved digest.
+ * before DEBATE_POLICY_CUTOFF (host-trust residual: approved_at is written by the host, as with SECURITY_POLICY_CUTOFF);
+ * a `debate_policy: 2` plan needs START.debate_attestation_sha256, the unchanged attestation line, the self-contained
+ * retained bundle (never the original scratch paths) and, unless CONVERGED or SKIPPED, a disposition that authorizes for
+ * every outstanding canonical finding in the approved digest.
  */
-function debateStartCheck(planText, start, { bundleDir, digest, add }) {
+function debateStartCheck(planText, start, { bundleDir, repo, digest, add }) {
   let added = 0;
   const put = (code, message) => { added += 1; add(code, message); };
   const policy = debatePolicy(narrativeOf(planText));
@@ -565,58 +719,77 @@ function debateStartCheck(planText, start, { bundleDir, digest, add }) {
   if (start.debate_attestation_sha256 !== got.sha256) added += 1;
   if (added) return;
   if (!bundleDir) { put('debate_evidence_missing', 'no retained debate bundle: run `brief.mjs debate-retain` after approval and pass --repo to start-check'); return; }
-  let kept;
-  try { kept = readFileSync(join(bundleDir, 'attestation.line')); } catch (err) { put('debate_evidence_missing', `the retained bundle has no attestation.line (${err.code ?? err.message})`); return; }
-  if (!kept.equals(Buffer.from(got.line, 'utf8'))) { put('debate_evidence_mismatch', 'the retained attestation.line is not byte-identical to the plan line'); return; }
-  const v = verifyDebate(planText, { bundleDir });
+  const lineFile = containedFile(bundleDir, 'attestation.line');
+  if (!lineFile.path) { put(lineFile.code, `the retained bundle's attestation.line: ${lineFile.why}`); return; }
+  if (symlinkInside(bundleDir)) { put('debate_evidence_mismatch', 'the retained bundle holds a symbolic link: it must be self-contained regular files'); return; }
+  if (!readFileSync(lineFile.path).equals(Buffer.from(got.line, 'utf8'))) { put('debate_evidence_mismatch', 'the retained attestation.line is not byte-identical to the plan line'); return; }
+  const v = verifyDebate(planText, { bundleDir, repo });
   for (const e of v.errors) put(e.code, e.message);
   if (added || v.outcome === 'CONVERGED' || v.outcome === 'SKIPPED') return;
   const need = [...v.outstanding, ...(v.outcome === 'LIMIT_REACHED' ? ['LIMIT'] : [])];
   for (const id of need) {
-    const row = v.byId.get(id);
-    if (!row) { add('debate_disposition_pending', `outstanding ${id} has no disposition row in section 7 (accept_risk, decided or waived with its text)`); continue; }
-    if (!CONCRETE.has(row.disposition) || placeholder(row.resolution)) { add('debate_disposition_pending', `${id}: ${row.disposition || '(empty)'} without a concrete resolution blocks START (decide and re-debate are pending)`); continue; }
-    if (row.disposition === 'waived' && !exceptionOk(v.sec, 'WAIVED') && !exceptionOk(v.sec, 'SKIPPED')) { add('debate_disposition_pending', `${id}: waived needs the owner exception frozen in section 7`); continue; }
-    if (/^yes$/i.test(row.design.trim()) && v.lastCompleted?.plan_digest !== digest) add('debate_reconfirm_required', `${id}: a design-changing disposition needs a new plan_version, the counterpart's reconfirmation of the new digest, then native approval again`);
+    const p = dispositionProblem(id, v.byId.get(id), v.sec, v.rounds, digest);
+    if (p) add(p[0], p[1]);
   }
 }
 
 /**
  * Copy the bundle an attestation references byte-for-byte from `from` (the scratch bundle root) to `to` (the retained
- * locator), after verifying it. Writes a temporary sibling and renames it into place; an existing retained bundle is
- * accepted only when byte-identical and is never overwritten. Returns { ok, retained, errors }.
+ * locator under `root`, the git common dir), after verifying it against `repo`. Every destination component below
+ * `root` is checked with lstat and created one level at a time; a symbolic link or non-directory there is refused, files
+ * are created exclusively in a temporary sibling that is then renamed into place, and an existing retained bundle is
+ * accepted only when byte-identical and self-contained; it is never overwritten. Returns { ok, retained, errors }.
  */
-export function retainBundle(planText, { from, to }) {
-  const v = verifyDebate(planText, { bundleDir: from });
+export function retainBundle(planText, { from, to, root = null, repo = null }) {
+  const refuse = (code, message) => ({ ok: false, retained: null, errors: [{ code, message }] });
+  const v = verifyDebate(planText, { bundleDir: from, repo });
   if (v.errors.length) return { ok: false, retained: null, errors: v.errors };
   const files = [...new Set(evidencePaths(v.attestation))];
   const line = Buffer.from(v.line, 'utf8');
+  const top = root ?? resolve(to, '..', '..', '..', '..', '..');
+  const rel = relative(top, to);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return refuse('debate_evidence_missing', 'the retained locator is not below the git common dir');
+  const parts = rel.split(sep);
+  let p = top;
+  try {
+    for (const part of parts.slice(0, -1)) {
+      p = join(p, part);
+      let st = null;
+      try { st = lstatSync(p); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+      if (st && (st.isSymbolicLink() || !st.isDirectory())) return refuse('debate_evidence_mismatch', `${p} is a symbolic link or not a directory; the retained locator is never followed through one`);
+      if (!st) mkdirSync(p);
+    }
+  } catch (err) { return refuse('debate_evidence_missing', `creating the retained locator failed (${err.code ?? err.message}): WAIT_FOR_USER`); }
   const same = (dir) => {
     try {
-      if (!readFileSync(join(dir, 'attestation.line')).equals(line)) return false;
-      return files.every((f) => readFileSync(join(dir, ...f.split('/'))).equals(readFileSync(join(from, ...f.split('/')))));
+      if (symlinkInside(dir)) return false;
+      const lf = containedFile(dir, 'attestation.line');
+      if (!lf.path || !readFileSync(lf.path).equals(line)) return false;
+      return files.every((f) => { const c = containedFile(dir, f); return Boolean(c.path) && readFileSync(c.path).equals(readFileSync(join(from, ...f.split('/')))); });
     } catch { return false; }
   };
-  if (existsSync(to)) {
-    return same(to) ? { ok: true, retained: to, errors: [] }
-      : { ok: false, retained: null, errors: [{ code: 'debate_evidence_mismatch', message: `a different bundle is already retained at ${to}; it is never overwritten` }] };
+  let existing = null;
+  try { existing = lstatSync(to); } catch (err) { if (err.code !== 'ENOENT') return refuse('debate_evidence_missing', `cannot inspect ${to} (${err.code})`); }
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isDirectory()) return refuse('debate_evidence_mismatch', `${to} is a symbolic link or not a directory; it is never followed or overwritten`);
+    return same(to) ? { ok: true, retained: to, errors: [] } : refuse('debate_evidence_mismatch', `a different bundle is already retained at ${to}; it is never overwritten`);
   }
   const tmp = `${to}.tmp-${process.pid}`;
   try {
     rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(tmp);
     for (const f of files) {
-      const dest = join(tmp, ...f.split('/'));
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(join(from, ...f.split('/')), dest);
+      let d = tmp;
+      for (const part of f.split('/').slice(0, -1)) { d = join(d, part); if (!existsSync(d)) mkdirSync(d); }
+      copyFileSync(join(from, ...f.split('/')), join(tmp, ...f.split('/')), fsConstants.COPYFILE_EXCL);
     }
-    mkdirSync(tmp, { recursive: true });
-    writeFileSync(join(tmp, 'attestation.line'), line);
+    writeFileSync(join(tmp, 'attestation.line'), line, { flag: 'wx' });
     if (!same(tmp)) throw new Error('the copy is not byte-identical');
-    mkdirSync(dirname(to), { recursive: true });
     renameSync(tmp, to);
+    if (lstatSync(to).isSymbolicLink() || !same(to)) throw new Error('the retained bundle does not verify after the rename');
   } catch (err) {
     rmSync(tmp, { recursive: true, force: true });
-    return { ok: false, retained: null, errors: [{ code: 'debate_evidence_missing', message: `retaining the bundle failed (${err.code ?? err.message}): WAIT_FOR_USER, never a START without the retained evidence` }] };
+    return refuse('debate_evidence_missing', `retaining the bundle failed (${err.code ?? err.message}): WAIT_FOR_USER, never a START without the retained evidence`);
   }
   return { ok: true, retained: to, errors: [] };
 }
@@ -626,13 +799,13 @@ function gitCommonDir(repo) {
   const r = spawnSync('git', ['-C', repo, 'rev-parse', '--git-common-dir'], { encoding: 'utf8' });
   return r.status === 0 && r.stdout.trim() ? resolve(repo, r.stdout.trim()) : null;
 }
-/** The retained bundle directory for the plan's attestation under `repo`, or null when it cannot be located. */
+/** The retained bundle directory (and its git common dir root) for the plan's attestation under `repo`, or null. */
 function retainedDirFor(planText, repo) {
   const got = readAttestation(planText);
   if (!got.ok) return null;
   const common = gitCommonDir(repo);
   if (!common) return null;
-  try { return debateLocator(common, got.attestation.ticket, got.attestation.debate_id); } catch { return null; }
+  try { return { root: common, dir: debateLocator(common, got.attestation.ticket, got.attestation.debate_id) }; } catch { return null; }
 }
 
 // ---- PLAN carrier probe (F) ------------------------------------------------------------------------------------------
@@ -652,42 +825,52 @@ function resultClass(res) {
 /**
  * Classify the PLAN-start probe's observations into the plan header's `codex_route`: dispatch, fresh_result, resume,
  * cancellation and coverage, each pass or fail with a failure class (permission_denied | auth | provider | relay). Pure.
- * A dispatch that fails before a child process starts is a dispatch failure, never a cancellation pass.
+ * Carrier-specific (`o.carrier`): the Codex relay binds `threadId` and `sandbox: read-only` and checks `codex login
+ * status`; the Claude relay binds `sessionId` and `readOnly: true` and needs `claude auth status` with authMethod
+ * claude.ai. A dispatch that fails before a child process starts is a dispatch failure, and a failed process listing is
+ * a failure, never a cancellation pass.
  */
 export function classifyProbe(o) {
   const pass = (detail) => ({ result: 'pass', detail });
   const no = (cls, detail) => ({ result: 'fail', class: cls, detail });
+  const claude = o.carrier === 'claude';
+  const bin = claude ? 'claude' : 'codex';
+  const cli = o.cli_version ?? o.codex_version;
+  const idOf = (res) => (claude ? res?.sessionId : res?.threadId);
+  const readOnly = (res) => (claude ? res?.readOnly === true : res?.sandbox === 'read-only');
   const d = o.dispatch ?? {};
   let dispatch;
   if (!o.relay_present) dispatch = no('relay', 'the relay script is missing or unreadable');
-  else if (o.codex_version?.error) dispatch = no(errorClass(o.codex_version.error), `codex --version could not run (${o.codex_version.error})`);
-  else if (o.codex_version?.status !== 0) dispatch = no('provider', 'codex --version failed');
-  else if (o.login?.error) dispatch = no(errorClass(o.login.error), `codex login status could not run (${o.login.error})`);
-  else if (o.login?.status !== 0) dispatch = no('auth', 'codex login status reports no usable login');
+  else if (cli?.error) dispatch = no(errorClass(cli.error), `${bin} --version could not run (${cli.error})`);
+  else if (cli?.status !== 0) dispatch = no('provider', `${bin} --version failed`);
+  else if (o.login?.error) dispatch = no(errorClass(o.login.error), `${bin} authentication status could not run (${o.login.error})`);
+  else if (o.login?.status !== 0) dispatch = no('auth', `${bin} authentication status reports no usable login`);
+  else if (claude && o.login.authMethod !== 'claude.ai') dispatch = no('auth', `claude auth status reports authMethod ${o.login.authMethod ?? 'unknown'}, not the claude.ai subscription`);
   else if (d.spawn_error) dispatch = no(spawnClass(d.spawn_error), `the relay could not be started (${d.spawn_error})`);
   else if (!d.result) dispatch = no('relay', 'the relay wrote no readable result.json');
   else if (d.result.status !== 'completed') dispatch = no(resultClass(d.result), `the no-op read-only dispatch ended ${d.result.status}`);
   else dispatch = pass('read-only no-op dispatch from the repository root completed');
   const reached = dispatch.result === 'pass';
   const notReached = () => no(dispatch.class, `not reached: dispatch failed (${dispatch.class})`);
-  const thread = d.result?.threadId;
+  const id = idOf(d.result);
   const fresh_result = !reached ? notReached()
-    : nonEmpty(thread) && String(d.result.finalMessage ?? '').includes(`probe-ok ${o.nonce}`) ? pass(`readable result.json, status completed, new threadId ${thread}`)
-      : no('relay', 'result.json has no threadId or does not answer this probe\'s nonce');
+    : nonEmpty(id) && readOnly(d.result) && String(d.result.finalMessage ?? '').includes(`probe-ok ${o.nonce}`) ? pass(`readable result.json, status completed, read-only, new ${claude ? 'sessionId' : 'threadId'} ${id}`)
+      : no('relay', `result.json lacks a ${claude ? 'sessionId' : 'threadId'}, is not read-only, or does not answer this probe's nonce`);
   const rs = o.resume ?? {};
   const resume = fresh_result.result !== 'pass' ? no(fresh_result.class, 'not reached: no fresh result to resume')
     : rs.spawn_error ? no(spawnClass(rs.spawn_error), `the resume could not be started (${rs.spawn_error})`)
       : !rs.result ? no('relay', 'the resume wrote no readable result.json')
         : rs.result.status !== 'completed' ? no(resultClass(rs.result), `the resume ended ${rs.result.status}`)
-          : rs.result.threadId !== thread ? no('relay', `the resume returned thread ${rs.result.threadId}, not ${thread}`)
-            : pass(`--session ${thread} returned the same thread`);
+          : idOf(rs.result) !== id ? no('relay', `the resume returned ${idOf(rs.result)}, not ${id}`)
+            : pass(`--session ${id} returned the same session`);
   const c = o.cancel ?? {};
   const cancellation = !reached ? notReached()
     : c.spawn_error ? no(spawnClass(c.spawn_error), `the busy dispatch could not be started (${c.spawn_error})`)
-      : !c.child_seen ? no(c.result ? resultClass(c.result) : 'relay', 'no child process was observed: the relay returned before a child started, which is a dispatch failure, never a cancellation pass')
-        : c.result?.status !== 'timeout' ? no('relay', `the busy dispatch ended ${c.result?.status ?? 'without a result'}, not timeout: the watchdog was not exercised`)
-          : asList(c.survivors).length ? no('relay', `the child process group survived the timeout (pgid ${asList(c.survivors).join(', ')})`)
-            : pass('the child started, the relay reported status timeout and the child process group was verified terminated');
+      : c.listing_failed ? no('relay', 'the process listing (ps) failed: the child process group cannot be verified, so cancellation is unproven, never a pass')
+        : !c.child_seen ? no(c.result ? resultClass(c.result) : 'relay', 'no child process was observed: the relay returned before a child started, which is a dispatch failure, never a cancellation pass')
+          : c.result?.status !== 'timeout' ? no('relay', `the busy dispatch ended ${c.result?.status ?? 'without a result'}, not timeout: the watchdog was not exercised`)
+            : asList(c.survivors).length ? no('relay', `the child process group survived the timeout (pgid ${asList(c.survivors).join(', ')})`)
+              : pass('the child started, the relay reported status timeout and the child process group was verified terminated');
   const cv = o.coverage ?? {};
   const coverage = cv.error ? no('relay', `coverage could not be computed: ${cv.error}`)
     : nonEmpty(cv.before) && cv.before === cv.after && cv.ignored_before === cv.ignored_after ? pass(COVERAGE_PASS)
@@ -704,78 +887,126 @@ function coverageSnapshot(repo) {
   try { return { candidate: JSON.parse(cid.stdout).candidate_id, ignored: sha256Of(st.stdout) }; } catch { return { error: 'candidate-id.mjs printed no candidate_id' }; }
 }
 
-/** Process rows (pid, ppid, pgid) from `ps`, POSIX only; [] when unavailable (cancellation then fails closed). */
+/** Process rows (pid, ppid, pgid) from `ps`, POSIX only; null when the listing is unavailable or fails (cancellation then fails). */
 function processRows() {
-  if (process.platform === 'win32') return [];
+  if (process.platform === 'win32') return null;
   const r = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8' });
-  if (r.status !== 0) return [];
+  if (r.status !== 0 || r.error) return null;
   return r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((a) => a.length === 3 && a.every(Number.isFinite));
+}
+
+/** Relays (and the foreign process groups their children lead) the probe is running, so a signal or the outer timeout can stop them. */
+const ACTIVE_RELAYS = new Set();
+function stopActiveRelays() {
+  for (const a of ACTIVE_RELAYS) {
+    const rows = processRows() ?? [];
+    for (const [, ppid, pgid] of rows) if (ppid === a.pid && a.foreign(pgid)) a.groups.add(pgid);
+    for (const g of a.groups) { try { process.kill(-g, 'SIGKILL'); } catch { /* gone */ } }
+    try { if (process.platform === 'win32') a.child.kill('SIGKILL'); else process.kill(-a.pid, 'SIGKILL'); } catch { /* gone */ }
+  }
 }
 
 /**
  * Run the relay once with `args`, the brief on stdin; with `watch`, observe its child process group. The relay runs in
  * its own process group (detached on POSIX), so its ordinary helpers (`codex --version`, `git status`) share the relay's
  * group and are not mistaken for the cancellation target; only a child leading ANOTHER group (the relay's detached
- * codex child) counts. The probe never signals its own group or the relay's.
+ * child) counts. The probe never signals its own group; a failed listing is recorded, never read as "no survivors".
  */
-function relayRun({ relay, repo }, args, brief, { watch = false } = {}) {
+function relayRun({ relay, repo, env }, args, brief, { watch = false } = {}) {
   return new Promise((done) => {
     const outDir = args[args.indexOf('--out-dir') + 1];
-    const obs = { spawn_error: null, result: null, child_seen: false, survivors: [] };
-    const own = processRows().find(([pid]) => pid === process.pid)?.[2] ?? null;
+    const obs = { spawn_error: null, result: null, child_seen: false, survivors: [], listing_failed: false };
+    const rows0 = processRows();
+    const own = rows0?.find(([pid]) => pid === process.pid)?.[2] ?? null;
+    if (watch && rows0 === null) obs.listing_failed = true;
     let child;
-    try { child = spawn(process.execPath, [relay, ...args], { cwd: repo, stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }); } catch (err) { obs.spawn_error = err.code ?? 'spawn'; done(obs); return; }
+    try { child = spawn(process.execPath, [relay, ...args], { cwd: repo, env, stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }); } catch (err) { obs.spawn_error = err.code ?? 'spawn'; done(obs); return; }
     const foreign = (pgid) => pgid !== own && pgid !== child.pid && pgid !== process.pid && pgid > 1;
-    const groups = new Set();
+    const active = { pid: child.pid, child, groups: new Set(), foreign };
+    ACTIVE_RELAYS.add(active);
     const timer = watch ? setInterval(() => {
-      for (const [, ppid, pgid] of processRows()) if (ppid === child.pid && foreign(pgid)) { groups.add(pgid); obs.child_seen = true; }
+      const rows = processRows();
+      if (rows === null) { obs.listing_failed = true; return; }
+      for (const [, ppid, pgid] of rows) if (ppid === child.pid && foreign(pgid)) { active.groups.add(pgid); obs.child_seen = true; }
     }, 100) : null;
     child.on('error', (err) => { obs.spawn_error = err.code ?? 'spawn'; });
     child.stdin.on('error', () => {});
     child.stdin.end(brief);
     child.on('close', () => {
       if (timer) clearInterval(timer);
+      ACTIVE_RELAYS.delete(active);
       try { obs.result = JSON.parse(readFileSync(join(outDir, 'result.json'), 'utf8')); } catch { obs.result = null; }
       if (watch) {
-        const alive = new Set(processRows().map(([, , pgid]) => pgid));
-        obs.survivors = [...groups].filter((g) => foreign(g) && alive.has(g));
-        for (const g of obs.survivors) { try { process.kill(-g, 'SIGKILL'); } catch { /* already gone */ } }
+        const rows = processRows();
+        if (rows === null) obs.listing_failed = true;
+        const alive = new Set((rows ?? []).map(([, , pgid]) => pgid));
+        obs.survivors = [...active.groups].filter((g) => foreign(g) && alive.has(g));
+        for (const g of active.groups) { if (foreign(g)) { try { process.kill(-g, 'SIGKILL'); } catch { /* already gone */ } } }
       }
       done(obs);
     });
   });
 }
 
+const DURATION = /^(\d+)(s|m)$/;
+const durationMs = (v, fallback) => { const m = DURATION.exec(String(v)); return m ? Number(m[1]) * (m[2] === 'm' ? 60_000 : 1000) : fallback; };
+
 /**
  * The PLAN-start probe. Run it in the actual native Plan Mode context; it writes only under --out-dir (the session
- * scratch directory) and changes nothing in the repository (coverage proves that bounded claim). It cannot detect
- * whether it runs inside Plan Mode or whether --relay is the real codex-delegate relay: `relay_kind_verified` is
- * always false, and a fake relay proves only this parser.
+ * scratch directory) and changes nothing in the repository (coverage proves that bounded claim). `carrier` is the
+ * selected counterpart's relay: codex (Claude host) or claude (Codex host). SIGINT, SIGTERM and the outer timeout stop
+ * the relay's own process group and its observed child groups before the probe exits. It cannot detect whether it runs
+ * inside Plan Mode or whether --relay is the real delegate relay: `relay_kind_verified` is always false, and a fake relay
+ * proves only this parser.
  */
-export async function runProbe({ relay, repo, outDir, codex = 'codex', busyTimeout = '30s' }) {
+export async function runProbe({ relay, repo, outDir, carrier = 'codex', cli = null, busyTimeout = '30s', probeTimeout = '20m' }) {
+  const claude = carrier === 'claude';
+  const bin = cli ?? (claude ? 'claude' : 'codex');
+  const env = { ...process.env };
+  if (claude) { delete env.ANTHROPIC_API_KEY; delete env.ANTHROPIC_AUTH_TOKEN; }
   const nonce = createHash('sha256').update(`${process.pid}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 12);
-  const obs = { nonce };
-  try { obs.relay_present = statSync(relay).isFile(); } catch { obs.relay_present = false; }
-  const probeCmd = (args) => { const r = spawnSync(codex, args, { encoding: 'utf8', timeout: 30_000 }); return r.error ? { error: r.error.code ?? 'spawn' } : { status: r.status }; };
-  obs.codex_version = probeCmd(['--version']);
-  obs.login = obs.codex_version.status === 0 ? probeCmd(['login', 'status']) : { status: null };
-  const before = coverageSnapshot(repo);
-  const noop = `This is a ship-ticket PLAN carrier probe. Do not read, run or change anything. Reply with exactly one line: probe-ok ${nonce}\n`;
-  const busy = 'This is a ship-ticket cancellation probe. Do not change any file. Run the read-only shell command `sleep 600`, then reply `done`.\n';
-  const flags = ['--cd', repo, '--read-only', '--effort', 'high'];
-  if (obs.relay_present && obs.codex_version.status === 0 && obs.login.status === 0) {
-    obs.dispatch = await relayRun({ relay, repo }, [...flags, '--timeout', '5m', '--out-dir', join(outDir, 'dispatch')], noop);
-    const thread = obs.dispatch.result?.threadId;
-    if (obs.dispatch.result?.status === 'completed' && nonEmpty(thread)) obs.resume = await relayRun({ relay, repo }, [...flags, '--session', thread, '--timeout', '5m', '--out-dir', join(outDir, 'resume')], noop);
-    obs.cancel = await relayRun({ relay, repo }, [...flags, '--timeout', busyTimeout, '--out-dir', join(outDir, 'cancel')], busy, { watch: true });
+  const obs = { carrier, nonce };
+  let outerFired = false;
+  const onSignal = (sig) => { stopActiveRelays(); process.exit(sig === 'SIGINT' ? 130 : 143); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  process.on('exit', stopActiveRelays);
+  const outer = setTimeout(() => { outerFired = true; stopActiveRelays(); }, durationMs(probeTimeout, 20 * 60_000));
+  try {
+    try { obs.relay_present = statSync(relay).isFile(); } catch { obs.relay_present = false; }
+    const probeCmd = (args) => { const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 30_000, env }); return r.error ? { error: r.error.code ?? 'spawn' } : { status: r.status, stdout: r.stdout }; };
+    obs.cli_version = probeCmd(['--version']);
+    if (obs.cli_version.status !== 0) obs.login = { status: null };
+    else if (claude) {
+      const a = probeCmd(['auth', 'status']);
+      let method = null;
+      try { method = JSON.parse(a.stdout ?? '').authMethod ?? null; } catch { method = null; }
+      obs.login = a.error ? { error: a.error } : { status: a.status, authMethod: method };
+    } else { const a = probeCmd(['login', 'status']); obs.login = a.error ? { error: a.error } : { status: a.status }; }
+    const before = coverageSnapshot(repo);
+    const noop = `This is a ship-ticket PLAN carrier probe. Do not read, run or change anything. Reply with exactly one line: probe-ok ${nonce}\n`;
+    const busy = 'This is a ship-ticket cancellation probe. Do not change any file. Run the read-only shell command `sleep 600`, then reply `done`.\n';
+    const flags = ['--cd', repo, '--read-only', '--effort', 'high'];
+    const authOk = obs.login.status === 0 && (!claude || obs.login.authMethod === 'claude.ai');
+    if (obs.relay_present && obs.cli_version.status === 0 && authOk) {
+      obs.dispatch = await relayRun({ relay, repo, env }, [...flags, '--timeout', '5m', '--out-dir', join(outDir, 'dispatch')], noop);
+      const id = claude ? obs.dispatch.result?.sessionId : obs.dispatch.result?.threadId;
+      if (!outerFired && obs.dispatch.result?.status === 'completed' && nonEmpty(id)) obs.resume = await relayRun({ relay, repo, env }, [...flags, '--session', id, '--timeout', '5m', '--out-dir', join(outDir, 'resume')], noop);
+      if (!outerFired) obs.cancel = await relayRun({ relay, repo, env }, [...flags, '--timeout', busyTimeout, '--out-dir', join(outDir, 'cancel')], busy, { watch: true });
+    }
+    const after = coverageSnapshot(repo);
+    obs.coverage = before.error || after.error ? { error: before.error ?? after.error } : { before: before.candidate, after: after.candidate, ignored_before: before.ignored, ignored_after: after.ignored };
+    const route = classifyProbe(obs);
+    return {
+      ok: !outerFired && Object.values(route).every((c) => c.result === 'pass'), carrier, codex_route: route, relay_kind_verified: false, outer_timeout: outerFired,
+      note: 'whether this ran inside native Plan Mode, and whether --relay is the real delegate relay, is not detectable here: record both; only a real relay inside real Plan Mode is carrier evidence',
+    };
+  } finally {
+    clearTimeout(outer);
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    process.off('exit', stopActiveRelays);
   }
-  const after = coverageSnapshot(repo);
-  obs.coverage = before.error || after.error ? { error: before.error ?? after.error } : { before: before.candidate, after: after.candidate, ignored_before: before.ignored, ignored_after: after.ignored };
-  const route = classifyProbe(obs);
-  return {
-    ok: Object.values(route).every((c) => c.result === 'pass'), codex_route: route, relay_kind_verified: false,
-    note: 'whether this ran inside native Plan Mode, and whether --relay is the real codex-delegate relay, is not detectable here: record both; only a real relay inside real Plan Mode is carrier evidence',
-  };
 }
 
 // eslint-disable-next-line no-control-regex
@@ -1143,20 +1374,20 @@ export function main(argv) {
         return 1;
       }
       // The retained debate bundle is located from the repository (default: the plan's directory), never from scratch paths.
-      const bundleDir = retainedDirFor(text, opts.repo ?? dirname(resolve(opts.plan)));
-      const r = startCheck(text, { runId: opts['run-id'], bundleDir });
+      const repo = resolve(opts.repo ?? dirname(resolve(opts.plan)));
+      const r = startCheck(text, { runId: opts['run-id'], bundleDir: retainedDirFor(text, repo)?.dir ?? null, repo });
       process.stdout.write(`${JSON.stringify(r)}\n`);
       return r.ok ? 0 : 1;
     }
     if (command === 'debate-check') {
-      const { opts, positional } = parseFlags(rest, ['plan', 'bundle']);
-      if (!opts.plan || !opts.bundle || positional.length) throw Object.assign(new Error('debate-check needs --plan and --bundle and takes no other argument'), { usage: true });
+      const { opts, positional } = parseFlags(rest, ['plan', 'bundle', 'repo']);
+      if (!opts.plan || !opts.bundle || !opts.repo || positional.length) throw Object.assign(new Error('debate-check needs --plan, --bundle and --repo and takes no other argument'), { usage: true });
       let text;
       try { text = readFileSync(opts.plan, 'utf8'); } catch (err) {
         process.stdout.write(`${JSON.stringify({ ok: false, errors: [{ code: 'plan_unreadable', message: `cannot read plan: ${err.code ?? err.message}` }], warnings: [] })}\n`);
         return 1;
       }
-      const r = debateCheck(text, { bundleDir: resolve(opts.bundle) });
+      const r = debateCheck(text, { bundleDir: resolve(opts.bundle), repo: resolve(opts.repo) });
       process.stdout.write(`${JSON.stringify(r)}\n`);
       return r.ok ? 0 : 1;
     }
@@ -1171,19 +1402,21 @@ export function main(argv) {
       const { opts, positional } = parseFlags(rest, ['plan', 'bundle', 'repo']);
       if (!opts.plan || !opts.bundle || !opts.repo || positional.length) throw Object.assign(new Error('debate-retain needs --plan, --bundle and --repo'), { usage: true });
       const text = readText(opts.plan, 'plan');
-      const to = retainedDirFor(text, resolve(opts.repo));
-      const r = to ? retainBundle(text, { from: resolve(opts.bundle), to })
+      const loc = retainedDirFor(text, resolve(opts.repo));
+      const r = loc ? retainBundle(text, { from: resolve(opts.bundle), to: loc.dir, root: loc.root, repo: resolve(opts.repo) })
         : { ok: false, retained: null, errors: [{ code: 'debate_evidence_missing', message: 'cannot locate <git-common-dir> or read the plan attestation; WAIT_FOR_USER' }] };
       process.stdout.write(`${JSON.stringify(r)}\n`);
       return r.ok ? 0 : 1;
     }
     if (command === 'debate-probe') {
-      const { opts, positional } = parseFlags(rest, ['relay', 'repo', 'out-dir', 'codex', 'busy-timeout']);
+      const { opts, positional } = parseFlags(rest, ['relay', 'repo', 'out-dir', 'carrier', 'cli', 'busy-timeout', 'probe-timeout']);
       if (!opts.relay || !opts.repo || !opts['out-dir'] || positional.length) throw Object.assign(new Error('debate-probe needs --relay, --repo and --out-dir'), { usage: true });
-      return runProbe({ relay: resolve(opts.relay), repo: resolve(opts.repo), outDir: resolve(opts['out-dir']), codex: opts.codex ?? 'codex', busyTimeout: opts['busy-timeout'] ?? '30s' })
+      const carrier = opts.carrier ?? 'codex';
+      if (!['codex', 'claude'].includes(carrier)) throw Object.assign(new Error('debate-probe --carrier is codex or claude'), { usage: true });
+      return runProbe({ relay: resolve(opts.relay), repo: resolve(opts.repo), outDir: resolve(opts['out-dir']), carrier, cli: opts.cli ?? null, busyTimeout: opts['busy-timeout'] ?? '30s', probeTimeout: opts['probe-timeout'] ?? '20m' })
         .then((r) => { process.stdout.write(`${JSON.stringify(r)}\n`); return r.ok ? 0 : 1; });
     }
-    throw Object.assign(new Error('usage: brief.mjs plan-digest --plan <plan.md> | brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>] | brief.mjs debate-check --plan <plan.md> --bundle <dir> | brief.mjs debate-serialize --attestation <json> | brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--codex <bin>] [--busy-timeout <dur>] | brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
+    throw Object.assign(new Error('usage: brief.mjs plan-digest --plan <plan.md> | brief.mjs start-check --plan <plan.md> --run-id <id> [--repo <dir>] | brief.mjs debate-check --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-serialize --attestation <json> | brief.mjs debate-retain --plan <plan.md> --bundle <dir> --repo <dir> | brief.mjs debate-probe --relay <relay.mjs> --repo <dir> --out-dir <dir> [--carrier codex|claude] [--cli <bin>] [--busy-timeout <dur>] [--probe-timeout <dur>] | brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
   } catch (err) {
     if (!err.briefError && !err.usage) throw err;
     if (command === 'start-check' && /^plan_invalid/.test(err.message)) {

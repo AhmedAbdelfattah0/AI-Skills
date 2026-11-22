@@ -239,7 +239,7 @@ Not applicable: <check>: <one-line reason>, ...
 ## 7. Cross-model planning debate
 <Every implementation plan; the debate rules live in cross-model.md "PLAN debate". Freeze this section before the final confirmation request.>
 **Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
-**Result:** <CONVERGED / UNRESOLVED / LIMIT_REACHED / SKIPPED (only with the owner exception below) and why; a substitute carrier is stated as `carrier.degraded: true`, never as an outcome>
+**Result:** <CONVERGED / UNRESOLVED / LIMIT_REACHED / SKIPPED (only with the owner exception below) as the first word, then why; it must equal the attestation outcome; a substitute carrier is stated as `carrier.degraded: true`, never as an outcome>
 **Draft:** <final version; last version actually checked by counterpart>
 **Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported; budget none unless overridden> (information only)
 Attestation: <debate-<ticket>-<yyyymmddThhmmZ>, predeclared; the attestation line itself lives in the RUN-STATE body>
@@ -250,7 +250,7 @@ Attestation: <debate-<ticket>-<yyyymmddThhmmZ>, predeclared; the attestation lin
 
 ### Debate carrier and exceptions requested
 - carrier.degraded: <true|false>
-- degradation acknowledgement: <none, or exactly: The owner accepts this degraded debate carrier for this ticket: it is not cross-model agreement and it resolves no finding.>
+- degradation acknowledgement: <none, or exactly: The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply.>
 - exception: <none|SKIPPED|WAIVED>
 - exception reason: <none, or the reason>
 - exception acknowledgement: <none, or exactly: The owner approves skipping the Planning Debate for this ticket only. (SKIPPED) / The owner waives the listed debate findings for this ticket only. (WAIVED)>
@@ -260,7 +260,7 @@ This is inspectable frozen content: approving the exact plan digest in `ExitPlan
 
 | Finding | Disposition | Resolution | Design change |
 |---|---|---|---|
-| <outstanding canonical ID, or LIMIT> | <accept_risk / decided / waived> | <the accepted-risk text, the actual decision, or the waiver> | <yes / no> |
+| <outstanding canonical ID, or LIMIT> | <accept_risk / decided / waived> | <the accepted-risk text, the actual decision, or the waiver> | <exactly yes or no> |
 
 **Outstanding decisions:** <remaining positions, recommendation and human choice
 needed; or none>. Model agreement is advice, not approval. `decide` or `re-debate`

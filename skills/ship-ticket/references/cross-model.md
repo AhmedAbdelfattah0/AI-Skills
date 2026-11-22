@@ -32,8 +32,9 @@ participation. If Codex is unavailable or fails after bounded recovery, hold the
 same debate with a fresh Fable session as the declared substitute: the attestation
 records `carrier: {agent: fable, degraded: true}` and the plan carries the frozen
 degradation acknowledgement. That is a same-provider challenge, never cross-model
-agreement, and a transport label only: it resolves no finding and the same
-convergence, limit and disposition checks apply. Only if Fable cannot run either
+agreement, and a transport label only: the degraded carrier does not by itself
+resolve or waive any finding, and the same convergence, limit and disposition
+checks apply (a substitute's verified concession counts exactly like any other). Only if Fable cannot run either
 is it `WAIT_FOR_USER`, unless the owner approves an exception. On a Codex host the
 counterpart is already a Claude session; if no Claude session can run, that is
 `WAIT_FOR_USER` likewise, and Fable stands in only as the declared degraded
@@ -228,7 +229,11 @@ For each finding the host incorporates it or challenges it with evidence and
 reasoning. Send the revised full draft or unambiguous versioned delta, every
 finding's disposition and evidence, and host counterproposals to the **same**
 counterpart session. Ask it to defend or concede disputed points and verify the
-changed design and affected seams, without rereading the whole repository.
+changed design and affected seams, without rereading the whole repository. The
+counterpart marks each closed finding with an anchored line
+`finding <ID>: conceded` or `finding <ID>: confirmed` (column 1, outside code
+fences); a blocker or major counts as closed by the counterpart only when the round
+it cites carries that line.
 Agreement on an older draft never transfers automatically to a revised one.
 
 If the Integration Contract changes, recheck affected provider/consumer
@@ -240,7 +245,8 @@ occur during debate.
 Each counterpart response begins with four anchored lines, each exactly once:
 `verdict: AGREE` or `verdict: CHANGES_REQUESTED`, `request_id: <id from the brief>`,
 `plan_version: <v>` and `plan_digest: <digest>` (the digest line is required when
-the brief carried one). Prose such as "AGREE for v4" is not an echo. Findings
+the brief carried one), each from column 1 and outside code fences. Prose such as
+"AGREE for v4", or an echo inside a fence or indented, is not an echo. Findings
 follow, at most twelve (blockers and majors first, at most three minors), each with
 a stable ID, severity, plan section, repository evidence, consequence and proposed
 change; delta responses explicitly concede or defend previous findings, and excess
@@ -282,14 +288,27 @@ relay out-dir as provenance only, bundle-relative `files` with their `sha256`
 native session), or `dispatch_error: {class, text}` when no result exists. Keep the
 relay out-dirs under one scratch bundle root (`--out-dir <bundle root>/r<n>`).
 
-Run `node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root>`
-at PLAN preflight, before `ExitPlanMode`. It verifies the evidence hashes, the
-relay `status`, exit code, thread or session, read-only sandbox and workdir (the
+Run `node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`
+at PLAN preflight, before `ExitPlanMode`. It verifies the evidence hashes (every
+evidence file a regular file inside the bundle, no symbolic link), the relay
+`status`, exit code (0 for a completed round, in the record and the result), the
+non-empty thread or session id bound to the result, read-only on every round (the
 Claude relay also needs `authMethod: claude.ai`), the brief and response
-`request_id` binding, the outcome rules and the frozen exception and degradation
-acknowledgements, and prints `outcome`, `debate_qualified`, `outstanding`,
-`pending`, `carrier`, `diversity`, `attestation_sha256` and `run_log_metrics`. A
-refusal is fixed inside Plan Mode. Because the RUN-STATE body is outside the
+`request_id` binding, the outcome rules (the first word of section 7's
+`**Result:**` line must be the attestation outcome) and the frozen exception and
+degradation acknowledgements. It binds the relay workdir to `--repo`, never to a
+path the attestation merely names: `workdir_kind: repo` means the relay ran in the
+repository itself (realpath of the workdir equals the repository top level);
+`workdir_kind: snapshot` means it ran in a read-only Git snapshot copy, recorded as
+`snapshot: {base: <commit>, entries: {<top-level path>: <object id>}}`, where every
+entry must equal the repository's entry at `base` and, while the snapshot exists,
+its HEAD must hold exactly those entries with no tracked change. Once the scratch
+snapshot is deleted, `start-check` can check only the repository side of that
+binding. It prints `outcome`, `debate_qualified`, `outstanding`, `pending`,
+`carrier`, `diversity` (PLAN-side evidence, same_provider or cross_provider from
+`provider:model`; the separate gateReview diversity field, item G, was withdrawn
+by owner decision D-15 as optional telemetry outside closure), `attestation_sha256`
+and `run_log_metrics`. A refusal is fixed inside Plan Mode. Because the RUN-STATE body is outside the
 digest, state `attestation_sha256` in the text accompanying `ExitPlanMode`; START
 records it as `debate_attestation_sha256` and `start-check` re-verifies it. Present
 outstanding choices through the normal native approval; unresolved product,
@@ -313,13 +332,19 @@ canonical finding (and, for `LIMIT_REACHED`, the limit itself as row `LIMIT`) ha
 concrete disposition in the approved digest: `accept_risk` with the accepted-risk
 text, `decided` with the actual decision, or `waived` with the frozen exception.
 `decide` or `re-debate` without the resolution is pending and blocks START
-(`debate_disposition_pending`). A design-changing disposition needs a new
-`plan_version`, the counterpart's reconfirmation of the new digest, then native
-approval again (`debate_reconfirm_required`). Populated names or timestamps are
+(`debate_disposition_pending`). The Design change cell is exactly `yes` or `no`;
+anything else is pending. A design-changing disposition (`yes`) needs a new
+`plan_version`, the counterpart's AGREE for the new digest, then native approval
+again (`debate_reconfirm_required`). A finding the attestation records as closed by
+the owner goes through the same disposition validation. Populated names or timestamps are
 never proof of authorization. Documented limit: this detects inconsistency, replay
 and stale or unrelated results; it cannot authenticate against a host able to
-fabricate every input. Engine `init` does not enforce debate qualification yet (a
-recorded follow-up); `start-check` is the workflow gate.
+fabricate every input. Host-trust residual, the same property as
+`SECURITY_POLICY_CUTOFF` in engine-dag.mjs: a new plan without `debate_policy`
+whose START `approved_at` is backdated before `DEBATE_POLICY_CUTOFF` passes as
+legacy, because the host writes `approved_at`; no new mechanism closes that. Engine
+`init` does not enforce debate qualification yet (a recorded follow-up);
+`start-check` is the workflow gate.
 
 Remain in native Plan Mode throughout. Per-round measurements live in the
 attestation, never in logger writes during Plan Mode
