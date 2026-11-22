@@ -531,6 +531,106 @@ test('benign plans stay valid: closed fences and comments elsewhere, CRLF line e
   assert.doesNotThrow(() => S.parseContract(planText(contract(good)).replace(/\n/g, '\r\n')), 'CRLF: one trailing CR before LF is stripped');
 });
 
+// ------------------------------------------------------------------ review repair 2: the hidden-contract class closed by refusal
+
+const C = contract(good);
+const hiddenCases = [
+  ['script', `<script>\n\n${C}\n\n</script>`], ['style', `<style>\n\n${C}\n\n</style>`], ['template', `<template>\n\n${C}\n\n</template>`],
+  ['template without blank lines', `<template>\n${C}\n</template>`], ['noscript', `<noscript>\n\n${C}\n\n</noscript>`],
+  ['details', `<details>\n\n${C}\n\n</details>`], ['details with summary', `<details><summary>x</summary>\n\n${C}\n\n</details>`],
+  ['div hidden', `<div hidden>\n\n${C}\n\n</div>`], ['mid-line div hidden', `text <div hidden>\n\n${C}\n\n</div>`],
+  ['CDATA', `<![CDATA[\n\n${C}\n\n]]>`], ['processing instruction', `<?x\n\n${C}\n\n?>`], ['declaration', `<!X\n\n${C}\n\n>`],
+  ['multi-line img alt', `<img alt="\n\n${C}\n\n">`], ['multi-line iframe srcdoc', `text <iframe srcdoc="\n\n${C}\n\n">`],
+  ['a style after the line', `${C}\n\n<style>p{display:none}</style>`], ['a placeholder tag before the line', `<TICKET> placeholder\n\n${C}`],
+  ['a mid-line placeholder tag', `Plan for <TICKET>\n\n${C}`], ['an unterminated tag opening', `a <unterminated\n\n${C}`],
+  ['an autolink-like tag', `see <https://example.invalid>\n\n${C}`], ['a closing tag', `</div>\n\n${C}`],
+  ['no blank line before', `intro\n${C}`], ['no blank line after', `${C}\nafter`],
+  ['a comment open inside the JSON (Codex)', 'scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}'],
+  ['an entity inside the line', contract({ planned: ['src/&#60;!--'] })], ['a named entity inside the line', contract({ planned: ['src/&lt;x'] })],
+  ['a > inside the line', contract({ planned: ['src/a>b'] })],
+  ['an unbalanced single-line backtick before a tag', `\` <div hidden> \`\`\n\n${C}`],
+  ['a tag where the fence trackers disagree (after the line)', `${C}\n\n\`\`\`\`\n\`\`\`\n<style>p{display:none}</style>\n\`\`\`\``],
+];
+for (const [name, body] of hiddenCases) {
+  test(`hidden-contract refusal (scope_contract_hidden): ${name}`, () => {
+    assert.throws(() => S.parseContract(planText(body)), (e) => e.exit === 2 && e.code === 'scope_contract_hidden', name);
+  });
+}
+
+test('entry charset: backtick, pipe, quote and non-ASCII are refused in both modes; engine glob characters stay allowed', () => {
+  for (const mode of ['manual', 'engine']) {
+    for (const bad of ['src/a`b', 'src/a|b', 'src/a"b', 'src/café.ts', 'src/a b']) {
+      assert.throws(() => S.validateContract({ v: 1, mode, dag: mode === 'engine' ? sha('d') : null, planned: [bad], supporting: [] }), (e) => e.code === 'scope_contract_invalid', `${mode} ${bad}`);
+    }
+  }
+  assert.doesNotThrow(() => S.validateContract({ v: 1, mode: 'engine', dag: sha('d'), planned: ['apps/**/[id]/{a}/*.ts', 'x?y'], supporting: [] }));
+});
+
+test('benign plans stay valid: balanced comments, the template metadata comment, the security-plan comment, <br> in tables, HTML in closed fences, backticked tags, entities, comparisons', () => {
+  const ok = [
+    `<!-- a note -->\n\n${C}`,
+    `<!-- the YAML header above this body carries:\n     run_id: <opaque ID>\n     design_ref: <SHA>  -->\n\n**Shape:** BE\n\n${C}`,
+    `<!-- security-plan: {"v":1} -->\n\n${C}`,
+    `| a | b<br>c |\n|---|---|\n| x | y<br/>z<BR /> |\n\n${C}`,
+    `\`\`\`html\n<div hidden>\n<script>x</script>\n\`\`\`\n\n${C}\n\n~~~html\n<style>p{}</style>\n~~~`,
+    `Plan for \`<TICKET>\` and \`\`<a \` b>\`\`\n\n${C}`,
+    `x &lt;div&gt; &amp; y\n\n${C}`,
+    `x <= 5 and a < b, 3<4\n\n${C}`,
+  ];
+  for (const body of ok) assert.doesNotThrow(() => S.parseContract(planText(body)), body);
+});
+
+test('Codex JSON-string example end to end: the line is refused, never CLEAN', (t) => {
+  const r = repo(t);
+  writePlan(r, 'scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}');
+  r.write('src/evil.mjs');
+  const out = run(r);
+  assert.equal(out.status, 2, out.stdout + out.stderr);
+  assert.match(out.stderr, /scope_contract_hidden/);
+});
+
+test('case-insensitive manifests and case-consistent supporting entries', (t) => {
+  const r = repo(t);
+  writePlan(r, contract({ planned: ['src/checkout'], supporting: ['tests'] }));
+  r.write('tests/PACKAGE.JSON', '{}\n'); r.write('tests/My.CSPROJ', '<x/>\n'); r.write('tests/Requirements-dev.TXT', 'x\n');
+  r.write('Tests/a.ts');
+  const f = byPath(run(r).json);
+  for (const p of ['tests/PACKAGE.JSON', 'tests/My.CSPROJ', 'tests/Requirements-dev.TXT']) assert.deepEqual([f[p].class, f[p].flags], ['material', ['dependency_manifest']], p);
+  // On a case-insensitive file system Tests/ may alias tests/; git reports the stored case, and literal matching keeps it material.
+  if (f['Tests/a.ts']) assert.equal(f['Tests/a.ts'].class, 'material');
+  const v = (supporting, planned = ['src/a.ts']) => () => S.validateContract({ v: 1, mode: 'manual', dag: null, planned, supporting });
+  for (const bad of ['Tests', 'DOCS', '.GITHUB/tests', 'Node_Modules/x/tests']) assert.throws(v([bad]), (e) => e.code === 'scope_contract_invalid', bad);
+  assert.throws(v(['src/checkout/tests'], ['src/Checkout']), (e) => e.code === 'supporting_overlaps_planned', 'overlap compares case-insensitively');
+});
+
+test('git index mode alone: core.filemode=true, file system 0644, index 100755 is material', (t) => {
+  const r = repo(t);
+  writePlan(r, contract({ planned: ['src/a.ts'], supporting: ['tests'] }));
+  r.write('src/a.ts');
+  r.write('tests/run.sh', 'echo\n');
+  r.git(['add', 'tests/run.sh']);
+  r.git(['update-index', '--chmod=+x', 'tests/run.sh']);
+  const f = byPath(run(r).json);
+  assert.deepEqual([f['tests/run.sh'].class, f['tests/run.sh'].flags], ['material', ['executable_mode']]);
+});
+
+test('git index and diff modes: an executable staged with core.filemode=false is material (candidate-id sees 0644)', (t) => {
+  const r = repo(t);
+  r.git(['config', 'core.filemode', 'false']);
+  writePlan(r, contract({ planned: ['src/a.ts'], supporting: ['tests'] }));
+  r.write('src/a.ts');
+  r.write('tests/run.sh', 'echo\n');
+  r.write('tests/plain.txt', 'x\n');
+  r.git(['add', 'tests/run.sh', 'tests/plain.txt']);
+  r.git(['update-index', '--chmod=+x', 'tests/run.sh']);
+  const staged = byPath(run(r).json);
+  assert.deepEqual([staged['tests/run.sh'].class, staged['tests/run.sh'].flags], ['material', ['executable_mode']]);
+  assert.equal(staged['tests/plain.txt'].class, 'supporting');
+  r.git(['commit', '-q', '-m', 'x']);
+  const committed = byPath(run(r).json);
+  assert.deepEqual([committed['tests/run.sh'].class, committed['tests/run.sh'].flags], ['material', ['executable_mode']]);
+});
+
 test('a lone CR or a NUL never produce an accepted declaration (CRLF line ends are accepted)', () => {
   const ok = planText(contract(good));
   assert.doesNotThrow(() => S.parseContract(ok));
@@ -769,8 +869,10 @@ test('S6 and F11 wording pins', () => {
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
   assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
   assert.ok(ship.includes('`CLEAN` alone does not establish this line'));
-  assert.ok(review.includes('The reviewer reads the raw contract line in the plan and the `contract` field the record prints'));
+  assert.ok(review.includes('the reviewer reads the raw contract line in the plan and the `contract` field the record prints'));
   assert.ok(plan.includes('Supporting paths are outside the Design Contract'));
+  assert.ok(plan.includes('so the `ExitPlanMode` request restates the canonical contract line (the `contract` helper output) as plain text for the owner'));
+  assert.ok(review.includes('The `ExitPlanMode` request restated the canonical contract line as plain text'));
   assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
   for (const t of [plan, review, ship]) assert.ok(!/\bspecialists?\b/i.test(t));
 });

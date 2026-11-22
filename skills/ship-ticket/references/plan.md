@@ -185,6 +185,7 @@ no producer/consumer boundary changes.>
 | integration | orchestrator | Join and verify the real integration | `<real path>` | backend, frontend | local app + datastore |
 
 <Files touched: explanation for the approver only; the contract line below is the scope.>
+
 scope-contract: {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]}
 
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
@@ -582,8 +583,14 @@ Supporting paths are outside the Design Contract: on an engine run with security
 policy 2 the engine's reassess reports them as out-of-plan paths (REAPPROVAL), so
 put a test directory that will change into the DAG writes; supporting is most
 useful in manual mode. In manual mode `[ ]` and `{ }` are literal characters
-(`app/[id]/page.tsx`); `*` and `?` are refused. Keep the line outside every
-comment and code fence (a line that may be hidden is refused), and CRLF line ends
-are accepted. The mode is part of the approved text: a run whose engine init failed
+(`app/[id]/page.tsx`); `*` and `?` are refused. Keep the line plain and visible: a
+blank line directly before and after it, outside every comment and code fence, no
+`<`, `>` or `&` in it, and no raw HTML or `<placeholder>` text anywhere in the
+narrative outside a closed code fence or backticks (balanced `<!-- -->` comments
+and `<br>` are fine); the check refuses anything that could hide or alter the line
+in the rendered plan. Entries are printable ASCII without `` ` ``, `|` or `"`.
+CRLF line ends are accepted. The check cannot know how the approval view renders
+HTML, so the `ExitPlanMode` request restates the canonical contract line (the
+`contract` helper output) as plain text for the owner; the record prints it too. The mode is part of the approved text: a run whose engine init failed
 stays engine mode until a new plan version with `"mode":"manual"` is re-approved
 through `ExitPlanMode`.

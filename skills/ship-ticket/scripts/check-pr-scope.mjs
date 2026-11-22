@@ -17,14 +17,20 @@
  * Extraction: the narrative (RUN-STATE excluded) split on \n, one trailing CR stripped where it precedes LF (CRLF
  * files are accepted; a lone CR is not); exactly ONE line starts at column 0 with `scope-contract: `; any OTHER line
  * containing `scope-contract` in any case is `scope_contract_ambiguous` (prose, fence, comment, backticks, list item,
- * indentation, BOM, CR); none is `scope_contract_missing`. A line the rendered plan may hide is `scope_contract_hidden`:
- * after a raw `<!--` with no `-->` before it, or inside a fence under either a CommonMark-style or a naive toggle
- * tracker (or where they disagree); fences and comments elsewhere are fine. The JSON must equal its own canonical form
+ * indentation, BOM, CR); none is `scope_contract_missing`. A line the rendered plan may hide or alter is refused
+ * (`scope_contract_hidden`), closing the class by refusal rather than by listing tags: the line holds < > or &; it
+ * lacks a blank line (or the narrative's start or end) directly before and after it; it follows a raw `<!--` with no
+ * `-->`; it lies inside a fence under either a CommonMark-style or a naive toggle tracker (or where they disagree); or
+ * ANYWHERE in the narrative, outside a fence both trackers agree on and after removing same-line code spans and
+ * balanced `<!-- -->` comments, a `<` is followed by a letter, `/`, `!` or `?` (any tag, closing tag, CDATA,
+ * declaration, processing instruction or `<placeholder>`), `<br>` excepted. The check cannot know how the approval
+ * view renders HTML, so the author keeps the line plain and the ExitPlanMode request restates it; the record prints it. The JSON must equal its own canonical form
  * with keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); line <= 8 KiB (64 KiB in
  * engine mode), planned <= 64 entries of <= 256 chars (engine mode 256 of <= 512), supporting <= 16. Field rules
  * (`scope_contract_invalid`):
  *  - every entry is a path with no trailing slash covering itself and everything below (the DAG write syntax): the
- *    engine-dag normalRel rule, no control character or line terminator, no duplicate;
+ *    engine-dag normalRel rule, printable ASCII only without < > & ` | " (engine globs * ? [ ] { } allowed), no
+ *    duplicate;
  *  - planned: manual mode literal paths only (no * or ?; brackets and braces match literally, `app/[id]/page.tsx`)
  *    and at least one; engine mode may carry the DAG's globs; a single-segment entry or a wildcard-only first segment
  *    is allowed and flagged `broad_planned` (advisory: the engine DAG is the breadth authority);
@@ -52,7 +58,9 @@
  *  1. planned: equals an entry (via exact) or lies under one (via directory; engine mode matches every entry `w` as
  *     the engine does, globRe(w) or globRe(w/**), via glob when `w` has * or ?), flag unlisted_under_directory_write;
  *  2. supporting: under a supporting entry, kind `file` (never a symlink, deletion or submodule), not a manifest or
- *     lockfile, not git mode 100755 (flag executable_mode), not starting with `#!` (flag shebang), and under a `docs`
+ *     lockfile (case-insensitive basename), not executable (flag executable_mode: git index mode, the diff's new mode
+ *     or the file-system bit says 100755; on Windows the bit is always clear, so the index mode and the shebang rule
+ *     carry it), not starting with `#!` (flag shebang), and under a `docs`
  *     entry only a documentation or asset extension (md, mdx, markdown, txt, rst, adoc, png, jpg, jpeg, gif, svg,
  *     webp, ico, pdf, csv; anything else, json/yaml/toml and extensionless files included, flag docs_not_allowlisted).
  *     Under a tests-class entry any other plain file is supporting by the owner-approved design (D1): production code
@@ -92,6 +100,8 @@ export const SCHEMA = 'ship-ticket-scope-v1';
 const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+/** Printable ASCII without the characters that can change how a plan renders: < > & ` | " (and backslash, refused by normalRel). */
+const ENTRY_CHARS = /^[ !#$%'()*+,\-./0-9:;=?@A-Z[\]^_a-z{}~]+$/;
 const CONTROL = /[\u0000-\u001f\u007f\u0085\u2028\u2029]/;
 const KEY = 'scope-contract: ';
 const KEYS = 'v,mode,dag,planned,supporting';
@@ -167,7 +177,9 @@ const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
   'settings.gradle.kts', 'gradle.lockfile', 'packages.lock.json', 'Directory.Packages.props', 'Package.swift', 'Package.resolved',
   'Podfile', 'Podfile.lock', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock']);
 /** A dependency manifest or lockfile, by basename. */
-export const isManifest = (p) => { const b = posix.basename(p); return MANIFESTS.has(b) || /\.(csproj|fsproj|vbproj)$/.test(b) || /^requirements.*\.txt$/.test(b); };
+/** A dependency manifest or lockfile, by basename, case-insensitively (a case-insensitive file system aliases PACKAGE.JSON). */
+export const isManifest = (p) => { const b = posix.basename(p).toLowerCase(); return MANIFESTS_LOWER.has(b) || /\.(csproj|fsproj|vbproj)$/.test(b) || /^requirements.*\.txt$/.test(b); };
+const MANIFESTS_LOWER = new Set([...MANIFESTS].map(m => m.toLowerCase()));
 
 // ---------------------------------------------------------------------------------------------------- the contract
 
@@ -190,6 +202,7 @@ export function validateContract(c) {
     if (new Set(v).size !== v.length) invalid(`${name} holds a duplicate entry`);
     for (const e of v) {
       if (e.length > len || CONTROL.test(e) || !normalRel(e)) invalid(`${name} entry ${JSON.stringify(e)} is not a normalized repository path (no trailing slash, no . or .., no backslash, no control character)`);
+      if (!ENTRY_CHARS.test(e)) invalid(`${name} entry ${JSON.stringify(e)} holds a character outside printable ASCII or one of < > & \` | " (they can alter how the plan renders)`);
     }
     return v;
   };
@@ -202,10 +215,10 @@ export function validateContract(c) {
     const segs = s.split('/');
     if (hasGlob(s)) invalid(`supporting entry ${JSON.stringify(s)} carries * or ?`);
     if (!SUPPORTING_SEGMENTS.includes(segs.at(-1))) invalid(`supporting entry ${JSON.stringify(s)} must end in one of ${SUPPORTING_SEGMENTS.join(', ')}`);
-    if (segs.some(x => FORBIDDEN_SEGMENTS.includes(x))) invalid(`supporting entry ${JSON.stringify(s)} lies under ${FORBIDDEN_SEGMENTS.join(', ')}`);
+    if (segs.some(x => FORBIDDEN_SEGMENTS.includes(x.toLowerCase()))) invalid(`supporting entry ${JSON.stringify(s)} lies under ${FORBIDDEN_SEGMENTS.join(', ')}`);
     if (isManifest(s)) invalid(`supporting entry ${JSON.stringify(s)} is a manifest`);
     for (const p of planned) {
-      if (globOverlaps(p, s)) refuse('supporting_overlaps_planned', `supporting entry ${JSON.stringify(s)} overlaps planned entry ${JSON.stringify(p)}`);
+      if (globOverlaps(p.toLowerCase(), s.toLowerCase())) refuse('supporting_overlaps_planned', `supporting entry ${JSON.stringify(s)} overlaps planned entry ${JSON.stringify(p)}`);
     }
   }
   return c;
@@ -220,21 +233,60 @@ export function validateContract(c) {
  * in-fence, or the two disagreeing, refuses. Only the contract line's own position matters.
  */
 function hiddenCheck(lines, at) {
+  const hidden = (why) => refuse('scope_contract_hidden', why);
+  const line = lines[at];
+  if (/[<>&]/.test(line)) hidden('the scope-contract line holds < > or & (a comment, tag or entity could change what the approver sees); keep it plain');
+  if ((at > 0 && lines[at - 1].trim() !== '') || (at < lines.length - 1 && lines[at + 1].trim() !== '')) {
+    hidden('the scope-contract line needs a blank line (or the start or end of the narrative) directly before and after it');
+  }
   const before = lines.slice(0, at).join('\n');
   const open = before.lastIndexOf('<!--');
-  if (open >= 0 && before.indexOf('-->', open + 4) < 0) refuse('scope_contract_hidden', 'the scope-contract line lies inside (or after an unterminated) <!-- comment; the approver would not see it');
+  if (open >= 0 && before.indexOf('-->', open + 4) < 0) hidden('the scope-contract line lies inside (or after an unterminated) <!-- comment; the approver would not see it');
+  // Fence state of every line under both trackers: a line inside a fence counts only when BOTH agree.
+  const inFence = [];
   let fence = null, naive = false;
-  for (const l of lines.slice(0, at)) {
-    if (/^\s*(```|~~~)/.test(l)) naive = !naive;
+  for (const l of lines) {
+    const toggles = /^\s*(```|~~~)/.test(l);
+    let cm = fence !== null;
     if (fence) {
       const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l);
       if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
-      continue;
+    } else {
+      const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
+      if (o && !(o[1][0] === '`' && o[2].includes('`'))) { fence = { ch: o[1][0], len: o[1].length }; cm = true; }
     }
-    const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
-    if (o && !(o[1][0] === '`' && o[2].includes('`'))) fence = { ch: o[1][0], len: o[1].length };
+    inFence.push({ cm, nv: naive || toggles });
+    if (toggles) naive = !naive;
   }
-  if (fence || naive) refuse('scope_contract_hidden', `the scope-contract line may lie inside a code fence (${fence ? 'open fence' : 'fence lines do not pair'}); move it outside every fence`);
+  if (inFence[at].cm || inFence[at].nv) hidden(`the scope-contract line may lie inside a code fence (${inFence[at].cm ? 'open fence' : 'fence lines do not pair'}); move it outside every fence`);
+  // Raw HTML anywhere in the narrative outside a fence both trackers agree on, after removing same-line code spans
+  // and balanced <!-- --> comments: any `<` followed by a letter, `/`, `!` or `?` (a tag, closing tag, declaration,
+  // CDATA or processing instruction, a `<TICKET>` placeholder included) refuses, except a <br> line break.
+  const text = lines.map((l, i) => (inFence[i].cm && inFence[i].nv ? '' : stripCodeSpans(l))).join('\n').replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+  const tag = text.split('\n').map(l => l.replace(/<br\s*\/?>/gi, ' ')).findIndex(l => /<[A-Za-z/!?]/.test(l));
+  if (tag >= 0) hidden(`line ${tag + 1} of the narrative (${JSON.stringify(lines[tag].trim().slice(0, 60))}) holds raw HTML or a <placeholder> that could hide or alter the scope-contract line in the rendered plan; put it in backticks or write &lt; instead`);
+}
+
+/** `l` with its CommonMark code spans removed: a backtick run closes only at the next run of exactly the same length. */
+function stripCodeSpans(l) {
+  let out = '', i = 0;
+  while (i < l.length) {
+    if (l[i] !== '`') { out += l[i++]; continue; }
+    let n = 0;
+    while (l[i + n] === '`') n++;
+    let j = i + n, close = -1;
+    while (j < l.length) {
+      if (l[j] !== '`') { j++; continue; }
+      let m = 0;
+      while (l[j + m] === '`') m++;
+      if (m === n) { close = j; break; }
+      j += m;
+    }
+    if (close < 0) { out += '`'.repeat(n); i += n; continue; }
+    out += ' ';
+    i = close + n;
+  }
+  return out;
 }
 
 /** The plan's one `scope-contract:` line, parsed, canonical and validated; refuses (exit 2) otherwise. */
@@ -413,7 +465,15 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   try { cand = JSON.parse(r.stdout); } catch { gitFail('candidate_id_failed', 'candidate-id printed no JSON'); }
   const top = git(repo, ['rev-parse', '--show-toplevel']);
   const readHead = (p) => { const fd = openSync(join(top, p), 'r'); try { const b = Buffer.alloc(2); return b.subarray(0, readSync(fd, b, 0, 2, 0)).toString('latin1'); } finally { closeSync(fd); } };
-  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind, mode: p.mode })), { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: (p) => readlinkSync(join(top, p)), readHead });
+  // candidate-id reports the file-system mode; with core.filemode=false (and always on Windows) the git index or the
+  // diff carries an executable bit the file system does not. A path is executable when ANY of them says 100755.
+  const exec = new Set();
+  for (const rec of gitZ(top, ['ls-files', '-s', '-z'])) { const m = /^(\d{6}) [0-9a-f]+ \d\t(.*)$/s.exec(rec); if (m && m[1] === '100755') exec.add(m[2]); }
+  // The diff's new mode is belt and braces: for a work-tree diff git takes it from the index when core.filemode=false,
+  // so no reachable state found so far sets it without the index; it is kept so a future source of the bit is not lost.
+  const raw = gitZ(top, ['diff', '--raw', '-z', '--no-renames', cand.merge_base, '--']);
+  for (let i = 0; i + 1 < raw.length; i += 2) { const m = /^:\d{6} (\d{6}) /.exec(raw[i]); if (m && m[1] === '100755') exec.add(raw[i + 1]); }
+  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind, mode: exec.has(p.path) ? '100755' : p.mode })), { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: (p) => readlinkSync(join(top, p)), readHead });
   // candidate-id excludes by prefix, so a path below an exclusion FILE (session-log.md/x, the plan path used as a
   // directory) is missing from its set; enumerate the same way (tracked diff + untracked, non-ignored) and flag it.
   const changed = [...gitZ(top, ['diff', '--name-only', '-z', '--no-renames', cand.merge_base, '--']),
