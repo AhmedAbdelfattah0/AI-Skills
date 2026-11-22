@@ -167,33 +167,39 @@ const decodeEntities = (l) => l.replace(ENTITY, (all, d, h, n) => {
   return NAMED[n.toLowerCase()] ?? all;
 });
 const INLINE_TAG = /<\/?[a-z][a-z0-9]*\s*\/?>/gi;
-// an emoji / pictograph that NFKC would fold into a letter (U+2139 `ℹ` becomes `i`, `Ⓜ` becomes `M`) is a symbol, not a word: keep it a
-// non-letter placeholder so a line led by it is still read as decorated (FR-1a)
+export const normaliseForDetection = (l) => decodeEntities(l).normalize('NFKC').replace(INVISIBLE, '').replace(INLINE_TAG, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
+// FR-1a: an emoji / pictograph that NFKC would fold into a letter (U+2139 becomes `i`, U+24C2 becomes `M`) is a symbol, not a word. A plan-key line is
+// also read from this symbol-preserving copy, so a line LED by one is still decorated. The copy is only an alternative reading: the key's own NFKC
+// recognition is exactly the one above (`test-trℹggers:` still opts in), and a symbol never makes a word out of a letter.
 const PICTO = /\p{Extended_Pictographic}/gu;
-const foldPicto = (l) => l.replace(PICTO, (c) => (/\p{L}/u.test(c.normalize('NFKC')) ? '\uFFFC' : c));
-export const normaliseForDetection = (l) => foldPicto(decodeEntities(l)).normalize('NFKC').replace(INVISIBLE, '').replace(INLINE_TAG, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
+const normaliseSymbols = (l) => normaliseForDetection(decodeEntities(l).replace(PICTO, (c) => (/\p{L}/u.test(c.normalize('NFKC')) ? '\uFFFC' : c)));
 const JOIN = '\\s*-+\\s*';
 const EDGE = '(?<![a-z0-9])'; // a token starts a word
 const token = (...words) => new RegExp(EDGE + words.join(JOIN));
 // a plan key: its words joined by dashes, or by whitespace when a colon follows closely (0 such lines in 650 real plans).
 // FR-1a: it must LEAD its line. The lead is DECORATION only, a loop over CLOSED, finite grammars (each alternative below):
 //   any non-letter except `<` (spaces, `>`, `-`, `*`, backticks, `#`, `|`, emoji, every digit in any script: `1.`, `1.2`, `1:`, `#1`, `| 3 |`);
-//   a markup tag with any attributes (`<b class="key">`, `<span style="x">`, nested, self-closing), or an UNCLOSED `<` run that ends at the key;
-//   a task box `[x]` (`[ ]` is non-letters); a roman numeral list marker of 5 to 8 letters in strict roman grammar (`xviii.`); a list marker of
-//   up to 4 letters (`a.`, `iv)`, `iiii.`), each followed by `.` or `)` and a space.
-// A letter anywhere else (`Note:`, `Step 1:`, a sentence) is prose, so a mention ("No test-triggers line is needed") neither opts in nor refuses.
-// Linear: the alternatives start with disjoint characters (`<` has two, split by a lookahead; `[x]` dies at `x`; the two list markers differ in
-// length), and the unclosed-tag run is lazy and stops at the key, so no input backtracks catastrophically.
+//   a markup tag (`<b class="key">`, `<a title="a>b">`, `</b>`; attribute values are quote-aware); a tag that CONTAINS the key is never decoration:
+//   the key is found inside it (`<b title="test-triggers: x">`, `<b class="k" test-triggers: x`); a comment opener `<!--` (so `<!-- test-triggers: x -->`
+//   is caught, while `<!-- reviewer note: no test-triggers line` is prose); a task box `[x]`; a roman numeral list marker in strict roman grammar of 5 or
+//   more letters (`xviii.`, `clxxxviii.`); a list marker of up to 4 letters (`a.`, `iv)`, `iiii.`), each followed by `.` or `)` and a space.
+// A `<` followed by anything else (`< 5 ms`, `<= 3 files`, `<3`) is comparison prose. A letter anywhere else (`Note:`, `Step 1:`, a sentence) is prose, so
+// a mention ("No test-triggers line is needed") neither opts in nor refuses. The key never starts inside a word (`contest-triggers`).
+// Linear: the alternatives start with disjoint characters (`<` has three, split by the next character; `[x]` dies at `x`; the two list markers differ in
+// length; a tag's quoted and unquoted pieces start differently), and the run inside a tag is lazy and stops at the key.
+const TAG_PIECE = '(?:[^<>"\']|"[^"]*"|\'[^\']*\')*'; // attribute text, quote-aware
+const TAG_OPEN = '<(?:[a-z/]|!(?!--))';
 const KEY_LEAD = (body) => `^(?:${[
   '[^\\p{L}<]', // non-letters
-  '<[^<>\\n]*>', // a closed markup tag, any attributes
-  `<(?![^<>\\n]*>)[^<>\\n]*?(?=${body})`, // an unclosed `<` run up to the key
+  `${TAG_OPEN}${TAG_PIECE}>`, // a closed markup tag, any attributes
+  `${TAG_OPEN}${TAG_PIECE}?(?:"[^"]*?|'[^']*?)?(?=${body})`, // a tag that contains the key: the key is found inside it
+  '<!--', // a comment opener
   '\\[x\\]', // a checked task box
-  '(?=[mdclxvi]{5,8}[.)])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})[.)](?=\\s)', // a long roman numeral marker
+  '(?=[mdclxvi]{5,}[.)])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})[.)](?=\\s)', // a long roman numeral marker
   '[a-z]{1,4}[.)](?=\\s)', // a short letter marker
 ].join('|')})*`;
 const keyToken = (a, b) => {
-  const body = `(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`;
+  const body = `(?<![\\p{L}\\p{N}])(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`;
   return new RegExp(`${KEY_LEAD(body)}${body}`, 'u');
 };
 const KEY_LINE = (key) => new RegExp(`^\\s*${key}:(?!:)(.*)$`); // the strict plan-key line (a doubled colon is a near miss)
@@ -227,7 +233,7 @@ export function carriers(text, m) {
   return text.split(LINES).filter((l) => {
     if (m.event && l.trimStart().startsWith('{')) return false; // an event record names the markers in its text; it is never one
     const n = normaliseForDetection(l);
-    return m.token.test(m.benign ? n.replace(m.benign, ' ') : n);
+    return m.token.test(m.benign ? n.replace(m.benign, ' ') : n) || (m.opt_in === true && m.token.test(normaliseSymbols(l)));
   });
 }
 /**

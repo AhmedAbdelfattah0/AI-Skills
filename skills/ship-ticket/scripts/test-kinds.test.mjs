@@ -681,10 +681,12 @@ test('[R9] FR-1a repair 1: every Markdown list / outline / checkbox / table deco
   const DECOS = ['', '- ', '* ', '+ ', '- [x] ', '- [X] ', '- [ ] ', '* [x] ', '1. [x] ', '1. ', '12) ', '1.2 ', '1.2.3. ', '## 2.1 ', '### 1.2. ', '1: ', '1 - ', '1 — ', '#1 ', '1000. ', '123456) ',
     'a. ', 'a) ', 'iv. ', 'IV. ', 'B) ', 'xii) ', '| 3 | ', '| ', '|  | ', '> ', '> > ', '> - [x] ', '`', '``', '**', '__', '_', '- **', '1. **', '١. ', '✅ ', '→ ', '  ', '\t', ' ', '﻿', '&gt; ', '<b>', '<li>', '(1) ', '[1] ', '• ', '● ',
     // FR-1a new attempt: markup tags with attributes, nested, self-closing, unclosed; long roman markers; emoji / pictographs (incl. U+2139, which NFKC folds to the letter i)
-    '<b class="key">', '<span style="x">', '<span style="x"><i>', '<div><p class="a b">', '<a href="u" title=\'t\'>', '<br />', '<b class="key" ', '<', '< ', '<3 ', '<>', '< > ', '</b>', '- <b class="k">', '1. <span style="x"><em>',
+    '<b class="key">', '<span style="x">', '<span style="x"><i>', '<div><p class="a b">', '<a href="u" title=\'t\'>', '<br />', '<b class="key" ', '</b>', '- <b class="k">', '1. <span style="x"><em>',
     'xviii. ', 'XVIII. ', 'xxxviii) ', 'xxvii. ', 'xxxix. ', 'mmm. ', 'mmmcmxc. ', 'MCMXC) ', 'xviii.  ', 'iiii. ', 'IIII) ', 'abcd. ', 'ℹ️ ', 'ℹ ', '📌 ', '✅ ', 'Ⓜ️ ', '© ', '- ℹ️ ', '📌 ✅ ', 'ℹ️ℹ️ ',
     ...Array.from({ length: 39 }, (_, i) => i + 1).flatMap((n) => [`${roman(n)}. `, `${roman(n).toUpperCase()}) `])];
-  const D1 = ['Declaration: ', '**Declared:** ', 'Note: ', 'Step 1: ', 'Plan key -> ', '- key: ', 'Waiver: ', 'The ', 'See ', 'e.g. ', 'Section 1.2 and '];
+  const D1 = ['Declaration: ', '**Declared:** ', 'Note: ', 'Step 1: ', 'Plan key -> ', '- key: ', 'Waiver: ', 'The ', 'See ', 'e.g. ', 'Section 1.2 and ',
+    // FR-1a new attempt, round 1: a `<` that does not open a tag or a comment is comparison prose; a closed comment with prose words is a label
+    '<', '< ', '<3 ', '<>', '< > ', '<= 3 files, so no ', '< 5 ms; ', '< not using ', '<!-- reviewer note: no ', '<!-- note --> ', '<!-- a --><!-- b --> x '];
   const KEYS = ['test-triggers: money', 'lifecycle-item: L1 x', 'test-waiver: race n/a', 'Test triggers: x', 'test_triggers: x', 'Lifecycle item: L1 x', 'Test waiver: n/a'];
   let compared = 0;
   for (const d of DECOS) for (const k of KEYS) {
@@ -720,12 +722,52 @@ test('[R9] FR-1a repair 1: every Markdown list / outline / checkbox / table deco
   assert.notEqual(req('# Plan\n\n`test-triggers` is not used here.\n' + RS).status, 'not_declared');
   // ReDoS: long lead runs stay linear
   const t0 = process.hrtime.bigint();
-  for (const lead of ['[ ]'.repeat(33333), '[x]'.repeat(33333), '1.'.repeat(50000), 'a. '.repeat(33333), ' '.repeat(100000), 'ℹ️'.repeat(50000), '- [x] '.repeat(16666), '[x'.repeat(50000), '1.2'.repeat(33333), '<'.repeat(100000), '< '.repeat(50000), '<>'.repeat(50000), '< > '.repeat(25000), '<a'.repeat(50000), '<b class="'.repeat(11111), '<b class="x">'.repeat(7692), 'xviii. '.repeat(14285), 'xviiii. '.repeat(11111), 'mmm'.repeat(33333), 'ℹ️'.repeat(33333), '📌 '.repeat(25000), '< '.repeat(24999) + 'a < ']) {
-    for (const tail of ['z', 'test-triggers: x']) newOpts(lead + tail);
-  }
+  const LEADS = ['[ ]'.repeat(33333), '[x]'.repeat(33333), '1.'.repeat(50000), 'a. '.repeat(33333), ' '.repeat(100000), 'ℹ️'.repeat(50000), '- [x] '.repeat(16666), '[x'.repeat(50000), '1.2'.repeat(33333), '<'.repeat(100000), '< '.repeat(50000), '<>'.repeat(50000), '< > '.repeat(25000), '<a'.repeat(50000), '<b class="'.repeat(11111), '<b class="x">'.repeat(7692), 'xviii. '.repeat(14285), 'xviiii. '.repeat(11111), 'mmm'.repeat(33333), 'ℹ️'.repeat(33333), '📌 '.repeat(25000), '< '.repeat(24999) + 'a < ', '<b title="'.repeat(11111), '"'.repeat(100000), "'".repeat(100000), '<!--'.repeat(25000), '<!-- '.repeat(20000) + 'z', '<b "a>'.repeat(16666), '<b title="a>b" '.repeat(6666) + 'z', '<b '.repeat(33333), '<b x="'.repeat(16666) + 'test-trig', 'clxxxviii. '.repeat(9090), 'c'.repeat(100000) + '.', ('<b title="' + 'a'.repeat(1000) + '">').repeat(95) + 'z'];
+  let leads = 0;
+  for (const lead of LEADS) for (const rep of [1, 2]) for (const tail of ['z', 'test-triggers: x']) { newOpts(lead.repeat(rep) + tail); leads++; }
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  t.diagnostic(`FR-1a ReDoS: 22 leads of 10^5 chars x 2 tails in ${ms.toFixed(0)} ms; ${compared} decoration twins, ${lost} D1 losses`);
-  assert.ok(ms < 5000, `lead scan took ${ms} ms`);
+  t.diagnostic(`FR-1a ReDoS: ${leads} scans (${LEADS.length} lead shapes of 10^5 and 2x10^5 chars x 2 tails) in ${ms.toFixed(0)} ms; ${compared} decoration twins, ${lost} D1 losses`);
+  assert.ok(ms < 20000, `lead scan took ${ms} ms`);
+});
+
+test('[R10] FR-1a new attempt: each lead construct is tested on its OWN boundary (quotes, key inside, comments, roman 1..3999, symbols, mid-word, `<` prose): old and new agree except the explicit D1 set', () => {
+  const OLD = (a, b) => new RegExp(`(?<![a-z0-9])(?:${a}\\s*-+\\s*${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`);
+  const OLD_KEYS = [OLD('test', 'triggers'), OLD('lifecycle', 'item'), OLD('test', 'waiver')];
+  const oldOpts = (l) => OLD_KEYS.some((re) => re.test(TK.normaliseForDetection(l)));
+  const newOpts = (l) => TK.MARKERS.some((m) => m.opt_in && TK.carriers(l, m).length > 0);
+  const KEYS = ['test-triggers: money', 'lifecycle-item: L1 x', 'test-waiver: race n/a', 'Test triggers: x', 'test_triggers: x', 'Lifecycle item: L1 x', 'Test waiver: n/a'];
+  const ROM = [[1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']];
+  const roman = (n) => ROM.reduce((acc, [v, r]) => { while (n >= v) { acc += r; n -= v; } return acc; }, '');
+  const cases = []; // [line, class]: deco | inside | midword | symbolkey | d1
+  const add = (cls, ...lines) => lines.forEach((l) => cases.push([l, cls]));
+  for (const k of KEYS) {
+    for (const d of ['<b title="a>b">', '<b title=\'a>b\'>', '<b title="a<b">', '<b title="x" data-x=\'y>z\'>', '<a href="u>v" title=\'t>w\'>', '<span style="x"><b title="a>b">', '<!-- ', '<!--', '<!-- - ', '<!-- **', '</b><!-- ', '<br/><!-- ', '<b class="key">', '<b class="key" ']) add('deco', `${d}${k}`);
+    for (const w of [(x) => `<b title="${x}">`, (x) => `<span data-k='${x}'>`, (x) => `<!-- ${x} -->`, (x) => `<!--${x}-->`, (x) => `<!-- - ${x} -->`, (x) => `<!-- **${x}** -->`, (x) => `<b class="k" ${x}`, (x) => `<b title="a>b ${x}">`, (x) => `<b title='a<b ${x}'>`, (x) => `<!-- 1. ${x} -->`]) add('inside', w(k));
+    for (const d of ['contest-', 'attest-', 'latest ', 'protest-']) if (k.startsWith('test-')) add('midword', `${d}${k.slice(5)}`);
+    add('midword', `<div data-id="con${k}"`, `<div data-id="con${k}" class="x"`);
+    for (const p of ['< ', '<3 ', '<= 3 files, so no ', '< 5 ms; ', '< not using ', '<!-- reviewer note: no ', '<!-- note --> ', '<> ', '<']) add('d1', `${p}${k}`);
+    for (const n of Array.from({ length: 3999 }, (_, i) => i + 1)) if (n % 7 === 0 || n >= 3990 || n <= 40) for (const [r, p] of [[roman(n), '.'], [roman(n).toUpperCase(), ')']]) add('deco', `${r}${p} ${k}`);
+  }
+  for (const l of ['test-trℹggers: money', 'test-tr&#x2139;ggers: money', 'lifecycle-ℹtem: L1 x', 'test-wℹaver: n/a'.replace('wℹaver', 'waiver')]) add('symbolkey', l);
+  for (const k of KEYS) add('symbolkey', `ℹ️ ${k}`, `📌 ${k}`, `Ⓜ ${k}`);
+  // every roman marker 1..3999 opts in on the carrier check (a cheap scan); full requiredFor runs on the sample above
+  for (let n = 1; n <= 3999; n++) for (const l of [`${roman(n)}. test-triggers: x`, `${roman(n).toUpperCase()}) test-waiver: x`]) assert.equal(newOpts(l), true, l);
+  let d1 = 0, glued = 0;
+  for (const [line, cls] of cases) {
+    const o = oldOpts(line), n = newOpts(line);
+    if (cls === 'd1') { assert.equal(o, true, line); assert.equal(n, false, `${JSON.stringify(line)} is a D1 loss`); d1++; } else if (cls === 'midword') { assert.equal(o, false, line); assert.equal(n, false, line); } else {
+      assert.equal(n, true, `${cls}: ${JSON.stringify(line)} must opt in`); assert.equal(n, o || /\p{Extended_Pictographic}/u.test(line), line); // NEW never opts in what OLD read as absent, except a symbol glued to the key
+      if (!o) glued++;
+    }
+    for (const nl of ['\n', '\r\n']) {
+      const sole = req(`# Plan${nl}${nl}${line}${nl}${RS}`);
+      if (cls === 'd1' || cls === 'midword') assert.equal(sole.status, 'not_declared', line);
+      else assert.equal(sole.status, 'refused', `${JSON.stringify(line)}: ${sole.status}`);
+    }
+    const inPlan = req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${line}\ntest-triggers:`));
+    if (cls === 'd1' || cls === 'midword') assert.deepEqual(inPlan, BASE, line); else assert.equal(inPlan.status, 'refused', line);
+  }
+  assert.ok(cases.length > 2500 && d1 > 50, `${cases.length} cases, ${d1} D1 lines, ${glued} symbol-glued`);
 });
 
 // ---- S-01b2 P3: requirement provenance (optIn, provenance, kindsForClasses, PROTECTED_TAGS, the declaration `tests` key) ----
