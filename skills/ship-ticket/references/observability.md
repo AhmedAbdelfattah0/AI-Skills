@@ -22,20 +22,48 @@ is not pushed.
 **Old per-worktree logs (before S5).** Earlier versions wrote to
 `git rev-parse --git-path ai-skills/ship-ticket`, which in a linked worktree is
 `<git-common-dir>/worktrees/<name>/ai-skills/ship-ticket`. Those files are read,
-never written, moved, copied or deleted. `start`, `end` and `event` read the common log
-together with this worktree's own old log, so a start recorded there can still be ended
-(the end lands in the common log) and a duplicate is still refused. `summary` and
-`eval.mjs report` also read sibling worktrees' old logs, for reporting only. The carrier's
-REPAIR check reads the common log and this worktree's own old log, never a sibling's.
-`quarantine` changes the common log only. Engine files (`.state.json`, `.engine.jsonl`,
-`.usage.jsonl`, `.attempts`) are not run logs and stay per worktree. To judge pairing
-only, writers also read every sibling worktree's old log, so an end in the common log
-whose start is in some worktree's old log does not look ambiguous to the other
-worktrees; such a start is never ended, duplicated or authorised from another worktree.
-Mixed versions: a version before S5 never reads the common log. In the main checkout
-it reads and writes the common file itself (there the old path is the common dir), and
-it judges an end whose start is in a worktree's old log as an unpaired end and refuses
-to write until it is upgraded. Never put source text, prompts, ticket descriptions, credentials,
+never written or deleted. `start`, `end` and `event` read the common log together with
+this worktree's own old log (never a sibling worktree's), so a start recorded there can
+still be ended and a duplicate is still refused. When `end` pairs with a start found only
+in the own old log, the same append first copies that start row verbatim into the common
+log, then the end (end-time migration), so the common log never holds an end without its
+start. Readers that merge several files count a row that is identical to a row of another
+file once. `summary` and `eval.mjs report` also read sibling worktrees' old logs, for
+reporting only. `quarantine` changes the common log only. Engine files (`.state.json`,
+`.engine.jsonl`, `.usage.jsonl`, `.attempts`) are not run logs and stay per worktree.
+
+**Before `git worktree remove`**, copy that worktree's old log into the common log:
+`node <SHIP_TICKET_SKILL>/scripts/run-log.mjs migrate --repo <WORKTREE> [--ticket <TICKET>]`.
+It appends every start/end row of the worktree's own old log that the common log does
+not already hold, verbatim and in file order, in one locked and validated append, and
+prints `{"migrated": n, "skipped_events": m}` (S-04 measurement rows are not copied). It
+is idempotent and never changes the old log; in the main checkout it does nothing. Migrated
+rows keep their original timestamps, so for them file order is not time order. Without it,
+removing the worktree loses that history (closed intervals and open starts), but never
+breaks the common log.
+
+**REPAIR authority stays per worktree.** The common log is telemetry and never authorises
+a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its row
+to this worktree's own gitdir, `git rev-parse --git-path
+ai-skills/ship-ticket/<TICKET>.review-auth.jsonl`, a name no shared write uses. Without
+engine state, the carrier reads a REVIEW start only from that file and, in a linked worktree,
+from its own pre-S5 `<TICKET>.jsonl` (no other worktree writes it). The ticket suffix
+`.review-auth` is reserved. If the copy cannot be written, `start` exits 1 after the shared
+row is written, and REPAIR stays unauthorised.
+
+**Transitional upgrade note.** In the main checkout the old per-worktree path IS the common
+dir, so a REVIEW start that a pre-S5 version recorded there does not authorise a run-log
+REPAIR after the upgrade. Record a fresh REVIEW start (new event id, same
+`review_execution`) with this version, or rely on engine state. A REVIEW start in a linked
+worktree's own pre-S5 log keeps authorising there.
+
+**Mixed versions and rollback.** A version before S5 never reads the common log, except in
+the main checkout, where its old path is the common dir. There it reads and writes the
+common file itself. Because of end-time migration, every end in that file follows its start,
+so the old reader can pair it. After a rollback, a linked worktree's old version stops seeing
+the events written since S5; they are not lost. A common file whose end has its start
+elsewhere (only possible if it was edited by hand) is refused by old readers until it is
+repaired. Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 
@@ -135,16 +163,20 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs check --repo <TARGET_REPO> --ticket
 
 It writes nothing (no probe file, no directory, no lock) and prints one JSON line
 `{ok, resolved_dir, legacy_logs, degraded?, reason?}`. Exit 0: telemetry can be
-written to `resolved_dir`. Exit 1, with `reason`: not a Git repository, the
-directory (or its nearest existing parent) is not writable, the lock file is
-unreadable, or the existing log would refuse writes (for example a torn tail,
+written to `resolved_dir`. Exit 1, with `reason`: not a Git repository; a file the
+next append needs is not writable (the existing `<TICKET>.jsonl` itself, else its
+nearest existing directory, where `<TICKET>.jsonl.lock` is also created, and this
+worktree's `<TICKET>.review-auth.jsonl` or its directory); the lock file is
+unreadable or malformed; or the existing log would refuse writes (for example a torn tail,
 `incomplete_tail`; the next write or `quarantine` moves it aside). An exit 1 is a
 declared degradation of the run's telemetry: record it (`harness degraded`) and
 continue. It never blocks the ticket. `degraded` lists notes that do not stop
 writes: `legacy_logs_read_only` (old per-worktree logs exist and are read),
-`stale_lock_recoverable` (a dead writer's lock the next write recovers).
+`stale_lock_recoverable` (a dead writer's lock the next write recovers), and
+`future_history` (a row of a run is more than 5 s in the future, see below).
 
 ### Several intervals at once: `batch`
+
 
 A shell variable holding several `--metric` flags is one word in zsh, so the flags
 never reach the parser. Put the operations in a JSON file instead (or pass `-` and
@@ -158,7 +190,8 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs batch \
 `ops.json` is an array of
 `{"op": "start"|"end", "kind", "name", "event_id", "outcome"?, "metrics"?: {"key": value}}`.
 Metric values are typed exactly as `--metric key=value` types them and are never
-word-split, so `--` and spaces survive verbatim. Every op is validated before the
+word-split, so `--` and spaces survive verbatim. A metric key must be a plain name;
+a key containing `=` is refused, never re-split. Every op is validated before the
 first write; the ops then run in order and the first failure stops the batch. A
 batch is not atomic: ops already applied stay. stdout is one JSON line,
 `{"applied": n}` or `{"applied": n, "failed": {"index": i, "reason": "..."}}` (exit 1).
@@ -170,14 +203,34 @@ not stamped when it happened. The value must be strict UTC ISO-8601
 (`2026-01-01T00:00:00.000Z`). It is checked against the clock when the row is
 written: not later than now + 5 s, not earlier than now - 24 h, and never earlier
 than any row already recorded for the run (so a supplied value never backdates
-recorded history, and an end is never before its start). A refused value writes
-nothing. The row carries `timestamp_source: "supplied"` and `label: "estimated"`;
-`duration_ms` is computed from the recorded pair. A row stamped by the clock is
-unchanged and has neither key; when a supplied value up to 5 s ahead is already
-recorded, the clock stamp is raised to it so the run's rows stay in time order.
+recorded history, and an end is never before its start). A supplied `--ended-at`
+earlier than a LATER row of the same run is refused too, so backfilling intervals
+that overlap recorded ones is limited. A refused value writes nothing. The row
+carries `timestamp_source: "supplied"` and `label: "estimated"`; `duration_ms` is
+computed from the recorded pair. A row stamped by the clock is unchanged and has
+neither key; when a supplied value up to 5 s ahead is already recorded, the clock
+stamp is raised to it so the run's rows stay in time order. The raise never goes
+beyond now + 5 s. A row more than 5 s in the future (clock skew, a hand-seeded or
+an old version's `2999-...` stamp) is kept as it is, never adopted and never
+rewritten. It is left out of the ordering history, reported as `future_history` by
+`check` and by the integrity line, and the next rows keep the clock stamp. Ordering
+therefore holds only within the 5 s skew bound. The only exception is an end whose
+own start is in the future: the end is never earlier than its start.
 `event --started-at/--ended-at` take the same now + 5 s / now - 24 h bounds. They
 are not held to the time-order rule, because measurement events can overlap
-earlier rows (concurrent review lanes), and they carry their own `label`.
+earlier rows (concurrent review lanes), so an `event` row may be earlier than
+recorded rows of its run. They carry their own `label`.
+
+**When the checks run.** The append path (`run-log-io.mjs`) takes the bytes to append
+before it takes the lock, so the stamp is computed from the log as read. The lock-held
+check of that same append then re-validates the stamp against the exact bytes it is
+appended after, at the moment of writing: the window (now + 5 s, now - 24 h, for
+`start`, `end` and `event`) and, for `start`/`end`, never earlier than a recorded row
+of the run. A supplied stamp that fails there is refused and nothing is written. A
+clock stamp that a concurrent writer overtook while waiting for the lock is refused
+with a retry: the command re-reads the log, re-stamps and tries again, up to 5 times.
+So the bytes appended are always the bytes checked under the lock. The stamp itself is
+not computed inside run-log-io.
 
 ### What the log can and cannot claim
 
@@ -185,9 +238,16 @@ earlier rows (concurrent review lanes), and they carry their own `label`.
   `.git` can forge, edit or delete events.
 - Supplied timestamps are self-asserted. They are bounded, not verified.
 - The `run-log integrity` line of `ship-ready-check.mjs` (with `--repo` and
-  `--ticket`) claims only what was parsed, counted and paired: events, runs, open
-  phases, warnings and `log_loss` records. It does not claim the log is complete or
+  `--ticket`) claims only what was parsed, counted and paired: events (legacy
+  start/end ROWS plus S-04 events, each a start/end pair; `log_loss` records are
+  counted apart), runs, open phases, warnings and `log_loss` records, plus
+  `degraded=future_history(n)` when some run has a row more than 5 s in the future. It does not claim the log is complete or
   authentic. A deleted or missing log prints `unavailable`, never zero events.
+- Shared observability is not shared authority. The common log never authorises a
+  REPAIR; only this worktree's own gitdir does (see above).
+- Known limits: a writer reads only this worktree's own old log, so a start recorded
+  by a pre-S5 version in another worktree can be ended only from that worktree; and a
+  hand edit of any log file is outside these guarantees.
 - Telemetry never gates a ship decision. The integrity line never changes
   `ship-ready-check`'s exit code, and a failed `check` is a recorded degradation.
 

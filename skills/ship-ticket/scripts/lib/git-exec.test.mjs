@@ -838,7 +838,7 @@ const SCANNED = ['git-capability.mjs', 'git-exec.mjs'];
 const unpartitioned = (files) => files.filter((f) => !SCANNED.includes(f) && !Object.hasOwn(OUT_OF_SCOPE, f));
 const OUT_OF_SCOPE = {
   'durable-io.mjs': 'S-30a durable state/lock I/O. FINDING (reported, not adopted): gitPath() spawns `git rev-parse --git-path` with encoding utf8, a lossy git-output decode; no S-30c row adopts it yet (asserted below, so a fix updates this entry)',
-  'run-log-paths.mjs': 'S5 run-log location (telemetry, never an engine decision). FINDING (reported, not adopted): spawns `git rev-parse --git-common-dir`/`--git-path` with encoding utf8, the same lossy git-output decode as durable-io gitPath',
+  'run-log-paths.mjs': 'S5 run-log location for run-log.mjs and eval.mjs, and for carrier.mjs REPAIR authority (ownDirIsShared decides whether the own --git-path log is the shared log). FINDING (reported, not adopted): spawns `git rev-parse --git-dir`/`--git-common-dir`/`--git-path` with encoding utf8, the same lossy git-output decode as durable-io gitPath',
   'mutation.test-helper.mjs': 'shared mutation harness (test tooling, imported only by tests); spawns node --test, never git, and decodes TAP output only',
   'shape.mjs': 'S-30b closed-schema validator; no fs, child_process or git output (uses Reflect for own-key reads, which T4a would refuse)',
 };

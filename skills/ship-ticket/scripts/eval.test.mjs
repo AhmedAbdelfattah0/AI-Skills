@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildRun, attachUsage, aggregateUsage } from './run-summary.mjs';
-import { evaluateRun, suggest, evaluate } from './eval.mjs';
+import { evaluateRun, suggest, evaluate, lostSignal } from './eval.mjs';
 
 const script = fileURLToPath(new URL('./eval.mjs', import.meta.url));
 const schema = 'ship-ticket-run-log-v1';
@@ -607,7 +607,8 @@ test('S5: report from a linked worktree (and its subdirectory) pairs a start in 
   mkdirSync(legacy, { recursive: true });
   mkdirSync(common, { recursive: true });
   writeFileSync(join(legacy, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z'));
-  writeFileSync(join(common, 'T1.jsonl'), row('end', '2026-01-01T00:00:05.000Z', { duration_ms: 5000, outcome: 'pass' }));
+  // The start also migrated verbatim into the common log (S5 end-time migration): it is one row, not a duplicate.
+  writeFileSync(join(common, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z') + row('end', '2026-01-01T00:00:05.000Z', { duration_ms: 5000, outcome: 'pass' }));
   for (const repo of [wt2, join(wt2, 'sub')]) {
     for (const sel of [['--ticket', 'T1'], ['--all']]) {
       const r = spawnSync(process.execPath, [script, 'report', '--repo', repo, ...sel], { encoding: 'utf8' });
@@ -615,6 +616,22 @@ test('S5: report from a linked worktree (and its subdirectory) pairs a start in 
       const out = JSON.parse(r.stdout);
       assert.equal(out.runs.length, 1, `${repo} ${sel}`);
       assert.equal(out.runs[0].wall_ms_by_phase.BUILD, 5000);
+      assert.equal(JSON.stringify(out).includes('duplicate_start'), false);
     }
   }
+});
+
+test('S5 lostSignal list form: counts summed over every log directory; engine state read from stateDir (else the first dir)', (t) => {
+  const a = mkdtempSync(join(tmpdir(), 'lost-a-')), b = mkdtempSync(join(tmpdir(), 'lost-b-'));
+  t.after(() => { rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }); });
+  writeFileSync(join(a, 'T1.jsonl'), '{"torn"');
+  writeFileSync(join(b, 'T1.jsonl'), 'not json\n{"x"');
+  writeFileSync(join(b, 'T1.state.json'), '{bad');
+  const one = lostSignal(a, 'T1');
+  const both = lostSignal([a, b], 'T1');
+  assert.equal(both.torn_bytes, one.torn_bytes + lostSignal(b, 'T1').torn_bytes);
+  assert.equal(both.malformed_lines, 1);
+  assert.equal(both.state_unreadable, false, 'state from the first dir');
+  assert.equal(lostSignal([a, b], 'T1', { stateDir: b }).state_unreadable, true);
+  assert.deepEqual(lostSignal(a, 'T1'), lostSignal([a], 'T1'), 'the old one-directory signature is unchanged');
 });

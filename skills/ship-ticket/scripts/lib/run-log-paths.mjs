@@ -51,6 +51,14 @@ export function commonLogDir(repo) {
   return join(gitDirPath(repo, ['--git-common-dir']), LOG_SUBDIR);
 }
 
+/**
+ * Whether `repo`'s own gitdir IS the common dir (the main checkout, where `--git-path ai-skills/ship-ticket` names the shared
+ * log). Compared on the two git directories, which always exist, so realpath decides (case and symlinks). Throws `not_a_repo`.
+ */
+export function ownDirIsShared(repo) {
+  return samePath(gitDirPath(repo, ['--git-dir']), gitDirPath(repo, ['--git-common-dir']));
+}
+
 /** The pre-S5 location for `repo`: `git rev-parse --git-path ai-skills/ship-ticket`, absolute. */
 export function ownLogDir(repo) {
   return gitDirPath(repo, ['--git-path', 'ai-skills/ship-ticket']);

@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn as spawnAsync } from 'node:child_process';
+import { hostname as hostnameOf } from 'node:os';
 import { buildRun } from './run-summary.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { REVIEW_ROLE_OF, IDENTITY_ACTIVITIES, GAP_REASONS, CEILING_METRICS, STRING_METRICS } from './review-intervals.mjs';
@@ -766,4 +767,84 @@ test('old-reader compatibility: origin/main rowsFromText accepts rows carrying t
   const { rows, warnings } = rowsFromText(text, f.path);
   assert.deepEqual(warnings, []);
   assert.equal(rows.length, 2);
+});
+
+// ------------------------------------------------------------------ S5 repair: in-lock ordering and bounds, capped carry-forward, accurate check
+const holdLock = (f) => writeFileSync(`${f.path}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'test', nonce: 'held-by-test' }));
+const releaseLock = (f) => rmSync(`${f.path}.lock`, { force: true });
+/** Spawn the CLI without waiting; resolves { status, stdout, stderr } when it exits. */
+const spawnCli = (f, ...args) => new Promise((done) => {
+  const child = spawnAsync(process.execPath, [script, ...args, '--repo', f.repo, '--ticket', 'T1']);
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  child.on('close', (status) => done({ status, stdout, stderr }));
+});
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const legacyStart = (id, ts, run = 'run-1') => ({ schema, ticket: 'T1', run_id: run, event: 'start', event_id: id, kind: 'phase', name: `P${id}`, timestamp: ts, metrics: {} });
+
+test('S5 (3) ordering under the lock: a clock-stamped row overtaken while it waits for the lock is re-stamped, never written earlier than its run', async (t) => {
+  const f = fixture(t);
+  holdLock(f);
+  t.after(() => releaseLock(f));
+  const waiting = spawnCli(f, ...phaseArgs('start', 'late'));
+  await pause(700); // the writer has stamped by the clock and is waiting for the lock
+  const ahead = new Date(Date.now() + 4000).toISOString();
+  writeFileSync(f.path, `${JSON.stringify(legacyStart('ahead', ahead))}\n`); // another writer appended a supplied now+4s row
+  releaseLock(f);
+  const r = await waiting;
+  assert.equal(r.status, 0, r.stderr);
+  const rows = rowsOf(f);
+  assert.deepEqual(rows.map((x) => x.event_id), ['ahead', 'late']);
+  assert.ok(Date.parse(rows[1].timestamp) >= Date.parse(rows[0].timestamp), `${rows[1].timestamp} < ${rows[0].timestamp}`);
+  assert.equal(Object.hasOwn(rows[1], 'timestamp_source'), false, 'still a default row');
+});
+
+test('S5 (4) the supplied-timestamp window is re-checked at the moment of writing (start and event): zero rows when it expired in the lock wait', async (t) => {
+  const f = fixture(t);
+  holdLock(f);
+  t.after(() => releaseLock(f));
+  const edge = new Date(Date.now() - 24 * 3600000 + 1200).toISOString(); // inside the window now, outside it in 2 s
+  const s = spawnCli(f, ...phaseArgs('start', 'w'), '--started-at', edge);
+  const e = spawnCli(f, 'event', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', 'sw', '--metric', 'label=estimated', '--started-at', edge, '--ended-at', edge);
+  await pause(2500);
+  releaseLock(f);
+  const [rs, re] = await Promise.all([s, e]);
+  assert.equal(rs.status, 1, `start: ${rs.stderr}`);
+  assert.equal(re.status, 1, `event: ${re.stderr}`);
+  assert.match(re.stderr, /within the last 24 h/);
+  assert.equal(bytesOf(f), '', 'zero rows appended');
+});
+
+test('S5 (5) carry-forward is capped at now+5s: a 2999 row is not adopted, not rewritten, and is reported as future_history', (t) => {
+  const future = '2999-01-01T00:00:00.000Z';
+  const f = fixture(t, [legacyStart('far', future)]);
+  const before = bytesOf(f);
+  const supplied = f.cli(...phaseArgs('start', 's'), '--started-at', new Date(Date.now() - 3600000).toISOString());
+  assert.equal(supplied.status, 0, `a supplied stamp is still accepted beside far-future history: ${supplied.stderr}`);
+  const d = f.cli(...phaseArgs('start', 'd'));
+  assert.equal(d.status, 0, d.stderr);
+  assert.ok(Math.abs(Date.parse(JSON.parse(d.stdout).timestamp) - Date.now()) < 60000, `the default stamp stays near now: ${JSON.parse(d.stdout).timestamp}`);
+  assert.ok(bytesOf(f).startsWith(before), 'the 2999 row is not rewritten');
+  const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' });
+  assert.equal(c.status, 0, c.stdout);
+  assert.ok(JSON.parse(c.stdout).degraded.includes('future_history'), c.stdout);
+});
+
+test('S5 (6) check: a read-only existing log in a writable directory is exit 1 with a reason; nothing written', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const f = fixture(t, [legacyStart('a', new Date(Date.now() - 1000).toISOString())]);
+  chmodSyncSafe(f.path, 0o400);
+  let c;
+  try { c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }); } finally { chmodSyncSafe(f.path, 0o600); }
+  assert.equal(c.status, 1, c.stdout);
+  assert.match(JSON.parse(c.stdout).reason, /not writable/);
+  assert.deepEqual(readdirSyncSafe(dirname(f.path)), ['T1.jsonl'], 'no probe, no lock');
+});
+
+test('S5 (7c) batch refuses a metric key containing "=" instead of re-splitting it', (t) => {
+  const f = fixture(t);
+  const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'phase', name: 'B', event_id: 'b', metrics: { 'a=b': 'c' } }]) });
+  assert.equal(r.status, 1);
+  assert.equal(bytesOf(f), '');
 });

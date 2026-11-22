@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { runStateAppendOnly, workerRunStateAppend, AUTHORITY_EVENTS, prepareDispatch, dispatch, childEnv, verifySubscription, verifyApproval, spawnSpec,
   ownershipViolations, orchestratorPathsChanged, verifyReviewExecution, BILLING_ENV } from './carrier.mjs';
 import { extractUsage, summarizeUsage } from './usage.mjs';
@@ -265,9 +266,11 @@ test('REPAIR reviewExecution must have a REVIEW phase start in the same run log'
   mkdirSync(dir, { recursive: true });
   const row = (o) => JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start', event_id: 'e', kind: 'phase',
     name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' }, ...o }) + '\n';
-  writeFileSync(join(dir, 'T-1.jsonl'), row({ run_id: 'run-2' }) + row({ name: 'BUILD' }) + row({ kind: 'activity' }) + row({ event: 'end' }) + row({ metrics: { review_execution: 'review-9' } }));
+  writeFileSync(join(dir, 'T-1.review-auth.jsonl'), row({ run_id: 'run-2' }) + row({ name: 'BUILD' }) + row({ kind: 'activity' }) + row({ event: 'end' }) + row({ metrics: { review_execution: 'review-9' } }));
   assert.throws(() => verifyReviewExecution(fx.repo, approval, 'review-1'), /no REVIEW phase start/);
   writeFileSync(join(dir, 'T-1.jsonl'), row({}));
+  assert.throws(() => verifyReviewExecution(fx.repo, approval, 'review-1'), /no REVIEW phase start/, 'S5: the shared log never authorises');
+  writeFileSync(join(dir, 'T-1.review-auth.jsonl'), row({}));
   verifyReviewExecution(fx.repo, approval, 'review-1');
 });
 
@@ -336,7 +339,7 @@ process.stdin.resume(); process.stdin.on('end', () => { const p = '.specs/plans/
 `);
   const logDir = join(fx.repo, '.git', 'ai-skills', 'ship-ticket');
   mkdirSync(logDir, { recursive: true });
-  writeFileSync(join(logDir, 'T-1.jsonl'), JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start',
+  writeFileSync(join(logDir, 'T-1.review-auth.jsonl'), JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start',
     event_id: 'e1', kind: 'phase', name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' } }) + '\n');
   const result = await dispatch(config(fx, { phase: 'REPAIR', reviewExecution: 'review-1', usageLog: join(fx.root, 'u.jsonl') }),
     { env, verifySubscription: () => true, handleSignals: false });
@@ -604,7 +607,11 @@ test('RED carrier: usage events carry role from config; invalid role is refused'
   assert.equal(JSON.parse(readFileSync(def, 'utf8').trim()).role, 'builder', 'BUILD defaults to builder');
 });
 
-test('AC8 S5: REPAIR authorisation reads the REVIEW start from the common log and the OWN legacy log, never a sibling worktree log', (t) => {
+// S5 repair (owner: shared observability must not become shared execution authority). Without engine state, REPAIR is
+// authorised only by a REVIEW start in THIS worktree's own gitdir: the per-worktree <ticket>.review-auth.jsonl that run-log.mjs
+// writes next to the shared telemetry row, or a linked worktree's own pre-S5 <ticket>.jsonl. The shared log never authorises.
+const RUN_LOG = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
+function worktreeFixture(t) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'carrier-s5-')));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const g = (cwd, ...args) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8' }).status, 0, args.join(' '));
@@ -614,23 +621,56 @@ test('AC8 S5: REPAIR authorisation reads the REVIEW start from the common log an
   g(main, 'commit', '-q', '--allow-empty', '-m', 'init');
   g(main, 'worktree', 'add', '-q', join(base, 'wt2'));
   g(main, 'worktree', 'add', '-q', join(base, 'wt3'));
-  const wt2 = join(base, 'wt2');
-  const dirs = { common: join(main, '.git', 'ai-skills', 'ship-ticket'), own: join(main, '.git', 'worktrees', 'wt2', 'ai-skills', 'ship-ticket'),
-    sibling: join(main, '.git', 'worktrees', 'wt3', 'ai-skills', 'ship-ticket') };
-  const approval = { ticket: 'T-1', run_id: 'run-1' };
-  const row = JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start', event_id: 'e', kind: 'phase',
-    name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' } }) + '\n';
-  const only = (where) => {
-    for (const d of Object.values(dirs)) rmSync(join(d, 'T-1.jsonl'), { force: true });
-    mkdirSync(dirs[where], { recursive: true });
-    writeFileSync(join(dirs[where], 'T-1.jsonl'), row);
+  const dirs = { common: join(main, '.git', 'ai-skills', 'ship-ticket'), wt2: join(main, '.git', 'worktrees', 'wt2', 'ai-skills', 'ship-ticket'),
+    wt3: join(main, '.git', 'worktrees', 'wt3', 'ai-skills', 'ship-ticket') };
+  const review = (repo, id = 'e', rx = 'review-1') => {
+    const r = spawnSync(process.execPath, [RUN_LOG, 'start', '--repo', repo, '--ticket', 'T-1', '--run-id', 'run-1', '--kind', 'phase', '--name', 'REVIEW',
+      '--event-id', id, '--metric', 'candidate_id=sha-1', '--metric', `review_execution=${rx}`], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
   };
-  only('sibling');
-  assert.throws(() => verifyReviewExecution(wt2, approval, 'review-1'), /no REVIEW phase start/, "a sibling worktree's log never authorises");
-  only('common');
-  assert.equal(verifyReviewExecution(wt2, approval, 'review-1'), 'run-log');
-  only('own');
-  assert.equal(verifyReviewExecution(wt2, approval, 'review-1'), 'run-log', 'own pre-upgrade log still authorises');
-  mkdirSync(join(wt2, 'sub'));
-  assert.equal(verifyReviewExecution(join(wt2, 'sub'), approval, 'review-1'), 'run-log', 'from a subdirectory');
+  return { base, main, wt2: join(base, 'wt2'), wt3: join(base, 'wt3'), dirs, review };
+}
+const approval = { ticket: 'T-1', run_id: 'run-1' };
+const preS5Row = JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start', event_id: 'e', kind: 'phase',
+  name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' } }) + '\n';
+
+test('S5 authority: a REVIEW start written by a SIBLING worktree (real CLI) never authorises REPAIR in main or another worktree', (t) => {
+  const fx = worktreeFixture(t);
+  fx.review(fx.wt2);
+  assert.throws(() => verifyReviewExecution(fx.main, approval, 'review-1'), /no REVIEW phase start/, 'wt2 -> main');
+  assert.throws(() => verifyReviewExecution(fx.wt3, approval, 'review-1'), /no REVIEW phase start/, 'wt2 -> wt3');
+  assert.equal(verifyReviewExecution(fx.wt2, approval, 'review-1'), 'run-log', 'wt2 itself');
+  fx.review(fx.wt3, 'e3', 'review-3');
+  assert.throws(() => verifyReviewExecution(fx.wt2, approval, 'review-3'), /no REVIEW phase start/, 'wt3 -> wt2');
+  assert.throws(() => verifyReviewExecution(fx.main, approval, 'review-3'), /no REVIEW phase start/, 'wt3 -> main');
+  fx.review(fx.main, 'em', 'review-m');
+  assert.equal(verifyReviewExecution(fx.main, approval, 'review-m'), 'run-log', 'the main checkout authorises its own REVIEW start');
+  assert.throws(() => verifyReviewExecution(fx.wt2, approval, 'review-m'), /no REVIEW phase start/, 'main -> wt2');
+  mkdirSync(join(fx.wt2, 'sub'));
+  assert.equal(verifyReviewExecution(join(fx.wt2, 'sub'), approval, 'review-1'), 'run-log', 'from a subdirectory');
+});
+
+test('S5 authority (Opus repro): main has engine state and a REVIEW start; REPAIR from wt2 (no state) with any writes is refused', (t) => {
+  const fx = worktreeFixture(t);
+  fx.review(fx.main);
+  mkdirSync(fx.dirs.common, { recursive: true });
+  writeFileSync(join(fx.dirs.common, 'T-1.state.json'), JSON.stringify({ run_id: 'run-1',
+    review_chain: [{ review_execution: 'review-1', kind: 'original', outcome: 'FAIL', write_set: ['src'] }] }));
+  assert.throws(() => verifyReviewExecution(fx.wt2, approval, 'review-1', ['anything/**']), /no REVIEW phase start/);
+  assert.equal(verifyReviewExecution(fx.main, approval, 'review-1', ['src/a.js']), 'engine', 'engine state stays the authority where it lives');
+  assert.throws(() => verifyReviewExecution(fx.main, approval, 'review-1', ['anything/x']), /exceed the write set/, 'the FAIL write set still binds');
+});
+
+test('S5 transitional upgrade note: a pre-S5 REVIEW start in a linked worktree still authorises; in the MAIN checkout it does not, a fresh REVIEW start does', (t) => {
+  const fx = worktreeFixture(t);
+  mkdirSync(fx.dirs.wt2, { recursive: true });
+  writeFileSync(join(fx.dirs.wt2, 'T-1.jsonl'), preS5Row);
+  assert.equal(verifyReviewExecution(fx.wt2, approval, 'review-1'), 'run-log', 'linked worktree: its own pre-S5 log is not shared, so it still authorises');
+  assert.throws(() => verifyReviewExecution(fx.wt3, approval, 'review-1'), /no REVIEW phase start/, 'never a sibling');
+  mkdirSync(fx.dirs.common, { recursive: true });
+  writeFileSync(join(fx.dirs.common, 'T-1.jsonl'), preS5Row);
+  assert.throws(() => verifyReviewExecution(fx.main, approval, 'review-1'), /no REVIEW phase start/,
+    'main checkout: its pre-S5 file IS the shared file now, which never authorises');
+  fx.review(fx.main, 'e-fresh', 'review-1');
+  assert.equal(verifyReviewExecution(fx.main, approval, 'review-1'), 'run-log', 'remedy: a fresh REVIEW start (new event id, same review_execution)');
 });

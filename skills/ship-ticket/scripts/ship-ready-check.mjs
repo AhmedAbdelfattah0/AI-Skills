@@ -64,7 +64,8 @@ export async function integrityLine(repo, ticket) {
     const { integritySummary } = await import('./run-log.mjs');
     const r = integritySummary(repo, ticket);
     if (r.unavailable !== undefined) return `run-log integrity: unavailable (${r.unavailable})`;
-    return `run-log integrity: events=${r.events} runs=${r.runs} open_phases=${r.open_phases} warnings=${r.warnings} loss_records=${r.loss_records}`;
+    return `run-log integrity: events=${r.events} runs=${r.runs} open_phases=${r.open_phases} warnings=${r.warnings} loss_records=${r.loss_records}`
+      + (r.future_history ? ` degraded=future_history(${r.future_history})` : '');
   } catch (e) { return `run-log integrity: unavailable (${String(e?.message ?? e).split('\n')[0]})`; }
 }
 

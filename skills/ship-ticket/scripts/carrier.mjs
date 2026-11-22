@@ -35,7 +35,7 @@ import { parseRunState, malformedReason, workerRunStateAppend } from './run-stat
 import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
 import { finalMessage, parseWorkerReport } from './worker-report.mjs';
 import { runPolicy } from './engine-policy.mjs';
-import { readLogRows, writerLogDirs } from './lib/run-log-paths.mjs';
+import { ownDirIsShared } from './lib/run-log-paths.mjs';
 
 export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
@@ -162,12 +162,17 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
     if (outside.length) fail('REPAIR ownership.writes ' + outside.join(', ') + ' exceed the write set of FAIL review ' + reviewExecution);
     return 'engine';
   }
-  // S5 (F05): the run log lives in <git-common-dir>/ai-skills/ship-ticket; a pre-S5 log of THIS worktree (the --git-path
-  // dir above) is still read. A sibling worktree's log is never read here: it must not authorise this worktree's REPAIR.
+  // S5: the shared run log (<git-common-dir>/ai-skills/ship-ticket/<ticket>.jsonl) is telemetry and NEVER authorises: any
+  // worktree writes it. Authority is read only from THIS worktree's own gitdir (the --git-path dir above): the
+  // <ticket>.review-auth.jsonl copy run-log.mjs writes for each REVIEW start recorded here, and, in a linked worktree, its
+  // own pre-S5 <ticket>.jsonl (no other worktree writes it). In the main checkout the --git-path dir IS the common dir,
+  // so its <ticket>.jsonl is the shared log and is not read (transitional: record a fresh REVIEW start after the upgrade).
+  let shared = true;
+  try { shared = ownDirIsShared(repoRoot); } catch { /* unknown: treat the own log as shared (fail closed) */ }
   let text = '';
-  let logDirs = [dir];
-  try { logDirs = writerLogDirs(repoRoot); } catch { /* no common dir: the own dir only */ }
-  for (const { bytes } of readLogRows(logDirs, approval.ticket)) text += bytes.toString('utf8') + '\n';
+  for (const file of [approval.ticket + '.review-auth.jsonl', ...(shared ? [] : [approval.ticket + '.jsonl'])]) {
+    try { text += readFileSync(join(dir, file), 'utf8') + '\n'; } catch { /* absent: rejected below */ }
+  }
   const found = text.split(/\r?\n/).some(line => {
     if (!line.trim()) return false;
     try {

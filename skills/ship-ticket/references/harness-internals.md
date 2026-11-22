@@ -206,8 +206,9 @@ directory. `archive` copies only state, log and usage. After it runs, copy
 `<git-dir>/ai-skills/ship-ticket/<ticket>.attempts` to
 `<git-common-dir>/ai-skills/ship-ticket/archive/<ticket>/<run-id>-<n>.attempts`, a sibling
 of the archive directory it printed. The run-log.mjs timing log `<ticket>.jsonl` needs no copy:
-since S5 it lives in `<git-common-dir>/ai-skills/ship-ticket/`, which removing a worktree leaves intact
-([observability.md](observability.md)).
+since S5 it lives in `<git-common-dir>/ai-skills/ship-ticket/`, which removing a worktree leaves intact.
+Before removing a worktree, run `run-log.mjs migrate --repo <worktree>` so its pre-S5 per-worktree log is copied into
+that shared log ([observability.md](observability.md)).
 
 ### Base pin and SHIP_READY cross-check
 

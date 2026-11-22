@@ -108,7 +108,7 @@ test('AC2: a start in the old per-worktree log is ended by the new version; the 
   assert.equal(JSON.parse(r.stdout).event, 'end');
   assert.deepEqual(readFileSync(join(fx.wt2Legacy, 'T1.jsonl')), before, 'legacy file byte-identical');
   const common = readFileSync(join(fx.common, 'T1.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(common.map((row) => row.event), ['end']);
+  assert.deepEqual(common.map((row) => row.event), ['start', 'end'], 'S5 repair: the legacy start is migrated with its end');
   const s = summary(fx, fx.wt2);
   assert.deepEqual(intervals(s), ['a']);
   assert.deepEqual(s.integrity_warnings, [], 'a pair split across the legacy and the common file is one valid interval');
@@ -139,4 +139,75 @@ test('event counts preserved: N legacy events over two worktrees, then M new wri
   assert.equal(count(fx.main), 8);
   assert.equal(count(fx.wt2), 8);
   assert.deepEqual(readFileSync(join(fx.wt2Legacy, 'T1.jsonl')), wtBytes);
+});
+
+// ---- S5 repair (2): legacy interval migration, so removing a worktree never leaves an orphan end in the shared log.
+const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+/** origin/main's run-log.mjs (the pre-S5 writer) extracted to a temp tree; null when origin/main or tar is unavailable. */
+function preS5Writer(t) {
+  if (process.platform === 'win32') return null;
+  const tar = spawnSync('git', ['-C', REPO_ROOT, 'archive', 'origin/main', 'skills/ship-ticket/scripts'], { maxBuffer: 256 * 1024 * 1024 });
+  if (tar.status !== 0) return null;
+  const dir = mkdtempSync(join(tmpdir(), 's5-old-writer-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  if (spawnSync('tar', ['-x', '-C', dir], { input: tar.stdout }).status !== 0) return null;
+  const script = join(dir, 'skills', 'ship-ticket', 'scripts', 'run-log.mjs');
+  return existsSync(script) ? script : null;
+}
+function seedLegacyStart(t, fx, repo, legacyDir, id, ts) {
+  const old = preS5Writer(t);
+  if (old) {
+    const r = spawnSync(process.execPath, [old, ...iv('start', id), '--repo', repo], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `pre-S5 writer: ${r.stderr}`);
+    assert.ok(existsSync(join(legacyDir, 'T1.jsonl')), 'the pre-S5 writer wrote the per-worktree log');
+    return 'origin/main writer';
+  }
+  seed(legacyDir, [legacyRow('start', id, ts)]);
+  return 'hand-seeded';
+}
+
+test('S5 migration: a start in a worktree legacy log, ended by S5, survives `git worktree remove`: later writes, check and summary are healthy', (t) => {
+  const fx = worktrees(t);
+  git(fx.main, 'worktree', 'add', '-q', join(fx.base, 'wt3'));
+  const wt3 = join(fx.base, 'wt3'), wt3Legacy = join(fx.main, '.git', 'worktrees', 'wt3', 'ai-skills', 'ship-ticket');
+  seedLegacyStart(t, fx, wt3, wt3Legacy, 'a', new Date(Date.now() - 60000).toISOString());
+  const legacyBytes = readFileSync(join(wt3Legacy, 'T1.jsonl'));
+  const e = fx.cli(wt3, ...iv('end', 'a', ['--outcome', 'pass']));
+  assert.equal(e.status, 0, e.stderr);
+  assert.deepEqual(readFileSync(join(wt3Legacy, 'T1.jsonl')), legacyBytes, 'the legacy log is never written');
+  const shared = readFileSync(join(fx.common, 'T1.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(shared.map((r) => `${r.event}:${r.event_id}`), ['start:a', 'end:a'], 'the start was copied verbatim before its end');
+  assert.equal(JSON.stringify(shared[0]) + '\n', legacyBytes.toString('utf8'), 'verbatim copy of the legacy start');
+  assert.deepEqual(summary(fx, wt3).integrity_warnings, [], 'the migrated copy is not a duplicate of itself');
+  git(fx.main, 'worktree', 'remove', '--force', wt3);
+  assert.equal(existsSync(wt3Legacy), false, 'the legacy log went with the worktree');
+  for (const args of [iv('start', 'b'), iv('end', 'b'), ['event', '--ticket', 'T1', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', 'sl', '--metric', 'label=measured']]) {
+    const r = fx.cli(fx.main, ...args);
+    assert.equal(r.status, 0, `${args[0]} after the removal: ${r.stderr}`);
+  }
+  const c = fx.cli(fx.main, 'check', '--ticket', 'T1');
+  assert.equal(c.status, 0, c.stdout);
+  assert.deepEqual(intervals(summary(fx, fx.main)), ['a', 'b']);
+});
+
+test('S5 migrate: copies the own legacy log (open starts and closed pairs) verbatim, idempotently; writes nothing else', (t) => {
+  const fx = worktrees(t);
+  const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  const [t3, t2, t1] = [ago(30), ago(20), ago(10)];
+  seed(fx.wt2Legacy, [legacyRow('start', 'c', t3), legacyRow('end', 'c', t3), legacyRow('start', 'o', t2)]);
+  const legacyBytes = readFileSync(join(fx.wt2Legacy, 'T1.jsonl'));
+  const m = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1');
+  assert.equal(m.status, 0, m.stderr);
+  assert.deepEqual(JSON.parse(m.stdout.trim()), { migrated: 3, skipped_events: 0 });
+  assert.equal(readFileSync(join(fx.common, 'T1.jsonl'), 'utf8'), legacyBytes.toString('utf8'), 'verbatim, in file order');
+  const again = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1');
+  assert.deepEqual(JSON.parse(again.stdout.trim()), { migrated: 0, skipped_events: 0 }, 'idempotent');
+  assert.deepEqual(readFileSync(join(fx.wt2Legacy, 'T1.jsonl')), legacyBytes);
+  assert.equal(fx.cli(fx.wt2, ...iv('end', 'o', ['--ended-at', t1])).status, 0, 'the migrated open start can be ended');
+  git(fx.main, 'worktree', 'remove', '--force', fx.wt2);
+  const s = summary(fx, fx.main);
+  assert.deepEqual(intervals(s), ['c', 'o']);
+  assert.deepEqual(s.integrity_warnings, []);
+  const none = fx.cli(fx.main, 'migrate', '--ticket', 'T1');
+  assert.deepEqual(JSON.parse(none.stdout.trim()), { migrated: 0, skipped_events: 0 }, 'the main checkout has no separate legacy log');
 });

@@ -425,7 +425,7 @@ function report(options) {
   } else {
     // `<ticket>.engine.jsonl` is the run engine's event file, not a timing log.
     // A run whose timing log failed (telemetry degraded) is still found through its engine state.
-    const names = (d, timing) => (existsSync(d) ? readdirSync(d).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') ? [n.slice(0, -6)]
+    const names = (d, timing) => (existsSync(d) ? readdirSync(d).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') && !n.endsWith('.review-auth.jsonl') ? [n.slice(0, -6)]
       : !timing && n.endsWith('.state.json') ? [n.slice(0, -11)] : [])) : []);
     tickets = [...new Set([...logDirs.flatMap((d) => names(d, true)), ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
   }
@@ -435,7 +435,10 @@ function report(options) {
     const logs = readLogRows(logDirs, ticket).map((source) => source.path).reverse(); // legacy files first, the common log last
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
-    for (const row of logs.flatMap((log) => legacyRows(readJsonl(log)))) {
+    // A row migrated verbatim into the shared log (S5) is one row: a row equal to one of an earlier file is dropped.
+    const seen = new Map();
+    const once = (row, file) => { const k = JSON.stringify(row); if (!seen.has(k)) seen.set(k, file); return seen.get(k) === file; };
+    for (const row of logs.flatMap((log, file) => legacyRows(readJsonl(log)).filter((r) => once(r, file)))) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
