@@ -79,6 +79,11 @@ concurrently, then join once:
   The pre-REVIEW run is recorded in the PROVE event as
   `scope: {outcome, material[], record_sha}` (`record_sha` is the sha256 of the
   record it printed), and the PR body lists the supporting and flagged paths.
+  Use the run's base as `--base` and, on an engine run, the bound DAG as `--dag`.
+  At SHIP, exit 1 is **WAIT_FOR_USER** (a Design Contract expansion needs
+  re-approval); exit 2 or 3 means fix the input and rerun, and never commit
+  meanwhile. A refusal leaves any earlier record in place by design; it is never
+  read as evidence.
   **Exit 0 is never a commit or freeze permission.** It proves the path set
   against the approved roots, nothing more, and no gate reads the record;
 - all required locally runnable commands remain green or have unchanged reusable

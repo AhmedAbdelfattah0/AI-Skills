@@ -40,8 +40,14 @@ Finish these checks before announcing REVIEW or appending its start event:
   give the scope record to the primary reviewer. It classifies every candidate
   path as planned, supporting or material. Exit 1 (a material path) is a Design
   Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.
-  Exit 2 or 3 means fix the input and rerun; never proceed. Exit 0 proves only
-  the path set, not the behaviour inside a planned file;
+  An engine run must pass `--dag` (the script refuses `dag_required` without it
+  when the run has a DAG_BOUND, the plan names a DAG digest or an engine state
+  file exists); the Files touched table is the manual flow's contract only.
+  Exit 2 or 3 is never a pass. When the plan text itself must change (an
+  unparsable Files touched list, a bad `scope-envelope:` line), the remedy is
+  re-approval through `ExitPlanMode`, since an edited plan changes the digest and
+  gives `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
+  Exit 0 proves only the path set, not the behaviour inside a planned file;
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;

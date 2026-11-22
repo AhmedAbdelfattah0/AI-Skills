@@ -179,12 +179,13 @@ no producer/consumer boundary changes.>
 ### Execution DAG
 | ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |
 |---|---|---|---|---|---|
-| contract | orchestrator | Materialize the approved contract artifact | <real path> | — | generator outputs |
-| backend | backend worker | Build provider and provider tests | <real paths> | contract | <database/none> |
-| frontend | frontend worker | Build consumer and consumer tests | <real paths> | contract | <output dir/none> |
-| integration | orchestrator | Join and verify the real integration | <real paths> | backend, frontend | local app + datastore |
+| contract | orchestrator | Materialize the approved contract artifact | `<real path>` | — | generator outputs |
+| backend | backend worker | Build provider and provider tests | `<real path>`, `<real dir/>` | contract | <database/none> |
+| frontend | frontend worker | Build consumer and consumer tests | `<real path>`, `<real dir/>` | contract | <output dir/none> |
+| integration | orchestrator | Join and verify the real integration | `<real path>` | backend, frontend | local app + datastore |
 
-scope-envelope: <optional: comma-separated directories under a Files touched directory (or a DAG write) where unlisted test, fixture and docs files count as supporting, e.g. `tests/checkout/`; omit the line for none>
+scope-envelope: <optional: comma-separated directories under a Files touched directory (or a DAG write) where unlisted test, fixture and docs files count as supporting, e.g. scope-envelope: tests/checkout/, docs/checkout/ (no backticks); omit the line for none>
+<Files touched cells: backticked repository paths only, separated by commas, spaces or <br> (a trailing / marks a directory), or — / none; no prose. `check-pr-scope.mjs` reads this one table in the manual flow and refuses anything else.>
 
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
 rationale: <independent boundaries · shared contracts · acceptance criteria per

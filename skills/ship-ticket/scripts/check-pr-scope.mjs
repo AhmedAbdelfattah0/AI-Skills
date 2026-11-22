@@ -12,9 +12,13 @@
  *  (a) the plan narrative digest equals approved_plan_digest of this run's last START (`approval_mismatch`);
  *  (b) with --dag: validateEngineDag passes (`dag_invalid`) and the DAG sha is listed in the plan narrative or
  *      equals exactly one DAG_BOUND of this run (`dag_unbound`); roots = every node's writes;
- *  (c) without --dag (manual flow): roots = the paths of exactly ONE `Files touched` table (outside fenced blocks
- *      and RUN-STATE; header row starts with `ID`; each cell holds only backticked paths, or `—`/`none`); a
- *      placeholder, prose, zero or two tables, a bad path or zero paths is `plan_list_unparsable` (fail closed).
+ *  (c) without --dag (manual flow only): `dag_required` when this run has a DAG_BOUND, the narrative names a DAG
+ *      digest, or an engine state file exists for the ticket (an engine run must pass --dag). Roots = the paths of
+ *      exactly ONE visible `Files touched` table (CommonMark fences, HTML comments, indented code and RUN-STATE are
+ *      invisible; an unterminated fence or comment, or invisible text holding a `Files touched` header, fails
+ *      closed; header row starts with `ID`; each cell holds only backticked paths with no backtick inside, separated
+ *      by commas, whitespace or <br>, or `—`/`none`); a placeholder, prose, adjacent backticks, zero or two tables,
+ *      a bad path or zero paths is `plan_list_unparsable` (fail closed).
  *      With --dag, a parseable table that differs from the DAG writes is the advisory `plan_table_drift`;
  *  (d) the envelope: at most ONE narrative line `scope-envelope: a/, b/` (written by the plan author, approved in
  *      ExitPlanMode, bound by the plan digest; never a flag); every entry normalized and equal to or under a root
@@ -23,7 +27,9 @@
  *  (f) the path set and candidate_id come from candidate-id.mjs --base <ref> with those exclusions: the tracked
  *      diff against the merge base (no renames: a rename is a deleted source plus an added destination) plus
  *      untracked, non-ignored files. A git-ignored file is invisible to this check exactly as to the candidate
- *      ID; an edit of .gitignore is itself a changed path. A dirty submodule fails candidate-id.
+ *      ID; an edit of .gitignore is itself a changed path. A dirty submodule fails candidate-id. candidate-id
+ *      excludes by prefix, so a changed path strictly below an exclusion file (`session-log.md/x`) is added here
+ *      as material with flag `under_exclusion_file` (it is not in the candidate-id set; engine follow-up).
  *
  * Classes (case-sensitive, via engine-dag.mjs `under`), first match wins:
  *  1. planned, via exact: the path equals a root;
@@ -34,12 +40,15 @@
  * Advisory flags never change the exit code: case_alias (a root matches only case-insensitively; still material),
  * symlink, symlink_target_outside_contract (a symlink is never supporting), submodule, deleted, dependency_manifest,
  * unlisted_under_directory_write, line_terminator. The envelope lies inside the roots, so supporting is a subset of
- * under-roots and the order only moves labels: exit 0 implies every path is inside the engine's Design Contract
- * (designContract + security-plan.mjs globRe), pinned by the property test in check-pr-scope.test.mjs.
+ * under-roots and the order only moves labels. With --dag (source `dag`), exit 0 implies every path is inside the
+ * engine's Design Contract (designContract + security-plan.mjs globRe), pinned by the property test in
+ * check-pr-scope.test.mjs; in the manual flow (source `plan-table`) exit 0 means inside the approved table only.
  *
  * What it proves: the candidate's path set (the same set the candidate ID hashes) against the approved roots.
  * What it does not prove: behaviour inside a planned file (a new route inside page.tsx is reassess's new-route signal).
- * A forged record is moot: SHIP recomputes it on the frozen candidate and never trusts a stored one.
+ * A forged record is moot: SHIP recomputes it on the frozen candidate and never trusts a stored one. By design a
+ * refusal leaves an earlier record at the default path untouched, and START/DAG_BOUND are read as the engine reads
+ * them before init (the last START of the run, no quiescence rule): a stored record is never evidence.
  *
  * Output: the record as JSON on stdout, byte-identical to the file written atomically to --out (default
  * `<git dir>/ai-skills/ship-ticket/<T>.scope.json`, never committed; an --out inside the work tree but outside the
@@ -48,7 +57,7 @@
  * **Exit 0 is never a commit or freeze permission.**
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readlinkSync, realpathSync, existsSync } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, isAbsolute, join, relative, sep, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { under, validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
@@ -83,27 +92,64 @@ const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
 /** A dependency manifest or lockfile, by basename. */
 export const isManifest = (p) => { const b = posix.basename(p); return MANIFESTS.has(b) || /\.(csproj|fsproj|vbproj)$/.test(b) || /^requirements.*\.txt$/.test(b); };
 
-/** Narrative lines of `text` outside the RUN-STATE block and outside fenced code blocks. */
-function narrativeLines(text) {
+const FILES_TOUCHED_HEADER = /(?:^|\|)\s*Files touched\s*(?:\||$)/;
+const plainUnparsable = (why) => refuse('plan_list_unparsable', why);
+
+/**
+ * The plan narrative (RUN-STATE block removed) as one visible string per source line, CommonMark style:
+ * a fenced block opens with >= 3 backticks or tildes after at most 3 spaces (a backtick fence's info string has no
+ * backtick) and closes only on the same character, at least as long, with nothing but trailing whitespace; an HTML
+ * comment `<!-- ... -->` outside a fence is removed (it may span lines); a line indented 4+ columns is an indented
+ * code block. Fenced, commented and indented text is invisible (an empty string keeps the line numbering).
+ * Fails closed (`plan_list_unparsable`): an unterminated fence or comment, or invisible text holding a
+ * `Files touched` header, so an example table can never be confused with the real one.
+ */
+export function visibleLines(text) {
   const b = text.indexOf(BEGIN), e = text.indexOf(END);
   const narrative = b >= 0 && e > b ? text.slice(0, b) + text.slice(e + END.length) : text;
-  const out = [];
-  let fence = null;
+  const out = [], hidden = [];
+  let fence = null, comment = false;
   for (const line of narrative.split(/\r?\n/)) {
-    const m = /^\s*(`{3,}|~{3,})/.exec(line);
-    if (m) { if (fence === null) fence = m[1][0]; else if (m[1][0] === fence) fence = null; continue; }
-    if (fence === null) out.push(line);
+    if (fence) {
+      const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
+      else hidden.push(line);
+      out.push('');
+      continue;
+    }
+    if (!comment) {
+      const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (o && !(o[1][0] === '`' && o[2].includes('`'))) { fence = { ch: o[1][0], len: o[1].length }; out.push(''); continue; }
+    }
+    let rest = line, vis = '';
+    while (rest.length) {
+      if (comment) {
+        const i = rest.indexOf('-->');
+        if (i < 0) { hidden.push(rest); rest = ''; break; }
+        hidden.push(rest.slice(0, i)); rest = rest.slice(i + 3); comment = false;
+      } else {
+        const i = rest.indexOf('<!--');
+        if (i < 0) { vis += rest; rest = ''; break; }
+        vis += rest.slice(0, i); rest = rest.slice(i + 4); comment = true;
+      }
+    }
+    if (/^(?: {4}|\t| {0,3}\t)/.test(vis)) { hidden.push(vis); vis = ''; }
+    out.push(vis);
   }
+  if (fence) plainUnparsable(`the plan has an unterminated ${fence.ch.repeat(fence.len)} fenced block`);
+  if (comment) plainUnparsable('the plan has an unterminated <!-- comment');
+  if (hidden.some(h => FILES_TOUCHED_HEADER.test(h))) plainUnparsable('a fenced, commented or indented block holds a Files touched header; only the one visible table may name it');
   return out;
 }
 
 const cells = (line) => { const t = line.trim(); return t.slice(1, t.endsWith('|') ? -1 : undefined).split('|').map(c => c.trim()); };
-const CELL = /^`[^`]+`(?:\s*,?\s*`[^`]+`)*$/;
+/** Backticked tokens (no backtick inside) separated by commas, whitespace or <br>; nothing else. */
+const CELL = /^`[^`]+`(?:(?:\s|,|<br\s*\/?>)+`[^`]+`)*$/i;
 
 /** Paths (sorted, unique, trailing slash dropped) of the plan's one `Files touched` table; refuses `plan_list_unparsable`. */
 export function parseFilesTable(text) {
   const unparsable = (why) => refuse('plan_list_unparsable', why);
-  const lines = narrativeLines(text);
+  const lines = visibleLines(text);
   const heads = [];
   lines.forEach((l, i) => { if (l.trim().startsWith('|')) { const c = cells(l); if (c[0] === 'ID' && c.includes('Files touched')) heads.push(i); } });
   if (heads.length !== 1) unparsable(`expected exactly one table whose header starts with ID and has a Files touched cell, found ${heads.length}`);
@@ -115,7 +161,7 @@ export function parseFilesTable(text) {
     if (row.length !== head.length) unparsable(`row ${JSON.stringify(lines[i].trim())} has ${row.length} cells, the header ${head.length}`);
     const cell = row[col];
     if (cell === '—' || cell === 'none') continue;
-    if (!CELL.test(cell)) unparsable(`Files touched cell ${JSON.stringify(cell)} is not a list of backticked paths (or — / none)`);
+    if (/``/.test(cell) || !CELL.test(cell)) unparsable(`Files touched cell ${JSON.stringify(cell)} is not a list of backticked paths (or — / none)`);
     for (const [, tok] of cell.matchAll(/`([^`]+)`/g)) {
       const p = dirToken(tok);
       if (/[<>]/.test(tok) || !normalRel(p)) unparsable(`Files touched path ${JSON.stringify(tok)} is a placeholder or not a normalized repository-relative path`);
@@ -128,7 +174,7 @@ export function parseFilesTable(text) {
 
 /** Entries of the plan's at most one `scope-envelope:` narrative line ([] without one); refuses a bad entry or a second line. */
 export function parseEnvelope(text) {
-  const found = narrativeLines(text).map(l => l.trimStart()).filter(l => l.startsWith('scope-envelope:'));
+  const found = visibleLines(text).map(l => l.trimStart()).filter(l => l.startsWith('scope-envelope:'));
   if (found.length > 1) refuse('envelope_duplicate', `the plan has ${found.length} scope-envelope lines; at most one`);
   if (!found.length) return [];
   const entries = found[0].slice('scope-envelope:'.length).split(',').map(s => s.trim());
@@ -178,6 +224,17 @@ function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) gitFail('git_failed', `git ${args.join(' ')}: ${(r.stderr || r.error?.message || '').trim()}`);
   return r.stdout.trim();
+}
+
+/** NUL-separated git output, split (no trim: a path may start or end with a space). */
+function gitZ(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) gitFail('git_failed', `git ${args.join(' ')}: ${(r.stderr || r.error?.message || '').trim()}`);
+  return r.stdout.split('\0').filter(Boolean);
+}
+/** candidate-id.mjs's kinds for a work-tree path: symlink, file, submodule (a directory) or deleted. */
+function kindOf(abs) {
+  try { const st = lstatSync(abs); return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'submodule' : 'file'; } catch { return 'deleted'; }
 }
 
 /** realpath of `p`, or of its nearest existing ancestor joined with the rest (the file may not exist yet). */
@@ -237,6 +294,12 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
       drift = onlyDag.length || onlyTable.length ? { only_in_dag: onlyDag, only_in_table: onlyTable } : null;
     } catch (e) { if (!(e instanceof Refusal)) throw e; drift = { table: 'unparsable', reason: e.message }; }
   } else {
+    // Engine runs must pass --dag: a DAG_BOUND of this run, a DAG digest named in the narrative, or an engine state file.
+    const narrative = approved.text.slice(0, approved.text.indexOf(BEGIN)) + approved.text.slice(approved.text.indexOf(END));
+    const why = approved.events.some(e => e.event === 'DAG_BOUND' && e.run_id === runId) ? 'this run has a DAG_BOUND event'
+      : /\bDAG\b.*sha256[:-][0-9a-f]{64}/i.test(narrative) ? 'the plan narrative names a DAG digest'
+        : existsSync(gitPath(repo, `ai-skills/ship-ticket/${ticket}.state.json`)) ? 'an engine state file exists for this ticket' : null;
+    if (why) refuse('dag_required', `${why}; check an engine run with --dag (the Files touched table is the manual flow's contract only)`);
     roots = parseFilesTable(approved.text);
     source = 'plan-table';
   }
@@ -251,6 +314,15 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   try { cand = JSON.parse(r.stdout); } catch { gitFail('candidate_id_failed', 'candidate-id printed no JSON'); }
   const top = git(repo, ['rev-parse', '--show-toplevel']);
   const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind })), { roots, envelope, readlink: (p) => readlinkSync(join(top, p)) });
+  // candidate-id excludes by prefix, so a path below an exclusion FILE (session-log.md/x, the plan path used as a
+  // directory) is missing from its set; enumerate the same way (tracked diff + untracked, non-ignored) and flag it.
+  const changed = [...gitZ(top, ['diff', '--name-only', '-z', '--no-renames', cand.merge_base, '--']),
+    ...gitZ(top, ['ls-files', '--others', '--exclude-standard', '-z', '--'])];
+  const hiddenUnder = [...new Set(changed.filter(p => exclusions.some(x => p.startsWith(x + '/'))))].sort();
+  for (const path of hiddenUnder) {
+    const kind = kindOf(join(top, path));
+    files.push({ path, kind, class: 'material', via: null, flags: ['under_exclusion_file', ...(kind === 'file' ? [] : [kind])] });
+  }
   const count = (c) => files.filter(f => f.class === c).length;
   const counts = { planned: count('planned'), supporting: count('supporting'), material: count('material'), total: files.length };
   const record = { schema: SCHEMA, ticket, run_id: runId, base, merge_base: cand.merge_base, candidate_id: cand.candidate_id,

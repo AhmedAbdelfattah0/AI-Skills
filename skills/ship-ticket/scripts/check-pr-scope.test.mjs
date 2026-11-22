@@ -287,6 +287,9 @@ test('a DAG bound by exactly one DAG_BOUND of this run passes; an unlisted, unbo
 
 // ------------------------------------------------------------------ refusals (exit 2), never a record
 
+/** Codex counterexample: a four-backtick fence whose content holds a three-backtick line and an example table. */
+const CODEX_FENCE = ['````md', '```', TABLE_HEAD, row('`src/`', 'example'), '````', '', table('`src/checkout/page.tsx`')].join('\n');
+
 for (const [name, body, code] of [
   ['a placeholder cell', table('<real paths>'), 'plan_list_unparsable'],
   ['a backticked placeholder', table('`<real path>`'), 'plan_list_unparsable'],
@@ -301,6 +304,17 @@ for (const [name, body, code] of [
   ['a dot-dot envelope', `${table('`tests/`')}\n\nscope-envelope: tests/../src`, 'envelope_outside_contract'],
   ['a placeholder envelope', `${table('`tests/`')}\n\nscope-envelope: <dirs>`, 'envelope_outside_contract'],
   ['a second envelope line', `${table('`tests/`')}\n\nscope-envelope: tests/a/\nscope-envelope: tests/b/`, 'envelope_duplicate'],
+  // review repair: m4, Codex-2, M2 (fences and comments)
+  ['a mixed prose cell', table('`src/a.ts` plus the orders API'), 'plan_list_unparsable'],
+  ['adjacent backticks (one code span, two tokens)', table('`src/``other`'), 'plan_list_unparsable'],
+  ['two tokens with no separator', table('`src/a.ts``src/b.ts`'), 'plan_list_unparsable'],
+  ['an unmatched backtick', table('`src/a.ts` `src/b.ts'), 'plan_list_unparsable'],
+  ['a four-backtick fence holding a three-backtick line', CODEX_FENCE, 'plan_list_unparsable'],
+  ['the only Files touched table inside an HTML comment', `<!--\n${table('`src/`')}\n-->`, 'plan_list_unparsable'],
+  ['a commented Files touched table beside the real one', `<!-- ${TABLE_HEAD.split('\n')[0]} -->\n\n${table('`src/a.ts`')}`, 'plan_list_unparsable'],
+  ['an unterminated HTML comment', `${table('`src/a.ts`')}\n\n<!-- note`, 'plan_list_unparsable'],
+  ['an unterminated fence', `${table('`src/a.ts`')}\n\n\`\`\`\ncode`, 'plan_list_unparsable'],
+  ['an indented (code block) Files touched table', table('`src/`').split('\n').map((l) => `    ${l}`).join('\n'), 'plan_list_unparsable'],
 ]) {
   test(`refused, exit 2, no record: ${name}`, (t) => {
     const r = repo(t);
@@ -315,8 +329,12 @@ for (const [name, body, code] of [
 }
 
 test('a Files touched table inside a fenced block or the RUN-STATE block is not read', () => {
-  const fenced = '```markdown\n' + table('`src/x.ts`') + '\n```\n' + table('`src/a.ts`');
+  // a fenced or commented block without a Files touched header is invisible; one WITH a header fails closed (refusal list)
+  const fenced = '````markdown\n```\n| a | b |\n```\n````\n<!-- a comment\nspanning lines -->\n~~~\n| x |\n~~~~\n' + table('`src/a.ts`');
   assert.deepEqual(parseFilesTable(planText(fenced)), ['src/a.ts']);
+  assert.deepEqual(parseFilesTable(planText(table('`src/a.ts`,`src/b/`<br>`src/c.ts` `src/d.ts`'))), ['src/a.ts', 'src/b', 'src/c.ts', 'src/d.ts']);
+  // a shorter fence line inside a longer fence does not close it (only the same character, at least as long)
+  assert.deepEqual(parseEnvelope(planText('````md\n```\nscope-envelope: src/x/\n```\n````\n~~~~\n~~~\nscope-envelope: src/y/\n~~~\n~~~~')), []);
   assert.deepEqual(parseEnvelope(planText(`scope-envelope: src/\n\`\`\`\nscope-envelope: x/\n\`\`\``)), ['src']);
   assert.deepEqual(parseEnvelope(planText('no envelope here')), []);
 });
@@ -447,7 +465,13 @@ test('S6 and F11 wording pins', () => {
   assert.ok(plan.includes('When the change touches a shared contract (the Integration Contract is triggered, or the `shared-contract` risk label or test-trigger tag applies), section 3b has a row for old consumers, cached clients and deploy order, or lists it under `Not applicable:` with the reason.'));
   assert.ok(review.includes('run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]` on the candidate'));
   assert.ok(review.includes('Exit 1 (a material path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.'));
-  assert.ok(review.includes('Exit 2 or 3 means fix the input and rerun; never proceed.'));
+  assert.ok(review.includes('An engine run must pass `--dag`'));
+  assert.ok(review.includes('the remedy is re-approval through `ExitPlanMode`, since an edited plan changes the digest and gives `approval_mismatch`'));
+  assert.ok(ship.includes('Use the run\'s base as `--base` and, on an engine run, the bound DAG as `--dag`.'));
+  assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
+  assert.ok(plan.includes('| contract | orchestrator | Materialize the approved contract artifact | `<real path>` |'));
+  assert.ok(plan.includes('e.g. scope-envelope: tests/checkout/, docs/checkout/ (no backticks)'));
+  assert.ok(plan.includes('<Files touched cells: backticked repository paths only'));
   assert.ok(ship.includes('Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.'));
   assert.ok(ship.includes('`scope: {outcome, material[], record_sha}`'));
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
@@ -466,3 +490,55 @@ test('the record hash: stdout bytes equal the written record', (t) => {
   assert.equal(h(readFileSync(defaultOut(r))), h(out.stdout));
   unlinkSync(defaultOut(r));
 });
+
+// ------------------------------------------------------------------ review repair: dag_required (M1), under-exclusion paths (M3)
+
+test('a run bound to a DAG cannot be checked against the plan table alone: dag_required (exit 2)', (t) => {
+  const r = repo(t);
+  const raw = JSON.stringify(DAG([['src/a.ts']]));
+  const dagFile = join(r.dir, '.git', 'm1.dag.json');
+  writeFileSync(dagFile, raw);
+  writePlan(r, table('`src/`'), { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: sha(raw) }] });
+  r.write('src/a.ts');
+  r.write('src/b.ts');
+  const without = run(r);
+  assert.equal(without.status, 2, without.stdout + without.stderr);
+  assert.match(without.stderr, /dag_required/);
+  assert.equal(existsSync(defaultOut(r)), false);
+  const withDag = run(r, ['--dag', dagFile]);
+  assert.equal(withDag.status, 1, withDag.stderr);
+  assert.equal(byPath(withDag.json)['src/b.ts'].class, 'material');
+  // a DAG digest listed in the narrative also requires --dag
+  writePlan(r, `${table('`src/`')}\n\nDAG digest: ${sha(raw)}`);
+  assert.match(run(r).stderr, /dag_required/);
+  // so does an engine state file for the ticket
+  writePlan(r, table('`src/`'));
+  assert.equal(run(r).status, 0, 'manual flow: no DAG_BOUND, no listed DAG, no engine state');
+  mkdirSync(dirname(join(r.dir, '.git', 'ai-skills', 'ship-ticket', `${TICKET}.state.json`)), { recursive: true });
+  writeFileSync(join(r.dir, '.git', 'ai-skills', 'ship-ticket', `${TICKET}.state.json`), '{}\n');
+  assert.match(run(r).stderr, /dag_required/);
+});
+
+test('a path strictly under an exclusion FILE entry is material (under_exclusion_file), outside the candidate-id set', (t) => {
+  const r = repo(t);
+  const plan = join(r.dir, '.git', 'plan-elsewhere.md');
+  writeFileSync(plan, planText(table('`src/a.ts`')));
+  r.write('src/a.ts');
+  r.write('session-log.md/evil.mjs');
+  r.write(`${PLAN_REL}/x.mjs`);
+  const out = run(r, [], { plan });
+  assert.equal(out.status, 1, out.stdout + out.stderr);
+  const f = byPath(out.json);
+  assert.deepEqual(f['session-log.md/evil.mjs'], { path: 'session-log.md/evil.mjs', kind: 'file', class: 'material', via: null, flags: ['under_exclusion_file'] });
+  assert.equal(f[`${PLAN_REL}/x.mjs`].class, 'material');
+  assert.deepEqual(f[`${PLAN_REL}/x.mjs`].flags, ['under_exclusion_file']);
+  // committed on the branch too, not only untracked
+  r.git(['add', '-A']); r.git(['commit', '-q', '-m', 'hide']);
+  assert.equal(run(r, [], { plan }).status, 1);
+  // the exact exclusion files themselves stay excluded
+  const ok = repo(t);
+  writePlan(ok, table('`src/a.ts`'));
+  ok.write('src/a.ts'); ok.write('session-log.md');
+  assert.equal(run(ok).status, 0);
+});
+
