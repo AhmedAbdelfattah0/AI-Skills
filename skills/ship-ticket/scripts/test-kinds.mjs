@@ -167,18 +167,35 @@ const decodeEntities = (l) => l.replace(ENTITY, (all, d, h, n) => {
   return NAMED[n.toLowerCase()] ?? all;
 });
 const INLINE_TAG = /<\/?[a-z][a-z0-9]*\s*\/?>/gi;
-export const normaliseForDetection = (l) => decodeEntities(l).normalize('NFKC').replace(INVISIBLE, '').replace(INLINE_TAG, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
+// an emoji / pictograph that NFKC would fold into a letter (U+2139 `ℹ` becomes `i`, `Ⓜ` becomes `M`) is a symbol, not a word: keep it a
+// non-letter placeholder so a line led by it is still read as decorated (FR-1a)
+const PICTO = /\p{Extended_Pictographic}/gu;
+const foldPicto = (l) => l.replace(PICTO, (c) => (/\p{L}/u.test(c.normalize('NFKC')) ? '\uFFFC' : c));
+export const normaliseForDetection = (l) => foldPicto(decodeEntities(l)).normalize('NFKC').replace(INVISIBLE, '').replace(INLINE_TAG, '').replace(MD_ESCAPE, '').toLowerCase().replace(FOLD_DASH, '-');
 const JOIN = '\\s*-+\\s*';
 const EDGE = '(?<![a-z0-9])'; // a token starts a word
 const token = (...words) => new RegExp(EDGE + words.join(JOIN));
 // a plan key: its words joined by dashes, or by whitespace when a colon follows closely (0 such lines in 650 real plans).
-// FR-1a: it must LEAD its line. The lead is DECORATION only: any run of non-letters (spaces, `>`, `-`, `*`, backticks, `#`, `|`,
-// emoji, any digit in any script: `1.`, `1.2`, `1:`, `#1`, `| 3 |`), a task box `[x]` (`[ ]` is non-letters), or a letter list marker
-// of up to 4 letters then `.` or `)` and a space (`a.`, `iv)`). A letter anywhere else (`Note:`, `Step 1:`, a sentence) is prose, so a
-// mention ("No test-triggers line is needed") neither opts in nor refuses. Every alternative starts with a different character class
-// (non-letter / `[x]` is the one two-way start and dies at `x`), so the loop is linear: no catastrophic backtracking.
-const KEY_LEAD = '^(?:[^\\p{L}]|\\[x\\]|[a-z]{1,4}[.)](?=\\s))*';
-const keyToken = (a, b) => new RegExp(`${KEY_LEAD}(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`, 'u');
+// FR-1a: it must LEAD its line. The lead is DECORATION only, a loop over CLOSED, finite grammars (each alternative below):
+//   any non-letter except `<` (spaces, `>`, `-`, `*`, backticks, `#`, `|`, emoji, every digit in any script: `1.`, `1.2`, `1:`, `#1`, `| 3 |`);
+//   a markup tag with any attributes (`<b class="key">`, `<span style="x">`, nested, self-closing), or an UNCLOSED `<` run that ends at the key;
+//   a task box `[x]` (`[ ]` is non-letters); a roman numeral list marker of 5 to 8 letters in strict roman grammar (`xviii.`); a list marker of
+//   up to 4 letters (`a.`, `iv)`, `iiii.`), each followed by `.` or `)` and a space.
+// A letter anywhere else (`Note:`, `Step 1:`, a sentence) is prose, so a mention ("No test-triggers line is needed") neither opts in nor refuses.
+// Linear: the alternatives start with disjoint characters (`<` has two, split by a lookahead; `[x]` dies at `x`; the two list markers differ in
+// length), and the unclosed-tag run is lazy and stops at the key, so no input backtracks catastrophically.
+const KEY_LEAD = (body) => `^(?:${[
+  '[^\\p{L}<]', // non-letters
+  '<[^<>\\n]*>', // a closed markup tag, any attributes
+  `<(?![^<>\\n]*>)[^<>\\n]*?(?=${body})`, // an unclosed `<` run up to the key
+  '\\[x\\]', // a checked task box
+  '(?=[mdclxvi]{5,8}[.)])m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})[.)](?=\\s)', // a long roman numeral marker
+  '[a-z]{1,4}[.)](?=\\s)', // a short letter marker
+].join('|')})*`;
+const keyToken = (a, b) => {
+  const body = `(?:${a}${JOIN}${b}|${a}\\s+${b}[^a-z0-9]{0,8}:)`;
+  return new RegExp(`${KEY_LEAD(body)}${body}`, 'u');
+};
 const KEY_LINE = (key) => new RegExp(`^\\s*${key}:(?!:)(.*)$`); // the strict plan-key line (a doubled colon is a near miss)
 const keyLine = (key) => (l) => KEY_LINE(key).test(l);
 const floorLine = (l) => /^(?:risk_floor:[ \t]*)?risk-floor:/.test(l.trimStart()); // parseRecordedLine's own filter; it validates the rest

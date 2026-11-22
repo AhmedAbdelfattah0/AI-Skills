@@ -62,11 +62,13 @@ HTML character references such as `&#45;` decoded; inline HTML tags removed; Mar
 case; unicode dashes and `_` folded to `-`). A token starts a word (`latest waiver:` carries none). Its words are joined
 by dashes (or, for the three plan keys, by whitespace followed within 8 non-alphanumeric characters by a colon:
 `Test triggers:`, `**Test triggers**:`). The three plan keys (`test-triggers`, `lifecycle-item`, `test-waiver`) must also
-lead their line. What may precede the key is decoration only: any run of non-letters (spaces, `>`, `-`, `*`, `+`, `#`, `|`, backticks, emoji,
-digits in any script, so `1.`, `1.2`, `1:`, `#1`, `1000.`, `| 3 |`, `## 2.1`, `- [ ]`), a checked task box (`[x]`, `[X]`), or a short letter
-list marker followed by a space (`a.`, `B)`, `iv.`). Every one of those still opts in and is refused unless it is the strict line. A letter
-anywhere else is prose, so the key then reads as absent and a sentence like "No test-triggers line is needed here." neither opts in nor
-refuses. Put the key first on its line. Prose ("this test triggers a reload") and camelCase identifiers carry no
+lead their line. What may precede the key is decoration only, from a closed set of grammars: any run of non-letters except `<` (spaces, `>`, `-`, `*`, `+`, `#`,
+`|`, backticks, emoji, digits in any script, so `1.`, `1.2`, `1:`, `#1`, `1000.`, `| 3 |`, `## 2.1`, `- [ ]`); a markup tag with any attributes
+(`<b class="key">`, `<span style="x">`, nested or self-closing), or an unclosed `<` run that ends at the key; a checked task box (`[x]`, `[X]`); a roman
+numeral marker of 5 to 8 letters in strict roman grammar (`xviii.`, `XXXIX)`); and a list marker of up to 4 letters (`a.`, `B)`, `iv.`, `iiii.`), each marker
+followed by a space. An emoji or pictograph that NFKC would fold into a letter (`ℹ`, `Ⓜ`) counts as a symbol. Every one of those still opts in and is
+refused unless it is the strict line. A letter anywhere else is prose, so the key then reads as absent and a sentence like "No test-triggers line is needed here."
+neither opts in nor refuses. Put the key first on its line. Prose ("this test triggers a reload") and camelCase identifiers carry no
 token, while snake_case ones (`test_triggers`) do. The first five tokens are the bare words; the block, pairs and RUN-STATE tokens are the words
 in their marker syntax (`<!-- security-plan`, `security-plan:`, a `"selection_digest":` key, `security-pairs sha256`,
 `RUN-STATE:BEGIN`/`END`), because real plans use those words in prose. A line that carries a token must parse strictly
@@ -85,8 +87,9 @@ check.
 Not caught (read as absent): homoglyphs, combining marks, misspellings, words joined by nothing, space-joined words
 whose colon is not near them (`Test triggers (tags):`), and a plan key that does not lead its line: prose (`Note: test-triggers: none`,
 ``There is no `test-triggers:` line.``) and label forms (`Declaration: test-triggers: x`, `**Declared:** test-triggers: x`, `Step 1: test-triggers: x`,
-`Plan key -> test-triggers: x`, `- key: test-triggers: x`, `Waiver: test-waiver: x`), and a symbol that NFKC folds to a letter (`ℹ` reads as `i`). Residual: a prose line that
-BEGINS with a backticked key (`` `test-triggers` is not used here ``) still opts in and is refused. One well-formed RUN-STATE pair wrapped around narrative still
+`Plan key -> test-triggers: x`, `- key: test-triggers: x`, `Waiver: test-waiver: x`). Residuals: a list marker of more than 4 letters that is not a
+valid roman numeral (`abcde.`, `xviiii.`) reads as a word; a roman numeral of more than 8 letters likewise; a prose line that BEGINS with a backticked key
+(`` `test-triggers` is not used here ``) still opts in and is refused. One well-formed RUN-STATE pair wrapped around narrative still
 hides it (plan trust, S-01b2). The prose scan behind the syntax tokens covered 650 real plans, none opted in: it shows
 the unopted path is stable, not that opted-in plans never refuse prose (the opted-in path is pinned by the tests).
 
