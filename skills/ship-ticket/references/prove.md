@@ -217,7 +217,7 @@ separate slices (S-01b2, S-01c); the risk-triggered test kinds are below.
 ## Risk-triggered test kinds (T1-S)
 
 Opt-in per plan or per repository. When the plan opts in (a `test-triggers:` line, or a repository
-`.ship-ticket/test-triggers.json`), load [test-kinds.md](test-kinds.md); otherwise nothing changes.
+`.ship-ticket/test-triggers.json`), load [test-kinds.md](test-kinds.md); otherwise nothing changes. The engine-enforced evidence option and its limits are in the same file.
 
 ## The static proof
 

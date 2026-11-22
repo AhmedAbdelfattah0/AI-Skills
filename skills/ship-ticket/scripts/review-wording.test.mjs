@@ -214,3 +214,16 @@ test('S3c: manual-flow fallback stops at fallback time on ELEVATED runs, and an 
   assert.ok(resume.includes('Renewed approval of the substance is needed only if the pairs, DAG, surfaces or review profile change; even a deterministic completion goes through `ExitPlanMode`, and derived sections are never auto-approved.'));
   assert.ok(resume.includes('After `init`, any narrative change needs a new approved START/run'));
 });
+
+test('P7m: test-kinds.md carries the verbatim L-ran claim, the declaration how-to and the limits, and no stale freeze-check claim', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const tk = flat(ref('test-kinds.md'));
+  assert.ok(tk.includes('Test-kind evidence is **L-ran**: the engine itself ran the declared test command on the exact candidate and received, through a channel no test file can write after the run, the runner\'s report that a test carrying the marker in its own title executed and passed. It does not show the test would fail if the behaviour broke (mutation testing and independent review cover that). It does not yet cover Angular/nx tests, tests run in a `threads` pool, or tampering with installed dependencies.'));
+  assert.ok(tk.includes('`config.testKinds: { "policy": 1 }`'));
+  assert.ok(tk.includes('`config.securityPolicy: 2`'));
+  for (const code of ['test_kinds_policy_required', 'plan_tags_missing', 'test_kinds_runner_missing', 'multi_entry_unsupported_v0', 'evidence_refreshed', 'evidence_unquiet', 'channel_unsupported']) assert.ok(tk.includes('`' + code + '`'), code);
+  for (const limit of ['**R-L2:**', '**R-T2:**', '**R-TC:**', '**R-cov:**']) assert.ok(tk.includes(limit), limit);
+  assert.ok(tk.includes('**T0 (`fast-checks.mjs`) is not engine-enforced yet**'));
+  assert.ok(!tk.includes('No engine step runs `check` at freeze yet'), 'the stale claim is gone');
+  assert.ok(flat(ref('prove.md')).includes('The engine-enforced evidence option and its limits are in the same file.'));
+});
