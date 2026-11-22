@@ -289,7 +289,8 @@ mutates nothing.
 
 **Policy version (S-27 minimum).** `init` records two more state fields. `policy_version` is
 the run's semantics version: `1` for the engine as it was before the field existed, `2` with
-test kinds, `3` with a format-3 security block (security obligations), `4` with both. `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
+test kinds, `3` with a format-3 security block (security obligations), `4` with both, and `5` to `8`
+for `1` to `4` with a pinned remote base (below). `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
 is the literal `unknown` for a copy install, for a copy nested untracked in another repository, and
 when git fails. It names HEAD only, not uncommitted edits to the installed scripts. The repository
 is found from the script's own directory: inherited `GIT_*` variables such as `GIT_DIR` are not
@@ -336,6 +337,67 @@ Limits:
 - The R0-S candidate (`ais-p0` `a890b0d`) will conflict with this change mechanically: three hunks
   in `run-engine.mjs` and one in `run-engine-record.test.mjs`. Resolve each by keeping both sides.
   The candidate's `skill_revision`, recorded at enrollment, duplicates `skill_commit`.
+
+**Pinned base (S-12, opt-in).** A DAG with `config.pinnedBase: { remote: "<name>" }` (exactly that
+shape, never defaulted, bound by the DAG digest) pins the run's base at `init`. The base branch is
+`config.base` when it names a branch, else the default branch the remote names
+(`git ls-remote --symref <remote> HEAD`). Its commit is the one the remote names now
+(`git ls-remote`), never a local ref. The state records
+`base: { remote, identity, ref, sha, merge_base, pinned_at_seq }` and a `BASE_PINNED` event, and the run
+records policy version 5 to 8. From then on every base read of the engine (the candidate id, RED and
+unit evidence bindings, the test-kind declaration, the reassess diff) uses `base.merge_base` through
+one accessor (`baseRef` in `engine-dag.mjs`), so a stale or moved local `main` never changes what the
+run measures. That is the SCRUM-202 latch: a local `main` 26 commits behind origin put the upstream
+files into the candidate, and the first `gate reassess` recorded a permanent REAPPROVAL.
+
+`init` refuses, writing nothing:
+- `remote_ambiguous`: several `remote.<name>.url` values, several push URLs, or a push URL that is
+  neither the fetch URL nor the same repository (checked whatever host the fetch URL names).
+- `base_unverified`: no configured URL for the remote (git would read the bare name as a local path,
+  such as an in-tree `origin` directory), a detached HEAD, a ticket branch with no upstream, or no
+  history shared with the remote base.
+- `base_remote_unavailable`: offline, no such remote or branch, no default branch, or the remote
+  commit not fetched yet.
+
+A local `config.base` branch whose merge base with HEAD differs from the pinned one is reported as an
+advisory `BASE_LOCAL_DIVERGED` event, and the run proceeds.
+
+`gate reassess` re-reads the remote first. None of its refusals latches (`S.security` is not
+written), and each is a judgment point:
+- `base_remote_unavailable`: fetch and retry.
+- `base_moved_remote`: the remote base no longer descends from the pinned commit (a force-push).
+- `base_moved_local` with `expected` (the pinned merge base) and `observed`: either the local base
+  branch disagrees (reset it, or the owner decides, then retry), or the branch merged or rebased
+  onto another base mid-run. In that case, archive the run and start a new one, which pins again.
+  The pin is never moved silently.
+
+A remote that advanced with commits the branch lacks has no effect. `status` shows `base_advanced`
+in its advisory `base` block, which is never a judgment. A real unapproved delta measured from the
+pinned merge base still gives REAPPROVAL.
+
+Every git read derived from a pinned base runs hardened (`engine-base-read.mjs`): no inherited
+`GIT_*` variable (so `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG*` and the like never redirect it), replace
+refs off and grafts off. The remote is always given by its one configured URL, never by its name.
+`engine-base.mjs` keeps its ported `authGit`; the environment it runs under is supplied by the caller.
+
+A partial pin is never resumed (`base_state_missing`): the policy flag, the `base` key and
+`config.pinnedBase` must come together, and `S.base` must be exactly
+`{ remote, identity, ref, sha, merge_base, pinned_at_seq }` with full SHAs. A pinned run never falls
+back to a local ref. An engine without S-12 refuses a pinned run with
+`policy_version_unsupported`. Rollback is the flag: archive the run and start a new one without
+`config.pinnedBase`.
+
+Limits:
+- The remote is reached through the repository's git config, so a same-user `insteadOf` or
+  `remote set-url` can redirect it.
+- `ls-remote` uses the user's git config and credential helpers. Inherited `GIT_SSH_COMMAND` and
+  `GIT_ASKPASS` are not honored for these reads. The hermetic git runner (S-02a0c) is not used yet.
+- The base is checked at `gate reassess` only (and reported by `status`). A pinned run without
+  `config.securityPolicy 2` gets the accessor but no base check.
+- A remote URL re-pointed at another repository mid-run is not detected (`identity_changed` is
+  S-28a). A second URL added mid-run is refused at the next reassess.
+- `state.json` is same-user writable: a tampered but well-formed `S.base` is trusted.
+- `base-drift.mjs` is unchanged. It is the standalone, advisory local-ref check that the briefs use.
 
 **Lock and persistence.** Every mutating command takes one lock file created
 with `O_EXCL` holding `{pid, process_start_time, host, run_id, nonce}`, and

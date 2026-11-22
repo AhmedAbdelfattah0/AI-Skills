@@ -14,7 +14,8 @@ import { gateRed, gateReview, gateShipReady, specResults } from './gate.mjs';
 import * as io from './engine-io.mjs';
 import { retire, leaderStart, LIVE } from './engine-quiesce.mjs';
 import { retryEvent, securityEvents, waiverState } from './engine-authority.mjs';
-import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry } from './engine-dag.mjs';
+import { note, judgment, pinnedSpecs, redRunner, boundRiskEvidence, clampTimeout, overlap, securityOn, pairKey, auditOn, flatEntry, baseRef } from './engine-dag.mjs';
+import { pinnedBaseRefusal, baseCandidate, baseCommit as baseCommit_, onBase } from './engine-base-read.mjs';
 import { redChanges, invalidateRed, invalidCause } from './engine-attempts.mjs';
 import { runnerDeps, unverified, truncation } from './engine-units.mjs';
 import { unitReviewGate, reviewsMissing, unitExecution, unitReviewOn } from './engine-unit-review.mjs';
@@ -89,7 +90,7 @@ async function redGate(E, input, candidate) {
   }
   const pin = pinnedSpecs(node, input.specs, addendumSpecs);
   if (pin.code) return gateNo(pin.code, [pin.reason]);
-  const baseCommit = io.resolveCommit(E.ctx.repoRoot, E.S.config.base ?? 'HEAD');
+  const baseCommit = baseCommit_(E.ctx.repoRoot, E.S);
   const v = await gateRed({ state: E.S, node: node.id, command: { cmd: runner.cmd, args: runner.args ?? [] }, format: runner.format,
     specs: pin.specs, baselineCandidate: candidate, timeoutMs: clampTimeout(E.S.config.timeoutMs), resources: [...node.resources], ...(slot ? { slot } : {}) }, runnerDeps(E));
   E.S = v.state; // gateRed re-verified the binding (deps.verifyBinding) before committing any evidence
@@ -129,7 +130,7 @@ export async function refreshRed(E, transient) {
       continue;
     }
     const before = E.S.attempts.length;
-    const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+    const c = baseCandidate(E.ctx.repoRoot, E.S, E.S.pinned_exclusions);
     const v = c.candidate_id ? await redGate(E, { node: d, command: inv.command, specs: inv.evidence.specs }, c.candidate_id)
       : gateNo('candidate_unavailable', [c.reason]);
     const attempt_id = E.S.attempts.slice(before).find(a => a.kind === 'gate-red')?.attempt_id ?? null;
@@ -363,7 +364,7 @@ async function shipReadyGate(E, input, candidate) {
     }
     // ...and the tree must be the one the commands ran on: a proof that changed it (codegen, --fix)
     // tested neither tree, so it is bound to none (a RETRY review of the new tree needs a new proof).
-    const after = io.candidateId(E.ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+    const after = baseCandidate(E.ctx.repoRoot, S, S.pinned_exclusions);
     if (after.candidate_id !== candidate) {
       S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: ['candidate_mismatch'] };
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
@@ -742,11 +743,15 @@ export function addedLinesByFile(text) {
 }
 
 const MAX_ADDED_BYTES = 1024 * 1024;
-/** The candidate's changed paths with their added lines (git diff from config.base; a path not in the diff is read whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only). */
+/**
+ * The candidate's changed paths with their added lines (git diff from baseRef: config.base, or a pinned run's merge base, so a
+ * branch made from an older local base never shows the upstream commits reversed as added lines; a path not in the diff is read
+ * whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only).
+ */
 function changedFiles(E, paths) {
   const root = E.ctx.repoRoot, added = new Map();
-  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],
-    { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 });
+  const r = onBase(E.S, () => spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', baseRef(E.S), '--'],
+    { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 60000 }));
   if (r.status === 0) for (const [p, lines] of addedLinesByFile(r.stdout)) added.set(p, lines);
   return paths.map(p => {
     if (added.has(p)) return { path: p, added: added.get(p) };
@@ -776,6 +781,8 @@ export function designContract(nodes) {
  */
 async function reassessGate(E, input, candidate) {
   const S = E.S;
+  const baseNo = pinnedBaseRefusal(E); // S-12: a pinned base is verified first; its refusals never latch
+  if (baseNo) return baseNo;
   const sec = await securityContext(E, candidate);
   const refusal = securityRefusal(sec);
   if (refusal) return refusal;

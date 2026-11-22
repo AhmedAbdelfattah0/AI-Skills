@@ -17,6 +17,7 @@ import { retire, LIVE, leaderStart } from './engine-quiesce.mjs';
 import { judgment, note, closure, scope, under, overlap, providerOk, clampTimeout } from './engine-dag.mjs';
 import { depDone, stateMemo } from './engine-units.mjs';
 import { unitChain, unitRepairCurrent, recordUnitRepair } from './engine-unit-review.mjs';
+import { baseCandidate, baseCommit } from './engine-base-read.mjs';
 
 const MAX_PROVE_BATCHES = 2, MAX_REVIEW_REPAIRS = 1, MAX_RETRIES = 1;
 const UNSETTLED = ['intent', 'launched'];
@@ -72,7 +73,7 @@ function budgetOk(E, transient, phase) {
 /** What changed since RED evidence `ev` was accepted ({ changed, moved }), or null when it still binds. */
 export function redChanges(E, ev) {
   const { S, ctx } = E;
-  E.baseCommit ??= io.resolveCommit(ctx.repoRoot, S.config.base ?? 'HEAD');
+  E.baseCommit ??= baseCommit(ctx.repoRoot, S);
   const changed = Object.entries(ev.spec_digests ?? {}).filter(([f, digest]) => io.repoFileDigest(ctx.repoRoot, f) !== digest).map(([f]) => f);
   const moved = ev.base_commit !== undefined && ev.base_commit !== E.baseCommit;
   return changed.length || moved ? { changed, moved } : null;
@@ -187,7 +188,7 @@ function completeRepair(E, repair, a, paths) {
   if (repair.kind === 'unit-review') return recordUnitRepair(E, repair, a); // pre-freeze: no freeze, no final confirmation
   if (repair.kind !== 'review') return;
   S.confirmation = { review_execution: repair.review_execution, closure: ids };
-  const c = io.candidateId(ctx.repoRoot, S.config.base ?? 'HEAD', S.pinned_exclusions);
+  const c = baseCandidate(ctx.repoRoot, S, S.pinned_exclusions);
   if (!c.candidate_id) { pushJudgment(S, 'candidate_unavailable', repair.id, `repaired candidate not computable: ${c.reason}`); return; }
   S.review_chain.push({ review_execution: repair.review_execution, kind: 'repair', old_candidate: repair.old_candidate ?? null,
     new_candidate: c.candidate_id, write_set: [...repair.writes], attempt_id: a.attempt_id });
@@ -442,7 +443,7 @@ function authorize(S, r, batchOpen) {
  * the repaired candidate the confirmation reviews.
  */
 function startsFromFreeze(E, r, transient) {
-  const c = io.candidateId(E.ctx.repoRoot, E.S.config.base ?? 'HEAD', E.S.pinned_exclusions);
+  const c = baseCandidate(E.ctx.repoRoot, E.S, E.S.pinned_exclusions);
   const frozen = E.S.freeze?.candidate;
   if (c.candidate_id && c.candidate_id === frozen && (r.old_candidate ?? frozen) === frozen) return true;
   transientOnce(transient, 'post_freeze_drift', r.id, `work tree is ${c.candidate_id ?? c.reason}, frozen is ${frozen ?? '(none)'}: `
