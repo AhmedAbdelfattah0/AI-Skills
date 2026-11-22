@@ -226,6 +226,7 @@ test('cutover: run-log.mjs legacy prints the archive of the named worktree read-
   assert.deepEqual(summary(fx, fx.wt2).runs, [], 'never merged');
 });
 
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 // fs spy: a preloaded module records every path a child process touches through node:fs.
 const SPY = `data:text/javascript,${encodeURIComponent(`import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
 const out = process.env.FS_SPY; const write = fs.appendFileSync.bind(fs); const seen = [];
@@ -249,8 +250,9 @@ test('cutover AC9-C (fs spy): no normal command opens a sibling legacy path; the
     assert.equal(ev.status, 0, ev.stderr);
     const trace = readFileSync(spy, 'utf8');
     assert.ok(trace.split('\n').filter(Boolean).length > 20, `${name}: the spy recorded the commands' fs calls`);
-    assert.match(trace, new RegExp(`(openSync|readFileSync) .*${join('ai-skills', 'ship-ticket', 'T1.jsonl').replaceAll('/', '\\/')}`), `${name}: the shared log was read`);
-    if (name !== 'main') assert.match(trace, new RegExp(`lstatSync .*${join('.git', 'worktrees', name, 'ai-skills', 'ship-ticket', 'T1.jsonl').replaceAll('/', '\\/')}`), `${name}: legacy_present lstat seen`);
+    // Paths are escaped as regex literals: on win32 `join` yields backslashes (`\s`, `\T` would be regex escapes).
+    assert.match(trace, new RegExp(`(openSync|readFileSync) .*${escapeRe(join('ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: the shared log was read`);
+    if (name !== 'main') assert.match(trace, new RegExp(`lstatSync .*${escapeRe(join('.git', 'worktrees', name, 'ai-skills', 'ship-ticket', 'T1.jsonl'))}`), `${name}: legacy_present lstat seen`);
     const touched = trace.split('\n').filter((l) => l.includes(`${join('.git', 'worktrees')}`));
     for (const line of touched) {
       const [op, path] = [line.slice(0, line.indexOf(' ')), line.slice(line.indexOf(' ') + 1)];
