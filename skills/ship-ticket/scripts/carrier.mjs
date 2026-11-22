@@ -35,6 +35,7 @@ import { parseRunState, malformedReason, workerRunStateAppend } from './run-stat
 import { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec } from './provider-env.mjs';
 import { finalMessage, parseWorkerReport } from './worker-report.mjs';
 import { runPolicy } from './engine-policy.mjs';
+import { readLogRows, writerLogDirs } from './lib/run-log-paths.mjs';
 
 export { BILLING_ENV, childEnv, verifySubscription, resolveWindowsCommand, spawnSpec, parseWorkerReport };
 
@@ -161,9 +162,12 @@ export function verifyReviewExecution(repoRoot, approval, reviewExecution, write
     if (outside.length) fail('REPAIR ownership.writes ' + outside.join(', ') + ' exceed the write set of FAIL review ' + reviewExecution);
     return 'engine';
   }
-  const logFile = join(dir, approval.ticket + '.jsonl');
+  // S5 (F05): the run log lives in <git-common-dir>/ai-skills/ship-ticket; a pre-S5 log of THIS worktree (the --git-path
+  // dir above) is still read. A sibling worktree's log is never read here: it must not authorise this worktree's REPAIR.
   let text = '';
-  try { text = readFileSync(logFile, 'utf8'); } catch { /* absent log: rejected below */ }
+  let logDirs = [dir];
+  try { logDirs = writerLogDirs(repoRoot); } catch { /* no common dir: the own dir only */ }
+  for (const { bytes } of readLogRows(logDirs, approval.ticket)) text += bytes.toString('utf8') + '\n';
   const found = text.split(/\r?\n/).some(line => {
     if (!line.trim()) return false;
     try {

@@ -8,7 +8,11 @@ import { spawnSync } from 'node:child_process';
 import { buildRun } from './run-summary.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { REVIEW_ROLE_OF, IDENTITY_ACTIVITIES, GAP_REASONS, CEILING_METRICS, STRING_METRICS } from './review-intervals.mjs';
-import { readFileSync as readText } from 'node:fs';
+import { readFileSync as readText, readdirSync, realpathSync, existsSync, chmodSync } from 'node:fs';
+const readdirSyncSafe = (d) => { try { return readdirSync(d).sort(); } catch { return []; } };
+const realpathSyncSafe = (p) => realpathSync.native(p);
+const existsSyncSafe = existsSync;
+const chmodSyncSafe = (p, m) => { try { chmodSync(p, m); } catch { /* gone */ } };
 
 const script = fileURLToPath(new URL('./run-log.mjs', import.meta.url));
 const schema = 'ship-ticket-run-log-v1';
@@ -562,4 +566,195 @@ test('S-04a1 summary: an unfinished repair under a declared 0 (or no declaration
     assert.ok(s.runs[0].missing_review_intervals.items.some((i) => i.role === 'repair' && i.reason === 'open_without_end'));
     assert.notEqual(s.aggregate.missing_review_intervals, 0);
   }
+});
+
+// ------------------------------------------------------------------ S5 (F05): batch, check, supplied timestamps
+
+const rowsOf = (f) => { try { return readText(f.path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const bytesOf = (f) => { try { return readText(f.path, 'latin1'); } catch { return null; } };
+const phaseArgs = (cmd, id) => [cmd, '--run-id', 'run-1', '--kind', 'phase', '--name', `P${id}`, '--event-id', id];
+const zsh = spawnSync('zsh', ['-f', '-c', 'exit 0']).status === 0;
+
+test('AC3 batch: metric values with -- and spaces survive verbatim under zsh (no word-splitting), from a file and from stdin', { skip: !zsh && 'zsh not installed' }, (t) => {
+  const f = fixture(t);
+  const opsFile = join(f.repo, 'ops file.json');
+  writeFileSync(opsFile, JSON.stringify([
+    { op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1', metrics: { note: '--metric x=1  two  spaces', n: 3 } },
+    { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'b1', outcome: 'pass', metrics: { tail: 'a -- b' } },
+  ]));
+  // The unquoted variable is the F05 failure: zsh passes "$OPS" as ONE word whatever it contains.
+  const zshScript = 'OPS=$1; R=$2; "$3" "$4" batch --repo $R --ticket T1 --run-id run-1 --ops-file $OPS';
+  const r = spawnSync('zsh', ['-f', '-c', zshScript, 'zsh', opsFile, f.repo, process.execPath, script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)), { applied: 2 });
+  const rows = rowsOf(f);
+  assert.equal(rows[0].metrics.note, '--metric x=1  two  spaces');
+  assert.equal(rows[0].metrics.n, 3);
+  assert.equal(rows[1].metrics.tail, 'a -- b');
+  const viaStdin = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name: 'contract_review', event_id: 'c1', metrics: { candidate_id: 'sha-1', review_execution: 'review-1', x: '-- y' } }]) });
+  assert.equal(viaStdin.status, 0, viaStdin.stderr);
+  assert.equal(rowsOf(f)[2].metrics.x, '-- y');
+  // The failure batch replaces: an unquoted multi-flag variable is ONE word in zsh, so the flags never reach the parser.
+  const split = spawnSync('zsh', ['-f', '-c', 'M="--metric a=1 --metric b=2"; "$1" "$2" start --repo "$3" --ticket T1 --run-id run-1 --kind phase --name Q --event-id q $M',
+    'zsh', process.execPath, script, f.repo], { encoding: 'utf8' });
+  assert.equal(split.status, 1, 'the documented zsh failure mode');
+  assert.equal(rowsOf(f).length, 3);
+});
+
+test('batch: every op is validated before the first write; a later runtime failure stops with {applied, failed:{index, reason}}', (t) => {
+  const f = fixture(t);
+  const batch = (ops) => spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'], { encoding: 'utf8', input: JSON.stringify(ops) });
+  const ok = { op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1' };
+  for (const bad of [[ok, { op: 'start', kind: 'nope', name: 'X', event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'X', event_id: 'bad id' }],
+    [ok, { op: 'drop', kind: 'phase', name: 'X', event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'X', event_id: 'x', metrics: { 'bad key': 1 } }],
+    [ok, { op: 'start', kind: 'activity', name: IDENTITY_ACTIVITIES[0], event_id: 'x' }], [ok, { op: 'start', kind: 'phase', name: 'host_sleep', event_id: 'x' }], 'not-an-array']) {
+    const r = batch(bad);
+    assert.equal(r.status, 1, JSON.stringify(bad));
+    const out = JSON.parse(r.stdout.trim());
+    assert.equal(out.applied, 0);
+    assert.equal(typeof out.failed.reason, 'string');
+    assert.equal(bytesOf(f), '', `nothing written: ${JSON.stringify(bad)}`);
+  }
+  const r = batch([ok, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'b1' }, { op: 'end', kind: 'phase', name: 'BUILD', event_id: 'zz' }, { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
+  assert.equal(r.status, 1);
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { applied: 2, failed: { index: 2, reason: 'event zz has no start in run run-1' } });
+  assert.deepEqual(rowsOf(f).map((x) => `${x.event}:${x.event_id}`), ['start:b1', 'end:b1'], 'not atomic: applied ops stay, later ops never run');
+});
+
+test('AC5/AC6 supplied timestamps: bounded, labelled estimated, duration from the supplied pair; every refusal appends zero rows', (t) => {
+  const f = fixture(t);
+  const base = Date.now();
+  const ago = (ms) => new Date(base - ms).toISOString();
+  const H = 3600000;
+  const s = f.cli(...phaseArgs('start', 'a'), '--started-at', ago(H));
+  assert.equal(s.status, 0, s.stderr);
+  const started = JSON.parse(s.stdout);
+  assert.deepEqual([started.timestamp_source, started.label], ['supplied', 'estimated']);
+  const before = bytesOf(f);
+  for (const [why, args] of [['future', ['--started-at', new Date(Date.now() + H).toISOString()]], ['beyond 24 h', ['--started-at', ago(25 * H)]],
+    ['earlier than a row of the run', ['--started-at', ago(2 * H)]], ['non-ISO', ['--started-at', 'yesterday']], ['offset form', ['--started-at', '2026-01-01T00:00:00+02:00']]]) {
+    const r = f.cli(...phaseArgs('start', 'b'), ...args);
+    assert.equal(r.status, 1, why);
+    assert.equal(bytesOf(f), before, `zero rows appended: ${why}`);
+  }
+  const endEarly = f.cli(...phaseArgs('end', 'a'), '--ended-at', ago(H + 1000));
+  assert.equal(endEarly.status, 1, 'end before its start');
+  assert.match(endEarly.stderr, /ended-at/);
+  assert.equal(bytesOf(f), before);
+  const endAt = ago(H / 2);
+  const e = f.cli(...phaseArgs('end', 'a'), '--ended-at', endAt);
+  assert.equal(e.status, 0, e.stderr);
+  const ended = JSON.parse(e.stdout);
+  assert.deepEqual([ended.timestamp, ended.duration_ms, ended.timestamp_source, ended.label], [endAt, H / 2, 'supplied', 'estimated']);
+  const d = f.cli(...phaseArgs('start', 'c'));
+  assert.equal(d.status, 0, d.stderr);
+  const plain = JSON.parse(d.stdout);
+  assert.equal(Object.hasOwn(plain, 'timestamp_source') || Object.hasOwn(plain, 'label'), false, 'a default row is unchanged: no new key');
+  assert.equal(f.summary().integrity_warnings.length, 0);
+  assert.equal(f.cli(...phaseArgs('start', 'x'), '--ended-at', ago(1)).status, 1, '--ended-at is an end option');
+  assert.equal(f.cli(...phaseArgs('end', 'c'), '--started-at', ago(1)).status, 1, '--started-at is a start option');
+});
+
+test('D2 event --started-at/--ended-at: the same now-window bounds; zero rows appended on refusal', (t) => {
+  const f = fixture(t);
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  let n = 0;
+  const ev = (a, b) => f.cli('event', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', `s-${n += 1}`, '--metric', 'label=estimated', '--started-at', a, '--ended-at', b);
+  assert.equal(ev(ago(3600000), ago(1800000)).status, 0);
+  const before = bytesOf(f);
+  for (const [a, b] of [[ago(25 * 3600000), ago(1000)], [ago(1000), new Date(Date.now() + 3600000).toISOString()]]) {
+    const r = ev(a, b);
+    assert.equal(r.status, 1, `${a}..${b}`);
+    assert.match(r.stderr, /within/);
+    assert.equal(bytesOf(f), before);
+  }
+});
+
+test('AC6 property (seeded): no start/end row is ever earlier than an earlier row of its run, whatever is supplied', (t) => {
+  const f = fixture(t);
+  let seed = 0x5eed5;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const open = [];
+  let n = 0;
+  for (let i = 0; i < 24; i += 1) {
+    const offset = Math.round((rand() - 0.9) * 2 * 3600000); // mostly the past, sometimes a few seconds ahead
+    const stamp = new Date(Date.now() + Math.min(offset, 4000)).toISOString();
+    const supply = rand() < 0.6;
+    const before = bytesOf(f);
+    let r;
+    if (open.length && rand() < 0.5) {
+      const id = open[Math.floor(rand() * open.length)];
+      r = f.cli(...phaseArgs('end', id), ...(supply ? ['--ended-at', stamp] : []));
+      if (r.status === 0) open.splice(open.indexOf(id), 1);
+    } else {
+      const id = `e${n += 1}`;
+      r = f.cli(...phaseArgs('start', id), ...(supply ? ['--started-at', stamp] : []));
+      if (r.status === 0) open.push(id);
+    }
+    if (r.status !== 0) assert.equal(bytesOf(f), before, `refused op ${i} appended nothing: ${r.stderr}`);
+  }
+  const rows = rowsOf(f);
+  assert.ok(rows.length >= 8, `the property saw writes (${rows.length})`);
+  for (let k = 1; k < rows.length; k += 1) assert.ok(Date.parse(rows[k].timestamp) >= Date.parse(rows[k - 1].timestamp), `row ${k} ${rows[k].timestamp} < ${rows[k - 1].timestamp}`);
+  for (const row of rows) if (!row.timestamp_source) assert.equal(Object.hasOwn(row, 'label'), false);
+});
+
+test('AC4 check: one JSON line, exit 0 healthy and 1 with a reason (non-repo, unwritable, torn tail); it writes nothing', (t) => {
+  const f = fixture(t);
+  const check = (repo, ...extra) => spawnSync(process.execPath, [script, 'check', '--repo', repo, ...extra], { encoding: 'utf8' });
+  const listing = () => spawnSync('git', ['-C', f.repo, 'status', '--porcelain', '--ignored'], { encoding: 'utf8' }).stdout + readdirSyncSafe(dirname(f.path)).join(',');
+  const before = listing();
+  const ok = check(f.repo, '--ticket', 'T1');
+  assert.equal(ok.status, 0, ok.stderr);
+  const out = JSON.parse(ok.stdout.trim());
+  assert.equal(out.ok, true);
+  assert.equal(realpathSyncSafe(out.resolved_dir), realpathSyncSafe(dirname(f.path)));
+  assert.equal(listing(), before, 'check created nothing (no probe file, no lock)');
+  const fresh = mkdtempSync(join(tmpdir(), 'ship-ticket-check-'));
+  t.after(() => rmSync(fresh, { recursive: true, force: true }));
+  const nonRepo = check(fresh);
+  assert.equal(nonRepo.status, 1);
+  assert.equal(JSON.parse(nonRepo.stdout.trim()).ok, false);
+  assert.ok(JSON.parse(nonRepo.stdout.trim()).reason);
+  spawnSync('git', ['init', '-q', fresh]);
+  const unborn = check(fresh, '--ticket', 'T1');
+  assert.equal(unborn.status, 0, unborn.stderr);
+  assert.equal(existsSyncSafe(join(fresh, '.git', 'ai-skills')), false, 'a healthy check on a fresh repository creates no directory');
+  writeFileSync(f.path, readText(f.path, 'utf8') + '{"torn":');
+  const torn = check(f.repo, '--ticket', 'T1');
+  assert.equal(torn.status, 1);
+  assert.match(JSON.parse(torn.stdout.trim()).reason, /incomplete_tail/);
+  writeFileSync(f.path, '');
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    chmodSyncSafe(dirname(f.path), 0o500);
+    let ro;
+    try { ro = check(f.repo, '--ticket', 'T1'); } finally { chmodSyncSafe(dirname(f.path), 0o700); }
+    assert.equal(ro.status, 1);
+    assert.match(JSON.parse(ro.stdout.trim()).reason, /not writable/);
+  }
+});
+
+test('old-reader compatibility: origin/main rowsFromText accepts rows carrying timestamp_source and label', async (t) => {
+  const old = spawnSync('git', ['-C', dirname(script), 'show', 'origin/main:skills/ship-ticket/scripts/run-log.mjs'], { encoding: 'utf8' });
+  if (old.status !== 0) { t.skip('origin/main is not available in this checkout'); return; }
+  const src = old.stdout;
+  const body = src.slice(src.indexOf('function rowsFromText'), src.indexOf('function carrierBinding'));
+  assert.ok(body.includes('function validCarrierTiming'), 'extracted the unmodified old reader');
+  const dir = mkdtempSync(join(tmpdir(), 'old-reader-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const url = (m) => new URL(`./${m}`, import.meta.url).href;
+  writeFileSync(join(dir, 'old.mjs'), `import { basename } from 'node:path';\nimport { buildRun } from '${url('run-summary.mjs')}';\n`
+    + `import { RUN_LOG_SCHEMA as SCHEMA, isEventName } from '${url('measure/events.mjs')}';\n`
+    + `const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);\nconst SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;\nexport ${body}`);
+  const { rowsFromText } = await import(new URL(`file://${join(dir, 'old.mjs').replaceAll('\\', '/').replace(/^([A-Za-z]:)/, '/$1')}`).href);
+  const f = fixture(t);
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  assert.equal(f.cli(...phaseArgs('start', 'a'), '--started-at', ago(60000)).status, 0);
+  assert.equal(f.cli(...phaseArgs('end', 'a'), '--ended-at', ago(30000)).status, 0);
+  const text = readText(f.path, 'utf8');
+  assert.match(text, /"timestamp_source":"supplied"/);
+  const { rows, warnings } = rowsFromText(text, f.path);
+  assert.deepEqual(warnings, []);
+  assert.equal(rows.length, 2);
 });

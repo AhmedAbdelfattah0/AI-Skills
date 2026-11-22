@@ -6,21 +6,37 @@ not part of the reviewed candidate.
 ## Storage and privacy
 
 Use `scripts/run-log.mjs` from the installed `ship-ticket` folder. It resolves the
-target repository's Git metadata directory and appends to:
+target repository's shared Git directory (`git rev-parse --git-common-dir`) and appends to:
 
 ```text
-<git-metadata>/ai-skills/ship-ticket/<TICKET>.jsonl
+<git-common-dir>/ai-skills/ship-ticket/<TICKET>.jsonl
 ```
 
-This location survives branch switches, does not dirty the worktree, and remains
+There is one file per ticket for the whole repository: the main checkout and every
+linked worktree write the same file, so a run whose phases are logged from two
+worktrees is not split. `--repo` may be any directory inside the work tree. This
+location survives branch switches, does not dirty the worktree, and remains
 available while waiting for approval, CI, or tracker operations. It is local and
-is not pushed. Never put source text, prompts, ticket descriptions, credentials,
+is not pushed.
+
+**Old per-worktree logs (before S5).** Earlier versions wrote to
+`git rev-parse --git-path ai-skills/ship-ticket`, which in a linked worktree is
+`<git-common-dir>/worktrees/<name>/ai-skills/ship-ticket`. Those files are read,
+never written, moved, copied or deleted. `start`, `end` and `event` read the common log
+together with this worktree's own old log, so a start recorded there can still be ended
+(the end lands in the common log) and a duplicate is still refused. `summary` and
+`eval.mjs report` also read sibling worktrees' old logs, for reporting only. The carrier's
+REPAIR check reads the common log and this worktree's own old log, never a sibling's.
+`quarantine` changes the common log only. Engine files (`.state.json`, `.engine.jsonl`,
+`.usage.jsonl`, `.attempts`) are not run logs and stay per worktree. A version before S5
+reading the common log sees an end whose start is in an old per-worktree log as an
+unpaired end; that is the only cross-version effect. Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 
 The run engine ([execution-harness.md](execution-harness.md)) writes its own
 events (`MARK`, resume and retry events) to a sibling file,
-`<git-metadata>/ai-skills/ship-ticket/<TICKET>.engine.jsonl`. It is not a timing
+`git rev-parse --git-path ai-skills/ship-ticket/<TICKET>.engine.jsonl` (per worktree). It is not a timing
 log: `run-log.mjs summary --all` skips it, and `run-log.mjs` never appends to it.
 
 Measurement events (`run-log.mjs event`, `close`) are validated against a closed schema
@@ -103,6 +119,72 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs start \
 `<SHIP_TICKET_SKILL>` means the directory containing this skill's `SKILL.md`.
 Keep the same ticket and run ID for the entire execution, including later turns
 that resume a legitimate wait.
+
+### Preflight: `check`
+
+Before `EnterPlanMode`, run the read-only preflight once:
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs check --repo <TARGET_REPO> --ticket <TICKET>
+```
+
+It writes nothing (no probe file, no directory, no lock) and prints one JSON line
+`{ok, resolved_dir, legacy_logs, degraded?, reason?}`. Exit 0: telemetry can be
+written to `resolved_dir`. Exit 1, with `reason`: not a Git repository, the
+directory (or its nearest existing parent) is not writable, the lock file is
+unreadable, or the existing log would refuse writes (for example a torn tail,
+`incomplete_tail`; the next write or `quarantine` moves it aside). An exit 1 is a
+declared degradation of the run's telemetry: record it (`harness degraded`) and
+continue. It never blocks the ticket. `degraded` lists notes that do not stop
+writes: `legacy_logs_read_only` (old per-worktree logs exist and are read),
+`stale_lock_recoverable` (a dead writer's lock the next write recovers).
+
+### Several intervals at once: `batch`
+
+A shell variable holding several `--metric` flags is one word in zsh, so the flags
+never reach the parser. Put the operations in a JSON file instead (or pass `-` and
+write them to stdin):
+
+```bash
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs batch \
+  --repo <TARGET_REPO> --ticket <TICKET> --run-id <RUN_ID> --ops-file <ops.json>
+```
+
+`ops.json` is an array of
+`{"op": "start"|"end", "kind", "name", "event_id", "outcome"?, "metrics"?: {"key": value}}`.
+Metric values are typed exactly as `--metric key=value` types them and are never
+word-split, so `--` and spaces survive verbatim. Every op is validated before the
+first write; the ops then run in order and the first failure stops the batch. A
+batch is not atomic: ops already applied stay. stdout is one JSON line,
+`{"applied": n}` or `{"applied": n, "failed": {"index": i, "reason": "..."}}` (exit 1).
+
+### Supplied timestamps (estimated)
+
+`start --started-at <iso>` and `end --ended-at <iso>` record a boundary that was
+not stamped when it happened. The value must be strict UTC ISO-8601
+(`2026-01-01T00:00:00.000Z`). It is checked against the clock when the row is
+written: not later than now + 5 s, not earlier than now - 24 h, and never earlier
+than any row already recorded for the run (so a supplied value never backdates
+recorded history, and an end is never before its start). A refused value writes
+nothing. The row carries `timestamp_source: "supplied"` and `label: "estimated"`;
+`duration_ms` is computed from the recorded pair. A row stamped by the clock is
+unchanged and has neither key; when a supplied value up to 5 s ahead is already
+recorded, the clock stamp is raised to it so the run's rows stay in time order.
+`event --started-at/--ended-at` take the same now + 5 s / now - 24 h bounds. They
+are not held to the time-order rule, because measurement events can overlap
+earlier rows (concurrent review lanes), and they carry their own `label`.
+
+### What the log can and cannot claim
+
+- The log is local, unauthenticated and unsigned. Any process that can write
+  `.git` can forge, edit or delete events.
+- Supplied timestamps are self-asserted. They are bounded, not verified.
+- The `run-log integrity` line of `ship-ready-check.mjs` (with `--repo` and
+  `--ticket`) claims only what was parsed, counted and paired: events, runs, open
+  phases, warnings and `log_loss` records. It does not claim the log is complete or
+  authentic. A deleted or missing log prints `unavailable`, never zero events.
+- Telemetry never gates a ship decision. The integrity line never changes
+  `ship-ready-check`'s exit code, and a failed `check` is a recorded degradation.
 
 ## Close intervals
 

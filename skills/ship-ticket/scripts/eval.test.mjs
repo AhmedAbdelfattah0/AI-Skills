@@ -590,3 +590,31 @@ test('T-C1 generator: re-captures the golden from the pinned base even under hos
     assert.equal(lf(readFileSync(out, 'utf8')), lf(readFileSync(join(here, 'legacy-figures.golden.json'), 'utf8')), 'the committed golden is exactly what the base produces');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('S5: report from a linked worktree (and its subdirectory) pairs a start in its pre-S5 log with the end in the common log', (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'eval-s5-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const g = (cwd, ...a) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...a], { cwd, encoding: 'utf8' }).status, 0, a.join(' '));
+  const main = join(base, 'main'), wt2 = join(base, 'wt2');
+  mkdirSync(main);
+  g(main, 'init', '-q');
+  g(main, 'commit', '-q', '--allow-empty', '-m', 'init');
+  g(main, 'worktree', 'add', '-q', wt2);
+  mkdirSync(join(wt2, 'sub'));
+  const row = (event, ts, extra = {}) => JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T1', run_id: 'run-1', event, event_id: 'b', kind: 'phase',
+    name: 'BUILD', timestamp: ts, metrics: {}, ...extra }) + '\n';
+  const legacy = join(main, '.git', 'worktrees', 'wt2', 'ai-skills', 'ship-ticket'), common = join(main, '.git', 'ai-skills', 'ship-ticket');
+  mkdirSync(legacy, { recursive: true });
+  mkdirSync(common, { recursive: true });
+  writeFileSync(join(legacy, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z'));
+  writeFileSync(join(common, 'T1.jsonl'), row('end', '2026-01-01T00:00:05.000Z', { duration_ms: 5000, outcome: 'pass' }));
+  for (const repo of [wt2, join(wt2, 'sub')]) {
+    for (const sel of [['--ticket', 'T1'], ['--all']]) {
+      const r = spawnSync(process.execPath, [script, 'report', '--repo', repo, ...sel], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.runs.length, 1, `${repo} ${sel}`);
+      assert.equal(out.runs[0].wall_ms_by_phase.BUILD, 5000);
+    }
+  }
+});

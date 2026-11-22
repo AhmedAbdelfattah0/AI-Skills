@@ -603,3 +603,34 @@ test('RED carrier: usage events carry role from config; invalid role is refused'
   await dispatch(config(fx, { usageLog: def }), { env, verifySubscription: () => true, handleSignals: false });
   assert.equal(JSON.parse(readFileSync(def, 'utf8').trim()).role, 'builder', 'BUILD defaults to builder');
 });
+
+test('AC8 S5: REPAIR authorisation reads the REVIEW start from the common log and the OWN legacy log, never a sibling worktree log', (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'carrier-s5-')));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const g = (cwd, ...args) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8' }).status, 0, args.join(' '));
+  const main = join(base, 'main');
+  mkdirSync(main);
+  g(main, 'init', '-q');
+  g(main, 'commit', '-q', '--allow-empty', '-m', 'init');
+  g(main, 'worktree', 'add', '-q', join(base, 'wt2'));
+  g(main, 'worktree', 'add', '-q', join(base, 'wt3'));
+  const wt2 = join(base, 'wt2');
+  const dirs = { common: join(main, '.git', 'ai-skills', 'ship-ticket'), own: join(main, '.git', 'worktrees', 'wt2', 'ai-skills', 'ship-ticket'),
+    sibling: join(main, '.git', 'worktrees', 'wt3', 'ai-skills', 'ship-ticket') };
+  const approval = { ticket: 'T-1', run_id: 'run-1' };
+  const row = JSON.stringify({ schema: 'ship-ticket-run-log-v1', ticket: 'T-1', run_id: 'run-1', event: 'start', event_id: 'e', kind: 'phase',
+    name: 'REVIEW', timestamp: '2026-11-04T00:00:00Z', metrics: { review_execution: 'review-1' } }) + '\n';
+  const only = (where) => {
+    for (const d of Object.values(dirs)) rmSync(join(d, 'T-1.jsonl'), { force: true });
+    mkdirSync(dirs[where], { recursive: true });
+    writeFileSync(join(dirs[where], 'T-1.jsonl'), row);
+  };
+  only('sibling');
+  assert.throws(() => verifyReviewExecution(wt2, approval, 'review-1'), /no REVIEW phase start/, "a sibling worktree's log never authorises");
+  only('common');
+  assert.equal(verifyReviewExecution(wt2, approval, 'review-1'), 'run-log');
+  only('own');
+  assert.equal(verifyReviewExecution(wt2, approval, 'review-1'), 'run-log', 'own pre-upgrade log still authorises');
+  mkdirSync(join(wt2, 'sub'));
+  assert.equal(verifyReviewExecution(join(wt2, 'sub'), approval, 'review-1'), 'run-log', 'from a subdirectory');
+});

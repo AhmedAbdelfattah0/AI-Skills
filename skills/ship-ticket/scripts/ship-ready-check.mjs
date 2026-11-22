@@ -14,6 +14,9 @@
  * (use it after SHIP_READY was appended); without it, zero SHIP_READY passes.
  * Exit codes: 0 pass, 1 malformed block, unmatched or (with --require-event) missing SHIP_READY, or
  * unreadable input; 2 usage error.
+ * S5 (F05): with --repo <R> --ticket <T>, a pass also prints `run-log integrity: events=N runs=M open_phases=K warnings=W
+ * loss_records=L` (or `run-log integrity: unavailable (<why>)`) from run-log.mjs's pure reader. It is information only:
+ * it NEVER changes the exit code, and it claims only what was parsed, counted and paired, never completeness or authenticity.
  */
 import { readFileSync } from 'node:fs';
 import { malformedReason, parseRunState, splitLines } from './run-state.mjs';
@@ -55,7 +58,17 @@ export function checkShipReady(planText, logText, { requireEvent = false, runId 
   return { ok: unmatched.length === 0, shipReady, unmatched, reason };
 }
 
-function main(argv) {
+/** The integrity line for --repo/--ticket (S5); never throws. run-log.mjs is loaded only when asked for. */
+export async function integrityLine(repo, ticket) {
+  try {
+    const { integritySummary } = await import('./run-log.mjs');
+    const r = integritySummary(repo, ticket);
+    if (r.unavailable !== undefined) return `run-log integrity: unavailable (${r.unavailable})`;
+    return `run-log integrity: events=${r.events} runs=${r.runs} open_phases=${r.open_phases} warnings=${r.warnings} loss_records=${r.loss_records}`;
+  } catch (e) { return `run-log integrity: unavailable (${String(e?.message ?? e).split('\n')[0]})`; }
+}
+
+async function main(argv) {
   const [cmd, ...all] = argv;
   // The one boolean flag is taken out first: the pairwise loop below would swallow the next flag as its value.
   const requireEvent = all.includes('--require-event');
@@ -67,7 +80,7 @@ function main(argv) {
     if (rest[i] === '--engine-log') logs.push(rest[i + 1]); else flags[rest[i].slice(2)] = rest[i + 1];
   }
   if (cmd !== 'check' || flags.bad || !flags['run-state'] || !logs.length) {
-    process.stderr.write('Usage: ship-ready-check.mjs check --run-state <plan.md> --engine-log <file>... [--run-id <ID>] [--require-event]\n');
+    process.stderr.write('Usage: ship-ready-check.mjs check --run-state <plan.md> --engine-log <file>... [--run-id <ID>] [--require-event] [--repo <R> --ticket <T>]\n');
     return 2;
   }
   let plan, log;
@@ -76,7 +89,8 @@ function main(argv) {
   const r = checkShipReady(plan, log, { requireEvent, runId: flags['run-id'] ?? null });
   if (!r.ok) { process.stderr.write(`ship-ready-check: FAIL ${r.reason}\n`); return 1; }
   process.stdout.write(`ship-ready-check: ok (${r.shipReady.length} SHIP_READY matched)\n`);
+  if (flags.repo !== undefined && flags.ticket !== undefined) process.stdout.write(`${await integrityLine(flags.repo, flags.ticket)}\n`);
   return 0;
 }
 
-if (isEntrypoint(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+if (isEntrypoint(import.meta.url)) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });

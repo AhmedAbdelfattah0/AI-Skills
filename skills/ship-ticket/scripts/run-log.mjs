@@ -1,39 +1,56 @@
 #!/usr/bin/env node
 
 import {
+  accessSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
 } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
 import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
+import { commonLogDir, legacyLogDirs, readLogRows, reportLogDirs, samePath } from './lib/run-log-paths.mjs';
+import { isTimestamp } from './lib/shape.mjs';
+import { isEntrypoint } from './harness.mjs';
 
 const KINDS = new Set(['workflow', 'phase', 'activity', 'wait']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_METRIC = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 
+/** A refusal. `fail` throws it; the CLI entry point prints `run-log: <message>` and exits 1, and `batch` reports it per op. */
+class RunLogError extends Error {}
 function fail(message) {
-  process.stderr.write(`run-log: ${message}\n`);
-  process.exit(1);
+  throw new RunLogError(message);
 }
+/** Diagnostics on stderr; silenced while `batch` validates its ops (the same op writes them once, when it is applied). */
+let quiet = false;
+const note = (text) => { if (!quiet) process.stderr.write(text); };
 
 function usage() {
   return `Usage:
-  run-log.mjs start --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--metric key=value ...]
-  run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>]
+  run-log.mjs start --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--metric key=value ...] [--started-at <iso>]
+  run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>] [--ended-at <iso>]
+  run-log.mjs batch --repo <path> --ticket <key> --run-id <id> --ops-file <path|->
+  run-log.mjs check --repo <path> [--ticket <key>]
   run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> [--event-id <id>] [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>]
   run-log.mjs close --repo <path> --ticket <key> --run-id <id> --through <iso> --final true|false --count-source orchestrator_tally|posthoc --count <kind>=<n> ...
   run-log.mjs quarantine --repo <path> --ticket <key>
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
+Location (S5): <git-common-dir>/ai-skills/ship-ticket/<ticket>.jsonl, one file for every worktree of the repository. A pre-S5
+per-worktree log (git rev-parse --git-path ai-skills/ship-ticket) is read, never written; summary also reads sibling worktrees' old logs.
+batch: JSON ops [{op:"start"|"end", kind, name, event_id, outcome?, metrics?:{k:v}}], validated first, applied in order, not atomic.
+check: read-only preflight, one JSON line {ok, resolved_dir, legacy_logs, degraded?, reason?}; exit 1 is a declared degradation.
+--started-at/--ended-at on start/end: strict UTC ISO, within now+5s..now-24h, never earlier than a recorded row of the run;
+the row is labelled timestamp_source=supplied, label=estimated. event --started-at/--ended-at take the same now-window bounds.
 Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${CLI_EVENT_NAMES.join(', ')}.
 start/end refuse these names. event writes one start/end pair in one append; event_id is derived where the event has an identity.
 A fallback or recovery run is recorded by hand: event --name run_mode --metric mode=fallback|recovery --metric label=measured.
@@ -134,7 +151,7 @@ function lenientEndMetric(metrics, key, value) {
   if (valid && !repeated) { metrics[key] = value; return; }
   metrics[key] = 'unknown';
   const why = repeated ? 'repeated' : key === 'gap_reason' ? `not one of: ${[...GAP_REASONS].join(', ')}` : 'not a valid revision';
-  process.stderr.write(`run-log: ${key} recorded as unknown (${why}; got ${JSON.stringify(value.slice(0, 40))})\n`);
+  note(`run-log: ${key} recorded as unknown (${why}; got ${JSON.stringify(value.slice(0, 40))})\n`);
 }
 
 function parseMetrics(values, { lenientGap = false } = {}) {
@@ -168,11 +185,17 @@ function git(repo, args) {
   return result.stdout.trim();
 }
 
+/**
+ * S5 (F05): `directory` is the ONE shared log directory of the repository (`<git-common-dir>/ai-skills/ship-ticket`), the
+ * only place this script writes. `legacy` is this worktree's pre-S5 directory (`--git-path`), read but never written, or
+ * null where it is the common dir (the main checkout). Both are absolute, also for a --repo inside a subdirectory.
+ */
 function locations(repo) {
   const root = git(repo, ['rev-parse', '--show-toplevel']);
-  const rawDirectory = git(repo, ['rev-parse', '--git-path', 'ai-skills/ship-ticket']);
-  const directory = isAbsolute(rawDirectory) ? rawDirectory : resolve(root, rawDirectory);
-  return { root, directory };
+  try {
+    const directory = commonLogDir(repo);
+    return { root, directory, legacy: legacyLogDirs(repo).own };
+  } catch (error) { return fail(error.message); }
 }
 
 function logPath(directory, ticket) {
@@ -183,12 +206,71 @@ function logPath(directory, ticket) {
  * Legacy rows of a log. A writer (not tolerant) reads the R11 committed prefix: a torn tail or torn record is no longer
  * history, and the next append truncates it. `summary` (tolerant) reads every byte, as before.
  */
-function readRows(path, tolerant = false) {
-  if (!existsSync(path)) return { rows: [], warnings: [] };
+function readRows(path, tolerant = false, { pairing = true } = {}) {
+  if (!existsSync(path)) return { rows: [], warnings: [], buf: Buffer.alloc(0) };
   const buf = readFileSync(path);
   const { rows, warnings } = rowsFromText((tolerant ? buf : buf.subarray(0, committedLength(buf))).toString('utf8'), path);
-  if (!tolerant && warnings.length) fail(`${path}: unsafe log history (${warnings[0].code}); left unchanged`);
-  return { rows, warnings };
+  const refusing = pairing ? warnings : warnings.filter((w) => w.run_id === undefined);
+  if (!tolerant && refusing.length) fail(`${path}: unsafe log history (${refusing[0].code}); left unchanged`);
+  return { rows, warnings, buf };
+}
+
+/** Pairing (integrity) warnings of a legacy row set, per run: the check rowsFromText applies to one file. */
+function pairWarnings(rows) {
+  const byRun = new Map();
+  for (const row of rows) {
+    if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
+    byRun.get(row.run_id).push(row);
+  }
+  const warnings = [];
+  for (const [id, runRows] of byRun) {
+    warnings.push(...buildRun('', id, runRows).integrity_warnings
+      .map((warning) => ({ ...warning, run_id: id })));
+  }
+  return warnings;
+}
+
+/**
+ * One row set from several files of a ticket (legacy files first, the common file last). With rows from more than one
+ * file they are ordered by timestamp (stable: at an equal instant the earlier file's row stays first), so a start in a
+ * legacy file pairs with its end in the common file.
+ */
+function mergeRows(lists) {
+  const nonEmpty = lists.filter((l) => l.length);
+  if (nonEmpty.length <= 1) return nonEmpty[0] ?? [];
+  return nonEmpty.flat().map((row, i) => [row, i]).sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([row]) => row);
+}
+
+/** Pairing warnings of `merged` that the read-only `context` rows did not already have: what a write would introduce. */
+function newPairWarnings(context, merged) {
+  const key = (w) => JSON.stringify([w.code, w.run_id, w.event_id]);
+  const known = new Set(pairWarnings(context).map(key));
+  return pairWarnings(merged).filter((w) => !known.has(key(w)));
+}
+
+/** The own legacy log's committed legacy rows (read-only pairing context) and bytes; empty in the main checkout. */
+function legacyContext(loc, ticket) {
+  const legacyPath = loc.legacy ? logPath(loc.legacy, ticket) : null;
+  const legacyBuf = legacyPath && existsSync(legacyPath) ? readFileSync(legacyPath) : Buffer.alloc(0);
+  const context = legacyBuf.length ? rowsFromText(legacyBuf.subarray(0, committedLength(legacyBuf)).toString('utf8'), legacyPath).rows : [];
+  return { context, legacyBuf };
+}
+
+/**
+ * The writer's view of a ticket (S5): the rows of the common log, which must be clean line by line as before, merged with
+ * the rows of the own legacy log (read-only context; its own damage never blocks a write to the common log). A pairing
+ * ambiguity the union adds refuses, exactly as a single file's did. `legacyEnds` are the legacy file's S-04 events.
+ */
+function writerRows(loc, ticket) {
+  const path = logPath(loc.directory, ticket);
+  const own = readRows(path, false, { pairing: false });
+  const { context, legacyBuf } = legacyContext(loc, ticket);
+  const rows = mergeRows([context, own.rows]);
+  const fresh = newPairWarnings(context, rows);
+  if (fresh.length) fail(`${path}: unsafe log history (${fresh[0].code}); left unchanged`);
+  const legacyEvents = legacyBuf.length ? readEvents(legacyBuf).events : [];
+  const events = [...legacyEvents, ...readEvents(own.buf).events];
+  return { path, rows, context, legacyEnds: legacyEvents.map((e) => e.end), eventRows: events.flatMap((e) => [e.start, e.end]) };
 }
 
 /** The legacy row set of a log text and its warnings. S-04 event rows are not legacy rows: measure/events.mjs readEvents checks them. */
@@ -218,15 +300,7 @@ function rowsFromText(contents, path) {
   }
   // Pairing errors are integrity errors too: writers must not append into an
   // ambiguous history even if every individual line parses successfully.
-  const byRun = new Map();
-  for (const row of rows) {
-    if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
-    byRun.get(row.run_id).push(row);
-  }
-  for (const [id, runRows] of byRun) {
-    warnings.push(...buildRun('', id, runRows).integrity_warnings
-      .map((warning) => ({ ...warning, run_id: id })));
-  }
+  warnings.push(...pairWarnings(rows));
   return { rows, warnings };
 }
 
@@ -289,25 +363,34 @@ const unsafe = (path, why) => Object.assign(new Error(`${path}: ${why}; left unc
  * I1/I3: the whole log as it will be after a write must be clean: strict UTF-8, every legacy row valid under the legacy rules,
  * every S-04 record a valid pair, no malformed line and no torn tail. Throws a typed `unsafe_history` error.
  */
-function assertCleanLog(bytes, path) {
+function assertCleanLog(bytes, path, context = []) {
   let text;
   try { text = strictUtf8.decode(bytes); } catch { throw unsafe(path, 'the log is not valid UTF-8 (recovery: run-log.mjs quarantine)'); }
-  const { warnings } = rowsFromText(text, path);
+  // S5: with legacy rows as read-only context (a start in the old per-worktree log), pairing is judged on the union;
+  // only an ambiguity the union adds counts. Every line of THIS file is still judged on its own.
+  const { warnings } = context.length ? unionCheck(text, path, context) : rowsFromText(text, path);
   if (warnings.length) throw unsafe(path, `unsafe log history (${warnings[0].code})`);
   const { lost } = readEvents(bytes);
   const bad = Object.entries(lost).filter(([k, n]) => n && !['loss_records', 'recovered_bytes'].includes(k));
   if (bad.length) throw unsafe(path, `unsafe measurement history (${bad.map(([k, n]) => `${k}=${n}`).join(', ')}; recovery: run-log.mjs quarantine)`);
+}
+function unionCheck(text, path, context) {
+  const own = rowsFromText(text, path);
+  return { warnings: [...own.warnings.filter((w) => w.run_id === undefined), ...newPairWarnings(context, mergeRows([context, own.rows]))] };
 }
 /**
  * The single write path of <ticket>.jsonl: records pass the encodeRecords choke point (an S-04 row only from encodeEvent),
  * then one locked append whose WHOLE resulting file passes assertCleanLog (I1). A torn tail from an interrupted earlier write
  * is moved to a sidecar with a `log_loss` record in the same write (I2). `check(eventEndRows)` sees the committed S-04 events.
  */
-async function appendRows(directory, ticket, records, check) {
+async function appendRows(directory, ticket, records, check, { context = [], legacyEnds = [], guard } = {}) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = logPath(directory, ticket), now = new Date().toISOString();
   const { lost } = await appendLocked(path, encodeRecords(records), { marker: (info) => encodeRecords([encodeLoss(ticket, info, now)]),
-    check: (after, before) => { assertCleanLog(after, path); if (check) check(readEvents(before).events.map((e) => e.end)); } });
+    check: (after, before) => { assertCleanLog(after, path, context);
+      if (check) check([...legacyEnds, ...readEvents(before).events.map((e) => e.end)]);
+      if (guard) guard(before);
+    } });
   if (lost) process.stderr.write(`run-log: moved ${lost.bytes} byte(s) of a torn tail to ${sidecarPath(path, lost)} and recorded log_loss\n`);
 }
 const failOnError = (promise) => promise.catch((error) => fail(error.message));
@@ -347,7 +430,7 @@ function validateReviewStart(interval, metrics) {
     noted.push(key);
     delete metrics[key];
   }
-  if (noted.length) process.stderr.write(`run-log: recorded as unknown (not refused): ${noted.join(', ')}\n`);
+  if (noted.length) note(`run-log: recorded as unknown (not refused): ${noted.join(', ')}\n`);
 }
 
 /** Review intervals with no closed start/end pair; `unknown` without review_execution ids (built on review-intervals.mjs). */
@@ -363,12 +446,71 @@ function missingReviewIntervals(run) {
   return { count: items.length, items };
 }
 
-async function start(options) {
+/**
+ * Supplied timestamps (S5, D1). `start --started-at` / `end --ended-at` record an interval boundary that was not stamped
+ * when it happened. They are self-asserted, so they are bounded against the clock AT WRITE TIME and labelled: the row
+ * gets `timestamp_source: 'supplied'` and `label: 'estimated'` (a default row is unchanged and carries neither key).
+ * Bounds: strict UTC ISO-8601; not after now + 5 s; not before now - 24 h; and never earlier than any row already
+ * recorded for the run (legacy or S-04, in the common or the own legacy log), so a supplied stamp never backdates
+ * recorded history. An end's start is a row of its run, so an end is never before its start.
+ */
+const FUTURE_SLACK_MS = 5000;
+const PAST_WINDOW_MS = 24 * 60 * 60 * 1000;
+function suppliedMs(raw, flag) {
+  if (!isTimestamp(raw)) fail(`${flag} must be a strict UTC ISO-8601 timestamp such as 2026-01-01T00:00:00.000Z`);
+  return Date.parse(raw);
+}
+function inWindow(ms, flag, now = Date.now()) {
+  if (ms > now + FUTURE_SLACK_MS) fail(`${flag} must be within ${FUTURE_SLACK_MS / 1000} s of now or earlier (it is in the future)`);
+  if (ms < now - PAST_WINDOW_MS) fail(`${flag} must be within the last 24 h`);
+}
+/** The latest instant of any row of `runId` in the given row lists (NaN-free); -Infinity when the run has none. */
+function latestOfRun(runId, ...lists) {
+  let latest = -Infinity;
+  for (const list of lists) for (const row of list) {
+    if (row?.run_id !== runId) continue;
+    const ms = Date.parse(row.timestamp);
+    if (Number.isFinite(ms) && ms > latest) latest = ms;
+  }
+  return latest;
+}
+/** The rows of the common log as they are inside the lock (`before`): legacy rows and S-04 rows. */
+const lockedRows = (before, path) => {
+  const text = before.subarray(0, committedLength(before)).toString('utf8');
+  return [...rowsFromText(text, path).rows, ...readEvents(before).events.flatMap((e) => [e.start, e.end])];
+};
+/**
+ * The timestamp of a new start/end row of `runId` and the guard that re-checks it inside the log lock. A supplied stamp
+ * is refused (nothing written) if it breaks a bound; a default stamp is the clock, raised to the run's latest recorded
+ * instant when a supplied stamp up to 5 s ahead is already recorded, so no row is ever earlier than an earlier row of its run.
+ */
+function stampFor(view, runId, raw, flag, floor = -Infinity) {
+  const recorded = Math.max(latestOfRun(runId, view.rows, view.eventRows), floor);
+  const now = Date.now();
+  if (raw === undefined) {
+    const at = new Date(Math.max(now, recorded));
+    return { at, supplied: false, guard: undefined };
+  }
+  const ms = suppliedMs(raw, flag);
+  inWindow(ms, flag, now);
+  if (ms < recorded) fail(`${flag} ${raw} is earlier than a row already recorded for run ${runId} (${new Date(recorded).toISOString()}); supplied timestamps never backdate recorded history`);
+  const guard = (before) => {
+    inWindow(ms, flag);
+    const latest = latestOfRun(runId, lockedRows(before, view.path), view.context, view.eventRows);
+    if (ms < latest) throw new Error(`${flag} ${raw} is earlier than a row recorded for run ${runId} meanwhile; nothing written`);
+  };
+  return { at: new Date(ms), supplied: true, guard };
+}
+const suppliedKeys = (stamp) => (stamp.supplied ? { timestamp_source: 'supplied', label: 'estimated' } : {});
+
+async function start(options, { print = true, loc: given } = {}) {
   const repo = requireOption(options, 'repo');
-  const { directory } = locations(repo);
+  if (options['ended-at'] !== undefined) fail('--ended-at is an end option (start takes --started-at)');
+  const loc = given ?? locations(repo);
+  const { directory } = loc;
   const interval = intervalOptions(options);
-  const path = logPath(directory, interval.ticket);
-  const duplicate = readRows(path).rows.find(
+  const view = writerRows(loc, interval.ticket);
+  const duplicate = view.rows.find(
     (row) => row.run_id === interval.runId && row.event_id === interval.eventId,
   );
   if (duplicate) fail(`event ${interval.eventId} already exists in run ${interval.runId}`);
@@ -376,6 +518,7 @@ async function start(options) {
   const metrics = parseMetrics(options.metric);
   validateReviewStart(interval, metrics);
   const binding = carrierBinding(options, metrics);
+  const stamp = stampFor(view, interval.runId, options['started-at'], '--started-at');
   const row = {
     schema: SCHEMA,
     ticket: interval.ticket,
@@ -384,20 +527,24 @@ async function start(options) {
     event_id: interval.eventId,
     kind: interval.kind,
     name: interval.name,
-    timestamp: new Date().toISOString(),
+    timestamp: stamp.at.toISOString(),
+    ...suppliedKeys(stamp),
     metrics,
     ...(binding ? { carrier_binding: binding } : {}),
   };
-  await failOnError(appendRows(directory, interval.ticket, [row]));
-  process.stdout.write(`${JSON.stringify(row)}\n`);
+  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.context, guard: stamp.guard }));
+  if (print) process.stdout.write(`${JSON.stringify(row)}\n`);
+  return row;
 }
 
-async function end(options) {
+async function end(options, { print = true, loc: given } = {}) {
   const repo = requireOption(options, 'repo');
-  const { directory, root } = locations(repo);
+  if (options['started-at'] !== undefined) fail('--started-at is a start option (end takes --ended-at)');
+  const loc = given ?? locations(repo);
+  const { directory, root } = loc;
   const interval = intervalOptions(options);
-  const path = logPath(directory, interval.ticket);
-  const rows = readRows(path).rows;
+  const view = writerRows(loc, interval.ticket);
+  const rows = view.rows;
   const matching = rows.filter(
     (row) => row.run_id === interval.runId && row.event_id === interval.eventId,
   );
@@ -406,16 +553,22 @@ async function end(options) {
   if (started.kind !== interval.kind || started.name !== interval.name) {
     fail(`event ${interval.eventId} must end with its original kind and name`);
   }
+  const startedAt = Date.parse(started.timestamp);
+  if (!Number.isFinite(startedAt)) fail(`event ${interval.eventId} has an invalid start timestamp`);
+  if (options['ended-at'] !== undefined && suppliedMs(options['ended-at'], '--ended-at') < startedAt) {
+    fail(`--ended-at ${options['ended-at']} is before the start of ${interval.eventId} (${started.timestamp})`);
+  }
 
-  const timestamp = new Date();
+  const stamp = stampFor(view, interval.runId, options['ended-at'], '--ended-at', startedAt);
+  const timestamp = stamp.at;
   const timing = importCarrier(options, started, root, timestamp);
   const previous = matching.find((row) => row.event === 'end');
   if (previous) {
     if (timing && previous.carrier_timing?.result_sha256 === timing.result_sha256
       && (options.outcome === undefined || options.outcome === previous.outcome)
       && options.metric.length === 0) {
-      process.stdout.write(`${JSON.stringify(previous)}\n`);
-      return;
+      if (print) process.stdout.write(`${JSON.stringify(previous)}\n`);
+      return previous;
     }
     fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
   }
@@ -423,8 +576,6 @@ async function end(options) {
   for (const key of ['candidate_id', 'review_execution']) {
     if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
   }
-  const startedAt = Date.parse(started.timestamp);
-  if (!Number.isFinite(startedAt)) fail(`event ${interval.eventId} has an invalid start timestamp`);
   const row = {
     schema: SCHEMA,
     ticket: interval.ticket,
@@ -434,27 +585,37 @@ async function end(options) {
     kind: interval.kind,
     name: interval.name,
     timestamp: timestamp.toISOString(),
+    ...suppliedKeys(stamp),
     duration_ms: Math.max(0, timestamp.getTime() - startedAt),
     outcome: options.outcome ?? 'complete',
     metrics,
     ...(timing ? { carrier_timing: timing } : {}),
   };
-  await failOnError(appendRows(directory, interval.ticket, [row]));
-  process.stdout.write(`${JSON.stringify(row)}\n`);
+  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.context, guard: stamp.guard }));
+  if (print) process.stdout.write(`${JSON.stringify(row)}\n`);
+  return row;
 }
 /** One measurement event (or a closure from `close`): encoded by encodeEvent, refused on a duplicate (run, event_id). */
 async function writeEvent(options, name, metrics, detail) {
-  const { directory } = locations(requireOption(options, 'repo'));
+  const loc = locations(requireOption(options, 'repo'));
+  const { directory } = loc;
   const ticket = validateId('ticket', requireOption(options, 'ticket'));
   const runId = validateId('run id', requireOption(options, 'run-id'));
   const now = new Date().toISOString();
   const endedAt = options['ended-at'] ?? now, startedAt = options['started-at'] ?? endedAt;
   let encoded;
   try { encoded = encodeEvent({ ticket, runId, eventId: options['event-id'], name, metrics, detail, startedAt, endedAt }); } catch (error) { fail(error.message); }
+  // S5 (D2): a supplied --started-at/--ended-at is bounded against the clock at write time like start/end (now + 5 s, now - 24 h).
+  // Measurement events keep their own label (measured|estimated) and may overlap earlier rows (concurrent lanes), so the
+  // never-backdate rule of start/end does not apply here.
+  for (const flag of ['started-at', 'ended-at']) if (options[flag] !== undefined) inWindow(Date.parse(options[flag]), `--${flag}`, Date.parse(now));
+  // Read-only legacy context only: the common log itself is judged whole, inside the lock, by assertCleanLog (as before S5).
+  const { context, legacyBuf } = legacyContext(loc, ticket);
+  const legacyEnds = legacyBuf.length ? readEvents(legacyBuf).events.map((e) => e.end) : [];
   const id = JSON.parse(encoded.text.slice(0, encoded.text.indexOf('\n'))).event_id;
   await failOnError(appendRows(directory, ticket, [encoded], (rows) => {
     if (rows.some((row) => row.run_id === runId && row.event_id === id)) throw new Error(`event ${id} already exists in run ${runId}`);
-  }));
+  }, { context, legacyEnds }));
   process.stdout.write(encoded.text);
 }
 
@@ -504,12 +665,14 @@ async function closeCommand(options) {
 
 /** I4: move every undecodable, malformed or invalid S-04 line and a torn tail to a sidecar, with a `log_loss` record. */
 async function quarantineCommand(options) {
-  const { directory } = locations(requireOption(options, 'repo'));
+  const loc = locations(requireOption(options, 'repo'));
+  const { directory } = loc;
   const ticket = validateId('ticket', requireOption(options, 'ticket'));
   const path = logPath(directory, ticket), now = new Date().toISOString();
-  if (!existsSync(path)) fail(`${path} does not exist`);
+  if (!existsSync(path)) fail(`${path} does not exist (quarantine works on the common log only; a legacy per-worktree log is never changed)`);
+  const { context } = legacyContext(loc, ticket);
   const info = await failOnError(quarantineLocked(path, { select: (buf) => readEvents(buf).bad,
-    marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path) }));
+    marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path, context) }));
   process.stdout.write(`${JSON.stringify(info ? { quarantined: info, sidecar: sidecarPath(path, info) } : { quarantined: null })}\n`);
 }
 
@@ -520,29 +683,51 @@ function missingTotal(counted, total) {
   return unknownRuns ? { missing_review_intervals: 'at_least', missing_review_intervals_known_sum: sum, missing_review_intervals_unknown_runs: unknownRuns }
     : { missing_review_intervals: sum, missing_review_intervals_unknown_runs: 0 };
 }
+/** The tickets with a timing log in any of `dirs` (never `<ticket>.engine.jsonl`, the run engine's own event file). */
+function ticketsIn(dirs) {
+  const names = new Set();
+  for (const dir of dirs) {
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      // <ticket>.engine.jsonl is the run engine's own event file, not a timing log.
+      if (name.endsWith('.jsonl') && !name.endsWith('.engine.jsonl') && SAFE_ID.test(name.slice(0, -'.jsonl'.length))) names.add(name.slice(0, -'.jsonl'.length));
+    }
+  }
+  return [...names].sort();
+}
+
+/**
+ * The reporting view of one ticket over `dirs` (common, own legacy, sibling legacy): every byte read, as summary always
+ * did. Line warnings stay per file; pairing is judged on the merged row set, so an interval split across files is one
+ * interval. With one file this is exactly the old single-file result.
+ */
+function reportRows(dirs, ticket) {
+  const sources = readLogRows(dirs, ticket, (bytes, path) => rowsFromText(bytes.toString('utf8'), path));
+  if (sources.length <= 1) return { ...(sources[0]?.parsed ?? { rows: [], warnings: [] }), sources };
+  const lists = sources.map((source) => source.parsed.rows);
+  const rows = mergeRows([...lists.slice(1), lists[0]]);
+  const warnings = [...sources.flatMap((source) => source.parsed.warnings.filter((w) => w.run_id === undefined)), ...pairWarnings(rows)];
+  return { rows, warnings, sources };
+}
+
+function reportDirsOf(repo) {
+  locations(repo);
+  try { return reportLogDirs(repo); } catch (error) { return fail(error.message); }
+}
+
 function summary(options) {
   const repo = requireOption(options, 'repo');
-  const { directory } = locations(repo);
+  const dirs = reportDirsOf(repo);
   if (Boolean(options.all) === Boolean(options.ticket)) {
     fail('summary requires exactly one of --ticket or --all');
   }
 
-  let tickets = [];
-  if (options.ticket) {
-    tickets = [validateId('ticket', options.ticket)];
-  } else if (existsSync(directory)) {
-    tickets = readdirSync(directory)
-      // <ticket>.engine.jsonl is the run engine's own event file, not a timing log.
-      .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.engine.jsonl'))
-      .map((name) => name.slice(0, -'.jsonl'.length))
-      .filter((name) => SAFE_ID.test(name))
-      .sort();
-  }
-
+  const tickets = options.ticket ? [validateId('ticket', options.ticket)] : ticketsIn(dirs);
   const runs = [];
   const integrityWarnings = [];
   for (const ticket of tickets) {
-    const { rows, warnings } = readRows(logPath(directory, ticket), true);
+    const { rows, warnings } = reportRows(dirs, ticket);
     integrityWarnings.push(...warnings.map((warning) => ({ ticket, ...warning })));
     const byRun = new Map();
     for (const row of rows) {
@@ -563,12 +748,162 @@ function summary(options) {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-const { command, options } = parseArgs(process.argv.slice(2));
-if (command !== 'close' && command !== 'event' && options.count.length) fail('--count is supported on close only');
-if (command === 'start') await start(options);
-else if (command === 'end') await end(options);
-else if (command === 'event') await eventCommand(options);
-else if (command === 'close') await closeCommand(options);
-else if (command === 'quarantine') await quarantineCommand(options);
-else if (command === 'summary') summary(options);
-else fail(`unknown command: ${command}`);
+/**
+ * Run-log integrity of one ticket for ship-ready-check (S5). Pure read over the reporting directories. It claims only what
+ * was parsed, counted and paired: `events` (legacy rows plus S-04 events, log_loss records excluded), `runs`, `open_phases`
+ * (phase starts without an end), `warnings` (line and pairing warnings plus undecodable, malformed or invalid S-04 lines),
+ * `loss_records`. Never completeness or authenticity. `{ unavailable: <why> }` when no log exists or git cannot answer:
+ * a deleted log is unavailable, never zero events.
+ */
+export function integritySummary(repo, ticket) {
+  try {
+    if (typeof ticket !== 'string' || !SAFE_ID.test(ticket)) return { unavailable: 'invalid ticket' };
+    const dirs = reportLogDirs(repo);
+    const { rows, warnings, sources } = reportRows(dirs, ticket);
+    if (!sources.length) return { unavailable: `no run log for ${ticket}` };
+    let events = 0, loss = 0, badS04 = 0;
+    for (const { bytes } of sources) {
+      const read = readEvents(bytes);
+      events += read.events.length;
+      loss += read.lost.loss_records;
+      badS04 += read.lost.undecodable_lines + read.lost.malformed_lines + read.lost.invalid_events;
+    }
+    const byRun = new Map();
+    for (const row of rows) byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
+    const openPhases = [...byRun].reduce((n, [runId, runRows]) => n + buildRun(ticket, runId, runRows).open_intervals.filter((i) => i.kind === 'phase').length, 0);
+    return { events: rows.length + events, runs: byRun.size, open_phases: openPhases, warnings: warnings.length + badS04, loss_records: loss };
+  } catch (error) { return { unavailable: error.message.split('\n')[0] }; }
+}
+
+/**
+ * `check` (S5): a read-only preflight before EnterPlanMode. It writes nothing: no probe file, no directory, no lock.
+ * One JSON line `{ ok, resolved_dir, legacy_logs, degraded?, reason? }`; exit 0 when telemetry can be written, else 1.
+ * A failure is a declared degradation for the run (record it), never a blocker for the ticket.
+ */
+function checkCommand(options) {
+  const out = { ok: false, resolved_dir: null, legacy_logs: 0 };
+  const degraded = [];
+  const finish = (reason) => {
+    if (reason) out.reason = reason; else out.ok = true;
+    if (degraded.length) out.degraded = degraded;
+    process.stdout.write(`${JSON.stringify(out)}\n`);
+    if (!out.ok) process.exit(1);
+  };
+  const repo = options.repo;
+  if (!repo) return finish('--repo is required');
+  const ticket = options.ticket;
+  if (ticket !== undefined && (!SAFE_ID.test(ticket) || ticket.endsWith('.engine'))) return finish('invalid --ticket');
+  let loc;
+  try { loc = locations(repo); } catch (error) { return finish(`not a git repository: ${error.message}`); }
+  out.resolved_dir = loc.directory;
+  let probe = loc.directory;
+  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+  try { accessSync(probe, fsConstants.W_OK); } catch { return finish(`${probe} is not writable`); }
+  let legacyDirs = [];
+  try { const l = legacyLogDirs(repo, { siblings: true }); legacyDirs = [l.own, ...l.siblings].filter(Boolean); } catch { /* counted as none */ }
+  if (ticket !== undefined) {
+    out.legacy_logs = legacyDirs.filter((d) => existsSync(logPath(d, ticket))).length;
+    const path = logPath(loc.directory, ticket);
+    if (existsSync(`${path}.lock`)) {
+      let held = null;
+      try { held = JSON.parse(readFileSync(`${path}.lock`, 'utf8')); } catch { return finish(`${path}.lock is unreadable (remove it by hand when no writer runs)`); }
+      if (!held || !Number.isInteger(held.pid) || held.pid <= 0 || typeof held.host !== 'string') return finish(`${path}.lock is malformed`);
+      let alive = true;
+      try { process.kill(held.pid, 0); } catch (e) { alive = e.code === 'EPERM'; }
+      if (!alive) degraded.push('stale_lock_recoverable');
+    }
+    if (existsSync(path)) {
+      const { context } = legacyContext(loc, ticket);
+      try { assertCleanLog(readFileSync(path), path, context); } catch (error) { return finish(error.message); }
+    }
+  } else {
+    out.legacy_logs = legacyDirs.reduce((n, d) => n + ticketsIn([d]).length, 0);
+  }
+  if (out.legacy_logs) degraded.push('legacy_logs_read_only');
+  return finish();
+}
+
+/**
+ * `batch` (S5): start/end ops from a JSON file (or `-`, stdin), so metric values never pass through a shell (an unquoted
+ * multi-flag variable is one word in zsh). Ops: `[{ op: 'start'|'end', kind, name, event_id, outcome?, metrics?: {k: v} }]`;
+ * metric values are typed exactly as `--metric k=v` would type them. Every op is validated before the first write; ops
+ * then run in order and the first failure stops the batch. NOT atomic: ops already applied stay. stdout is one JSON line,
+ * `{ applied }` or `{ applied, failed: { index, reason } }` (exit 1).
+ */
+const BATCH_KEYS = new Set(['op', 'kind', 'name', 'event_id', 'outcome', 'metrics']);
+const BATCH_MAX_BYTES = 1024 * 1024;
+async function batchCommand(options) {
+  let applied = 0;
+  const stop = (index, error) => {
+    if (!(error instanceof RunLogError) && !(error instanceof Error)) throw error;
+    process.stdout.write(`${JSON.stringify({ applied, failed: { index, reason: error.message } })}\n`);
+    process.exit(1);
+  };
+  let ops;
+  try {
+    for (const key of ['kind', 'name', 'event-id', 'outcome', 'started-at', 'ended-at', 'carrier-result', 'detail']) if (options[key] !== undefined) fail(`--${key} is not a batch option (put it in the ops)`);
+    if (options.metric.length) fail('--metric is not a batch option (put metrics in the ops)');
+    const source = requireOption(options, 'ops-file');
+    let text;
+    try { text = source === '-' ? readFileSync(0, 'utf8') : readFileSync(resolve(source), 'utf8'); } catch { fail('--ops-file must name a readable file (or - for stdin)'); }
+    if (Buffer.byteLength(text) > BATCH_MAX_BYTES) fail('--ops-file is too large');
+    try { ops = JSON.parse(text); } catch { fail('--ops-file must be a JSON array of ops'); }
+    if (!Array.isArray(ops) || !ops.length) fail('--ops-file must be a non-empty JSON array of ops');
+  } catch (error) { return stop(null, error); }
+  const loc = (() => { try { return locations(requireOption(options, 'repo')); } catch (error) { return stop(null, error); } })();
+  const prepared = [];
+  quiet = true;
+  for (const [index, op] of ops.entries()) {
+    try {
+      if (!op || typeof op !== 'object' || Array.isArray(op)) fail('an op must be an object');
+      for (const key of Object.keys(op)) if (!BATCH_KEYS.has(key)) fail(`unknown op key: ${key}`);
+      if (op.op !== 'start' && op.op !== 'end') fail("op must be 'start' or 'end'");
+      if (op.op === 'start' && op.outcome !== undefined) fail('outcome is an end field');
+      if (op.outcome !== undefined && (typeof op.outcome !== 'string' || !op.outcome)) fail('outcome must be a non-empty string');
+      const m = op.metrics ?? {};
+      if (!m || typeof m !== 'object' || Array.isArray(m)) fail('metrics must be an object');
+      const metric = Object.entries(m).map(([k, v]) => {
+        if (v !== null && !['string', 'number', 'boolean'].includes(typeof v)) fail(`metric ${k} must be a string, number, boolean or null`);
+        if (typeof v === 'number' && !Number.isFinite(v)) fail(`metric ${k} must be finite`);
+        return `${k}=${v === null ? 'null' : String(v)}`;
+      });
+      const opts = { repo: options.repo, ticket: options.ticket, 'run-id': options['run-id'], kind: op.kind, name: op.name, 'event-id': op.event_id,
+        ...(op.outcome !== undefined ? { outcome: op.outcome } : {}), metric, count: [] };
+      for (const key of ['kind', 'name', 'event-id']) if (typeof opts[key] !== 'string') fail(`${key.replace('-', '_')} must be a string`);
+      const interval = intervalOptions(opts);
+      const metrics = parseMetrics(metric, { lenientGap: op.op === 'end' });
+      if (op.op === 'start') validateReviewStart(interval, metrics);
+      prepared.push({ op: op.op, opts });
+    } catch (error) { quiet = false; return stop(index, error); }
+  }
+  quiet = false;
+  for (const [index, { op, opts }] of prepared.entries()) {
+    try { await (op === 'start' ? start : end)(opts, { print: false, loc }); }
+    catch (error) { return stop(index, error); }
+    applied += 1;
+  }
+  process.stdout.write(`${JSON.stringify({ applied })}\n`);
+}
+
+async function main(argv) {
+  const { command, options } = parseArgs(argv);
+  if (command !== 'close' && command !== 'event' && options.count.length) fail('--count is supported on close only');
+  if (command === 'start') await start(options);
+  else if (command === 'end') await end(options);
+  else if (command === 'event') await eventCommand(options);
+  else if (command === 'close') await closeCommand(options);
+  else if (command === 'quarantine') await quarantineCommand(options);
+  else if (command === 'summary') summary(options);
+  else if (command === 'batch') await batchCommand(options);
+  else if (command === 'check') checkCommand(options);
+  else fail(`unknown command: ${command}`);
+}
+
+if (isEntrypoint(import.meta.url)) {
+  try { await main(process.argv.slice(2)); }
+  catch (error) {
+    if (!(error instanceof RunLogError)) throw error;
+    process.stderr.write(`run-log: ${error.message}\n`);
+    process.exit(1);
+  }
+}
