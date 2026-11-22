@@ -33,7 +33,7 @@ function git(cwd, args, opts = {}) {
 
 /** A temp repo: `base` files committed on main, then branch `work`. Returns helpers. */
 function repo(t, baseFiles = { 'README.md': 'base\n' }) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 's6-scope-')));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 's6-scope-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['config', 'user.email', 'builder@example.invalid']);
@@ -375,7 +375,7 @@ test('git or candidate-id failure exits 3: an unknown base and a dirty submodule
 
 /** security-plan.mjs globRe and normPath, extracted from the real file (not copied), so the proof runs against the engine's matcher. */
 function engineGlobRe() {
-  const src = readFileSync(join(HERE, 'security-plan.mjs'), 'utf8');
+  const src = load(join(HERE, 'security-plan.mjs')); // LF-normalized: a CRLF checkout must not defeat the extraction
   const norm = /^const normPath = .*;$/m.exec(src)?.[0];
   const start = src.indexOf('function globRe(glob) {');
   const end = src.indexOf('\n}\n', start);
@@ -395,7 +395,8 @@ test('property: a non-material path always matches the engine Design Contract (d
   for (let i = 0; i < 4000; i++) {
     const writes = Array.from({ length: Math.floor(rand() * 4) }, rel).filter((w) => normalRel(w));
     const roots = [...new Set(writes)].sort();
-    const envelope = roots.length && rand() < 0.5 ? [roots[0] + (rand() < 0.5 ? '' : '/' + seg())].filter((e) => normalRel(e)) : [];
+    // nested in a root, or anywhere (classify must stay sound even for an envelope the CLI would refuse)
+    const envelope = (roots.length && rand() < 0.5 ? [roots[0] + (rand() < 0.5 ? '' : '/' + seg())] : rand() < 0.5 ? [rel()] : []).filter((e) => normalRel(e));
     const contract = designContract([{ writes }]).map(globRe);
     for (let j = 0; j < 6; j++) {
       const pick = roots.length && rand() < 0.7 ? roots[Math.floor(rand() * roots.length)] : rel();

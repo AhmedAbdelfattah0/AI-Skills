@@ -27,7 +27,7 @@
  *
  * Classes (case-sensitive, via engine-dag.mjs `under`), first match wins:
  *  1. planned, via exact: the path equals a root;
- *  2. supporting, via envelope: under an envelope entry, kind `file`, basename not a dependency manifest or lockfile;
+ *  2. supporting, via envelope: under an envelope entry and a root, kind `file`, basename not a dependency manifest or lockfile;
  *  3. planned, via directory: under a root (flag unlisted_under_directory_write);
  *  4. material: anything else. A path holding a line terminator (\n, \r, U+2028, U+2029) is material whatever its
  *     roots, because the engine's contract matcher does not match it under a directory (fail closed).
@@ -167,7 +167,7 @@ export function classify(entries, { roots, envelope, readlink }) {
     let cls = 'material', via = null;
     if (LINE_TERMINATOR.test(path)) flags.push('line_terminator');
     else if (roots.includes(path)) { cls = 'planned'; via = 'exact'; }
-    else if (kind === 'file' && !manifest && under(path, envelope)) { cls = 'supporting'; via = 'envelope'; }
+    else if (kind === 'file' && !manifest && under(path, envelope) && under(path, roots)) { cls = 'supporting'; via = 'envelope'; }
     else if (under(path, roots)) { cls = 'planned'; via = 'directory'; flags.push('unlisted_under_directory_write'); }
     else if (under(path.toLowerCase(), lower)) flags.push('case_alias');
     return { path, kind, class: cls, via, flags };
@@ -183,7 +183,7 @@ function git(cwd, args) {
 /** realpath of `p`, or of its nearest existing ancestor joined with the rest (the file may not exist yet). */
 function realish(p) {
   const abs = resolve(p);
-  if (existsSync(abs)) return realpathSync(abs);
+  if (existsSync(abs)) return realpathSync.native(abs); // native: expands Windows 8.3 short names as git reports them
   const parent = dirname(abs);
   return parent === abs ? abs : join(realish(parent), basename(abs));
 }
