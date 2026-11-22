@@ -56,7 +56,7 @@ Finish these checks before announcing REVIEW or appending its start event:
   also after a failed engine init; a manual-mode contract refuses `--dag` and any
   engine evidence of the run. A contract or mode change is a plan change: re-approval through `ExitPlanMode`.
   Exit 2 or 3 is never a pass. When the plan text itself must change (a missing,
-  ambiguous, noncanonical or invalid contract line), the remedy is re-approval
+  ambiguous, noncanonical or invalid contract block), the remedy is re-approval
   through `ExitPlanMode`, since an edited plan changes the digest and gives
   `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
   Exit 0 proves only the path set, not the behaviour inside a planned file;

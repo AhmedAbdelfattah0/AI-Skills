@@ -368,9 +368,13 @@ export function verifyQuote(quoteText, planText, record) {
   if (FORBIDDEN_CHARS.test(quoteText)) return fail('the quote holds a control character, BOM or lone CR');
   const q = quoteText.split(/\r?\n/);
   const starts = q.flatMap((l, i) => (l === QUOTE_FENCE && q[i + 1] === OPENER && q[i + 3] === CLOSER && q[i + 4] === QUOTE_FENCE ? [i] : []));
-  const openers = q.filter(l => l === OPENER).length;
-  if (starts.length !== 1 || openers !== 1) return fail(`the request must hold exactly one four-backtick-quoted scope-contract block (found ${starts.length} quoted, ${openers} opener line(s))`);
-  const quoted = q[starts[0] + 2];
+  if (starts.length !== 1) return fail(`the request must hold exactly one four-backtick-quoted scope-contract block (found ${starts.length})`);
+  // By construction the one exact quote is the ONLY candidate: outside its five lines no line may name the key, open a
+  // fence of any kind (3+ backticks or tildes after container prefixes and indentation) or look like a contract body.
+  const s0 = starts[0];
+  const extra = q.findIndex((l, i) => (i < s0 || i > s0 + 4) && (/scope-contract/i.test(l) || /^(`{3,}|~{3,})/.test(l.replace(CONTAINER, '')) || l.includes('{"v":1')));
+  if (extra >= 0) return fail(`line ${extra + 1} of the request is another quote candidate (the key, a fence or a contract-like line); the single four-backtick quote must be the only one`);
+  const quoted = q[s0 + 2];
   const plan = validatePlanText(planText);
   const diff = (a, b) => { let k = 0; while (k < a.length && a[k] === b[k]) k++; return k; };
   if (quoted !== plan.body) return fail(`the quoted body differs from the plan block at character ${diff(quoted, plan.body)}`);

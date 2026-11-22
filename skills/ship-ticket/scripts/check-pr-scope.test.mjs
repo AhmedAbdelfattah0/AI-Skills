@@ -840,6 +840,53 @@ test('contract --verify-quote: byte comparison of the four-backtick quote with t
   assert.equal(q(`${quote}\n`, []).status, 0, 'plan-only verification');
 });
 
+test('verify-quote rejects every extra quote candidate in the saved request (Codex repro and near-misses)', (t) => {
+  const r = repo(t);
+  const plan = writePlan(r, contract(good));
+  r.write('src/a.ts');
+  const recordFile = join(r.dir, '.git', 'rec.json');
+  writeFileSync(recordFile, run(r).stdout);
+  const q = (text) => { const f = join(r.dir, '.git', 'req.txt'); writeFileSync(f, text); return spawnSync(process.execPath, [SCRIPT, 'contract', '--verify-quote', f, '--plan', plan, '--record', recordFile], { encoding: 'utf8' }); };
+  const quote = S.contractOutput(GOOD_BODY).quote;
+  const otherQuote = S.contractOutput(GOOD_BODY.replace('"src/a.ts"', '"src"')).quote;
+  assert.equal(q(`Request:\n\n${quote}\n`).status, 0, 'the single exact quote passes');
+  const NBSP = String.fromCharCode(0xa0);
+  for (const [name, extra] of [
+    ['Codex repro: a second quote whose opener has a trailing space', otherQuote.replace(S.OPENER, `${S.OPENER} `)],
+    ['a tab after the opener', otherQuote.replace(S.OPENER, `${S.OPENER}\t`)],
+    ['extra info text', otherQuote.replace(S.OPENER, `${S.OPENER} x`)],
+    ['a five-backtick outer fence', otherQuote.replace(/^````/, '`````').replace(/````$/, '`````')],
+    ['a tilde outer fence', otherQuote.replace(/^````/, '~~~~').replace(/````$/, '~~~~')],
+    ['an indented second quote', otherQuote.split('\n').map((l) => `  ${l}`).join('\n')],
+    ['a CRLF second quote', otherQuote.replace(/\n/g, '\r\n')],
+    ['an NBSP after the opener', otherQuote.replace(S.OPENER, `${S.OPENER}${NBSP}`)],
+    ['a quote-prefixed second quote', otherQuote.split('\n').map((l) => `> ${l}`).join('\n')],
+    ['a plain fence elsewhere', '```\nnote\n```'],
+    ['an indented plain fence', '  ```\n  note\n  ```'],
+    ['a quote-prefixed plain tilde fence', '> ~~~\n> note\n> ~~~'],
+    ['a stray contract-looking JSON line', GOOD_BODY.replace('"src/a.ts"', '"src"')],
+    ['the key in prose', 'see the scope-contract above'],
+  ]) {
+    const res = q(`Request:\n\n${quote}\n\n${extra}\n`);
+    assert.equal(res.status, 1, `${name}: ${res.stdout}`);
+    assert.match(res.stdout, /verify-quote: FAIL/, name);
+  }
+});
+
+test('verify-quote: record.contract correct but record.contract_sha256 wrong is a FAIL', (t) => {
+  const r = repo(t);
+  const plan = writePlan(r, contract(good));
+  r.write('src/a.ts');
+  const rec = JSON.parse(run(r).stdout);
+  const recordFile = join(r.dir, '.git', 'rec.json');
+  writeFileSync(recordFile, JSON.stringify({ ...rec, contract: GOOD_BODY, contract_sha256: sha('x') }));
+  const f = join(r.dir, '.git', 'req.txt');
+  writeFileSync(f, `${S.contractOutput(GOOD_BODY).quote}\n`);
+  const res = spawnSync(process.execPath, [SCRIPT, 'contract', '--verify-quote', f, '--plan', plan, '--record', recordFile], { encoding: 'utf8' });
+  assert.equal(res.status, 1, res.stdout);
+  assert.match(res.stdout, /verify-quote: FAIL: record\.contract_sha256 is not the SHA-256 of the quoted body/);
+});
+
 // ORACLE-GENERATOR-BEGIN (the scratch generator evaluates exactly this function; changing it requires regenerating ORACLE)
 function oracleDocs(hash) {
   const body = '{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":["tests"]}';
@@ -997,6 +1044,7 @@ test('S6 and F11 wording pins', () => {
   assert.ok(review.includes('run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]` on the candidate'));
   assert.ok(review.includes('Exit 1 (a material path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.'));
   assert.ok(review.includes('A contract or mode change is a plan change: re-approval through `ExitPlanMode`.'));
+  assert.ok(review.includes('ambiguous, noncanonical or invalid contract block)') && !review.includes('invalid contract line)'));
   assert.ok(review.includes('An engine-mode contract always needs `--dag`'));
   assert.ok(review.includes('`node scripts/check-pr-scope.mjs contract --verify-quote <saved-request> --plan <plan> --record <scope.json>`'));
   assert.ok(review.includes('native ExitPlanMode approval remains mandatory'));
