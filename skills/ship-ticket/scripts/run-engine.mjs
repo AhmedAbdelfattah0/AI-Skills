@@ -296,14 +296,15 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (block.policy === 3) await bindObligations(sp, cat, block, nodes, ctx.repoRoot);
 }
 
-/** File-shaped DAG writes (a basename with an extension): the plan-time paths the surface inventory must cover. */
+/** File-shaped DAG writes (a basename with an extension): the plan-time paths the surface inventory checks, path-only (L4: lines, extensionless and directory writes are checked at reassess). */
 const writtenFiles = (nodes) => [...new Set(nodes.flatMap(n => n.writes ?? []).filter(w => /.\.[A-Za-z0-9]+$/.test(w.split('/').pop())))].sort();
 
 /**
  * Block format 3 (F12a) at init and preflight: the full surface x control obligation matrix must be complete
  * (security-plan.mjs obligationMatrix: every cell exactly one disposition, every dropped pair a cited, catalog-gated
- * fact; its refusal code is thrown as is), and every file-shaped DAG write that raises a surface-introducing signal
- * (test-named or not: no filename exemption) must be a listed surface (surface_inventory_incomplete). Format 2 blocks are
+ * fact; its refusal code is thrown as is), and every file-shaped DAG write whose path alone raises a surface-introducing
+ * signal (test-named or not: no filename exemption) must be a listed surface (surface_inventory_incomplete). Line-based
+ * signals and extensionless or directory writes are checked at reassess (known limitation L4). Format 2 blocks are
  * not checked here (unchanged).
  */
 async function bindObligations(sp, cat, block, nodes, root) {

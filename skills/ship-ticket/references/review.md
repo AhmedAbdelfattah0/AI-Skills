@@ -191,8 +191,8 @@ and rule-catalogue work:
   `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
   dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
   the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
-  gives its finding `subject_id: '<boundary>:<control>'`, which records the same
-  run-wide dispute (see
+  gives its finding `subject_id: '<boundary>:<control>'`, which, on an original
+  review, records the same run-wide dispute (see
   [security-risk.md](security-risk.md) section 9). No file is exempted by its
   name: a test file that registers a route or sits on an auth path is a §3a
   surface with its own pairs, like any other file.

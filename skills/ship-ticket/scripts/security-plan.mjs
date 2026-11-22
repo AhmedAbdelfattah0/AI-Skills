@@ -821,10 +821,11 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * through a surface, then ADD_CONTROLS and an owner addendum), plus one ADDITIVE difference: ROUTE_LINE_V3 (fastify /
  * hono / elysia verbs, one-line tRPC procedures) raises new-route on more lines. Nothing is narrowed anywhere: no test
  * name, workspace folder or other path rule removes a signal, in any consumer (reassess signals, the plan-time inventory
- * check at init and preflight, the own-path lowering guard, the reopen keep set). Invariant, property-tested
+ * check at init and preflight, path-only over file-shaped DAG writes (L4), the own-path lowering guard, the reopen keep set). Invariant, property-tested
  * ([S103]): for every input, with lines and path-only, the format-3 signals are a superset of the format-2 signals, and
  * path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
- * like any other file; a test with no route line and no signalling path raises nothing.
+ * like any other file (a route line is first seen at reassess, L4); a test with no route line and no signalling path
+ * raises nothing.
  */
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
@@ -928,7 +929,8 @@ function fileKinds(f, c5) {
 /**
  * Surface-inventory completeness (C5, F12a, block format 3): every path of `files` (path strings, or {path, added[]})
  * that raises a surface-introducing signal under the format-3 detector (the one reassess uses) must be the path of a
- * listed surface. Returns the gaps [{ path, kinds }].
+ * listed surface. Returns the gaps [{ path, kinds }]. It sees only what it is given: at init and preflight that is
+ * path-only file-shaped DAG writes (L4); at reassess the changed files with their added lines.
  */
 export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
   const listed = new Set(surfacePaths.map(normPath));

@@ -175,8 +175,10 @@ For a block format 3, `controlCoverage` lists the effective pairs only. A droppe
 pair has no spec and is not in the DAG; listing it is `security_pairs_mismatch`.
 `init` also checks two more things. First, the obligation matrix must verify
 (section 12, `disposition_*` or `plan_block_invalid`). Second, every file-shaped DAG
-write that raises a surface-introducing signal (test-named or not) must be a
-listed surface (`surface_inventory_incomplete`). The run records `policy_version` 3,
+write (a basename with an extension) whose PATH alone raises a surface-introducing
+signal (test-named or not) must be a listed surface (`surface_inventory_incomplete`).
+Line-based signals and extensionless or directory writes are not seen here; reassess
+checks them (section 13, L4). The run records `policy_version` 3,
 or 4 with test kinds. An engine that does not know these versions refuses the run
 (`policy_version_unsupported`).
 
@@ -297,13 +299,15 @@ difference, and it only adds signals:
 
 **No narrowing, anywhere.** No test name, workspace folder or other path rule removes
 a signal, in any consumer of the detector: reassess signals, the plan-time inventory
-check at `init` and `preflight`, the own-path lowering guard at selection, and the
-reopen of dropped pairs. A test-named file is therefore treated like any other file:
+check at `init` and `preflight` (path-only, over file-shaped DAG writes: section 13,
+L4), the own-path lowering guard at selection, and the reopen of dropped pairs. A test-named file is therefore treated like any other file:
 
 - one that registers a route (`app.post(...)` in `src/orders.test.ts`, `@router.get`
   in `app/routers/test_results.py`) or sits on an auth path (`src/auth.test.ts`,
   `edge-functions/auth.test.ts`, `public/login.test.php`) raises its signal and needs
-  a §3a surface, at plan time and at reassess;
+  a §3a surface. A path signal (an auth path) is refused already at plan time when the
+  DAG writes that file; a route LINE is first seen at reassess, which refuses it
+  `surface_inventory_incomplete` (section 13, L4);
 - a surface at such a path cannot lower a fact whose control its own path signal
   names (`surface_fact_not_lowerable`), exactly like `src/auth.ts`;
 - a test with no route line and no signalling path (only `describe` / `it` /
@@ -312,8 +316,9 @@ reopen of dropped pairs. A test-named file is therefore treated like any other f
 A property test pins this (`[S79] [S103]`). Over at least 4000 random inputs of changed
 files and lines, plus fixed examples, with lines and path-only: the format-3 signals
 are a superset of the format-2 signals for every kind, path-only they are equal, the
-only extras are `new-route` route lines, and the plan-time inventory never omits a
-format-2 surface signal. Anything format 2 leaves closable only by a surface cannot
+only extras are `new-route` route lines, and the inventory check (`inventoryGaps`, fed
+lines at reassess and path-only DAG writes at `init` and `preflight`) never omits a
+format-2 surface signal of what it is given. Anything format 2 leaves closable only by a surface cannot
 reach `reassessed` in format 3 through reason-only classifications. Mutants that
 re-add a narrowing (per signal kind, in the lowering guard, in the reopen pass) are
 killed by it.
@@ -336,8 +341,8 @@ must be re-selected and re-approved. It never reassesses `UNCHANGED`.
 For a format-3 block, a changed path inside the Design Contract that raises one of
 the three surface signals under this detector, and has no surface at its path, is
 refused `surface_inventory_incomplete` before classification. The same check runs
-at `init` and `preflight` over file-shaped DAG writes. Add the surface to the
-inventory.
+at `init` and `preflight`, path-only, over file-shaped DAG writes (section 13, L4).
+Add the surface to the inventory.
 
 **The LF pin on `controls.json` (side effect).** The catalog digest is the sha256 of
 `skills/vapt/controls.json`'s raw bytes. `.gitattributes` now pins that file to LF,
@@ -514,3 +519,17 @@ in this file or the engine claims otherwise.
   Only a second-opinion finding of an original review whose `subject_id` is exactly a
   dropped pair's `<boundary>:<control>` records a dispute; a pair named only in
   finding text, in another spelling, or in a confirmation records none.
+- **L4, the plan-time inventory is path-only and file-shaped.** At `init` and
+  `preflight` the inventory check sees only the PATHS of file-shaped DAG writes (a
+  basename with an extension), so only path-based signals are refused there.
+  Line-based signals (`app.post(...)` in `src/orders.test.ts`, `@router.get` in
+  `app/routers/test_results.py`) and extensionless or directory writes
+  (`src/auth/entry`, `src`) are first checked at reassess, which refuses
+  `surface_inventory_incomplete`. Reassess is the backstop: nothing is lost, only
+  deferred from plan time to the gate.
+
+Known detector blind spots inherited from format 2 (not a regression of S1): no
+`new-route` signal for a Laravel `Route::get` outside a route path, a Rails
+`get '/x'`, or a Supabase `Deno.serve`, and an `app/routers/*.py` file raises nothing
+path-only until reassess sees its route line; this matters if a later catalog change
+gates `VAPT-API-0x` controls.
