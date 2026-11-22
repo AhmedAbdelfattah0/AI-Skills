@@ -14,6 +14,7 @@ import { classify as classifyMutant, loadMutationSource, runMutant as runTreeMut
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const CLI = join(HERE, 'ci-classify.mjs');
+const cli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', input });
 const REAL_FIXTURE = join(HERE, 'fixtures', 'ci-snapshot', 'scrum202-abf4d7ea-actions-jobs.jsonl');
 const REPLICA = join(HERE, 'fixtures', 'ci-classify', 'synthetic-linked-abf4d7ea');
 const REPO = 'acme/widgets', ORIGIN = 'https://api.github.com', SHA = 'abf4d7ea' + 'ab'.repeat(16);
@@ -58,6 +59,7 @@ const assertInvalid = (r, code, label = code) => {
   assert.equal(r.ci_state, 'UNAVAILABLE', label);
   assert.equal(r.snapshot_sha256, null, label);
   assert.deepEqual(r.rows, [], label);
+  assert.ok(invalidCodes(r).every((c) => INVALID_CODES.includes(c)), `${label}: every code is listed: ${r.reasons}`);
   if (code) assert.ok(invalidCodes(r).includes(code), `${label}: ${JSON.stringify(r.reasons)}`);
 };
 
@@ -160,6 +162,7 @@ test('7: anything but a fully valid snapshot is refused as unavailable with type
     ['an array', [], 'shape_not_object'],
     ['a string', 'snapshot_valid', 'shape_not_object'],
     ['unbound row', forge(good, (s) => { Object.assign(s.check_runs[0], { binding: 'unbound', input_status: 'unbound' }); }), 'shape_not_in_set'],
+    ['binding unbound alone', forge(good, (s) => { s.check_runs[0].binding = 'unbound'; }), 'shape_not_in_set'],
     ['input_status unknown', forge(good, (s) => { s.check_runs[0].input_status = 'unknown'; }), 'shape_not_in_set'],
     ['steps missing', forge(good, (s) => { Object.assign(s.check_runs[0].job_inputs, { steps_state: 'absent', steps: null }); }), 'steps_state_inconsistent'],
     ['steps null', forge(good, (s) => { Object.assign(s.check_runs[0].job_inputs, { steps_state: 'null', steps_type: 'null', steps: null }); }), 'input_status_mismatch'],
@@ -394,6 +397,29 @@ test('a Proxy or a getter cannot answer validation and classification differentl
   assertInvalid(classifySnapshot(g), 'shape_accessor');
 });
 
+test('liveness on realistic provider lines: labels, runner groups, null steps/labels and extra provider fields validate; the documented pipe works', () => {
+  const step = { name: 'a', status: 'completed', conclusion: 'success', number: 1, started_at: ts(1), completed_at: ts(2) };
+  const job = (id, extra) => ({ id, name: `j${id}`, run_id: 100, run_attempt: 1, head_sha: SHA, status: 'completed', conclusion: 'success', started_at: ts(0), completed_at: ts(30), runner_name: 'GitHub Actions 2', check_run_url: url(id), html_url: 'h', node_id: 'n', workflow_name: 'ci', runner_id: 5, ...extra });
+  const jobs = [job(1, { labels: ['ubuntu-latest'], runner_group_name: 'GitHub Actions', steps: [step] }), job(2, { steps: null, labels: null, runner_group_name: null }), job(3, { labels: [] })];
+  const checks = jobs.map((j) => ({ id: j.id, name: j.name, head_sha: SHA, status: 'completed', conclusion: 'success', started_at: j.started_at, completed_at: j.completed_at, url: url(j.id), app: { slug: 'github-actions', id: 15368 }, output: { annotations_count: 0, title: null }, details_url: 'd', check_suite: { id: 1 } }));
+  const s = buildSnapshot({ texts: { checkRuns: nl(checks), jobs: { 'a.jsonl': nl(jobs) }, annotations: {}, problems: [] }, repo: REPO, sha: SHA, origin: ORIGIN });
+  assert.equal(s.state, 'snapshot_valid');
+  assert.equal(validateSnapshot(s).ok, true, JSON.stringify(validateSnapshot(s).reasons));
+  assert.equal(classifySnapshot(s).classification, 'no_failure_observed');
+  // ci-snapshot.mjs check ... | ci-classify.mjs classify --snapshot-json -
+  const snapOut = spawnSync(process.execPath, [join(HERE, 'ci-snapshot.mjs'), 'check', '--snapshot', REPLICA, '--repo', REPO, '--sha', SHA, '--origin', ORIGIN], { encoding: 'utf8' });
+  assert.equal(snapOut.status, 0);
+  const piped = cli(['classify', '--snapshot-json', '-'], snapOut.stdout);
+  assert.equal(piped.status, 1);
+  assert.equal(JSON.parse(piped.stdout).classification, 'billing_blocked');
+});
+
+test('an unknown key is never echoed into the output (no input can plant a word in the reasons)', () => {
+  const r = classifySnapshot(forge(snap([{ id: 1, ...OK }]), (s) => { s.check_runs[0].passed_LOCAL_CI_VERIFIED = true; }));
+  assertInvalid(r, 'shape_unknown_key');
+  assert.deepEqual(r.reasons, ['invalid:shape_unknown_key@/check_runs/0/*']);
+});
+
 // ---- every typed reason code fires (the INVALID_CODES table; a code without a breaking case fails the suite) ----
 const BASE = () => snap([{ id: 1, ...OK }, { id: 2, name: 'unit', attempt: 1, steps: [STEP], secs: 80 }, { id: 3, name: 'unit', attempt: 2, ...OK }, { id: 4, name: 'review', ...EXT, conclusion: 'success' }]);
 const CODE_CASES = [
@@ -444,7 +470,7 @@ test('INVALID_CODES: every semantic reason code has a breaking case and fires, w
     assert.ok(INVALID_CODES.includes(code), `${code} is listed`);
     assertInvalid(classifySnapshot(forge(base, fn)), code);
   }
-  const covered = new Set([...CODE_CASES.map(([c]) => c), 'unreadable']);
+  const covered = new Set([...CODE_CASES.map(([c]) => c), 'unreadable', 'not_a_validated_normal_form']);
   assert.deepEqual(INVALID_CODES.filter((c) => !c.startsWith('shape_') && !covered.has(c)), [], 'every semantic code has a case');
   assertInvalid(classifySnapshot(new Proxy(base, {})), 'unreadable');
 });
@@ -536,6 +562,7 @@ function runProperty(seeds, perSeed) {
         const r = classifySnapshot(f);
         assert.equal(r.classification, 'unavailable', `${where}: malformed by ${op} must be unavailable, got ${r.classification}`);
         assert.ok(r.reasons.length > 0 && r.reasons.every((x) => /^invalid:[a-z_]+@/.test(x)), `${where}: ${op}: ${r.reasons}`);
+        assert.ok(invalidCodes(r).every((c) => INVALID_CODES.includes(c)), `${where}: ${op}: a code outside INVALID_CODES: ${r.reasons}`);
         assert.equal(r.snapshot_sha256, null);
         continue;
       }
@@ -550,6 +577,7 @@ function runProperty(seeds, perSeed) {
       if (o.liveExecuted) assert.equal(r.ci_state, 'FAIL', `${where}: a live executed failure must be FAIL`);
       assert.equal(r.classification, o.expected, `${where}: differential ${JSON.stringify(specs)}`);
       assert.equal(r.snapshot_sha256, s.provider_snapshot_sha256);
+      assert.deepEqual(classifySnapshot(JSON.parse(JSON.stringify(s))), r, `${where}: the CLI's view (a JSON round trip) classifies identically`);
     }
   }
   return stats;
@@ -571,6 +599,7 @@ const ALL_CASES = () => [
   snap(six()), snap([{ id: 1, steps: [STEP], secs: 90 }]), snap([{ id: 1, steps: [STEP] }, ...six().slice(1)]), snap([{ id: 1, ann: ['other'] }]),
   snap([{ id: 1, ...OK }]), snap([{ id: 1, steps: undefined }]), null, { schema: 'x' },
   snap([{ id: 1, conclusion: 'failure', steps: [SKIP] }]), forge(snap(six()), (s) => { s.provider_snapshot_sha256 = [s.provider_snapshot_sha256]; }),
+  forge(snap([{ id: 1, ...OK }]), (s) => { s.passed_LOCAL_CI_VERIFIED = true; s.check_runs[0].eligible_waived = 1; }),
 ];
 test('advisory: over every case ci_state is in {FAIL, UNAVAILABLE, NOT_CLASSIFIED}; the key set is closed and has no pass/waive/eligible field', () => {
   assert.deepEqual([...CI_STATES], ['FAIL', 'UNAVAILABLE', 'NOT_CLASSIFIED']);
@@ -675,7 +704,6 @@ test('synthetic replica with CRLF line endings (a Windows checkout) classifies i
 });
 
 // ---- strict parse and CLI ----
-const cli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', input });
 test('parseStrictJson: equals JSON.parse on valid text and refuses BOM, duplicate keys (also nested), trailing text, depth and broken text', () => {
   const ok = '{"a":[1,2.5,-3e2,true,false,null,"x\\"y\\\\"],"b":{"c":{}},"d":[],"__proto__":{"k":1}}';
   assert.deepEqual(parseStrictJson(ok), JSON.parse(ok));
@@ -773,6 +801,11 @@ const MUTANTS = [
   ['R2-c: hash type coerced', "provider_snapshot_sha256: 'string',", "provider_snapshot_sha256: 'string|number|null',"],
   ['identity fields not checked', "  if (!/^[0-9a-f]{40}$/.test(s.head_sha)) bad('head_sha_invalid', 'head_sha');\n", ''],
   ['closed row shape opened (unknown keys accepted)', "const ROW = { object: {", 'const ROW = { open: true, object: {'],
+  ['row status not required completed (successor of the old row)', "status: { enum: ['completed'] },", "status: 'string',"],
+  ['unbound rows admitted by the binding enum (successor of "unbound treated as bound")', "binding: { enum: ['bound', 'external'] },", "binding: { enum: ['bound', 'external', 'unbound'] },"],
+  ['unknown input_status admitted by the enum (successor of "unknown input_status treated as ok")', "input_status: { enum: ['ok', 'outside_r3', 'external'] },", "input_status: { enum: ['ok', 'outside_r3', 'external', 'unknown'] },"],
+  ['impossible calendar dates accepted as durations (successor of the old row)', '  if (!isTimestamp(start) || !isTimestamp(end)) return null;', "  if (typeof start !== 'string' || typeof end !== 'string') return null;"],
+  ['unknown key names echoed into the reasons', "(p.code === 'unknown_key' ? `${p.path.replace(/\\/[^/]*$/, '')}/*` : p.path)", '(p.path)'],
   // validation: rows
   ['row id shape not required', "    if (!isId(r.id)) bad('row_id_invalid', at);\n", ''],
   ['duplicate row ids accepted', "    if (rowIds.has(r.id)) bad('row_id_duplicate', at);\n", ''],

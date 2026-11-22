@@ -77,7 +77,7 @@ export const INVALID_CODES = Object.freeze([
   'binding_app_mismatch', 'external_row_inconsistent', 'bound_row_inconsistent', 'job_not_completed', 'conclusion_inconsistent',
   'attempt_inconsistent', 'steps_state_inconsistent', 'runner_state_inconsistent', 'labels_state_inconsistent', 'input_status_mismatch',
   'annotations_inconsistent', 'supersession_mismatch', 'ambiguous_job_slot', 'attempt_gap', 'job_id_invalid', 'job_id_duplicate',
-  'job_row_inconsistent', 'job_row_mismatch', 'job_not_bound_by_one_row',
+  'job_row_inconsistent', 'job_row_mismatch', 'job_not_bound_by_one_row', 'not_a_validated_normal_form',
   ...SHAPE_CODES.map((c) => `shape_${c}`),
 ]);
 
@@ -190,7 +190,8 @@ function semanticProblems(s) {
 
 const NORMAL = new WeakSet();
 const deepFreeze = (v) => { if (v && typeof v === 'object') { Object.freeze(v); for (const x of Object.values(v)) deepFreeze(x); } return v; };
-const shapeReasons = (res) => res.problems.map((p) => `invalid:shape_${p.code}@${p.path || '/'}`);
+// An unknown key is input text: its name is never echoed (the reason names only the parent path), so no input can plant a word in the output.
+const shapeReasons = (res) => res.problems.map((p) => `invalid:shape_${p.code}@${(p.code === 'unknown_key' ? `${p.path.replace(/\/[^/]*$/, '')}/*` : p.path) || '/'}`);
 
 /**
  * Validate ONE snapshot completely. -> { ok: true, normal } (a frozen normal form the classifier accepts) or
