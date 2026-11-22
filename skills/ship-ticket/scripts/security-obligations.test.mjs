@@ -336,8 +336,8 @@ test('security-plan.mjs obligations CLI prints the matrix (manual flow, no engin
   const dir = dirname(OB.GATED_PATH);
   const plan = join(dir, 'plan.md');
   writeFileSync(plan, OB.planOf(OB.approved3(GC)));
-  const repo = dirname(OB.writeCatalog({}));
-  mkdirSync(join(repo, 'src'), { recursive: true }); writeFileSync(join(repo, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
+  const repo = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
+  writeFileSync(join(repo, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
   const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH, '--repo', repo], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const out = JSON.parse(r.stdout);
@@ -393,22 +393,22 @@ test('policy version: a format-3 run records 3 (4 with test kinds); every other 
 
 // ------------------------------------------------------------------ engine end to end (real catalog)
 /** A format-3 selection over the REAL catalog: request-handler `orders` lowers session_context (bearer auth), keeper `forms` keeps it. */
-function realSelection() {
+function realSelection(cite = 'src/orders.ts:bearerOnly') {
   const bools = Object.keys(REAL.catalog.fact_vocabulary).filter((k) => REAL.catalog.fact_vocabulary[k].type === 'bool');
   const facts = { ...Object.fromEntries(bools.map((b) => [b, false])), session_context: true };
-  const surfaces = [{ boundary_id: 'orders', kind: 'request-handler', path: 'src/orders.ts', principals: ['staff'], facts: { session_context: false }, evidence: { session_context: 'src/orders.ts:bearerOnly' } },
+  const surfaces = [{ boundary_id: 'orders', kind: 'request-handler', path: 'src/orders.ts', principals: ['staff'], facts: { session_context: false }, evidence: { session_context: cite } },
     { boundary_id: 'forms', kind: 'server-input', path: 'src/forms.ts', principals: ['staff'] }];
   return ok(SP.selectControls(REAL, { security_policy: 2, surfaces, facts, evidence: Object.fromEntries(bools.map((b) => [b, 'src/orders.ts:handler'])) }));
 }
 const SPEC = 'spec/sec.test.mjs';
 const specText = (list) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
   + `for (const id of ${J(list)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
-function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles } = {}) {
+function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles, fixRemove } = {}) {
   const cov = coverage(sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, ...(startAt ? { startAt } : {}), narrativeExtra: narrative(sel) + '\n\n',
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } }, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov },
     nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }, ...nodes],
-    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: fixFiles ?? { 'src/impl.txt': 'fixed' } } } });
+    behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: fixFiles ?? { 'src/impl.txt': 'fixed' }, ...(fixRemove ? { remove: fixRemove } : {}) } } });
   const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
   g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
   return Object.assign(fx, { sel, ids: cov.map((c) => `${c.boundary}:${c.control}`) });
@@ -562,8 +562,7 @@ test('[S62] B2 a selected control can never end with zero effective pairs becaus
 });
 
 test('[S63] B3 a cited path must exist (and contain its :symbol) in the tree checked; a file the plan will write is pending at plan time; an unreadable root fails closed', () => {
-  const root = dirname(OB.writeCatalog({}));
-  mkdirSync(join(root, 'src'), { recursive: true });
+  const root = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
   writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
   const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
   ok(SP.verifyCitations(block, { root }));
@@ -582,9 +581,9 @@ test('B3 the obligations CLI checks citations against --repo (required): missing
   writeFileSync(plan, OB.planOf(OB.approved3(GC)));
   const run = (repo) => spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', plan, '--catalog', OB.GATED_PATH, ...(repo ? ['--repo', repo] : [])], { encoding: 'utf8' });
   assert.equal(run(null).status, 1, 'no --repo is a usage error');
-  const repo = dirname(OB.writeCatalog({}));
+  const repo = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
   assert.equal(JSON.parse(run(repo).stdout).code, 'citation_missing');
-  mkdirSync(join(repo, 'src'), { recursive: true }); writeFileSync(join(repo, 'src', 'a.ts'), 'persistent_writeFree');
+  writeFileSync(join(repo, 'src', 'a.ts'), 'persistent_writeFree');
   assert.equal(JSON.parse(run(repo).stdout).code, 'obligations');
 });
 
@@ -695,8 +694,7 @@ test('[S70] R2.4 citations: .git paths, docs-only files, symbols shorter than 3 
 });
 
 test('[S67] R2.4 ship-ready re-verifies citations on the candidate (a repair that deleted the cited symbol does not ship)', () => {
-  const root = dirname(OB.writeCatalog({}));
-  mkdirSync(join(root, 'src'), { recursive: true });
+  const root = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
   const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
   const s = { sp: SP, block, root };
   writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
@@ -740,7 +738,8 @@ test('[S78] R2 supplement: node_modules, .git and gitignored files are never cit
   const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC)));
   ok(SP.verifyCitations(block, { root }));
   writeFileSync(join(root, '.gitignore'), 'src/a.ts\n');
-  refused(SP.verifyCitations(block, { root }), 'citation_missing');
+  const r = refused(SP.verifyCitations(block, { root }), 'citation_missing');
+  assert.ok(r.reasons.some((x) => x.startsWith('src/a.ts:') && x.includes('is gitignored')), J(r.reasons)); // the evidence reason (X1 also refuses the surface)
 });
 
 test('[S77] R2 supplement: confirmation re-verifies citations: a repair that removed the cited symbol is refused (citation_missing)', { skip: WIN_SKIP }, (t) => {
@@ -825,14 +824,14 @@ test('[S79] R3 fixed examples: the six workspace route forms and server/middlewa
 });
 
 test('[S84] [S85] [S86] R3 citations: the :symbol matches a whole identifier; a symlink leaving the repo, docs/** markdown and an unanswerable git check-ignore are refused', () => {
-  const root = dirname(OB.writeCatalog({}));
-  mkdirSync(join(root, 'src'), { recursive: true });
+  const root = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
   const block = SP.parsePlanSecurityBlock(OB.planOf(OB.approved3(GC))); // cites src/a.ts:persistent_writeFree
   writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFreeAndMore = 1;\n');
   refused(SP.verifyCitations(block, { root }), 'citation_missing'); // a longer identifier is not the symbol
   writeFileSync(join(root, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
   ok(SP.verifyCitations(block, { root }));
-  refused(SP.verifyCitations(block, { root, gitBin: join(root, 'no-such-git') }), 'citation_missing'); // check-ignore cannot answer: fail closed
+  const nogit = refused(SP.verifyCitations(block, { root, gitBin: join(root, 'no-such-git') }), 'citation_missing'); // check-ignore cannot answer: fail closed
+  assert.ok(nogit.reasons.some((x) => x.startsWith('src/a.ts:') && x.includes('cannot be checked against .gitignore')), J(nogit.reasons)); // the evidence reason
   const outside = dirname(OB.writeCatalog({}));
   writeFileSync(join(outside, 'a.ts'), 'export const persistent_writeFree = 1;\n');
   rmSync(join(root, 'src', 'a.ts'));
@@ -870,12 +869,16 @@ test('[S87] R4 F1: inside a repository, a git that cannot answer (exit 128) fail
   const plain = realpathSync(dirname(OB.writeCatalog({})));
   mkdirSync(join(plain, 'src'), { recursive: true });
   writeFileSync(join(plain, 'src', 'a.ts'), 'export const persistent_writeFree = 1;\n');
-  ok(SP.verifyCitations(CITE_BLOCK(), { root: plain })); // no .git at or above it: as documented
+  writeFileSync(join(plain, 'src', 'policy.ts'), 'export const persistent_writeFree = 1;\n');
+  // no .git at or above it: an evidence citation is taken as it is (as documented), while X1 refuses the existing lowering
+  // surface file (it cannot be checked against git); a deferred surface leaves only the evidence check
+  ok(SP.verifyCitations(x1Block('src/orders.ts'), { root: plain, pending: ['src/orders.ts'] }));
+  const noRepo = refused(SP.verifyCitations(CITE_BLOCK(), { root: plain }), 'citation_missing');
+  assert.ok(noRepo.reasons.every((x) => x.startsWith('surface A path src/a.ts: ') && x.includes('cannot be checked against git')), J(noRepo.reasons));
 });
 
 test('[S88] R4 F2: the :symbol leading boundary is pinned (a longer identifier ending in the symbol does not verify it)', () => {
-  const root = realpathSync(dirname(OB.writeCatalog({})));
-  mkdirSync(join(root, 'src'), { recursive: true });
+  const root = gitRepo(); // X1: the lowering surface src/a.ts must be a repository file too
   writeFileSync(join(root, 'src', 'a.ts'), 'export const xpersistent_writeFree = 1;\n');
   refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
   writeFileSync(join(root, 'src', 'a.ts'), 'export const x = persistent_writeFree;\n');
@@ -889,12 +892,15 @@ test('[S89] R4 F3: an in-repo symlink is judged by what it resolves to (gitignor
     mkdirSync(dirname(join(root, target)), { recursive: true });
     writeFileSync(join(root, target), 'export const persistent_writeFree = 1;\n');
     symlinkSync(join(root, target), join(root, 'src', 'a.ts'));
-    refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+    const r = refused(SP.verifyCitations(CITE_BLOCK(), { root }), 'citation_missing');
+    assert.ok(r.reasons.some((x) => x.startsWith('src/a.ts:') && x.includes(`resolves to ${target}`)), J(r.reasons)); // the evidence reason (X1 also refuses the symlinked surface)
   }
-  const root = gitRepo(); // a symlink to an ordinary tracked-path file inside the repo is fine
+  // a cited symlink to an ordinary file inside the repo is fine (the lowering surface itself is a separate regular file: X1)
+  const root = gitRepo();
   writeFileSync(join(root, 'src', 'impl.ts'), 'export const persistent_writeFree = 1;\n');
+  writeFileSync(join(root, 'src', 'orders.ts'), 'export const orders = 1;\n');
   symlinkSync(join(root, 'src', 'impl.ts'), join(root, 'src', 'a.ts'));
-  ok(SP.verifyCitations(CITE_BLOCK(), { root }));
+  ok(SP.verifyCitations(SP.parsePlanSecurityBlock(OB.planOf(ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/orders.ts', ['persistent_write'], () => 'src/a.ts:persistent_writeFree'), KEEP])))), { root }));
 });
 
 test('[S90] R4 N3: the symlink guard compares path-segment boundaries (a sibling directory sharing the prefix is outside)', () => {
@@ -945,8 +951,8 @@ test('[S93] R5 I1: a dangling .git symlink still marks a repository (lstat, not 
 /** A digest-consistent format-3 plan whose surface A sits at `src/tmp/../lib/orders.ts` (as a hostile planner forges it). */
 function forgedDotPlan() {
   // selected at a clean path, then the LOWERING surface A is moved to a dot-segment spelling of a path that raises no
-  // signal: no name borrows an exemption and no other check looks at a lowering surface's path (known limitation L1),
-  // so only the dot-segment refusal itself can reject this block
+  // signal: no name borrows an exemption. Since X1 the lowering-path rule refuses it as well, so the test pins the
+  // dot-segment reason itself
   const base = ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/lib/orders.ts', ['session_context'], () => 'src/orders.ts:bearerOnly'), KEEP]));
   const surfaces = base.surfaces.map((s) => (s.boundary_id === 'A' ? { ...s, path: 'src/tmp/../lib/orders.ts' } : s));
   const v3 = { surfaces, pairs: ids(base.pairs), na_pairs: base.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: n.evidence })) };
@@ -960,7 +966,8 @@ test('[S95] [S96] R6 L4: a forged format-3 block with a dot-segment surface path
   // obligationMatrix on the block object itself (a caller that bypasses the parse): the replay refuses it
   const line = plan.split('\n').find((l) => l.startsWith('<!-- security-plan: '));
   const raw = JSON.parse(line.slice('<!-- security-plan: '.length, -' -->'.length));
-  refused(SP.obligationMatrix(GC, raw), 'plan_block_invalid');
+  const replayed = refused(SP.obligationMatrix(GC, raw), 'plan_block_invalid');
+  assert.ok(replayed.reasons.some((x) => x.includes("has a '.' or '..' segment")), J(replayed.reasons)); // the R6 refusal, not only X1's path rule
   // the CLI (manual flow)
   const dir = dirname(OB.writeCatalog({}));
   writeFileSync(join(dir, 'forged.md'), plan);
@@ -1088,4 +1095,269 @@ test('[S79] [S103] property (S79 corpus, >= 4000 inputs, with lines and path-onl
     checked++;
   }
   assert.ok(checked >= 4000 && extras > 100 && testNamed > 1000 && refusedBoth > 1000, J({ checked, extras, testNamed, refusedBoth }));
+});
+
+// ====================================================================================================================
+// X1 (closes S1 known limitation L1): the path of a surface that LOWERS a fact (block format 3) must be one exact
+// repository file. Syntactic rule in lowerings() (select, replay, reassess, obligationMatrix): surface_fact_not_lowerable.
+// Filesystem and git rule in verifyCitations (init, preflight, original and confirmation reviews, ship-ready, the
+// obligations CLI): citation_missing. Written before the fix; red on 3977b81. Each block below cites its evidence in a
+// separate clean file (src/policy.ts), so only the surface-path rule can refuse it.
+// ====================================================================================================================
+const X1_CITE = 'src/policy.ts:persistent_writeFree';
+const X1_SYM = POSIX ? false : 'symlinks need privileges on Windows';
+/** The selection with lowering surface A (persistent_write) at `path` and the keeper K (non-lowering, at a path that never exists). */
+const x1Sel = (path, keeper = KEEP) => OB.sel3(GC, [OB.surf('A', 'request-handler', path, ['persistent_write'], () => X1_CITE), keeper]);
+const x1Block = (path) => SP.parsePlanSecurityBlock(OB.planOf(ok(x1Sel(path))));
+/** A git repository holding the cited src/policy.ts and `files`; `add` stages them all (tracked), else they stay untracked. */
+const x1Repo = (files = { 'src/orders.ts': 'export const orders = 1;\n' }, { add = true } = {}) => {
+  const root = gitRepo();
+  writeFileSync(join(root, 'src', 'policy.ts'), 'export const persistent_writeFree = 1;\n');
+  for (const [p, text] of Object.entries(files)) { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), text); }
+  if (add) assert.equal(spawnSync('git', ['add', '-A'], { cwd: root }).status, 0);
+  return root;
+};
+/** A citation_missing refusal naming surface A's path with `what`; the evidence citation (src/policy.ts) is not among the reasons. */
+const surfaceRefused = (r, path, what) => {
+  refused(r, 'citation_missing');
+  assert.ok(r.reasons.some((x) => x.startsWith(`surface A path ${path}: `) && x.includes(what)), `want "surface A path ${path}: ...${what}...": ${J(r.reasons)}`);
+  return r;
+};
+const evidenceClean = (r) => assert.ok(!r.reasons.some((x) => x.startsWith('src/policy.ts')), `the evidence citation verifies: ${J(r.reasons)}`);
+
+test('[S107] X1 syntactic rule: a lowering surface path that is not one file path (trailing slash, directory, path:symbol, glob, whitespace, placeholder, docs-only, .git, node_modules) is surface_fact_not_lowerable', () => {
+  for (const path of ['src/', 'src', 'src/orders.ts/', 'src/orders.ts:handler', 'src/orders.ts:bearerOnly', 'src/*.ts', 'src/**', 'src/?.ts', 'src/orders .ts',
+    'src/TODO', 'src/tbd.ts', 'README.md', 'docs/orders.md', 'node_modules/x/orders.ts', '.git/config']) {
+    const r = refused(x1Sel(path), 'surface_fact_not_lowerable');
+    assert.ok(r.reasons.some((x) => x.startsWith('surface A: its path') && x.includes(J(path))), `${path}: ${J(r.reasons)}`);
+  }
+  // controls: an exact file path (a leading ./ normalized as before; brackets, parentheses and $ are file-name characters)
+  for (const path of ['src/orders.ts', './src/orders.ts', 'app/api/orders/[id]/route.ts', 'src/routes/(app)/orders/+page.server.ts', 'app/routes/orders.$id.tsx']) ok(x1Sel(path));
+  // a NON-lowering surface is never checked, and format 2 is untouched
+  ok(x1Sel('src/orders.ts', OB.surf('K', 'request-handler', 'src/')));
+  ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/*.ts'), OB.surf('K', 'request-handler', 'src/orders.ts:handler')]));
+});
+
+/** A digest-consistent format-3 plan whose LOWERING surface A was moved to `path` after selection (a hand-edited block). */
+function x1ForgedPlan(path) {
+  const base = ok(x1Sel('src/orders.ts'));
+  const surfaces = base.surfaces.map((s) => (s.boundary_id === 'A' ? { ...s, path } : s));
+  const v3 = { surfaces, pairs: ids(base.pairs), na_pairs: base.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: n.evidence })) };
+  const selection_digest = sha(SP.canon({ policy: 3, catalog_digest: base.catalog_digest, facts_digest: base.facts_digest, controls: base.controls.map((c) => c.control_id), ...v3 }));
+  return OB.planOf({ ...base, surfaces, selection_digest });
+}
+
+test('[S107] X1 syntactic rule at replay: a hand-edited block whose lowering surface names a path:symbol or a directory is plan_block_invalid (reassess, obligationMatrix, the obligations CLI)', () => {
+  for (const path of ['src/orders.ts:handler', 'src/', 'src/*.ts']) {
+    const plan = x1ForgedPlan(path);
+    const block = SP.parsePlanSecurityBlock(plan);
+    assert.ok(block, `${path}: the forged block is well-formed`);
+    const re = refused(SP.reassess(OB.reIn3(GC, { plan, files: [{ path: 'src/k.ts' }], contract: ['**'] })), 'plan_block_invalid');
+    assert.ok(re.reasons.some((x) => x.includes('surface_fact_not_lowerable')), `${path}: ${J(re.reasons)}`);
+    refused(SP.obligationMatrix(GC, block), 'plan_block_invalid');
+  }
+  const dir = x1Repo();
+  writeFileSync(join(dir, 'forged.md'), x1ForgedPlan('src/orders.ts:handler'));
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('./security-plan.mjs', import.meta.url)), 'obligations', '--plan', join(dir, 'forged.md'), '--catalog', OB.GATED_PATH, '--repo', dir], { encoding: 'utf8' });
+  assert.equal(JSON.parse(r.stdout).code, 'plan_block_invalid', r.stdout);
+});
+
+test('X1 controls: an exact tracked file and an untracked, not ignored file verify; the non-lowering keeper (a path that does not exist) is never checked; format 2 has nothing to check', () => {
+  const block = x1Block('src/orders.ts');
+  ok(SP.verifyCitations(block, { root: x1Repo() }));
+  ok(SP.verifyCitations(block, { root: x1Repo(undefined, { add: false }) }));
+  assert.equal(SP.verifyCitations({ ...block, policy: 2 }, { root: join(tmpRoot(), 'nope') }).ok, true);
+});
+const tmpRoot = () => realpathSync(dirname(OB.writeCatalog({})));
+
+test('[S108] X1 exact case: a lowering surface path that differs only in letter case from the tracked file is refused on every OS (a case alias)', () => {
+  const root = x1Repo();
+  for (const path of ['src/Orders.ts', 'Src/orders.ts', 'src/orders.TS']) {
+    const r = surfaceRefused(SP.verifyCitations(x1Block(path), { root }), path, 'case alias');
+    evidenceClean(r);
+  }
+});
+
+test('[S115] X1 untracked is what git lists as untracked: a file inside a nested repository, or (case-insensitive file systems) a file the index spells otherwise, is refused', () => {
+  const nested = x1Repo({});
+  mkdirSync(join(nested, 'src', 'vendor'), { recursive: true });
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: join(nested, 'src', 'vendor') }).status, 0);
+  writeFileSync(join(nested, 'src', 'vendor', 'orders.ts'), 'export const orders = 1;\n');
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/vendor/orders.ts'), { root: nested }), 'src/vendor/orders.ts', 'listed by git neither as tracked nor as untracked'));
+  const split = x1Repo({ 'src/Orders.ts': 'export const orders = 1;\n' }); // staged as src/Orders.ts ...
+  rmSync(join(split, 'src', 'Orders.ts'));
+  writeFileSync(join(split, 'src', 'orders.ts'), 'export const orders = 1;\n'); // ... and spelled src/orders.ts on disk
+  const insensitive = existsSync(join(split, 'src', 'ORDERS.ts'));
+  const r = SP.verifyCitations(x1Block('src/orders.ts'), { root: split });
+  if (insensitive) evidenceClean(surfaceRefused(r, 'src/orders.ts', 'the index spells it otherwise'));
+  else ok(r); // case-sensitive: src/orders.ts is a new untracked file and src/Orders.ts a deleted one, as git reports them
+});
+
+test('[S109] X1 regular file: a lowering surface path that is a directory, or sits below a file, is refused', () => {
+  const root = x1Repo({ 'src/orders/index.ts': 'export const x = 1;\n', 'src/orders.ts': 'export const y = 1;\n' });
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/orders'), { root }), 'src/orders', 'is not a regular file'));
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts/index.ts'), { root }), 'src/orders.ts/index.ts', 'src/orders.ts is not a directory'));
+});
+
+test('[S110] X1 no symlink anywhere: a symlinked leaf, a symlinked parent directory, a link leaving the repository and a dangling link are refused (also at confirmation and ship-ready)', { skip: X1_SYM }, () => {
+  const leaf = x1Repo({ 'src/real.ts': 'export const y = 1;\n' });
+  symlinkSync(join(leaf, 'src', 'real.ts'), join(leaf, 'src', 'orders.ts'));
+  spawnSync('git', ['add', '-A'], { cwd: leaf });
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root: leaf }), 'src/orders.ts', 'src/orders.ts is a symlink'));
+  // ...at confirmation and ship-ready too: both re-run the same check on the candidate (engine-gates citationRefusal)
+  assert.equal(G.citationRefusal({ sp: SP, block: x1Block('src/orders.ts'), root: leaf })?.code, 'citation_missing');
+  const parent = x1Repo({ 'lib/orders.ts': 'export const y = 1;\n' });
+  symlinkSync(join(parent, 'lib'), join(parent, 'src', 'lib'));
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/lib/orders.ts'), { root: parent }), 'src/lib/orders.ts', 'src/lib is a symlink'));
+  const away = x1Repo({}), outside = tmpRoot();
+  writeFileSync(join(outside, 'orders.ts'), 'export const y = 1;\n');
+  symlinkSync(join(outside, 'orders.ts'), join(away, 'src', 'orders.ts'));
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root: away }), 'src/orders.ts', 'src/orders.ts is a symlink'));
+  const dangling = x1Repo({});
+  symlinkSync(join(dangling, 'src', 'gone.ts'), join(dangling, 'src', 'orders.ts'));
+  // a dangling link is an entry, never "missing": not even a pending write defers it
+  evidenceClean(surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root: dangling, pending: ['src'] }), 'src/orders.ts', 'src/orders.ts is a symlink'));
+});
+
+test('[S111] X1 tracked or not ignored: an untracked gitignored lowering surface file is refused; tracked or untracked-not-ignored verifies', () => {
+  const root = x1Repo(undefined, { add: false });
+  writeFileSync(join(root, '.gitignore'), 'src/orders.ts\n');
+  const r = surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root }), 'src/orders.ts', 'is ignored by git');
+  evidenceClean(r);
+  assert.ok(!r.reasons.some((x) => x.includes('gitignored')), 'the surface reason never reads like the evidence ignore reason');
+  rmSync(join(root, '.gitignore'));
+  ok(SP.verifyCitations(x1Block('src/orders.ts'), { root }));
+});
+
+test('[S112] X1 deferral is plan-time only: a missing lowering surface file under a DAG write is deferred; at the gates (no pending) or outside every write it is refused; an existing directory is never deferred', () => {
+  const root = x1Repo({});
+  const block = x1Block('src/orders.ts');
+  ok(SP.verifyCitations(block, { root, pending: ['src'] }));
+  ok(SP.verifyCitations(block, { root, pending: ['src/orders.ts'] }));
+  evidenceClean(surfaceRefused(SP.verifyCitations(block, { root }), 'src/orders.ts', 'does not exist'));
+  surfaceRefused(SP.verifyCitations(block, { root, pending: ['lib'] }), 'src/orders.ts', 'does not exist');
+  mkdirSync(join(root, 'src', 'orders.ts'));
+  writeFileSync(join(root, 'src', 'orders.ts', 'x.ts'), 'export const x = 1;\n');
+  surfaceRefused(SP.verifyCitations(block, { root, pending: ['src'] }), 'src/orders.ts', 'is not a regular file');
+});
+
+test('[S113] X1 fail closed: no repository at or above the root, or no git binary, refuses the lowering surface (cannot be checked against git)', () => {
+  const plain = tmpRoot();
+  mkdirSync(join(plain, 'src'), { recursive: true });
+  writeFileSync(join(plain, 'src', 'orders.ts'), 'export const orders = 1;\n');
+  writeFileSync(join(plain, 'src', 'policy.ts'), 'export const persistent_writeFree = 1;\n');
+  const r = surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root: plain }), 'src/orders.ts', 'cannot be checked against git');
+  evidenceClean(r); // an evidence citation outside any repository is still taken as it is ([S87])
+  const root = x1Repo();
+  surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root, gitBin: join(root, 'no-such-git') }), 'src/orders.ts', 'cannot be checked against git');
+  // a broken .git (git exits 128 inside a repository) fails closed too
+  rmSync(join(root, '.git'), { recursive: true, force: true });
+  writeFileSync(join(root, '.git'), 'gitdir: /nonexistent/gitdir\n');
+  surfaceRefused(SP.verifyCitations(x1Block('src/orders.ts'), { root }), 'src/orders.ts', 'cannot be checked against git');
+});
+
+test('[S114] X1 GIT_* dropped: an inherited GIT_DIR / GIT_WORK_TREE naming a repository that tracks the path cannot vouch for a root that has none', () => {
+  const other = x1Repo(); // tracks src/orders.ts
+  const plain = tmpRoot();
+  mkdirSync(join(plain, 'src'), { recursive: true });
+  writeFileSync(join(plain, 'src', 'orders.ts'), 'export const orders = 1;\n');
+  writeFileSync(join(plain, 'src', 'policy.ts'), 'export const persistent_writeFree = 1;\n');
+  const block = x1Block('src/orders.ts');
+  surfaceRefused(withEnv('GIT_DIR', join(other, '.git'), () => SP.verifyCitations(block, { root: plain })), 'src/orders.ts', 'cannot be checked against git');
+  surfaceRefused(withEnv('GIT_DIR', join(other, '.git'), () => withEnv('GIT_WORK_TREE', plain, () => SP.verifyCitations(block, { root: plain }))), 'src/orders.ts', 'cannot be checked against git');
+});
+
+/** The engine rows of a review over obFx: PASS per effective pair, NOT_APPLICABLE per dropped pair citing its own evidence. */
+const x1Rows = (fx) => [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+  ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: `${Object.values(n.evidence)[0]} reads a bearer token only` }))];
+const X1_POLICY = { 'src/policy.ts': 'export const bearerOnly = true;\n' };
+const x1Okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+const x1ToReview = (fx) => { x1Okc(fx.cli('init', { dag: fx.dagFile }), 'init (src/orders.ts is a pending write: deferred)'); x1Okc(fx.cli('drive'), 'api'); x1Okc(fx.gate('red', { node: 'api' }), 'red'); x1Okc(fx.cli('drive'), 'impl'); x1Okc(fx.gate('reassess', {}), 'reassess'); return fx.candidate(); };
+const surfaceGateRefused = (r, what) => {
+  assert.equal(r.out?.code, 'citation_missing', r.stdout);
+  assert.ok((r.out.reasons ?? []).some((x) => x.includes('surface orders path src/orders.ts: ') && x.includes(what)), r.stdout);
+};
+
+test('[S112] X1 end to end: a lowering surface file deferred at init that is still missing (or became a directory) at the original review is refused there', { skip: WIN_SKIP }, (t) => {
+  for (const [implFiles, what] of [[X1_POLICY, 'does not exist'], [{ ...X1_POLICY, 'src/orders.ts/index.ts': 'export const x = 1;\n' }, 'is not a regular file']]) {
+    const fx = obFx(t, { sel: realSelection('src/policy.ts:bearerOnly'), implFiles });
+    const cand = x1ToReview(fx);
+    surfaceGateRefused(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: x1Rows(fx) }) })), what);
+  }
+});
+
+test('X1 end to end: a confirmation after a repair that deletes the lowering surface file is refused (citation_missing)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { sel: realSelection('src/policy.ts:bearerOnly'), implFiles: { ...X1_POLICY, 'src/orders.ts': 'export const orders = 1;\n' }, fixFiles: {}, fixRemove: ['src/orders.ts'] });
+  const cand = x1ToReview(fx);
+  const review = failReview('rx-1', cand, 'src/orders.ts', fx.prompt('fix'));
+  review.primary = { ...review.primary, rule_rows: x1Rows(fx) };
+  x1Okc(fx.gate('review', review), 'original FAIL');
+  x1Okc(fx.cli('drive'), 'repair (deletes src/orders.ts)');
+  x1Okc(fx.gate('reassess', {}), 'reassess after repair');
+  surfaceGateRefused(fx.gate('review', confirmReview('rx-1', fx.candidate())), 'does not exist');
+});
+
+test('X1 end to end: ship-ready refuses when the lowering surface file left the candidate after the review (now ignored)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { sel: realSelection('src/policy.ts:bearerOnly'), implFiles: { ...X1_POLICY, 'src/orders.ts': 'export const orders = 1;\n' } });
+  const cand = x1ToReview(fx);
+  x1Okc(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: x1Rows(fx) }) })), 'review');
+  writeFileSync(join(fx.repo, '.git', 'info', 'exclude'), 'src/orders.ts\n');
+  x1Okc(fx.gate('reassess', {}), 'reassess on the changed candidate');
+  surfaceGateRefused(fx.gate('ship-ready', {}), 'is ignored by git');
+});
+
+// ---- X1 differential against S1 (3977b81): the corpus of [S103] extended with lowering surfaces at exact and broken paths.
+/** Broken spellings of a valid path: each breaks the documented rule (a ':' or a citationProblem). */
+const X1_BAD = [(p) => `${p}/`, (p) => p.slice(0, p.lastIndexOf('/') + 1), (p) => p.split('/')[0], (p) => `${p}:handler`, (p) => `${p.slice(0, p.lastIndexOf('/'))}/*.ts`,
+  (p) => `${p.slice(0, p.lastIndexOf('/'))}/?.ts`, (p) => `${p.slice(0, p.lastIndexOf('/'))}/README.md`, (p) => `node_modules/${p}`, (p) => `${p.slice(0, p.lastIndexOf('/'))}/TODO`,
+  (p) => `${p} x`, (p) => `docs/${p.split('/').pop().replace(/\.[^.]+$/, '')}.md`, (p) => `${p.slice(0, p.lastIndexOf('/'))}/.git/HEAD`];
+const X1_FACTS = Object.keys(OB.TRUE3);
+function x1Corpus(n, seed) {
+  const rnd = prng(seed), pick = (xs) => xs[Math.floor(rnd() * xs.length)], file = () => `${pick(DIRS)}/${pick(BASES)}`;
+  const lowering = (id) => {
+    const valid = file(), r = rnd();
+    const path = r < 0.35 ? pick(X1_BAD)(valid) : r < 0.45 ? `./${valid}` : valid;
+    const low = X1_FACTS.filter(() => rnd() < 0.5);
+    return OB.surf(id, pick(['request-handler', 'rendering-sink']), path, low.length ? low : [pick(X1_FACTS)], (f) => `${file()}:${f}Free`);
+  };
+  return Array.from({ length: n }, () => ({ files: [{ path: file(), added: pick(LINES) }],
+    surfaces: [lowering('A'), ...(rnd() < 0.3 ? [lowering('B')] : []), OB.surf('K', pick(['request-handler', 'rendering-sink', 'outbound-data']), file())] }));
+}
+/** The documented rule, independently of lowerings(): one repository file path, no ':symbol'. */
+const x1RuleHolds = (path) => !String(path).replace(/^(\.\/)+/, '').includes(':') && SP.citationProblem(String(path).replace(/^(\.\/)+/, '')) === null;
+const x1Sum = (r) => (r.ok ? sha(SP.canon(r)) : SP.canon([r.code, r.reasons]));
+/** Every output of one corpus input: format-3 select, its format-2 twin, and for an accepted format-3 block its reassessment (reason-only) and obligation matrix. */
+function x1Outputs(sp, catalog, x) {
+  const sel = (surfaces) => sp.selectControls(catalog, { security_policy: 2, surfaces, facts: OB.TRUE3, evidence: OB.cite3(OB.TRUE3) });
+  const f3 = sel(x.surfaces), f2 = sel(x.surfaces.map(({ facts, evidence, ...s }) => s));
+  const out = { f3, f2: x1Sum(f2), f3sum: x1Sum(f3) };
+  if (f3.ok) {
+    const plan = OB.planOf(f3), base = { plan, catalog, inventory: { surfaces: [] }, changed: { contract_paths: ['**'], files: x.files } };
+    const first = sp.reassess({ ...base, classifications: [] });
+    const final = sp.reassess({ ...base, classifications: (first.signals ?? []).filter((s) => s.class === null).map((s) => ({ signal_id: s.id, reason: 'reason-only dismissal (X1 differential)' })) });
+    out.rest = [x1Sum(first), x1Sum(final), x1Sum(sp.obligationMatrix(catalog, sp.parsePlanSecurityBlock(plan)))];
+  }
+  return out;
+}
+/** S1 (3977b81) outputs over x1Corpus(4000, 20261122), captured with X1_CAPTURE=1 on that commit's security-plan.mjs. */
+const X1_S1 = { n: 4000, keep: 'sha256:737006b48fc5eef67a8d5a462002b3255c558e0d301692f0db22b7791a0c7a82',
+  f2: 'sha256:7831307e5cf2e25d40059236d6e67b333c1ae552921decc6b385ae1d5e8e1902', keptAccepted: 1219, brokenAcceptedByS1: 936 };
+
+test('X1 differential (S1 3977b81, >= 4000 inputs): X1 accepts a subset of S1; every input that keeps the rule has S1\'s exact outputs (select, reassess, matrix); every broken lowering path is refused; format 2 is identical on every input', () => {
+  const corpus = x1Corpus(X1_S1.n, 20261122);
+  const keep = [], f2 = [];
+  let keptAccepted = 0, broken = 0, brokenAccepted = 0;
+  for (const [i, x] of corpus.entries()) {
+    const o = x1Outputs(SP, GC, x);
+    f2.push(o.f2);
+    if (x.surfaces.every((s) => !s.facts || x1RuleHolds(s.path))) { keep.push([i, o.f3sum, ...(o.rest ?? [])]); if (o.f3.ok) keptAccepted++; continue; }
+    broken++;
+    if (o.f3.ok) brokenAccepted++;
+    if (!process.env.X1_CAPTURE) assert.equal(o.f3.ok, false, `a broken lowering path is accepted: ${J(x.surfaces)}`);
+  }
+  const got = { n: corpus.length, keep: sha(SP.canon(keep)), f2: sha(SP.canon(f2)), keptAccepted, brokenAcceptedByS1: brokenAccepted };
+  // capture (on 3977b81's security-plan.mjs, to re-pin X1_S1): always a failure, so it can never pass for the real test
+  if (process.env.X1_CAPTURE) assert.fail(`X1_CAPTURE ${J(got)} broken=${broken}`);
+  assert.deepEqual({ ...got, brokenAcceptedByS1: X1_S1.brokenAcceptedByS1 }, X1_S1, 'X1 outputs differ from S1 on inputs that keep the documented rule (or on format 2)');
+  assert.ok(keptAccepted >= 1000 && broken >= 1000 && X1_S1.brokenAcceptedByS1 >= 500, J({ keptAccepted, broken, s1: X1_S1.brokenAcceptedByS1 }));
 });
