@@ -52,7 +52,13 @@ const CONFIG_FIELDS = ['provider', 'modelMap', 'permissionMode', 'billing', 'wid
  * reads the pin (a partial switch would fire RED_INVALIDATED base_moved).
  */
 export const pinnedBaseOn = (S) => S?.config?.pinnedBase !== undefined;
-export const baseRef = (S) => S?.base?.merge_base ?? S?.config?.base ?? 'HEAD';
+export const baseRef = (S) => (pinnedBaseOn(S) ? pinnedMergeBase(S) : S?.config?.base ?? 'HEAD');
+/** A pinned run's merge base, or base_state_missing: a pinned run never falls back to a local ref. */
+function pinnedMergeBase(S) {
+  const m = S?.base?.merge_base;
+  if (typeof m === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(m)) return m;
+  throw coded('base_state_missing', 'the run pins its base (config.pinnedBase) but S.base has no well-formed merge_base: a partial pin is never resumed');
+}
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**

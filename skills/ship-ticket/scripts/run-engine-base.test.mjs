@@ -20,6 +20,7 @@ import { POSIX, fixture, withOrigin } from './engine-test-fixture.mjs';
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';
+import { pinBaseRecord } from './engine-base-read.mjs';
 
 const WIN_SKIP = POSIX ? false : 'POSIX process groups: Windows quiescence is unknown, so attempts end in a judgment (known limit N7)';
 const CATALOG = SP.loadCatalog();
@@ -103,7 +104,7 @@ test('[B2] [B4] R1 SCRUM-202 replica, flag on: base_moved_local with both SHAs, 
 
 test('[B4] AC2 a remote that advanced after init (fetched, local main fast-forwarded) has no effect: unrelated upstream files never count', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   const pinned = o.sha('HEAD');
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
@@ -120,7 +121,7 @@ test('[B4] AC2 a remote that advanced after init (fetched, local main fast-forwa
 
 test('AC2 an advanced remote whose commit was not fetched is a recoverable base_remote_unavailable, never a pass or a latch', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   o.upstream(1);
@@ -152,7 +153,7 @@ test('AC3 local-only commits on the base that the branch contains are the branch
     o.git('add', 'ops/local.txt');
     o.git('commit', '-q', '-m', 'local only');
     const localTip = o.sha('main');
-    o.git('checkout', '-q', '-b', 'feature');
+    o.feature();
     ok(fx.cli('init', { dag: fx.dagFile }), `init (base ${base})`);
     assert.notEqual(fx.readState().base.merge_base, localTip, 'the pin is the remote base, not the local one');
     ok(fx.cli('drive'));
@@ -168,7 +169,7 @@ test('AC3 local-only commits on the base that the branch contains are the branch
 
 test('[B4] Neg1 offline: init refuses base_remote_unavailable (no state); at reassess the same code is a refusal, never a pass', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   renameSync(o.origin, o.origin + '.away');
   initFails(fx.cli('init', { dag: fx.dagFile }), 'base_remote_unavailable');
   noState(fx);
@@ -194,7 +195,9 @@ test('Neg2 a detached HEAD is refused at init (base_unverified, no state)', { sk
 test('Neg3 no upstream: no origin remote, a remote without the branch, a remote naming no default branch: base_remote_unavailable, no state', { skip: WIN_SKIP }, (t) => {
   const a = baseFx(t, { config: PIN });
   a.o.git('remote', 'remove', 'origin');
-  initFails(a.fx.cli('init', { dag: a.fx.dagFile }), 'base_remote_unavailable');
+  const ra = a.fx.cli('init', { dag: a.fx.dagFile });
+  initFails(ra, 'base_unverified'); // Round 1 item 3: a remote with no configured URL is refused, never read as a path
+  assert.match(ra.stderr, /no configured URL/);
   noState(a.fx);
   const b = baseFx(t, { config: { ...PIN, base: 'trunk' } });
   initFails(b.fx.cli('init', { dag: b.fx.dagFile }), 'base_remote_unavailable');
@@ -231,18 +234,20 @@ test('a remote rewound below the pinned commit is base_moved_remote at reassess 
   const before = o.sha('main');
   o.upstream(2);
   o.fetch();
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   o.git('branch', '-f', 'main', 'origin/main');
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   o.rewind(before);
+  const st = fx.cli('status');
+  assert.ok(st.out.base.advisory.some(x => x.code === 'base_rewound' && x.remote_now === before), st.stdout);
   refused(fx.gate('reassess', {}), 'base_moved_remote');
   assert.equal(fx.readState().security?.reapproval, undefined);
 });
 
 test('a branch that merges the advanced base mid-run is base_moved_local (expected the pin, observed the new merge base): a new run re-pins', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   const pinned = o.sha('HEAD');
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
@@ -267,7 +272,7 @@ test('[B1] every base read uses the pin: a local base branch that moves after RE
   mkdirSync(join(fx.repo, 'spec'), { recursive: true });
   writeFileSync(join(fx.repo, 'spec', 'red.test.mjs'), FAILING_SPEC);
   const o = withOrigin(fx);
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   ok(fx.gate('red', { node: 'r', command: 'unit' }));
@@ -283,27 +288,36 @@ test('[B1] every base read uses the pin: a local base branch that moves after RE
   assert.equal(fx.runs('p').length, 1);
 });
 
-/** A base READ: `config.base ??` or `config.base ||` (optional chaining included); messages and labels naming config.base are not reads. */
-const BASE_READ = /config\??\.base\s*(\?\?|\|\|)/;
+/**
+ * A base READ: `config.base` used as a value, i.e. followed by `??`, `||`, a comparison, a ternary `?` or passed as an argument
+ * (`,` or `)`); a message or label naming config.base in text is not a read.
+ */
+const BASE_READ = /config\??\.base\s*(\?\?|\|\||[=!]==?|\?(?![.?])|[,)])/;
 test('no engine module reads config.base except through baseRef (a partial switch is a defect)', () => {
   // positive controls: the read shapes this guard exists for are hits, a message naming config.base is not
-  assert.ok(BASE_READ.test("  const c = io.candidateId(root, S.config.base ?? 'HEAD', ex);"), 'a planted S.config.base ?? HEAD read is a hit');
-  assert.ok(BASE_READ.test("const b = config?.base || 'HEAD';"), 'config?.base || HEAD is a hit');
+  for (const l of ["  const c = io.candidateId(root, S.config.base ?? 'HEAD', ex);", "const b = config?.base || 'HEAD';", 'io.resolveCommit(root, S.config.base);',
+    "const ref = S.config.base === 'HEAD' ? x : y;", "const r = config.base ? config.base : 'HEAD';", 'git(root, [E.S.config.base, \'--\']);'])
+    assert.ok(BASE_READ.test(l), `planted read is a hit: ${l}`);
   assert.ok(!BASE_READ.test("bad('config.pinnedBase needs config.base to be absent, HEAD or a branch name');"));
+  assert.ok(!BASE_READ.test('`merge-base(HEAD, local ${E.S.config.base}) is`'));
   const files = readdirSync(HERE).filter(f => /^(run-engine|engine-[a-z-]+)\.mjs$/.test(f));
-  assert.ok(files.length > 10 && files.includes('engine-attempts.mjs') && files.includes('engine-unit-review.mjs'), `scanned ${files}`);
+  assert.ok(files.length > 10 && ['engine-attempts.mjs', 'engine-unit-review.mjs', 'engine-base-read.mjs'].every(f => files.includes(f)), `scanned ${files}`);
   const hits = files.flatMap(f => readFileSync(join(HERE, f), 'utf8').replace(/\r\n/g, '\n').split('\n').map((l, i) => [f, i + 1, l]))
     .filter(([, , l]) => BASE_READ.test(l) && !/^\s*(\*|\/\/)/.test(l)).map(([f, , l]) => `${f}: ${l.trim()}`);
-  const ALLOWED = ["engine-dag.mjs: export const baseRef = (S) => S?.base?.merge_base ?? S?.config?.base ?? 'HEAD';",
-    "run-engine.mjs: async function bindTestKinds(ctx, config, text, base = config.base ?? 'HEAD') {"];
-  assert.deepEqual(hits.sort(), [...ALLOWED].sort(), 'every base read goes through baseRef (the accessor itself and the bindTestKinds default, which init always overrides)');
+  const ALLOWED = ["engine-dag.mjs: export const baseRef = (S) => (pinnedBaseOn(S) ? pinnedMergeBase(S) : S?.config?.base ?? 'HEAD');",
+    "run-engine.mjs: try { ({ declaration, baseSha } = pinned ? onBase(pinned, () => tk.readDeclaration(ctx.repoRoot, baseRef(pinned))) : tk.readDeclaration(ctx.repoRoot, config.base ?? 'HEAD')); }",
+    "run-engine.mjs: note(E.S, 'BASE_LOCAL_DIVERGED', { advisory: true, ref: dag.config.base, expected: pin.base.merge_base, observed: pin.local });"];
+  assert.deepEqual(hits.sort(), [...ALLOWED].sort(), 'every base read goes through baseRef (the accessor, the flag-off declaration read, and one event label)');
+  // every candidate id and base commit is read through the base-read module, never io directly
+  const direct = files.filter(f => f !== 'engine-base-read.mjs').flatMap(f => readFileSync(join(HERE, f), 'utf8').split('\n').filter(l => /io\.(candidateId|resolveCommit)\(/.test(l)).map(l => `${f}: ${l.trim()}`));
+  assert.deepEqual(direct, []);
 });
 
 // ------------------------------------------------------------------ flag off, policy versions, in-flight compatibility
 
 test('flag off: a run without config.pinnedBase records no base, no BASE_* event, no status base block, and keeps its policy version', { skip: WIN_SKIP }, (t) => {
   const { fx, o } = baseFx(t);
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   ok(fx.cli('init', { dag: fx.dagFile }));
   ok(fx.cli('drive'));
   const st = fx.cli('status');
@@ -318,7 +332,7 @@ test('policy: versions 5-8 are 1-4 plus pinnedBase, and an engine without S-12 r
   for (const [v, w] of [[1, 5], [2, 6], [3, 7], [4, 8]]) assert.deepEqual(POLICY_SEMANTICS[w], { ...POLICY_SEMANTICS[v], pinnedBase: true });
   const old = { current: 1, semantics: Object.fromEntries([1, 2, 3, 4].map(v => [v, POLICY_SEMANTICS[v]])) };
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   await assert.rejects(init(fx.ctx({ policy: old })), (e) => e.code === 'policy_version_unsupported');
   noState(fx);
   await init(fx.ctx());
@@ -329,7 +343,7 @@ test('policy: versions 5-8 are 1-4 plus pinnedBase, and an engine without S-12 r
 
 test('[B5] a partial pin is never resumed: a pinned state without S.base, or a pin without its policy flag, is base_state_missing', { skip: WIN_SKIP }, async (t) => {
   const { fx, o } = baseFx(t, { config: PIN });
-  o.git('checkout', '-q', '-b', 'feature');
+  o.feature();
   ok(fx.cli('init', { dag: fx.dagFile }));
   const saved = readFileSync(fx.stateFile(), 'utf8');
   fx.editState((s) => { delete s.base; });
@@ -350,4 +364,98 @@ test('DAG: config.pinnedBase is exactly { remote: <name> } and needs config.base
   for (const base of ['main', 'HEAD', 'release/1.2']) validateEngineDag(dag({ ...PIN, base }));
   for (const base of ['main..x', '-x', 3, ''])
     assert.throws(() => validateEngineDag(dag({ ...PIN, base })), (e) => e.code === 'dag_invalid', JSON.stringify(base));
+});
+
+// ------------------------------------------------------------------ Round 1: the pin is only as strong as its weakest read
+
+
+test('[B6] a replace ref on the pinned commit never hides an out-of-plan file (every base-derived read is replace-immune)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const B = fx.readState().base.merge_base;
+  ok(fx.cli('drive'));
+  mkdirSync(join(fx.repo, 'ops'), { recursive: true });
+  writeFileSync(join(fx.repo, 'ops', 'deploy.txt'), 'outside the contract');
+  o.git('add', 'ops/deploy.txt');
+  o.git('commit', '-q', '-m', 'out of plan');
+  // a commit with the branch tip's tree and B's parents, put in place of B: B now "contains" ops/deploy.txt
+  const fake = o.git('commit-tree', 'HEAD^{tree}', '-p', `${B}^`, '-m', 'B, rewritten');
+  o.git('replace', B, fake);
+  const r = refused(fx.gate('reassess', {}), 'security_reapproval');
+  assert.ok(r.out.reapproval_basis.some(b => b.path === 'ops/deploy.txt'), r.stdout);
+});
+
+test('[B7] grafts never rewrite base ancestry: a remote force-pushed to a sibling grafted onto the pin is still base_moved_remote', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const B = fx.readState().base.sha;
+  ok(fx.cli('drive'));
+  const sibling = o.git('commit-tree', `${B}^{tree}`, '-p', `${B}^`, '-m', 'sibling of the pin');
+  o.git('push', '-q', '--force', 'origin', `${sibling}:refs/heads/main`);
+  o.fetch();
+  writeFileSync(join(o.gitDir(), 'info', 'grafts'), `${sibling} ${B}\n`);
+  refused(fx.gate('reassess', {}), 'base_moved_remote');
+});
+
+test('[B8] an inherited GIT_DIR (or any GIT_*) never redirects the pin to another checkout', { skip: WIN_SKIP }, (t) => {
+  const a = baseFx(t, { config: PIN }), b = baseFx(t, { config: PIN });
+  b.o.upstream(2);
+  a.o.feature();
+  const want = a.o.sha('origin/main');
+  const saved = { ...process.env };
+  try {
+    process.env.GIT_DIR = b.o.gitDir();
+    process.env.GIT_WORK_TREE = b.fx.repo;
+    let pin;
+    try { pin = pinBaseRecord(a.fx.repo, { pinnedBase: { remote: 'origin' }, base: 'main' }); } catch (e) { assert.fail(`the pin was redirected: ${e.code}: ${e.message}`); }
+    assert.equal(pin.base.sha, want, 'the pin is the remote base of the repository given, not of GIT_DIR');
+    assert.equal(pin.base.merge_base, want);
+  } finally { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
+});
+
+test('[B9] a remote with no configured URL is refused (base_unverified), never read as a local path (an in-tree `origin` worktree)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  o.git('remote', 'remove', 'origin');
+  o.git('worktree', 'add', '-q', 'origin', 'main');
+  const r = fx.cli('init', { dag: fx.dagFile });
+  initFails(r, 'base_unverified');
+  assert.match(r.stderr, /no configured URL/);
+  noState(fx);
+});
+
+test('[B10] a pinned state whose S.base is malformed (null, false, 0, \'\', [], partial, bad sha) is base_state_missing, never a local-base read', { skip: WIN_SKIP }, async (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  const good = fx.readState().base;
+  const { sha: _s, ...noSha } = good;
+  for (const bad of [null, false, 0, '', [], {}, noSha, { ...good, merge_base: 'main' }, { ...good, sha: 'HEAD' }, { ...good, pinned_at_seq: '1' }, { ...good, extra: 1 }]) {
+    fx.editState((s) => { s.base = bad; });
+    await assert.rejects(status(fx.ctx()), (e) => e.code === 'base_state_missing', JSON.stringify(bad));
+    assert.equal(fx.gate('reassess', {}).out?.code, 'base_state_missing', JSON.stringify(bad));
+  }
+});
+
+test('[B11] Neg4 a push URL of another repository is refused even when the fetch URL names no GitHub repository (a local path)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.feature();
+  o.git('config', 'remote.origin.pushurl', 'https://github.com/evil/app.git');
+  const r = fx.cli('init', { dag: fx.dagFile });
+  initFails(r, 'remote_ambiguous');
+  assert.match(r.stderr, /push URL of another repository/);
+  noState(fx);
+  o.git('config', 'remote.origin.pushurl', o.origin);
+  ok(fx.cli('init', { dag: fx.dagFile }), 'a push URL equal to the fetch URL is fine');
+});
+
+test('[B12] Neg3 a ticket branch with no upstream is refused at init (base_unverified, no state)', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = baseFx(t, { config: PIN });
+  o.git('checkout', '-q', '-b', 'feature');
+  const r = fx.cli('init', { dag: fx.dagFile });
+  initFails(r, 'base_unverified');
+  assert.match(r.stderr, /no upstream/);
+  noState(fx);
 });

@@ -3,7 +3,8 @@
  *
  * Provenance (ported, trimmed): repositoryOf and sameRepository from commit a890b0d skills/ship-ticket/scripts/engine-ci.mjs
  * (lines 283-294), configAll, remoteIdentity and resolveBaseRef from a890b0d skills/ship-ticket/scripts/engine-identity.mjs
- * (lines 50-87 and 112-118), unchanged in behaviour. Left out on purpose: the release-identity tuple (publicationOf,
+ * (lines 50-87 and 112-118). Changed by S-12 Round 1: a push URL is checked whatever the fetch URL is, remoteUrl is new, and
+ * resolveBaseRef ends its options with `--` (it is given a URL). Callers run all of it under engine-base-read.mjs underHardenedGit. Left out on purpose: the release-identity tuple (publicationOf,
  * verifyReleaseBinding, identityRecord), which is S-28a's, and resolveTool/pinnedTool, which wait for their first consumer
  * (S-28a, S-15). This module lives beside the engine, not in lib/: lib/ holds the hardened git runner and its directory scans.
  */
@@ -56,11 +57,27 @@ export function remoteIdentity(repoRoot, remote = 'origin') {
   if (pushes.values.length > 1) return no('remote_ambiguous', `remote ${given} has ${pushes.values.length} push URLs (${pushes.values.join(', ')}): git pushes to all of them; ${fix}`);
   const url = urls.values[0] ?? null;
   const id = repositoryOf(url);
-  if (!id) return { ok: true, identity: null };
   const push = pushes.values[0] ?? null;
-  if (push !== null && !sameRepository(repositoryOf(push), id))
-    return no('remote_ambiguous', `remote ${given} fetches from ${id.slug} but pushes to ${repositoryOf(push)?.slug ?? push}: a push URL of another repository; ${fix}`);
+  // S-12 Round 1: a push URL is compared even when the fetch URL names no GitHub repository (a local path, file://, another host):
+  // the same literal URL or the same repository, else remote_ambiguous
+  if (push !== null && push !== url && !(id && sameRepository(repositoryOf(push), id)))
+    return no('remote_ambiguous', `remote ${given} fetches from ${id?.slug ?? url} but pushes to ${repositoryOf(push)?.slug ?? push}: a push URL of another repository; ${fix}`);
+  if (!id) return { ok: true, identity: null };
   return { ok: true, identity: { remote_name: given, url, ...id } };
+}
+
+/**
+ * S-12 Round 1: the ONE configured URL of remote `name`, which every ls-remote of a pinned run is given (never the bare name: git
+ * reads a name with no URL as a local path, e.g. an in-tree directory or worktree called `origin`). base_unverified when no URL
+ * is configured or it could be read as an option; remote_ambiguous when several are.
+ */
+export function remoteUrl(repoRoot, name) {
+  const urls = configAll(repoRoot, `remote.${name}.url`);
+  if (!urls.ok) return no('remote_ambiguous', `${urls.reason}: the remote ${name} cannot be read unambiguously`);
+  if (urls.values.length === 0) return no('base_unverified', `remote ${name} has no configured URL: git would read "${name}" as a local path; configure remote.${name}.url`);
+  if (urls.values.length > 1) return no('remote_ambiguous', `remote ${name} has ${urls.values.length} fetch URLs (${urls.values.join(', ')})`);
+  if (urls.values[0].startsWith('-')) return no('base_unverified', `remote ${name} has a URL that git would read as an option: ${urls.values[0]}`);
+  return { ok: true, url: urls.values[0] };
 }
 
 /**
@@ -69,7 +86,7 @@ export function remoteIdentity(repoRoot, remote = 'origin') {
  */
 export function resolveBaseRef(S, repoRoot, remote) {
   if (S?.config?.base && S.config.base !== 'HEAD') return { ok: true, ref: S.config.base };
-  const r = authGit(repoRoot, ['ls-remote', '--symref', remote, 'HEAD']);
+  const r = authGit(repoRoot, ['ls-remote', '--symref', '--', remote, 'HEAD']);
   if (r.status !== 0) return no('base_remote_unavailable', `git ls-remote --symref ${remote} HEAD failed (${(r.stderr || r.error?.message || `exit ${r.status}`).trim()}): the default branch cannot be resolved`);
   const m = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(r.stdout);
   return m ? { ok: true, ref: m[1] } : no('base_remote_unavailable', `remote ${remote} names no default branch (ls-remote --symref HEAD): bind config.base`);

@@ -2,7 +2,7 @@
 // skills/ship-ticket/scripts/engine-base.mjs, git blob 2ea46c719fa62ce350784a8e91185e79e5195857: every line below this header is
 // that blob, byte for byte. On main S-12 uses verifyBase, authGit and BASE_CODES for the pinned base of a run (run-engine.mjs
 // init, gate reassess, status). The review freeze and engine-identity.mjs verifyReleaseBinding the comment below names are
-// S-28a, not on main yet. TODO(S-02a0c): authGit moves to the hardened lib git runner once that runner is public (OD-5).
+// S-28a. OD-5 revised: callers run it under engine-base-read.mjs underHardenedGit (env); TODO(S-02a0c): lib git runner.
 /**
  * Verified base commit (R0-S repair round 3, defect N-BASE). Node built-ins only.
  *

@@ -351,9 +351,11 @@ run measures. That is the SCRUM-202 latch: a local `main` 26 commits behind orig
 files into the candidate, and the first `gate reassess` recorded a permanent REAPPROVAL.
 
 `init` refuses, writing nothing:
-- `remote_ambiguous`: several `remote.<name>.url` values, several push URLs, or a push URL of another
-  repository.
-- `base_unverified`: a detached HEAD, or no history shared with the remote base.
+- `remote_ambiguous`: several `remote.<name>.url` values, several push URLs, or a push URL that is
+  neither the fetch URL nor the same repository (checked whatever host the fetch URL names).
+- `base_unverified`: no configured URL for the remote (git would read the bare name as a local path,
+  such as an in-tree `origin` directory), a detached HEAD, a ticket branch with no upstream, or no
+  history shared with the remote base.
 - `base_remote_unavailable`: offline, no such remote or branch, no default branch, or the remote
   commit not fetched yet.
 
@@ -373,16 +375,28 @@ A remote that advanced with commits the branch lacks has no effect. `status` sho
 in its advisory `base` block, which is never a judgment. A real unapproved delta measured from the
 pinned merge base still gives REAPPROVAL.
 
-A partial pin is never resumed (`base_state_missing`): the policy flag, `S.base` and
-`config.pinnedBase` must come together. An engine without S-12 refuses a pinned run with
+Every git read derived from a pinned base runs hardened (`engine-base-read.mjs`): no inherited
+`GIT_*` variable (so `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG*` and the like never redirect it), replace
+refs off and grafts off. The remote is always given by its one configured URL, never by its name.
+`engine-base.mjs` keeps its ported `authGit`; the environment it runs under is supplied by the caller.
+
+A partial pin is never resumed (`base_state_missing`): the policy flag, the `base` key and
+`config.pinnedBase` must come together, and `S.base` must be exactly
+`{ remote, identity, ref, sha, merge_base, pinned_at_seq }` with full SHAs. A pinned run never falls
+back to a local ref. An engine without S-12 refuses a pinned run with
 `policy_version_unsupported`. Rollback is the flag: archive the run and start a new one without
 `config.pinnedBase`.
 
 Limits:
 - The remote is reached through the repository's git config, so a same-user `insteadOf` or
   `remote set-url` can redirect it.
-- `ls-remote` needs the user's ambient credentials, and the hermetic git runner (S-02a0c) is not
-  used yet.
+- `ls-remote` uses the user's git config and credential helpers. Inherited `GIT_SSH_COMMAND` and
+  `GIT_ASKPASS` are not honored for these reads. The hermetic git runner (S-02a0c) is not used yet.
+- The base is checked at `gate reassess` only (and reported by `status`). A pinned run without
+  `config.securityPolicy 2` gets the accessor but no base check.
+- A remote URL re-pointed at another repository mid-run is not detected (`identity_changed` is
+  S-28a). A second URL added mid-run is refused at the next reassess.
+- `state.json` is same-user writable: a tampered but well-formed `S.base` is trusted.
 - `base-drift.mjs` is unchanged. It is the standalone, advisory local-ref check that the briefs use.
 
 **Lock and persistence.** Every mutating command takes one lock file created

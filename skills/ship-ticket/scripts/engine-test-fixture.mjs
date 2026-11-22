@@ -234,10 +234,14 @@ export function withOrigin(fx, { branch = 'main' } = {}) {
   must(fx.root, 'clone', '-q', '--bare', fx.repo, origin);
   must(fx.repo, 'remote', 'add', 'origin', origin);
   must(fx.repo, 'fetch', '-q', 'origin');
+  must(fx.repo, 'branch', '-q', `--set-upstream-to=origin/${branch}`, branch); // the base branch tracks origin, as a clone's does
   must(fx.root, 'clone', '-q', '--branch', branch, origin, up);
   let seq = 0;
   return { origin, branch, git: (...a) => must(fx.repo, ...a), gitRaw: (...a) => run(fx.repo, ...a), sha: (ref) => must(fx.repo, 'rev-parse', ref),
     fetch: () => must(fx.repo, 'fetch', '-q', 'origin'),
+    gitDir: () => join(fx.repo, '.git'),
+    /** Check out a new ticket branch (from `start`, default HEAD) that tracks origin/<branch>, as a pushed branch would. */
+    feature: (start = 'HEAD', name = 'feature') => { must(fx.repo, 'checkout', '-q', '-b', name, start); must(fx.repo, 'branch', '-q', `--set-upstream-to=origin/${branch}`, name); },
     upstream(n, prefix = 'upstream') {
       mkdirSync(join(up, prefix), { recursive: true });
       for (let i = 0; i < n; i++) { const f = `${prefix}/f${++seq}.txt`; writeFileSync(join(up, f), `upstream ${seq}\n`); must(up, 'add', f); must(up, 'commit', '-q', '-m', `upstream ${seq}`); }

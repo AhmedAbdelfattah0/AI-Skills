@@ -38,9 +38,7 @@ import { unretired, LIVE } from './engine-quiesce.mjs';
 import { hasUnits, unitDrift, unitWork, runUnitChecks, bindingHeld, unitStates, unitJudgments, unitProjection, restoreCheckFailed, ceiling, clearUnit } from './engine-units.mjs';
 import { unitReviewOn, unitReviewJudgments, withReviews, pendingReviews, reconcileReviews } from './engine-unit-review.mjs';
 import { ENGINE_POLICY_VERSION, POLICY_SEMANTICS, TEST_KINDS_POLICY_VERSION, recordedVersion, runPolicy, skillCommit, pinnedVersion } from './engine-policy.mjs';
-import { verifyBase, authGit } from './engine-base.mjs';
-import { remoteIdentity, resolveBaseRef } from './remote-identity.mjs';
-import { localMergeBase, baseStatus } from './engine-gates.mjs';
+import { pinBaseRecord, baseStatus, baseCandidate, onBase, wellFormedBase } from './engine-base-read.mjs';
 
 export { acquireLock, writeStateAtomic } from './engine-io.mjs';
 export { planNarrativeDigest, validateEngineDag } from './engine-dag.mjs';
@@ -124,8 +122,11 @@ function open(ctx) {
       if (E.S.test_kinds && evidenceEntries(E.S.config).map(([n]) => n).join() !== E.S.test_kinds.entry)
         throw coded('multi_entry_unsupported_v0', `the run's evidence entries (${evidenceEntries(E.S.config).map(([n]) => n).join(', ') || 'none'}) are not exactly its bound entry ${E.S.test_kinds.entry}`);
       // S-12: the pinned-base flag of the run's version, S.base and config.pinnedBase come together or not at all (no partial pin is resumed)
-      if (new Set([E.policy.semantics.pinnedBase === true, E.S.base !== undefined, pinnedBaseOn(E.S)]).size !== 1)
+      // (S-12 Round 1: presence is the KEY, so a null/false/0 S.base counts; a pin must be well-formed, never read as no pin)
+      if (new Set([E.policy.semantics.pinnedBase === true, Object.hasOwn(E.S, 'base'), pinnedBaseOn(E.S)]).size !== 1)
         throw coded('base_state_missing', `policy_version ${E.S.policy_version}, the pinned base state and config.pinnedBase disagree: a partial pin is never resumed`);
+      if (Object.hasOwn(E.S, 'base') && !wellFormedBase(E.S.base))
+        throw coded('base_state_missing', 'S.base is not a well-formed pin { remote, identity, ref, sha, merge_base, pinned_at_seq }: a partial pin is never resumed');
       for (const [k, v] of Object.entries({ builders: [], telemetry_degraded: [], locks: {}, repairs: [], outbox: [] })) E.S[k] ??= v;
       E.S.rounds ??= { prove_repair_batches: 0, review_repairs: {} };
       // commit() never persists an unretired attempt, so one on disk predates the `quiesced` field.
@@ -369,10 +370,11 @@ function newRunPolicy(ctx, active = false, obligations = false, pinned = false) 
  * ONE runner entry) and runner_unsupported (P4r readEntry: an unsupported runner is reported, never bypassed; commands
  * without `evidence` are untouched and still run in the proof). Without config.testKinds an unresolvable base is "no declaration".
  */
-async function bindTestKinds(ctx, config, text, base = config.base ?? 'HEAD') {
+async function bindTestKinds(ctx, config, text, pinned = null) {
   const tk = await import('./test-kinds.mjs'); // the opt-in probe only: an inactive run never loads the evidence modules
   let declaration = null, baseSha = null;
-  try { ({ declaration, baseSha } = tk.readDeclaration(ctx.repoRoot, base)); }
+  // S-12: a pinned run reads the declaration at its pinned merge base, through the base-read module
+  try { ({ declaration, baseSha } = pinned ? onBase(pinned, () => tk.readDeclaration(ctx.repoRoot, baseRef(pinned))) : tk.readDeclaration(ctx.repoRoot, config.base ?? 'HEAD')); }
   catch (e) { if (config.testKinds !== undefined || !['base_invalid', 'repo_unavailable'].includes(e.code)) throw coded(e.code ?? 'declaration_invalid', e.message); }
   const opted = tk.optIn({ planText: text, declaration });
   if (config.testKinds === undefined) { if (opted) throw coded('test_kinds_policy_required', 'the plan or the base declaration opts in to test kinds, but the DAG has no config.testKinds'); return null; }
@@ -390,28 +392,6 @@ async function bindTestKinds(ctx, config, text, base = config.base ?? 'HEAD') {
     floor: { line, claimed: rec.claimed, ai: rec.ai }, tests: { globs: declaration?.tests?.globs ?? [] }, records: {}, refused: null, freeze_evidence: null };
 }
 
-/**
- * S-12 (ASTF-6) init with config.pinnedBase { remote }: the base of record is the commit the REMOTE names for the base branch
- * (config.base when it names a branch, else the remote's default branch, `ls-remote --symref`), read once here; its merge base
- * with HEAD is what every base read of the run uses (baseRef). Refusals (nothing is written): remote_ambiguous (several fetch or
- * push URLs, or a push URL of another repository), base_unverified (HEAD detached, or no history shared with the remote base),
- * base_remote_unavailable (offline, no such remote or branch, no default branch, or the remote commit not fetched). A local
- * config.base branch whose merge base differs is reported (BASE_LOCAL_DIVERGED, advisory): the run proceeds on the pinned base
- * and gate reassess refuses base_moved_local until the local ref agrees.
- */
-function pinBase(root, config) {
-  const remote = config.pinnedBase.remote;
-  const id = remoteIdentity(root, remote);
-  if (!id.ok) throw coded(id.code, id.reasons.join('; '));
-  if (authGit(root, ['symbolic-ref', '-q', 'HEAD']).status !== 0)
-    throw coded('base_unverified', 'HEAD is detached: a pinned base is recorded for a branch, so check out the ticket branch, then init');
-  const ref = resolveBaseRef({ config }, root, remote);
-  if (!ref.ok) throw coded(ref.code, ref.reasons.join('; '));
-  const v = verifyBase(root, { ref: ref.ref, remote, identity: id.identity });
-  if (!v.ok) throw coded(v.code, v.reasons.join('; '));
-  return { base: { remote, identity: v.base.identity, ref: v.base.ref, sha: v.base.sha, merge_base: v.base.merge_base }, local: localMergeBase(root, config) };
-}
-
 /** Create the state ledger after verifying the approved narrative, the DAG binding and the pinned exclusions. */
 export async function init(ctx) {
   return locked(ctx, async (E) => {
@@ -426,8 +406,8 @@ export async function init(ctx) {
     const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
     await bindSecurity(ctx, dag.config, dag.nodes, start, text, narrative);
     const obligations = dag.config.securityPolicy === 2 && (await securityPlan()).parsePlanSecurityBlock(text)?.policy === 3;
-    const pin = pinnedBaseOn(dag) ? pinBase(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
-    const testKinds = await bindTestKinds(ctx, dag.config, text, baseRef({ base: pin?.base, config: dag.config }));
+    const pin = pinnedBaseOn(dag) ? pinBaseRecord(ctx.repoRoot, dag.config) : null; // before the declaration read: it reads at the base
+    const testKinds = await bindTestKinds(ctx, dag.config, text, pin ? { base: pin.base, config: dag.config } : null);
     const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === ctx.runId);
     const listed = narrative.includes(dagDigest) || narrative.includes(dagDigest.replace(/^sha256:/, 'sha256-'));
     const binding = listed ? 'plan' : bound.length === 1 && normDigest(bound[0].dag_digest) === dagDigest ? 'dag_bound' : null;
@@ -598,7 +578,7 @@ export async function rebind(ctx) {
     if (hasUnits(S)) throw coded('rebind_units', 'rebind does not cover runs with units (their evidence bindings are not re-bound)');
     const live = S.attempts.filter(a => LIVE.includes(a.status)).map(a => a.attempt_id);
     if (live.length) throw coded('rebind_attempts_live', `attempts still live: ${live.join(', ')}`);
-    const c = io.candidateId(ctx.repoRoot, baseRef(S), S.pinned_exclusions);
+    const c = baseCandidate(ctx.repoRoot, S, S.pinned_exclusions);
     if (!c.candidate_id || c.candidate_id !== S.freeze.candidate)
       throw coded('rebind_not_frozen_tree', `work tree is ${c.candidate_id ?? c.reason}, frozen is ${S.freeze.candidate}: revert the edit or record an owner RETRY for a new review`);
     const nodes = [];
@@ -706,7 +686,7 @@ export async function gate(ctx) {
       if ((ctx.gate === 'reassess' || input.addendum !== undefined) && !securityOn(E.S)) throw coded('bad_input', `gate ${ctx.gate}: needs a DAG with config.securityPolicy 2`);
       await deliver(E);
       reconcileReviews(E);
-      const c = io.candidateId(ctx.repoRoot, baseRef(E.S), E.S.pinned_exclusions);
+      const c = baseCandidate(ctx.repoRoot, E.S, E.S.pinned_exclusions);
       if (ctx.gate === 'reassess') E.candidatePaths = c.paths ?? [];
       // SHIP conjunction (Wave 3.5, seeded seed 20): a done node whose declared input or output drifted is not done.
       const drifted = ctx.gate === 'ship-ready' ? drift(E, { mutate: false }) : [];
