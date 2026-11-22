@@ -45,6 +45,7 @@
  * unreadable input (not UTF-8, BOM, not JSON, duplicate keys, trailing text, too deep, too large) or an internal error; the
  * stdout line carries the data. Every output carries `note`: "Required checks unverified; no gate decision."
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { isEntrypoint } from './harness.mjs';
@@ -70,6 +71,12 @@ export const CI_STATES = Object.freeze(['FAIL', 'UNAVAILABLE', 'NOT_CLASSIFIED']
 export const NOT_ASSERTED = Object.freeze(['required_check_policy', 'merge_basis', 'local_evidence', 'fallback_decision']);
 export const NOTE = 'Required checks unverified; no gate decision.';
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
+/**
+ * The annotation hash ci-snapshot.mjs records for a zero-annotation check whose annotation file EXISTS and is empty: its
+ * sha256(JSON of the canonical parsed lines) over `[]` (no file at all records null). Derived the same way, never a literal;
+ * the test proves it equals buildSnapshot's own output.
+ */
+export const EMPTY_ANNOTATIONS_SHA256 = createHash('sha256').update(JSON.stringify([])).digest('hex');
 /** Every semantic reason code validateSnapshot may raise; shape problems are `shape_<lib/shape.mjs code>`. */
 export const INVALID_CODES = Object.freeze([
   'unreadable', 'not_internally_consistent', 'snapshot_reports_problems', 'not_attested_mismatch', 'hash_invalid', 'repo_invalid',
@@ -136,7 +143,8 @@ function semanticProblems(s) {
     if (r.fields_malformed !== false) bad('row_fields_malformed', at);
     if ((r.binding === 'bound') !== (r.app === 'github-actions') || r.app === '') bad('binding_app_mismatch', at);
     const a = r.annotations;
-    if (a.status === 'none' ? !(a.count === 0 && a.messages.length === 0 && a.sha256 === null) : !(a.count >= 1 && a.messages.length === a.count && typeof a.sha256 === 'string' && HEX64.test(a.sha256))) bad('annotations_inconsistent', at);
+    // none: no file (null) or an EMPTY file (the builder's hash of []); present: a real hash, never the empty-list one
+    if (a.status === 'none' ? !(a.count === 0 && a.messages.length === 0 && (a.sha256 === null || a.sha256 === EMPTY_ANNOTATIONS_SHA256)) : !(a.count >= 1 && a.messages.length === a.count && typeof a.sha256 === 'string' && a.sha256 !== EMPTY_ANNOTATIONS_SHA256 && HEX64.test(a.sha256))) bad('annotations_inconsistent', at);
     if (r.binding === 'external') {
       if (!(r.job_id === null && r.run_id === null && r.run_attempt === null && r.job_inputs === null && r.input_status === 'external')) bad('external_row_inconsistent', at);
       continue;

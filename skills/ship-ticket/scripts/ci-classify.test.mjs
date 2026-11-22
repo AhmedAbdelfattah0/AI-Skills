@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, mkdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSnapshot, readSnapshot, CONCLUSIONS } from './ci-snapshot.mjs';
-import { classifySnapshot, classifyNormal, validateSnapshot, durationSeconds, parseStrictJson, main, NOTE, BILLING_MAX_SECONDS, BILLING_ALLOWLIST_VERSION, BILLING_ANNOTATION_ALLOWLIST, CLASSIFICATIONS, CI_STATES, SCHEMA, INVALID_CODES, MAX_INPUT_BYTES } from './ci-classify.mjs';
+import { classifySnapshot, classifyNormal, validateSnapshot, durationSeconds, parseStrictJson, main, NOTE, BILLING_MAX_SECONDS, BILLING_ALLOWLIST_VERSION, BILLING_ANNOTATION_ALLOWLIST, CLASSIFICATIONS, CI_STATES, SCHEMA, INVALID_CODES, MAX_INPUT_BYTES, EMPTY_ANNOTATIONS_SHA256 } from './ci-classify.mjs';
 import { classify as classifyMutant, loadMutationSource, runMutant as runTreeMutant } from './lib/mutation.test-helper.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -45,6 +45,7 @@ function snap(specs, over = {}) {
       (jobs[`run${s.run}-${s.attempt}.jsonl`] ??= []).push(j);
     }
     if (s.ann.length) annotations[`${s.id}.jsonl`] = s.ann.map((message) => JSON.stringify({ message })).join('\n') + '\n';
+    else if (s.emptyAnnFile) annotations[`${s.id}.jsonl`] = ''; // `gh api .../annotations --jq '.[]'` on a zero-annotation check writes an EMPTY file
   }
   const texts = { checkRuns: nl(checks), jobs: Object.fromEntries(Object.entries(jobs).map(([k, v]) => [k, nl(v)])), annotations, problems: [] };
   return buildSnapshot({ texts: { ...texts, ...over }, repo: REPO, sha: SHA, origin: ORIGIN });
@@ -420,6 +421,49 @@ test('an unknown key is never echoed into the output (no input can plant a word 
   assert.deepEqual(r.reasons, ['invalid:shape_unknown_key@/check_runs/0/*']);
 });
 
+test('zero annotations with an EMPTY annotation file (the common real case): the builder hashes [] and the snapshot is classified, never refused', () => {
+  const green = snap([{ id: 1, ...OK, emptyAnnFile: true }, { id: 2, name: 'lint', ...OK, emptyAnnFile: true }, { id: 3, name: 'review', ...EXT, conclusion: 'success', emptyAnnFile: true }]);
+  assert.equal(green.state, 'snapshot_valid');
+  const empty = green.check_runs[0].annotations;
+  assert.equal(empty.status, 'none');
+  assert.match(empty.sha256, /^[0-9a-f]{64}$/, 'the REAL builder records a hash for an empty annotation file');
+  assert.equal(empty.sha256, EMPTY_ANNOTATIONS_SHA256, 'the accepted value is exactly what buildSnapshot emits');
+  assert.equal(snap([{ id: 1, ...OK }]).check_runs[0].annotations.sha256, null, 'no file: null');
+  // (a) a green run: classified per precedence, not invalid
+  assert.equal(validateSnapshot(green).ok, true, JSON.stringify(validateSnapshot(green).reasons));
+  assert.equal(classifySnapshot(green).classification, 'no_failure_observed');
+  // (b) a failed check with zero annotations (empty file): R4 fails, unavailable by precedence; executed: failed_code
+  const zeroAnn = classifySnapshot(snap([{ id: 1, ann: [], emptyAnnFile: true }]));
+  assert.equal(zeroAnn.classification, 'unavailable');
+  assert.ok(rowOf(zeroAnn, 1).reasons.includes('R4_annotation_not_allowlisted'));
+  assert.equal(invalidCodes(zeroAnn).length, 0);
+  assert.equal(classifySnapshot(snap([{ id: 1, ann: [], emptyAnnFile: true, steps: [STEP], secs: 80 }])).classification, 'failed_code');
+  // (c) a failed check with annotations beside zero-annotation green checks
+  assert.equal(classifySnapshot(snap([...six(), { id: 7, name: 'lint', ...OK, emptyAnnFile: true }])).classification, 'billing_blocked');
+  // (d) the empty-list hash where annotations exist, any other hash on status none, or null-ness swapped: invalid
+  const withAnn = snap(six());
+  assertInvalid(classifySnapshot(forge(withAnn, (s) => { s.check_runs[0].annotations.sha256 = EMPTY_ANNOTATIONS_SHA256; })), 'annotations_inconsistent');
+  assertInvalid(classifySnapshot(forge(withAnn, (s) => { s.check_runs[0].annotations.sha256 = null; })), 'annotations_inconsistent');
+  assertInvalid(classifySnapshot(forge(green, (s) => { s.check_runs[0].annotations.sha256 = withAnn.check_runs[0].annotations.sha256; })), 'annotations_inconsistent');
+  assertInvalid(classifySnapshot(forge(green, (s) => { s.check_runs[0].annotations.sha256 = 'f'.repeat(64); })), 'annotations_inconsistent');
+  assertInvalid(classifySnapshot(forge(green, (s) => { s.check_runs[0].annotations.sha256 = EMPTY_ANNOTATIONS_SHA256.toUpperCase(); })), 'annotations_inconsistent');
+  assertInvalid(classifySnapshot(forge(green, (s) => { s.check_runs[0].annotations.sha256 = 0; })), 'shape_bad_type');
+  // through the documented CLI pipe: a real snapshot directory whose zero-annotation checks have empty annotation files
+  const dir = mkdtempSync(join(tmpdir(), 'ci-classify-emptyann-'));
+  try {
+    for (const rel of ['check-runs.jsonl', ...readdirSync(join(REPLICA, 'jobs')).map((n) => join('jobs', n)), ...readdirSync(join(REPLICA, 'annotations')).map((n) => join('annotations', n))]) {
+      mkdirSync(join(dir, rel, '..'), { recursive: true }); writeFileSync(join(dir, rel), readFileSync(join(REPLICA, rel)));
+    }
+    const zero = readFileSync(join(REPLICA, 'check-runs.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((l) => l.output?.annotations_count === 0);
+    assert.ok(zero.length >= 1);
+    for (const c of zero) writeFileSync(join(dir, 'annotations', `${c.id}.jsonl`), '');
+    const out = spawnSync(process.execPath, [join(HERE, 'ci-snapshot.mjs'), 'check', '--snapshot', dir, '--repo', REPO, '--sha', SHA, '--origin', ORIGIN], { encoding: 'utf8' });
+    assert.equal(out.status, 0);
+    const piped = cli(['classify', '--snapshot-json', '-'], out.stdout);
+    assert.equal(JSON.parse(piped.stdout).classification, 'billing_blocked');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---- every typed reason code fires (the INVALID_CODES table; a code without a breaking case fails the suite) ----
 const BASE = () => snap([{ id: 1, ...OK }, { id: 2, name: 'unit', attempt: 1, steps: [STEP], secs: 80 }, { id: 3, name: 'unit', attempt: 2, ...OK }, { id: 4, name: 'review', ...EXT, conclusion: 'success' }]);
 const CODE_CASES = [
@@ -483,19 +527,24 @@ function generate(rnd) {
   const pick = (a) => a[Math.floor(rnd() * a.length)];
   const specs = [];
   let id = 1;
-  for (const run of rnd() < 0.7 ? [100] : [100, 200]) {
-    for (const name of ['build', 'unit', 'lint'].slice(0, 1 + Math.floor(rnd() * 3))) {
+  // widened grammar: several run ids (incl. a max safe integer), names with spaces/slashes, several external apps
+  const RUNS = [100, 200, 300, 7000000001, 9007199254740991];
+  const NAMES = ['build', 'unit', 'lint', 'e2e', 'sast', 'deploy preview', 'node 18 / ubuntu'];
+  const APPS = ['coderabbitai', 'vercel', 'codecov', 'sonarcloud'];
+  const sample = (a, n) => { const c = a.slice(); const out = []; while (out.length < n && c.length) out.push(c.splice(Math.floor(rnd() * c.length), 1)[0]); return out; };
+  for (const run of sample(RUNS, rnd() < 0.6 ? 1 : rnd() < 0.7 ? 2 : 3)) {
+    for (const name of sample(NAMES, 1 + Math.floor(rnd() * 3))) {
       const k = rnd() < 0.55 ? 1 : rnd() < 0.6 ? 2 : 3;
       for (let attempt = 1; attempt <= k; attempt++) {
         const conclusion = pick(['success', 'success', 'success', 'failure', 'failure', 'failure', 'startup_failure', 'cancelled', 'skipped', 'neutral', 'timed_out', 'action_required', 'stale']);
         const steps = rnd() < 0.03 ? undefined : pick([[], [], [SKIP], [STEP], [FAILSTEP], [SKIP, STEP]]);
         const runner = rnd() < 0.03 ? null : conclusion === 'skipped' && rnd() < 0.5 ? null : pick(['', '', 'gh-runner-1']);
-        specs.push({ id: id++, name, run, attempt, app: 'github-actions', conclusion, steps, runner, secs: Math.floor(rnd() * 15), ann: pick([[BILL], [BILL], [], ['other'], [BILL, BILL], [`${BILL} `]]) });
+        specs.push({ id: id++, name, run, attempt, app: 'github-actions', conclusion, steps, runner, secs: Math.floor(rnd() * 15), ann: pick([[BILL], [BILL], [], [], ['other'], [BILL, BILL], [`${BILL} `]]), emptyAnnFile: rnd() < 0.5 });
       }
     }
   }
-  const ext = rnd() < 0.6 ? 0 : rnd() < 0.7 ? 1 : 2;
-  for (let i = 0; i < ext; i++) specs.push({ id: id++, name: `ext${i}`, run: 100, attempt: 1, app: 'coderabbitai', conclusion: pick(['success', 'success', ...CONCLUSIONS]), steps: undefined, runner: '', secs: Math.floor(rnd() * 5), ann: pick([[], [], [BILL]]) });
+  const ext = rnd() < 0.5 ? 0 : rnd() < 0.6 ? 1 : 2;
+  for (let i = 0; i < ext; i++) specs.push({ id: id++, name: `ext${i}`, run: 100, attempt: 1, app: pick(APPS), conclusion: pick(['success', 'success', ...CONCLUSIONS]), steps: undefined, runner: '', secs: Math.floor(rnd() * 5), ann: pick([[], [], [BILL]]), emptyAnnFile: rnd() < 0.5 });
   return specs;
 }
 const FAILED = (c) => !['success', 'neutral', 'skipped'].includes(c);
@@ -536,12 +585,13 @@ const MALFORM = {
 };
 const MALFORM_NAMES = Object.keys(MALFORM);
 function runProperty(seeds, perSeed) {
-  const stats = { total: 0, valid: 0, malformed: 0, builder_refused: 0, by: Object.fromEntries(Object.keys(CLASSIFICATIONS).map((k) => [k, 0])), ops: Object.fromEntries(MALFORM_NAMES.map((k) => [k, 0])) };
+  const stats = { total: 0, empty_annotation_files: 0, valid: 0, malformed: 0, builder_refused: 0, by: Object.fromEntries(Object.keys(CLASSIFICATIONS).map((k) => [k, 0])), ops: Object.fromEntries(MALFORM_NAMES.map((k) => [k, 0])) };
   for (const seed of seeds) {
     const rnd = mulberry32(seed);
     for (let i = 0; i < perSeed; i++) {
       const specs = generate(rnd);
       const s = snap(specs);
+      stats.empty_annotation_files += specs.filter((x) => x.emptyAnnFile && x.ann.length === 0).length;
       const where = `seed ${seed.toString(16)} #${i}`;
       stats.total++;
       if (s.state !== 'snapshot_valid') {
@@ -582,7 +632,7 @@ function runProperty(seeds, perSeed) {
   }
   return stats;
 }
-const PROPERTY_SEEDS = [0x5eed0001, 0x5eed0002, 0x5eed0003, 0x5eed0004];
+const PROPERTY_SEEDS = [0x5eed0001, 0x5eed0002, 0x5eed0003, 0x5eed0004, 0x5eed0005, 0x5eed0006];
 const PER_SEED = IN_CHILD ? 300 : 5000;
 test(`property: ${PROPERTY_SEEDS.length * PER_SEED} generated snapshots (seeds ${PROPERTY_SEEDS.map((x) => x.toString(16)).join(',')}) agree with the independent oracle; liveness and coverage asserted`, () => {
   const stats = runProperty(PROPERTY_SEEDS, PER_SEED);
@@ -592,6 +642,7 @@ test(`property: ${PROPERTY_SEEDS.length * PER_SEED} generated snapshots (seeds $
   for (const [k, n] of Object.entries(stats.by)) assert.ok(n >= floor, `classification ${k} reached ${n} times (< ${floor})`);
   assert.ok(stats.builder_refused >= floor && stats.malformed >= floor * 5, JSON.stringify(stats));
   if (!IN_CHILD) for (const [k, n] of Object.entries(stats.ops)) assert.ok(n >= 50, `malform op ${k} applied ${n} times`);
+  assert.ok(stats.empty_annotation_files >= (IN_CHILD ? 20 : 1000), `zero-annotation checks with an EMPTY annotation file generated: ${stats.empty_annotation_files}`);
 });
 
 // ---- advisory guarantee ----
@@ -813,6 +864,8 @@ const MUTANTS = [
   ['binding/app agreement not required', "    if ((r.binding === 'bound') !== (r.app === 'github-actions') || r.app === '') bad('binding_app_mismatch', at);\n", ''],
   ['external row fields not checked', "bad('external_row_inconsistent', at);", ';'],
   ['bound row fields not checked', "{ bad('bound_row_inconsistent', at); continue; }", '{ continue; }'],
+  ['empty-annotation hash: ANY hash accepted on status none', "(a.sha256 === null || a.sha256 === EMPTY_ANNOTATIONS_SHA256)", "(a.sha256 === null || typeof a.sha256 === 'string')"],
+  ['empty-annotation hash accepted where annotations exist', "a.sha256 !== EMPTY_ANNOTATIONS_SHA256 && HEX64.test(a.sha256)", 'HEX64.test(a.sha256)'],
   ['annotation consistency not checked', "bad('annotations_inconsistent', at);", ';'],
   ['R2-a: row/job conclusion disagreement ignored', "    if (inp.conclusion !== r.conclusion) bad('conclusion_inconsistent', at);\n", ''],
   ['job status not required completed', "    if (inp.status !== 'completed') bad('job_not_completed', at);\n", ''],
