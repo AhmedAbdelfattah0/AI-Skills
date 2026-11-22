@@ -437,9 +437,9 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
     }
     for (const s of block.surfaces.filter((x) => isObj(x.facts))) {
       const p = normPath(s.path), rule = surfacePathRule(p);
-      const why = rule ? `is not one repository file path (${rule})` : surfaceFileProblem(gitBin, root, p);
-      if (why === MISSING && under(p)) continue; // plan time only: a file a DAG node will create (the gates pass no pending)
-      if (why !== null) bad.push(`surface ${s.boundary_id} path ${p}: ${why === MISSING ? `does not exist in ${root}` : why}`);
+      const fault = rule ? `is not one repository file path (${rule})` : surfaceFileProblem(gitBin, root, p);
+      if (fault === MISSING && under(p)) continue; // plan time only: a file a DAG node will create (the gates pass no pending)
+      if (fault !== null) bad.push(`surface ${s.boundary_id} path ${p}: ${fault === MISSING ? `does not exist in ${root}` : fault}`);
     }
     if (bad.length) refuse('citation_missing', ...bad);
     return { ok: true, code: 'citations_verified', reasons: [], checked };
@@ -575,8 +575,8 @@ function lowerings({ catalog, gates }, facts, surfaces) {
     if (surfaces.every((s) => lower.get(s.boundary_id)?.has(f))) refuse('surface_fact_reinflates', `every surface lowers ${f}, so the change-level ${f}=true has no surface (the change fact is the OR of its surfaces)`);
   }
   for (const s of surfaces) {
-    const why = s.facts ? surfacePathRule(s.path) : null;
-    if (why) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path ${JSON.stringify(s.path)} must name one exact repository file (${why})`);
+    const fault = s.facts ? surfacePathRule(s.path) : null;
+    if (fault) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path ${JSON.stringify(s.path)} must name one exact repository file (${fault})`);
   }
   return lower;
 }

@@ -220,7 +220,7 @@ export const SECURITY_MUTANTS = [
     from: "      for (const s of reassessSignals({ paths: files, c5: true })) {", to: "      for (const s of reassessSignals({ paths: files.filter((f) => !/\\.(test|spec)\\./.test(f.path)), c5: true })) {" },
   // ---- X1 (closes S1 limitation L1): exact-path validation of format-3 lowering surfaces ----
   { tag: "S107", name: "select/replay: a lowering surface path that is not one file path (directory, path:symbol, glob, ...) is accepted", file: "security-plan.mjs",
-    from: "    if (why) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path", to: "    if (false) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path" },
+    from: "    if (fault) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path", to: "    if (false) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path" },
   { tag: "S108", name: "citations: a lowering surface path that differs only in case from the file (a case alias) is accepted", file: "security-plan.mjs",
     from: "      if (!exactCase(dir, segs[i])) return", to: "      if (false) return" },
   { tag: "S109", name: "citations: a lowering surface path that is a directory is accepted (no regular-file check)", file: "security-plan.mjs",
@@ -230,7 +230,7 @@ export const SECURITY_MUTANTS = [
   { tag: "S111", name: "citations: an untracked gitignored lowering surface file is accepted", file: "security-plan.mjs",
     from: "  return state === 'not-ignored' ? null :", to: "  return true ? null :" },
   { tag: "S112", name: "citations: the plan-time deferral of a missing lowering surface file also applies at the gates (no pending needed)", file: "security-plan.mjs",
-    from: "      if (why === MISSING && under(p)) continue;", to: "      if (why === MISSING) continue;" },
+    from: "      if (fault === MISSING && under(p)) continue;", to: "      if (fault === MISSING) continue;" },
   { tag: "S113", name: "citations: a git that cannot answer (no repository, no git, a failure) is taken as success for a lowering surface", file: "security-plan.mjs",
     from: "  if (tracked !== 'untracked') return", to: "  if (false) return" },
   { tag: "S114", name: "citations: the tracked check inherits GIT_DIR/GIT_WORK_TREE (another repository vouches for the path)", file: "security-plan.mjs",
