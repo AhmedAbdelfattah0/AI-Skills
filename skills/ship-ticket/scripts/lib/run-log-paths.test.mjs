@@ -115,13 +115,20 @@ test('AC2: a start in the old per-worktree log is ended by the new version; the 
   const again = fx.cli(fx.wt2, ...iv('start', 'c'));
   assert.equal(again.status, 0, `later writes are not refused by the split pair: ${again.stderr}`);
   assert.match(fx.cli(fx.wt2, ...iv('start', 'a')).stderr, /already exists/, 'a duplicate start is refused across files');
+  // The split pair must not lock the OTHER worktrees out of the shared file: they judge pairing with every legacy log.
+  const fromMain = fx.cli(fx.main, ...iv('start', 'm'));
+  assert.equal(fromMain.status, 0, `the main checkout can still write: ${fromMain.stderr}`);
+  const checkMain = fx.cli(fx.main, 'check', '--ticket', 'T1');
+  assert.equal(checkMain.status, 0, checkMain.stdout);
+  assert.deepEqual(summary(fx, fx.main).integrity_warnings, []);
 });
 
 test('event counts preserved: N legacy events over two worktrees, then M new writes: summary --all counts N, then N+M; legacy bytes identical', (t) => {
   const fx = worktrees(t);
   const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
-  seed(fx.common, [legacyRow('start', 'm1', ago(50)), legacyRow('end', 'm1', ago(50))]); // the main checkout's old log IS common
-  seed(fx.wt2Legacy, [legacyRow('start', 'w1', ago(40)), legacyRow('end', 'w1', ago(40)), legacyRow('start', 'w2', ago(30))]);
+  const [t50, t40, t30] = [ago(50), ago(40), ago(30)];
+  seed(fx.common, [legacyRow('start', 'm1', t50), legacyRow('end', 'm1', t50)]); // the main checkout's old log IS common
+  seed(fx.wt2Legacy, [legacyRow('start', 'w1', t40), legacyRow('end', 'w1', t40), legacyRow('start', 'w2', t30)]);
   const wtBytes = readFileSync(join(fx.wt2Legacy, 'T1.jsonl'));
   const count = (repo) => { const r = fx.cli(repo, 'summary', '--all'); assert.equal(r.status, 0, r.stderr); const s = JSON.parse(r.stdout);
     return s.runs.reduce((n, run) => n + run.intervals.length * 2 + run.open_intervals.length, 0); };

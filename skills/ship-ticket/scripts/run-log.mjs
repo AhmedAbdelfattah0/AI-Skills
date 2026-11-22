@@ -194,7 +194,8 @@ function locations(repo) {
   const root = git(repo, ['rev-parse', '--show-toplevel']);
   try {
     const directory = commonLogDir(repo);
-    return { root, directory, legacy: legacyLogDirs(repo).own };
+    const { own, siblings } = legacyLogDirs(repo, { siblings: true });
+    return { root, directory, legacy: own, siblings };
   } catch (error) { return fail(error.message); }
 }
 
@@ -248,12 +249,20 @@ function newPairWarnings(context, merged) {
   return pairWarnings(merged).filter((w) => !known.has(key(w)));
 }
 
-/** The own legacy log's committed legacy rows (read-only pairing context) and bytes; empty in the main checkout. */
+/**
+ * Read-only legacy context of a ticket. `context`: the OWN legacy log's committed legacy rows (start lookup, duplicates,
+ * time order); empty in the main checkout. `pairContext`: those plus every sibling worktree's legacy rows, used ONLY to
+ * judge pairing, so an end in the common log whose start sits in some worktree's old log does not make the common log
+ * look ambiguous to the other worktrees. Never used to find a start or to authorise anything.
+ */
 function legacyContext(loc, ticket) {
-  const legacyPath = loc.legacy ? logPath(loc.legacy, ticket) : null;
-  const legacyBuf = legacyPath && existsSync(legacyPath) ? readFileSync(legacyPath) : Buffer.alloc(0);
-  const context = legacyBuf.length ? rowsFromText(legacyBuf.subarray(0, committedLength(legacyBuf)).toString('utf8'), legacyPath).rows : [];
-  return { context, legacyBuf };
+  const committedRows = (path) => {
+    const buf = path && existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
+    return { buf, rows: buf.length ? rowsFromText(buf.subarray(0, committedLength(buf)).toString('utf8'), path).rows : [] };
+  };
+  const own = committedRows(loc.legacy ? logPath(loc.legacy, ticket) : null);
+  const others = (loc.siblings ?? []).map((d) => committedRows(logPath(d, ticket)).rows);
+  return { context: own.rows, pairContext: mergeRows([own.rows, ...others]), legacyBuf: own.buf };
 }
 
 /**
@@ -264,13 +273,13 @@ function legacyContext(loc, ticket) {
 function writerRows(loc, ticket) {
   const path = logPath(loc.directory, ticket);
   const own = readRows(path, false, { pairing: false });
-  const { context, legacyBuf } = legacyContext(loc, ticket);
+  const { context, pairContext, legacyBuf } = legacyContext(loc, ticket);
   const rows = mergeRows([context, own.rows]);
-  const fresh = newPairWarnings(context, rows);
+  const fresh = newPairWarnings(pairContext, mergeRows([pairContext, own.rows]));
   if (fresh.length) fail(`${path}: unsafe log history (${fresh[0].code}); left unchanged`);
   const legacyEvents = legacyBuf.length ? readEvents(legacyBuf).events : [];
   const events = [...legacyEvents, ...readEvents(own.buf).events];
-  return { path, rows, context, legacyEnds: legacyEvents.map((e) => e.end), eventRows: events.flatMap((e) => [e.start, e.end]) };
+  return { path, rows, context, pairContext, legacyEnds: legacyEvents.map((e) => e.end), eventRows: events.flatMap((e) => [e.start, e.end]) };
 }
 
 /** The legacy row set of a log text and its warnings. S-04 event rows are not legacy rows: measure/events.mjs readEvents checks them. */
@@ -532,7 +541,7 @@ async function start(options, { print = true, loc: given } = {}) {
     metrics,
     ...(binding ? { carrier_binding: binding } : {}),
   };
-  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.context, guard: stamp.guard }));
+  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.pairContext, guard: stamp.guard }));
   if (print) process.stdout.write(`${JSON.stringify(row)}\n`);
   return row;
 }
@@ -591,7 +600,7 @@ async function end(options, { print = true, loc: given } = {}) {
     metrics,
     ...(timing ? { carrier_timing: timing } : {}),
   };
-  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.context, guard: stamp.guard }));
+  await failOnError(appendRows(directory, interval.ticket, [row], undefined, { context: view.pairContext, guard: stamp.guard }));
   if (print) process.stdout.write(`${JSON.stringify(row)}\n`);
   return row;
 }
@@ -610,7 +619,7 @@ async function writeEvent(options, name, metrics, detail) {
   // never-backdate rule of start/end does not apply here.
   for (const flag of ['started-at', 'ended-at']) if (options[flag] !== undefined) inWindow(Date.parse(options[flag]), `--${flag}`, Date.parse(now));
   // Read-only legacy context only: the common log itself is judged whole, inside the lock, by assertCleanLog (as before S5).
-  const { context, legacyBuf } = legacyContext(loc, ticket);
+  const { pairContext: context, legacyBuf } = legacyContext(loc, ticket);
   const legacyEnds = legacyBuf.length ? readEvents(legacyBuf).events.map((e) => e.end) : [];
   const id = JSON.parse(encoded.text.slice(0, encoded.text.indexOf('\n'))).event_id;
   await failOnError(appendRows(directory, ticket, [encoded], (rows) => {
@@ -670,7 +679,7 @@ async function quarantineCommand(options) {
   const ticket = validateId('ticket', requireOption(options, 'ticket'));
   const path = logPath(directory, ticket), now = new Date().toISOString();
   if (!existsSync(path)) fail(`${path} does not exist (quarantine works on the common log only; a legacy per-worktree log is never changed)`);
-  const { context } = legacyContext(loc, ticket);
+  const { pairContext: context } = legacyContext(loc, ticket);
   const info = await failOnError(quarantineLocked(path, { select: (buf) => readEvents(buf).bad,
     marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path, context) }));
   process.stdout.write(`${JSON.stringify(info ? { quarantined: info, sidecar: sidecarPath(path, info) } : { quarantined: null })}\n`);
@@ -813,7 +822,7 @@ function checkCommand(options) {
       if (!alive) degraded.push('stale_lock_recoverable');
     }
     if (existsSync(path)) {
-      const { context } = legacyContext(loc, ticket);
+      const { pairContext: context } = legacyContext(loc, ticket);
       try { assertCleanLog(readFileSync(path), path, context); } catch (error) { return finish(error.message); }
     }
   } else {

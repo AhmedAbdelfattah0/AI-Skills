@@ -28,9 +28,14 @@ together with this worktree's own old log, so a start recorded there can still b
 `eval.mjs report` also read sibling worktrees' old logs, for reporting only. The carrier's
 REPAIR check reads the common log and this worktree's own old log, never a sibling's.
 `quarantine` changes the common log only. Engine files (`.state.json`, `.engine.jsonl`,
-`.usage.jsonl`, `.attempts`) are not run logs and stay per worktree. A version before S5
-reading the common log sees an end whose start is in an old per-worktree log as an
-unpaired end; that is the only cross-version effect. Never put source text, prompts, ticket descriptions, credentials,
+`.usage.jsonl`, `.attempts`) are not run logs and stay per worktree. To judge pairing
+only, writers also read every sibling worktree's old log, so an end in the common log
+whose start is in some worktree's old log does not look ambiguous to the other
+worktrees; such a start is never ended, duplicated or authorised from another worktree.
+Mixed versions: a version before S5 never reads the common log. In the main checkout
+it reads and writes the common file itself (there the old path is the common dir), and
+it judges an end whose start is in a worktree's old log as an unpaired end and refuses
+to write until it is upgraded. Never put source text, prompts, ticket descriptions, credentials,
 URLs with tokens, reviewer prose, or command output in the log. Metrics are only
 short booleans, numbers, or enum-like labels.
 

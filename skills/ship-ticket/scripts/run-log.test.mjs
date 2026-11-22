@@ -591,15 +591,24 @@ test('AC3 batch: metric values with -- and spaces survive verbatim under zsh (no
   assert.equal(rows[0].metrics.note, '--metric x=1  two  spaces');
   assert.equal(rows[0].metrics.n, 3);
   assert.equal(rows[1].metrics.tail, 'a -- b');
-  const viaStdin = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
-    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name: 'contract_review', event_id: 'c1', metrics: { candidate_id: 'sha-1', review_execution: 'review-1', x: '-- y' } }]) });
-  assert.equal(viaStdin.status, 0, viaStdin.stderr);
-  assert.equal(rowsOf(f)[2].metrics.x, '-- y');
   // The failure batch replaces: an unquoted multi-flag variable is ONE word in zsh, so the flags never reach the parser.
   const split = spawnSync('zsh', ['-f', '-c', 'M="--metric a=1 --metric b=2"; "$1" "$2" start --repo "$3" --ticket T1 --run-id run-1 --kind phase --name Q --event-id q $M',
     'zsh', process.execPath, script, f.repo], { encoding: 'utf8' });
   assert.equal(split.status, 1, 'the documented zsh failure mode');
-  assert.equal(rowsOf(f).length, 3);
+  assert.equal(rowsOf(f).length, 2);
+});
+
+test('AC3 batch without a shell: values with -- and spaces are kept verbatim from a file and from stdin', (t) => {
+  const f = fixture(t);
+  const opsFile = join(f.repo, 'ops file.json');
+  writeFileSync(opsFile, JSON.stringify([{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b1', metrics: { note: '--metric x=1  two  spaces', n: 3, flag: true } }]));
+  const r = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', opsFile], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(rowsOf(f)[0].metrics, { note: '--metric x=1  two  spaces', n: 3, flag: true });
+  const viaStdin = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+    { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name: 'contract_review', event_id: 'c1', metrics: { candidate_id: 'sha-1', review_execution: 'review-1', x: '-- y' } }]) });
+  assert.equal(viaStdin.status, 0, viaStdin.stderr);
+  assert.equal(rowsOf(f)[1].metrics.x, '-- y');
 });
 
 test('batch: every op is validated before the first write; a later runtime failure stops with {applied, failed:{index, reason}}', (t) => {
