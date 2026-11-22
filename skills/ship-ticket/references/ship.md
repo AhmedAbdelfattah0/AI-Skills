@@ -87,7 +87,7 @@ concurrently, then join once:
   Use the run's base as `--base` and, on an engine run, the bound DAG as `--dag`.
   The scope is the approved fenced `scope-contract` block; a contract or mode
   change is a plan change, re-approved through `ExitPlanMode`, never an edit at
-  SHIP. Rerun `contract --verify-quote` against the saved approval request and
+  SHIP. Rerun `contract --verify-quote` against the saved quote block (only the four-backtick quote, extracted from the request) and
   the SHIP record; a FAIL blocks SHIP. Verification does not prove what the
   owner saw or authorize execution: native ExitPlanMode approval from a trusted
   terminal remains mandatory, and without it SHIP reports `scope approval NOT

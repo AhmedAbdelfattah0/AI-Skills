@@ -614,7 +614,7 @@ without `` ` ``, `|`, `"`, `<`, `>` or `&`.
 
 **Approval of the scope (owner policy, terminal only).** Scope approval is valid only when the complete, untruncated, literal ExitPlanMode request is presented in a trusted terminal, without active rendering or control-sequence ambiguity, and the canonical contract is verified byte for byte with `contract --verify-quote`.
 The ExitPlanMode request quotes the block inside a four-backtick fence (the
-`contract` helper prints it). Browser, GitHub and editor previews are never valid
+`contract` helper prints it); for `--verify-quote` the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, nothing else (a precise input definition, not an attempt to detect contradictory prose). Browser, GitHub and editor previews are never valid
 approval surfaces. A successful `--verify-quote` does not by itself prove what the
 owner saw and does not authorize execution: native ExitPlanMode approval remains
 mandatory. If the approval surface cannot meet the trusted-terminal requirement,

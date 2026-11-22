@@ -819,15 +819,16 @@ test('contract --verify-quote: byte comparison of the four-backtick quote with t
   writeFileSync(recordFile, run(r).stdout);
   const q = (text, extra = ['--record', recordFile]) => { const f = join(r.dir, '.git', 'req.txt'); writeFileSync(f, text); return spawnSync(process.execPath, [SCRIPT, 'contract', '--verify-quote', f, '--plan', plan, ...extra], { encoding: 'utf8' }); };
   const quote = S.contractOutput(GOOD_BODY).quote;
-  const pass = q(`Plan for approval:\n\n${quote}\n\ncontract body: ${sha(GOOD_BODY)}\n`);
+  const pass = q(`\n\n${quote}\n\n`);
   assert.equal(pass.status, 0, pass.stdout + pass.stderr);
   assert.match(pass.stdout, /verify-quote: PASS/);
   assert.ok(pass.stdout.includes(`CAVEAT: ${S.APPROVAL_CAVEAT}`));
   assert.ok(pass.stdout.includes(S.NOT_VERIFIED_REPORT));
   const other = bodyOf({ planned: ['src'], supporting: ['tests'] });
-  const swapped = q(`${S.contractOutput(other).quote}\n\ncontract body: ${sha(GOOD_BODY)}\n`);
+  const swapped = q(`${S.contractOutput(other).quote}\n`);
   assert.equal(swapped.status, 1, 'a stated matching hash with a different body must FAIL');
   assert.match(swapped.stdout, /verify-quote: FAIL: the quoted body differs from the plan block/);
+  assert.equal(q(`${S.contractOutput(other).quote}\n\ncontract body: ${sha(GOOD_BODY)}\n`).status, 1, 'a stated matching hash beside a different body');
   const three = q(`\`\`\`\n${S.contractOutput(GOOD_BODY).block}\n\`\`\`\n`);
   assert.equal(three.status, 1, 'a three-backtick outer fence collides with the inner closer');
   assert.equal(q(`${quote}\n\n${quote}\n`).status, 1, 'two quoted blocks');
@@ -840,7 +841,7 @@ test('contract --verify-quote: byte comparison of the four-backtick quote with t
   assert.equal(q(`${quote}\n`, []).status, 0, 'plan-only verification');
 });
 
-test('verify-quote rejects every extra quote candidate in the saved request (Codex repro and near-misses)', (t) => {
+test('verify-quote input is exactly the quote block: every other non-blank line FAILS (Codex repros, near-misses, prose)', (t) => {
   const r = repo(t);
   const plan = writePlan(r, contract(good));
   r.write('src/a.ts');
@@ -848,8 +849,15 @@ test('verify-quote rejects every extra quote candidate in the saved request (Cod
   writeFileSync(recordFile, run(r).stdout);
   const q = (text) => { const f = join(r.dir, '.git', 'req.txt'); writeFileSync(f, text); return spawnSync(process.execPath, [SCRIPT, 'contract', '--verify-quote', f, '--plan', plan, '--record', recordFile], { encoding: 'utf8' }); };
   const quote = S.contractOutput(GOOD_BODY).quote;
+  const ZWSP = String.fromCharCode(0x200b);
   const otherQuote = S.contractOutput(GOOD_BODY.replace('"src/a.ts"', '"src"')).quote;
-  assert.equal(q(`Request:\n\n${quote}\n`).status, 0, 'the single exact quote passes');
+  assert.equal(q(`${quote}\n`).status, 0, 'the quote alone passes');
+  assert.equal(q(`\n \t\n${quote}\n\n\t\n`).status, 0, 'whitespace-only lines around the quote are allowed');
+  assert.equal(q(`${quote}\n`.replace(/\n/g, '\r\n')).status, 0, 'CRLF is normalized');
+  const prose = q(`Request:\n\n${quote}\n`);
+  assert.equal(prose.status, 1, 'prose beside the quote');
+  assert.match(prose.stdout, /saved text must be only the quote; save the quote block extracted from the request, prose belongs elsewhere/);
+  assert.equal(q(`${quote.replace('````\n', '````\n\n')}\n`).status, 1, 'a blank line inside the quote');
   const NBSP = String.fromCharCode(0xa0);
   for (const [name, extra] of [
     ['Codex repro: a second quote whose opener has a trailing space', otherQuote.replace(S.OPENER, `${S.OPENER} `)],
@@ -866,10 +874,17 @@ test('verify-quote rejects every extra quote candidate in the saved request (Cod
     ['a quote-prefixed plain tilde fence', '> ~~~\n> note\n> ~~~'],
     ['a stray contract-looking JSON line', GOOD_BODY.replace('"src/a.ts"', '"src"')],
     ['the key in prose', 'see the scope-contract above'],
+    ['Codex: a split, spaced second contract', '{\n"v":1,"mode":"manual","dag":null,"planned":["src"],"supporting":["tests"]}'],
+    ['a zero-width-space-prefixed second fence', otherQuote.split('\n').map((l) => `${ZWSP}${l}`).join('\n')],
+    ['a zero-width space inside the key', otherQuote.replace('scope-contract', `scope-${ZWSP}contract`)],
+    ['a Cyrillic lookalike key line', otherQuote.replace('scope-contract', `sc${CYR_O}pe-contract`)],
+    ['contract-like JSON in indented code', `    ${GOOD_BODY.replace('"src/a.ts"', '"src"')}`],
+    ['a lone word', 'approved'],
   ]) {
-    const res = q(`Request:\n\n${quote}\n\n${extra}\n`);
+    const res = q(`${quote}\n\n${extra}\n`);
     assert.equal(res.status, 1, `${name}: ${res.stdout}`);
     assert.match(res.stdout, /verify-quote: FAIL/, name);
+    assert.equal(q(`${extra}\n\n${quote}\n`).status, 1, `${name} (before the quote)`);
   }
 });
 
@@ -1046,11 +1061,15 @@ test('S6 and F11 wording pins', () => {
   assert.ok(review.includes('A contract or mode change is a plan change: re-approval through `ExitPlanMode`.'));
   assert.ok(review.includes('ambiguous, noncanonical or invalid contract block)') && !review.includes('invalid contract line)'));
   assert.ok(review.includes('An engine-mode contract always needs `--dag`'));
-  assert.ok(review.includes('`node scripts/check-pr-scope.mjs contract --verify-quote <saved-request> --plan <plan> --record <scope.json>`'));
+  assert.ok(review.includes('`node scripts/check-pr-scope.mjs contract --verify-quote <saved-quote> --plan <plan> --record <scope.json>`'));
   assert.ok(review.includes('native ExitPlanMode approval remains mandatory'));
   assert.ok(review.includes('Raw HTML in the plan is no longer refused by the check'));
+  assert.ok(review.includes('the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that'));
+  assert.ok(review.includes('This is a precise input definition, not an attempt to detect contradictory prose.'));
+  assert.ok(ship.includes('the saved quote block (only the four-backtick quote, extracted from the request)'));
+  assert.ok(plan.includes('the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that'));
   assert.ok(ship.includes('Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.'));
-  assert.ok(ship.includes('Rerun `contract --verify-quote` against the saved approval request and the SHIP record; a FAIL blocks SHIP.'));
+  assert.ok(ship.includes('Rerun `contract --verify-quote` against the saved quote block (only the four-backtick quote, extracted from the request) and the SHIP record; a FAIL blocks SHIP.'));
   assert.ok(ship.includes('`scope: {outcome, material[], record_sha}`'));
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
   assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));

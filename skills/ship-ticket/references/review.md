@@ -39,7 +39,7 @@ Finish these checks before announcing REVIEW or appending its start event:
   record to the primary reviewer. It reads only the plan's one fenced
   `scope-contract` block (see [plan.md](plan.md)), never the Files touched
   table, and classifies every candidate path as planned, supporting or material.
-  The ExitPlanMode request quoted the block inside a four-backtick fence; the orchestrator saves that request text and runs `node scripts/check-pr-scope.mjs contract --verify-quote <saved-request> --plan <plan> --record <scope.json>`, and the reviewer re-runs it.
+  The ExitPlanMode request quoted the block inside a four-backtick fence; the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, then runs `node scripts/check-pr-scope.mjs contract --verify-quote <saved-quote> --plan <plan> --record <scope.json>`, and the reviewer re-runs it. The saved file must hold the quote and nothing else (whitespace-only lines and CRLF aside); any other line fails. This is a precise input definition, not an attempt to detect contradictory prose.
   It byte-compares the quoted body with the plan block and `record.contract`.
   Verification does not by itself prove what the owner saw and does not authorize
   execution: native ExitPlanMode approval remains mandatory, and it counts only

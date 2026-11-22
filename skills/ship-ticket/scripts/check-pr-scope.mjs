@@ -10,7 +10,8 @@
  * CLI: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]
  *      check-pr-scope.mjs lint --plan <plan.md>            (the same rule function on the plan alone, before approval)
  *      check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...
- *      check-pr-scope.mjs contract --verify-quote <saved-request.txt> --plan <plan.md> [--record <scope.json>]
+ *      check-pr-scope.mjs contract --verify-quote <saved-quote.txt> --plan <plan.md> [--record <scope.json>]
+ *      (saved-quote.txt is exactly the four-backtick quote block extracted from the request, nothing else)
  *
  * The contract is one fenced block at column 0 with a blank line before and after it, inside the plan digest bound by
  * START, plus one `contract body: sha256:<hex>` line (SHA-256 of the body bytes without the line end):
@@ -34,7 +35,8 @@
  * the body as its literal content (structural, design v3 §3). NOT proven: DOM/CSS effects of raw HTML in a viewer that
  * renders it, and renderer extensions. Raw HTML is deliberately no longer refused by S6 (option B): such viewers are
  * excluded by the owner's signed terminal-only approval policy, not by code. `contract --verify-quote` byte-compares
- * the four-backtick-quoted body of the saved ExitPlanMode request with the plan block and the record. That is byte
+ * the body of the saved quote block (the orchestrator extracts only the four-backtick quote from the ExitPlanMode
+ * request it sent; any other non-blank line fails: a precise input definition) with the plan block and the record. That is byte
  * verification only: it does not prove what the owner saw and does not authorize execution; native ExitPlanMode
  * approval, given from a complete, untruncated, literal request in a trusted terminal, remains mandatory, and when the
  * approval surface cannot meet that requirement the orchestrator fails closed with the NOT_VERIFIED_REPORT wording.
@@ -124,7 +126,7 @@ const FORBIDDEN_SEGMENTS = ['.github', '.git', '.claude', '.ship-ticket', '.spec
 const DOCS_ALLOWED = /\.(md|mdx|markdown|txt|rst|adoc|png|jpg|jpeg|gif|svg|webp|ico|pdf|csv)$/i;
 const USAGE = 'Usage: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]\n'
   + '       check-pr-scope.mjs lint --plan <plan.md>\n'
-  + '       check-pr-scope.mjs contract --verify-quote <saved-request.txt> --plan <plan.md> [--record <scope.json>]\n'
+  + '       check-pr-scope.mjs contract --verify-quote <saved-quote.txt> --plan <plan.md> [--record <scope.json>]\n'
   + '       check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...';
 
 class Refusal extends Error {
@@ -357,8 +359,8 @@ export function contractFor(c) {
 }
 
 /**
- * Byte-compare the quoted body (the single four-backtick-quoted block of `quoteText`, the request text the orchestrator
- * saved) with the plan block and, when given, the record's `contract`; recompute SHA-256 against the plan's digest line
+ * Byte-compare the quoted body (`quoteText` must be exactly the four-backtick quote block the orchestrator extracted
+ * from the approval request it sent; nothing else) with the plan block and, when given, the record's `contract`; recompute SHA-256 against the plan's digest line
  * and the record's `contract_sha256`. Returns { ok, lines }. A human/orchestrator step: it cannot know the saved quote
  * is what the owner saw.
  */
@@ -366,15 +368,14 @@ export function verifyQuote(quoteText, planText, record) {
   const out = [];
   const fail = (why) => ({ ok: false, lines: [...out, `verify-quote: FAIL: ${why}`] });
   if (FORBIDDEN_CHARS.test(quoteText)) return fail('the quote holds a control character, BOM or lone CR');
-  const q = quoteText.split(/\r?\n/);
-  const starts = q.flatMap((l, i) => (l === QUOTE_FENCE && q[i + 1] === OPENER && q[i + 3] === CLOSER && q[i + 4] === QUOTE_FENCE ? [i] : []));
-  if (starts.length !== 1) return fail(`the request must hold exactly one four-backtick-quoted scope-contract block (found ${starts.length})`);
-  // By construction the one exact quote is the ONLY candidate: outside its five lines no line may name the key, open a
-  // fence of any kind (3+ backticks or tildes after container prefixes and indentation) or look like a contract body.
-  const s0 = starts[0];
-  const extra = q.findIndex((l, i) => (i < s0 || i > s0 + 4) && (/scope-contract/i.test(l) || /^(`{3,}|~{3,})/.test(l.replace(CONTAINER, '')) || l.includes('{"v":1')));
-  if (extra >= 0) return fail(`line ${extra + 1} of the request is another quote candidate (the key, a fence or a contract-like line); the single four-backtick quote must be the only one`);
-  const quoted = q[s0 + 2];
+  // PRECISE INPUT DEFINITION: the saved file is exactly the quote that `contract` prints (four-backtick fence, opener,
+  // body, closer, four-backtick fence), optionally surrounded by whitespace-only lines; CRLF is normalized. Any other
+  // non-blank line fails, so no second contract, lookalike key, zero-width character or stray fence can be present.
+  const all = quoteText.split(/\r?\n/), at = all.flatMap((l, i) => (BLANK.test(l) ? [] : [i])), q = at.map(i => all[i]);
+  if (!(q.length === 5 && at[4] - at[0] === 4 && q[0] === QUOTE_FENCE && q[1] === OPENER && q[3] === CLOSER && q[4] === QUOTE_FENCE)) {
+    return fail('saved text must be only the quote; save the quote block extracted from the request, prose belongs elsewhere');
+  }
+  const quoted = q[2];
   const plan = validatePlanText(planText);
   const diff = (a, b) => { let k = 0; while (k < a.length && a[k] === b[k]) k++; return k; };
   if (quoted !== plan.body) return fail(`the quoted body differs from the plan block at character ${diff(quoted, plan.body)}`);
