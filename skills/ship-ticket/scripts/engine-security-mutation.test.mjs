@@ -228,6 +228,19 @@ export const SECURITY_MUTANTS = [
     from: "    if (normPath(s.path).split('/').some((x) => x === '.' || x === '..')) return null; // R6", to: "    // R6" },
   { tag: "S97", name: "citations: only GIT_DIR is dropped (an inherited GIT_WORK_TREE still redirects git)", file: "security-plan.mjs",
     from: "filter(([k]) => !/^GIT_/i.test(k))", to: "filter(([k]) => !/^GIT_DIR$/i.test(k))" },
+  // ---- S1 review repair: every C5 exemption is a mandatory, mechanically verified review row ----
+  { tag: "S98", name: "review: C5 rows are never checked (a name exemption passes unreviewed)", file: "engine-gates.mjs",
+    from: "    if (c5Rows) return c5Rows;\n", to: "" },
+  { tag: "S98", name: "review: a C5 row of another head is accepted", file: "engine-gates.mjs",
+    from: "  if (stale.length) return gateNo('stale_candidate'", to: "  if (false) return gateNo('stale_candidate'" },
+  { tag: "S99", name: "review: a FAIL C5 row is not recorded as a run-wide dispute", file: "engine-gates.mjs",
+    from: "disputes = [...disputes, ...c5Disputes(input, c5)]; ", to: "" },
+  { tag: "S100", name: "confirmation: the C5 rows are not re-attested on the repaired head", file: "engine-gates.mjs",
+    from: "    const c5Rows = c5RowsRefusal(input.primary, S, sec);", to: "    const c5Rows = input.kind === 'original' ? c5RowsRefusal(input.primary, S, sec) : null;" },
+  { tag: "S101", name: "ship-ready: the attested C5 set is not compared with the current one", file: "engine-gates.mjs",
+    from: "JSON.stringify(got.subjects) === JSON.stringify(subjects)", to: "true" },
+  { tag: "S102", name: "ship-ready: the C5 attestation is never checked", file: "engine-gates.mjs",
+    from: "?? c5ReviewRefusal(S, sec)\n  ", to: "" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

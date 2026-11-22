@@ -401,11 +401,11 @@ function realSelection() {
 const SPEC = 'spec/sec.test.mjs';
 const specText = (list) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
   + `for (const id of ${J(list)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
-function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles } = {}) {
+function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles, implWrites = ['src'] } = {}) {
   const cov = coverage(sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, ...(startAt ? { startAt } : {}), narrativeExtra: narrative(sel) + '\n\n',
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } }, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov },
-    nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: ['src'] }, ...nodes],
+    nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: implWrites }, ...nodes],
     behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: fixFiles ?? { 'src/impl.txt': 'fixed' } } } });
   const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
   g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
@@ -491,7 +491,9 @@ test('[S73] [S74] [S75] ship-ready of a format-3 run prints its obligation matri
   assert.deepEqual(fx.readState().security.reassessed.c5_exempted, EX, 'recorded reassessment');
   const cand = fx.candidate();
   const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
-    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' })),
+    // S1 review repair: the exemption needs its own reviewed row (input only; every expectation below is unchanged)
+    { subject_id: 'c5:new-route:src/lib/util.test.ts', outcome: 'PASS', candidate_id: cand, evidence: 'src/lib/util.test.ts is a test fixture: nothing imports or serves it' }];
   okc(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }) })), 'review');
   let r = fx.gate('ship-ready', {});
   for (let i = 0; i < 3 && r.out?.code !== 'ship_ready'; i++) r = fx.gate('ship-ready', {});
@@ -1051,4 +1053,114 @@ test('[S97] R6 I6: a lone inherited GIT_WORK_TREE is dropped too (the root repos
   const out = withEnv('GIT_WORK_TREE', other, () => SP.verifyCitations(CITE_BLOCK(), { root }));
   refused(out, 'citation_missing');
   assert.ok(out.reasons.some((x) => x.includes('gitignored')), J(out.reasons));
+});
+
+// ====================================================================================================================
+// S1 review repair: every C5 exemption is a MANDATORY, mechanically verified review row. A name exemption alone
+// is never enough: the independent reviewer judges each exempted file on the candidate, the gate checks coverage,
+// identity, freshness and evidence, and a FAIL row is a run-wide hard stop (the disputed-N/A one). Written before the fix.
+// ====================================================================================================================
+const C5_FILES = {
+  'app/routers/test_results.py': 'from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get("/test-results/{id}")\ndef detail(id: str):\n    return {"id": id}\n',
+  'edge-functions/auth.test.ts': 'export default async (request, context) => new Response("ok");\n',
+  'src/orders.test.ts': "import { app } from './server';\napp.post('/orders', (req, res) => res.json({ ok: true }));\n",
+};
+const c5Key = (e) => `c5:${e.kind}:${e.path}`;
+const c5Row = (e, cand, over = {}) => ({ subject_id: c5Key(e), outcome: 'PASS', candidate_id: cand,
+  evidence: `${e.path} read whole on this candidate: describe/it/expect only, no route or middleware registration; nothing imports or serves it`, ...over });
+const baseRows = (fx) => [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
+  ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
+const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
+/** A format-3 run driven to its first reassessment with `implFiles` written by the impl node; returns the recorded exemptions. */
+function c5Fx(t, implFiles, implWrites = ['src']) {
+  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const bearerOnly = true;\n', ...implFiles }, implWrites });
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive impl');
+  okc(fx.gate('reassess', {}), 'reassess');
+  return { fx, ex: fx.readState().security.reassessed.c5_exempted, cand: fx.candidate() };
+}
+
+test('[S98] [S102] each C5 exemption needs exactly one fresh, evidenced review row: the three reported files; missing, duplicate, unknown, incomplete, stale and NOT_APPLICABLE rows are refused', { skip: WIN_SKIP }, (t) => {
+  const { fx, ex, cand } = c5Fx(t, C5_FILES, ['src', 'app', 'edge-functions']);
+  assert.deepEqual(ex.map((e) => `${e.path}|${e.kind}`), ['app/routers/test_results.py|new-route', 'edge-functions/auth.test.ts|auth-or-middleware-change', 'src/orders.test.ts|new-route'],
+    'precondition: the route, the edge auth handler and app.post are exempted by file name alone');
+  const review = (c5rows) => passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: [...baseRows(fx), ...c5rows] }) });
+  const gate = (rows) => { const r = fx.gate('review', review(rows)); return { code: r.out?.code, why: r.out?.reasons ?? [] }; };
+  let r = gate([]);
+  assert.equal(r.code, 'incomplete_contract', 'missing: no C5 row at all');
+  for (const e of ex) assert.ok(r.why.some((x) => x.includes(c5Key(e))), `the refusal names ${c5Key(e)}: ${J(r.why)}`);
+  r = gate(ex.slice(1).map((e) => c5Row(e, cand)));
+  assert.equal(r.code, 'incomplete_contract', 'missing: one exempted file has no row');
+  assert.ok(r.why.some((x) => x.includes(c5Key(ex[0]))), J(r.why));
+  assert.equal(gate([...ex.map((e) => c5Row(e, cand)), c5Row(ex[2], cand)]).code, 'incomplete_contract', 'duplicate row');
+  assert.equal(gate([...ex.map((e) => c5Row(e, cand)), c5Row({ kind: 'new-route', path: 'src/orders.ts' }, cand)]).code, 'incomplete_contract', 'a row for a file that is not exempted');
+  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 1 ? { evidence: 'looked at it, fine' } : {}))).code, 'incomplete_contract', 'evidence that never names the file');
+  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 1 ? { evidence: e.path } : {}))).code, 'incomplete_contract', 'evidence that is the bare path');
+  assert.equal(gate(ex.map((e, i) => { const x = c5Row(e, cand); if (i === 0) delete x.candidate_id; return x; })).code, 'incomplete_contract', 'a row naming no candidate');
+  assert.equal(gate(ex.map((e, i) => c5Row(e, i === 2 ? 'sha256:' + '0'.repeat(64) : cand))).code, 'stale_candidate', 'a row of another head');
+  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 0 ? { outcome: 'NOT_APPLICABLE' } : {}))).code, 'security_row_escape', 'a row can never waive');
+  assert.equal(fx.readState().review_chain.length, 0, 'every refusal wrote nothing');
+  okc(fx.gate('review', review(ex.map((e) => c5Row(e, cand)))), 'complete rows');
+  assert.deepEqual(fx.readState().review_chain.at(-1).c5_reviewed, { candidate_id: cand, subjects: ex.map(c5Key).sort() });
+  // [S102] ship-ready re-checks the attestation itself (defence in depth: e.g. a record an older engine wrote without it)
+  fx.editState((st) => { delete st.review_chain.at(-1).c5_reviewed; });
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_review_stale');
+});
+
+test('[S99] a FAIL C5 row is a run-wide hard stop: repair + confirmation and a RETRY review with a PASS row both leave ship-ready refused', { skip: WIN_SKIP }, (t) => {
+  const { fx, ex, cand } = c5Fx(t, { 'src/orders.test.ts': C5_FILES['src/orders.test.ts'] });
+  assert.deepEqual(ex.map(c5Key), ['c5:new-route:src/orders.test.ts'], 'precondition');
+  const review = failReview('rx-1', cand, 'src/impl.txt', fx.prompt('fix'));
+  review.primary = { ...review.primary, security_outcome: 'FAIL', rule_rows: [...baseRows(fx),
+    c5Row(ex[0], cand, { outcome: 'FAIL', evidence: "src/orders.test.ts registers app.post('/orders') on the production app it imports from ./server" })] };
+  okc(fx.gate('review', review), 'original FAIL accepted');
+  assert.deepEqual(fx.readState().security.disputed_na, ['c5:new-route:src/orders.test.ts'], 'the FAIL row is recorded as a run-wide dispute');
+  okc(fx.cli('drive'), 'repair'); okc(fx.gate('reassess', {}), 'reassess after repair');
+  const c2 = fx.candidate();
+  const conf = confirmReview('rx-1', c2);
+  conf.primary.rule_rows = [c5Row(ex[0], c2)];
+  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed', 'a confirmation PASS row never clears it');
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed');
+  fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
+  okc(fx.gate('review', passReview('rx-2', c2, { primary: primaryReview(c2, { rule_rows: [...baseRows(fx), c5Row(ex[0], c2)] }) })), 'RETRY original with a PASS row');
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed', 'a RETRY never launders the dispute');
+});
+
+test('[S100] C5 rows bind to the candidate: after a repair the confirmation must re-attest every exemption on the repaired head; a PASS row lets a genuine test-only exemption ship', { skip: WIN_SKIP }, (t) => {
+  const { fx, ex, cand } = c5Fx(t, { 'src/auth.test.ts': "import { describe, it, expect } from 'vitest';\ndescribe('auth', () => { it('rejects', () => { expect(401).toBe(401); }); });\n",
+    'src/orders.test.ts': "describe('orders', () => {\n  it('totals', () => { expect(1 + 1).toBe(2); });\n});\n" });
+  assert.deepEqual(ex.map(c5Key), ['c5:auth-or-middleware-change:src/auth.test.ts'], 'precondition: a describe/it/expect-only orders.test.ts raises nothing (no row due); auth.test.ts is exempted by name');
+  const review = failReview('rx-1', cand, 'src/impl.txt', fx.prompt('fix'));
+  review.primary = { ...review.primary, rule_rows: [...baseRows(fx), c5Row(ex[0], cand)] };
+  okc(fx.gate('review', review), 'original FAIL with a PASS C5 row');
+  okc(fx.cli('drive'), 'repair'); okc(fx.gate('reassess', {}), 'reassess after repair');
+  const c2 = fx.candidate();
+  assert.notEqual(c2, cand);
+  const conf = (rows) => { const c = confirmReview('rx-1', c2); if (rows) c.primary.rule_rows = rows; return fx.gate('review', c).out?.code; };
+  assert.equal(conf(null), 'incomplete_contract', 'the confirmation carries no C5 row: the original row is of another head');
+  assert.equal(conf([c5Row(ex[0], cand)]), 'stale_candidate', 'the row of the pre-repair head is stale');
+  okc(fx.gate('review', Object.assign(confirmReview('rx-1', c2), { primary: { ...confirmReview('rx-1', c2).primary, rule_rows: [c5Row(ex[0], c2)] } })), 'fresh row');
+  let s = fx.gate('ship-ready', {});
+  for (let i = 0; i < 3 && s.out?.code !== 'ship_ready'; i++) s = fx.gate('ship-ready', {});
+  assert.equal(s.out?.code, 'ship_ready', s.stdout);
+});
+
+test('[S101] ship-ready: the authorizing record must attest the current exemption set on the current candidate; C5 disputes come from a FAIL row or a second-opinion finding (pure)', () => {
+  const ex = [{ path: 'src/orders.test.ts', kind: 'new-route', rule: 'test-file' }];
+  const subj = ['c5:new-route:src/orders.test.ts'];
+  const S = (rec, exempted = ex) => ({ security: { reassessed: { candidate_id: 'c2', c5_exempted: exempted } }, review_chain: rec ? [rec] : [] });
+  const sec = { block: { policy: 3 }, tuple: { candidate_id: 'c2' } };
+  const rec = (over = {}) => ({ kind: 'confirmation', outcome: 'PASS', c5_reviewed: { candidate_id: 'c2', subjects: subj }, ...over });
+  assert.equal(G.c5ReviewRefusal(S(rec()), sec), null);
+  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: { candidate_id: 'c1', subjects: subj } })), sec)?.code, 'security_review_stale', 'rows of another head');
+  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: undefined })), sec)?.code, 'security_review_stale', 'no rows recorded');
+  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: { candidate_id: 'c2', subjects: [] } })), sec)?.code, 'security_review_stale', 'another exemption set');
+  assert.equal(G.c5ReviewRefusal(S(rec(), []), sec), null, 'no exemption: nothing to attest');
+  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: undefined })), { ...sec, block: { policy: 2 } }), null, 'format 2: unchanged');
+  // disputes: a FAIL row, or a second-opinion finding naming the subject
+  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'FAIL' }] } }, subj), subj);
+  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'PASS' }] }, second_opinion: { findings: [{ id: 'S1', subject_id: subj[0] }] } }, subj), subj);
+  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'PASS' }] } }, subj), []);
+  // the hard stop: an effective pair never clears a C5 dispute (only a re-approved plan, a new run, does)
+  const st = { security: { disputed_na: subj } };
+  assert.equal(disputedRefusal(st, { events: { pairs: [{ boundary: 'orders', control: 'VAPT-API-01' }] } })?.code, 'security_na_disputed');
 });

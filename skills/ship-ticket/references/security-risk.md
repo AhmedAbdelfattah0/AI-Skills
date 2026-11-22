@@ -365,8 +365,39 @@ directory and name, not by import, so a test-named migration still signals. Othe
 signals of a test file (mail, payment, env, dependency) and its out-of-plan path
 always count.
 
+Every record is also **reviewed**. A name alone never settles an exemption.
+In an engine run, each record (`path`, `kind`) of the recorded reassessment
+needs exactly one primary `rule_row` in the review that authorizes ship:
+
+- the original review, and again a confirmation after a repair;
+- `subject_id` `c5:<kind>:<path>`;
+- `candidate_id` the reviewed candidate;
+- evidence that cites the file and states the conclusion;
+- outcome `PASS` (the file is test-only) or `FAIL` (it introduces a production
+  route or an auth/middleware change).
+
+The gate refuses the following rows:
+
+- a missing, duplicate, unknown or unevidenced row: `incomplete_contract`;
+- a row of another head: `stale_candidate`;
+- a `NOT_APPLICABLE` row, because a row never waives: `security_row_escape`.
+
+Ship-ready refuses `security_review_stale` unless the authorizing record attested
+the current exemption set on the current candidate. A `FAIL` row, or a
+second-opinion finding with that `subject_id`, is recorded in the run-wide,
+add-only dispute list, the same one a disputed dropped pair uses. Confirmation and
+ship-ready then refuse `security_na_disputed`. A repair, a confirmation or a RETRY
+review cannot clear it, and neither can an addendum or a waiver, because those
+address pairs, not files. Only a re-approved plan that names the file as a surface
+clears it, which means a new run.
+
+**Limit (manual flow).** The engine-less `security-plan.mjs reassess` prints
+`c5_exempted`, but no gate checks the review rows there. In that flow the rows are
+the reviewer's obligation under [review.md](review.md), not a mechanical check.
+
 **Accepted residuals of the test-file exemption.** It is a name rule, so these cases
-stay with the reviewer, who sees the `c5_exempted` record:
+rest on the reviewer's judgment in the `c5:` row (the gate checks that the row
+exists, is fresh and is evidenced, not that the judgment is right):
 
 - production code that imports a test-named file (an import wiring a spec into the
   app);

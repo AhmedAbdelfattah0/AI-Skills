@@ -193,9 +193,16 @@ and rule-catalogue work:
   the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
   gives its finding `subject_id: '<boundary>:<control>'`, which records the same
   run-wide dispute (see
-  [security-risk.md](security-risk.md) section 9). For each `c5_exempted`
-  test-named file in the recorded reassessment, confirm that no production code
-  imports it and no loader or deploy config serves it.
+  [security-risk.md](security-risk.md) section 9). Each `c5_exempted` record
+  (`path`, `kind`) of the recorded reassessment needs exactly one primary
+  `rule_row`, `subject_id` `c5:<kind>:<path>`, in the original review and again
+  in a confirmation, with `candidate_id` the reviewed candidate. Read the file
+  itself, because its name alone is not enough. Return `PASS` when it registers
+  no production route or auth/middleware change, no production code imports it
+  and no loader or deploy config serves it. Return `FAIL` when it does, which is
+  a run-wide dispute. The evidence cites the path and states the conclusion. The
+  gate refuses a missing, duplicate, unknown, stale, unevidenced or
+  `NOT_APPLICABLE` row.
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule

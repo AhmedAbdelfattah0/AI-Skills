@@ -821,7 +821,9 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * - the ONLY narrowing, rule `test-file`, RECORDED in `c5_exempted` (path, signal, rule): a test-named file (TEST_FILE)
  *   raises no new-route unless it is under a router root (ROUTER_ROOT), and no auth-or-middleware-change unless it is
  *   under a router root or a middleware/plugins root (MIDDLEWARE_ROOT). migration-or-rls-change is never narrowed.
- * Every exemption record is consumed: exemptionRefusal() refuses any record that is not a test-named file.
+ * Every exemption record is consumed: exemptionRefusal() refuses any record that is not a test-named file. In an
+ * engine run every record is also REVIEWED: engine-gates.mjs c5RowsRefusal / c5ReviewRefusal require one fresh,
+ * evidenced primary rule_row `c5:<kind>:<path>` per record (a FAIL row is a run-wide dispute); the name is never enough.
  * The same detector serves reassess AND the plan-time inventory check (init, preflight): nothing else is narrowed
  * anywhere (no workspace-folder or other path narrowing). Invariant, property-tested against format 2: a format-3
  * reassess or inventory check never closes or omits a signal format 2 would require a surface for, except the
