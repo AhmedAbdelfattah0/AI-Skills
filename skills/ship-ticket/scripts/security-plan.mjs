@@ -825,7 +825,7 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * ([S103]): for every input, with lines and path-only, the format-3 signals are a superset of the format-2 signals, and
  * path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
  * like any other file (a route line is first seen at reassess, L4); a test with no route line and no signalling path
- * raises nothing.
+ * raises no surface signal.
  */
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
@@ -930,7 +930,8 @@ function fileKinds(f, c5) {
  * Surface-inventory completeness (C5, F12a, block format 3): every path of `files` (path strings, or {path, added[]})
  * that raises a surface-introducing signal under the format-3 detector (the one reassess uses) must be the path of a
  * listed surface. Returns the gaps [{ path, kinds }]. It sees only what it is given: at init and preflight that is
- * path-only file-shaped DAG writes (L4); at reassess the changed files with their added lines.
+ * path-only file-shaped DAG writes (L4); at reassess the changed files with the added lines the gate supplies
+ * (engine-gates.mjs changedFiles: none for an untracked file over 1 MiB).
  */
 export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
   const listed = new Set(surfacePaths.map(normPath));

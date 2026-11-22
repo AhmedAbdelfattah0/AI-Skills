@@ -178,7 +178,7 @@ pair has no spec and is not in the DAG; listing it is `security_pairs_mismatch`.
 write (a basename with an extension) whose PATH alone raises a surface-introducing
 signal (test-named or not) must be a listed surface (`surface_inventory_incomplete`).
 Line-based signals and extensionless or directory writes are not seen here; reassess
-checks them (section 13, L4). The run records `policy_version` 3,
+checks them, within its own limits (section 13, L4). The run records `policy_version` 3,
 or 4 with test kinds. An engine that does not know these versions refuses the run
 (`policy_version_unsupported`).
 
@@ -307,18 +307,19 @@ L4), the own-path lowering guard at selection, and the reopen of dropped pairs. 
   `edge-functions/auth.test.ts`, `public/login.test.php`) raises its signal and needs
   a §3a surface. A path signal (an auth path) is refused already at plan time when the
   DAG writes that file; a route LINE is first seen at reassess, which refuses it
-  `surface_inventory_incomplete` (section 13, L4);
+  `surface_inventory_incomplete` within its own limits (section 13, L4);
 - a surface at such a path cannot lower a fact whose control its own path signal
   names (`surface_fact_not_lowerable`), exactly like `src/auth.ts`;
 - a test with no route line and no signalling path (only `describe` / `it` /
-  `expect`) raises nothing.
+  `expect`) raises no surface signal (other signals, such as a mail send, still fire
+  as in any file).
 
 A property test pins this (`[S79] [S103]`). Over at least 4000 random inputs of changed
 files and lines, plus fixed examples, with lines and path-only: the format-3 signals
 are a superset of the format-2 signals for every kind, path-only they are equal, the
 only extras are `new-route` route lines, and the inventory check (`inventoryGaps`, fed
 lines at reassess and path-only DAG writes at `init` and `preflight`) never omits a
-format-2 surface signal of what it is given. Anything format 2 leaves closable only by a surface cannot
+format-2 surface signal of what it is given, for a path with no listed surface. Anything format 2 leaves closable only by a surface cannot
 reach `reassessed` in format 3 through reason-only classifications. Mutants that
 re-add a narrowing (per signal kind, in the lowering guard, in the reopen pass) are
 killed by it.
@@ -500,8 +501,8 @@ decision.
 
 ## 13. Known limitations of S1 (tracked separately)
 
-S1 does not enforce the following. Each is tracked for a separate change; nothing
-in this file or the engine claims otherwise.
+S1 does not enforce the following. Each is tracked for a separate change; this file
+and the engine comments are written not to claim otherwise.
 
 - **L1, lowering-surface paths are not required to be the exact Git file path.** The
   path of a surface that lowers a fact is not mechanically checked to be one exact
@@ -525,11 +526,19 @@ in this file or the engine claims otherwise.
   Line-based signals (`app.post(...)` in `src/orders.test.ts`, `@router.get` in
   `app/routers/test_results.py`) and extensionless or directory writes
   (`src/auth/entry`, `src`) are first checked at reassess, which refuses
-  `surface_inventory_incomplete`. Reassess is the backstop: nothing is lost, only
-  deferred from plan time to the gate.
+  `surface_inventory_incomplete` for a signalling changed path inside the Design
+  Contract with no surface at it. Reassess is the backstop for line-based signals and
+  for extensionless or directory writes, within reassess's own documented limits: an
+  untracked file larger than 1 MiB (`MAX_ADDED_BYTES`, 1024 * 1024 bytes, in
+  `engine-gates.mjs` `changedFiles`) contributes no added lines (pre-existing, both
+  formats), and a file outside the Design Contract gives `REAPPROVAL` (an
+  `out-of-plan-path` basis) instead of the inventory refusal.
 
 Known detector blind spots inherited from format 2 (not a regression of S1): no
-`new-route` signal for a Laravel `Route::get` outside a route path, a Rails
-`get '/x'`, or a Supabase `Deno.serve`, and an `app/routers/*.py` file raises nothing
-path-only until reassess sees its route line; this matters if a later catalog change
-gates `VAPT-API-0x` controls.
+`new-route` signal for a Laravel `Route::get` or a Rails `get '/x'` outside a route
+path, or for a Supabase `Deno.serve` (even under `supabase/functions/`), and an
+`app/routers/*.py` file raises no `new-route` path-only until reassess sees its route
+line; this matters if a later catalog change gates `VAPT-API-0x` controls. Inherited
+from both formats, not a regression: a changed path that is not in the `git diff`
+from the base (an untracked file) and is larger than 1 MiB contributes no added lines
+at reassess, so none of its line-based signals fire.
