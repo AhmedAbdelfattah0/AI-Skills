@@ -36,11 +36,19 @@ Finish these checks before announcing REVIEW or appending its start event:
 - the approved plan and Design Contract still match the intended change;
   run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]`
   on the candidate before announcing REVIEW (manual flow too) and give the scope
-  record to the primary reviewer. It reads only the plan's one `scope-contract:`
-  line (see [plan.md](plan.md)), never the Files touched table, and classifies
-  every candidate path as planned, supporting or material. The `ExitPlanMode` request restated the canonical contract line as plain text; the reviewer reads
-  the raw contract line in the plan and the `contract` field the record prints,
-  and checks every supporting path, which lies outside the Design Contract (on an
+  record to the primary reviewer. It reads only the plan's one fenced
+  `scope-contract` block (see [plan.md](plan.md)), never the Files touched
+  table, and classifies every candidate path as planned, supporting or material.
+  The ExitPlanMode request quoted the block inside a four-backtick fence; the orchestrator saves that request text and runs `node scripts/check-pr-scope.mjs contract --verify-quote <saved-request> --plan <plan> --record <scope.json>`, and the reviewer re-runs it.
+  It byte-compares the quoted body with the plan block and `record.contract`.
+  Verification does not by itself prove what the owner saw and does not authorize
+  execution: native ExitPlanMode approval remains mandatory, and it counts only
+  when the complete, untruncated, literal request was presented in a trusted
+  terminal (browser, GitHub and editor previews never count). If the approval
+  surface could not meet that, report `scope approval NOT verified: the approval
+  surface does not meet the trusted-terminal requirement; do not build` and stop.
+  Raw HTML in the plan is no longer refused by the check; such viewers are
+  excluded by that policy. The reviewer reads the block and checks every supporting path, which lies outside the Design Contract (on an
   engine policy-2 run reassess reports it as out-of-plan; supporting is most
   useful in manual mode). Exit 1 (a material
   path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through

@@ -1,32 +1,45 @@
 #!/usr/bin/env node
 /**
- * PR scope check (S6, F07; Option B): classifies every path of the candidate as planned, supporting or material
- * against the ONE `scope-contract:` line of the approved plan, and writes a `ship-ticket-scope-v1` record. The
- * orchestrator runs it before announcing REVIEW and again on the frozen candidate at SHIP (manual flow included).
- * No gate, engine step or ship-ready check reads it, and the engine never imports it: it adds no authority.
- * No Markdown is parsed: the Files touched table is explanation for the approver and is read by no script.
+ * PR scope check (S6, F07; design v3, option B): classifies every path of the candidate as planned, supporting or
+ * material against the ONE fenced scope-contract block of the approved plan, and writes a `ship-ticket-scope-v1`
+ * record. The orchestrator runs it before announcing REVIEW and again on the frozen candidate at SHIP (manual flow
+ * included). No gate, engine step or ship-ready check reads it, and the engine never imports it: it adds no authority.
+ * The Files touched table is explanation for the approver and is read by no script.
  * Dependency-free Node >= 18; git and candidate-id.mjs through spawnSync with an argument list, no shell.
  *
  * CLI: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]
+ *      check-pr-scope.mjs lint --plan <plan.md>            (the same rule function on the plan alone, before approval)
  *      check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...
- *      (prints the canonical contract line through the same validator; engine mode takes planned from the DAG writes)
+ *      check-pr-scope.mjs contract --verify-quote <saved-request.txt> --plan <plan.md> [--record <scope.json>]
  *
- * The contract, one raw narrative line inside the plan digest bound by START:
- *   scope-contract: {"v":1,"mode":"engine","dag":"sha256:<64 hex>","planned":["apps/web","apps/api/src/**\/*.ts"],"supporting":["tests"]}
- *   scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/checkout/page.tsx","src/checkout"],"supporting":["tests"]}
- * Extraction: the narrative (RUN-STATE excluded) split on \n, one trailing CR stripped where it precedes LF (CRLF
- * files are accepted; a lone CR is not); exactly ONE line starts at column 0 with `scope-contract: `; any OTHER line
- * containing `scope-contract` in any case is `scope_contract_ambiguous` (prose, fence, comment, backticks, list item,
- * indentation, BOM, CR); none is `scope_contract_missing`. A line the rendered plan may hide or alter is refused
- * (`scope_contract_hidden`), closing the class by refusal rather than by listing tags: the line holds < > or &; it
- * lacks a blank line (or the narrative's start or end) directly before and after it; it follows a raw `<!--` with no
- * `-->`; it lies inside a fence under either a CommonMark-style or a naive toggle tracker (or where they disagree); or
- * ANYWHERE in the narrative, outside a fence both trackers agree on and after removing same-line code spans and
- * balanced `<!-- -->` comments, a `<` is followed by a letter, `/`, `!` or `?` (any tag, closing tag, CDATA,
- * declaration, processing instruction or `<placeholder>`), `<br>` excepted. The check cannot know how the approval
- * view renders HTML, so the author keeps the line plain and the ExitPlanMode request restates it; the record prints it. The JSON must equal its own canonical form
- * with keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); line <= 8 KiB (64 KiB in
- * engine mode), planned <= 64 entries of <= 256 chars (engine mode 256 of <= 512), supporting <= 16. Field rules
+ * The contract is one fenced block at column 0 with a blank line before and after it, inside the plan digest bound by
+ * START, plus one `contract body: sha256:<hex>` line (SHA-256 of the body bytes without the line end):
+ *   ```scope-contract
+ *   {"v":1,"mode":"manual","dag":null,"planned":["src/checkout","src/checkout/page.tsx"],"supporting":["tests"]}
+ *   ```
+ * Rules (validatePlanText, shared by lint, check and verify-quote; all refusals exit 2):
+ *  R0 no C0/C1 control other than TAB, LF and CRLF, no DEL, U+2028/2029 or BOM anywhere in the file (RUN-STATE body
+ *     included); lines split on \r?\n, which then equals the CommonMark line model; blank = spaces and tabs only;
+ *  R1 exactly one opener line, then one body line, then the closer (`scope_contract_missing` / `_ambiguous` /
+ *     `_malformed`; a legacy bare `scope-contract:` line is missing and is never converted);
+ *  R2 `scope-contract` appears on no other line, in any case;
+ *  R3 no run of 3+ backticks or tildes on any line before the closer (R3a), and no line anywhere else that starts,
+ *     after container prefixes, with one (R3b): the plan holds exactly one fenced block, so no second block whose
+ *     info string decodes to the same name can exist;
+ *  R4 the block precedes RUN-STATE; R5 blank lines around it (no front-matter exception); R6 CommonMark 0.31.2 HTML
+ *     blocks of types 1-5 opened before it end before the blank line (types 6 and 7 end at that blank line);
+ *  R7 front matter (a first line starting with --- or +++) closes with the same token before the block, no `...`;
+ *  R8 no `$$` before the block; R10 exactly one `contract body:` line, equal to the body's SHA-256.
+ * Under these rules CommonMark/GFM render exactly one fenced code block, at top level, with info `scope-contract` and
+ * the body as its literal content (structural, design v3 §3). NOT proven: DOM/CSS effects of raw HTML in a viewer that
+ * renders it, and renderer extensions. Raw HTML is deliberately no longer refused by S6 (option B): such viewers are
+ * excluded by the owner's signed terminal-only approval policy, not by code. `contract --verify-quote` byte-compares
+ * the four-backtick-quoted body of the saved ExitPlanMode request with the plan block and the record. That is byte
+ * verification only: it does not prove what the owner saw and does not authorize execution; native ExitPlanMode
+ * approval, given from a complete, untruncated, literal request in a trusted terminal, remains mandatory, and when the
+ * approval surface cannot meet that requirement the orchestrator fails closed with the NOT_VERIFIED_REPORT wording.
+ * The canonical JSON body: keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); body
+ * <= 8 KiB (64 KiB in engine mode), planned <= 64 entries of <= 256 chars (engine mode 256 of <= 512), supporting <= 16. Field rules
  * (`scope_contract_invalid`):
  *  - every entry is a path with no trailing slash covering itself and everything below (the DAG write syntax): the
  *    engine-dag normalRel rule, printable ASCII only without < > & ` | " (engine globs * ? [ ] { } allowed), no
@@ -103,7 +116,6 @@ const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
 /** Printable ASCII without the characters that can change how a plan renders: < > & ` | " (and backslash, refused by normalRel). */
 const ENTRY_CHARS = /^[ !#$%'()*+,\-./0-9:;=?@A-Z[\]^_a-z{}~]+$/;
 const CONTROL = /[\u0000-\u001f\u007f\u0085\u2028\u2029]/;
-const KEY = 'scope-contract: ';
 const KEYS = 'v,mode,dag,planned,supporting';
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 export const SUPPORTING_SEGMENTS = Object.freeze(['tests', 'test', '__tests__', 'spec', 'e2e', 'fixtures', '__fixtures__', 'docs']);
@@ -111,6 +123,8 @@ const FORBIDDEN_SEGMENTS = ['.github', '.git', '.claude', '.ship-ticket', '.spec
 /** Files a `docs` supporting entry may hold as supporting: documentation and static assets only (closed allowlist). */
 const DOCS_ALLOWED = /\.(md|mdx|markdown|txt|rst|adoc|png|jpg|jpeg|gif|svg|webp|ico|pdf|csv)$/i;
 const USAGE = 'Usage: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]\n'
+  + '       check-pr-scope.mjs lint --plan <plan.md>\n'
+  + '       check-pr-scope.mjs contract --verify-quote <saved-request.txt> --plan <plan.md> [--record <scope.json>]\n'
   + '       check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...';
 
 class Refusal extends Error {
@@ -181,14 +195,6 @@ const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
 export const isManifest = (p) => { const b = posix.basename(p).toLowerCase(); return MANIFESTS_LOWER.has(b) || /\.(csproj|fsproj|vbproj)$/.test(b) || /^requirements.*\.txt$/.test(b); };
 const MANIFESTS_LOWER = new Set([...MANIFESTS].map(m => m.toLowerCase()));
 
-// ---------------------------------------------------------------------------------------------------- the contract
-
-/** The narrative of `text` with the RUN-STATE block (markers included) removed. */
-function narrativeOf(text) {
-  const b = text.indexOf(BEGIN), e = text.indexOf(END);
-  return b >= 0 && e > b ? text.slice(0, b) + text.slice(e + END.length) : text;
-}
-
 /** Validate a contract object's fields; refuses scope_contract_invalid / supporting_overlaps_planned. Returns it. */
 export function validateContract(c) {
   const invalid = (why) => refuse('scope_contract_invalid', why);
@@ -224,102 +230,157 @@ export function validateContract(c) {
   return c;
 }
 
+// ---------------------------------------------------------------------------------------------------- the contract block
+
+export const OPENER = '```scope-contract';
+export const CLOSER = '```';
+/** The ExitPlanMode quote wraps the block in a FOUR-backtick fence (three would be closed by the block's own closer). */
+export const QUOTE_FENCE = '````';
+/** Every C0 and C1 control except TAB and LF (CR only before LF), DEL, U+2028/2029 and BOM: refused anywhere in the file. */
+const FORBIDDEN_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029\ufeff]|\r(?!\n)/;
+const BLANK = /^[ \t]*$/;
+/** A container prefix (blockquote markers, list markers, spaces and tabs), stripped before the fence and HTML tests. */
+const CONTAINER = /^(?:[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)))*[ \t]*/;
+const DIGEST_LINE = /^contract body: (sha256:[0-9a-f]{64})$/;
+/** Printed in every record and by --verify-quote: the owner's terminal-only approval condition (design v3 option B). */
+export const APPROVAL_CAVEAT = 'Byte verification only: this does not prove what the owner saw and does not authorize execution. '
+  + 'Native ExitPlanMode approval remains mandatory, and it is valid only when the complete, untruncated, literal request '
+  + 'was presented in a trusted terminal without active rendering or control-sequence ambiguity. Browser, GitHub and editor '
+  + 'previews are never valid approval surfaces.';
+/** The exact report when the approval surface cannot meet the trusted-terminal requirement (fail closed). */
+export const NOT_VERIFIED_REPORT = 'scope approval NOT verified: the approval surface does not meet the trusted-terminal requirement; do not build';
+
 /**
- * Refuse `scope_contract_hidden` when the rendered plan may not show the contract line at index `at` (fail closed, no
- * Markdown renderer): (a) a raw `<!--` before it with no `-->` after that opener and before the line; (b) the line is
- * inside a fence under EITHER a CommonMark-style tracker (opener of >= 3 backticks or tildes after <= 3 spaces, a
- * backtick info string without a backtick; closer of the same character, at least as long, nothing but whitespace)
- * OR a naive tracker where every line starting (after any indentation) with ``` or ~~~ toggles. Either saying
- * in-fence, or the two disagreeing, refuses. Only the contract line's own position matters.
+ * CommonMark 0.31.2 §4.6 HTML block start conditions 1-5 (the ones whose end is not a blank line), as a conservative
+ * superset (type 1 fires on any character after the name outside [A-Za-z0-9-]), with their end conditions. Types 6 and
+ * 7 end at the next blank line, which R5 guarantees before the opener. Pinned spec wording: see check-pr-scope.test.mjs.
  */
-function hiddenCheck(lines, at) {
-  const hidden = (why) => refuse('scope_contract_hidden', why);
-  const line = lines[at];
-  if (/[<>&]/.test(line)) hidden('the scope-contract line holds < > or & (a comment, tag or entity could change what the approver sees); keep it plain');
-  if ((at > 0 && lines[at - 1].trim() !== '') || (at < lines.length - 1 && lines[at + 1].trim() !== '')) {
-    hidden('the scope-contract line needs a blank line (or the start or end of the narrative) directly before and after it');
+const HTML_BLOCKS = [
+  { type: 1, start: /^<(?:pre|script|style|textarea)(?![A-Za-z0-9-])/i, end: /<\/(?:pre|script|style|textarea)>/i },
+  { type: 2, start: /^<!--/, end: /-->/ },
+  { type: 3, start: /^<\?/, end: /\?>/ },
+  { type: 5, start: /^<!\[CDATA\[/, end: /\]\]>/ },
+  { type: 4, start: /^<![A-Za-z]/, end: />/ },
+];
+
+/**
+ * The ONE rule function shared by `lint`, `check` and `contract --verify-quote` (design v3, rules R0-R8, R3b, R10): the
+ * plan's single fenced scope-contract block, its canonical validated contract and its body bytes. Refuses (exit 2).
+ * A file without RUN-STATE markers is a draft (R4 is then not applicable); with markers the block must precede BEGIN
+ * and the RUN-STATE body is held to R0, R2 and R3b like the rest of the file.
+ */
+export function validatePlanText(text) {
+  const unsafe = (why) => refuse('scope_contract_unsafe', why);
+  const fc = FORBIDDEN_CHARS.exec(text);
+  if (fc) unsafe(`the plan holds a forbidden character U+${fc[0].charCodeAt(0).toString(16).padStart(4, '0')} (only TAB, LF and CRLF are allowed as controls)`);
+  const lines = text.split(/\r?\n/);
+  const openers = lines.flatMap((l, i) => (l === OPENER ? [i] : []));
+  if (!openers.length) {
+    const legacy = lines.some(l => l.startsWith('scope-contract: '));
+    refuse('scope_contract_missing', `the plan has no \`${OPENER}\` block${legacy ? ' (a legacy bare `scope-contract:` line is never converted: write the fenced block and re-approve through ExitPlanMode)' : ''}`);
   }
-  const before = lines.slice(0, at).join('\n');
-  const open = before.lastIndexOf('<!--');
-  if (open >= 0 && before.indexOf('-->', open + 4) < 0) hidden('the scope-contract line lies inside (or after an unterminated) <!-- comment; the approver would not see it');
-  // Fence state of every line under both trackers: a line inside a fence counts only when BOTH agree.
-  const inFence = [];
-  let fence = null, naive = false;
-  for (const l of lines) {
-    const toggles = /^\s*(```|~~~)/.test(l);
-    let cm = fence !== null;
-    if (fence) {
-      const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l);
-      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
-    } else {
-      const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
-      if (o && !(o[1][0] === '`' && o[2].includes('`'))) { fence = { ch: o[1][0], len: o[1].length }; cm = true; }
-    }
-    inFence.push({ cm, nv: naive || toggles });
-    if (toggles) naive = !naive;
+  if (openers.length > 1) refuse('scope_contract_ambiguous', `the plan holds ${openers.length} scope-contract blocks; exactly one is allowed`);
+  const o = openers[0], body = lines[o + 1], c3 = o + 2;
+  if (body === undefined || lines[c3] !== CLOSER) refuse('scope_contract_malformed', 'the scope-contract block is one opener line, one JSON line and one closing ``` line');
+  // R2: the key nowhere else (any case), body and RUN-STATE body included.
+  const mention = lines.findIndex((l, i) => i !== o && /scope-contract/i.test(l));
+  if (mention >= 0) refuse('scope_contract_ambiguous', `line ${mention + 1} mentions scope-contract outside the block opener`);
+  // R3a: no 3+ backtick or tilde run anywhere on a line before the closer; R3b: no fence-starting line anywhere else.
+  const before = lines.findIndex((l, i) => i < c3 && i !== o && /`{3,}|~{3,}/.test(l));
+  if (before >= 0) unsafe(`line ${before + 1} holds a run of 3+ backticks or tildes before the scope-contract block closes`);
+  const fence = lines.findIndex((l, i) => (i < o || i > c3) && /^(`{3,}|~{3,})/.test(l.replace(CONTAINER, '')));
+  if (fence >= 0) unsafe(`line ${fence + 1} starts a code fence; a plan holds no fenced block other than the scope-contract block`);
+  // R4: before RUN-STATE.
+  const begin = lines.findIndex(l => l.includes(BEGIN));
+  if (begin >= 0 && c3 > begin) unsafe('the scope-contract block must come before the RUN-STATE block');
+  // R5: a blank line directly before the opener and after the closer (or end of file), with no exception.
+  if (o === 0 || !BLANK.test(lines[o - 1])) unsafe('the scope-contract block needs a blank line directly before it');
+  if (c3 + 1 < lines.length && !BLANK.test(lines[c3 + 1])) unsafe('the scope-contract block needs a blank line directly after it');
+  // R7: front matter, triggered by any first line starting with --- or +++; closed by the same token before the block.
+  const fm = /^(---|\+\+\+)/.exec(lines[0]);
+  if (fm) {
+    const close = lines.findIndex((l, i) => i > 0 && l.replace(/[ \t]+$/, '') === fm[1]);
+    if (close < 0 || close >= o - 1) unsafe(`front matter opened by ${fm[1]} must close with ${fm[1]} before the scope-contract block, with a blank line between`);
+    const dots = lines.findIndex((l, i) => i > 0 && i < close && l.replace(/[ \t]+$/, '') === '...');
+    if (dots >= 0) unsafe(`line ${dots + 1}: a ... line inside front matter is an ambiguous terminator`);
   }
-  if (inFence[at].cm || inFence[at].nv) hidden(`the scope-contract line may lie inside a code fence (${inFence[at].cm ? 'open fence' : 'fence lines do not pair'}); move it outside every fence`);
-  // Raw HTML anywhere in the narrative outside a fence both trackers agree on, after removing same-line code spans
-  // and balanced <!-- --> comments: any `<` followed by a letter, `/`, `!` or `?` (a tag, closing tag, declaration,
-  // CDATA or processing instruction, a `<TICKET>` placeholder included) refuses, except a <br> line break.
-  const text = lines.map((l, i) => (inFence[i].cm && inFence[i].nv ? '' : stripCodeSpans(l))).join('\n').replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
-  const tag = text.split('\n').map(l => l.replace(/<br\s*\/?>/gi, ' ')).findIndex(l => /<[A-Za-z/!?]/.test(l));
-  if (tag >= 0) hidden(`line ${tag + 1} of the narrative (${JSON.stringify(lines[tag].trim().slice(0, 60))}) holds raw HTML or a <placeholder> that could hide or alter the scope-contract line in the rendered plan; put it in backticks or write &lt; instead`);
+  // R6: HTML blocks of types 1-5 opened before the block must end before the blank line that precedes it.
+  for (let i = 0; i < o - 1; i++) {
+    const s = lines[i].replace(CONTAINER, '');
+    const h = HTML_BLOCKS.find(t => t.start.test(s));
+    if (!h) continue;
+    let j = i;
+    if (!h.end.test(s.slice(h.type === 2 ? 4 : 1))) { j = i + 1; while (j < o - 1 && !h.end.test(lines[j])) j++; }
+    if (j >= o - 1) unsafe(`line ${i + 1} opens an HTML block (type ${h.type}) that does not end before the scope-contract block`);
+    // No skip to j: a container close can end the block earlier than its end string, so every later line is checked
+    // again as a possible start (a superset: it only adds refusals). Live-oracle survivor: `><script>` ... `<?x`.
+  }
+  // R8: no $$ before the block.
+  const math = lines.findIndex((l, i) => i < o && l.includes('$$'));
+  if (math >= 0) unsafe(`line ${math + 1} holds $$ (display math) before the scope-contract block`);
+  // The body: canonical JSON, then the field rules.
+  const engineLike = body.startsWith('{"v":1,"mode":"engine"');
+  if (Buffer.byteLength(body) > (engineLike ? 65536 : 8192)) refuse('scope_contract_noncanonical', 'the contract body exceeds 8 KiB (64 KiB in engine mode)');
+  let c;
+  try { c = JSON.parse(body); } catch { refuse('scope_contract_noncanonical', 'the contract body is not JSON'); }
+  if (c === null || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).join(',') !== KEYS || JSON.stringify(c) !== body) {
+    refuse('scope_contract_noncanonical', `the contract body must be canonical JSON with keys ${KEYS} in that order (no whitespace, escapes or extra keys)`);
+  }
+  validateContract(c);
+  // R10: exactly one `contract body:` line in the narrative before RUN-STATE, equal to SHA-256 of the body bytes.
+  const digestLines = lines.flatMap((l, i) => ((begin < 0 || i < begin) && /^contract body:/i.test(l) ? [i] : []));
+  if (!digestLines.length) refuse('contract_body_digest_missing', 'the plan needs one `contract body: sha256:<hex>` line (printed by `check-pr-scope.mjs contract`)');
+  if (digestLines.length > 1) refuse('contract_body_digest_ambiguous', `the plan holds ${digestLines.length} contract body lines; exactly one is allowed`);
+  const bodySha = sha(body);
+  const m = DIGEST_LINE.exec(lines[digestLines[0]]);
+  if (!m || m[1] !== bodySha) refuse('contract_body_digest_mismatch', `the contract body line must read exactly \`contract body: ${bodySha}\``);
+  return { contract: c, body, bodySha };
 }
 
-/** `l` with its CommonMark code spans removed: a backtick run closes only at the next run of exactly the same length. */
-function stripCodeSpans(l) {
-  let out = '', i = 0;
-  while (i < l.length) {
-    if (l[i] !== '`') { out += l[i++]; continue; }
-    let n = 0;
-    while (l[i + n] === '`') n++;
-    let j = i + n, close = -1;
-    while (j < l.length) {
-      if (l[j] !== '`') { j++; continue; }
-      let m = 0;
-      while (l[j + m] === '`') m++;
-      if (m === n) { close = j; break; }
-      j += m;
-    }
-    if (close < 0) { out += '`'.repeat(n); i += n; continue; }
-    out += ' ';
-    i = close + n;
-  }
+/** The plan's contract (the validated block); refuses (exit 2) otherwise. */
+export const parseContract = (text) => validatePlanText(text).contract;
+
+/** The canonical body for `c` (keys in order, arrays sorted). */
+const canonicalBody = (c) => JSON.stringify({ v: 1, mode: c.mode, dag: c.dag, planned: [...c.planned].sort(), supporting: [...c.supporting].sort() });
+
+/** The block, its digest line and the ExitPlanMode quote for a canonical body. */
+export function contractOutput(body) {
+  const block = `${OPENER}\n${body}\n${CLOSER}`;
+  return { block, digestLine: `contract body: ${sha(body)}`, quote: `${QUOTE_FENCE}\n${block}\n${QUOTE_FENCE}` };
+}
+
+/** The canonical contract output for `c`, validated through the same rule function as a plan. */
+export function contractFor(c) {
+  const out = contractOutput(canonicalBody(c));
+  validatePlanText(`\n${out.block}\n\n${out.digestLine}\n`);
   return out;
 }
 
-/** The plan's one `scope-contract:` line, parsed, canonical and validated; refuses (exit 2) otherwise. */
-export function parseContract(text) {
-  // One trailing CR is stripped only where it precedes LF (CRLF line ends); a lone CR anywhere else stays and refuses.
-  const raw = narrativeOf(text).split('\n');
-  const lines = raw.map((l, i) => (i < raw.length - 1 && l.endsWith('\r') ? l.slice(0, -1) : l));
-  const found = lines.filter(l => l.startsWith(KEY));
-  const mentions = lines.filter(l => !l.startsWith(KEY) && /scope-contract/i.test(l));
-  if (mentions.length || found.length > 1) refuse('scope_contract_ambiguous', `the plan must hold exactly one scope-contract line and mention the key nowhere else (${found.length} line(s), ${mentions.length} other mention(s))`);
-  if (!found.length) refuse('scope_contract_missing', 'the plan has no `scope-contract: {...}` line');
-  const line = found[0];
-  hiddenCheck(lines, lines.indexOf(line));
-  if (Buffer.byteLength(line) > 65536 || (!line.startsWith(KEY + '{"v":1,"mode":"engine"') && Buffer.byteLength(line) > 8192)) {
-    refuse('scope_contract_noncanonical', 'the scope-contract line exceeds 8 KiB (64 KiB in engine mode)');
+/**
+ * Byte-compare the quoted body (the single four-backtick-quoted block of `quoteText`, the request text the orchestrator
+ * saved) with the plan block and, when given, the record's `contract`; recompute SHA-256 against the plan's digest line
+ * and the record's `contract_sha256`. Returns { ok, lines }. A human/orchestrator step: it cannot know the saved quote
+ * is what the owner saw.
+ */
+export function verifyQuote(quoteText, planText, record) {
+  const out = [];
+  const fail = (why) => ({ ok: false, lines: [...out, `verify-quote: FAIL: ${why}`] });
+  if (FORBIDDEN_CHARS.test(quoteText)) return fail('the quote holds a control character, BOM or lone CR');
+  const q = quoteText.split(/\r?\n/);
+  const starts = q.flatMap((l, i) => (l === QUOTE_FENCE && q[i + 1] === OPENER && q[i + 3] === CLOSER && q[i + 4] === QUOTE_FENCE ? [i] : []));
+  const openers = q.filter(l => l === OPENER).length;
+  if (starts.length !== 1 || openers !== 1) return fail(`the request must hold exactly one four-backtick-quoted scope-contract block (found ${starts.length} quoted, ${openers} opener line(s))`);
+  const quoted = q[starts[0] + 2];
+  const plan = validatePlanText(planText);
+  const diff = (a, b) => { let k = 0; while (k < a.length && a[k] === b[k]) k++; return k; };
+  if (quoted !== plan.body) return fail(`the quoted body differs from the plan block at character ${diff(quoted, plan.body)}`);
+  out.push(`verify-quote: quoted body equals the plan block (${plan.bodySha})`);
+  if (record !== undefined) {
+    if (record.contract !== quoted) return fail(`the quoted body differs from record.contract at character ${diff(quoted, String(record.contract ?? ''))}`);
+    if (record.contract_sha256 !== sha(quoted)) return fail('record.contract_sha256 is not the SHA-256 of the quoted body');
+    out.push('verify-quote: quoted body equals record.contract and record.contract_sha256');
   }
-  const json = line.slice(KEY.length);
-  let c;
-  try { c = JSON.parse(json); } catch { refuse('scope_contract_noncanonical', 'the scope-contract value is not JSON'); }
-  if (c === null || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).join(',') !== KEYS || JSON.stringify(c) !== json) {
-    refuse('scope_contract_noncanonical', `the scope-contract value must be canonical JSON with keys ${KEYS} in that order (no whitespace, escapes or extra keys)`);
-  }
-  return validateContract(c);
-}
-
-/** The contract's own canonical line (as approved, arrays in their approved order), printed in the record for the reviewer. */
-const contractText = (c) => KEY + JSON.stringify({ v: c.v, mode: c.mode, dag: c.dag, planned: c.planned, supporting: c.supporting });
-
-/** The canonical contract line for `c` (keys in order, arrays sorted), validated. */
-export function contractLine(c) {
-  const line = KEY + JSON.stringify({ v: 1, mode: c.mode, dag: c.dag, planned: [...c.planned].sort(), supporting: [...c.supporting].sort() });
-  parseContract(line);
-  return line;
+  return { ok: true, lines: [...out, 'verify-quote: PASS'] };
 }
 
 // ---------------------------------------------------------------------------------------------------- classification
@@ -455,7 +516,8 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   if (!SAFE_ID.test(runId ?? '')) refuse('bad_input', `unsafe --run-id ${JSON.stringify(runId)}`);
   if (typeof base !== 'string' || !base || base.startsWith('-')) refuse('bad_input', `refused ref: ${base}`);
   const approved = approvedPlan(plan, runId);
-  const c = parseContract(approved.text);
+  const block = validatePlanText(approved.text);
+  const c = block.contract;
   bindMode(c, { repo, ticket, runId, events: approved.events, dag });
   const exclusions = [`.specs/plans/${ticket}.md`, 'session-log.md'];
   const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', base, ...exclusions.flatMap(x => ['--exclude', x])],
@@ -486,7 +548,7 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   const counts = { planned: count('planned'), supporting: count('supporting'), material: count('material'), total: files.length };
   const record = { schema: SCHEMA, ticket, run_id: runId, base, merge_base: cand.merge_base, candidate_id: cand.candidate_id,
     approved_plan_digest: approved.digest, mode: c.mode, dag_digest: c.dag, roots: [...c.planned].sort(), supporting: [...c.supporting].sort(),
-    broad_planned: c.planned.filter(isBroad).sort(), contract: contractText(c), exclusions, files, counts, outcome: counts.material ? 'MATERIAL' : 'CLEAN' };
+    broad_planned: c.planned.filter(isBroad).sort(), contract: block.body, contract_sha256: block.bodySha, approval_caveat: APPROVAL_CAVEAT, exclusions, files, counts, outcome: counts.material ? 'MATERIAL' : 'CLEAN' };
   return { exit: counts.material ? 1 : 0, record, text: JSON.stringify(record, null, 1) + '\n' };
 }
 
@@ -513,11 +575,36 @@ function flags(rest, allowed, repeat = []) {
   return f;
 }
 
+const readText = (file, code) => { try { return readFileSync(file, 'utf8'); } catch (e) { return refuse(code, `${file}: ${e.code ?? e.message}`); } };
+
+/** Print the block, the digest line and the four-backtick quote (the order a plan and an ExitPlanMode request use them). */
+const printContract = (out) => process.stdout.write(`${out.block}\n\n${out.digestLine}\n\n${out.quote}\n`);
+
 function contractCommand(rest) {
+  if (rest[0] === '--verify-quote') {
+    const f = flags(rest, ['verify-quote', 'plan', 'record']);
+    if (!f || !f['verify-quote'] || !f.plan) { process.stderr.write(USAGE + '\n'); return 2; }
+    let record;
+    if (f.record !== undefined) { try { record = JSON.parse(readText(f.record, 'record_unreadable')); } catch (e) { if (e instanceof Refusal) throw e; refuse('record_unreadable', `${f.record} is not JSON`); } }
+    const r = verifyQuote(readText(f['verify-quote'], 'quote_unreadable'), readText(f.plan, 'plan_unreadable'), record);
+    process.stdout.write(`${r.lines.join('\n')}\nCAVEAT: ${APPROVAL_CAVEAT}\nIf the approval surface did not meet that requirement, report exactly: ${NOT_VERIFIED_REPORT}\n`);
+    return r.ok ? 0 : 1;
+  }
   const f = flags(rest, ['mode', 'dag', 'planned', 'supporting'], ['planned', 'supporting']);
   if (!f || !['engine', 'manual'].includes(f.mode) || (f.mode === 'engine') !== (f.dag !== undefined)) { process.stderr.write(USAGE + '\n'); return 2; }
   const d = f.dag === undefined ? null : readDag(resolve(f.dag));
-  process.stdout.write(contractLine({ mode: f.mode, dag: d?.digest ?? null, planned: f.planned ?? d?.writes ?? [], supporting: f.supporting ?? [] }) + '\n');
+  printContract(contractFor({ mode: f.mode, dag: d?.digest ?? null, planned: f.planned ?? d?.writes ?? [], supporting: f.supporting ?? [] }));
+  return 0;
+}
+
+/** `lint --plan P`: the same rule function as `check`, on the plan file alone (no git, no START); prints the contract output. */
+function lintCommand(rest) {
+  const f = flags(rest, ['plan']);
+  if (!f || !f.plan) { process.stderr.write(USAGE + '\n'); return 2; }
+  const text = readText(f.plan, 'plan_unreadable');
+  const b = validatePlanText(text);
+  printContract(contractOutput(b.body));
+  process.stderr.write(`check-pr-scope lint: PASS${text.includes(BEGIN) ? '' : ' (draft: no RUN-STATE)'}\n`);
   return 0;
 }
 
@@ -525,6 +612,7 @@ export async function main(argv) {
   const [cmd, ...rest] = argv;
   try {
     if (cmd === 'contract') return contractCommand(rest);
+    if (cmd === 'lint') return lintCommand(rest);
     const f = cmd === 'check' ? flags(rest, ['repo', 'ticket', 'run-id', 'base', 'plan', 'dag', 'out']) : null;
     if (!f || !f.repo || !f.ticket || !f['run-id'] || !f.base || !f.plan) { process.stderr.write(USAGE + '\n'); return 2; }
     const repo = resolve(f.repo);

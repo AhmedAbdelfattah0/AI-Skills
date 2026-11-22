@@ -53,8 +53,10 @@ function repo(t, baseFiles = { 'README.md': 'base\n' }) {
 }
 
 /** The canonical contract line (fixed key order v, mode, dag, planned, supporting). */
-const contract = ({ mode = 'manual', dag = null, planned, supporting = [] }) =>
-  `scope-contract: ${JSON.stringify({ v: 1, mode, dag, planned, supporting })}`;
+const bodyOf = ({ mode = 'manual', dag = null, planned, supporting = [] }) => JSON.stringify({ v: 1, mode, dag, planned, supporting });
+/** The fenced block (opener, canonical body, closer), a blank line and the required `contract body:` line. */
+const block = (body) => `\`\`\`scope-contract\n${body}\n\`\`\`\n\ncontract body: ${sha(body)}`;
+const contract = (c) => block(bodyOf(c));
 /** The explanatory table a real plan keeps; no script reads it. */
 const TABLE = '| ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |\n|---|---|---|---|---|---|\n| web | worker | Build checkout | `src/checkout/page.tsx` | — | none |';
 
@@ -367,17 +369,6 @@ test('Codex 1: a table cell hiding a comment inside backticks is ignored; the co
   assert.equal(byPath(out.json)['src/evil.mjs'].class, 'material');
 });
 
-test('Codex 2: a list-contained fence cannot hide or add a declaration', (t) => {
-  const r = repo(t);
-  const fence = `- step one\n  \`\`\`\n${TABLE.split('\n').map((l) => `  ${l}`).join('\n')}\n  \`\`\`\n`;
-  writePlan(r, fence);
-  r.write('src/a.ts');
-  assert.match(run(r).stderr, /scope_contract_missing/);
-  const fencedLine = `- step one\n  \`\`\`\n  ${contract({ planned: ['src'] })}\n  \`\`\`\n`;
-  writePlan(r, `${fencedLine}\n${contract({ planned: ['src/a.ts'] })}`);
-  assert.match(run(r).stderr, /scope_contract_ambiguous/);
-});
-
 test('Codex 3: a DAG digest on lines of its own is irrelevant to binding; the contract mode decides', (t) => {
   const r = repo(t);
   const d = dagFile(r, [['src/a.ts']]);
@@ -392,67 +383,6 @@ test('Codex 3: a DAG digest on lines of its own is irrelevant to binding; the co
 });
 
 // ------------------------------------------------------------------ declaration refusals (exit 2, never a record)
-
-const good = { planned: ['src/a.ts'], supporting: ['tests'] };
-const raw = (json) => `scope-contract: ${json}`;
-for (const [name, body, code] of [
-  ['no contract line', TABLE, 'scope_contract_missing'],
-  ['a second contract line', `${contract(good)}\n${contract(good)}`, 'scope_contract_ambiguous'],
-  ['the key mentioned in prose', `${contract(good)}\nThe scope-contract above is binding.`, 'scope_contract_ambiguous'],
-  ['the key in another case', `${contract(good)}\n<!-- Scope-Contract: x -->`, 'scope_contract_ambiguous'],
-  ['an indented contract line only', `  ${contract(good)}`, 'scope_contract_ambiguous'],
-  ['a contract in backticks only', `\`${contract(good)}\``, 'scope_contract_ambiguous'],
-  ['a list item contract only', `- ${contract(good)}`, 'scope_contract_ambiguous'],
-  ['a BOM before the key', `${BOM}${contract(good)}`, 'scope_contract_ambiguous'],
-  ['a space after the colon', contract(good).replace('{', ' {'), 'scope_contract_noncanonical'],
-  ['whitespace inside the JSON', contract(good).replace('"v":1', '"v": 1'), 'scope_contract_noncanonical'],
-  ['keys out of order', raw('{"mode":"manual","v":1,"dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
-  ['an extra key', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[],"x":1}'), 'scope_contract_noncanonical'],
-  ['a missing key', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"]}'), 'scope_contract_noncanonical'],
-  ['a duplicate key', raw('{"v":1,"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
-  ['a unicode escape', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/\\u0061.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
-  ['trailing whitespace', `${contract(good)} `, 'scope_contract_noncanonical'],
-  ['not JSON', raw('{v:1}'), 'scope_contract_noncanonical'],
-  ['version 2', raw('{"v":2,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_invalid'],
-  ['an unknown mode', contract({ ...good, mode: 'auto' }), 'scope_contract_invalid'],
-  ['manual with a dag', contract({ ...good, dag: sha('x') }), 'scope_contract_invalid'],
-  ['engine without a dag', contract({ ...good, mode: 'engine' }), 'scope_contract_invalid'],
-  ['a dot-dot planned entry', contract({ planned: ['src/../api/x.ts'] }), 'scope_contract_invalid'],
-  ['a dot planned entry', contract({ planned: ['./src/a.ts'] }), 'scope_contract_invalid'],
-  ['an absolute planned entry', contract({ planned: ['/etc/passwd'] }), 'scope_contract_invalid'],
-  ['a trailing slash', contract({ planned: ['src/'] }), 'scope_contract_invalid'],
-  ['a backslash', contract({ planned: ['src\\a.ts'] }), 'scope_contract_invalid'],
-  ['a glob in manual mode', contract({ planned: ['src/*.ts'] }), 'scope_contract_invalid'],
-  ['an empty manual planned list', contract({ planned: [] }), 'scope_contract_invalid'],
-  ['a duplicate planned entry', contract({ planned: ['src/a.ts', 'src/a.ts'] }), 'scope_contract_invalid'],
-  ['a supporting entry outside the closed class', contract({ planned: ['src/a.ts'], supporting: ['tests2'] }), 'scope_contract_invalid'],
-  ['a supporting entry with production code in its name', contract({ planned: ['src/a.ts'], supporting: ['src/api'] }), 'scope_contract_invalid'],
-  ['a supporting entry under a forbidden directory', contract({ planned: ['src/a.ts'], supporting: ['.github/tests'] }), 'scope_contract_invalid'],
-  ['a supporting entry under node_modules', contract({ planned: ['src/a.ts'], supporting: ['node_modules/x/tests'] }), 'scope_contract_invalid'],
-  ['a supporting glob', contract({ planned: ['src/a.ts'], supporting: ['*/tests'] }), 'scope_contract_invalid'],
-  ['supporting inside planned', contract({ planned: ['src'], supporting: ['src/tests'] }), 'supporting_overlaps_planned'],
-  ['planned inside supporting', contract({ planned: ['tests/helpers.ts'], supporting: ['tests'] }), 'supporting_overlaps_planned'],
-  // review repair: a contract line the rendered plan may hide (raw comment span, fence under either tracker)
-  ['a contract inside a comment span (Codex)', `${TABLE}\n\n<!--\n${contract(good)}\n-->`, 'scope_contract_hidden'],
-  ['a contract after an unterminated comment', `<!-- note\n\n${contract(good)}`, 'scope_contract_hidden'],
-  ['a contract after a comment opened mid-line', `text <!-- hidden\n${contract(good)}\nend -->`, 'scope_contract_hidden'],
-  ['a contract inside a backtick fence', `\`\`\`\n${contract(good)}\n\`\`\``, 'scope_contract_hidden'],
-  ['a contract inside a tilde fence', `~~~\n${contract(good)}\n~~~`, 'scope_contract_hidden'],
-  ['a 4-backtick fence closed by 3 backticks (trackers disagree)', `\`\`\`\`\n\`\`\`\n${contract(good)}\n\`\`\`\``, 'scope_contract_hidden'],
-  ['a list-contained fence', `- step\n  \`\`\`\n${contract(good)}\n  \`\`\``, 'scope_contract_hidden'],
-  ['a deeply indented list fence (naive tracker only)', `- step\n    - sub\n        \`\`\`\n${contract(good)}\n        \`\`\``, 'scope_contract_hidden'],
-  ['an unterminated fence before the contract', `\`\`\`js\ncode\n\n${contract(good)}`, 'scope_contract_hidden'],
-]) {
-  test(`refused, exit 2, no record: ${name}`, (t) => {
-    const r = repo(t);
-    writePlan(r, body);
-    r.write('src/a.ts');
-    const out = run(r);
-    assert.equal(out.status, 2, out.stdout + out.stderr);
-    assert.match(out.stderr, new RegExp(code));
-    assert.equal(existsSync(defaultOut(r)), false);
-  });
-}
 
 test('overlap with an engine glob: a supporting entry matched by a planned glob or under its literal prefix is refused', () => {
   const eng = (planned, supporting) => () => S.validateContract({ v: 1, mode: 'engine', dag: sha('d'), planned, supporting });
@@ -525,38 +455,6 @@ test('manual mode matches brackets and braces literally; * and ? stay refused', 
   for (const g of ['src/*.ts', 'src/a?.ts']) assert.throws(() => S.validateContract({ v: 1, mode: 'manual', dag: null, planned: [g], supporting: [] }), (e) => e.code === 'scope_contract_invalid', g);
 });
 
-test('benign plans stay valid: closed fences and comments elsewhere, CRLF line ends', () => {
-  const body = `<!-- a note -->\n\`\`\`js\nconst x = 1;\n\`\`\`\n\n\`\`\`\`md\n\`\`\`\ninner\n\`\`\`\n\`\`\`\`\n~~~\nt\n~~~\n\n${contract(good)}\n\n\`\`\`\nafter\n\`\`\``;
-  assert.doesNotThrow(() => S.parseContract(planText(body)));
-  assert.doesNotThrow(() => S.parseContract(planText(contract(good)).replace(/\n/g, '\r\n')), 'CRLF: one trailing CR before LF is stripped');
-});
-
-// ------------------------------------------------------------------ review repair 2: the hidden-contract class closed by refusal
-
-const C = contract(good);
-const hiddenCases = [
-  ['script', `<script>\n\n${C}\n\n</script>`], ['style', `<style>\n\n${C}\n\n</style>`], ['template', `<template>\n\n${C}\n\n</template>`],
-  ['template without blank lines', `<template>\n${C}\n</template>`], ['noscript', `<noscript>\n\n${C}\n\n</noscript>`],
-  ['details', `<details>\n\n${C}\n\n</details>`], ['details with summary', `<details><summary>x</summary>\n\n${C}\n\n</details>`],
-  ['div hidden', `<div hidden>\n\n${C}\n\n</div>`], ['mid-line div hidden', `text <div hidden>\n\n${C}\n\n</div>`],
-  ['CDATA', `<![CDATA[\n\n${C}\n\n]]>`], ['processing instruction', `<?x\n\n${C}\n\n?>`], ['declaration', `<!X\n\n${C}\n\n>`],
-  ['multi-line img alt', `<img alt="\n\n${C}\n\n">`], ['multi-line iframe srcdoc', `text <iframe srcdoc="\n\n${C}\n\n">`],
-  ['a style after the line', `${C}\n\n<style>p{display:none}</style>`], ['a placeholder tag before the line', `<TICKET> placeholder\n\n${C}`],
-  ['a mid-line placeholder tag', `Plan for <TICKET>\n\n${C}`], ['an unterminated tag opening', `a <unterminated\n\n${C}`],
-  ['an autolink-like tag', `see <https://example.invalid>\n\n${C}`], ['a closing tag', `</div>\n\n${C}`],
-  ['no blank line before', `intro\n${C}`], ['no blank line after', `${C}\nafter`],
-  ['a comment open inside the JSON (Codex)', 'scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}'],
-  ['an entity inside the line', contract({ planned: ['src/&#60;!--'] })], ['a named entity inside the line', contract({ planned: ['src/&lt;x'] })],
-  ['a > inside the line', contract({ planned: ['src/a>b'] })],
-  ['an unbalanced single-line backtick before a tag', `\` <div hidden> \`\`\n\n${C}`],
-  ['a tag where the fence trackers disagree (after the line)', `${C}\n\n\`\`\`\`\n\`\`\`\n<style>p{display:none}</style>\n\`\`\`\``],
-];
-for (const [name, body] of hiddenCases) {
-  test(`hidden-contract refusal (scope_contract_hidden): ${name}`, () => {
-    assert.throws(() => S.parseContract(planText(body)), (e) => e.exit === 2 && e.code === 'scope_contract_hidden', name);
-  });
-}
-
 test('entry charset: backtick, pipe, quote and non-ASCII are refused in both modes; engine glob characters stay allowed', () => {
   for (const mode of ['manual', 'engine']) {
     for (const bad of ['src/a`b', 'src/a|b', 'src/a"b', 'src/café.ts', 'src/a b']) {
@@ -564,29 +462,6 @@ test('entry charset: backtick, pipe, quote and non-ASCII are refused in both mod
     }
   }
   assert.doesNotThrow(() => S.validateContract({ v: 1, mode: 'engine', dag: sha('d'), planned: ['apps/**/[id]/{a}/*.ts', 'x?y'], supporting: [] }));
-});
-
-test('benign plans stay valid: balanced comments, the template metadata comment, the security-plan comment, <br> in tables, HTML in closed fences, backticked tags, entities, comparisons', () => {
-  const ok = [
-    `<!-- a note -->\n\n${C}`,
-    `<!-- the YAML header above this body carries:\n     run_id: <opaque ID>\n     design_ref: <SHA>  -->\n\n**Shape:** BE\n\n${C}`,
-    `<!-- security-plan: {"v":1} -->\n\n${C}`,
-    `| a | b<br>c |\n|---|---|\n| x | y<br/>z<BR /> |\n\n${C}`,
-    `\`\`\`html\n<div hidden>\n<script>x</script>\n\`\`\`\n\n${C}\n\n~~~html\n<style>p{}</style>\n~~~`,
-    `Plan for \`<TICKET>\` and \`\`<a \` b>\`\`\n\n${C}`,
-    `x &lt;div&gt; &amp; y\n\n${C}`,
-    `x <= 5 and a < b, 3<4\n\n${C}`,
-  ];
-  for (const body of ok) assert.doesNotThrow(() => S.parseContract(planText(body)), body);
-});
-
-test('Codex JSON-string example end to end: the line is refused, never CLEAN', (t) => {
-  const r = repo(t);
-  writePlan(r, 'scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}');
-  r.write('src/evil.mjs');
-  const out = run(r);
-  assert.equal(out.status, 2, out.stdout + out.stderr);
-  assert.match(out.stderr, /scope_contract_hidden/);
 });
 
 test('case-insensitive manifests and case-consistent supporting entries', (t) => {
@@ -629,14 +504,6 @@ test('git index and diff modes: an executable staged with core.filemode=false is
   r.git(['commit', '-q', '-m', 'x']);
   const committed = byPath(run(r).json);
   assert.deepEqual([committed['tests/run.sh'].class, committed['tests/run.sh'].flags], ['material', ['executable_mode']]);
-});
-
-test('a lone CR or a NUL never produce an accepted declaration (CRLF line ends are accepted)', () => {
-  const ok = planText(contract(good));
-  assert.doesNotThrow(() => S.parseContract(ok));
-  for (const bad of [ok.replace(contract(good), `\r${contract(good)}`), ok.replace(contract(good), `${contract(good).replace('"v":1,', '"v":1,\r')}`), ok.replace(`${contract(good)}\n`, `${contract(good)}\r\r\n`), ok.replace('"v":1', `"v":1${NUL}`)]) {
-    assert.throws(() => S.parseContract(bad), (e) => e.exit === 2);
-  }
 });
 
 // ------------------------------------------------------------------ inputs and git failures
@@ -707,21 +574,6 @@ test('a path strictly under an exclusion FILE entry is material (under_exclusion
   writePlan(ok, contract({ planned: ['src/a.ts'] }));
   ok.write('src/a.ts'); ok.write('session-log.md');
   assert.equal(run(ok).status, 0);
-});
-
-test('the contract helper prints the canonical line that check accepts', (t) => {
-  const r = repo(t);
-  const d = dagFile(r, [['src/b', 'src/a']]);
-  const p = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'engine', '--dag', d.file, '--supporting', 'tests', '--supporting', 'docs'], { encoding: 'utf8' });
-  assert.equal(p.status, 0, p.stderr);
-  assert.equal(p.stdout, `${contract({ mode: 'engine', dag: d.digest, planned: ['src/a', 'src/b'], supporting: ['docs', 'tests'] })}\n`);
-  const m = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/x', '--planned', 'src/a'], { encoding: 'utf8' });
-  assert.equal(m.stdout, `${contract({ planned: ['src/a', 'src/x'] })}\n`);
-  const bad = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/*.ts'], { encoding: 'utf8' });
-  assert.equal(bad.status, 2);
-  writePlan(r, p.stdout.trim());
-  r.write('src/a/x.ts');
-  assert.equal(run(r, ['--dag', d.file]).status, 0);
 });
 
 // ------------------------------------------------------------------ engine matcher parity and the no-downgrade proof
@@ -797,52 +649,6 @@ test('normalRel parity: the local copy accepts exactly the writes validateEngine
 
 // ------------------------------------------------------------------ malformed-declaration property (>= 5000)
 
-test('property: a mutated declaration is refused or classifies exactly as the canonical contract (never CLEAN where it says MATERIAL)', (t) => {
-  const C = { v: 1, mode: 'manual', dag: null, planned: ['src/checkout/page.tsx', 'src/checkout'], supporting: ['tests', 'docs'] };
-  const line = `scope-contract: ${JSON.stringify(C)}`;
-  const files = ['src/checkout/page.tsx', 'src/checkout/x.ts', 'tests/a.test.ts', 'docs/g.md', 'docs/x.mjs', 'src/api/route.ts', 'package.json', 'tests/l']
-    .map((path) => ({ path, kind: path === 'tests/l' ? 'symlink' : 'file' }));
-  const classes = (c) => S.classify(files, { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: () => '../x' }).map((f) => [f.path, f.class]);
-  const reference = classes(S.parseContract(planText(line)));
-  assert.ok(reference.some(([, c]) => c === 'material'));
-  const M = [
-    (s) => s.replace('{', ' {'), (s) => s.replace('"v":1', '"v": 1'), (s) => s.replace('{"v":1,', '{"v":1,"v":1,'),
-    (s) => s.replace(/}$/, ',"x":1}'), (s) => s.replace(/,"supporting":\[[^\]]*\]/, ''), (s) => s.replace('"v":1', '"v":"1"'),
-    (s) => s.replace('"dag":null', '"dag":0'), (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":"src"'),
-    (s) => s.replace('{"v":1,"mode":"manual",', '{"mode":"manual","v":1,'), (s) => s.replace('tests', '\\u0074ests'),
-    (s) => s.replace('tests', `t${CYR_E}sts`), (s) => s.replace('"mode"', `"m${CYR_O}de"`), (s) => s.replace('src/checkout"', 'src/../checkout"'),
-    (s) => s.replace('src/checkout"', 'src/./checkout"'), (s) => s.replace('"src/checkout"', '"/src/checkout"'), (s) => s.replace('src/checkout"', 'src\\\\checkout"'),
-    (s) => s.replace('src/checkout"', 'src/checkout/*"'), (s) => s.replace('src/checkout"', 'src/?heckout"'), (s) => s.replace('"src/checkout"', '""'),
-    (s) => s.replace('"docs"', `"${'d'.repeat(300)}"`), (s) => s.replace(/"planned":\[/, `"planned":[${Array.from({ length: 70 }, (_, i) => `"p${i}"`).join(',')},`),
-    (s) => s.replace('"tests"', '"src/checkout/tests"'), (s) => s.replace('"docs"', '"documentation"'), (s) => s.replace('"tests"', '"tests/"'),
-    (s) => s.replace('"manual"', '"engine"'), (s) => s.replace('"dag":null', `"dag":"${sha('x')}"`),
-    (s) => `${s} `, (s) => `${s}\t`, (s) => s.replace('"v":1', `"v":1${NUL}`), (s) => `${BOM}${s}`, (s) => ` ${s}`, (s) => s.replace('scope-contract:', 'Scope-contract:'),
-    (s) => s.replace('scope-contract: ', 'scope-contract:'), (s) => s.replace('scope-contract: ', 'scope-contract:  '), (s) => `${s}\r`,
-    (s) => `${s}\n${s}`, (s) => `${s}\nsee the scope-contract above`, (s) => `${s}\n\`\`\`\n${s}\n\`\`\``, (s) => `${s}\n<!-- ${s} -->`,
-    (s) => `${s}\n- ${s}`, (s) => `${s}\n\`scope-contract\``, (s) => `\r${s}`, (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":[]'),
-    (s) => s.replace('"src/checkout/page.tsx","src/checkout"', '"src/checkout","src/checkout/page.tsx"'), // valid: order is not semantic
-    (s) => s.replace('"tests","docs"', '"docs","tests"'), (s) => s.split('"').join("'"), (s) => s.replace('{', '{\n'), (s) => s.slice(0, -1),
-    (s) => s.replace('"planned"', '"Planned"'), (s) => s.replace(/"supporting":\[[^\]]*\]/, '"supporting":null'), (s) => s.replace('"v":1', '"v":1.0'),
-    (s) => s.replace('"v":1', '"v":true'), (s) => s.replace('page.tsx', 'page.tsx\\n'), (s) => s.replace('page.tsx', `page.tsx${LS}`),
-    (s) => s.replace('"src/checkout"', '"src/checkout","src/checkout"'), (s) => s.replace('"tests"', '"node_modules/tests"'),
-    (s) => s.replace('"tests"', '"package.json"'), (s) => s.replace('"tests"', '"src/checkout/page.tsx/tests"'),
-  ];
-  const rand = rng(424242);
-  let refused = 0, same = 0;
-  for (let i = 0; i < 6000; i++) {
-    let body = line;
-    const k = 1 + Math.floor(rand() * 3);
-    for (let j = 0; j < k; j++) body = M[Math.floor(rand() * M.length)](body);
-    const text = planText(rand() < 0.1 ? body.replace(/\n/g, '\r\n') : body);
-    let c;
-    try { c = S.parseContract(text); } catch (e) { assert.equal(e.exit, 2, String(e.stack)); refused++; continue; }
-    assert.deepEqual(classes(c), reference, JSON.stringify(body));
-    same++;
-  }
-  t.diagnostic(`refused ${refused}, same ${same}`);
-  assert.ok(refused + same >= 5000 && refused > 3000 && same > 50, `refused ${refused}, same ${same}`);
-});
-
 // ------------------------------------------------------------------ separation and wording pins
 
 test('no engine, gate or ship-ready script imports check-pr-scope.mjs, and nothing reads plan_table_drift', () => {
@@ -853,26 +659,355 @@ test('no engine, gate or ship-ready script imports check-pr-scope.mjs, and nothi
   for (const f of ['run-engine.mjs', 'engine-gates.mjs', 'gate.mjs', 'ship-ready-check.mjs']) assert.ok(existsSync(join(HERE, f)), f);
 });
 
+// ------------------------------------------------------------------ v3: the fenced block, structure rules R0-R10 (option B)
+
+const good = { planned: ['src/a.ts'], supporting: ['tests'] };
+const C = contract(good);
+const GOOD_BODY = bodyOf(good);
+/** A plan file text without START (validatePlanText reads structure only): `narr`, then RUN-STATE holding `rs`. */
+const doc = (narr, rs = '') => `${narr}\n\n${B}\n${rs ? `${rs}\n` : ''}${E}\n`;
+const P = (x) => doc(`# Plan\n\n${x}`);
+const ESC = String.fromCharCode(0x1b);
+const ACCEPT = 'ACCEPT';
+const STRUCTURE = [
+  // R1
+  ['no block', P(TABLE), 'scope_contract_missing'],
+  ['a legacy bare line (never converted)', P(`scope-contract: ${GOOD_BODY}`), 'scope_contract_missing'],
+  ['two blocks', P(`${C}\n\n${C}`), 'scope_contract_ambiguous'],
+  ['an opener with trailing info', P(C.replace('```scope-contract', '```scope-contract x')), 'scope_contract_missing'],
+  ['a tilde opener', P(C.replace('```scope-contract', '~~~scope-contract').replace(/\n```\n/, '\n~~~\n')), 'scope_contract_missing'],
+  ['an indented opener', P(`  ${C}`), 'scope_contract_missing'],
+  ['a wrong closer', P(C.replace(/\n```\n/, '\n````\n')), 'scope_contract_malformed'],
+  // R2
+  ['the key in prose', P(`${C}\n\nThe scope-contract above binds.`), 'scope_contract_ambiguous'],
+  ['the key in another case in a comment', P(`<!-- Scope-Contract: x -->\n\n${C}`), 'scope_contract_ambiguous'],
+  ['the key in the RUN-STATE body', doc(`# Plan\n\n${C}`, 'note: scope-contract'), 'scope_contract_ambiguous'],
+  ['a planned path holding the key', P(contract({ planned: ['src/scope-contract.ts'] })), 'scope_contract_ambiguous'],
+  // R3a and R3b
+  ['a fence before the block', P(`\`\`\`js\nx\n\`\`\`\n\n${C}`), 'scope_contract_unsafe'],
+  ['inline triple backticks before', P(`use \`\`\`x\`\`\` here\n\n${C}`), 'scope_contract_unsafe'],
+  ['a tilde run before', P(`~~~ note\n\n${C}`), 'scope_contract_unsafe'],
+  ['a 4-backtick fence holding 3 before', P(`\`\`\`\`\n\`\`\`\nx\n\`\`\`\`\n\n${C}`), 'scope_contract_unsafe'],
+  ['a list-contained fence before', P(`- step\n  \`\`\`\n  x\n  \`\`\`\n\n${C}`), 'scope_contract_unsafe'],
+  ['an alias fence after (entity)', P(`${C}\n\n\`\`\`scope&#45;contract\nX\n\`\`\``), 'scope_contract_unsafe'],
+  ['an alias fence after (backslash escape)', P(`${C}\n\n\`\`\`scope\\-contract\nX\n\`\`\``), 'scope_contract_unsafe'],
+  ['a tilde fence after', P(`${C}\n\n~~~\nY\n~~~`), 'scope_contract_unsafe'],
+  ['a quote-prefixed fence after', P(`${C}\n\n> \`\`\`x\n> q`), 'scope_contract_unsafe'],
+  ['a list-prefixed fence after', P(`${C}\n\n1. \`\`\`\n   q`), 'scope_contract_unsafe'],
+  ['a fence in the RUN-STATE body', doc(`# Plan\n\n${C}`, '```'), 'scope_contract_unsafe'],
+  // R4 and R5
+  ['the block after BEGIN', `# Plan\n\n${B}\n${E}\n\n${C}\n`, 'scope_contract_unsafe'],
+  ['no blank line before', doc(`# Plan\n${C}`), 'scope_contract_unsafe'],
+  ['no blank line after', P(C.replace(/\n```\n\n/, '\n```\nafter\n\n')), 'scope_contract_unsafe'],
+  ['front matter directly before', doc(`---\nt: x\n---\n${C}`), 'scope_contract_unsafe'],
+  ['front matter with a div and no blank (Codex)', doc(`---\n<div>\n---\n${C}`), 'scope_contract_unsafe'],
+  // R6
+  ['an unterminated script before', P(`<script>\n\n${C}\n\n</script>`), 'scope_contract_unsafe'],
+  ['a script with a tab before', P(`<script\t>\n\n${C}`), 'scope_contract_unsafe'],
+  ['a quoted script before', P(`> <script>\n\n${C}`), 'scope_contract_unsafe'],
+  ['a quote marker glued to a script', P(`><script>\n\n${C}`), 'scope_contract_unsafe'],
+  ['an unterminated style before', P(`<style>\n\n${C}\n\n</style>`), 'scope_contract_unsafe'],
+  ['an unterminated comment before', P(`<!-- note\n\n${C}`), 'scope_contract_unsafe'],
+  ['a comment around the block (Codex)', P(`${TABLE}\n\n<!--\n\n${C}\n\n-->`), 'scope_contract_unsafe'],
+  ['an unterminated CDATA', P(`<![CDATA[\n\n${C}\n\n]]>`), 'scope_contract_unsafe'],
+  ['an unterminated processing instruction', P(`<?x\n\n${C}\n\n?>`), 'scope_contract_unsafe'],
+  ['an unterminated declaration', P(`<!X\n\n${C}\n\n>`), 'scope_contract_unsafe'],
+  ['a processing instruction hidden behind a quoted script (live-oracle survivor)', doc(`><script>\n\n<?x\n\n\\\`<style>pre{display:none}</style>\\\`\n\n${C}\n\n<script>`), 'scope_contract_unsafe'],
+  // R7 and R0 front matter
+  ['unclosed front matter', doc(`---\nt: x\n\n${C}`), 'scope_contract_unsafe'],
+  ['front matter closed by the other token', doc(`---\nt: x\n+++\n\n${C}`), 'scope_contract_unsafe'],
+  ['a ... line in front matter', doc(`---\nt: x\n...\n---\n\n${C}`), 'scope_contract_unsafe'],
+  ['unclosed gray-matter front matter', doc(`---yaml\nt: x\n\n${C}`), 'scope_contract_unsafe'],
+  ['BOM front matter', doc(`${BOM}---\nt: x\n---\n\n${C}`), 'scope_contract_unsafe'],
+  // R8
+  ['display math before', P(`$$\nx\n$$\n\n${C}`), 'scope_contract_unsafe'],
+  // R0 characters
+  ['a lone CR before a script (Codex)', P(`x\r<script>\n\n${C}`), 'scope_contract_unsafe'],
+  ['NUL', P(`a${NUL}b\n\n${C}`), 'scope_contract_unsafe'],
+  ['ESC (terminal concealment)', P(`${ESC}[8mhidden${ESC}[0m\n\n${C}`), 'scope_contract_unsafe'],
+  ['ESC in the RUN-STATE body', doc(`# Plan\n\n${C}`, `${ESC}[2J`), 'scope_contract_unsafe'],
+  ...[0x07, 0x0b, 0x0c, 0x1f, 0x7f, 0x85, 0x9b, 0x2028, 0x2029, 0xfeff].map((cp) => [`control U+${cp.toString(16).padStart(4, '0')}`, P(`a${String.fromCharCode(cp)}b\n\n${C}`), 'scope_contract_unsafe']),
+  // R10
+  ['no contract body line', P(C.replace(/\n\ncontract body: .*$/, '')), 'contract_body_digest_missing'],
+  ['two contract body lines', P(`${C}\n\n${C.split('\n').at(-1)}`), 'contract_body_digest_ambiguous'],
+  ['a wrong contract body digest', P(C.replace(/sha256:[0-9a-f]{64}$/, sha('x'))), 'contract_body_digest_mismatch'],
+  ['a malformed contract body digest', P(C.replace(/sha256:[0-9a-f]{64}$/, 'abc')), 'contract_body_digest_mismatch'],
+  ['a contract body digest only after RUN-STATE', `# Plan\n\n${C.replace(/\n\ncontract body: .*$/, '')}\n\n${B}\n${E}\n\n${C.split('\n').at(-1)}\n`, 'contract_body_digest_missing'],
+  // body: canonical and field rules (unchanged from 82ec937)
+  ['a space before the JSON', P(block(` ${GOOD_BODY}`)), 'scope_contract_noncanonical'],
+  ['whitespace inside the JSON', P(block(GOOD_BODY.replace('"v":1', '"v": 1'))), 'scope_contract_noncanonical'],
+  ['keys out of order', P(block('{"mode":"manual","v":1,"dag":null,"planned":["src/a.ts"],"supporting":[]}')), 'scope_contract_noncanonical'],
+  ['an extra key', P(block('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[],"x":1}')), 'scope_contract_noncanonical'],
+  ['a duplicate key', P(block('{"v":1,"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}')), 'scope_contract_noncanonical'],
+  ['a unicode escape', P(block('{"v":1,"mode":"manual","dag":null,"planned":["src/\\u0061.ts"],"supporting":[]}')), 'scope_contract_noncanonical'],
+  ['not JSON', P(block('{v:1}')), 'scope_contract_noncanonical'],
+  ['version 2', P(block('{"v":2,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}')), 'scope_contract_invalid'],
+  ['a comment open inside the JSON (Codex)', P(block('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}')), 'scope_contract_invalid'],
+  ['an entity inside the JSON', P(contract({ planned: ['src/&#60;!--'] })), 'scope_contract_invalid'],
+  ['a dot-dot planned entry', P(contract({ planned: ['src/../api/x.ts'] })), 'scope_contract_invalid'],
+  ['a glob in manual mode', P(contract({ planned: ['src/*.ts'] })), 'scope_contract_invalid'],
+  ['an empty manual planned list', P(contract({ planned: [] })), 'scope_contract_invalid'],
+  ['a supporting entry outside the closed class', P(contract({ planned: ['src/a.ts'], supporting: ['tests2'] })), 'scope_contract_invalid'],
+  ['a supporting entry under a forbidden directory', P(contract({ planned: ['src/a.ts'], supporting: ['.github/tests'] })), 'scope_contract_invalid'],
+  ['supporting inside planned', P(contract({ planned: ['src'], supporting: ['src/tests'] })), 'supporting_overlaps_planned'],
+  // accepted: structure only (option B: raw HTML is no longer refused; DOM effects are excluded by the signed policy)
+  ['a template wrapper (type 7, ends at the blank)', P(`<template>\n\n${C}\n\n</template>`), ACCEPT],
+  ['a details wrapper', P(`<details><summary>x</summary>\n\n${C}\n\n</details>`), ACCEPT],
+  ['a div hidden wrapper', P(`<div hidden>\n\n${C}\n\n</div>`), ACCEPT],
+  ['a mid-line div hidden', P(`text <div hidden>\n\n${C}\n\n</div>`), ACCEPT],
+  ['a multi-line img alt', P(`<img alt="\n\n${C}\n\n">`), ACCEPT],
+  ['a style after the block', P(`${C}\n\n<style>pre{display:none}</style>`), ACCEPT],
+  ['a script in the RUN-STATE body', doc(`# Plan\n\n${C}`, '<script>document.body.hidden=true</script>'), ACCEPT],
+  ['an escaped-backtick style before (Codex)', P(`\\\`<style>pre{display:none}</style>\\\`\n\n${C}`), ACCEPT],
+  ['placeholders, autolinks and closing tags', P(`Plan for <TICKET>, see <https://e.invalid> </div>\n\n${C}`), ACCEPT],
+  ['a single-line script and balanced comments', P(`<script>x</script>\n<!-- a -->\n\n<!--\nmulti <x>\n-->\n\n${C}`), ACCEPT],
+  ['closed front matter', doc(`---\ntitle: x\n---\n\n# Plan\n\n${C}`), ACCEPT],
+  ['closed gray-matter and toml front matter', doc(`---yaml\nk: v\n---\n\n${C}`), ACCEPT],
+  ['toml front matter', doc(`+++\nk = 1\n+++\n\n${C}`), ACCEPT],
+  ['front matter with a div then a blank (Codex, fixed)', doc(`---\n<div>\n---\n\n${C}`), ACCEPT],
+  ['display math after the block', P(`${C}\n\n$$\nx\n$$`), ACCEPT],
+  ['lists and quotes before, separated by a blank', P(`- a\n  b\n\n> q\n\n1. x\n\n${C}`), ACCEPT],
+  ['indented code before', P(`    <div hidden>\n    code\n\n${C}`), ACCEPT],
+  ['CRLF line ends', P(C).replace(/\n/g, '\r\n'), ACCEPT],
+  ['emphasis and link syntax in entries (literal in the fence)', P(contract({ planned: ['src/[safe](hidden)', 'src/_a_/__b__'], supporting: ['__tests__'] })), ACCEPT],
+  ['engine globs that would render as emphasis', P(contract({ mode: 'engine', dag: sha('d'), planned: ['apps/*/src', 'lib/**/x_y_.ts'] })), ACCEPT],
+];
+for (const [name, text, want] of STRUCTURE) {
+  test(`v3 structure: ${name} -> ${want}`, () => {
+    if (want === ACCEPT) assert.doesNotThrow(() => S.validatePlanText(text), name);
+    else assert.throws(() => S.validatePlanText(text), (e) => e.exit === 2 && e.code === want, `${name}: expected ${want}`);
+  });
+}
+
+test('lint and check share one rule function: lint refuses every STRUCTURE refusal with the same code, and passes a draft', (t) => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 's6-lint-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const lint = (text) => { writeFileSync(join(dir, 'p.md'), text); return spawnSync(process.execPath, [SCRIPT, 'lint', '--plan', join(dir, 'p.md')], { encoding: 'utf8' }); };
+  let n = 0;
+  for (const [name, text, want] of STRUCTURE.filter((_, i) => i % 3 === 0)) {
+    const r = lint(text);
+    if (want === ACCEPT) assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+    else { assert.equal(r.status, 2, name); assert.match(r.stderr, new RegExp(want), name); }
+    n++;
+  }
+  assert.ok(n > 25, `linted ${n}`);
+  const draft = lint(`# Plan\n\n${C}\n`);
+  assert.equal(draft.status, 0, draft.stderr);
+  assert.match(draft.stderr, /draft: no RUN-STATE/);
+  const out = S.contractOutput(GOOD_BODY);
+  assert.equal(draft.stdout, `${out.block}\n\n${out.digestLine}\n\n${out.quote}\n`);
+});
+
+test('the record carries the block body, its SHA-256 and the approval caveat', (t) => {
+  const r = repo(t);
+  writePlan(r, contract(good));
+  r.write('src/a.ts');
+  const out = run(r);
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(out.json.contract, GOOD_BODY);
+  assert.equal(out.json.contract_sha256, sha(GOOD_BODY));
+  assert.equal(out.json.approval_caveat, S.APPROVAL_CAVEAT);
+  assert.match(S.APPROVAL_CAVEAT, /does not authorize execution/);
+  assert.match(S.APPROVAL_CAVEAT, /Native ExitPlanMode approval remains mandatory/);
+});
+
+test('contract --verify-quote: byte comparison of the four-backtick quote with the plan and the record, never hashes alone', (t) => {
+  const r = repo(t);
+  const plan = writePlan(r, contract(good));
+  r.write('src/a.ts');
+  const recordFile = join(r.dir, '.git', 'rec.json');
+  writeFileSync(recordFile, run(r).stdout);
+  const q = (text, extra = ['--record', recordFile]) => { const f = join(r.dir, '.git', 'req.txt'); writeFileSync(f, text); return spawnSync(process.execPath, [SCRIPT, 'contract', '--verify-quote', f, '--plan', plan, ...extra], { encoding: 'utf8' }); };
+  const quote = S.contractOutput(GOOD_BODY).quote;
+  const pass = q(`Plan for approval:\n\n${quote}\n\ncontract body: ${sha(GOOD_BODY)}\n`);
+  assert.equal(pass.status, 0, pass.stdout + pass.stderr);
+  assert.match(pass.stdout, /verify-quote: PASS/);
+  assert.ok(pass.stdout.includes(`CAVEAT: ${S.APPROVAL_CAVEAT}`));
+  assert.ok(pass.stdout.includes(S.NOT_VERIFIED_REPORT));
+  const other = bodyOf({ planned: ['src'], supporting: ['tests'] });
+  const swapped = q(`${S.contractOutput(other).quote}\n\ncontract body: ${sha(GOOD_BODY)}\n`);
+  assert.equal(swapped.status, 1, 'a stated matching hash with a different body must FAIL');
+  assert.match(swapped.stdout, /verify-quote: FAIL: the quoted body differs from the plan block/);
+  const three = q(`\`\`\`\n${S.contractOutput(GOOD_BODY).block}\n\`\`\`\n`);
+  assert.equal(three.status, 1, 'a three-backtick outer fence collides with the inner closer');
+  assert.equal(q(`${quote}\n\n${quote}\n`).status, 1, 'two quoted blocks');
+  assert.equal(q(`${quote.replace('````', `${ESC}[8m\`\`\`\``)}\n`).status, 1, 'a control sequence in the quote');
+  const rec = JSON.parse(readFileSync(recordFile, 'utf8'));
+  writeFileSync(recordFile, JSON.stringify({ ...rec, contract: other }));
+  assert.match(q(`${quote}\n`).stdout, /differs from record\.contract/);
+  writeFileSync(recordFile, JSON.stringify({ ...rec, contract_sha256: sha('x') }));
+  assert.match(q(`${quote}\n`).stdout, /record\.contract_sha256/);
+  assert.equal(q(`${quote}\n`, []).status, 0, 'plan-only verification');
+});
+
+// ORACLE-GENERATOR-BEGIN (the scratch generator evaluates exactly this function; changing it requires regenerating ORACLE)
+function oracleDocs(hash) {
+  const body = '{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":["tests"]}';
+  const block = '```scope-contract\n' + body + '\n```\n\ncontract body: ' + hash(body);
+  const PRE = ['# Title', 'para text', '---\ntitle: x\n---', '---yaml\nk: v\n---', '+++\nk = 1\n+++', '---\n<div>\n---', '<div hidden>',
+    'text <div hidden>', '<details>', '<template>', '<script>\nvar x', '<script>x</script>', '<script\tsrc=x>', '> <script>', '><script>',
+    '<style>pre{display:none}</style>', '<!-- c -->', '<!--\nmulti\n-->', '<!-- open', '<?x', '<![CDATA[', '<!DOCTYPE', '- item', '- item\n  more',
+    '> quote', '1. item', '```\ncode\n```', '~~~\ncode\n~~~', '````\n```\nx\n````', '- ```\n  code\n  ```', '    indented', '$$', '$$\nx\n$$',
+    '| a | b |\n|---|---|\n| c | d |', '**b** _e_ `c`', '\\`<style>pre{display:none}</style>\\`', '[x]: http://e.invalid', '***',
+    'Setext\n===', 'Setext\n---', '<TICKET> plan', 'see <https://e.invalid>', 'use ```x``` inline', '---\nunclosed: front'];
+  const POST = ['after', '```scope&#45;contract\nX\n```', '```scope\\-contract\nX\n```', '~~~\nY\n~~~', '> ```x\nq', '<style>pre{display:none}</style>',
+    '<script>', '$$', '```\nexample\n```'];
+  let s = 20261123 >>> 0;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; };
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const docs = [];
+  for (let i = 0; i < 400; i++) {
+    const pre = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(PRE)).join(rnd() < 0.8 ? '\n\n' : '\n');
+    const post = Array.from({ length: Math.floor(rnd() * 2) }, () => pick(POST)).join('\n\n');
+    const sep = rnd() < 0.85 ? '\n\n' : '\n';
+    docs.push(`${pre}${pre ? sep : ''}${block}${post ? '\n\n' + post : ''}\n`);
+  }
+  return { body, docs };
+}
+// ORACLE-GENERATOR-END
+
+/**
+ * Frozen expectations from two independent parsers, generated ONCE in a scratch directory (never a dependency):
+ * markdown-it 14.1.0 `markdownit({ html: true })`, fences = tokens of type `fence`, info normalized with
+ * `md.utils.unescapeAll(token.info).trim()`, top level = `token.level === 0`; commonmark.js 0.31.2 `new Parser()`
+ * (default options, raw HTML kept), fences = `code_block` nodes with `_isFenced`, top level = parent `document`.
+ * Per document: 'A' when the WHOLE document holds exactly one fence, at top level, info `scope-contract`, content
+ * `body + "\n"`; 'B' otherwise. This is REGRESSION EVIDENCE for this corpus, not a live oracle for new inputs (those rely
+ * on the structural argument of the design, section 3); the optional live-oracle script in the S6 scratchpad re-runs
+ * both parsers against random documents.
+ */
+const ORACLE = {
+  sha: 'sha256:379712613404afc1b68751a67128fbbfb71164da381750b1b1c9ab11faf8b094',
+  md: 'BBABBBBBAAAAAAAABBABBBBAAABBAAABABABABABBAABBBABBAABBBAAAABAAABBBBAABBAAAABBBBAABABBAABABBABBABAAAABAABBABBABAABABAAAABAAAABBAAABBBBBBBAAAAAABAAABAABAABABBAABAAABAAABBBBBBBBBAABAAAAAABAABABBBABABBAABABBBABBABAAAABABAABAAAABABAABBBAABBBAAAAAAABAABAABAAAAABABBBAABBAABBBBAABBBABAABABAABABBBBABBABAAABBBBABBABAABAAAABABBAABABBBAAABAABBABBAABBABABAABBAABABAAABABBBBBABABBAABBABBABBBAAAAABBAABAAABAAABAAAA',
+  cm: 'BBABBBBBAAAAAAAABBABBBBAAABBAAABABABABABBAABBBABBAABBBAAAABAAABBBBAABBAAAABBBBAABABBAABABBABBABAAAABAABBABBABAABABAAAABAAAABBAAABBBBBBBAAAAAABAAABAABAABABBAABAAABAAABBBBBBBBBAABAAAAAABAABABBBABABBAABABBBABBABAAAABABAABAAAABABAABBBAABBBAAAAAAABAABAABAAAAABABBBAABBAABBBBAABBBABAABABAABABBBBABBABAAABBBBABBABAABAAAABABBAABABBBAAABAABBABBAABBABABAABBAABABAAABABBBBBABABBAABBABBABBBAAAAABBAABAAABAAABAAAA',
+};
+
+test('frozen two-parser corpus (regression evidence): every accepted document renders exactly one top-level scope-contract fence', () => {
+  const { docs } = oracleDocs(sha);
+  assert.equal(sha(docs.join(NUL)), ORACLE.sha, 'the generator changed: regenerate ORACLE with the scratch generator');
+  let accepted = 0, refusedMisrendered = 0;
+  docs.forEach((d, i) => {
+    let ok = true;
+    try { S.validatePlanText(d); } catch (e) { assert.equal(e.exit, 2, String(e.stack)); ok = false; }
+    if (ok) { accepted++; assert.equal(ORACLE.md[i] + ORACLE.cm[i], 'AA', `accepted but rendered otherwise: ${JSON.stringify(d)}`); }
+    else if (ORACLE.md[i] !== 'A' || ORACLE.cm[i] !== 'A') refusedMisrendered++;
+  });
+  assert.ok(accepted >= 40 && refusedMisrendered >= 40, `accepted ${accepted}, refused misrendered ${refusedMisrendered}`);
+});
+
+test('Codex 2: a list-contained fence cannot hide or add a declaration', (t) => {
+  const r = repo(t);
+  writePlan(r, `- step one\n  \`\`\`\n${TABLE.split('\n').map((l) => `  ${l}`).join('\n')}\n  \`\`\`\n`);
+  r.write('src/a.ts');
+  assert.match(run(r).stderr, /scope_contract_missing/);
+  writePlan(r, `- step one\n  \`\`\`\n  \`\`\`scope-contract\n  ${bodyOf({ planned: ['src'] })}\n  \`\`\`\n\n${contract({ planned: ['src/a.ts'] })}`);
+  assert.match(run(r).stderr, /scope_contract_ambiguous/);
+});
+
+test('Codex JSON-string example end to end: refused by the entry charset, never CLEAN', (t) => {
+  const r = repo(t);
+  writePlan(r, block('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts<!--","src","x-->"],"supporting":[]}'));
+  r.write('src/evil.mjs');
+  const out = run(r);
+  assert.equal(out.status, 2, out.stdout + out.stderr);
+  assert.match(out.stderr, /scope_contract_invalid/);
+});
+
+test('the contract helper prints the block, the digest line and the four-backtick quote, which check accepts', (t) => {
+  const r = repo(t);
+  const d = dagFile(r, [['src/b', 'src/a']]);
+  const p = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'engine', '--dag', d.file, '--supporting', 'tests', '--supporting', 'docs'], { encoding: 'utf8' });
+  assert.equal(p.status, 0, p.stderr);
+  const out = S.contractOutput(bodyOf({ mode: 'engine', dag: d.digest, planned: ['src/a', 'src/b'], supporting: ['docs', 'tests'] }));
+  assert.equal(p.stdout, `${out.block}\n\n${out.digestLine}\n\n${out.quote}\n`);
+  assert.ok(out.quote.startsWith('````\n```scope-contract\n') && out.quote.endsWith('\n```\n````'));
+  const m = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/x', '--planned', 'src/a'], { encoding: 'utf8' });
+  const mo = S.contractOutput(bodyOf({ planned: ['src/a', 'src/x'] }));
+  assert.equal(m.stdout, `${mo.block}\n\n${mo.digestLine}\n\n${mo.quote}\n`);
+  const bad = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/*.ts'], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  writePlan(r, `${out.block}\n\n${out.digestLine}`);
+  r.write('src/a/x.ts');
+  assert.equal(run(r, ['--dag', d.file]).status, 0);
+});
+
+test('property: a mutated declaration is refused or classifies exactly as the canonical contract (never CLEAN where it says MATERIAL)', (t) => {
+  const base = JSON.stringify({ v: 1, mode: 'manual', dag: null, planned: ['src/checkout/page.tsx', 'src/checkout'], supporting: ['tests', 'docs'] });
+  const files = ['src/checkout/page.tsx', 'src/checkout/x.ts', 'tests/a.test.ts', 'docs/g.md', 'docs/x.mjs', 'src/api/route.ts', 'package.json', 'tests/l']
+    .map((path) => ({ path, kind: path === 'tests/l' ? 'symlink' : 'file' }));
+  const classes = (c) => S.classify(files, { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: () => '../x' }).map((f) => [f.path, f.class]);
+  const reference = classes(S.parseContract(planText(block(base))));
+  assert.ok(reference.some(([, c]) => c === 'material'));
+  const BODY_M = [
+    (s) => s.replace('{', ' {'), (s) => s.replace('"v":1', '"v": 1'), (s) => s.replace('{"v":1,', '{"v":1,"v":1,'),
+    (s) => s.replace(/}$/, ',"x":1}'), (s) => s.replace(/,"supporting":\[[^\]]*\]/, ''), (s) => s.replace('"v":1', '"v":"1"'),
+    (s) => s.replace('"dag":null', '"dag":0'), (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":"src"'),
+    (s) => s.replace('{"v":1,"mode":"manual",', '{"mode":"manual","v":1,'), (s) => s.replace('tests', '\\u0074ests'),
+    (s) => s.replace('tests', `t${CYR_E}sts`), (s) => s.replace('"mode"', `"m${CYR_O}de"`), (s) => s.replace('src/checkout"', 'src/../checkout"'),
+    (s) => s.replace('src/checkout"', 'src/./checkout"'), (s) => s.replace('"src/checkout"', '"/src/checkout"'), (s) => s.replace('src/checkout"', 'src\\\\checkout"'),
+    (s) => s.replace('src/checkout"', 'src/checkout/*"'), (s) => s.replace('src/checkout"', 'src/?heckout"'), (s) => s.replace('"src/checkout"', '""'),
+    (s) => s.replace('"docs"', `"${'d'.repeat(300)}"`), (s) => s.replace(/"planned":\[/, `"planned":[${Array.from({ length: 70 }, (_, i) => `"p${i}"`).join(',')},`),
+    (s) => s.replace('"tests"', '"src/checkout/tests"'), (s) => s.replace('"docs"', '"documentation"'), (s) => s.replace('"tests"', '"tests/"'),
+    (s) => s.replace('"manual"', '"engine"'), (s) => s.replace('"dag":null', `"dag":"${sha('x')}"`), (s) => `${s} `, (s) => `${s}\t`,
+    (s) => s.replace('"v":1', `"v":1${NUL}`), (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":[]'),
+    (s) => s.replace('"src/checkout/page.tsx","src/checkout"', '"src/checkout","src/checkout/page.tsx"'), // valid: order is not semantic
+    (s) => s.replace('"tests","docs"', '"docs","tests"'), (s) => s.split('"').join("'"), (s) => s.replace('{', '{\n'), (s) => s.slice(0, -1),
+    (s) => s.replace('"planned"', '"Planned"'), (s) => s.replace(/"supporting":\[[^\]]*\]/, '"supporting":null'), (s) => s.replace('"v":1', '"v":1.0'),
+    (s) => s.replace('page.tsx', 'page.tsx\\n'), (s) => s.replace('page.tsx', `page.tsx${LS}`), (s) => s.replace('"tests"', '"node_modules/tests"'),
+    (s) => s.replace('page.tsx', 'page<!--.tsx'), (s) => s.replace('page.tsx', 'page&lt;.tsx'), (s) => s.replace('page.tsx', 'page`.tsx'),
+    (s) => s.replace('page.tsx', 'scope-contract.tsx'),
+  ];
+  const TEXT_M = [
+    (x) => x.replace('```scope-contract', ' ```scope-contract'), (x) => `${x}\n\n${x}`, (x) => `${x}\n\nsee the scope-contract above`,
+    (x) => `${x}\n\n\`\`\`\nexample\n\`\`\``, (x) => `\`\`\`\nx\n\`\`\`\n\n${x}`, (x) => `${x}\n\n\`\`\`scope&#45;contract\nX\n\`\`\``,
+    (x) => `${BOM}${x}`, (x) => x.replace('\n```\n', `\n\`\`\`${ESC}\n`), (x) => `x\r${x}`, (x) => x.replace(/\n\ncontract body/, '\ncontract body digest'),
+    (x) => x.replace(/contract body: .*$/, `contract body: sha256:${'0'.repeat(64)}`), (x) => `<!--\n\n${x}`, (x) => `$$\n\n${x}`,
+    (x) => `<script>\n\n${x}`, (x) => x.replace(/\n/g, '\r\n'), (x) => `<div hidden>\n\n${x}`, (x) => `> ${x}`, (x) => `- ${x}`,
+    (x) => x.replace('\n```\n\n', '\n```\nnext\n\n'), (x) => `${x}\n\n~~~\ny\n~~~`, (x) => `${x}\n\ncontract body: ${sha('x')}`,
+  ];
+  const rand = rng(424242);
+  let refused = 0, same = 0;
+  for (let i = 0; i < 6000; i++) {
+    let body = base;
+    for (let j = Math.floor(rand() * 3); j > 0; j--) body = BODY_M[Math.floor(rand() * BODY_M.length)](body);
+    let text = block(body);
+    for (let j = Math.floor(rand() * 3); j > 0; j--) text = TEXT_M[Math.floor(rand() * TEXT_M.length)](text);
+    let c;
+    try { c = S.parseContract(planText(text)); } catch (e) { assert.equal(e.exit, 2, String(e.stack)); refused++; continue; }
+    assert.deepEqual(classes(c), reference, JSON.stringify(text));
+    same++;
+  }
+  t.diagnostic(`refused ${refused}, same ${same}`);
+  assert.ok(refused + same >= 5000 && refused > 2500 && same > 300, `refused ${refused}, same ${same}`);
+});
+
 test('S6 and F11 wording pins', () => {
   const plan = flat(ref('plan.md')), review = flat(ref('review.md')), ship = flat(ref('ship.md'));
-  assert.ok(plan.includes('scope-contract: {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]}'));
-  assert.ok(plan.includes('The Files touched column is explanation for the approver and is read by no script; the `scope-contract:` line is the authoritative scope.'));
+  assert.ok(ref('plan.md').includes('````markdown\n'), 'the template has a four-backtick outer fence');
+  assert.ok(plan.includes('```scope-contract {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]} ```'));
+  assert.ok(plan.includes('The Files touched column is explanation for the approver and is read by no script; the fenced `scope-contract` block is the authoritative scope.'));
+  assert.ok(plan.includes('Scope approval is valid only when the complete, untruncated, literal ExitPlanMode request is presented in a trusted terminal, without active rendering or control-sequence ambiguity, and the canonical contract is verified byte for byte with `contract --verify-quote`.'));
+  assert.ok(plan.includes('Browser, GitHub and editor previews are never valid approval surfaces.'));
+  assert.ok(plan.includes('native ExitPlanMode approval remains mandatory'));
+  assert.ok(plan.includes('Raw HTML in a plan is no longer refused by `check-pr-scope.mjs`'));
   assert.ok(!plan.includes('scope-envelope:'));
   assert.ok(plan.includes('| <old consumers · cached clients · deploy order of the changed shared contract> | <regression · data-integrity: a deployed or cached client still sends/expects the previous shape> | <`contract-consumer` test kind against the previous shape (`shared-contract` tag); Integration Contract frontend compatibility> | <PROVE> | <the contract shape or deploy order changes> | <planned> |'));
   assert.ok(plan.includes('When the change touches a shared contract (the Integration Contract is triggered, or the `shared-contract` risk label or test-trigger tag applies), section 3b has a row for old consumers, cached clients and deploy order, or lists it under `Not applicable:` with the reason.'));
+  assert.ok(plan.includes('Supporting paths are outside the Design Contract'));
   assert.ok(review.includes('run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]` on the candidate'));
   assert.ok(review.includes('Exit 1 (a material path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.'));
   assert.ok(review.includes('A contract or mode change is a plan change: re-approval through `ExitPlanMode`.'));
   assert.ok(review.includes('An engine-mode contract always needs `--dag`'));
+  assert.ok(review.includes('`node scripts/check-pr-scope.mjs contract --verify-quote <saved-request> --plan <plan> --record <scope.json>`'));
+  assert.ok(review.includes('native ExitPlanMode approval remains mandatory'));
+  assert.ok(review.includes('Raw HTML in the plan is no longer refused by the check'));
   assert.ok(ship.includes('Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.'));
+  assert.ok(ship.includes('Rerun `contract --verify-quote` against the saved approval request and the SHIP record; a FAIL blocks SHIP.'));
   assert.ok(ship.includes('`scope: {outcome, material[], record_sha}`'));
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
   assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
   assert.ok(ship.includes('`CLEAN` alone does not establish this line'));
-  assert.ok(review.includes('the reviewer reads the raw contract line in the plan and the `contract` field the record prints'));
-  assert.ok(plan.includes('Supporting paths are outside the Design Contract'));
-  assert.ok(plan.includes('so the `ExitPlanMode` request restates the canonical contract line (the `contract` helper output) as plain text for the owner'));
-  assert.ok(review.includes('The `ExitPlanMode` request restated the canonical contract line as plain text'));
+  for (const [name, t] of [['plan', plan], ['review', review], ['ship', ship]]) assert.ok(t.includes(S.NOT_VERIFIED_REPORT), `${name} carries the fail-closed report`);
   assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
   for (const t of [plan, review, ship]) assert.ok(!/\bspecialists?\b/i.test(t));
 });

@@ -85,8 +85,14 @@ concurrently, then join once:
   `scope: {outcome, material[], record_sha}` (`record_sha` is the sha256 of the
   record it printed), and the PR body lists the supporting and flagged paths.
   Use the run's base as `--base` and, on an engine run, the bound DAG as `--dag`.
-  The scope is the approved `scope-contract:` line; a contract or mode change is
-  a plan change, re-approved through `ExitPlanMode`, never an edit at SHIP.
+  The scope is the approved fenced `scope-contract` block; a contract or mode
+  change is a plan change, re-approved through `ExitPlanMode`, never an edit at
+  SHIP. Rerun `contract --verify-quote` against the saved approval request and
+  the SHIP record; a FAIL blocks SHIP. Verification does not prove what the
+  owner saw or authorize execution: native ExitPlanMode approval from a trusted
+  terminal remains mandatory, and without it SHIP reports `scope approval NOT
+  verified: the approval surface does not meet the trusted-terminal requirement;
+  do not build`.
   At SHIP, exit 1 is **WAIT_FOR_USER** (a Design Contract expansion needs
   re-approval); exit 2 or 3 means fix the input and rerun, and never commit
   meanwhile. A refusal leaves any earlier record in place by design; it is never
