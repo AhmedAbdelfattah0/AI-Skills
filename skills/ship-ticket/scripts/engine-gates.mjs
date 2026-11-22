@@ -208,17 +208,14 @@ async function reviewGate(E, input, candidate) {
     const sec = await securityContext(E, candidate);
     const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);
     if (refusal) return refusal;
+    // F12a: a repair never clears a dropped pair an ORIGINAL review disputed (run-wide, add-only; see recordDisputes).
+    // A confirmation carries no structured rows or findings (gate.mjs confirm refuses them), so it adds no dispute: its
+    // FAIL is terminal for the attempt, and an owner RETRY is the explicit next step (S1 review repair F1).
+    const disputed = input.kind === 'confirmation' ? disputedRefusal(S, sec) : null;
+    if (disputed) return disputed;
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
-    // F12a + S1 review repair (M1, M2): an original AND a confirmation can dispute a dropped pair.
-    disputes = input.kind === 'original' ? naDisputes(input, sec) : confirmationDisputes(input, sec);
-    if (input.kind === 'confirmation') {
-      // A repair never clears a disputed drop, and the confirmation's OWN new disputes count too (merged before the check).
-      const disputed = disputedRefusal({ security: { disputed_na: [...(S.security?.disputed_na ?? []), ...disputes] } }, sec);
-      // The refusal keeps the disputes (gate() commits state on a refusal; the review itself is not recorded): a clean
-      // confirmation re-sent afterwards, or a RETRY, cannot launder them. Every check before this one has passed.
-      if (disputed) { recordDisputes(S, disputes, input.review_execution); return disputed; }
-    }
+    if (input.kind === 'original') disputes = naDisputes(input, sec);
     // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review (or its confirmation) judges.
     const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null; // R2: a repair may have removed it
     if (cited) return cited;
@@ -240,7 +237,22 @@ async function reviewGate(E, input, candidate) {
       writes: [...v.repair.write_set], promptFile: brief, state: 'pending', old_candidate: candidate });
     note(S, 'REPAIR_ENQUEUED', { review_execution: v.repair.review_execution });
   }
-  return { judgment_point: false, ...v };
+  return { judgment_point: false, ...v, ...(v.record.kind === 'confirmation' && v.record.outcome === 'FAIL' ? { reasons: confirmationFailReasons(input) } : {}) };
+}
+
+/** Longest reviewer evidence a confirmation-FAIL reason quotes. */
+const EVIDENCE_QUOTE_MAX = 1000;
+/**
+ * S1 review repair F1(e): an accepted confirmation FAIL is terminal for its review attempt. Its gate output names each
+ * reviewer's outcome and evidence (the review_chain record keeps outcomes and identities, not the evidence text), so
+ * the owner decides a RETRY with the FAIL and its evidence in front of them.
+ */
+function confirmationFailReasons(input) {
+  const q = (e) => String(e ?? '').slice(0, EVIDENCE_QUOTE_MAX);
+  const so = input.second_opinion;
+  return [`confirmation ${input.review_execution} FAIL: terminal for this review attempt; proceeding needs an owner RUN-STATE RETRY and a fresh original review`,
+    `primary ${input.primary.reviewer_identity} ${input.primary.outcome}: ${q(input.primary.evidence)}`,
+    ...(so ? [`second opinion ${so.route} ${so.reviewer_identity} ${so.outcome}: ${q(so.evidence)}`] : [])];
 }
 
 /**
@@ -671,21 +683,6 @@ export const naDisputes = (input, sec) => {
   return [...new Set([...primary, ...second])].sort();
 };
 
-/**
- * S1 review repair (M1, M2): the dropped pairs a CONFIRMATION disputes. A confirmation's primary and its second opinion
- * have the confirmation shape { [route,] reviewer_identity, candidate_id, checked_findings, outcome, evidence } and no
- * findings list, so the subjects are: a primary rule_row FAIL naming a dropped pair (as in an original), and, for each
- * confirmation reviewer whose outcome is FAIL, every dropped pair id it lists in checked_findings or names as a whole
- * token in its evidence. A PASS naming a pair disputes nothing. Recorded run-wide like an original's disputes.
- */
-export const confirmationDisputes = (input, sec) => {
-  const ids = (sec.na ?? []).map(n => n.pair_id), set = new Set(ids);
-  const rows = (Array.isArray(input.primary?.rule_rows) ? input.primary.rule_rows : []).filter(r => set.has(r?.subject_id) && r.outcome === 'FAIL').map(r => r.subject_id);
-  const named = (c) => (c?.outcome !== 'FAIL' ? [] : ids.filter(id => (Array.isArray(c.checked_findings) && c.checked_findings.includes(id))
-    || (typeof c.evidence === 'string' && citesPath(c.evidence, id))));
-  return [...new Set([...rows, ...named(input.primary), ...named(input.second_opinion)])].sort();
-};
-
 /** Add `disputes` to the run-wide dispute list: add-only, sorted, never replaced by a later review (a RETRY cannot launder one). */
 export function recordDisputes(S, disputes, reviewExecution) {
   if (!disputes.length) return;
@@ -695,10 +692,11 @@ export function recordDisputes(S, disputes, reviewExecution) {
 }
 
 /**
- * F12a disputed-N/A hard stop: a dropped pair any accepted original review disputed (S.security.disputed_na, kept
- * run-wide so a RETRY review cannot launder it) blocks confirmation and ship-ready until it is EFFECTIVE again: only
- * a trusted SECURITY_ADDENDUM reopens it (then it is proven or waived like any pair) or a re-approved plan (a new run).
- * Repair and confirmation never clear it.
+ * F12a disputed-N/A hard stop: a dropped pair any accepted ORIGINAL review disputed (S.security.disputed_na, kept
+ * run-wide and add-only so a RETRY review cannot launder it) blocks confirmation and ship-ready until it is EFFECTIVE
+ * again: only a trusted SECURITY_ADDENDUM reopens it (then it is proven or waived like any pair) or a re-approved plan
+ * (a new run). Repair and confirmation never clear it. A confirmation adds no dispute (it carries no rows or findings);
+ * its FAIL is terminal for the attempt, and an owner RETRY is the explicit next step.
  */
 export function disputedRefusal(S, sec) {
   const effective = new Set(sec.events.pairs.map(pairKey));

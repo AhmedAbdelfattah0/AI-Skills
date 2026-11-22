@@ -15,7 +15,7 @@
  *   the pairs line covers the effective pairs only. A block without surface facts is format 2, byte for byte.
  * reassess: a dropped pair reopens (delta pair) when a signal at an approved surface's path names its control
  *   (whatever any classification says) or a used classification raises its fact; a format-3 block is replayed under
- *   the catalog (plan_block_invalid when a lowering does not follow); a signalling non-test path inside the Design
+ *   the catalog (plan_block_invalid when a lowering does not follow); a signalling path (test-named or not) inside the Design
  *   Contract with no surface is surface_inventory_incomplete.
  * obligationMatrix / verifyMatrix: every surface x control cell has exactly one disposition of DISPOSITIONS.
  * engine: a format-3 run records policy_version 3 (4 with test kinds); review needs one row per dropped pair
@@ -258,7 +258,7 @@ test('[S47] [S48] C5: real route and handler files (repo fixtures and framework 
   const paths = [...J(scenarios).matchAll(/"path":"([^"]+)"/g)].map((m) => m[1]).filter((p) => /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/.test(p));
   assert.ok(paths.length > 0);
   for (const p of paths) assert.equal(routeSignal(p), true, p);
-  // added route lines fire in any non-test file
+  // added route lines fire in any file
   assert.equal(routeSignal('apps/api/src/index.ts', ["app.get('/health', h)"]), true);
 });
 
@@ -403,13 +403,14 @@ function realSelection() {
 const SPEC = 'spec/sec.test.mjs';
 const specText = (list) => `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n`
   + `for (const id of ${J(list)}) test(id, () => { assert.ok(fs.existsSync('src/impl.txt'), 'not implemented'); });\n`;
-function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles, implWrites = ['src'] } = {}) {
+function obFx(t, { sel = realSelection(), coverage = (c) => c, narrative = (s) => SP.renderSection3a(s), nodes = [], startAt, implFiles = { 'src/orders.ts': 'export const bearerOnly = true;\n' }, fixFiles, implWrites = ['src'], baseFiles = {} } = {}) {
   const cov = coverage(sel.pairs.map((p) => ({ boundary: p.boundary_id, control: p.control_id, node: 'api', specs: [{ file: SPEC, name: p.pair_id }] })));
   const fx = fixture(t, { commit: true, ...(startAt ? { startAt } : {}), narrativeExtra: narrative(sel) + '\n\n',
     config: { width: 1, testCommands: { unit: { cmd: process.execPath, args: ['--test', '--test-reporter=tap', SPEC], format: 'tap' } }, securityPolicy: 2, catalogDigest: REAL.digest, controlCoverage: cov },
     nodes: [{ id: 'api', writes: ['spec'], redSpecs: cov.flatMap((c) => c.specs) }, { id: 'impl', deps: ['api'], writes: implWrites }, ...nodes],
     behaviour: { api: { write: { [SPEC]: specText(cov.map((c) => `${c.boundary}:${c.control}`)) } }, impl: { write: { 'src/impl.txt': 'done', ...implFiles } }, fix: { write: fixFiles ?? { 'src/impl.txt': 'fixed' } } } });
   const g = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: fx.repo, encoding: 'utf8' });
+  for (const [f, text] of Object.entries(baseFiles)) { mkdirSync(dirname(join(fx.repo, f)), { recursive: true }); writeFileSync(join(fx.repo, f), text); }
   g('add', '-A'); assert.equal(g('commit', '-q', '-m', 'base').status, 0);
   return Object.assign(fx, { sel, ids: cov.map((c) => `${c.boundary}:${c.control}`) });
 }
@@ -1093,18 +1094,6 @@ test('[S79] [S103] property (S79 corpus, >= 4000 inputs, with lines and path-onl
   assert.ok(checked >= 4000 && extras > 100 && testNamed > 1000 && refusedBoth > 1000, J({ checked, extras, testNamed, refusedBoth }));
 });
 
-test('[S109] confirmation disputes (pure): a primary FAIL row on a dropped pair; a FAIL confirmation (primary or second opinion) naming one in checked_findings or as a whole token in evidence', () => {
-  const N = 'A:VAPT-API-04';
-  const conf = (over = {}) => ({ reviewer_identity: 'opus:review', candidate_id: 'c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed', ...over });
-  assert.deepEqual(G.confirmationDisputes({ primary: conf({ rule_rows: [{ subject_id: N, outcome: 'FAIL', evidence: 'src/a.ts:42 writes' }] }) }, sec()), [N], 'a FAIL row in a PASS confirmation');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), outcome: 'FAIL', checked_findings: ['F1', N] } }, sec()), [N], 'second opinion FAIL, checked_findings');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), outcome: 'FAIL', evidence: `${N} is applicable: the repair writes orders` } }, sec()), [N], 'second opinion FAIL, evidence');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf({ outcome: 'FAIL', evidence: `F1 fixed but ${N} now applies` }) }, sec()), [N], 'primary FAIL, evidence');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), evidence: `${N} still not applicable` } }, sec()), [], 'a PASS naming it disputes nothing');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf({ outcome: 'FAIL', evidence: `${N}5 and K:VAPT-API-04 regress` }) }, sec()), [], 'a longer token or an effective pair is no dropped-pair dispute');
-  assert.deepEqual(G.confirmationDisputes({ primary: conf({ rule_rows: [{ subject_id: N, outcome: 'NOT_APPLICABLE' }] }) }, sec()), []);
-});
-
 /** A format-3 run with an original FAIL that disputes nothing, repaired: returns the fixture and the repaired candidate. */
 function repairedFx(t) {
   const fx = obFx(t);
@@ -1119,26 +1108,117 @@ function repairedFx(t) {
   return { fx, c2: fx.candidate(), naId: fx.sel.na_pairs[0].pair_id };
 }
 
-test('[S107] M2: a confirmation PASS carrying a first-time FAIL row on a dropped pair is refused; its dispute is recorded with the refusal, so a clean re-sent confirmation cannot launder it', { skip: WIN_SKIP }, (t) => {
+// ---- S1 review repair (final correction F1): a confirmation has no validated way to name a disputed pair, so the
+// gate extracts no dispute from it. A confirmation FAIL is terminal for that review attempt; an owner RETRY is an explicit
+// human decision taken with the FAIL and its evidence on record. Structured rows or findings on a confirmation are not
+// part of its shape and are refused (incomplete_contract), never silently accepted. Original-review disputes are
+// unchanged: run-wide and add-only ([S46], [S64], [S72]).
+const soConf = (c2, over = {}) => ({ route: 'codex', reviewer_identity: 'codex:gpt', candidate_id: c2, checked_findings: ['F1'], outcome: 'FAIL', evidence: 'F1 fixed', ...over });
+
+test('[S107] a confirmation PASS carrying structured rows or findings (a FAIL row on a dropped pair) is refused incomplete_contract and writes nothing', { skip: WIN_SKIP }, (t) => {
   const { fx, c2, naId } = repairedFx(t);
-  const conf = confirmReview('rx-1', c2);
-  conf.primary.rule_rows = [{ subject_id: naId, outcome: 'FAIL', evidence: 'src/orders.ts:bearerOnly sets a cookie after the repair' }];
-  const chain = fx.readState().review_chain.length;
-  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed');
+  const before = J(fx.readState().review_chain);
+  for (const extra of [{ rule_rows: [{ subject_id: naId, outcome: 'FAIL', evidence: 'src/orders.ts:bearerOnly sets a cookie after the repair' }] },
+    { rule_rows: [] }, { findings: [{ id: 'C1', subject_id: naId, severity: 'major' }] }]) {
+    const conf = confirmReview('rx-1', c2);
+    Object.assign(conf.primary, extra);
+    const r = fx.gate('review', conf);
+    assert.equal(r.out?.code, 'incomplete_contract', `${J(extra)}: ${r.stdout}`);
+  }
   const st = fx.readState();
-  assert.deepEqual(st.security.disputed_na, [naId], 'the dispute is recorded run-wide');
-  assert.equal(st.review_chain.length, chain, 'the refused confirmation is not recorded: nothing else changed');
-  assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out?.code, 'security_na_disputed', 'a clean confirmation re-sent after the refusal');
-  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed');
+  assert.equal(J(st.review_chain), before, 'nothing recorded');
+  assert.equal(st.security?.disputed_na, undefined, 'no dispute is extracted from a confirmation');
+  okc(fx.gate('review', confirmReview('rx-1', c2)), 'the confirmation in its own shape');
 });
 
-test('[S108] M1: a confirmation second-opinion FAIL naming a dropped pair reaches disputed_na; an owner RETRY with a PASS original cannot ship it', { skip: WIN_SKIP }, (t) => {
+test('[S108] [S110] a confirmation FAIL is terminal for the attempt in every representation; the owner sees it and its evidence; RETRY + a fresh PASS original ships (no sticky confirmation dispute)', { skip: WIN_SKIP }, (t) => {
   const { fx, c2, naId } = repairedFx(t);
+  // structured representations are not part of the confirmation shape: refused, nothing recorded
+  for (const extra of [{ findings: [{ id: 'S1', subject_id: naId, severity: 'major' }] }, { rule_rows: [{ subject_id: naId, outcome: 'FAIL', evidence: 'src/orders.ts:1' }] }]) {
+    const conf = confirmReview('rx-1', c2);
+    conf.second_opinion = soConf(c2, extra);
+    assert.equal(fx.gate('review', conf).out?.code, 'incomplete_contract', J(extra));
+  }
+  assert.equal(fx.readState().review_chain.at(-1).kind, 'repair', 'nothing recorded');
+  // the free-text representations (bold, underscore, lowercase): accepted as what they are, a terminal FAIL
+  const EVID = `F1 fixed, but **${naId}** and _${naId}_ (${naId.toLowerCase()}) apply: the repair sets a session cookie`;
   const conf = confirmReview('rx-1', c2);
-  conf.second_opinion = { route: 'codex', reviewer_identity: 'codex:gpt', candidate_id: c2, checked_findings: ['F1'], outcome: 'FAIL', evidence: `F1 fixed; ${naId} is applicable: the repair writes the session` };
-  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed');
-  assert.deepEqual(fx.readState().security.disputed_na, [naId]);
+  conf.second_opinion = soConf(c2, { evidence: EVID });
+  const r = fx.gate('review', conf);
+  okc(r, 'confirmation FAIL accepted');
+  assert.equal(r.out.record.outcome, 'FAIL');
+  assert.equal(fx.readState().security?.disputed_na, undefined, 'no dispute is parsed from evidence text');
+  // owner visibility: the gate output carries the FAIL with both reviewers' evidence, and the record stays in the chain
+  assert.ok(r.out.reasons.some((x) => x.includes('FAIL') && x.includes(EVID)), J(r.out.reasons));
+  assert.ok(r.out.reasons.some((x) => x.includes('opus:review') && x.includes('F1 fixed')), J(r.out.reasons));
+  const rec = fx.readState().review_chain.at(-1);
+  assert.deepEqual([rec.kind, rec.outcome, rec.second_opinion_outcome, rec.second_opinion_identity], ['confirmation', 'FAIL', 'FAIL', 'codex:gpt']);
+  // terminal: no second confirmation, no repair, no ship
+  assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out?.code, 'confirmation_spent');
+  assert.equal(fx.readState().repairs.filter((x) => x.state === 'pending').length, 0, 'a confirmation FAIL opens no repair');
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'review_not_accepted');
+  // proceeding is the owner's explicit RETRY and a fresh PASS original (the honest behaviour: it then ships)
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
   okc(fx.gate('review', passReview('rx-2', c2, { primary: primaryReview(c2, { rule_rows: baseRows(fx) }) })), 'RETRY original PASS');
-  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed', 'a RETRY never launders the confirmation dispute');
+  let s = fx.gate('ship-ready', {});
+  for (let i = 0; i < 3 && s.out?.code !== 'ship_ready'; i++) s = fx.gate('ship-ready', {});
+  assert.equal(s.out?.code, 'ship_ready', s.stdout);
+});
+
+// ---- S1 review repair (final correction F2): a surface that LOWERS a fact names one exact repository file. The path
+// shape (citationProblem, the citation rule) is checked wherever the block is selected or replayed; existence, exact case
+// and file-ness (exactCase + isFile, the citation check) wherever citations are verified (init, preflight, review,
+// confirmation, ship-ready), deferred for a path inside a DAG write like a citation. Surfaces that lower nothing are not
+// checked (they drop no pair, and their path only places signals).
+const BAD_SHAPES = ['src/a.ts ', ' src/a.ts', 'src/', '/src/a.ts', 'src', 'src//a.ts'];
+test('[S112] a lowering surface path must be an exact file path in shape: whitespace, slashes and a bare directory are refused at select and at replay; non-lowering surfaces are unaffected', () => {
+  for (const path of BAD_SHAPES) {
+    const r = refused(OB.sel3(GC, [OB.surf('A', 'request-handler', path, ['persistent_write'], () => 'src/a.ts:saveNothing'), KEEP]), 'surface_fact_not_lowerable');
+    assert.ok(r.reasons.some((x) => x.includes('exact repository file path')), `${J(path)}: ${J(r.reasons)}`);
+  }
+  ok(OB.sel3(GC, [A_PW, OB.surf('K', 'request-handler', 'src')]));
+  // replay: a block bound with such a path (forged with a valid digest) is plan_block_invalid
+  const good = ok(OB.sel3(GC, [A_PW, KEEP]));
+  for (const P of ['src', 'src/a.ts ']) {
+    const surfaces = good.surfaces.map((x) => (x.boundary_id === 'A' ? { ...x, path: P } : x));
+    const v3 = { surfaces, pairs: ids(good.pairs), na_pairs: good.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: n.evidence })) };
+    const selection_digest = sha(SP.canon({ policy: 3, catalog_digest: good.catalog_digest, facts_digest: good.facts_digest, controls: good.controls.map((c) => c.control_id), ...v3 }));
+    const plan = OB.planOf({ ...good, surfaces, selection_digest });
+    const b = SP.parsePlanSecurityBlock(plan);
+    const r = SP.reassess(OB.reIn3(GC, { plan, files: [{ path: 'src/a.ts' }], contract: ['**'] }));
+    assert.ok(r.ok === false && ['plan_block_invalid', 'plan_block_missing'].includes(r.code), `${J(P)}: ${J(r)}`);
+    if (b) refused(SP.obligationMatrix(GC, b), 'plan_block_invalid');
+  }
+});
+
+test('[S113] a lowering surface path must exist as a file with its exact case where citations are verified; inside a DAG write it is deferred; a non-lowering surface is not checked', () => {
+  const root = dirname(OB.writeCatalog({}));
+  mkdirSync(join(root, 'src', 'lib'), { recursive: true });
+  writeFileSync(join(root, 'src', 'a.ts'), 'export const saveNothing = 1;\n');
+  const block = (path, extra = []) => ({ policy: 3, surfaces: [{ boundary_id: 'A', kind: 'request-handler', path, principals: ['staff'], facts: { persistent_write: false }, evidence: { persistent_write: 'src/a.ts:saveNothing' } }, ...extra] });
+  ok(SP.verifyCitations(block('src/a.ts'), { root }));
+  for (const path of ['src/A.ts', 'src/lib', 'src/missing.ts']) {
+    const r = refused(SP.verifyCitations(block(path), { root }), 'citation_missing');
+    assert.ok(r.reasons.some((x) => x.includes(`surface A: ${path}`)), `${path}: ${J(r.reasons)}`);
+  }
+  ok(SP.verifyCitations(block('src/new.ts'), { root, pending: ['src'] }), 'a file the plan will write is deferred');
+  for (const path of ['src/A.ts', 'src/lib', 'SRC/a.ts']) refused(SP.verifyCitations(block(path), { root, pending: ['src', 'SRC'] }), 'citation_missing');
+  ok(SP.verifyCitations(block('src/a.ts', [{ boundary_id: 'K', kind: 'request-handler', path: 'src', principals: ['staff'] }]), { root }), 'a surface that lowers nothing is not checked');
+});
+
+test('[S113] end to end: init refuses a wrong-case alias of a base file as a lowering surface path, even inside the DAG writes (citation_missing); the exact path binds and a sendEmail( in it reopens the dropped pair (addendum_required)', { skip: WIN_SKIP }, (t) => {
+  const bools = Object.keys(REAL.catalog.fact_vocabulary).filter((k) => REAL.catalog.fact_vocabulary[k].type === 'bool');
+  const sel = (path) => ok(SP.selectControls(REAL, { security_policy: 2, facts: { ...Object.fromEntries(bools.map((b) => [b, false])), outbound_message: true },
+    surfaces: [{ boundary_id: 'orders', kind: 'request-handler', path, principals: ['staff'], facts: { outbound_message: false }, evidence: { outbound_message: 'src/orders.ts:noMail' } },
+      { boundary_id: 'keeper', kind: 'request-handler', path: 'src/hooks.ts', principals: ['staff'] }],
+    evidence: Object.fromEntries(bools.map((b) => [b, 'src/hooks.ts:handler'])) }));
+  const files = { 'src/orders.ts': 'export const noMail = true;\n', 'src/hooks.ts': 'export const handler = 1;\n' };
+  const bad = obFx(t, { sel: sel('src/Orders.ts'), implFiles: files, baseFiles: { 'src/orders.ts': files['src/orders.ts'] } });
+  assert.equal(initCode(bad.cli('init', { dag: bad.dagFile })), 'citation_missing');
+  const fx = obFx(t, { sel: sel('src/orders.ts'), implFiles: { ...files, 'src/orders.ts': 'export const noMail = true;\nexport const send = (u) => sendEmail(u.email);\n' } });
+  assert.ok(fx.sel.na_pairs.some((n) => n.pair_id === 'orders:VAPT-ABUSE-02'), J(fx.sel.na_pairs));
+  okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive impl');
+  const re = fx.gate('reassess', { classifications: [{ signal_id: 'mail-or-notification-send@src/orders.ts', reason: 'reason-only attempt' }] });
+  assert.equal(re.out?.code, 'addendum_required', re.stdout);
+  assert.ok(re.out.delta_pairs.includes('orders:VAPT-ABUSE-02'), J(re.out.delta_pairs));
 });

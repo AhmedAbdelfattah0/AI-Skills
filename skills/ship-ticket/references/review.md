@@ -378,11 +378,12 @@ gate counts a supplied one (the confirmation is PASS only when both are), and
 requires it (`missing_second_opinion`) when the repair's write set overlaps a node
 labelled `concurrency` or `security`. A security or architecture finding on a node
 without such a label is not detectable by the gate: supplying the second opinion
-there stays the orchestrator's duty. A confirmation can dispute a dropped pair too:
-a primary `rule_row` `FAIL` with its `subject_id`, or a `FAIL` confirmation (primary
-or second opinion) that lists the pair id in `checked_findings` or names it in its
-`evidence`. The gate records that run-wide dispute and refuses the confirmation
-(`security_na_disputed`); a re-sent confirmation or a `RETRY` cannot clear it. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
+there stays the orchestrator's duty. A confirmation (primary or second opinion)
+carries no `rule_rows` or `findings` (`incomplete_contract`): a dropped pair it finds
+applicable is a `FAIL` with that in its `evidence`. Original-review disputes stay
+run-wide and add-only; a confirmation `FAIL` is terminal for that attempt, and an
+owner `RETRY` is an explicit human decision made with the FAIL and its evidence (the
+gate output quotes them) on record. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle. A residual
 within the plan's recorded ship threshold is not actionable here: the confirmation

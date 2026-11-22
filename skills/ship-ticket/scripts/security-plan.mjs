@@ -432,6 +432,16 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
       if (sym !== null && !hasIdentifier(text, sym)) { bad.push(`${c}: ${path} does not contain the identifier ${JSON.stringify(sym)}`); continue; }
       checked.push(c);
     }
+    // S1 review repair F2: the path of every surface that lowers a fact is one exact file. A case alias or a directory is
+    // refused even inside a DAG write; a missing path inside a DAG write is deferred (a file the plan will write).
+    for (const s of block.surfaces.filter((x) => isObj(x.facts))) {
+      const path = normPath(s.path), found = caseAlias(root, path);
+      let file = false;
+      try { file = found === 'exact' && statSync(join(root, path)).isFile(); } catch { file = false; }
+      if (found === 'alias') bad.push(`surface ${s.boundary_id}: ${path} is not the exact case of the repository path`);
+      else if (found === 'exact' && !file) bad.push(`surface ${s.boundary_id}: ${path} is not a file (a surface that lowers a fact names one file)`);
+      else if (found === 'missing' && !under(path)) bad.push(`surface ${s.boundary_id}: ${path} is not a file in ${root}`);
+    }
     if (bad.length) refuse('citation_missing', ...bad);
     return { ok: true, code: 'citations_verified', reasons: [], checked };
   });
@@ -471,6 +481,17 @@ function insideRepository(root) {
 const hasIdentifier = (text, sym) => new RegExp(`(^|[^A-Za-z0-9_$])${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_$])`).test(text);
 
 /** Whether every segment of `path` exists under `root` with exactly that case (case-insensitive file systems agree with Linux). */
+/** 'exact' when every segment of `path` exists under `root` with its case, 'alias' when one exists only in another case, else 'missing'. */
+function caseAlias(root, path) {
+  let dir = root;
+  for (const seg of path.split('/')) {
+    let names;
+    try { names = readdirSync(dir); } catch { return 'missing'; }
+    if (!names.includes(seg)) return names.some((n) => n.toLowerCase() === seg.toLowerCase()) ? 'alias' : 'missing';
+    dir = join(dir, seg);
+  }
+  return 'exact';
+}
 function exactCase(root, path) {
   let dir = root;
   for (const seg of path.split('/')) { if (!readdirSync(dir).includes(seg)) return false; dir = join(dir, seg); }
@@ -494,6 +515,10 @@ function lowerings({ catalog, gates }, facts, surfaces) {
   for (const s of surfaces) {
     if (!s.facts) continue;
     if (s.kind === 'unknown') refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: a surface of kind unknown lowers no fact (its kind selects every control)`);
+    // S1 review repair F2: a lowering surface names one exact repository file (the citation path rule; existence and case
+    // are checked by verifyCitations), so a signal at that file always matches it (no whitespace, slash or directory alias).
+    const pathProblem = citationProblem(s.path);
+    if (pathProblem) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: a surface that lowers a fact needs an exact repository file path (${pathProblem})`);
     const gated = gatedFactsOf(gates, s.kind);
     const m = new Map();
     for (const f of Object.keys(s.facts).sort()) {

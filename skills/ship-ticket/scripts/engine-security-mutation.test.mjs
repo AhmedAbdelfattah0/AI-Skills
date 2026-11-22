@@ -124,7 +124,7 @@ export const SECURITY_MUTANTS = [
     from: '.filter(([f]) => facts[f] === true && !raised.has(f))', to: '.filter(([f]) => facts[f] === true)' },
   { tag: 'S46', name: 'review: repair + confirmation (and ship-ready) clear a disputed dropped pair', file: 'engine-gates.mjs',
     from: 'export function disputedRefusal(S, sec) {\n', to: 'export function disputedRefusal(S, sec) {\n  return null;\n' },
-  { tag: 'S49', name: 'C5: a signalling non-test path with no surface is left to classification (no inventory refusal)', file: 'security-plan.mjs',
+  { tag: 'S49', name: 'C5: a signalling path (test-named or not) with no surface is left to classification (no inventory refusal)', file: 'security-plan.mjs',
     from: "      if (gaps.length) refuse('surface_inventory_incomplete',", to: "      if (false) refuse('surface_inventory_incomplete'," },
   { tag: 'S50', name: 'review: dropped pairs need no row (and PASS / uncited NOT_APPLICABLE / NOT_TRIGGERED with a dispute pass)', file: 'engine-gates.mjs',
     from: '  return naRowsRefusal(p, sec);\n', to: '  return null;\n' },
@@ -164,7 +164,7 @@ export const SECURITY_MUTANTS = [
   { tag: "S70", name: "citations: a path inside .git is accepted", file: "security-plan.mjs",
     from: "  if (path.split('/').includes('.git')) return", to: "  if (false) return" },
   { tag: "S72", name: "review: the call site passes only the primary to the dispute check", file: "engine-gates.mjs",
-    from: "disputes = input.kind === 'original' ? naDisputes(input, sec) :", to: "disputes = input.kind === 'original' ? naDisputes({ primary: input.primary }, sec) :" },
+    from: "    if (input.kind === 'original') disputes = naDisputes(input, sec);", to: "    if (input.kind === 'original') disputes = naDisputes({ primary: input.primary }, sec);" },
   { tag: "S77", name: "confirmation: citations are not re-verified after a repair", file: "engine-gates.mjs",
     from: "const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null;", to: "const cited = input.kind === 'original' ? citationRefusal(sec) : null;" },
   { tag: "S78", name: "citations: a gitignored file is accepted", file: "security-plan.mjs",
@@ -203,8 +203,7 @@ export const SECURITY_MUTANTS = [
     from: "    if (normPath(s.path).split('/').some((x) => x === '.' || x === '..')) return null; // R6", to: "    // R6" },
   { tag: "S97", name: "citations: only GIT_DIR is dropped (an inherited GIT_WORK_TREE still redirects git)", file: "security-plan.mjs",
     from: "filter(([k]) => !/^GIT_/i.test(k))", to: "filter(([k]) => !/^GIT_DIR$/i.test(k))" },
-  // ---- S1 review repair: every C5 exemption is a mandatory, mechanically verified review row ----
-  // ---- S1 review repair (owner Option 2): no filename-based exemption; confirmation dispute handling ----
+  // ---- S1 review repair (owner Option 2): no filename-based exemption ----
   { tag: "S103", name: "C5: a test-named file's new-route and auth signals are narrowed again (format 3 omits format-2 signals)", file: "security-plan.mjs",
     from: "    if (!(byPath || byLine || byLineV3)) continue;\n", to: "    if (!(byPath || byLine || byLineV3)) continue;\n    if (c5 && kind !== 'migration-or-rls-change' && /\\.(test|spec)\\.[a-z0-9]+$/.test(p)) continue;\n" },
   { tag: "S60", name: "C5: format 3 narrows a test-named migration file", file: "security-plan.mjs",
@@ -219,14 +218,21 @@ export const SECURITY_MUTANTS = [
     from: "const pathSignalKinds = (path) => fileKinds({ path: normPath(path), added: [] }, true);", to: "const pathSignalKinds = (path) => (/\\.(test|spec)\\./.test(path) ? [] : fileKinds({ path: normPath(path), added: [] }, true));" },
   { tag: "S105", name: "reassess: the reopen keep set skips test-named changed files", file: "security-plan.mjs",
     from: "      for (const s of reassessSignals({ paths: files, c5: true })) {", to: "      for (const s of reassessSignals({ paths: files.filter((f) => !/\\.(test|spec)\\./.test(f.path)), c5: true })) {" },
-  { tag: "S107", name: "confirmation: its own new disputes are not merged before the hard stop (a PASS with a FAIL row is accepted)", file: "engine-gates.mjs",
-    from: "      const disputed = disputedRefusal({ security: { disputed_na: [...(S.security?.disputed_na ?? []), ...disputes] } }, sec);", to: "      const disputed = disputedRefusal(S, sec);" },
-  { tag: "S107", name: "confirmation: a refused confirmation drops its disputes (a clean re-sent confirmation launders them)", file: "engine-gates.mjs",
-    from: "      if (disputed) { recordDisputes(S, disputes, input.review_execution); return disputed; }", to: "      if (disputed) return disputed;" },
-  { tag: "S108", name: "confirmation: a second-opinion FAIL naming a dropped pair records no dispute", file: "engine-gates.mjs",
-    from: "...named(input.primary), ...named(input.second_opinion)]", to: "...named(input.primary)]" },
-  { tag: "S109", name: "confirmation: a dropped pair listed in checked_findings of a FAIL is not a dispute", file: "engine-gates.mjs",
-    from: "(Array.isArray(c.checked_findings) && c.checked_findings.includes(id))", to: "false" },
+  // ---- S1 review repair (final correction): confirmation FAIL is terminal (no free-text dispute extraction); exact lowering-surface paths ----
+  { tag: "S107", name: "confirmation: a primary carrying rule_rows or findings is accepted silently (a PASS with a structured FAIL)", file: "gate.mjs",
+    from: "  if (rowsOrFindings(p).length) return no('incomplete_contract'", to: "  if (false) return no('incomplete_contract'" },
+  { tag: "S108", name: "confirmation: a second opinion carrying rule_rows or findings is accepted silently", file: "gate.mjs",
+    from: "    if (rowsOrFindings(so).length) return no('incomplete_contract'", to: "    if (false) return no('incomplete_contract'" },
+  { tag: "S110", name: "confirmation FAIL: the gate output does not quote the reviewers' outcome and evidence", file: "engine-gates.mjs",
+    from: "? { reasons: confirmationFailReasons(input) } : {}) };", to: "? {} : {}) };" },
+  { tag: "S112", name: "select/replay: a lowering surface path that is not an exact file path (whitespace, slash, directory) is accepted", file: "security-plan.mjs",
+    from: "    if (pathProblem) refuse('surface_fact_not_lowerable'", to: "    if (false) refuse('surface_fact_not_lowerable'" },
+  { tag: "S113", name: "citations: a case alias of a lowering surface path is accepted (init, review, ship-ready)", file: "security-plan.mjs",
+    from: "      if (found === 'alias') bad.push(", to: "      if (false) bad.push(" },
+  { tag: "S113", name: "citations: a directory as a lowering surface path is accepted", file: "security-plan.mjs",
+    from: "      else if (found === 'exact' && !file) bad.push(", to: "      else if (false) bad.push(" },
+  { tag: "S113", name: "citations: a missing lowering surface path outside every DAG write is accepted", file: "security-plan.mjs",
+    from: "      else if (found === 'missing' && !under(path)) bad.push(", to: "      else if (false) bad.push(" },
 ];
 
 /** Copy the layout, apply `mutant` (null: the control), run the tagged tests; resolve exit code and failing test names. */

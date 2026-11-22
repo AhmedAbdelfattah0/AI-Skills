@@ -541,10 +541,11 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   checked_findings, outcome, evidence}`): when supplied it is validated and counted (the record is
   PASS only when both are), and it is required (`missing_second_opinion`) when the repair's write
   set overlaps a node labelled `concurrency` or `security` (review.md, Targeted confirmation).
-  Under a block format 3, a confirmation's own disputes of a dropped pair (a primary `rule_row`
-  `FAIL`, or a `FAIL` primary or second opinion listing the pair id in `checked_findings` or
-  naming it in `evidence`) are merged into the run-wide dispute list before the hard stop:
-  the confirmation is refused `security_na_disputed` and the dispute stays recorded.
+  A confirmation or its second opinion carrying `rule_rows` or `findings` is `incomplete_contract`
+  (not part of the shape). Original-review disputes of a dropped pair are run-wide and add-only
+  (`security_na_disputed` at confirmation and ship-ready); a confirmation records none. An
+  accepted confirmation FAIL is terminal for that attempt: its output `reasons` quote each
+  reviewer's outcome and evidence, and an owner RETRY (an explicit human decision) is the next step.
   A repair dispatch is routed like the nodes whose writes it overlaps (their risk labels, and high
   complexity if any is high), so a repair of a risk-labelled node gets the strong tier.
 

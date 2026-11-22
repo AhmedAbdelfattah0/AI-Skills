@@ -88,6 +88,19 @@ surface**, under five rules, each refused when broken:
   tree is inside a repository is decided from the filesystem: a `.git` entry,
   including a dangling symlink, at the root or any directory above it. Outside every
   repository no ignore rule applies.
+- on a surface whose **own path is one exact repository file** (S1 review repair). A
+  signal reopens a dropped pair only at the exact path of its surface, so a path that
+  only looks like the file would silently disable the reopen. The path of every
+  surface that lowers a fact follows the citation path rule (no whitespace, no leading
+  or trailing slash, no empty segment, not a bare directory name such as `src`,
+  `surface_fact_not_lowerable` at select; `plan_block_invalid` when a stored block is
+  replayed, so `init` and `preflight` refuse it as `security_pairs_mismatch`). Where
+  citations are checked (the list above), the path must also be a **file** with
+  **exactly** that case (`citation_missing`): a case alias of an existing path
+  (`src/Orders.ts` for `src/orders.ts`) or a directory is refused even inside a DAG
+  write; a path that does not exist yet is deferred inside a DAG write (a file the
+  change creates) and must exist at review and ship-ready. A surface that lowers no
+  fact is not checked: it drops no pair, so its path only places signals.
   Residual: a repository reachable only through `GIT_DIR` or `GIT_WORK_TREE`, with
   no `.git` entry at or above the root, has no ignore rules this check can see. That
   arrangement exists only in the operator's process environment, which the plan
@@ -175,7 +188,7 @@ For a block format 3, `controlCoverage` lists the effective pairs only. A droppe
 pair has no spec and is not in the DAG; listing it is `security_pairs_mismatch`.
 `init` also checks two more things. First, the obligation matrix must verify
 (section 12, `disposition_*` or `plan_block_invalid`). Second, every file-shaped DAG
-write that raises a surface-introducing signal (and is not a test file) must be a
+write that raises a surface-introducing signal (test-named or not) must be a
 listed surface (`surface_inventory_incomplete`). The run records `policy_version` 3,
 or 4 with test kinds. An engine that does not know these versions refuses the run
 (`policy_version_unsupported`).
@@ -326,6 +339,13 @@ name: list the file as a surface. The S2 catalog entries and per-surface facts r
 the pair cost of such surfaces generically. No exemption record (`c5_exempted`) and
 no per-file review row exist: the surface's pairs carry the obligation.
 
+**Approvals made under the old name rule.** A block approved while the name rule
+applied can drop a pair on a test-named surface whose own path raises the auth
+signal (for example `src/auth.test.ts` lowering `session_context`). The own-path
+guard now refuses that lowering, so such a block is `plan_block_invalid` when it is
+replayed at the next reassessment (the gates report `security_pairs_mismatch`): it
+must be re-selected and re-approved. It never reassesses `UNCHANGED`.
+
 For a format-3 block, a changed path inside the Design Contract that raises one of
 the three surface signals under this detector, and has no surface at its path, is
 refused `surface_inventory_incomplete` before classification. The same check runs
@@ -364,19 +384,22 @@ The end-to-end paths are covered by the ubuntu and macOS harness legs.
 - The legacy golden embeds the catalog digest. A legitimate catalog change fails
   `[S59]`, whose message explains how to regenerate from be63aea's
   `security-plan.mjs` under the new catalog (see the capture helper).
-- An original's second-opinion dispute counts only with a `subject_id`; a confirmation's
-  counts only as a `FAIL` naming the pair id in `checked_findings` or `evidence`.
+- An original's second-opinion dispute counts only with a `subject_id`. A confirmation
+  records no dispute at all (it has no structured way to name one): its `FAIL` is
+  terminal for the attempt and the owner decides the `RETRY`.
 
 **What reopening does not cover (residuals, documented).**
 
 - A dropped pair reopens only through a signal at **its surface's own path**, or
   through a classification that raises its fact. A change in another file the
   surface imports reopens nothing by itself.
-- Four gated controls have **no signal tripwire** at all: `VAPT-API-04` (mass
-  assignment), `VAPT-WEB-04` (CSRF), `VAPT-ABUSE-01` and `VAPT-ABUSE-06`. No signal
-  class names them, so a later write that makes the dropped fact true again is
-  caught only by the mandatory review row of the dropped pair (section 9), on the
-  frozen candidate.
+- Six gated controls have **no signal tripwire**. `VAPT-API-04` (mass assignment),
+  `VAPT-WEB-04` (CSRF), `VAPT-ABUSE-01` and `VAPT-ABUSE-06`: no signal class names
+  them. `VAPT-CFG-04` and `VAPT-ABUSE-08`: their only signal class is the path-only
+  `auth-or-middleware-change` signal, and the own-path guard refuses to drop them on a
+  surface whose path raises it, so no signal at a dropping surface's path can name
+  them. A later write that makes the dropped fact true again is caught only by the
+  mandatory review row of the dropped pair (section 9), on the frozen candidate.
 - A surface the candidate adds after approval gets only its effective pairs in the
   matrix (`extra` cells): its other controls have no cell. Its pairs are delta pairs
   and need an addendum, so nothing is dropped, but the matrix is complete only for
@@ -429,14 +452,18 @@ is installed, an update that carries a catalog change does this mid-run.
 - A **disputed** dropped pair is a hard stop for the whole run. Repair and
   confirmation never clear it, and neither does a later `RETRY` review: the dispute is
   recorded run-wide. Confirmation and `gate ship-ready` refuse it with
-  `security_na_disputed` until the pair is effective again. A confirmation can raise
-  a dispute itself: a primary `rule_row` `FAIL` naming the pair, or a `FAIL`
-  confirmation (primary or second opinion, shape `{route, reviewer_identity,
-  candidate_id, checked_findings, outcome, evidence}`) that lists the pair id in
-  `checked_findings` or names it as a whole token in `evidence`. Its disputes are
-  merged before the check, so that confirmation is refused, and they stay recorded
-  with the refusal (the refused confirmation itself is not recorded), so a clean
-  confirmation sent afterwards cannot launder them. Only these make it
+  `security_na_disputed` until the pair is effective again. These run-wide, add-only
+  disputes come from ORIGINAL reviews only (a primary row `FAIL`, or a second-opinion
+  finding with the pair's `subject_id`). A confirmation (shape `{[route,]
+  reviewer_identity, candidate_id, checked_findings, outcome, evidence}`) has no
+  validated way to name a pair: rows or findings on it are refused
+  `incomplete_contract`, and no dispute is read from its evidence text. A
+  confirmation `FAIL` is terminal for that review attempt (no repair, no second
+  confirmation, ship-ready `review_not_accepted`); its gate output quotes each
+  reviewer's outcome and evidence. Proceeding is an owner `RETRY`, an explicit human
+  decision made with that FAIL and its evidence on record, followed by a fresh
+  original review; a PASS original then ships like any other. Only these make a
+  disputed pair
   effective:
   - an owner `SECURITY_ADDENDUM`, after which the pair is proven or waived like any
     pair;

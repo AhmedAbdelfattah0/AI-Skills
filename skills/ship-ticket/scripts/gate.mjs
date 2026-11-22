@@ -484,6 +484,8 @@ export const SUMMARY_MAX = 2000;
 /** reconciliation.summary as recorded: a string cut to SUMMARY_MAX characters, anything else null (normalized, never refused). */
 export const boundedSummary = (v) => (typeof v === 'string' ? v.slice(0, SUMMARY_MAX) : null);
 
+/** The structured review fields an original carries and a confirmation must not (rule_rows, findings). */
+const rowsOrFindings = (c) => ['rule_rows', 'findings'].filter((k) => Object.hasOwn(c, k));
 const confirmationOk = (c) => isObj(c) && nonEmpty(c.reviewer_identity) && nonEmpty(c.candidate_id) && Array.isArray(c.checked_findings)
   && OUTCOMES.has(c.outcome) && nonEmpty(c.evidence);
 
@@ -499,6 +501,8 @@ function confirm(input, state, rx, chain, secondOpinion = 'none', recording = {}
   if (!confirmationOk(p)) {
     return no('incomplete_contract', ['confirmation needs reviewer_identity, candidate_id, checked_findings, outcome and evidence']);
   }
+  // S1 review repair F1(d): rows and findings are not part of a confirmation's shape; never accept them silently.
+  if (rowsOrFindings(p).length) return no('incomplete_contract', [`a confirmation carries no ${rowsOrFindings(p).join(' or ')}: it returns PASS or FAIL with evidence`]);
   const mine = chain.filter((r) => r.review_execution === rx);
   const original = mine.find((r) => r.kind === 'original' && r.outcome === 'FAIL');
   const repair = original && mine.find((r) => r.kind === 'repair' && chain.indexOf(r) > chain.indexOf(original));
@@ -516,6 +520,7 @@ function confirm(input, state, rx, chain, secondOpinion = 'none', recording = {}
   if (secondOpinion === 'required' && !hasSo) return no('missing_second_opinion', ['this confirmation needs a second-opinion confirmation']);
   if (hasSo) {
     if (!confirmationOk(so) || !nonEmpty(so.route)) return no('second_opinion_unusable', ['second-opinion confirmation needs route, reviewer_identity, candidate_id, checked_findings, outcome and evidence']);
+    if (rowsOrFindings(so).length) return no('incomplete_contract', [`a second-opinion confirmation carries no ${rowsOrFindings(so).join(' or ')}: it returns PASS or FAIL with evidence`]);
     const sUnchecked = (original.fix_findings ?? []).filter((id) => !so.checked_findings.includes(id));
     if (sUnchecked.length) return no('incomplete_contract', [`second-opinion confirmation must check every fixed finding: ${sUnchecked.join(', ')}`]);
     const sb = builderOf(state, so.reviewer_identity);
