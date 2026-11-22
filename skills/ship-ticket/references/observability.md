@@ -14,7 +14,9 @@ target repository's shared Git directory (`git rev-parse --git-common-dir`) and 
 
 There is one file per ticket for the whole repository: the main checkout and every
 linked worktree write the same file, so a run whose phases are logged from two
-worktrees is not split. `--repo` may be any directory inside the work tree. This
+worktrees after S5 is not split. No command reads another worktree's files. A linked
+worktree's pre-S5 history is in no figure, and it is kept only by leaving that worktree in
+place (see the interim rule below). `--repo` may be any directory inside the work tree. This
 location survives branch switches, does not dirty the worktree, and remains
 available while waiting for approval, CI, or tracker operations. It is local and
 is not pushed.
@@ -84,8 +86,8 @@ not in the shared log, so this version cannot end its intervals.
 - The S5 continuation of such a run (new intervals after the upgrade) IS in the shared
   log. Its figures are partial and labelled `partial_legacy: 'possible'`.
 
-**Audit and retention of an archive.** `run-log.mjs legacy --repo <worktree> [--ticket T]`
-prints that worktree's archive read-only: its rows, its warnings, and a summary computed
+**Audit of an archive (inspection only).** `run-log.mjs legacy --repo <worktree> [--ticket T]`
+prints that worktree's archive to the terminal, read-only: its rows, its warnings, and a summary computed
 over that file alone, labelled `scope: 'legacy-archive'`. It is never combined with the
 shared log. It uses the same safe read as `legacy_present`:
 - lstat first, a regular file only, never following a symbolic link, never blocking on a
@@ -93,22 +95,24 @@ shared log. It uses the same safe read as `legacy_present`:
 - at most 64 MiB; a larger file is reported `truncated: true, bytes_read`;
 - an unlistable directory is `status: 'unavailable'` with its errno, never an empty listing.
 
-That JSON is a READABLE COMPANION only. It does not preserve the history:
-- S-04 measurement rows export as zero rows;
+That JSON is a READABLE COMPANION for inspection only. It is NOT a preservation of history,
+and its output must not be redirected onto an existing path. Its gaps:
+- S-04 measurement rows appear as zero rows;
 - invalid or torn lines are dropped;
 - a file over the limit is truncated.
 
-**Before `git worktree remove` (interim rule).** A linked worktree that holds a pre-S5 log
-must not be removed until its history is preserved. Until an archive helper is approved,
-do one of the following:
-- leave the worktree in place; or
-- save its audit output with `run-log.mjs legacy --repo <wt> --ticket <T> > <file>`, where
-  the operator names a file OUTSIDE the git directory.
+**Retention (interim rule).** A linked worktree that holds a pre-S5 run log must not be
+removed until its history is preserved by a faithful, integrity-verified raw archive.
+Until the archive helper unit (AC16-AC20) is approved and delivered, the only supported
+preservation is to LEAVE THE WORKTREE IN PLACE.
 
-That output is a readable companion only: S-04 rows, invalid lines and data over the
-limit are NOT in it. For a raw-copy export, wait for the approved archive helper. No
-hand-written copy procedure is documented, because a shell copy of git metadata could not
-be made safe by construction.
+`run-log.mjs legacy --repo <wt> --ticket <T>` prints a readable companion to the terminal
+for inspection only. It omits S-04 rows, invalid or torn lines, and data over the read
+limit. It is NOT a preservation of history, and its output must not be redirected onto an
+existing path.
+
+No hand-written copy procedure is documented: a shell copy of git metadata could not be
+made safe by construction.
 
 **REPAIR authority stays per worktree.** The common log is telemetry and never authorises
 a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its
@@ -364,8 +368,8 @@ not computed inside run-log-io.
   - `lostSignal` sets `log_unreadable`.
 - Known limits:
   - Pre-S5 history of LINKED worktrees is in no figure. It is visible only through
-    `run-log.mjs legacy` while the worktree exists, or through its saved audit output (the
-    interim rule above; a readable companion, not a raw copy).
+    `run-log.mjs legacy` (inspection only) while the worktree exists, and it is kept only by
+    leaving that worktree in place (the interim rule above).
   - A run spanning the upgrade is split. It is labelled `partial_legacy` only when some of
     its S5 rows were written in the worktree that holds the archive. Rows written from the
     main checkout, or from any worktree without an archive of the ticket, carry no
