@@ -28,7 +28,7 @@ export const REASSESS_FILES = [
   { path: 'apps/api/src/services/shipment.service.ts', added: [] },
   { path: 'apps/api/src/index.ts', added: [] },
   { path: 'apps/api/src/routes/orders.spec.ts', added: [] },
-  // files a FORMAT-3 run exempts (test-named, outside every router/middleware root): a format-2 run must still signal them
+  // test-named files (an earlier format-3 rule exempted them; none does now): a format-2 run must still signal them
   { path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] },
   { path: 'src/lib/auth.spec.ts', added: [] },
   { path: 'tests/test_routes.py', added: ["router.post('/x', h)"] },

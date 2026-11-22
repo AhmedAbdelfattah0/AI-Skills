@@ -193,18 +193,9 @@ and rule-catalogue work:
   the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
   gives its finding `subject_id: '<boundary>:<control>'`, which records the same
   run-wide dispute (see
-  [security-risk.md](security-risk.md) section 9). Each `c5_exempted` record
-  (`path`, `kind`) of the recorded reassessment needs exactly one primary
-  `rule_row`, `subject_id` `c5:<kind>:<path>`, in the original review and again
-  in a confirmation, with `candidate_id` the reviewed candidate. Read the file
-  itself, because its name alone is not enough. Return `PASS` when it registers
-  no production route or auth/middleware change, no production code imports it
-  and no loader or deploy config serves it. Also return `PASS` when the path is
-  an approved §3a surface whose pairs carry that obligation, and cite the
-  surface. Return `FAIL` otherwise, which is a run-wide dispute. The evidence
-  cites the path and states the conclusion. The
-  gate refuses a missing, duplicate, unknown, stale, unevidenced or
-  `NOT_APPLICABLE` row.
+  [security-risk.md](security-risk.md) section 9). No file is exempted by its
+  name: a test file that registers a route or sits on an auth path is a §3a
+  surface with its own pairs, like any other file.
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
@@ -387,7 +378,11 @@ gate counts a supplied one (the confirmation is PASS only when both are), and
 requires it (`missing_second_opinion`) when the repair's write set overlaps a node
 labelled `concurrency` or `security`. A security or architecture finding on a node
 without such a label is not detectable by the gate: supplying the second opinion
-there stays the orchestrator's duty. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
+there stays the orchestrator's duty. A confirmation can dispute a dropped pair too:
+a primary `rule_row` `FAIL` with its `subject_id`, or a `FAIL` confirmation (primary
+or second opinion) that lists the pair id in `checked_findings` or names it in its
+`evidence`. The gate records that run-wide dispute and refuses the confirmation
+(`security_na_disputed`); a re-sent confirmation or a `RETRY` cannot clear it. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle. A residual
 within the plan's recorded ship threshold is not actionable here: the confirmation

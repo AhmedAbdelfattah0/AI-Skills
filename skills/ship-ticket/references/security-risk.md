@@ -284,129 +284,47 @@ the original detector byte for byte. This is pinned by
 `scripts/security-plan-legacy.golden.json`, captured from be63aea under the catalog
 digest the file records.
 
-**The final C5 rule (after R3).** A format-3 **reassess** uses the format-2 detector,
-the same signal kinds and the same closure rule. A `new-route`,
-`auth-or-middleware-change` or `migration-or-rls-change` signal on a path that is not
-an approved surface closes only through a surface at that path, which leads to
-`ADD_CONTROLS` and then an owner `SECURITY_ADDENDUM`. A reason never closes it, in
-either format. There are exactly two differences, and neither silences a production
-file:
+**The C5 rule (S1 review repair, owner decision: no filename-based exemption).** A
+format-3 run uses the format-2 detector, the same signal kinds and the same closure
+rule, for every path and line signal. A `new-route`, `auth-or-middleware-change` or
+`migration-or-rls-change` signal on a path that is not an approved surface closes only
+through a surface at that path, which leads to `ADD_CONTROLS` and then an owner
+`SECURITY_ADDENDUM`. A reason never closes it, in either format. There is exactly one
+difference, and it only adds signals:
 
 - **Additive route lines.** Format 3 also raises `new-route` on fastify, hono and
-  elysia verbs and on one-line tRPC procedures. This only adds signals; nothing
-  relies on it.
-- **The one narrowing, rule `test-file`.**
-  - A test-named file raises no `new-route` unless it sits under a **router root**.
-  - A test-named file raises no `auth-or-middleware-change` unless it sits under a
-    router root or a **middleware root** (`middleware/`, `middlewares/`,
-    `plugins/`, `server/middleware/`). Nitro loads every file in `middleware/`, and
-    @fastify/autoload loads every file in `plugins/`.
-  - `migration-or-rls-change` is never narrowed.
+  elysia verbs and on one-line tRPC procedures. Nothing relies on it.
 
-A property test pins this. Over a random corpus of changed files and lines, plus fixed
-examples, format 3 loses exactly the recorded test-file exemptions of signals
-format 2 raised, and nothing else, at reassess and in the plan-time inventory. Anything format 2 leaves closable only by a surface
-cannot reach `reassessed` in format 3 through reason-only classifications. The fixed
-examples are:
+**No narrowing, anywhere.** No test name, workspace folder or other path rule removes
+a signal, in any consumer of the detector: reassess signals, the plan-time inventory
+check at `init` and `preflight`, the own-path lowering guard at selection, and the
+reopen of dropped pairs. A test-named file is therefore treated like any other file:
 
-- multi-line tRPC, `usersRouter.post`, a Hono sub-app, `new Elysia().post`, a renamed
-  fastify instance and a GraphQL `@Mutation`, all under `apps/api/`;
-- `server/middleware/` test and mock files;
-- test-named migrations;
-- workspace production files (`apps/api/src/services/...`, `apps/api/src/index.ts`).
+- one that registers a route (`app.post(...)` in `src/orders.test.ts`, `@router.get`
+  in `app/routers/test_results.py`) or sits on an auth path (`src/auth.test.ts`,
+  `edge-functions/auth.test.ts`, `public/login.test.php`) raises its signal and needs
+  a §3a surface, at plan time and at reassess;
+- a surface at such a path cannot lower a fact whose control its own path signal
+  names (`surface_fact_not_lowerable`), exactly like `src/auth.ts`;
+- a test with no route line and no signalling path (only `describe` / `it` /
+  `expect`) raises nothing.
 
-**No other narrowing, anywhere.** The same detector serves reassess and the plan-time
-inventory check at `init` and `preflight`. No workspace folder (`apps/api/`,
-`packages/api/` and the like) and no other path is narrowed at either point. The
-invariant is property-tested against format 2, over at least 4000 random inputs for
-reassess and for the plan-time inventory: a format-3 reassess or inventory check
-never closes or omits a signal format 2 would require a surface for, except the
-recorded test-file exemption set. A mutant that re-adds any narrowing or reason-only
-closure (the earlier workspace rule, at reassess or at plan time) is killed by it.
+A property test pins this (`[S79] [S103]`). Over at least 4000 random inputs of changed
+files and lines, plus fixed examples, with lines and path-only: the format-3 signals
+are a superset of the format-2 signals for every kind, path-only they are equal, the
+only extras are `new-route` route lines, and the plan-time inventory never omits a
+format-2 surface signal. Anything format 2 leaves closable only by a surface cannot
+reach `reassessed` in format 3 through reason-only classifications. Mutants that
+re-add a narrowing (per signal kind, in the lowering guard, in the reopen pass) are
+killed by it.
 
-**Accepted friction.** A production file under `apps/api/` that raises `new-route`
-needs a surface, at plan time and at reassess, as on format 2. So does a **test-named**
-file under a workspace folder named `api` (`apps/api/`, `packages/api/`,
-`services/api/`, for example `apps/api/src/services/order.service.spec.ts` or
-`apps/api/test/orders.e2e-spec.ts`). `api/` is a router root wherever it appears, so
-no test-file exemption applies there. This is identical to format 2. That is correct: a
-service that holds credentials is a boundary, and an `index.ts` that registers routes
-is a route surface. The S2 catalog entries and per-surface facts reduce the pair cost
-of such surfaces generically.
-
-Every exemption that applies is **recorded** as `c5_exempted` (`path`, `kind`,
-`rule`). The record appears in:
-
-- the `gate reassess` output;
-- the recorded reassessment;
-- the ship-ready `obligations` print;
-- the `preflight` output for DAG writes.
-
-Every record is also **consumed**. Reassess, `init` and `preflight` refuse
-`surface_inventory_incomplete` if any record names a file that is not test-named. So
-only test files can ever be narrowed.
-
-Definitions:
-
-- **Test-named file.** A `*.test.*`, `*.spec.*` or `*.e2e-spec.*` file, a
-  `*_test.<go|py|rb|exs>` or `*_spec.rb` file, a `test_*.py` file, or a path under
-  `__tests__/`, `__mocks__/` or `__fixtures__/`. Go and Elixir `_spec` files are
-  production code.
-- **Router root.** Any `routes/`, `route/`, `pages/`, `api/`, `controllers/`,
-  `handlers/`, `endpoints/`, `webhooks/` or `functions/` segment, or
-  `server/api|routes|middleware/`. File-system routers (React Router / Remix
-  `flatRoutes`, TanStack, SolidStart, SvelteKit, Next.js `pages/`, Nitro, Vercel
-  `api/`) serve every file there, test-named or not.
-- **Accepted residual.** A test-named file outside every router and middleware root
-  stays exempt. It is recorded, never silent.
-
-`migration-or-rls-change` is **never** narrowed: migration runners select files by
-directory and name, not by import, so a test-named migration still signals. Other
-signals of a test file (mail, payment, env, dependency) and its out-of-plan path
-always count.
-
-Every record is also **reviewed**. A name alone never settles an exemption.
-In an engine run, each record (`path`, `kind`) of the recorded reassessment
-needs exactly one primary `rule_row` in the review that authorizes ship:
-
-- the original review, and again a confirmation after a repair;
-- `subject_id` `c5:<kind>:<path>`;
-- `candidate_id` the reviewed candidate;
-- evidence that cites the file and states the conclusion;
-- outcome `PASS` (the file is test-only) or `FAIL` (it introduces a production
-  route or an auth/middleware change).
-
-The gate refuses the following rows:
-
-- a missing, duplicate, unknown or unevidenced row: `incomplete_contract`;
-- a row of another head: `stale_candidate`;
-- a `NOT_APPLICABLE` row, because a row never waives: `security_row_escape`.
-
-Ship-ready refuses `security_review_stale` unless the authorizing record attested
-the current exemption set on the current candidate. A `FAIL` row, or a
-second-opinion finding with that `subject_id`, is recorded in the run-wide,
-add-only dispute list, the same one a disputed dropped pair uses. Confirmation and
-ship-ready then refuse `security_na_disputed`. A repair, a confirmation or a RETRY
-review cannot clear it, and neither can an addendum or a waiver, because those
-address pairs, not files. Only a re-approved plan that names the file as a surface
-clears it, which means a new run. The detector still records the exemption there,
-so the file still needs its `c5:` row. That row is `PASS` with the surface cited,
-because the surface's pairs now carry the obligation.
-
-**Limit (manual flow).** The engine-less `security-plan.mjs reassess` prints
-`c5_exempted`, but no gate checks the review rows there. In that flow the rows are
-the reviewer's obligation under [review.md](review.md), not a mechanical check.
-
-**Accepted residuals of the test-file exemption.** It is a name rule, so these cases
-rest on the reviewer's judgment in the `c5:` row (the gate checks that the row
-exists, is fresh and is evidenced, not that the judgment is right):
-
-- production code that imports a test-named file (an import wiring a spec into the
-  app);
-- a glob or `readdir` loader that registers every file of a folder outside the
-  router and middleware roots;
-- a `__mocks__/` or `__fixtures__/` module imported by production code;
-- an unchanged deploy or build config that names a test file.
+**Accepted friction.** Every file under a folder named `api` (`apps/api/`,
+`packages/api/`), test-named or not, raises `new-route` and needs a surface, as on
+format 2. So does a test-named file that registers a route or sits on an auth path
+anywhere. That is correct for a gate that cannot tell a test from a served file by
+name: list the file as a surface. The S2 catalog entries and per-surface facts reduce
+the pair cost of such surfaces generically. No exemption record (`c5_exempted`) and
+no per-file review row exist: the surface's pairs carry the obligation.
 
 For a format-3 block, a changed path inside the Design Contract that raises one of
 the three surface signals under this detector, and has no surface at its path, is
@@ -427,7 +345,7 @@ on Windows. POSIX process groups are needed for quiescence (known limit N7). On
 Windows, CI runs every pure test of the file:
 
 - selection, block format 3, replay and digests;
-- the C5 detector and its property test;
+- the C5 detector and its superset property test;
 - the legacy golden;
 - the obligation matrix;
 - citation checks;
@@ -437,16 +355,17 @@ The end-to-end paths are covered by the ubuntu and macOS harness legs.
 
 **Follow-ups (not done in S1).**
 
-- **F4, spec files under a workspace folder named `api`.** Under the current
-  behaviour (accepted friction above), such specs need a surface, as on format 2.
-  Whether to reduce this friction is pending a quantified assessment at the
-  SCRUM-422 re-plan. It is not authorized for implementation.
+- **F4, test files that raise a surface signal.** Under the current behaviour
+  (accepted friction above), such files need a surface, as on format 2. Any way to
+  reduce this friction (for example from the project's own test configuration) is
+  pending an owner decision. It is not authorized for implementation, and it may never
+  be a filename exemption.
 
 - The legacy golden embeds the catalog digest. A legitimate catalog change fails
   `[S59]`, whose message explains how to regenerate from be63aea's
   `security-plan.mjs` under the new catalog (see the capture helper).
-- A second-opinion dispute counts only with a `subject_id`.
-- `isTestPath` is exported but unused outside tests.
+- An original's second-opinion dispute counts only with a `subject_id`; a confirmation's
+  counts only as a `FAIL` naming the pair id in `checked_findings` or `evidence`.
 
 **What reopening does not cover (residuals, documented).**
 
@@ -510,7 +429,14 @@ is installed, an update that carries a catalog change does this mid-run.
 - A **disputed** dropped pair is a hard stop for the whole run. Repair and
   confirmation never clear it, and neither does a later `RETRY` review: the dispute is
   recorded run-wide. Confirmation and `gate ship-ready` refuse it with
-  `security_na_disputed` until the pair is effective again. Only these make it
+  `security_na_disputed` until the pair is effective again. A confirmation can raise
+  a dispute itself: a primary `rule_row` `FAIL` naming the pair, or a `FAIL`
+  confirmation (primary or second opinion, shape `{route, reviewer_identity,
+  candidate_id, checked_findings, outcome, evidence}`) that lists the pair id in
+  `checked_findings` or names it as a whole token in `evidence`. Its disputes are
+  merged before the check, so that confirmation is refused, and they stay recorded
+  with the refusal (the refused confirmation itself is not recorded), so a clean
+  confirmation sent afterwards cannot launder them. Only these make it
   effective:
   - an owner `SECURITY_ADDENDUM`, after which the pair is proven or waived like any
     pair;

@@ -541,6 +541,10 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   checked_findings, outcome, evidence}`): when supplied it is validated and counted (the record is
   PASS only when both are), and it is required (`missing_second_opinion`) when the repair's write
   set overlaps a node labelled `concurrency` or `security` (review.md, Targeted confirmation).
+  Under a block format 3, a confirmation's own disputes of a dropped pair (a primary `rule_row`
+  `FAIL`, or a `FAIL` primary or second opinion listing the pair id in `checked_findings` or
+  naming it in `evidence`) are merged into the run-wide dispute list before the hard stop:
+  the confirmation is refused `security_na_disputed` and the dispute stays recorded.
   A repair dispatch is routed like the nodes whose writes it overlaps (their risk labels, and high
   complexity if any is high), so a repair of a risk-labelled node gets the strong tier.
 

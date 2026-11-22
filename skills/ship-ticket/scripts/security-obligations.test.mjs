@@ -22,7 +22,8 @@
  *   (NOT_APPLICABLE citing it, or FAIL to dispute; PASS is security_row_escape); a dispute blocks confirmation and
  *   ship-ready (security_na_disputed) until an addendum makes the pair effective; ship-ready prints the matrix;
  *   `run-engine.mjs preflight` runs init's plan checks before approval, writing nothing.
- * C5: a test file raises no surface signal; a workspace `apps/api/` folder is not a route directory.
+ * C5: format 3 detects exactly like format 2 (plus additive route lines): no filename or folder rule removes a signal,
+ *   so a test-named file that registers a route or sits on an auth path needs a surface like any other file.
  * =========================================================================
  */
 import test from 'node:test';
@@ -261,36 +262,37 @@ test('[S47] [S48] C5: real route and handler files (repo fixtures and framework 
   assert.equal(routeSignal('apps/api/src/index.ts', ["app.get('/health', h)"]), true);
 });
 
-test('[S47] [S48] C5 (format 3): test files outside every router root raise no new-route (exemption recorded); workspace apps/api/ modules are never narrowed', () => {
+test('[S47] [S48] C5 (format 3): test-named files signal exactly as format 2 (no exemption); workspace apps/api/ modules are never narrowed', () => {
   for (const p of ['apps/api/src/services/shipment.service.ts', 'apps/api/src/index.ts', 'packages/api/src/config.ts', 'services/api/src/db.ts', 'libs/api/src/client.ts']) {
-    const ex = [];
-    assert.deepEqual(SP.reassessSignals({ paths: [p], c5: true, exempted: ex }).map((s) => s.kind), ['new-route'], `${p}: format 3 keeps format 2's signal`);
-    assert.deepEqual(ex, [], p);
+    assert.deepEqual(SP.reassessSignals({ paths: [p], c5: true }).map((s) => s.kind), ['new-route'], `${p}: format 3 keeps format 2's signal`);
     assert.deepEqual(SP.inventoryGaps({ files: [p] }), [{ path: p, kinds: ['new-route'] }], `${p}: a plan-time inventory gap too`);
   }
-  // only a dot-separated test name is a test file: a production file named ab-test with a route line still signals
+  // a production file named ab-test with a route line signals
   assert.equal(routeSignal('src/lib/ab-test.ts', ["app.get('/x', h)"]), true);
+  // S1 review repair (Option 2): a test-named file with a route line raises new-route like any file (it was exempted by name before)
   for (const p of ['src/__tests__/lib/x.ts', 'test/e2e/app.e2e-spec.ts', 'spec/requests/orders_spec.rb', 'tests/test_routes.py', 'src/lib/util.test.ts']) {
-    const ex = [];
-    assert.deepEqual(SP.reassessSignals({ paths: [{ path: p, added: ['router.post("/x")'] }], c5: true, exempted: ex }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)), [], p);
-    assert.deepEqual(ex, [{ path: p, kind: 'new-route', rule: 'test-file' }], p);
+    const f = [{ path: p, added: ['router.post("/x")'] }];
+    assert.deepEqual(SP.reassessSignals({ paths: f, c5: true }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)).map((s) => s.kind), ['new-route'], p);
+    assert.deepEqual(SP.reassessSignals({ paths: f, c5: true }).map((s) => s.id), SP.reassessSignals({ paths: f }).map((s) => s.id), `${p}: = format 2`);
   }
-  assert.deepEqual(SP.reassessSignals({ paths: ['src/lib/auth.spec.ts'], c5: true }), []); // exempt (recorded): no router or middleware root
-  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'], c5: true }).map((x) => x.kind), ['auth-or-middleware-change'], 'R2: a middleware/ root is never exempt');
+  assert.deepEqual(SP.reassessSignals({ paths: ['src/lib/auth.spec.ts'], c5: true }).map((x) => x.kind), ['auth-or-middleware-change'], 'an auth path signals, test-named or not');
+  assert.deepEqual(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'], c5: true }).map((x) => x.kind), ['auth-or-middleware-change']);
   assert.equal(SP.reassessSignals({ paths: ['src/middleware/auth.spec.ts'] }).length > 0, true, 'format 2 (legacy): unchanged, it still signals');
-  // a test file is still an out-of-plan path when outside the contract (reassess), and non-surface signals still fire
+  // non-surface signals still fire in a test file
   assert.ok(SP.reassessSignals({ paths: [{ path: 'src/mail.test.ts', added: ['sendMail(x)'] }] }).some((s) => s.kind === 'mail-or-notification-send'));
 });
 
-test('[S49] C5 inventory completeness: a signalling non-test path written by the plan with no surface is surface_inventory_incomplete (format 3)', () => {
+test('[S49] C5 inventory completeness: a signalling path written by the plan (test-named or not) with no surface is surface_inventory_incomplete (format 3)', () => {
   assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.ts', 'src/lib/new.test.ts', 'src/a.ts', 'README.md'], surfacePaths: ['src/a.ts'] }),
     [{ path: 'src/routes/new.ts', kinds: ['new-route'] }]);
-  assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.test.ts'], surfacePaths: [] }), [{ path: 'src/routes/new.test.ts', kinds: ['new-route'] }], 'a test name under a router root is no exemption');
+  assert.deepEqual(SP.inventoryGaps({ files: ['src/routes/new.test.ts'], surfacePaths: [] }), [{ path: 'src/routes/new.test.ts', kinds: ['new-route'] }], 'a test name is no exemption');
   refused(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }] })), 'surface_inventory_incomplete');
   refused(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/x.ts', added: ["router.post('/x', h)"] }] })), 'surface_inventory_incomplete');
   const listed = SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/routes/new.ts' }], inventory: [OB.surf('N', 'request-handler', 'src/routes/new.ts')] }));
   assert.equal(listed.ok, true, J(listed)); assert.equal(listed.outcome, 'ADD_CONTROLS');
-  ok(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/new.spec.ts', added: ["app.get('/x', h)"] }] })));
+  // S1 review repair (Option 2): a spec that registers a route is a gap too (it passed by name before)
+  refused(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/new.spec.ts', added: ["app.get('/x', h)"] }] })), 'surface_inventory_incomplete');
+  ok(SP.reassess(OB.reIn3(GC, { files: [{ path: 'src/lib/new.spec.ts', added: ["it('x', () => expect(1).toBe(1))"] }] })));
 });
 
 // ------------------------------------------------------------------ accountability
@@ -436,14 +438,15 @@ test('[S53] (j) init binds a format-3 plan with controlCoverage = the effective 
   assert.equal(initCode(extra.cli('init', { dag: extra.dagFile })), 'security_pairs_mismatch');
 });
 
-test('[S76] init: an engine whose semantics lack version 3 refuses a format-3 run (policy_version_unsupported); preflight checks the plan with no START and writes nothing', { skip: WIN_SKIP }, async (t) => {
+test('init: an engine whose semantics lack version 3 refuses a format-3 run (policy_version_unsupported); preflight checks the plan with no START and writes nothing', { skip: WIN_SKIP }, async (t) => {
   const fx = obFx(t);
   await assert.rejects(async () => (await import('./run-engine.mjs')).init(fx.ctx({ policy: { current: 1, semantics: { 1: {}, 2: { testKinds: true } } } })), (e) => e.code === 'policy_version_unsupported');
   const pf = await preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile });
   assert.equal(pf.code, 'preflight_ok'); assert.equal(pf.block_format, 3); assert.equal(pf.dropped_pairs, fx.sel.na_pairs.length);
-  // [S76] the C5 exemption record of a DAG write reaches the preflight output
+  assert.equal('c5_exempted' in pf, false, 'no exemption record exists');
+  // S1 review repair (Option 2): a test-named DAG write on an auth path is an inventory gap like any other file
   const ax = obFx(t, { nodes: [{ id: 'web', deps: ['impl'], writes: ['lib/auth.spec.ts'] }] });
-  assert.deepEqual((await preflight({ repoRoot: ax.repo, ticket: 'T-1', dagFile: ax.dagFile })).c5_exempted, [{ path: 'lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]);
+  await assert.rejects(() => preflight({ repoRoot: ax.repo, ticket: 'T-1', dagFile: ax.dagFile }), (e) => e.code === 'surface_inventory_incomplete' && e.message.includes('lib/auth.spec.ts'));
   assert.equal(existsSync(fx.stateFile()), false, 'preflight wrote no state');
   // without a RUN-STATE block or START (a plan still in Plan Mode)
   const draft = join(fx.root, 'draft.md');
@@ -480,27 +483,24 @@ test('[S46] (h) end to end: a reviewer FAIL on a dropped pair cannot be cleared 
   assert.equal(s.out?.code, 'security_na_disputed', s.stdout);
 });
 
-test('[S73] [S74] [S75] ship-ready of a format-3 run prints its obligation matrix, and the C5 exemption record reaches reassess output, the recorded reassessment and ship-ready', { skip: WIN_SKIP }, (t) => {
-  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const bearerOnly = true;\n', 'src/lib/util.test.ts': "app.get('/x', h)\n" } });
+test('ship-ready of a format-3 run prints its obligation matrix; no exemption record exists anywhere (reassess output, recorded reassessment, ship-ready)', { skip: WIN_SKIP }, (t) => {
+  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const bearerOnly = true;\n', 'src/lib/util.test.ts': "describe('util', () => { it('adds', () => { expect(1).toBe(1); }); });\n" } });
   const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
   okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive impl');
   const re = fx.gate('reassess', {});
   okc(re, 'reassess');
-  const EX = [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }];
-  assert.deepEqual(re.out.c5_exempted, EX, 'reassess output');
-  assert.deepEqual(fx.readState().security.reassessed.c5_exempted, EX, 'recorded reassessment');
+  assert.equal('c5_exempted' in re.out, false, 'reassess output');
+  assert.equal('c5_exempted' in fx.readState().security.reassessed, false, 'recorded reassessment');
   const cand = fx.candidate();
   const rows = [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
-    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' })),
-    // S1 review repair: the exemption needs its own reviewed row (input only; every expectation below is unchanged)
-    { subject_id: 'c5:new-route:src/lib/util.test.ts', outcome: 'PASS', candidate_id: cand, evidence: 'src/lib/util.test.ts is a test fixture: nothing imports or serves it' }];
+    ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
   okc(fx.gate('review', passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: rows }) })), 'review');
   let r = fx.gate('ship-ready', {});
   for (let i = 0; i < 3 && r.out?.code !== 'ship_ready'; i++) r = fx.gate('ship-ready', {});
   assert.equal(r.out?.code, 'ship_ready', r.stdout);
   assert.equal(r.out.obligations.counts['dropped-by-fact'], fx.sel.na_pairs.length);
   assert.equal(r.out.obligations.matrix.length, 2 * REAL.catalog.controls.length);
-  assert.deepEqual(r.out.obligations.c5_exempted, [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }], 'ship-ready obligations print');
+  assert.equal('c5_exempted' in r.out.obligations, false, 'ship-ready obligations print');
 });
 
 test('config_fragment spreads into a DAG config that validates (no securityControls key)', () => {
@@ -543,17 +543,15 @@ test('[S61] B1(b) format 3: a test-named file under a router root still raises n
   }
 });
 
-test('[S65] B1(c)(d) format 3: every C5 exemption that applies is listed (path, signal, rule); fastify and tRPC routes in a workspace api/ still signal', () => {
-  const ok3 = ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }] })));
-  const ex = ok3.c5_exempted.map((e) => `${e.path}|${e.kind}|${e.rule}`).sort();
-  assert.deepEqual(ex, ['src/lib/util.test.ts|new-route|test-file']); // middleware/ is never exempt; a workspace module keeps its signal
+test('[S65] B1(c)(d) format 3: a test-named route registration is an inventory gap (no exemption, no record); fastify and tRPC routes in a workspace api/ still signal', () => {
+  const r = refused(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }] })), 'surface_inventory_incomplete');
+  assert.ok(r.reasons.some((x) => x.includes('src/lib/util.test.ts') && x.includes('new-route')), J(r.reasons));
   for (const [path, line] of [['apps/api/src/plugins/users.ts', "fastify.get('/users', async () => db.all())"], ['apps/api/src/trpc/router.ts', 'deleteUser: protectedProcedure.mutation(() => 1),']]) {
     refused(r3([{ path, added: [line] }]), 'surface_inventory_incomplete');
   }
-  // the inventory helper uses the same detector and reports the exemptions it applied (it cannot be blinded silently)
-  const exempted = [];
-  assert.deepEqual(SP.inventoryGaps({ files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, 'src/routes/a.ts'], surfacePaths: [], exempted }), [{ path: 'src/routes/a.ts', kinds: ['new-route'] }]);
-  assert.deepEqual(exempted, [{ path: 'src/lib/util.test.ts', kind: 'new-route', rule: 'test-file' }]);
+  // the inventory helper uses the same detector
+  assert.deepEqual(SP.inventoryGaps({ files: [{ path: 'src/lib/util.test.ts', added: ["app.get('/x', h)"] }, 'src/routes/a.ts'], surfacePaths: [] }),
+    [{ path: 'src/lib/util.test.ts', kinds: ['new-route'] }, { path: 'src/routes/a.ts', kinds: ['new-route'] }]);
 });
 
 test('[S62] B2 a selected control can never end with zero effective pairs because of a surface fact (a keeper whose kind cannot pair it is no keeper)', () => {
@@ -678,26 +676,12 @@ test('[S69] R3 format 3: a workspace api/ module raises new-route exactly as for
   }
 });
 
-test('[S68] R2.2 format 3: the auth test-file exemption never applies under a router or middleware/plugins root; Go/Elixir _spec files are production', () => {
+test('[S68] R2.2 format 3: a test-named file on an auth path raises auth-or-middleware-change wherever it sits (no exemption)', () => {
   for (const path of ['server/middleware/auth.test.ts', 'server/middleware/__mocks__/session.ts', 'server/middleware/__tests__/00.bypass.ts', 'plugins/auth.test.js',
-    'src/middleware/auth.spec.ts', 'app/routes/auth.test.tsx', 'internal/auth/session_spec.go', 'lib/my_app/auth/session_spec.ex']) {
+    'src/middleware/auth.spec.ts', 'app/routes/auth.test.tsx', 'internal/auth/session_spec.go', 'lib/my_app/auth/session_spec.ex', 'src/lib/auth.spec.ts']) {
     const r = refused(r3([{ path, added: [] }]), 'surface_inventory_incomplete');
     assert.ok(r.reasons.some((x) => x.includes(path) && x.includes('auth-or-middleware-change')), path);
   }
-  const ex = ok(r3([{ path: 'src/lib/auth.spec.ts', added: [] }])).c5_exempted;
-  assert.deepEqual(ex, [{ path: 'src/lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]);
-});
-
-test('[S71] R2.1 every recorded exemption is consumed: an exemption record for a non-test path is refused (fail closed)', () => {
-  assert.equal(SP.exemptionRefusal([{ path: 'src/lib/auth.spec.ts', kind: 'auth-or-middleware-change', rule: 'test-file' }]), null);
-  assert.equal(SP.exemptionRefusal([{ path: 'apps/api/src/app.ts', kind: 'new-route', rule: 'workspace-api-folder' }])?.code, 'surface_inventory_incomplete');
-  // and the detector never produces one: every exemption over a wide corpus is a test-named file
-  const corpus = ['apps/api/src/services/x.ts', 'apps/api/src/index.ts', 'src/lib/util.test.ts', 'src/middleware/auth.spec.ts', 'server/middleware/a.test.ts', 'tests/test_routes.py',
-    'packages/api/src/config.ts', 'src/auth/session.ts', 'spec/requests/orders_spec.rb', 'internal/auth/x_spec.go'];
-  const exempted = [];
-  SP.reassessSignals({ paths: corpus.map((path) => ({ path, added: ["app.get('/x', h)"] })), c5: true, exempted });
-  assert.ok(exempted.length > 0);
-  assert.equal(SP.exemptionRefusal(exempted), null, J(exempted));
 });
 
 test('[S70] R2.4 citations: .git paths, docs-only files, symbols shorter than 3 and a case-variant path are refused', () => {
@@ -806,9 +790,9 @@ test('[S67] R2 end to end: ship-ready re-verifies citations on the candidate (a 
 });
 
 // ====================================================================================================================
-// Repair R3 (strategy change, review of 55784b9): format 3 closes signals EXACTLY as format 2 does. The only permitted
-// format-2 vs format-3 difference is the recorded test-file exemption set (plus format 3's additive route lines, which
-// only ever ADD signals). Property-tested over a random corpus; red on 55784b9.
+// Repair R3 (strategy change, review of 55784b9): format 3 closes signals EXACTLY as format 2 does. Since the S1 review
+// repair (Option 2) the only format-2 vs format-3 difference is format 3's additive route lines, which only ever ADD
+// signals. Property-tested over a random corpus ([S79] [S103] below).
 // ====================================================================================================================
 function prng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; }; }
 const DIRS = ['apps/api/src', 'packages/api/src', 'apps/api/src/trpc', 'apps/web/app/routes', 'src', 'src/lib', 'src/routes', 'src/services', 'server/middleware',
@@ -826,50 +810,6 @@ function reasonOnly(plan, files) {
   const sigs = first.signals ?? [];
   return { first, final: SP.reassess({ ...base, classifications: reasonAll(sigs) }) };
 }
-const kindsOf = (sigs) => new Set((sigs ?? []).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)).map((s) => `${s.path}|${s.kind}`));
-
-test('[S79] R3 property (reassess AND plan-time inventory, >= 4000 random inputs): format 3 never closes or omits what format 2 requires a surface for; the only difference is the recorded test-file exemptions', () => {
-  const rnd = prng(20261120), pick = (xs) => xs[Math.floor(rnd() * xs.length)];
-  const p2 = legacyPlan(), p3 = OB.planOf(OB.approved3(GC));
-  let checked = 0, exemptedSeen = 0, refusedBoth = 0;
-  const fixed = [...WORKSPACE_FORMS.map(([path, added]) => [{ path, added }]),
-    [{ path: 'server/middleware/__mocks__/session.ts', added: [] }], [{ path: 'server/middleware/auth.test.ts', added: [] }], [{ path: 'server/middleware/__tests__/00.bypass.ts', added: [] }],
-    [{ path: 'db/migrations/0002_rls.test.sql', added: ['create policy p on t using (true);'] }], [{ path: 'supabase/migrations/20261120_orders_rls.spec.sql', added: [] }],
-    [{ path: 'apps/api/src/services/shipment.service.ts', added: [] }], [{ path: 'apps/api/src/index.ts', added: [] }]];
-  const random = Array.from({ length: 4200 }, () => Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => ({ path: `${pick(DIRS)}/${pick(BASES)}`, added: pick(LINES) })));
-  for (const files of [...fixed, ...random]) {
-    const uniq = [...new Map(files.map((f) => [f.path, f])).values()];
-    const s2 = SP.reassessSignals({ paths: uniq });
-    const ex = [];
-    const s3 = SP.reassessSignals({ paths: uniq, c5: true, exempted: ex });
-    const k2 = kindsOf(s2), k3 = kindsOf(s3), exSet = new Set(ex.map((e) => `${e.path}|${e.kind}`));
-    // (1) format 3 loses exactly the recorded exemptions of signals format 2 raised (an exemption of a signal only the
-    // additive format-3 route lines raise loses nothing format 2 had), each of a test-named file
-    assert.deepEqual([...k2].filter((k) => !k3.has(k)).sort(), [...exSet].filter((k) => k2.has(k)).sort(), J(uniq));
-    for (const k of [...exSet].filter((x) => !k2.has(x))) assert.ok(k.endsWith('|new-route'), `${k} ${J(uniq)}`);
-    assert.equal(SP.exemptionRefusal(ex), null, J(ex));
-    // (2) anything format 3 adds is a new-route (an additive route line), never a weaker signal
-    for (const k of [...k3].filter((x) => !k2.has(x))) assert.ok(k.endsWith('|new-route'), `${k} ${J(uniq)}`);
-    assert.ok(s3.every((s) => !['possible-route'].includes(s.kind)), 'no reason-closable route signal exists');
-    // (2b) plan-time inventory (init, preflight): with lines, and path-only as DAG writes are; the format-3 gaps differ from the
-    // format-2 detector's surface signals only by the recorded exemptions (and additive route lines)
-    for (const fs of [uniq, uniq.map((f) => f.path)]) {
-      const exI = [];
-      const g3 = new Set(SP.inventoryGaps({ files: fs, surfacePaths: [], exempted: exI }).flatMap((g) => g.kinds.map((k) => `${g.path}|${k}`)));
-      const g2 = kindsOf(SP.reassessSignals({ paths: fs }));
-      const exI2 = new Set(exI.map((e) => `${e.path}|${e.kind}`));
-      assert.deepEqual([...g2].filter((k) => !g3.has(k)).sort(), [...exI2].filter((k) => g2.has(k)).sort(), `inventory ${J(fs)}`);
-      for (const k of [...g3].filter((x) => !g2.has(x))) assert.ok(k.endsWith('|new-route'), `inventory ${k}`);
-    }
-    // (3) end to end: if format 2 cannot reach `reassessed` with reason-only classifications because of a surface signal on a
-    // path format 3 did not exempt, format 3 cannot either
-    const r2 = reasonOnly(p2, uniq).final, r3 = reasonOnly(p3, uniq).final;
-    const surfaceOnly = (r2.unclassified ?? []).map((id) => { const s = s2.find((x) => x.id === id); return `${s.path}|${s.kind}`; }).filter((k) => !exSet.has(k));
-    if (surfaceOnly.length) { assert.equal(r3.ok, false, `format 3 reached ${r3.code} with reason-only classifications: ${J(uniq)}`); refusedBoth++; }
-    checked++; exemptedSeen += ex.length;
-  }
-  assert.ok(checked >= 4000 && exemptedSeen > 100 && refusedBoth > 1000, J({ checked, exemptedSeen, refusedBoth }));
-});
 
 test('[S79] R3 fixed examples: the six workspace route forms and server/middleware test files are never closed by a reason in format 3', () => {
   const p3 = OB.planOf(OB.approved3(GC));
@@ -882,22 +822,6 @@ test('[S79] R3 fixed examples: the six workspace route forms and server/middlewa
     const listed = ok(SP.reassess({ plan: p3, catalog: GC, inventory: { surfaces: [OB.surf('N', 'request-handler', files[0].path)] }, changed: { contract_paths: ['**'], files }, classifications: [] }));
     assert.equal(listed.outcome, 'ADD_CONTROLS', files[0].path);
   }
-});
-
-test('[S80] R3 a recorded exemption naming a non-test file is refused at the reassess call site', () => {
-  ok(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }) }));
-  refused(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }), c5_extra_exempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] }), 'surface_inventory_incomplete');
-  ok(SP.reassess({ ...OB.reIn3(GC, { files: [{ path: 'src/a.ts' }] }), c5_extra_exempted: [{ path: 'src/lib/x.test.ts', kind: 'new-route', rule: 'test-file' }] }));
-});
-
-test('[S81] R3 a recorded exemption naming a non-test file is refused at the init/preflight call site (bindObligations)', { skip: WIN_SKIP }, async (t) => {
-  const fx = obFx(t);
-  assert.equal((await preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile, c5ExtraExempted: [{ path: 'src/lib/x.test.ts', kind: 'new-route', rule: 'test-file' }] })).code, 'preflight_ok');
-  await assert.rejects(() => preflight({ repoRoot: fx.repo, ticket: 'T-1', dagFile: fx.dagFile, c5ExtraExempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] }),
-    (e) => e.code === 'surface_inventory_incomplete');
-  const { init: initCmd } = await import('./run-engine.mjs');
-  await assert.rejects(() => initCmd(fx.ctx({ c5ExtraExempted: [{ path: 'src/routes/admin.ts', kind: 'new-route', rule: 'test-file' }] })), (e) => e.code === 'surface_inventory_incomplete');
-  assert.equal(existsSync(fx.stateFile()), false);
 });
 
 test('[S84] [S85] [S86] R3 citations: the :symbol matches a whole identifier; a symlink leaving the repo, docs/** markdown and an unanswerable git check-ignore are refused', () => {
@@ -1055,112 +979,165 @@ test('[S97] R6 I6: a lone inherited GIT_WORK_TREE is dropped too (the root repos
   assert.ok(out.reasons.some((x) => x.includes('gitignored')), J(out.reasons));
 });
 
-// ====================================================================================================================
-// S1 review repair: every C5 exemption is a MANDATORY, mechanically verified review row. A name exemption alone
-// is never enough: the independent reviewer judges each exempted file on the candidate, the gate checks coverage,
-// identity, freshness and evidence, and a FAIL row is a run-wide hard stop (the disputed-N/A one). Written before the fix.
-// ====================================================================================================================
-const C5_FILES = {
-  'app/routers/test_results.py': 'from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get("/test-results/{id}")\ndef detail(id: str):\n    return {"id": id}\n',
-  'edge-functions/auth.test.ts': 'export default async (request, context) => new Response("ok");\n',
-  'src/orders.test.ts': "import { app } from './server';\napp.post('/orders', (req, res) => res.json({ ok: true }));\n",
-};
-const c5Key = (e) => `c5:${e.kind}:${e.path}`;
-const c5Row = (e, cand, over = {}) => ({ subject_id: c5Key(e), outcome: 'PASS', candidate_id: cand,
-  evidence: `${e.path} read whole on this candidate: describe/it/expect only, no route or middleware registration; nothing imports or serves it`, ...over });
 const baseRows = (fx) => [{ subject_id: 'no-catch-all', outcome: 'PASS', evidence: 'src/a.txt:1' }, ...fx.ids.map((id) => ({ subject_id: id, outcome: 'PASS', evidence: SPEC })),
   ...fx.sel.na_pairs.map((n) => ({ subject_id: n.pair_id, outcome: 'NOT_APPLICABLE', evidence: 'src/orders.ts:bearerOnly reads a bearer token only' }))];
 const okc = (r, m) => assert.equal(r.status, 0, `${m}: ${r.stdout}${r.stderr}`);
-/** A format-3 run driven to its first reassessment with `implFiles` written by the impl node; returns the recorded exemptions. */
-function c5Fx(t, implFiles, implWrites = ['src']) {
-  const fx = obFx(t, { implFiles: { 'src/orders.ts': 'export const bearerOnly = true;\n', ...implFiles }, implWrites });
+
+// ====================================================================================================================
+// S1 review repair (Option 2, owner decision): NO filename-based exemption. Format 3 uses format 2's detector for
+// every path and line signal (plus the additive ROUTE_LINE_V3 route lines), so it never suppresses an obligation
+// format 2 requires, in every consumer: reassess signals, inventory gaps, the own-path lowering guard and the reopen
+// keep set. And a confirmation's own disputes (M1, M2) are merged before its hard stop. Written before the fix.
+// ====================================================================================================================
+const REPORTED = [
+  ['app/routers/test_results.py', ['from fastapi import APIRouter', 'router = APIRouter()', '@router.get("/test-results/{id}")', 'def detail(id: str):'], 'new-route'],
+  ['edge-functions/auth.test.ts', ['export default async (request, context) => new Response("ok");'], 'auth-or-middleware-change'],
+  ['src/orders.test.ts', ["import { app } from './server';", "app.post('/orders', (req, res) => res.json({ ok: true }));"], 'new-route'],
+  ['public/login.test.php', ['<?php $_SESSION["user"] = $u;'], 'auth-or-middleware-change'],
+  ['src/auth.test.ts', [], 'auth-or-middleware-change'],
+  ['src/lib/util.test.ts', ["app.get('/x', h)"], 'new-route'],
+  ['src/__tests__/lib/x.ts', ['router.post("/x")'], 'new-route'],
+  ['tests/test_routes.py', ['router.post("/x")'], 'new-route'],
+  ['spec/requests/orders_spec.rb', ['router.post("/x")'], 'new-route'],
+];
+const DESCRIBE_ONLY = [
+  ['src/orders.test.ts', ["describe('orders', () => {", "  it('totals', () => { expect(1 + 1).toBe(2); });", '});']],
+  ['src/lib/util.spec.ts', ["import { describe, it, expect } from 'vitest';", "describe('util', () => { it('adds', () => { expect(1).toBe(1); }); });"]],
+  ['test/e2e/app.e2e-spec.ts', ["describe('app', () => { it('boots', () => { expect(true).toBe(true); }); });"]],
+];
+const surfaceKinds = (path, added, c5) => SP.reassessSignals({ paths: [{ path, added }], ...(c5 ? { c5: true } : {}) }).filter((s) => SP.SURFACE_SIGNALS.includes(s.kind)).map((s) => s.kind);
+
+test('[S106] format 3: the reported test-named files raise their signals and inventory gaps exactly as format 2 does; a describe/it/expect-only file raises nothing', () => {
+  for (const [path, added, kind] of REPORTED) {
+    assert.ok(surfaceKinds(path, added, true).includes(kind), `${path}: format 3 raises ${kind}`);
+    assert.deepEqual(surfaceKinds(path, added, true), surfaceKinds(path, added, false), `${path}: format 3 = format 2`);
+    const r = refused(r3([{ path, added }]), 'surface_inventory_incomplete');
+    assert.ok(r.reasons.some((x) => x.includes(path) && x.includes(kind)), `${path}: ${J(r.reasons)}`);
+    assert.ok(SP.inventoryGaps({ files: [{ path, added }], surfacePaths: [] }).some((g) => g.path === path && g.kinds.includes(kind)), `${path}: plan-time gap`);
+    assert.deepEqual(SP.inventoryGaps({ files: [{ path, added }], surfacePaths: [path] }), [], `${path}: listing it as a surface clears the gap`);
+  }
+  // the remedy terminates: a route file listed in the inventory closes like any route file (ADD_CONTROLS, then an addendum)
+  const listed = ok(SP.reassess(OB.reIn3(GC, { contract: ['**'], files: [{ path: 'src/orders.test.ts', added: REPORTED[2][1] }], inventory: [OB.surf('T', 'request-handler', 'src/orders.test.ts')] })));
+  assert.equal(listed.outcome, 'ADD_CONTROLS');
+  for (const [path, added] of DESCRIBE_ONLY) {
+    assert.deepEqual(surfaceKinds(path, added, true), [], `${path}: a test with no route or auth signal raises nothing`);
+    assert.equal(ok(r3([{ path, added }])).outcome, 'UNCHANGED', path);
+  }
+});
+
+test('[S104] format 3: a test-named surface whose own path raises an auth signal cannot lower session_context, exactly like src/auth.ts', () => {
+  for (const path of ['src/auth.ts', 'src/auth.test.ts', 'src/session.spec.ts', 'src/__tests__/auth.ts', 'public/login.test.php']) {
+    const r = refused(OB.sel3(GC, [OB.surf('A', 'request-handler', path, ['session_context']), KEEP]), 'surface_fact_not_lowerable');
+    assert.ok(r.reasons.some((x) => x.includes('auth-or-middleware-change') && x.includes('VAPT-CFG-04')), `${path}: ${J(r.reasons)}`);
+  }
+  ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/orders.test.ts', ['session_context']), KEEP]));
+});
+
+/** The gated catalog with VAPT-API-02 also gated by persistent_write (so a new-route signal's class can name a dropped pair). */
+const GC_API02 = (() => { const c = JSON.parse(J(OB.GATED)); const api04 = c.controls.find((x) => x.id === 'VAPT-API-04'), api02 = c.controls.find((x) => x.id === 'VAPT-API-02');
+  api02.applies_when = api04.applies_when; api02.not_applicable = { ...api04.not_applicable }; return SP.loadCatalog({ catalogPath: OB.writeCatalog(c) }); })();
+
+test('[S105] format 3 reopen: a route line on a test-named approved surface reopens the dropped pairs its class names; an approval the name guard let through no longer replays', () => {
+  ok(GC_API02);
+  const s = ok(OB.sel3(GC_API02, [OB.surf('T', 'request-handler', 'src/orders.test.ts', ['persistent_write']), KEEP]));
+  assert.deepEqual(ids(s.na_pairs), ['T:VAPT-API-02', 'T:VAPT-API-04']);
+  const plan = OB.planOf(s);
+  const base = { plan, catalog: GC_API02, inventory: { surfaces: [] }, changed: { contract_paths: ['src/**'], files: [{ path: 'src/orders.test.ts', added: ["app.post('/orders', h)"] }] }, addenda: [] };
+  const r = SP.reassess({ ...base, classifications: [{ signal_id: 'new-route@src/orders.test.ts', reason: 'reason-only attempt' }] });
+  assert.equal(r.ok, true, J(r));
+  assert.equal(r.outcome, 'ADD_CONTROLS', J(r));
+  assert.ok(r.reopened_pairs.includes('T:VAPT-API-02'), J(r.reopened_pairs));
+  // Fable's example: src/auth.test.ts lowering session_context, a block the old name guard accepted (forged here with a
+  // valid digest), is refused when replayed: later session code there can never reassess UNCHANGED.
+  const good = ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/a.ts', ['session_context']), KEEP]));
+  assert.deepEqual(ids(good.na_pairs), ['A:VAPT-CFG-04']);
+  const P = 'src/auth.test.ts', mv = (x) => (x.boundary_id === 'A' ? { ...x, path: P, evidence: { session_context: `${P}:session_contextFree` } } : x);
+  const surfaces = good.surfaces.map(mv);
+  const na_pairs = good.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: { session_context: `${P}:session_contextFree` } }));
+  const v3 = { surfaces, pairs: ids(good.pairs), na_pairs };
+  const selection_digest = sha(SP.canon({ policy: 3, catalog_digest: good.catalog_digest, facts_digest: good.facts_digest, controls: good.controls.map((c) => c.control_id), ...v3 }));
+  const forged = { ...good, surfaces, na_pairs: good.na_pairs.map((n) => ({ ...n, evidence: na_pairs[0].evidence })), selection_digest };
+  const fplan = OB.planOf(forged);
+  assert.ok(SP.parsePlanSecurityBlock(fplan), 'the forged block is well-formed');
+  refused(SP.reassess(OB.reIn3(GC, { plan: fplan, files: [{ path: P, added: ["res.cookie('sid', token)"] }] })), 'plan_block_invalid');
+});
+
+test('[S79] [S103] property (S79 corpus, >= 4000 inputs, with lines and path-only): format-3 signals are a superset of format-2 signals for every kind; the only extras are new-route route lines', () => {
+  const rnd = prng(20261120), pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const random = Array.from({ length: 4200 }, () => Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => ({ path: `${pick(DIRS)}/${pick(BASES)}`, added: pick(LINES) })));
+  const fixed = [...REPORTED, ...DESCRIBE_ONLY].map(([path, added]) => [{ path, added }]);
+  const all = (sigs) => new Set(sigs.map((s) => `${s.path}|${s.kind}`));
+  const p2 = legacyPlan(), p3 = OB.planOf(OB.approved3(GC));
+  let checked = 0, extras = 0, testNamed = 0, refusedBoth = 0;
+  for (const files of [...fixed, ...random]) {
+    const uniq = [...new Map(files.map((f) => [f.path, f])).values()];
+    for (const fs of [uniq, uniq.map((f) => f.path)]) {
+      const f2 = all(SP.reassessSignals({ paths: fs })), f3 = all(SP.reassessSignals({ paths: fs, c5: true }));
+      assert.deepEqual([...f2].filter((k) => !f3.has(k)), [], `format 3 omits a format-2 signal: ${J(fs)}`);
+      for (const k of [...f3].filter((x) => !f2.has(x))) { assert.ok(k.endsWith('|new-route'), `${k} ${J(fs)}`); extras++; }
+      if (typeof fs[0] === 'string') assert.deepEqual([...f3].sort(), [...f2].sort(), `path-only signals are format 2's exactly: ${J(fs)}`);
+      const g3 = new Set(SP.inventoryGaps({ files: fs, surfacePaths: [] }).flatMap((g) => g.kinds.map((k) => `${g.path}|${k}`)));
+      assert.deepEqual([...f2].filter((k) => SP.SURFACE_SIGNALS.includes(k.split('|')[1]) && !g3.has(k)), [], `inventory omits a format-2 surface signal: ${J(fs)}`);
+    }
+    if (uniq.some((f) => /\.(test|spec)\.|_test\.|_spec\.|__tests__|__mocks__|(^|\/)test_/.test(f.path))) testNamed++;
+    // end to end: if format 2 cannot reach `reassessed` with reason-only classifications because of a surface signal, format 3 cannot either
+    const s2 = SP.reassessSignals({ paths: uniq });
+    const r2 = reasonOnly(p2, uniq).final;
+    if ((r2.unclassified ?? []).some((id) => SP.SURFACE_SIGNALS.includes(s2.find((x) => x.id === id)?.kind))) {
+      const r3x = reasonOnly(p3, uniq).final;
+      assert.equal(r3x.ok, false, `format 3 reached ${r3x.code} with reason-only classifications: ${J(uniq)}`); refusedBoth++;
+    }
+    checked++;
+  }
+  assert.ok(checked >= 4000 && extras > 100 && testNamed > 1000 && refusedBoth > 1000, J({ checked, extras, testNamed, refusedBoth }));
+});
+
+test('[S109] confirmation disputes (pure): a primary FAIL row on a dropped pair; a FAIL confirmation (primary or second opinion) naming one in checked_findings or as a whole token in evidence', () => {
+  const N = 'A:VAPT-API-04';
+  const conf = (over = {}) => ({ reviewer_identity: 'opus:review', candidate_id: 'c2', checked_findings: ['F1'], outcome: 'PASS', evidence: 'F1 fixed', ...over });
+  assert.deepEqual(G.confirmationDisputes({ primary: conf({ rule_rows: [{ subject_id: N, outcome: 'FAIL', evidence: 'src/a.ts:42 writes' }] }) }, sec()), [N], 'a FAIL row in a PASS confirmation');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), outcome: 'FAIL', checked_findings: ['F1', N] } }, sec()), [N], 'second opinion FAIL, checked_findings');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), outcome: 'FAIL', evidence: `${N} is applicable: the repair writes orders` } }, sec()), [N], 'second opinion FAIL, evidence');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf({ outcome: 'FAIL', evidence: `F1 fixed but ${N} now applies` }) }, sec()), [N], 'primary FAIL, evidence');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf(), second_opinion: { ...conf({ route: 'codex', reviewer_identity: 'codex:gpt' }), evidence: `${N} still not applicable` } }, sec()), [], 'a PASS naming it disputes nothing');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf({ outcome: 'FAIL', evidence: `${N}5 and K:VAPT-API-04 regress` }) }, sec()), [], 'a longer token or an effective pair is no dropped-pair dispute');
+  assert.deepEqual(G.confirmationDisputes({ primary: conf({ rule_rows: [{ subject_id: N, outcome: 'NOT_APPLICABLE' }] }) }, sec()), []);
+});
+
+/** A format-3 run with an original FAIL that disputes nothing, repaired: returns the fixture and the repaired candidate. */
+function repairedFx(t) {
+  const fx = obFx(t);
   okc(fx.cli('init', { dag: fx.dagFile }), 'init'); okc(fx.cli('drive'), 'drive api'); okc(fx.gate('red', { node: 'api' }), 'red'); okc(fx.cli('drive'), 'drive impl');
   okc(fx.gate('reassess', {}), 'reassess');
-  return { fx, ex: fx.readState().security.reassessed.c5_exempted, cand: fx.candidate() };
+  const cand = fx.candidate();
+  const review = failReview('rx-1', cand, 'src/impl.txt', fx.prompt('fix'));
+  review.primary = { ...review.primary, rule_rows: baseRows(fx) };
+  okc(fx.gate('review', review), 'original FAIL (no dispute)');
+  assert.equal(fx.readState().security?.disputed_na, undefined, 'precondition: nothing disputed');
+  okc(fx.cli('drive'), 'repair'); okc(fx.gate('reassess', {}), 'reassess after repair');
+  return { fx, c2: fx.candidate(), naId: fx.sel.na_pairs[0].pair_id };
 }
 
-test('[S98] [S102] each C5 exemption needs exactly one fresh, evidenced review row: the three reported files; missing, duplicate, unknown, incomplete, stale and NOT_APPLICABLE rows are refused', { skip: WIN_SKIP }, (t) => {
-  const { fx, ex, cand } = c5Fx(t, C5_FILES, ['src', 'app', 'edge-functions']);
-  assert.deepEqual(ex.map((e) => `${e.path}|${e.kind}`), ['app/routers/test_results.py|new-route', 'edge-functions/auth.test.ts|auth-or-middleware-change', 'src/orders.test.ts|new-route'],
-    'precondition: the route, the edge auth handler and app.post are exempted by file name alone');
-  const review = (c5rows) => passReview('rx-1', cand, { primary: primaryReview(cand, { rule_rows: [...baseRows(fx), ...c5rows] }) });
-  const gate = (rows) => { const r = fx.gate('review', review(rows)); return { code: r.out?.code, why: r.out?.reasons ?? [] }; };
-  let r = gate([]);
-  assert.equal(r.code, 'incomplete_contract', 'missing: no C5 row at all');
-  for (const e of ex) assert.ok(r.why.some((x) => x.includes(c5Key(e))), `the refusal names ${c5Key(e)}: ${J(r.why)}`);
-  r = gate(ex.slice(1).map((e) => c5Row(e, cand)));
-  assert.equal(r.code, 'incomplete_contract', 'missing: one exempted file has no row');
-  assert.ok(r.why.some((x) => x.includes(c5Key(ex[0]))), J(r.why));
-  assert.equal(gate([...ex.map((e) => c5Row(e, cand)), c5Row(ex[2], cand)]).code, 'incomplete_contract', 'duplicate row');
-  assert.equal(gate([...ex.map((e) => c5Row(e, cand)), c5Row({ kind: 'new-route', path: 'src/orders.ts' }, cand)]).code, 'incomplete_contract', 'a row for a file that is not exempted');
-  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 1 ? { evidence: 'looked at it, fine' } : {}))).code, 'incomplete_contract', 'evidence that never names the file');
-  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 1 ? { evidence: e.path } : {}))).code, 'incomplete_contract', 'evidence that is the bare path');
-  assert.equal(gate(ex.map((e, i) => { const x = c5Row(e, cand); if (i === 0) delete x.candidate_id; return x; })).code, 'incomplete_contract', 'a row naming no candidate');
-  assert.equal(gate(ex.map((e, i) => c5Row(e, i === 2 ? 'sha256:' + '0'.repeat(64) : cand))).code, 'stale_candidate', 'a row of another head');
-  assert.equal(gate(ex.map((e, i) => c5Row(e, cand, i === 0 ? { outcome: 'NOT_APPLICABLE' } : {}))).code, 'security_row_escape', 'a row can never waive');
-  assert.equal(fx.readState().review_chain.length, 0, 'every refusal wrote nothing');
-  okc(fx.gate('review', review(ex.map((e) => c5Row(e, cand)))), 'complete rows');
-  assert.deepEqual(fx.readState().review_chain.at(-1).c5_reviewed, { candidate_id: cand, subjects: ex.map(c5Key).sort() });
-  // [S102] ship-ready re-checks the attestation itself (defence in depth: e.g. a record an older engine wrote without it)
-  fx.editState((st) => { delete st.review_chain.at(-1).c5_reviewed; });
-  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_review_stale');
-});
-
-test('[S99] a FAIL C5 row is a run-wide hard stop: repair + confirmation and a RETRY review with a PASS row both leave ship-ready refused', { skip: WIN_SKIP }, (t) => {
-  const { fx, ex, cand } = c5Fx(t, { 'src/orders.test.ts': C5_FILES['src/orders.test.ts'] });
-  assert.deepEqual(ex.map(c5Key), ['c5:new-route:src/orders.test.ts'], 'precondition');
-  const review = failReview('rx-1', cand, 'src/impl.txt', fx.prompt('fix'));
-  review.primary = { ...review.primary, security_outcome: 'FAIL', rule_rows: [...baseRows(fx),
-    c5Row(ex[0], cand, { outcome: 'FAIL', evidence: "src/orders.test.ts registers app.post('/orders') on the production app it imports from ./server" })] };
-  okc(fx.gate('review', review), 'original FAIL accepted');
-  assert.deepEqual(fx.readState().security.disputed_na, ['c5:new-route:src/orders.test.ts'], 'the FAIL row is recorded as a run-wide dispute');
-  okc(fx.cli('drive'), 'repair'); okc(fx.gate('reassess', {}), 'reassess after repair');
-  const c2 = fx.candidate();
+test('[S107] M2: a confirmation PASS carrying a first-time FAIL row on a dropped pair is refused; its dispute is recorded with the refusal, so a clean re-sent confirmation cannot launder it', { skip: WIN_SKIP }, (t) => {
+  const { fx, c2, naId } = repairedFx(t);
   const conf = confirmReview('rx-1', c2);
-  conf.primary.rule_rows = [c5Row(ex[0], c2)];
-  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed', 'a confirmation PASS row never clears it');
+  conf.primary.rule_rows = [{ subject_id: naId, outcome: 'FAIL', evidence: 'src/orders.ts:bearerOnly sets a cookie after the repair' }];
+  const chain = fx.readState().review_chain.length;
+  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed');
+  const st = fx.readState();
+  assert.deepEqual(st.security.disputed_na, [naId], 'the dispute is recorded run-wide');
+  assert.equal(st.review_chain.length, chain, 'the refused confirmation is not recorded: nothing else changed');
+  assert.equal(fx.gate('review', confirmReview('rx-1', c2)).out?.code, 'security_na_disputed', 'a clean confirmation re-sent after the refusal');
   assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed');
+});
+
+test('[S108] M1: a confirmation second-opinion FAIL naming a dropped pair reaches disputed_na; an owner RETRY with a PASS original cannot ship it', { skip: WIN_SKIP }, (t) => {
+  const { fx, c2, naId } = repairedFx(t);
+  const conf = confirmReview('rx-1', c2);
+  conf.second_opinion = { route: 'codex', reviewer_identity: 'codex:gpt', candidate_id: c2, checked_findings: ['F1'], outcome: 'FAIL', evidence: `F1 fixed; ${naId} is applicable: the repair writes the session` };
+  assert.equal(fx.gate('review', conf).out?.code, 'security_na_disputed');
+  assert.deepEqual(fx.readState().security.disputed_na, [naId]);
   fx.appendRunState({ run_id: 'run-1', event: 'RETRY', review_execution: 'rx-2', predecessor: 'rx-1', authorized_by: 'owner' });
-  okc(fx.gate('review', passReview('rx-2', c2, { primary: primaryReview(c2, { rule_rows: [...baseRows(fx), c5Row(ex[0], c2)] }) })), 'RETRY original with a PASS row');
-  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed', 'a RETRY never launders the dispute');
-});
-
-test('[S100] C5 rows bind to the candidate: after a repair the confirmation must re-attest every exemption on the repaired head; a PASS row lets a genuine test-only exemption ship', { skip: WIN_SKIP }, (t) => {
-  const { fx, ex, cand } = c5Fx(t, { 'src/auth.test.ts': "import { describe, it, expect } from 'vitest';\ndescribe('auth', () => { it('rejects', () => { expect(401).toBe(401); }); });\n",
-    'src/orders.test.ts': "describe('orders', () => {\n  it('totals', () => { expect(1 + 1).toBe(2); });\n});\n" });
-  assert.deepEqual(ex.map(c5Key), ['c5:auth-or-middleware-change:src/auth.test.ts'], 'precondition: a describe/it/expect-only orders.test.ts raises nothing (no row due); auth.test.ts is exempted by name');
-  const review = failReview('rx-1', cand, 'src/impl.txt', fx.prompt('fix'));
-  review.primary = { ...review.primary, rule_rows: [...baseRows(fx), c5Row(ex[0], cand)] };
-  okc(fx.gate('review', review), 'original FAIL with a PASS C5 row');
-  okc(fx.cli('drive'), 'repair'); okc(fx.gate('reassess', {}), 'reassess after repair');
-  const c2 = fx.candidate();
-  assert.notEqual(c2, cand);
-  const conf = (rows) => { const c = confirmReview('rx-1', c2); if (rows) c.primary.rule_rows = rows; return fx.gate('review', c).out?.code; };
-  assert.equal(conf(null), 'incomplete_contract', 'the confirmation carries no C5 row: the original row is of another head');
-  assert.equal(conf([c5Row(ex[0], cand)]), 'stale_candidate', 'the row of the pre-repair head is stale');
-  okc(fx.gate('review', Object.assign(confirmReview('rx-1', c2), { primary: { ...confirmReview('rx-1', c2).primary, rule_rows: [c5Row(ex[0], c2)] } })), 'fresh row');
-  let s = fx.gate('ship-ready', {});
-  for (let i = 0; i < 3 && s.out?.code !== 'ship_ready'; i++) s = fx.gate('ship-ready', {});
-  assert.equal(s.out?.code, 'ship_ready', s.stdout);
-});
-
-test('[S101] ship-ready: the authorizing record must attest the current exemption set on the current candidate; C5 disputes come from a FAIL row or a second-opinion finding (pure)', () => {
-  const ex = [{ path: 'src/orders.test.ts', kind: 'new-route', rule: 'test-file' }];
-  const subj = ['c5:new-route:src/orders.test.ts'];
-  const S = (rec, exempted = ex) => ({ security: { reassessed: { candidate_id: 'c2', c5_exempted: exempted } }, review_chain: rec ? [rec] : [] });
-  const sec = { block: { policy: 3 }, tuple: { candidate_id: 'c2' } };
-  const rec = (over = {}) => ({ kind: 'confirmation', outcome: 'PASS', c5_reviewed: { candidate_id: 'c2', subjects: subj }, ...over });
-  assert.equal(G.c5ReviewRefusal(S(rec()), sec), null);
-  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: { candidate_id: 'c1', subjects: subj } })), sec)?.code, 'security_review_stale', 'rows of another head');
-  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: undefined })), sec)?.code, 'security_review_stale', 'no rows recorded');
-  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: { candidate_id: 'c2', subjects: [] } })), sec)?.code, 'security_review_stale', 'another exemption set');
-  assert.equal(G.c5ReviewRefusal(S(rec(), []), sec), null, 'no exemption: nothing to attest');
-  assert.equal(G.c5ReviewRefusal(S(rec({ c5_reviewed: undefined })), { ...sec, block: { policy: 2 } }), null, 'format 2: unchanged');
-  // disputes: a FAIL row, or a second-opinion finding naming the subject
-  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'FAIL' }] } }, subj), subj);
-  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'PASS' }] }, second_opinion: { findings: [{ id: 'S1', subject_id: subj[0] }] } }, subj), subj);
-  assert.deepEqual(G.c5Disputes({ primary: { rule_rows: [{ subject_id: subj[0], outcome: 'PASS' }] } }, subj), []);
-  // the hard stop: an effective pair never clears a C5 dispute (only a re-approved plan, a new run, does)
-  const st = { security: { disputed_na: subj } };
-  assert.equal(disputedRefusal(st, { events: { pairs: [{ boundary: 'orders', control: 'VAPT-API-01' }] } })?.code, 'security_na_disputed');
+  okc(fx.gate('review', passReview('rx-2', c2, { primary: primaryReview(c2, { rule_rows: baseRows(fx) }) })), 'RETRY original PASS');
+  assert.equal(fx.gate('ship-ready', {}).out?.code, 'security_na_disputed', 'a RETRY never launders the confirmation dispute');
 });

@@ -293,7 +293,7 @@ async function bindSecurity(ctx, config, nodes, start, text, narrative) {
   if (!res.ok) throw coded('security_pairs_mismatch', `the approved §3a security-plan block cannot be reassessed (${res.code}): ${(res.reasons ?? []).join('; ')}`);
   const outside = res.reapproval_basis.filter(b => b.kind === 'out-of-plan-path').map(b => b.path);
   if (outside.length) throw coded('security_pairs_mismatch', `the approved §3a surface path(s) ${outside.join(', ')} lie outside every node's writes (the Design Contract); re-plan and re-approve`);
-  if (block.policy === 3) await bindObligations(sp, cat, block, nodes, ctx.repoRoot, ctx.c5ExtraExempted ?? []);
+  if (block.policy === 3) await bindObligations(sp, cat, block, nodes, ctx.repoRoot);
 }
 
 /** File-shaped DAG writes (a basename with an extension): the plan-time paths the surface inventory must cover. */
@@ -303,16 +303,14 @@ const writtenFiles = (nodes) => [...new Set(nodes.flatMap(n => n.writes ?? []).f
  * Block format 3 (F12a) at init and preflight: the full surface x control obligation matrix must be complete
  * (security-plan.mjs obligationMatrix: every cell exactly one disposition, every dropped pair a cited, catalog-gated
  * fact; its refusal code is thrown as is), and every file-shaped DAG write that raises a surface-introducing signal
- * (not a test) must be a listed surface (surface_inventory_incomplete). Format 2 blocks are not checked here (unchanged).
+ * (test-named or not: no filename exemption) must be a listed surface (surface_inventory_incomplete). Format 2 blocks are
+ * not checked here (unchanged).
  */
-async function bindObligations(sp, cat, block, nodes, root, extraExempted) {
+async function bindObligations(sp, cat, block, nodes, root) {
   const m = sp.obligationMatrix(cat, block);
   if (!m.ok) throw coded(m.code, `the approved §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
-  const exempted = [...extraExempted]; // ctx.c5ExtraExempted: an in-process test seam (no CLI flag), to reach this call site
-  const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
+  const gaps = sp.inventoryGaps({ files: writtenFiles(nodes), surfacePaths: block.surfaces.map(s => s.path) });
   if (gaps.length) throw coded('surface_inventory_incomplete', `DAG-written path(s) raise a surface signal but no §3a surface lists them: ${gaps.map(g => `${g.path} (${g.kinds.join(', ')})`).join('; ')}`);
-  const ex = sp.exemptionRefusal(exempted); // R2: every exemption is consumed: only test-named files may be narrowed
-  if (ex) throw coded(ex.code, ex.reasons.join('; '));
   // B3: plan time checks the repository tree; a cited file one of the nodes will write is deferred to gate review.
   const cited = sp.verifyCitations(block, { root, pending: [...new Set(nodes.flatMap(n => n.writes ?? []))] });
   if (!cited.ok) throw coded(cited.code, `a §3a surface-fact citation does not verify: ${(cited.reasons ?? []).join('; ')}`);
@@ -322,8 +320,7 @@ async function bindObligations(sp, cat, block, nodes, root, extraExempted) {
  * F12a plan-time preflight: the checks `init` runs on the plan and DAG (validateEngineDag, bindSecurity, and for a
  * format-3 block the obligation matrix and inventory completeness), callable BEFORE approval: no lock, no state, no
  * START and no write. A DAG without config.securityPolicy is refused (security_policy_required: no START approves it).
- * ctx: { repoRoot, ticket, dagFile, planFile?, catalogFile?, c5ExtraExempted? (test seam) }. Returns the obligation matrix and
- * the recorded C5 exemptions, or throws a coded refusal.
+ * ctx: { repoRoot, ticket, dagFile, planFile?, catalogFile? }. Returns the obligation matrix, or throws a coded refusal.
  */
 export async function preflight(ctx) {
   if (!SAFE_ID.test(ctx?.ticket ?? '') || typeof ctx.repoRoot !== 'string') throw coded('bad_context', 'repoRoot and a safe ticket required');
@@ -339,10 +336,8 @@ export async function preflight(ctx) {
   const block = sp.parsePlanSecurityBlock(text);
   const m = sp.obligationMatrix(sp.loadCatalog(catalogOptions(ctx)), block);
   if (!m.ok) throw coded(m.code, `the §3a obligation matrix does not verify: ${(m.reasons ?? []).join('; ')}`);
-  const exempted = []; // for the print only: bindSecurity already refused gaps and non-test exemptions
-  if (block.policy === 3) sp.inventoryGaps({ files: writtenFiles(dag.nodes), surfacePaths: block.surfaces.map(s => s.path), exempted });
   return { ok: true, code: 'preflight_ok', writes: 'none', block_format: block.policy, effective_pairs: block.pairs.length,
-    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix, c5_exempted: exempted };
+    dropped_pairs: (block.na_pairs ?? []).length, counts: m.counts, matrix_digest: m.matrix_digest, matrix: m.matrix };
 }
 
 /**

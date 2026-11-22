@@ -28,7 +28,7 @@ try { DEFAULT_EVALUATOR = await import(EVALUATOR_URL); } catch { DEFAULT_EVALUAT
  * Every refusal code this module emits. Exit 1 for EXIT_ONE codes, 2 for the rest. F12a (block format 3) added
  * surface_fact_not_lowerable, surface_fact_ungated, surface_fact_reinflates (a refused surface-level fact),
  * disposition_missing, disposition_duplicate, disposition_unknown (the obligation matrix) and
- * surface_inventory_incomplete (a signalling non-test path written by the plan that no surface lists) and
+ * surface_inventory_incomplete (a signalling path written by the plan that no surface lists) and
  * citation_missing (a surface-fact citation whose file, or `:symbol` text, is not in the tree checked).
  */
 export const SECURITY_CODES = ['catalog_missing', 'catalog_invalid', 'bad_input', 'fact_out_of_vocabulary', 'surface_facts_mismatch',
@@ -56,8 +56,8 @@ function inputPath(p, what) {
 }
 /**
  * Block format 3 only (R4 N1, scoped by R5 L2 so format 2 stays byte-identical to be63aea): a surface or changed path
- * with a '.' or '..' segment is refused, so it cannot borrow another path's name (src/__tests__/../auth/session.ts) for
- * the test-file exemption. Git never reports such a path.
+ * with a '.' or '..' segment is refused, so it cannot borrow another path's name (src/__tests__/../auth/session.ts):
+ * signals, surfaces and citations are matched by exact normalized path. Git never reports such a path.
  */
 function dotSegmentRefusal(paths, what) {
   const bad = paths.filter((p) => normPath(p).split('/').some((x) => x === '.' || x === '..'));
@@ -516,7 +516,7 @@ function lowerings({ catalog, gates }, facts, surfaces) {
 }
 
 /** The path-only signal kinds of `path` (no added line): what reassess will see whenever that file changes. */
-const pathSignalKinds = (path) => fileKinds({ path: normPath(path), added: [] }, true, null);
+const pathSignalKinds = (path) => fileKinds({ path: normPath(path), added: [] }, true);
 
 function buildSelection(reg, catalog, digest, facts, surfaces, lower = null) {
   const core = compute(reg, facts, surfaces, { lower });
@@ -813,30 +813,17 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
   'go.mod', 'go.sum', 'cargo.toml', 'cargo.lock', 'gemfile', 'gemfile.lock', 'composer.json', 'composer.lock', 'pom.xml', 'build.gradle',
   'build.gradle.kts', 'packages.lock.json', 'directory.packages.props', 'mix.exs', 'mix.lock', 'pubspec.yaml', 'pubspec.lock', 'podfile', 'podfile.lock']);
 /**
- * C5 (F12a, final rule after R3). A format-2 run keeps origin/main's detector byte for byte (pinned by
- * security-plan-legacy.golden.json). A format-3 REASSESS uses the same detector, the same signal kinds and the same
- * closure rule (a new-route, auth or migration signal off every approved surface closes only through a surface, then
- * ADD_CONTROLS and an owner addendum), with exactly two differences:
- * - additive: ROUTE_LINE_V3 (fastify / hono / elysia verbs, one-line tRPC procedures) raises new-route on more lines;
- * - the ONLY narrowing, rule `test-file`, RECORDED in `c5_exempted` (path, signal, rule): a test-named file (TEST_FILE)
- *   raises no new-route unless it is under a router root (ROUTER_ROOT), and no auth-or-middleware-change unless it is
- *   under a router root or a middleware/plugins root (MIDDLEWARE_ROOT). migration-or-rls-change is never narrowed.
- * Every exemption record is consumed: exemptionRefusal() refuses any record that is not a test-named file. In an
- * engine run every record is also REVIEWED: engine-gates.mjs c5RowsRefusal / c5ReviewRefusal require one fresh,
- * evidenced primary rule_row `c5:<kind>:<path>` per record (a FAIL row is a run-wide dispute); the name is never enough.
- * The same detector serves reassess AND the plan-time inventory check (init, preflight): nothing else is narrowed
- * anywhere (no workspace-folder or other path narrowing). Invariant, property-tested against format 2: a format-3
- * reassess or inventory check never closes or omits a signal format 2 would require a surface for, except the
- * recorded test-file exemption set.
- * Test-named: `*.test.*`, `*.spec.*`, `*.e2e-spec.*`, `*_test.<go|py|rb|exs>`, `*_spec.rb`, `test_*.py`, or a path under
- * `__tests__/`, `__mocks__/` or `__fixtures__/`.
+ * C5 (F12a; S1 review repair, owner Option 2: NO filename-based exemption). A format-2 run keeps origin/main's
+ * detector byte for byte (pinned by security-plan-legacy.golden.json). A format-3 run uses the SAME detector, the same
+ * signal kinds and the same closure rule (a new-route, auth or migration signal off every approved surface closes only
+ * through a surface, then ADD_CONTROLS and an owner addendum), plus one ADDITIVE difference: ROUTE_LINE_V3 (fastify /
+ * hono / elysia verbs, one-line tRPC procedures) raises new-route on more lines. Nothing is narrowed anywhere: no test
+ * name, workspace folder or other path rule removes a signal, in any consumer (reassess signals, the plan-time inventory
+ * check at init and preflight, the own-path lowering guard, the reopen keep set). Invariant, property-tested
+ * ([S103]): for every input, with lines and path-only, the format-3 signals are a superset of the format-2 signals, and
+ * path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
+ * like any other file; a test with no route line and no signalling path raises nothing.
  */
-const TEST_FILE = /(^|\/)(__tests__|__mocks__|__fixtures__)\/|\.(test|spec|e2e-spec)\.[a-z0-9]+$|_test\.(go|py|rb|exs)$|_spec\.rb$|(^|\/)test_[^/]+\.py$/;
-/** Directories whose files a framework loads as middleware or plugins (Nitro middleware/, @fastify/autoload plugins/): never exempt. */
-const MIDDLEWARE_ROOT = /(^|\/)(middlewares?|plugins)\//;
-const ROUTER_ROOT = /(^|\/)(routes?|pages|api|controllers?|handlers?|endpoints?|webhooks?|functions)\/|(^|\/)server\/(api|routes|middleware)\//;
-/** A test-named file outside every router root (format 3: such a file raises no new-route or auth signal; recorded). */
-export const isTestPath = (p) => { const q = String(p).toLowerCase(); return TEST_FILE.test(q) && !ROUTER_ROOT.test(q); };
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
 /** Format-3 extra route registrations (fastify / hono / elysia verbs, one-line tRPC procedures): additive only, nothing relies on them. */
@@ -895,7 +882,7 @@ export const SURFACE_SIGNALS = ['new-route', 'auth-or-middleware-change', 'migra
  * path selects every such control (its pairs are computed, and reported as delta_pairs when not yet effective);
  * else null (open: `reassess` decides whether a classification may close it).
  */
-export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfaces = [], catalog, inventorySurfaces = [], inventoryPairs = [], c5 = false, exempted = null } = {}) {
+export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfaces = [], catalog, inventorySurfaces = [], inventoryPairs = [], c5 = false } = {}) {
   const files = asResult(() => { const fs = normFiles(paths); if (c5) dotSegmentRefusal(fs.map((f) => f.path), 'changed path'); return fs; });
   if (files.ok === false) throw new TypeError(files.reasons.join('; '));
   const ids = new Set((catalog?.controls ?? []).map((c) => c.id));
@@ -905,7 +892,7 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
   const carries = (surfaces, set, cls) => surfaces.length > 0 && cls.every((c) => surfaces.some((s) => set.has(`${s.boundary_id}:${c}`)));
   const out = new Map();
   for (const f of files) {
-    for (const kind of fileKinds(f, c5, exempted)) {
+    for (const kind of fileKinds(f, c5)) {
       const id = `${kind}@${f.path}`;
       const cls = SIGNAL_CLASS[kind];
       const mechanical = Array.isArray(cls) && cls.every((c) => ids.has(c));
@@ -921,10 +908,9 @@ export function reassessSignals({ paths = [], approvedPairs = [], approvedSurfac
 
 /**
  * The signal kinds one changed file raises, in RULES order. `c5` false: origin/main's detector, unchanged. `c5` true
- * (block format 3): the same detector plus ROUTE_LINE_V3, minus the C5 narrowings, each one pushed onto `exempted`
- * ({ path, kind, rule }) when given.
+ * (block format 3): the same detector plus the additive ROUTE_LINE_V3 route lines; nothing is ever removed.
  */
-function fileKinds(f, c5, exempted) {
+function fileKinds(f, c5) {
   const b = f.path.split('/').pop().toLowerCase();
   const p = f.path.toLowerCase();
   const kinds = [];
@@ -932,37 +918,19 @@ function fileKinds(f, c5, exempted) {
     const byPath = pathTest(p, b), byLine = Boolean(lineTest) && f.added.some((l) => lineTest.test(l));
     const byLineV3 = c5 && kind === 'new-route' && f.added.some((l) => ROUTE_LINE_V3.test(l));
     if (!(byPath || byLine || byLineV3)) continue;
-    if (c5) {
-      const test = TEST_FILE.test(p);
-      const rule = kind === 'auth-or-middleware-change' && test && !ROUTER_ROOT.test(p) && !MIDDLEWARE_ROOT.test(p) ? 'test-file'
-        : kind === 'new-route' && test && !ROUTER_ROOT.test(p) ? 'test-file' : null;
-      if (rule) { exempted?.push({ path: f.path, kind, rule }); continue; }
-    }
     kinds.push(kind);
   }
   return kinds;
 }
 
 /**
- * R2: every C5 exemption record must be of a test-named file; any other record (a narrowing of a production file) is
- * refused surface_inventory_incomplete, so no exemption can silently drop a deployed file. Null when consumed.
- */
-export function exemptionRefusal(records) {
-  const bad = (records ?? []).filter((e) => !TEST_FILE.test(String(e?.path ?? '').toLowerCase()));
-  return bad.length ? { ok: false, code: 'surface_inventory_incomplete', reasons: bad.map((e) => `${e?.path}: ${e?.kind} narrowed by ${e?.rule}, but it is not a test file`) } : null;
-}
-
-/** Exemption records, unique and sorted by path, signal kind. */
-const dedupExempt = (xs) => [...new Map(xs.map((e) => [`${e.path}\u0000${e.kind}`, e])).values()].sort((a, b) => (a.path + a.kind < b.path + b.kind ? -1 : 1));
-
-/**
  * Surface-inventory completeness (C5, F12a, block format 3): every path of `files` (path strings, or {path, added[]})
  * that raises a surface-introducing signal under the format-3 detector (the one reassess uses) must be the path of a
- * listed surface. Returns the gaps [{ path, kinds }]; the C5 narrowings it applied go to `exempted` (never silent).
+ * listed surface. Returns the gaps [{ path, kinds }].
  */
-export function inventoryGaps({ files = [], surfacePaths = [], exempted = null } = {}) {
+export function inventoryGaps({ files = [], surfacePaths = [] } = {}) {
   const listed = new Set(surfacePaths.map(normPath));
-  const sigs = reassessSignals({ paths: files, c5: true, exempted }).filter((s) => SURFACE_SIGNALS.includes(s.kind) && !listed.has(s.path));
+  const sigs = reassessSignals({ paths: files, c5: true }).filter((s) => SURFACE_SIGNALS.includes(s.kind) && !listed.has(s.path));
   const by = new Map();
   for (const s of sigs) by.set(s.path, uniqSorted([...(by.get(s.path) ?? []), s.kind]));
   return [...by].map(([path, kinds]) => ({ path, kinds })).sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -1110,18 +1078,16 @@ export function reassess(input = {}) {
     const surfaceFacts = (base) => normFacts(ev, { ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
       ...(vocab.principals ? { principals: ev.unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
     const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces, { lower: lowerApproved, keep }).pairs.map((p) => p.pair_id);
-    const c5 = block.policy === 3, c5_exempted = [];
-    const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs, c5, exempted: c5 ? c5_exempted : null });
+    const c5 = block.policy === 3;
+    const signals = reassessSignals({ paths: files, approvedPairs: effective, approvedSurfaces: block.surfaces, catalog, inventorySurfaces: surfaces, inventoryPairs, c5 });
     const basis = [];
     if (block.catalog_digest !== digest) basis.push({ kind: 'catalog_digest_changed' });
     const outside = uniqSorted([...files.map((f) => f.path), ...surfaces.map((s) => s.path)].filter((p) => !contract.some((re) => re.test(p))));
     for (const p of outside) { basis.push({ kind: 'out-of-plan-path', path: p }); signals.push({ id: `out-of-plan-path@${p}`, kind: 'out-of-plan-path', path: p, class: null }); }
     signals.sort((a, b) => (a.id < b.id ? -1 : 1));
-    // R3: every exemption record is consumed (c5_extra_exempted: an in-process test seam only; the engine and the CLI never set it).
-    if (block.policy === 3) { const ex = exemptionRefusal([...c5_exempted, ...(input.c5_extra_exempted ?? [])]); if (ex) refuse(ex.code, ...ex.reasons); }
     if (block.policy === 3 && !basis.length) {
-      // C5 inventory completeness: a signalling non-test path the plan writes must be a listed surface (typed, before classification).
-      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path), exempted: [] });
+      // C5 inventory completeness: a signalling path the plan writes (test-named or not) must be a listed surface (typed, before classification).
+      const gaps = inventoryGaps({ files: files.filter((f) => contract.some((re) => re.test(f.path))), surfacePaths: surfaces.map((s) => s.path) });
       if (gaps.length) refuse('surface_inventory_incomplete', ...gaps.map((g) => `${g.path}: ${g.kinds.join(', ')} with no surface at its path (add one to the inventory)`));
     }
 
@@ -1163,7 +1129,7 @@ export function reassess(input = {}) {
       delta_pairs, merged_facts: facts, candidate_id, approved_plan_digest: planDigest(input.plan),
       catalog_digest: digest, approved_catalog_digest: block.catalog_digest,
       effective_addendum_digest: sha(canon(addendaPairs)),
-      ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)), c5_exempted: dedupExempt(c5_exempted) } : {}),
+      ...(block.policy === 3 ? { reopened_pairs: block.na_pairs.map((n) => n.pair_id).filter((id) => pairs.includes(id)) } : {}),
     };
     if (outcome === 'ADD_CONTROLS') {
       out.addendum = { pairs: delta_pairs, controls: uniqSorted(delta_pairs.map((p) => parsePairId(p).control_id)), catalog_digest: digest, candidate_id,

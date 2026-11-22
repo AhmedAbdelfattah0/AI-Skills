@@ -208,15 +208,17 @@ async function reviewGate(E, input, candidate) {
     const sec = await securityContext(E, candidate);
     const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);
     if (refusal) return refusal;
-    const c5Rows = c5RowsRefusal(input.primary, S, sec); // S1 review repair: every C5 exemption is a reviewed row (original AND confirmation)
-    if (c5Rows) return c5Rows;
-    const disputed = input.kind === 'confirmation' ? disputedRefusal(S, sec) : null; // F12a: a repair never clears a disputed drop
-    if (disputed) return disputed;
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
-    if (input.kind === 'original') disputes = naDisputes(input, sec);
-    const c5 = c5Subjects(S, sec); // the rows above were checked against exactly these; ship-ready re-checks the record
-    if (c5.length) { disputes = [...disputes, ...c5Disputes(input, c5)]; v.record.c5_reviewed = { candidate_id: input.primary.candidate_id, subjects: c5 }; }
+    // F12a + S1 review repair (M1, M2): an original AND a confirmation can dispute a dropped pair.
+    disputes = input.kind === 'original' ? naDisputes(input, sec) : confirmationDisputes(input, sec);
+    if (input.kind === 'confirmation') {
+      // A repair never clears a disputed drop, and the confirmation's OWN new disputes count too (merged before the check).
+      const disputed = disputedRefusal({ security: { disputed_na: [...(S.security?.disputed_na ?? []), ...disputes] } }, sec);
+      // The refusal keeps the disputes (gate() commits state on a refusal; the review itself is not recorded): a clean
+      // confirmation re-sent afterwards, or a RETRY, cannot launder them. Every check before this one has passed.
+      if (disputed) { recordDisputes(S, disputes, input.review_execution); return disputed; }
+    }
     // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review (or its confirmation) judges.
     const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null; // R2: a repair may have removed it
     if (cited) return cited;
@@ -303,8 +305,7 @@ function unitShipRefusal(E) {
 }
 
 /** Ship-ready's security conjuncts on one security context (checked before the proof and again after it). */
-const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? c5ReviewRefusal(S, sec)
-  ?? citationRefusal(sec) ?? coverageRefusal(S, sec);
+const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? citationRefusal(sec) ?? coverageRefusal(S, sec);
 
 /**
  * B3/R2: a format-3 block's citations must exist (with their :symbol) in the candidate work tree (`sec.root`). Run at the
@@ -404,7 +405,7 @@ async function shipReadyGate(E, input, candidate) {
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   }
   return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
-    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix, c5_exempted: S.security?.reassessed?.c5_exempted ?? [] } } : {}) };
+    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
 // ---- S-01b2 P5r: runner-backed test-kind evidence at freeze (design rev 6 sections 3 and 5.1) ----------------
@@ -670,6 +671,21 @@ export const naDisputes = (input, sec) => {
   return [...new Set([...primary, ...second])].sort();
 };
 
+/**
+ * S1 review repair (M1, M2): the dropped pairs a CONFIRMATION disputes. A confirmation's primary and its second opinion
+ * have the confirmation shape { [route,] reviewer_identity, candidate_id, checked_findings, outcome, evidence } and no
+ * findings list, so the subjects are: a primary rule_row FAIL naming a dropped pair (as in an original), and, for each
+ * confirmation reviewer whose outcome is FAIL, every dropped pair id it lists in checked_findings or names as a whole
+ * token in its evidence. A PASS naming a pair disputes nothing. Recorded run-wide like an original's disputes.
+ */
+export const confirmationDisputes = (input, sec) => {
+  const ids = (sec.na ?? []).map(n => n.pair_id), set = new Set(ids);
+  const rows = (Array.isArray(input.primary?.rule_rows) ? input.primary.rule_rows : []).filter(r => set.has(r?.subject_id) && r.outcome === 'FAIL').map(r => r.subject_id);
+  const named = (c) => (c?.outcome !== 'FAIL' ? [] : ids.filter(id => (Array.isArray(c.checked_findings) && c.checked_findings.includes(id))
+    || (typeof c.evidence === 'string' && citesPath(c.evidence, id))));
+  return [...new Set([...rows, ...named(input.primary), ...named(input.second_opinion)])].sort();
+};
+
 /** Add `disputes` to the run-wide dispute list: add-only, sorted, never replaced by a later review (a RETRY cannot launder one). */
 export function recordDisputes(S, disputes, reviewExecution) {
   if (!disputes.length) return;
@@ -687,72 +703,8 @@ export function recordDisputes(S, disputes, reviewExecution) {
 export function disputedRefusal(S, sec) {
   const effective = new Set(sec.events.pairs.map(pairKey));
   const open = (S.security?.disputed_na ?? []).filter(k => !effective.has(k));
-  return open.length ? gateNo('security_na_disputed', open.map(k => (isC5Subject(k) ? `${k}: a reviewer found this C5-exempted file introduces a production route `
-    + 'or an auth/middleware change; repair, confirmation, a RETRY review, an addendum or a waiver cannot clear it (they address pairs, not files): the owner '
-    + 're-approves the plan with the file as a surface (a new run)' : `${k}: a reviewer disputed this dropped (not applicable) pair; repair and confirmation `
-    + 'cannot clear it: the owner reopens it with a SECURITY_ADDENDUM (then it is proven or waived like any pair) or re-approves the plan')), { judgment_point: true }) : null;
-}
-
-// ---- S1 review repair: every C5 exemption is a mandatory, mechanically verified review row ----------------------
-// A C5 record (security-plan.mjs fileKinds) exempts a test-named file by NAME. The name alone never suffices: the
-// independent reviewer judges each exempted file on the reviewed candidate, and these checks make that judgment a
-// row the gates verify, reusing the dropped-pair row machinery (rule_rows, citesPath, recordDisputes/disputedRefusal).
-
-/** A C5 subject id: 'c5:<kind>:<path>' (a pair key never has this shape: its last segment is a catalog control id). */
-const isC5Subject = (k) => /^c5:(new-route|auth-or-middleware-change):./.test(k);
-/** The C5 subjects of the recorded reassessment of a format-3 run, unique and sorted; [] for format 2 or no exemption. */
-export const c5Subjects = (S, sec) => (sec.block?.policy === 3
-  ? [...new Set((S.security?.reassessed?.c5_exempted ?? []).map(e => `c5:${e.kind}:${e.path}`))].sort() : []);
-
-/**
- * A format-3 review (original OR confirmation) of a candidate whose recorded reassessment (reassessRefusal: of this
- * very candidate) holds C5 exemptions needs exactly one primary rule_row per exemption: subject_id 'c5:<kind>:<path>',
- * candidate_id the reviewed candidate (another head: stale_candidate), evidence citing the file with a stated
- * conclusion, outcome PASS (the file is test-only) or FAIL (it introduces a production route or an auth/middleware
- * change: a run-wide dispute, see c5Disputes). NOT_APPLICABLE is security_row_escape: a row never waives. A missing,
- * duplicate or unknown 'c5:' row, or one without a candidate or evidence, is incomplete_contract. Null when complete.
- */
-export function c5RowsRefusal(p, S, sec) {
-  if (sec.block?.policy !== 3) return null;
-  const subjects = c5Subjects(S, sec), want = new Set(subjects);
-  const pathOf = new Map((S.security?.reassessed?.c5_exempted ?? []).map(e => [`c5:${e.kind}:${e.path}`, e.path]));
-  const rows = (Array.isArray(p?.rule_rows) ? p.rule_rows : []).filter(r => r !== null && typeof r === 'object' && isC5Subject(String(r.subject_id)));
-  const missing = subjects.map(s => [s, rows.filter(r => r.subject_id === s).length]).filter(([, n]) => n !== 1)
-    .map(([s, n]) => `primary.rule_rows must hold exactly one row with subject_id ${s} (a C5-exempted file; found ${n})`);
-  const unknown = rows.filter(r => !want.has(r.subject_id)).map(r => `primary.rule_rows: ${r.subject_id} names no C5 exemption of the recorded reassessment`);
-  if (missing.length || unknown.length) return gateNo('incomplete_contract', [...missing, ...new Set(unknown)]);
-  const evidenced = (r) => { const path = pathOf.get(r.subject_id), ev = typeof r.evidence === 'string' ? r.evidence : '';
-    return citesPath(ev, path) && /[A-Za-z]{3}/.test(ev.split(path).join(' ')); };
-  const incomplete = rows.filter(r => !['PASS', 'FAIL', 'NOT_APPLICABLE'].includes(r.outcome) || !nonEmpty(r.candidate_id) || !evidenced(r))
-    .map(r => `${r.subject_id}: a C5 row needs outcome PASS or FAIL, the reviewed candidate_id and evidence that cites the file and states the conclusion`);
-  if (incomplete.length) return gateNo('incomplete_contract', incomplete);
-  const waived = rows.filter(r => r.outcome === 'NOT_APPLICABLE');
-  if (waived.length) return gateNo('security_row_escape', waived.map(r => `${r.subject_id}: a C5 row cannot be NOT_APPLICABLE: PASS (test-only) or FAIL (it introduces a production route or auth change)`));
-  const stale = rows.filter(r => r.candidate_id !== p.candidate_id);
-  if (stale.length) return gateNo('stale_candidate', stale.map(r => `${r.subject_id}: the row reviewed ${r.candidate_id}, this review is of ${p.candidate_id}`));
-  return null;
-}
-
-/** The C5 subjects a review disputes: a primary row FAIL, or a second-opinion finding whose `subject_id` names one. */
-export const c5Disputes = (input, subjects) => {
-  const ids = new Set(subjects);
-  const primary = (Array.isArray(input.primary?.rule_rows) ? input.primary.rule_rows : []).filter(r => ids.has(r?.subject_id) && r.outcome === 'FAIL').map(r => r.subject_id);
-  const counterpart = (Array.isArray(input.second_opinion?.findings) ? input.second_opinion.findings : []).filter(f => ids.has(f?.subject_id)).map(f => f.subject_id);
-  return [...new Set([...primary, ...counterpart])].sort();
-};
-
-/**
- * Ship-ready: the record that authorizes ship (the last accepted original or confirmation) must have attested the
- * CURRENT exemption set on the CURRENT candidate (c5_reviewed), so a repair that leaves an exempted file, or changes
- * it, never ships on rows of an older head. Null for format 2, no exemption, or no accepted review (review_not_accepted).
- */
-export function c5ReviewRefusal(S, sec) {
-  const subjects = c5Subjects(S, sec), last = (S.review_chain ?? []).at(-1);
-  if (!subjects.length || !last || !['original', 'confirmation'].includes(last.kind) || last.outcome !== 'PASS') return null;
-  const got = last.c5_reviewed;
-  if (got?.candidate_id === sec.tuple.candidate_id && JSON.stringify(got.subjects) === JSON.stringify(subjects)) return null;
-  return gateNo('security_review_stale', [`review ${last.review_execution} (${last.kind}) attested C5 rows ${JSON.stringify(got ?? null)}, the candidate `
-    + `${sec.tuple.candidate_id} has ${JSON.stringify(subjects)}: every C5 exemption needs a reviewed row on this candidate`]);
+  return open.length ? gateNo('security_na_disputed', open.map(k => `${k}: a reviewer disputed this dropped (not applicable) pair; repair and confirmation `
+    + 'cannot clear it: the owner reopens it with a SECURITY_ADDENDUM (then it is proven or waived like any pair) or re-approves the plan'), { judgment_point: true }) : null;
 }
 
 /** F12a: the obligation matrix of a format-3 run on this security context (null for a format-2 run: unchanged). */
@@ -867,11 +819,11 @@ async function reassessGate(E, input, candidate) {
   if (res.outcome === 'ADD_CONTROLS') return gateNo('addendum_required', res.delta_pairs.map(p => `${p}: not in an effective pair or a trusted SECURITY_ADDENDUM`),
     { judgment_point: true, outcome: res.outcome, delta_pairs: res.delta_pairs, addendum: res.addendum });
   note(S, 'SECURITY_REASSESSED', { candidate_id: candidate, outcome: res.outcome });
-  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };
+  S.security.reassessed = { ...sec.tuple, outcome: res.outcome, seq: S.seq };
   S.outbox.push({ run_id: S.run_id, event: 'SECURITY_REASSESSED', event_id: `security-reassessed-${S.run_id}-${S.seq}`, candidate_id: candidate,
     outcome: res.outcome, plan_digest: sec.tuple.plan_digest, catalog_digest: sec.tuple.catalog_digest, addendum_set: sec.tuple.addendum_set,
     timestamp: new Date().toISOString() });
-  return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals, ...(res.c5_exempted ? { c5_exempted: res.c5_exempted } : {}) };
+  return { ok: true, code: 'reassessed', judgment_point: false, reasons: [], outcome: res.outcome, signals: res.signals };
 }
 
 /** View judgments of a policy-2 run (none for a legacy run): a recorded REAPPROVAL and unresolved event problems. */
