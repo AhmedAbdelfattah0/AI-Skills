@@ -75,6 +75,30 @@ concurrently, then join once:
 - the approved-plan digest still matches;
 - the recomputed candidate ID matches the reviewed ID;
 - every candidate path remains inside the Design Contract;
+  Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.
+  `CLEAN` covers planned and supporting paths, and supporting paths are outside
+  the Design Contract: they must be listed and accepted by the reviewer, so
+  `CLEAN` alone does not establish this line. On an engine run with security
+  policy 2, reassess reports a supporting path outside the DAG writes as an
+  out-of-plan path (REAPPROVAL).
+  The pre-REVIEW run is recorded in the PROVE event as
+  `scope: {outcome, material[], record_sha}` (`record_sha` is the sha256 of the
+  record it printed), and the PR body lists the supporting and flagged paths.
+  Use the run's base as `--base` and, on an engine run, the bound DAG as `--dag`.
+  The scope is the approved fenced `scope-contract` block; a contract or mode
+  change is a plan change, re-approved through `ExitPlanMode`, never an edit at
+  SHIP. Rerun `contract --verify-quote` against the saved quote block (only the four-backtick quote, extracted from the request) and
+  the SHIP record; a FAIL blocks SHIP. Verification does not prove what the
+  owner saw or authorize execution: native ExitPlanMode approval from a trusted
+  terminal remains mandatory, and without it SHIP reports `scope approval NOT
+  verified: the approval surface does not meet the trusted-terminal requirement;
+  do not build`.
+  At SHIP, exit 1 is **WAIT_FOR_USER** (a Design Contract expansion needs
+  re-approval); exit 2 or 3 means fix the input and rerun, and never commit
+  meanwhile. A refusal leaves any earlier record in place by design; it is never
+  read as evidence.
+  **Exit 0 is never a commit or freeze permission.** It proves the path set
+  against the approved roots, nothing more, and no gate reads the record;
 - all required locally runnable commands remain green or have unchanged reusable
   evidence;
 - every applicable security row in plan section 3b has the latest recorded status

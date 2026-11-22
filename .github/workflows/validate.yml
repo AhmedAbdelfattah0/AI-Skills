@@ -101,6 +101,7 @@ jobs:
           skills/ship-ticket/scripts/engine-authority-test-kinds.test.mjs
           skills/ship-ticket/scripts/run-engine-security.test.mjs
           skills/ship-ticket/scripts/security-plan.test.mjs
+          skills/ship-ticket/scripts/security-obligations.test.mjs
           skills/ship-ticket/scripts/risk-floor.test.mjs
           skills/ship-ticket/scripts/test-kinds.test.mjs
           skills/ship-ticket/scripts/engine-test-kinds.test.mjs
@@ -129,6 +130,7 @@ jobs:
           skills/ship-ticket/scripts/lib/mutation-harness.test.mjs
           skills/ship-ticket/scripts/measure/events.test.mjs
           skills/ship-ticket/scripts/lib/run-log-paths.test.mjs
+          skills/ship-ticket/scripts/check-pr-scope.test.mjs
 
   # AIS-HARNESS-3 Wave 3.5 engine-contract harness beyond the matrix: the seeded CLI layer (about
   # 100 commands; ENGINE_SEEDED_SEEDS / ENGINE_SEEDED_COMMANDS widen it) and the mutation check

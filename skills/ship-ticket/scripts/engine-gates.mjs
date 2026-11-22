@@ -153,8 +153,8 @@ const CONFIRM_SECOND_OPINION = ['concurrency', 'security'];
 
 /**
  * The second-opinion policy of a final-review confirmation of `rx`: 'required' when its repair's
- * write set overlaps a node labelled concurrency or security, else 'optional' (a supplied second
- * opinion is validated and counted, never ignored).
+ * write set overlaps the reads or writes of a node labelled concurrency or security, or (policy 2) an
+ * effective pair's spec file; else 'optional' (a supplied second opinion is validated and counted, never ignored).
  */
 function confirmationPolicy(S, rx) {
   const ws = S.review_chain.findLast(r => r.review_execution === rx && r.kind === 'repair')?.write_set ?? [];
@@ -168,7 +168,8 @@ function confirmationPolicy(S, rx) {
 /**
  * Review: the frozen candidate is the stored one (set by the first original review, a repair, or an
  * authorized retry). A new original after any earlier original needs a RETRY linked to its
- * predecessor. An accepted FAIL enqueues the finding-bound repair from its write set.
+ * predecessor. An accepted non-overflow FAIL with at least one finding to fix enqueues the finding-bound repair from
+ * its write set; any other accepted FAIL enqueues none.
  */
 async function reviewGate(E, input, candidate) {
   const S = E.S;
@@ -203,12 +204,19 @@ async function reviewGate(E, input, candidate) {
     if (stale) return stale;
     v.record.units_consumed = consumedUnits.map(c => ({ unit: c.unit, evidence_id: c.evidence_id }));
   }
+  let disputes = [];
   if (securityOn(S)) {
     const sec = await securityContext(E, candidate);
     const refusal = securityRefusal(sec) ?? reassessRefusal(S, sec) ?? (input.kind === 'original' ? securityRowsRefusal(input.primary, sec) : null);
     if (refusal) return refusal;
+    const disputed = input.kind === 'confirmation' ? disputedRefusal(S, sec) : null; // F12a: a repair never clears a disputed drop
+    if (disputed) return disputed;
     // What this review covered: ship-ready refuses once the catalog or the addendum set moves past it.
     if (input.kind === 'original') v.record.security_coverage = coverageOf(sec);
+    if (input.kind === 'original') disputes = naDisputes(input, sec);
+    // B3: every dropped pair's citation must exist (with its :symbol) in the candidate the review (or its confirmation) judges.
+    const cited = ['original', 'confirmation'].includes(input.kind) ? citationRefusal(sec) : null; // R2: a repair may have removed it
+    if (cited) return cited;
   }
   const brief = input.repair_prompt_file;
   if (v.repair && !(nonEmpty(brief) && isAbsolute(brief) && existsSync(brief) && statSync(brief).isFile())) {
@@ -219,6 +227,7 @@ async function reviewGate(E, input, candidate) {
     for (const r of S.repairs) if (r.review_execution === retry.predecessor && ['pending', 'failed'].includes(r.state)) { r.state = 'cancelled'; r.reason = 'superseded by retry'; }
   }
   S.review_chain.push(v.record);
+  recordDisputes(S, disputes, input.review_execution); // F12a: run-wide and add-only; disputedRefusal reads it
   if (input.kind === 'original') { S.freeze = { candidate, seq: S.seq ?? 0 }; S.frozen_candidate = candidate; }
   if (tk) S.test_kinds.freeze_evidence = tk.evidence_id; // informational: no decision reads it (F4/S1/S2 bind through the record)
   if (v.repair) {
@@ -291,7 +300,18 @@ function unitShipRefusal(E) {
 }
 
 /** Ship-ready's security conjuncts on one security context (checked before the proof and again after it). */
-const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? coverageRefusal(S, sec);
+const shipSecurityRefusal = (S, sec) => securityRefusal(sec) ?? reassessRefusal(S, sec) ?? disputedRefusal(S, sec) ?? citationRefusal(sec) ?? coverageRefusal(S, sec);
+
+/**
+ * B3/R2: a format-3 block's citations must exist (with their :symbol) in the candidate work tree (`sec.root`). Run at the
+ * original review and again at ship-ready (before and after the proof), so a repair that deletes a cited file or symbol
+ * never ships. Null for a format-2 block.
+ */
+export function citationRefusal(sec) {
+  if (sec.block?.policy !== 3) return null;
+  const cited = sec.sp.verifyCitations(sec.block, { root: sec.root });
+  return cited.ok ? null : gateNo(cited.code, cited.reasons ?? []);
+}
 
 /** Ship-ready: exclusions pinned, artifact digests and red_accepted derived; local proof run by the engine when it is all that is missing. */
 async function shipReadyGate(E, input, candidate) {
@@ -306,11 +326,15 @@ async function shipReadyGate(E, input, candidate) {
     if (list !== undefined) S.risk_evidence = boundRiskEvidence(S, list.map(({ kind, path }) => ({ kind, path })), io.evidenceExists(E.ctx.repoRoot));
   };
   rebind();
-  let sec = null;
+  let sec = null, obligations = null;
   if (securityOn(S)) {
     sec = await securityContext(E, candidate);
     const refusal = shipSecurityRefusal(S, sec);
     if (refusal) return refusal;
+    // F12a: a format-3 run ships only with a complete obligation matrix, which the decision prints.
+    const shipped = shipObligations(sec);
+    obligations = shipped.obligations;
+    if (shipped.refusal) return shipped.refusal;
   }
   const tk = await ensureEvidence(E, 'S1');
   if (tk && !tk.ok) return tk;
@@ -345,10 +369,13 @@ async function shipReadyGate(E, input, candidate) {
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
     }
     // ...and the security decision must still hold: a proof command can rewrite the installed catalog or append
-    // RUN-STATE lines, so the pre-proof context is re-derived and its three refusals rerun before anything binds.
+    // RUN-STATE lines, so the security context is re-derived and shipSecurityRefusal plus the obligation-matrix check
+    // rerun before anything binds.
     if (sec) {
       sec = await securityContext(E, candidate); // post-proof security context
-      const moved = shipSecurityRefusal(S, sec);
+      const again = shipObligations(sec);
+      obligations = again.obligations;
+      const moved = shipSecurityRefusal(S, sec) ?? again.refusal;
       if (moved) {
         S.local_proof = { candidate_id: null, commands, seq: S.seq, dropped: [moved.code] };
         return moved;
@@ -373,7 +400,8 @@ async function shipReadyGate(E, input, candidate) {
     S.ship_ready = { candidate_id: candidate, seq: S.seq };
     S.outbox.push({ run_id: S.run_id, event: 'SHIP_READY', event_id: 'ship-ready-' + candidate, candidate_id: candidate, timestamp: new Date().toISOString() });
   }
-  return { judgment_point: false, ...v };
+  return { judgment_point: false, ...v, ...(obligations ? { obligations: { block_format: obligations.block_format, counts: obligations.counts,
+    matrix_digest: obligations.matrix_digest, matrix: obligations.matrix } } : {}) };
 }
 
 // ---- S-01b2 P5r: runner-backed test-kind evidence at freeze (design rev 6 sections 3 and 5.1) ----------------
@@ -517,7 +545,7 @@ async function runEvidence(E, M, d, point) {
 // ---- security policy 2 (AIS-HARNESS-4 Wave B) ----------------------------------------------------
 
 let securityPlanModule = null;
-/** security-plan.mjs, loaded only by policy-2 paths (a legacy run never touches the catalog machinery). */
+/** security-plan.mjs for the policy-2 security-gate paths (a legacy init can still load the module through test-kinds.mjs). */
 export const securityPlan = async () => (securityPlanModule ??= await import('./security-plan.mjs'));
 /** loadCatalog options: the installed catalog, or ctx.catalogFile (an in-process test seam; no CLI flag). */
 export const catalogOptions = (ctx) => (ctx.catalogFile ? { catalogPath: ctx.catalogFile } : {});
@@ -534,16 +562,28 @@ export async function securityContext(E, candidate) {
   const { waived, unauthorized } = waiverState(E.S, events, candidate);
   const tuple = { candidate_id: candidate, plan_digest: E.S.plan_digest, catalog_digest: catalog.ok ? catalog.digest : null,
     addendum_set: events.addenda.map(a => a.addendum_id).sort() };
-  return { sp, catalog, events, waived, unauthorized, tuple };
+  // F12a: the approved block (bound by the plan digest) and its dropped pairs still not effective (an addendum reopens one).
+  const block = sp.parsePlanSecurityBlock(io.readIfExists(E.P.plan) ?? '');
+  const na = pendingNa(block, events);
+  const formatMismatch = (block?.policy === 3) !== (E.policy?.semantics?.securityObligations === true);
+  return { sp, catalog, events, waived, unauthorized, tuple, block, na, formatMismatch, root: E.ctx.repoRoot };
 }
 const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendum_set: [...sec.tuple.addendum_set] });
 const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
   && JSON.stringify(a.addendum_set) === JSON.stringify(b.addendum_set);
 
+/** F12a: the approved dropped pairs no trusted addendum has made effective (a reopened pair needs a proof or a trusted waiver, not a dropped-pair NOT_APPLICABLE row). */
+export function pendingNa(block, events) {
+  if (block?.policy !== 3) return [];
+  const effective = new Set(events.pairs.map(pairKey));
+  return block.na_pairs.filter(n => !effective.has(n.pair_id));
+}
+
 /** Policy-2 event problems every security decision refuses on (judgment points: the owner resolves them). */
 export function securityRefusal(sec) {
   const jp = { judgment_point: true };
   if (!sec.catalog.ok) return gateNo('catalog_unavailable', [`the control catalog is unavailable (${sec.catalog.code}): ${(sec.catalog.reasons ?? []).join('; ')}`], jp);
+  if (sec.formatMismatch) return gateNo('security_pairs_mismatch', ['the approved §3a block format and the run\'s recorded policy version disagree (a format-3 block needs policy_version 3 or 4, and only it)'], jp);
   const { conflicts, outside, forged, addenda } = sec.events;
   if (conflicts.length) return gateNo('addendum_conflict', conflicts.map(c => `${c.addendum_id}: ${c.reason}`), jp);
   if (outside.length) return gateNo('addendum_outside_contract', outside.map(c => `${c.addendum_id}: ${c.reason} (WAIT_FOR_USER: re-approve the plan)`), jp);
@@ -588,7 +628,77 @@ export function securityRowsRefusal(p, sec) {
   if (escape.length) return gateNo('security_row_escape', escape.map(k => `${k}: NOT_APPLICABLE needs a trusted SECURITY_WAIVER for this candidate`));
   if (p.security_outcome === 'NOT_TRIGGERED' && keys.some(k => !sec.waived.includes(k)))
     return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while unwaived security pairs are effective']);
+  return naRowsRefusal(p, sec);
+}
+
+/**
+ * F12a accountability: every dropped (not applicable) pair still needs exactly one primary rule_row. NOT_APPLICABLE
+ * agrees with its cited fact and its evidence must name a cited path; FAIL disputes the drop (recorded run-wide,
+ * see disputedRefusal); PASS is refused (security_row_escape): a dropped pair has no spec, so nothing proves it.
+ * security_outcome NOT_TRIGGERED (every effective pair waived) is refused here only for a current primary dropped-pair FAIL
+ * row; second-opinion and earlier recorded disputes block confirmation and ship-ready instead (disputedRefusal).
+ */
+function naRowsRefusal(p, sec) {
+  const na = sec.na ?? [], rows = p.rule_rows;
+  if (!na.length) return null;
+  const rowOf = (n) => rows.find(r => r.subject_id === n.pair_id);
+  const wrong = na.map(n => [n.pair_id, rows.filter(r => r.subject_id === n.pair_id).length]).filter(([, c]) => c !== 1);
+  if (wrong.length) return gateNo('incomplete_contract', wrong.map(([k, c]) => `primary.rule_rows must hold exactly one row with subject_id ${k} (a dropped pair; found ${c})`));
+  const passed = na.filter(n => rowOf(n).outcome === 'PASS');
+  if (passed.length) return gateNo('security_row_escape', passed.map(n => `${n.pair_id}: a dropped pair has no spec to PASS: NOT_APPLICABLE agrees with its cited fact, FAIL disputes it`));
+  const paths = (n) => n.facts.map(f => String(n.evidence[f]).split(':')[0]);
+  const uncited = na.filter(n => rowOf(n).outcome === 'NOT_APPLICABLE' && !paths(n).some(x => citesPath(rowOf(n).evidence, x)));
+  if (uncited.length) return gateNo('incomplete_contract', uncited.map(n => `${n.pair_id}: a NOT_APPLICABLE row of a dropped pair must cite its evidence (${paths(n).join(' or ')})`));
+  if (p.security_outcome === 'NOT_TRIGGERED' && na.some(n => rowOf(n).outcome === 'FAIL'))
+    return gateNo('security_outcome_escape', ['security_outcome NOT_TRIGGERED while a dropped pair is disputed (its row is FAIL)']);
   return null;
+}
+
+/** Whether review evidence names `path` as a whole token (so `a.ts` is not cited by `data.ts` or `lib/src/a.tsx`). */
+const citesPath = (evidence, path) => new RegExp(`(^|[\\s\`'"(\\[])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s\`'")\\]:,;]|\\.(?:$|\\s))`).test(evidence);
+
+/**
+ * The dropped pairs an original review disputes: a primary row FAIL, or (F3) a second-opinion finding whose
+ * `subject_id` names the dropped pair. Either records the run-wide dispute; reconciliation cannot dismiss it.
+ */
+export const naDisputes = (input, sec) => {
+  const ids = new Set((sec.na ?? []).map(n => n.pair_id));
+  const primary = (input.primary?.rule_rows ?? []).filter(r => ids.has(r?.subject_id) && r.outcome === 'FAIL').map(r => r.subject_id);
+  const second = (Array.isArray(input.second_opinion?.findings) ? input.second_opinion.findings : []).filter(f => ids.has(f?.subject_id)).map(f => f.subject_id);
+  return [...new Set([...primary, ...second])].sort();
+};
+
+/** Add `disputes` to the run-wide dispute list: add-only, sorted, never replaced by a later review (a RETRY cannot launder one). */
+export function recordDisputes(S, disputes, reviewExecution) {
+  if (!disputes.length) return;
+  S.security ??= {};
+  S.security.disputed_na = [...new Set([...(S.security.disputed_na ?? []), ...disputes])].sort();
+  note(S, 'SECURITY_NA_DISPUTED', { review_execution: reviewExecution, pairs: disputes });
+}
+
+/**
+ * F12a disputed-N/A hard stop: a dropped pair any accepted original review disputed (S.security.disputed_na, kept
+ * run-wide so a RETRY review cannot launder it) blocks confirmation and ship-ready until it is EFFECTIVE again: only
+ * a trusted SECURITY_ADDENDUM reopens it (then it is proven or waived like any pair) or a re-approved plan (a new run).
+ * Repair and confirmation never clear it. A confirmation adds no dispute (known limitation L2, security-risk.md section 13).
+ */
+export function disputedRefusal(S, sec) {
+  const effective = new Set(sec.events.pairs.map(pairKey));
+  const open = (S.security?.disputed_na ?? []).filter(k => !effective.has(k));
+  return open.length ? gateNo('security_na_disputed', open.map(k => `${k}: a reviewer disputed this dropped (not applicable) pair; repair and confirmation `
+    + 'cannot clear it: the owner reopens it with a SECURITY_ADDENDUM (then it is proven or waived like any pair) or re-approves the plan'), { judgment_point: true }) : null;
+}
+
+/** F12a: the obligation matrix of a format-3 run on this security context (null for a format-2 run: unchanged). */
+function obligationsOf(sec) {
+  if (sec.block?.policy !== 3) return null;
+  return sec.sp.obligationMatrix(sec.catalog, sec.block, { addenda: sec.events.addenda.flatMap(a => a.pairs.map(pairKey)), waived: sec.waived });
+}
+
+/** Ship-ready's matrix decision: { obligations (null for format 2), refusal (a gate refusal when the matrix does not verify) }. */
+export function shipObligations(sec) {
+  const obligations = obligationsOf(sec);
+  return { obligations, refusal: obligations && !obligations.ok ? gateNo(obligations.code, obligations.reasons ?? [], { judgment_point: true }) : null };
 }
 
 /**
@@ -632,7 +742,7 @@ export function addedLinesByFile(text) {
 }
 
 const MAX_ADDED_BYTES = 1024 * 1024;
-/** The candidate's changed paths with their added lines (git diff from config.base; an unlisted path is read whole: more signals, never fewer). */
+/** The candidate's changed paths with their added lines (git diff from config.base; a path not in the diff is read whole when it is at most MAX_ADDED_BYTES, else it contributes no added lines: path signals only). */
 function changedFiles(E, paths) {
   const root = E.ctx.repoRoot, added = new Map();
   const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-U0', E.S.config.base ?? 'HEAD', '--'],

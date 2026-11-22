@@ -34,6 +34,32 @@ a repair.
 Finish these checks before announcing REVIEW or appending its start event:
 
 - the approved plan and Design Contract still match the intended change;
+  run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]`
+  on the candidate before announcing REVIEW (manual flow too) and give the scope
+  record to the primary reviewer. It reads only the plan's one fenced
+  `scope-contract` block (see [plan.md](plan.md)), never the Files touched
+  table, and classifies every candidate path as planned, supporting or material.
+  The ExitPlanMode request quoted the block inside a four-backtick fence; the orchestrator extracts ONLY the four-backtick quote block from the approval request it sent and saves that, then runs `node scripts/check-pr-scope.mjs contract --verify-quote <saved-quote> --plan <plan> --record <scope.json>`, and the reviewer re-runs it. The saved file must hold the quote and nothing else (whitespace-only lines and CRLF aside); any other line fails. This is a precise input definition, not an attempt to detect contradictory prose.
+  It byte-compares the quoted body with the plan block and `record.contract`.
+  Verification does not by itself prove what the owner saw and does not authorize
+  execution: native ExitPlanMode approval remains mandatory, and it counts only
+  when the complete, untruncated, literal request was presented in a trusted
+  terminal (browser, GitHub and editor previews never count). If the approval
+  surface could not meet that, report `scope approval NOT verified: the approval
+  surface does not meet the trusted-terminal requirement; do not build` and stop.
+  Raw HTML in the plan is no longer refused by the check; such viewers are
+  excluded by that policy. The reviewer reads the block and checks every supporting path, which lies outside the Design Contract (on an
+  engine policy-2 run reassess reports it as out-of-plan; supporting is most
+  useful in manual mode). Exit 1 (a material
+  path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through
+  `ExitPlanMode`. An engine-mode contract always needs `--dag` (`dag_required`),
+  also after a failed engine init; a manual-mode contract refuses `--dag` and any
+  engine evidence of the run. A contract or mode change is a plan change: re-approval through `ExitPlanMode`.
+  Exit 2 or 3 is never a pass. When the plan text itself must change (a missing,
+  ambiguous, noncanonical or invalid contract block), the remedy is re-approval
+  through `ExitPlanMode`, since an edited plan changes the digest and gives
+  `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
+  Exit 0 proves only the path set, not the behaviour inside a planned file;
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
 - every CI-equivalent command runnable locally has passed;
@@ -188,8 +214,14 @@ and rule-catalogue work:
   evidence without rerunning attacks;
 - return an explicit `security_outcome` for a security-sensitive ticket;
 - under security policy 2, return one primary `rule_row` per effective pair,
-  `subject_id` `<boundary>:<control>`, with the pair's spec evidence (see
-  [security-risk.md](security-risk.md)).
+  `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
+  dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
+  the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
+  gives its finding `subject_id: '<boundary>:<control>'`, which, on an original
+  review, records the same run-wide dispute (see
+  [security-risk.md](security-risk.md) section 9). No file is exempted by its
+  name: a test file that registers a route or sits on an auth path is a §3a
+  surface with its own pairs, like any other file.
 
 Coverage is still applicability-driven. Combining the checks removes duplicate
 repository reads; it does not permit a family-level PASS without per-rule
@@ -252,9 +284,12 @@ single Fable fallback, then `WAIT_FOR_USER`.
 
 `PASS` requires complete path coverage, all applicable rows present, every
 acceptance criterion passing, no actionable findings, every triggered sub-outcome
-passing and `overflow: false`. Under security policy 2, `NOT_TRIGGERED` for
-`security_outcome` is rejected while unwaived pairs are effective, and
-`NOT_APPLICABLE` is rejected for a pair without a trusted `SECURITY_WAIVER`.
+passing and `overflow: false`. Under security policy 2, for an original review,
+`NOT_TRIGGERED` for `security_outcome` is rejected while unwaived pairs are effective
+or a current primary row of a dropped pair is `FAIL` (other recorded disputes block
+confirmation and ship-ready instead), `NOT_APPLICABLE` is rejected for an effective pair without a trusted
+`SECURITY_WAIVER`, and `PASS` is rejected for a dropped pair. A disputed dropped pair
+is never cleared by repair and confirmation (`security_na_disputed`).
 
 ## Reconcile once
 
@@ -368,9 +403,12 @@ with evidence. Record it as the confirmation's `second_opinion` (`route`,
 `reviewer_identity`, `candidate_id`, `checked_findings`, `outcome`, `evidence`): the
 gate counts a supplied one (the confirmation is PASS only when both are), and
 requires it (`missing_second_opinion`) when the repair's write set overlaps a node
-labelled `concurrency` or `security`. A security or architecture finding on a node
-without such a label is not detectable by the gate: supplying the second opinion
-there stays the orchestrator's duty. Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
+labelled `concurrency` or `security` (its reads or writes), or touches an effective
+pair's spec file. The gate cannot infer a security or architecture finding on a node
+without such a label: supplying the second opinion there stays the orchestrator's
+duty. A confirmation records no dispute of a dropped
+pair, whatever its rows, findings or evidence say: only an original review does
+([security-risk.md](security-risk.md) section 13, L2). Default ceiling: 6 minutes. The confirmation returns `PASS` or `FAIL` with evidence. It may not
 request another repair. A new actionable finding or failed check is the terminal
 result for this execution, not the start of another review cycle. A residual
 within the plan's recorded ship threshold is not actionable here: the confirmation
@@ -418,9 +456,11 @@ refuses a reviewer equal to any builder the engine dispatched and a second opini
 equal to the primary (also when only the suffix differs). A builder recorded as
 `<provider>:provider-default` ran the CLI's unresolved default model, so it counts
 as every model of that provider: a reviewer of that provider is `reviewer_is_builder`
-(choose a reviewer of another provider, or map the builders' tiers in `modelMap`). An accepted FAIL needs `repair_prompt_file` (the repair brief);
-the engine then enqueues and dispatches the finding-bound repair, records it, and the
-confirmation reviews the repaired candidate. A new original review after a FAIL needs
+(choose a reviewer of another provider, or map the builders' tiers in `modelMap`). An accepted non-overflow FAIL with at least one finding to fix needs
+`repair_prompt_file` (the repair brief); the engine then enqueues and dispatches the
+finding-bound repair, records it, and the confirmation reviews the repaired candidate.
+Any other accepted FAIL (an overflow FAIL, or one with no finding to fix) opens no
+repair. A new original review after a FAIL needs
 the owner's RUN-STATE `RETRY` event naming its predecessor execution, appended while nothing
 dispatched is live (a line that appears while a worker or runner could run is never honoured). Without the engine, the manual
 record above is the fallback. Details: [execution-harness.md](execution-harness.md).

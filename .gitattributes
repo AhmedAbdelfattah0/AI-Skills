@@ -3,3 +3,7 @@ skills/ship-ticket/scripts/legacy-figures.golden.json text eol=lf
 skills/ship-ticket/scripts/legacy-golden.s27-state.json text eol=lf
 # Vendored third-party files are verified byte-for-byte against UPSTREAM.json sha256: never convert line endings.
 skills/ship-ticket/vendor/** -text
+# F12a: the catalog digest is sha256 of controls.json's raw bytes, and plans, DAGs and the legacy golden pin it. Pin LF so
+# a core.autocrlf checkout (Windows) has the same bytes, hence the same digest, as every other OS (the file's bytes are unchanged).
+skills/vapt/controls.json text eol=lf
+skills/ship-ticket/scripts/security-plan-legacy.golden.json text eol=lf
