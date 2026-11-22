@@ -103,8 +103,13 @@ and its output must not be redirected onto an existing path. Its gaps:
 
 **Retention (interim rule).** A linked worktree that holds a pre-S5 run log must not be
 removed until its history is preserved by a faithful, integrity-verified raw archive.
-Until the archive helper unit (AC16-AC20) is approved and delivered, the only supported
-preservation is to LEAVE THE WORKTREE IN PLACE.
+Until a separately approved archive helper is delivered, the only supported preservation
+is to LEAVE THE WORKTREE IN PLACE.
+
+Read-only legacy export: `run-log.mjs legacy` output, readable, inspection only, lossy, NOT a
+preservation of history. Verified raw archival preservation: NOT available until a separately
+approved archive helper unit is delivered and qualified; no document, runbook or command in
+this repository claims it.
 
 `run-log.mjs legacy --repo <wt> --ticket <T>` prints a readable companion to the terminal
 for inspection only. It omits S-04 rows, invalid or torn lines, and data over the read

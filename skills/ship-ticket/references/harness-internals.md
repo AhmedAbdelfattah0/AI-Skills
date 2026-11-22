@@ -208,10 +208,16 @@ directory. `archive` copies only state, log and usage. After it runs, copy
 of the archive directory it printed. The run-log.mjs timing log `<ticket>.jsonl` needs no copy:
 since S5 it lives in `<git-common-dir>/ai-skills/ship-ticket/`, which removing a worktree leaves intact.
 A linked worktree's pre-S5 `<ticket>.jsonl` is a read-only archive that no figure includes. Such a worktree must not be
-removed until its history is preserved by a faithful, integrity-verified raw archive. Until the archive helper unit
-(AC16-AC20) is approved and delivered, the only supported preservation is to leave the worktree in place (the interim rule
-in [observability.md](observability.md)). `run-log.mjs legacy` prints a readable companion for inspection only; it is not
-a preservation of history. A run still open in the archive is closed by the build that started it, or recorded
+removed until its history is preserved by a faithful, integrity-verified raw archive. Until a separately approved archive
+helper is delivered, the only supported preservation is to leave the worktree in place (the interim rule in
+[observability.md](observability.md)).
+
+Read-only legacy export: `run-log.mjs legacy` output, readable, inspection only, lossy, NOT a
+preservation of history. Verified raw archival preservation: NOT available until a separately
+approved archive helper unit is delivered and qualified; no document, runbook or command in
+this repository claims it.
+
+A run still open in the archive is closed by the build that started it, or recorded
 with `run-log.mjs abandon` (never a success).
 
 ### Base pin and SHIP_READY cross-check
