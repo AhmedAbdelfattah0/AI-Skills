@@ -263,20 +263,27 @@ That activity's wall time intentionally includes research, cross-model debate an
 human approval wait because the read-only boundary prevents trustworthy nested
 writes. While it is open, the summary reports `planning_or_approval`, not
 `open_without_wait`. If Plan Mode is unavailable, log PLAN activities and the
-ordinary approval wait normally. Time each `plan_debate_exchange` with its own
-ID and `round=<n>` when writes are allowed. In native Plan Mode, keep exchange
-start/end timestamps in the permitted plan draft or session context and persist
-those in section 7 after approval; do not backdate logger events. The final PLAN
-metrics carry total measured debate time without conflating it with user wait.
+ordinary approval wait normally. Never invoke the logger per debate round while native Plan Mode is active. Per-round measurements (start, end,
+status, request and evidence hashes) live in the plan-resident debate attestation
+([cross-model.md](cross-model.md) "PLAN debate"), the one permitted write. After
+approval, call the logger with CURRENT timestamps and pass the historical round
+timing as labelled metric values, never as backdated events and never as
+reconstructed intervals: write the `run_log_metrics` array that
+`brief.mjs debate-check` prints into a JSON file as `{"run_log_metrics": [...]}`
+and pass it to the PLAN (or `native_plan_mode`) `end` with `--metrics-from`. A
+logging failure there is non-blocking. The final PLAN metrics carry total measured
+debate time without conflating it with user wait.
 
 Useful end metrics are:
 
 - REVIEW phase, per execution: `review_profile=standard|elevated`, `finding_count=<n>`,
   `repair_batches=0|1`, `confirmation_count=0|1`;
 - PLAN phase (or `native_plan_mode` end): `host_agent=claude|codex|other|unknown`,
-  `counterpart_agent=claude|codex|fable|other|unavailable`, `debate_responses=0|1|2|3`,
-  `debate_calls=<n>` (includes failed attempts),
-  `debate_status=converged|unresolved|degraded`, `debate_elapsed_ms=<n>`;
+  `counterpart_agent=claude|codex|fable|other|unavailable`, and the debate replay
+  `debate_outcome=converged|unresolved|limit_reached|skipped`, `debate_carrier=<agent>`,
+  `debate_carrier_degraded=true|false`, `debate_rounds=<n>`, `debate_calls=<n>`
+  (includes failed attempts), `debate_minutes=<n>`, `plan_debate_started_at=<iso>`,
+  `plan_debate_ended_at=<iso>` (historical values, logged at the current time);
 - `primary_review`: `finding_count=<n>`;
 - `optional_review` (the mandatory second opinion; the activity name is historical): `counterpart_agent=codex|fable|other|unavailable`, outcome `pass`, `findings`, or `degraded` and metric
   `reason=timeout|unavailable|no_concurrency|tool_error`;

@@ -377,7 +377,7 @@ joins and barriers.
 
 For full-stack work, PLAN drafts one Integration Contract and concurrently checks
 it from frontend-consumer and backend-provider perspectives before the host and
-counterpart debate the whole plan when it is security-sensitive. Human approval pins that contract. BUILD materializes its source
+counterpart debate the whole plan (every implementation plan, STANDARD or ELEVATED). Human approval pins that contract. BUILD materializes its source
 artifact, then frontend and backend workers depend on the same contract ID—not on
 each other's implementation—and run concurrently. The join verifies the digest,
 ownership, generated output, provider conformance and consumer conformance before
@@ -480,13 +480,19 @@ detectors, the command selection, and any wave partitioning all derive from the
 repository — they must never harden into fixed globs or an assumed runner.
 
 **`ship-ticket` selects the opposite-model counterpart from the host.** Claude
-uses Codex; Codex uses Claude. PLAN debate runs only for security-sensitive work
-(Fable stands in, recorded `DEGRADED`, when Codex is unavailable) and is a bounded debate: the host drafts and
-responds, the counterpart challenges and checks revisions, with at most three
-counterpart calls and 20 minutes total by default (failed attempts count).
-Same-final-draft agreement ends it;
-budget exhaustion or unresolved differences are recorded for the one human
-approval, never manufactured consensus or an endless loop.
+uses Codex; Codex uses Claude. The reciprocal PLAN debate is the default for every implementation plan, STANDARD or ELEVATED
+(`SKIPPED` only with an explicit owner exception frozen in the plan; Fable stands
+in as the declared degraded carrier, `carrier.degraded: true`, when Codex is
+unavailable): the host drafts and responds, the counterpart challenges and checks
+revisions, and the same counterpart session defends or concedes. There is no
+default call or minute cap. It stops on evidence: `CONVERGED` needs the
+counterpart's AGREE echoed for the exact final plan digest; rounds that stop being
+productive climb a diagnostic ladder and then escalate as `UNRESOLVED`; an
+owner-configured budget or a provider or resource limit is reported as
+`LIMIT_REACHED`, never as convergence. `brief.mjs debate-check` verifies the
+plan-resident attestation and the retained relay evidence without forcing
+agreement, and outstanding positions go to the one human approval, never
+manufactured consensus or an endless loop.
 
 Codex PLAN uses `codex-delegate` plus the binary; Codex REVIEW can use the binary
 with a verified watchdog/cancellation route, or the existing relay. Claude uses

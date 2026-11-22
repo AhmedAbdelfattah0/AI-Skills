@@ -214,3 +214,71 @@ test('S3c: manual-flow fallback stops at fallback time on ELEVATED runs, and an 
   assert.ok(resume.includes('Renewed approval of the substance is needed only if the pairs, DAG, surfaces or review profile change; even a deterministic completion goes through `ExitPlanMode`, and derived sections are never auto-approved.'));
   assert.ok(resume.includes('After `init`, any narrative change needs a new approved START/run'));
 });
+
+// S4: the restored reciprocal Planning Debate. The superseded scope and cap instructions are REPLACED, not appended to,
+// so a sentence that still makes the debate security-only, capped at three calls / 20 minutes, or skippable by default
+// fails here. Whitespace is flattened and matching is case-insensitive, so a phrase wrapped across lines still hits.
+const S4_FILES = () => {
+  const dir = fileURLToPath(new URL('../', import.meta.url));
+  const files = { 'SKILL.md': load(join(dir, 'SKILL.md')), 'AGENTS.md': load(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url))) };
+  for (const f of readdirSync(join(dir, 'references')).filter((n) => n.endsWith('.md'))) files[`references/${f}`] = load(join(dir, 'references', f));
+  return files;
+};
+const S4_SUPERSEDED = [
+  /security-sensitive work only/i, /only for security-sensitive/i, /three counterpart calls/i, /20 minutes total/i, /max_calls:\s*3/i,
+  /skip it and record/i, /plan_debate\.status: (DEGRADED|SKIPPED)/i, /debate runs only for security-sensitive/i, /bounded §7 debate runs only/i,
+  /remaining debate budget/i, /debate budget does not reset/i, /debate's (remaining|existing time)/i, /when the work is security-sensitive/i,
+  /total_timeout: 20m/i, /debate_responses=0\|1\|2\|3/i, /debate_status=converged\|unresolved\|degraded/i,
+  /debate the whole plan when it is security-sensitive/i, /counterpart when the work is security-sensitive/i,
+];
+test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
+  const files = S4_FILES();
+  assert.ok(Object.keys(files).length > 12, 'read the instruction files');
+  const hits = [];
+  for (const [name, text] of Object.entries(files)) {
+    const flat = text.replace(/\s+/g, ' ');
+    for (const re of S4_SUPERSEDED) if (re.test(flat)) hits.push(`${name}: ${re}`);
+  }
+  assert.deepEqual(hits, []);
+});
+test('S4: the superseded-phrase scan bites on wrapped and capitalised text (positive control)', () => {
+  for (const sample of ['with at most three\ncounterpart calls and 20 minutes\ntotal', '<Security-sensitive work only; otherwise', 'max_calls: 3']) {
+    const flat = sample.replace(/\s+/g, ' ');
+    assert.ok(S4_SUPERSEDED.some((re) => re.test(flat)), sample);
+  }
+});
+test('S4: SKIPPED appears only beside the owner-exception rule', () => {
+  const bad = [];
+  for (const [name, text] of Object.entries(S4_FILES())) {
+    const flat = text.replace(/\s+/g, ' ');
+    for (const m of flat.matchAll(/SKIPPED/g)) {
+      const around = flat.slice(Math.max(0, m.index - 220), m.index + 220);
+      if (!/exception/i.test(around)) bad.push(`${name}: ...${flat.slice(Math.max(0, m.index - 60), m.index + 60)}...`);
+    }
+  }
+  assert.deepEqual(bad, []);
+});
+test('S4: the restored default, the stopping policy, the checker and the restoration/evolution statement are pinned where they execute', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const f = S4_FILES();
+  const skill = flat(f['SKILL.md']), x = flat(f['references/cross-model.md']), plan = flat(f['references/plan.md']), agents = flat(f['AGENTS.md']);
+  const obs = flat(f['references/observability.md']), codex = flat(f['references/codex-cli.md']);
+  assert.ok(skill.includes('The reciprocal Planning Debate is the default for every implementation plan, STANDARD and ELEVATED alike; risk classification alone never skips it.'));
+  assert.ok(x.includes('The PLAN debate is the default for every implementation plan (a plan with a Design Contract), STANDARD or ELEVATED.'));
+  assert.ok(x.includes('`SKIPPED` is valid only with an explicit owner-approved exception frozen in the plan'));
+  assert.ok(x.includes('There is no default call or minute cap.'));
+  assert.ok(x.includes('Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop'));
+  assert.ok(x.includes('The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval.'));
+  assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
+  assert.ok(x.includes('`LIMIT_REACHED` is reported truthfully and is never converted to `CONVERGED`.'));
+  assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));
+  assert.ok(x.includes('Evolution (owner-requested, 2026-11-22): evidence-driven stopping instead of the old call/minute cap, the checkpoint, the plan-resident attestation and digest cycle, the `debate-check` checker and the separate carrier field.'));
+  assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root>`'));
+  assert.ok(plan.includes('debate_policy: 2'));
+  assert.ok(plan.includes('the §7 Planning Debate runs for every implementation plan, whatever the review profile'));
+  assert.ok(plan.includes('### Debate carrier and exceptions requested'));
+  assert.ok(plan.includes('| Finding | Disposition | Resolution | Design change |'));
+  assert.ok(agents.includes('The reciprocal PLAN debate is the default for every implementation plan, STANDARD or ELEVATED'));
+  assert.ok(obs.includes('Never invoke the logger per debate round while native Plan Mode is active.'));
+  assert.ok(codex.includes('Real-relay compatibility inside native Plan Mode is UNVERIFIED until this manual probe passes in a real Plan Mode session'));
+});
