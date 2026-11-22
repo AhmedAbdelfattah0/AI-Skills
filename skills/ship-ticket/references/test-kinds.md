@@ -128,7 +128,9 @@ All of these go in the DAG and the plan, before approval (the DAG digest is boun
 
 1. `config.testKinds: { "policy": 1 }` (exactly that object; `scripts/engine-dag.mjs`, the `testKinds` check in
    `validateEngineDag`).
-2. `config.securityPolicy: 2` (`init` refuses `test_kinds_needs_security_policy` otherwise; `scripts/run-engine.mjs:373`).
+2. `config.securityPolicy: 2`. On a current approval a MISSING value is refused first as `security_policy_required`
+   (`scripts/run-engine.mjs:274`, called at `:397`) and an INVALID value as `dag_invalid` (`scripts/engine-dag.mjs:133`);
+   `test_kinds_needs_security_policy` (`scripts/run-engine.mjs:372`) applies only after those pass.
 3. The plan opts in (a `test-triggers:` line or a committed `.ship-ticket/test-triggers.json`) and carries the
    `risk_floor:` line, as above.
 4. Exactly ONE `config.testCommands` entry with an `evidence` object:
@@ -156,7 +158,8 @@ carries the marker credits when it passes, and whether it is relevant is for the
 - **R-L2:** a vacuous or assertion-free test, or one that `test.fails` inverts, passes. Mutation testing and independent review cover that.
 - **R-T2:** code that holds the report channel during the run can shape the report: a `threads` or `vmThreads` pool,
   main-process config code (global setup, plugins, reporters), and on Linux a same-user reopen of `/proc/<pid>/fd/N`
-  (the last two are reasoned, not measured). Mitigations: `--pool=forks`, `runner_config_changed` on any change to the
+  (the last two are reasoned, not measured; the Linux vector is moot while the evidence channel is darwin-only,
+  `scripts/engine-io.mjs:257-259`). Mitigations: `--pool=forks`, `runner_config_changed` on any change to the
   entry's `config_paths`, and the forging code being in the reviewed diff.
 - **R-TC:** a worker can edit git-ignored `node_modules`, including the runner. The evidence identity and `config_paths`
   do not bind it. Review covers it.
