@@ -4,16 +4,19 @@
  *
  *   node plan-sync.mjs check --native <file> --plan <artifact> [--approved <sha256:hex>]
  *
+ * A file with a BOM or a CRLF line end (either side) is REFUSED as input (exit 2, plan_bom / plan_crlf), never normalised and never
+ * reported as stale; the engine digest of a CRLF twin still differs from the LF one, plan-sync just does not accept such input.
+ *
  * Two shapes of native file (PLAN-S3b package, B1):
  *  1. The native file has RUN-STATE markers: planDigest(native) must equal planDigest(artifact) (brief.mjs, the engine's
  *     planNarrativeDigest: RUN-STATE body excluded, markers kept, no line-end or BOM normalisation).
  *  2. The native file has no markers: the artifact text BEFORE the BEGIN marker (minus exactly one trailing LF) plus the text
- *     AFTER the END marker must equal the native bytes exactly. No CRLF or BOM normalisation, so a CRLF or BOM native file differs.
+ *     AFTER the END marker must equal the native bytes exactly. No normalisation (CRLF and BOM files are refused before this point).
  *
  * One JSON line on stdout. In sync: { in_sync: true, native_sha256, narrative_digest [, approved_match] }. Stale: the same with
  * in_sync false, code 'plan_sync_stale' and first_difference { line, native, artifact } (each side trimmed to 200 chars, null
  * when that side has no such line). Refused or unsupported: { in_sync: false, code, reason, which }.
- * Exit 0 in sync, 1 stale (plan_sync_stale), 2 refused input (usage, unreadable, symlink, not regular, oversize, plan_invalid,
+ * Exit 0 in sync, 1 stale (plan_sync_stale), 2 refused input (usage, CRLF, BOM, unreadable, symlink, not regular, oversize, plan_invalid,
  * malformed --approved), 3 plan_sync_unsupported (a wave file, D9: single ticket only; never parses Markdown sections).
  *
  * This tool grants NO authority. It reads no RUN-STATE event, writes no file, opens no network connection and starts no process.
@@ -88,6 +91,10 @@ export function firstDifference(a, b) {
 
 /** Pure comparison. Throws a refusal (plan_invalid) or an unsupported error (wave file). */
 export function comparePlans(nativeText, artifactText, approved) {
+  for (const [which, text] of [['native', nativeText], ['artifact', artifactText]]) {
+    if (text.charCodeAt(0) === 0xFEFF) throw refusal('plan_bom', which);
+    if (text.includes('\r\n')) throw refusal('plan_crlf', which);
+  }
   for (const [which, text] of [['native', nativeText], ['artifact', artifactText]]) {
     if (WAVE_HEADING.test(text)) throw Object.assign(new Error('wave_plan'), { unsupported: true, reason: 'wave_plan', which });
   }

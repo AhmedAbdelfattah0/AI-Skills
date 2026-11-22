@@ -54,12 +54,22 @@ test('marked native: RUN-STATE body differences do not change the digest', () =>
   assert.equal(r.json.in_sync, true);
 });
 
-test('marked native: CRLF twin and BOM twin are stale (no normalisation)', () => {
-  const lf = plan(), crlf = lf.replace(/\n/g, '\r\n');
-  const r = check(put('a4.md', lf), put('b4.md', crlf));
-  assert.equal(r.status, 1);
-  assert.equal(r.json.narrative_digest, planDigest(crlf));
-  assert.equal(check(put('a5.md', lf), put('b5.md', `﻿${lf}`)).status, 1);
+test('CRLF and BOM files are refused as input (exit 2), in the native or the artifact, marked or marker-less', () => {
+  const lf = plan(), crlf = lf.replace(/\n/g, '\r\n'), bom = `﻿${lf}`;
+  const ok = put('a4.md', lf);
+  for (const [t, code] of [[crlf, 'plan_crlf'], [bom, 'plan_bom']]) {
+    const f = put(`bad-${code}.md`, t);
+    const asArtifact = check(ok, f), asNative = check(f, ok);
+    assert.deepEqual([asArtifact.status, asArtifact.json.code, asArtifact.json.which], [2, code, 'artifact']);
+    assert.deepEqual([asNative.status, asNative.json.code, asNative.json.which], [2, code, 'native']);
+    assert.equal(asNative.json.in_sync, false);
+  }
+  // marker-less native with CRLF or BOM
+  const art = put('mlart.md', `# P\n\n${B}\nx\n${E}\n`);
+  assert.equal(check(put('ml-crlf.md', '# P\r\n\r\n'), art).json.code, 'plan_crlf');
+  assert.equal(check(put('ml-bom.md', '﻿# P\n\n'), art).json.code, 'plan_bom');
+  // the engine still hashes the CRLF twin differently; plan-sync simply refuses it
+  assert.notEqual(planDigest(crlf), planDigest(lf));
 });
 
 test('marker-less native: equals artifact before BEGIN (minus one trailing LF) plus after END', () => {
@@ -80,17 +90,6 @@ test('marker-less native: equals artifact before BEGIN (minus one trailing LF) p
   assert.equal(r3.json.code, 'plan_sync_stale');
   // a native missing the after-END LF is stale too
   assert.equal(check(put('n4.md', narr), put('p4.md', art)).status, 1);
-});
-
-test('marker-less native: CRLF and BOM natives are stale, not normalised', () => {
-  const narr = '# Plan\n\nStep one.\n';
-  const art = `${narr}\n${B}\nx\n${E}\n`;
-  const ok = `${narr}\n`;
-  assert.equal(check(put('c0.md', ok), put('cp.md', art)).status, 0);
-  const crlf = check(put('c1.md', ok.replace(/\n/g, '\r\n')), put('cp.md', art));
-  assert.equal(crlf.status, 1);
-  assert.equal(crlf.json.first_difference.line, 1);
-  assert.equal(check(put('c2.md', `﻿${ok}`), put('cp.md', art)).status, 1);
 });
 
 test('SCRUM-209 shape: an extra header line in the artifact outside the RUN-STATE block is stale and names the line', () => {
@@ -221,9 +220,11 @@ test('parity with brief.mjs plan-digest and the engine planNarrativeDigest on th
   for (const [i, text] of [plan(), plan().replace(/\n/g, '\r\n'), plan('# Ünï\n\n| a | b |\n'), plan(undefined, '')].entries()) {
     const p = put(`par${i}.md`, text);
     const cli = execFileSync(process.execPath, [BRIEF, 'plan-digest', '--plan', p], { encoding: 'utf8' }).trim();
+    assert.equal(cli, planDigest(text));
+    assert.equal(cli, `sha256:${planNarrativeDigest(text).replace(/^sha256:/, '')}`);
+    if (text.includes('\r')) { assert.equal(check(p, p).status, 2, 'CRLF input is refused, though it hashes'); continue; }
     const r = check(p, p);
     assert.equal(r.json.narrative_digest, cli);
-    assert.equal(r.json.narrative_digest, `sha256:${planNarrativeDigest(text).replace(/^sha256:/, '')}`);
     assert.equal(check(p, p, ['--approved', cli]).json.approved_match, true);
   }
 });
