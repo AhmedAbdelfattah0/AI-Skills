@@ -458,7 +458,7 @@ After approval:
 
 - create or reuse the ticket branch from an up-to-date base;
 - save the approved plan under .specs/plans/<TICKET>.md;
-- append a **START** event with the workflow run ID and approved-plan digest;
+- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`; then run `brief.mjs start-check --plan <plan> --run-id <id>`);
 - invoke the routed quality skill and write one Design Contract derived from the
   approved execution DAG;
 - for full-stack work, materialize or generate the approved Integration Contract,

@@ -11,9 +11,13 @@
  * CLI:
  *   brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] --out <file>
  *   brief.mjs lint <brief>
- * Output is deterministic: no clock, no randomness, no absolute path. The last line is
+ *   brief.mjs plan-digest --plan <plan.md>            prints `sha256:<64 hex>`, the narrative digest START binds
+ *   brief.mjs start-check --plan <plan.md> --run-id <id>   read-only START validation, typed JSON on stdout
+ * Output is deterministic for build and plan-digest: no randomness, no absolute path (start-check reads the clock only for the
+ * approved_at skew test). The last line is
  * `brief-digest sha256:<hex>`, the digest of everything above it after CRLF became LF. Dependency-free Node >= 18; its repository imports are the read-only
- * RISK_EVIDENCE table of harness.mjs, the T0 declaration validator of fast-checks.mjs and the test-kind table of test-kinds.mjs.
+ * RISK_EVIDENCE table of harness.mjs, the T0 declaration validator of fast-checks.mjs, the test-kind table of test-kinds.mjs and
+ * the RUN-STATE parser of run-state.mjs.
  *
  * Exit codes: 0 success, 1 a failed lint or any other refused input (unknown node, plan without a
  * RUN-STATE block, unreadable file, invalid JSON, a refused --out), 2 a usage error or a DAG or recon
@@ -25,6 +29,7 @@ import { basename, isAbsolute, resolve } from 'node:path';
 import { RISK_EVIDENCE, isEntrypoint } from './harness.mjs';
 import { validateDeclaration } from './fast-checks.mjs';
 import { KINDS, ITEM_ID } from './test-kinds.mjs';
+import { parseRunState, malformedReason } from './run-state.mjs';
 
 export const SECTIONS = [
   'Task', 'Approved plan and digest', 'Ownership', 'Forbidden paths', 'Dependencies and reads',
@@ -56,6 +61,85 @@ export function planDigest(planText) {
   const e = planText.indexOf(RUN_STATE_END);
   if (b < 0 || e < b) throw fail('plan_invalid: plan has no RUN-STATE block');
   return `sha256:${sha256(planText.slice(0, b + RUN_STATE_BEGIN.length) + planText.slice(e))}`;
+}
+
+// ---- plan-digest and start-check (S3a-1) -------------------------------------------------------------
+const DIGEST_FORMAT = /^sha256:[0-9a-f]{64}$/;
+const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const ISO_8601 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const SKEW_MS = 5 * 60 * 1000;
+/** True when the ISO-8601 string is a real calendar instant (rejects 2026-02-30 and hour 25). */
+function realInstant(at) {
+  const m = ISO_8601.exec(at);
+  if (!m) return false;
+  const [y, mo, d, h, mi, sec] = [1, 2, 3, 4, 5, 6].map((i) => Number(m[i] ?? 0));
+  if (mo < 1 || mo > 12 || h > 23 || mi > 59 || sec > 59) return false;
+  if (d < 1 || d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return false;
+  return !Number.isNaN(Date.parse(at));
+}
+
+/** Whole-file hashes a hand-computed digest could be: the file as it stands, and the file before any START line was appended. */
+function wholeFileHashes(planText) {
+  const lines = planText.split(/(?<=\n)/);
+  const withoutStart = lines.filter((l) => { try { return JSON.parse(l)?.event !== 'START'; } catch { return true; } }).join('');
+  return new Set([`sha256:${sha256(planText)}`, `sha256:${sha256(withoutStart)}`]);
+}
+
+/**
+ * Validate the START event of one run in a plan's RUN-STATE block. Read-only. Returns { ok, errors, warnings, run_id, digest }
+ * where each error is { code, message }. `runId` is required (the engine always filters START on run_id).
+ * Semantics follow the engine: a plan without a well-formed block is `plan_invalid` (thrown, never a fallback hash),
+ * a block the engine calls malformed is `run_state_malformed`, CRLF is not normalised (a CRLF plan and its LF twin differ).
+ * `ok` is NECESSARY, NOT SUFFICIENT: the engine also applies its trusted-START (quiescence) rule, which this check cannot see.
+ */
+export function startCheck(planText, { runId, now = Date.now() } = {}) {
+  if (typeof runId !== 'string' || !SAFE_RUN_ID.test(runId)) throw Object.assign(new Error('start-check needs a safe --run-id'), { usage: true });
+  const digest = planDigest(planText); // throws plan_invalid
+  const errors = [], warnings = [];
+  const add = (code, message) => errors.push({ code, message });
+  const R = parseRunState(planText);
+  const malformed = malformedReason(R);
+  if (malformed) {
+    add('run_state_malformed', malformed);
+    return { ok: false, errors, warnings, run_id: runId, digest };
+  }
+  const allStarts = R.events.filter((e) => e.event === 'START');
+  const start = allStarts.filter((e) => e.run_id === runId).at(-1);
+  if (!start) {
+    const noId = allStarts.some((e) => typeof e.run_id !== 'string' || !SAFE_RUN_ID.test(e.run_id));
+    if (noId) add('start_run_id_missing', 'a START has no safe run_id; the engine ignores it');
+    else add('start_missing', `no START event for run_id ${runId}`);
+    return { ok: false, errors, warnings, run_id: runId, digest };
+  }
+  // digest
+  const d = start.approved_plan_digest;
+  if (typeof d !== 'string' || !d) add('start_digest_missing', 'START has no approved_plan_digest');
+  else {
+    let canon = d;
+    if (/^sha256-[0-9a-f]{64}$/.test(d)) { canon = d.replace(/^sha256-/, 'sha256:'); warnings.push({ code: 'start_digest_legacy', message: 'approved_plan_digest uses the legacy sha256- prefix; write sha256:<hex>' }); }
+    if (/^(sha256[:-])?[0-9a-f]{8,63}$/.test(d)) add('start_digest_truncated', 'approved_plan_digest is truncated (shasum | cut); use `brief.mjs plan-digest`');
+    else if (!DIGEST_FORMAT.test(canon)) add('start_digest_format', 'approved_plan_digest must match ^sha256:[0-9a-f]{64}$ (use `brief.mjs plan-digest`, not shasum)');
+    else if (canon !== digest) {
+      if (wholeFileHashes(planText).has(canon)) add('start_digest_whole_file', 'approved_plan_digest hashes the whole file; the START binds the narrative digest (RUN-STATE body removed): use `brief.mjs plan-digest`');
+      else add('start_digest_stale', `approved_plan_digest does not equal the current narrative digest ${digest}; the narrative changed after hashing or the digest was computed another way`);
+    }
+  }
+  // approval time: approved_at; a timestamp-only START is read by the engine, so it passes with a warning
+  let at = start.approved_at;
+  if ((at === undefined || at === null || at === '') && typeof start.timestamp === 'string' && start.timestamp) {
+    at = start.timestamp;
+    warnings.push({ code: 'start_timestamp_legacy', message: 'START has no approved_at; the engine reads timestamp, but new runs must write approved_at' });
+  }
+  if (at === undefined || at === null || at === '') {
+    add(start.at !== undefined ? 'start_at_not_approved_at' : 'start_approved_at_missing',
+      start.at !== undefined ? 'START uses `at`; the field is `approved_at`' : 'START has no approved_at');
+  } else if (typeof at !== 'string' || !realInstant(at)) add('start_approved_at_invalid', 'approved_at must be a real ISO-8601 timestamp with a time zone');
+  else if (Date.parse(at) > now + SKEW_MS) add('start_approved_at_future', 'approved_at is in the future (more than 5 minutes of clock skew)');
+  // approved_by: descriptive metadata, presence-checked only. Its content is never inspected and never evidence of
+  // authorization; authority is native Plan Mode approval plus the approved-plan digest binding (checked above).
+  const by = start.approved_by;
+  if (typeof by !== 'string' || !by.trim()) add('start_approver_missing', 'START has no approved_by (descriptive metadata: who approved the plan)');
+  return { ok: errors.length === 0, errors, warnings, run_id: runId, digest };
 }
 
 // eslint-disable-next-line no-control-regex
@@ -408,9 +492,31 @@ export function main(argv) {
       process.stdout.write('brief lint ok\n');
       return 0;
     }
-    throw Object.assign(new Error('usage: brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
+    if (command === 'plan-digest') {
+      const { opts, positional } = parseFlags(rest, ['plan']);
+      if (!opts.plan || positional.length) throw Object.assign(new Error('plan-digest needs --plan and takes no other argument'), { usage: true });
+      process.stdout.write(`${planDigest(readText(opts.plan, 'plan'))}\n`);
+      return 0;
+    }
+    if (command === 'start-check') {
+      const { opts, positional } = parseFlags(rest, ['plan', 'run-id']);
+      if (!opts.plan || !opts['run-id'] || positional.length) throw Object.assign(new Error('start-check needs --plan and --run-id and takes no other argument'), { usage: true });
+      let text;
+      try { text = readFileSync(opts.plan, 'utf8'); } catch (err) {
+        process.stdout.write(`${JSON.stringify({ ok: false, errors: [{ code: 'plan_unreadable', message: `cannot read plan: ${err.code ?? err.message}` }], warnings: [] })}\n`);
+        return 1;
+      }
+      const r = startCheck(text, { runId: opts['run-id'] });
+      process.stdout.write(`${JSON.stringify(r)}\n`);
+      return r.ok ? 0 : 1;
+    }
+    throw Object.assign(new Error('usage: brief.mjs plan-digest --plan <plan.md> | brief.mjs start-check --plan <plan.md> --run-id <id> | brief.mjs build --dag <dag.json> --node <id> --plan <plan.md> [--recon <json>] [--notes <file>] [--t0 <repo>/.ship-ticket/t0.json] [--test-kinds <require.json>] --out <file> | brief.mjs lint <brief>'), { usage: true });
   } catch (err) {
     if (!err.briefError && !err.usage) throw err;
+    if (command === 'start-check' && /^plan_invalid/.test(err.message)) {
+      process.stdout.write(`${JSON.stringify({ ok: false, errors: [{ code: 'plan_invalid', message: err.message }], warnings: [] })}\n`);
+      return 1;
+    }
     process.stderr.write(`brief: ${err.message}\n`);
     return err.usage ? 2 : 1;
   }

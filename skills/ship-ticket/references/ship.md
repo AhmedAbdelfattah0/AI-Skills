@@ -28,7 +28,7 @@ Every event carries run_id, event and timestamp. Use only these event names:
 
 | Event | Required evidence |
 |---|---|
-| **START** | approved-plan digest, human approver, target base and approval time (`approved_at`; `timestamp` is read when absent), which sets security-policy grandfathering |
+| **START** | `approved_plan_digest` (`sha256:<64 hex>`), `approved_by` (REQUIRED for new runs; descriptive metadata only, presence-checked and not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding), target base and approval time (`approved_at`, ISO-8601, not in the future; `timestamp` is read when absent), which sets security-policy grandfathering. Compute the digest with `node scripts/brief.mjs plan-digest --plan <plan>`, never with `shasum`; write START only after the narrative is final; run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>` before dispatching (`--run-id` is required; a START without a safe `run_id` is refused, as the engine ignores it; a `timestamp`-only START passes with a `start_timestamp_legacy` warning because the engine reads it, but new runs write `approved_at`; `ok` is necessary, not sufficient, because start-check cannot see the engine's trusted-START quiescence rule); never edit the narrative after START |
 | **RED** | test paths, exact command, failing test names with their assertion messages, any stub paths written first; appended before the first non-test Design Contract write |
 | **PROVE** | command outcomes, rule/test/docs/parity/VAPT evidence and degradations |
 | **REVIEW** | profile, candidate ID, primary identity, optional identity/degradation, coverage, findings, dispositions and outcome |
