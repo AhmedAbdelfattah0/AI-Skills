@@ -56,7 +56,8 @@ function inputPath(p, what) {
 }
 /**
  * Block format 3 only (R4 N1, scoped by R5 L2 so format 2 stays byte-identical to be63aea): a surface or changed path
- * with a '.' or '..' segment is refused, so it cannot borrow another path's name (src/__tests__/../auth/session.ts):
+ * with a '.' or '..' segment is refused (bad_input for direct select/reassess input; replayFormat3 wraps it as
+ * plan_block_invalid), so it cannot borrow another path's name (src/__tests__/../auth/session.ts):
  * signals, surfaces and citations are compared as normalized path strings. Git never reports such a path.
  */
 function dotSegmentRefusal(paths, what) {

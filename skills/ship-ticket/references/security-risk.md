@@ -70,9 +70,10 @@ surface**, under five rules, each refused when broken:
   (`citation_missing`). A symlink inside the repository is also judged by the file
   it resolves to: a target that is docs-only, inside `.git/` or `node_modules/`, or
   gitignored is refused. A citation with a `.` or `..` segment, or with a leading
-  `./`, is refused `fact_uncited`. In a format-3 run, a surface or changed path with
-  a `.` or `..` segment given directly (select, reassess, a block object replayed) is
-  refused `bad_input`; a leading `./` is normalized. In a plan's block it makes the
+  `./`, is refused `fact_uncited`. In a format-3 run, direct select and reassess inputs
+  refuse a surface or changed path with a `.` or `..` segment with `bad_input`; a
+  replayed block object refuses one with `plan_block_invalid`; a leading `./` is
+  normalized. In a plan's block it makes the
   parse fail, so it is `plan_block_invalid` in the helper and the `obligations` CLI and
   `security_pairs_mismatch` at `init`, `preflight` and the gates. A format-2 run takes
   such paths as it did before F12a. Where each check runs:
