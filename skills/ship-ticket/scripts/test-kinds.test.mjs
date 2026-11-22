@@ -616,11 +616,14 @@ test('[R5] benign text is not a marker: prose, script names and the reassess rec
     assert.equal(req(`# Plan\n\n${prose}\n${RS}`).status, 'not_declared', prose);
     assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${prose}\ntest-triggers:`)), BASE, prose);
   }
-  for (const near of ['the test-triggers line', 'a test_triggers variable', 'RUN_STATE:BEGIN', 'run-state end', '<!- security-plan {"policy":2} -->', 'security-plan= {}', '"selection_digest": "sha256:00"', 'security_pairs: sha256:00', '<!-- security_plan -->', 'security_plan: none', 'Test triggers: money', 'lifecycle item: L2 x', 'Test Waiver : L1 x', 'test\\-triggers: money', 'test\uFE0F-triggers: money', 'risk_floor: see below', 'RISK_FLOOR: ELEVATED', 'risk\u2011floor: ELEVATED', 'a stray classes=tenancy']) {
+  for (const near of ['RUN_STATE:BEGIN', 'run-state end', '<!- security-plan {"policy":2} -->', 'security-plan= {}', '"selection_digest": "sha256:00"', 'security_pairs: sha256:00', '<!-- security_plan -->', 'security_plan: none', 'Test triggers: money', 'lifecycle item: L2 x', 'Test Waiver : L1 x', 'test\\-triggers: money', 'test\uFE0F-triggers: money', 'risk_floor: see below', 'RISK_FLOOR: ELEVATED', 'risk\u2011floor: ELEVATED', 'a stray classes=tenancy']) {
     const r = req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${near}\ntest-triggers:`));
     assert.equal(r.status, 'refused', near); assert.ok(r.errors.length > 0);
   }
-  assert.deepEqual(req(`# Plan\n\nThe test\u2011triggers line is missing.\n${RS}`).errors, ['plan_line_invalid', 'plan_tags_missing', 'risk_floor_missing'], 'a non-breaking hyphen opts in');
+  // FR-1a (flipped by design): a plan key opts in only from the START of a line (after Markdown decoration). A mid-line mention is prose,
+  // so the old pin "a non-breaking hyphen opts in" (`The test\u2011triggers line is missing.`) now reads as absent. A key-led twin still opts in.
+  assert.equal(req(`# Plan\n\nThe test\u2011triggers line is missing.\n${RS}`).status, 'not_declared', 'a mid-line mention is prose');
+  assert.deepEqual(req(`# Plan\n\ntest\u2011triggers line is missing.\n${RS}`).errors, ['plan_line_invalid', 'plan_tags_missing', 'risk_floor_missing'], 'a key-led non-breaking hyphen opts in');
   // Opus M1/M2: Markdown- or HTML-formatted plan keys refuse, opted in or not
   for (const k of ['**Test triggers**: money', '_Test triggers_: money', '`Test triggers`: money', '<b>test-triggers</b>: money', '<b>Test triggers</b>: money', '<code>lifecycle item</code>: L2 x', 'test&#45;triggers: money',
     'test&#x2D;triggers: money', 'test&hyphen;triggers: money', 'lifecycle&lowbar;item: L2 x', 'test-waiver&colon; L1 x', '__Test Waiver__ : L1 x']) {
@@ -641,6 +644,31 @@ test('[R5] benign text is not a marker: prose, script names and the reassess rec
   const noReassess = swapOnce(FULL, `     ${reassessLine()}\n`, '');
   assert.deepEqual(req(noReassess), BASE, 'the reassess line adds and removes nothing');
   assert.deepEqual(req(swapOnce(FULL, 'risk_reassess: ', 'Risk_Reassess: ')).errors, ['risk_floor_invalid'], 'a damaged reassess key is not ignored');
+});
+
+test('[R8] FR-1a: a plan key opts in only from the start of a line (after Markdown decoration); a mid-line mention is prose (SCRUM-418)', () => {
+  const PROSE = ['No test-triggers line is needed here.', 'Not using test-triggers (opt-out).', 'There is no `test-triggers:` line.', 'The repository has no .ship-ticket/test-triggers.json',
+    'The test-triggers line is missing.', 'Note: test-triggers: none', 'the test-triggers line', 'a test_triggers variable', 'We skip the lifecycle-item: none and test-waiver: none rows.', 'See the Test triggers: note'];
+  for (const p of PROSE) {
+    const alone = req(`# Plan\n\n${p}\n${RS}`);
+    assert.equal(alone.status, 'not_declared', p); assert.equal(TK.optIn({ planText: `# Plan\n\n${p}\n${RS}` }), false, p);
+    assert.deepEqual(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${p}\ntest-triggers:`)), BASE, p);
+    assert.equal(req(`# Plan\r\n\r\n${p}\r\n${RS}`).status, 'not_declared', `${p} (CRLF)`);
+  }
+  // every key-led line (decorated, re-cased, snake_case, no colon, prose that STARTS with the key) still opts in and is refused when it is not the strict line
+  const KEYS = ['Test triggers: x', '**Test triggers**: x', '_Test triggers_: x', 'test_triggers: x', '- test-triggers: x', '* test-triggers: x', '1. test-triggers: none', '12) test-triggers: none', '> Test-Triggers: none', '  test-triggers: x',
+    '`test-triggers`: x', '`Test triggers`: x', '| test-triggers: x', '## test-triggers: x', 'TEST-TRIGGERS input-path', 'test-triggers line is missing',
+    'lifecycle-item: L1 x', '- lifecycle item: L1 x', '**Lifecycle item**: L1 x', 'test-waiver: race n/a', '1. Test waiver: race n/a', '\u00a0test-triggers: x', '\ufefftest-triggers: x', '&gt; test-triggers: none'];
+  for (const k of KEYS) {
+    const alone = req(`# Plan\n\n${k}\n${RS}`);
+    assert.notEqual(alone.status, 'not_declared', `${k} opts in`); assert.equal(TK.optIn({ planText: `# Plan\n\n${k}\n${RS}` }), true, k);
+    assert.equal(req(`# Plan\r\n\r\n${k}\r\n${RS}`).status, alone.status, `${k} (CRLF)`);
+  }
+  for (const k of ['Test triggers: x', '**Test triggers**: x', 'test_triggers: x', '- test-triggers: x', 'TEST-TRIGGERS input-path']) assert.equal(req(swapOnce(FULL, '\n\ntest-triggers:', `\n\n${k}\ntest-triggers:`)).status, 'refused', k);
+  assert.deepEqual(req(`# Plan\n\nTEST-TRIGGERS input-path\n${RS}`).errors, ['plan_line_invalid', 'plan_tags_missing', 'risk_floor_missing']);
+  // the strict line and a repository declaration are unchanged
+  assert.equal(req(`# Plan\n\ntest-triggers: none\n${RS}`).status, 'refused');
+  assert.equal(TK.optIn({ planText: '# Plan\n\nno triggers here', declaration: TK.validateDeclaration({ version: 1 }) }), true);
 });
 
 // ---- S-01b2 P3: requirement provenance (optIn, provenance, kindsForClasses, PROTECTED_TAGS, the declaration `tests` key) ----

@@ -47,6 +47,7 @@ const GUARDS = [
   { name: 'run-state token: only a colon between the words and BEGIN/END', from: 'state[\\\\s:=]*(?:begin|end)', to: 'state:(?:begin|end)' },
   { name: 'plan-key token: the whitespace-before-colon form is dropped', from: '|${a}\\\\s+${b}[^a-z0-9]{0,8}:', to: '' },
   { name: 'plan-key token: no decoration between the words and the colon', from: '${b}[^a-z0-9]{0,8}:', to: '${b}\\\\s*:' },
+  { name: 'FR-1a: a plan key is not anchored to the start of its line (a prose mention opts in)', from: "const KEY_LEAD = '^(?:[^\\\\p{L}\\\\p{N}]|\\\\d{1,3}[.)])*';", to: 'const KEY_LEAD = EDGE;' },
   { name: 'a token may start inside a word (no boundary)', from: "const EDGE = '(?<![a-z0-9])';", to: "const EDGE = '';" },
   { name: 'HTML character references are not decoded', from: 'decodeEntities(l).normalize', to: 'l.normalize' },
   { name: 'inline HTML tags are not removed', from: ".replace(INLINE_TAG, '')", to: '' },

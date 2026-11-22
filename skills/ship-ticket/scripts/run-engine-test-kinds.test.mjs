@@ -237,6 +237,14 @@ test('[AC5] row 2: every opt-in carrier, valid or near-miss, without config.test
   assert.deepEqual([S.policy_version, S.test_kinds], [1, undefined]);
 });
 
+test('[AC5] FR-1a: a plan whose narrative only MENTIONS the plan keys mid-line (SCRUM-418 prose) does not opt in; init stays inactive', (t) => {
+  const prose = ['No test-triggers line is needed here.', 'Not using test-triggers (opt-out).', 'There is no `test-triggers:` line.', 'The repository has no .ship-ticket/test-triggers.json', 'Note: test-waiver: none'];
+  const fx = fixture(t, { commit: true, narrativeExtra: `${prose.join('\n')}\n` });
+  ok(fx.cli('init', { dag: fx.dagFile }), 'prose mentions do not opt in');
+  const S = fx.readState();
+  assert.deepEqual([S.policy_version, S.test_kinds], [1, undefined]);
+});
+
 test('[AC5] active init binds S.test_kinds with policy_version 2; a partial activation state is test_kinds_state_missing (row 8)', (t) => {
   const fx = tkFx(t);
   ok(fx.cli('init', { dag: fx.dagFile }));

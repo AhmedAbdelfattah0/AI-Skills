@@ -61,7 +61,10 @@ every line (NFKC; format and default-ignorable characters such as zero-width spa
 HTML character references such as `&#45;` decoded; inline HTML tags removed; Markdown backslash escapes removed; lower
 case; unicode dashes and `_` folded to `-`). A token starts a word (`latest waiver:` carries none). Its words are joined
 by dashes (or, for the three plan keys, by whitespace followed within 8 non-alphanumeric characters by a colon:
-`Test triggers:`, `**Test triggers**:`), so prose ("this test triggers a reload") and camelCase identifiers carry no
+`Test triggers:`, `**Test triggers**:`). The three plan keys (`test-triggers`, `lifecycle-item`, `test-waiver`) must also
+lead their line, after Markdown decoration only (spaces, `>`, `-`, `*`, backticks, `#`, `|`, a list number such as `1.`):
+a key written mid-line after prose reads as absent, so a sentence like "No test-triggers line is needed here." neither
+opts in nor refuses. Put the key first on its line. Prose ("this test triggers a reload") and camelCase identifiers carry no
 token, while snake_case ones (`test_triggers`) do. The first five tokens are the bare words; the block, pairs and RUN-STATE tokens are the words
 in their marker syntax (`<!-- security-plan`, `security-plan:`, a `"selection_digest":` key, `security-pairs sha256`,
 `RUN-STATE:BEGIN`/`END`), because real plans use those words in prose. A line that carries a token must parse strictly
@@ -77,8 +80,9 @@ narrative, it must equal the engine's own reading of the raw plan
 (`parsePlanSecurityBlock(plan)`, which cuts at substrings), else `security_block_invalid`. So an event record holding a literal
 marker string refuses whenever it moves the engine's cut; this gate does not rely on the engine's own malformed-RUN-STATE
 check.
-Not caught (read as absent): homoglyphs, combining marks, misspellings, words joined by nothing, and space-joined words
-whose colon is not near them (`Test triggers (tags):`). One well-formed RUN-STATE pair wrapped around narrative still
+Not caught (read as absent): homoglyphs, combining marks, misspellings, words joined by nothing, space-joined words
+whose colon is not near them (`Test triggers (tags):`), and a plan key that does not lead its line (`Note: test-triggers: none`,
+``There is no `test-triggers:` line.``). One well-formed RUN-STATE pair wrapped around narrative still
 hides it (plan trust, S-01b2). The prose scan behind the syntax tokens covered 650 real plans, none opted in: it shows
 the unopted path is stable, not that opted-in plans never refuse prose (the opted-in path is pinned by the tests).
 
