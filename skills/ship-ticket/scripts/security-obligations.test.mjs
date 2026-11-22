@@ -944,9 +944,10 @@ test('[S93] R5 I1: a dangling .git symlink still marks a repository (lstat, not 
 // ====================================================================================================================
 /** A digest-consistent format-3 plan whose surface A sits at `src/__tests__/../auth/orders.ts` (as a hostile planner forges it). */
 function forgedDotPlan() {
-  // selected at a clean path, then moved: the dot path borrows `__tests__` to evade the own-path auth tripwire select would apply
+  // selected at a clean path, then moved to a dot-segment spelling of a path that raises no signal (since the S1 review
+  // repair no name borrows an exemption, so only the dot-segment refusal itself can reject this block)
   const base = ok(OB.sel3(GC, [OB.surf('A', 'request-handler', 'src/lib/orders.ts', ['session_context'], () => 'src/orders.ts:bearerOnly'), KEEP]));
-  const surfaces = base.surfaces.map((s) => (s.boundary_id === 'A' ? { ...s, path: 'src/__tests__/../auth/orders.ts' } : s));
+  const surfaces = base.surfaces.map((s) => (s.boundary_id === 'A' ? { ...s, path: 'src/tmp/../lib/orders.ts' } : s));
   const v3 = { surfaces, pairs: ids(base.pairs), na_pairs: base.na_pairs.map((n) => ({ pair_id: n.pair_id, facts: n.facts, evidence: n.evidence })) };
   const selection_digest = sha(SP.canon({ policy: 3, catalog_digest: base.catalog_digest, facts_digest: base.facts_digest, controls: base.controls.map((c) => c.control_id), ...v3 }));
   return OB.planOf({ ...base, surfaces, selection_digest });
