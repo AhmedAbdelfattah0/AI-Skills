@@ -273,8 +273,8 @@ Write the START only after the narrative is final. Compute `approved_plan_digest
 with `node scripts/brief.mjs plan-digest --plan <plan>` (it prints
 `sha256:<64 hex>`: the digest of the plan with the RUN-STATE body removed), never
 with `shasum` and never over the whole file. A START carries `approved_plan_digest`,
-`approved_at` (not `at`) and `approved_by` (the human approver, never an agent or a
-placeholder). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
+`approved_at` (not `at`) and `approved_by` (the approver, never an agent name or a
+placeholder; start-check refuses only those honest mistakes, it cannot prove a human, and authority is Plan Mode approval plus the digest binding). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
 before dispatching any worker (`--run-id` is required); it refuses a malformed
 RUN-STATE block, a stale or malformed digest, a missing approval time or approver.
 Its `ok` is necessary but not sufficient: it cannot see the engine's trusted-START

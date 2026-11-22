@@ -178,6 +178,13 @@ test('start-check: approved_by placeholders and agent identities are refused, a 
   }
   for (const by of ['Ahmed Abdelfatah', 'Li Na', 'Agent Smith', 'Bot Jones', 'Ana Todorova', 'Ian None']) assert.equal(chk(withStart({ approved_by: by })).ok, true, by);
 });
+test('start-check: approver table (refuse honest mistakes, accept real names; the field cannot prove a human)', () => {
+  const REFUSE = ['agent', 'assistant', 'bot', 'AI', 'ChatGPT', 'chatgpt-5', 'Copilot', 'Gemini', 'subagent', 'orchestration agent',
+    'main session', '-', '?', '\u200b', 'TBD.', 'TBD (pending owner)', 'null', 'owner', 'claude3', 'GPT5', 'ClaudeCode', 'orchestrator'];
+  const ACCEPT = ['Ahmed', 'Li Na', 'Agent Smith', 'Gupta', 'Opal Jones', 'Claudio Ranieri'];
+  for (const by of REFUSE) assert.equal(chk(withStart({ approved_by: by })).ok, false, `refuse: ${JSON.stringify(by)}`);
+  for (const by of ACCEPT) assert.equal(chk(withStart({ approved_by: by })).ok, true, `accept: ${JSON.stringify(by)}`);
+});
 test('start-check: no START, wrong run id, and a missing digest field', () => {
   assert.deepEqual(codes(chk(plan([]))), ['start_missing']);
   assert.deepEqual(codes(chk(withStart(), { runId: 'nope' })), ['start_missing']);
