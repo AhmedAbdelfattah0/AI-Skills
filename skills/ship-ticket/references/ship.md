@@ -76,6 +76,11 @@ concurrently, then join once:
 - the recomputed candidate ID matches the reviewed ID;
 - every candidate path remains inside the Design Contract;
   Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.
+  `CLEAN` covers planned and supporting paths, and supporting paths are outside
+  the Design Contract: they must be listed and accepted by the reviewer, so
+  `CLEAN` alone does not establish this line. On an engine run with security
+  policy 2, reassess reports a supporting path outside the DAG writes as an
+  out-of-plan path (REAPPROVAL).
   The pre-REVIEW run is recorded in the PROVE event as
   `scope: {outcome, material[], record_sha}` (`record_sha` is the sha256 of the
   record it printed), and the PR body lists the supporting and flagged paths.

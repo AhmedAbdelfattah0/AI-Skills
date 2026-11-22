@@ -572,8 +572,18 @@ Every entry is a repository path with no trailing slash that covers itself and
 everything below it. `planned` is the DAG write set in engine mode (globs as the
 DAG carries them) and literal paths in manual mode. `supporting` entries end in
 `tests`, `test`, `__tests__`, `spec`, `e2e`, `fixtures`, `__fixtures__` or `docs`
-and never overlap a planned entry; a file under one counts as supporting only when
-it is a plain file, not a manifest or lockfile, and under `docs` not executable
-source. The mode is part of the approved text: a run whose engine init failed
+and never overlap a planned entry (checked segment by segment, globs included); a
+file under one counts as supporting only when it is a plain, non-executable file
+(git mode not 100755, no `#!` first line), not a manifest or lockfile, and under
+`docs` only documentation or an asset (md, mdx, markdown, txt, rst, adoc, png,
+jpg, jpeg, gif, svg, webp, ico, pdf, csv). Under a tests-class entry any other
+plain file counts as supporting by design and is listed for the reviewer.
+Supporting paths are outside the Design Contract: on an engine run with security
+policy 2 the engine's reassess reports them as out-of-plan paths (REAPPROVAL), so
+put a test directory that will change into the DAG writes; supporting is most
+useful in manual mode. In manual mode `[ ]` and `{ }` are literal characters
+(`app/[id]/page.tsx`); `*` and `?` are refused. Keep the line outside every
+comment and code fence (a line that may be hidden is refused), and CRLF line ends
+are accepted. The mode is part of the approved text: a run whose engine init failed
 stays engine mode until a new plan version with `"mode":"manual"` is re-approved
 through `ExitPlanMode`.

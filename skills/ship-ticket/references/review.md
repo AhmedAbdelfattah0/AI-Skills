@@ -38,7 +38,11 @@ Finish these checks before announcing REVIEW or appending its start event:
   on the candidate before announcing REVIEW (manual flow too) and give the scope
   record to the primary reviewer. It reads only the plan's one `scope-contract:`
   line (see [plan.md](plan.md)), never the Files touched table, and classifies
-  every candidate path as planned, supporting or material. Exit 1 (a material
+  every candidate path as planned, supporting or material. The reviewer reads
+  the raw contract line in the plan and the `contract` field the record prints,
+  and checks every supporting path, which lies outside the Design Contract (on an
+  engine policy-2 run reassess reports it as out-of-plan; supporting is most
+  useful in manual mode). Exit 1 (a material
   path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through
   `ExitPlanMode`. An engine-mode contract always needs `--dag` (`dag_required`),
   also after a failed engine init; a manual-mode contract refuses `--dag` and any

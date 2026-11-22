@@ -14,18 +14,24 @@
  * The contract, one raw narrative line inside the plan digest bound by START:
  *   scope-contract: {"v":1,"mode":"engine","dag":"sha256:<64 hex>","planned":["apps/web","apps/api/src/**\/*.ts"],"supporting":["tests"]}
  *   scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/checkout/page.tsx","src/checkout"],"supporting":["tests"]}
- * Extraction: the narrative (RUN-STATE excluded) split on \n; exactly ONE line starts at column 0 with
- * `scope-contract: `; any OTHER line containing `scope-contract` in any case is `scope_contract_ambiguous` (prose,
- * fence, comment, backticks, list item, indentation, BOM, CR); none is `scope_contract_missing`. The JSON must equal its
- * own canonical form with keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); line
- * <= 8 KiB, planned <= 64, supporting <= 16, entry <= 256 chars. Field rules (`scope_contract_invalid`):
+ * Extraction: the narrative (RUN-STATE excluded) split on \n, one trailing CR stripped where it precedes LF (CRLF
+ * files are accepted; a lone CR is not); exactly ONE line starts at column 0 with `scope-contract: `; any OTHER line
+ * containing `scope-contract` in any case is `scope_contract_ambiguous` (prose, fence, comment, backticks, list item,
+ * indentation, BOM, CR); none is `scope_contract_missing`. A line the rendered plan may hide is `scope_contract_hidden`:
+ * after a raw `<!--` with no `-->` before it, or inside a fence under either a CommonMark-style or a naive toggle
+ * tracker (or where they disagree); fences and comments elsewhere are fine. The JSON must equal its own canonical form
+ * with keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); line <= 8 KiB (64 KiB in
+ * engine mode), planned <= 64 entries of <= 256 chars (engine mode 256 of <= 512), supporting <= 16. Field rules
+ * (`scope_contract_invalid`):
  *  - every entry is a path with no trailing slash covering itself and everything below (the DAG write syntax): the
  *    engine-dag normalRel rule, no control character or line terminator, no duplicate;
- *  - planned: manual mode literal paths only (no * ? [ ] { }) and at least one; engine mode may carry the DAG's
- *    globs; never a wildcard-only first segment; a single-segment entry is allowed and flagged `broad_planned`;
+ *  - planned: manual mode literal paths only (no * or ?; brackets and braces match literally, `app/[id]/page.tsx`)
+ *    and at least one; engine mode may carry the DAG's globs; a single-segment entry or a wildcard-only first segment
+ *    is allowed and flagged `broad_planned` (advisory: the engine DAG is the breadth authority);
  *  - supporting: literal, last segment in the closed set tests, test, __tests__, spec, e2e, fixtures, __fixtures__,
  *    docs; no segment .github, .git, .claude, .ship-ticket, .specs or node_modules; disjoint from planned
- *    (`supporting_overlaps_planned`: no entry equals, contains or lies under a planned entry or its literal prefix).
+ *    (`supporting_overlaps_planned`: segment-wise unification of the planned entry, globs included, against the
+ *    supporting path: no planned entry may cover it, an ancestor of it, or any descendant of it).
  * Mode binding (the approved contract is the authority; the tripwires below only refuse):
  *  - engine: --dag required (`dag_required`, also after a failed engine init); sha of the --dag file equals `dag`
  *    and, when the run has any DAG_BOUND, exactly one DAG_BOUND equal to it (`dag_unbound`); validateEngineDag passes
@@ -33,7 +39,8 @@
  *  - manual: no --dag (`contract_mode_mismatch`); no DAG_BOUND of the run, no <T>.state.json, no <T>.engine.jsonl
  *    (`manual_with_engine_evidence`). Falling back from engine to manual is a new plan version re-approved through
  *    ExitPlanMode (the digest changes). The script cannot prove a ticket is ELEVATED or that the owner understood the
- *    mode; that is the S3c human step.
+ *    mode; that is the S3c human step. The engine archive directory is not a manual tripwire (an archived earlier
+ *    run is not evidence about this one).
  * Steps (any refusal exits 2 and writes no record): approval (the narrative digest equals the last START of the run,
  * `approval_mismatch`), the contract, the mode, then the path set from candidate-id.mjs --base <ref> with exactly the
  * pinned exclusions `.specs/plans/<T>.md` and `session-log.md` (tracked diff against the merge base, no renames, plus
@@ -45,13 +52,20 @@
  *  1. planned: equals an entry (via exact) or lies under one (via directory; engine mode matches every entry `w` as
  *     the engine does, globRe(w) or globRe(w/**), via glob when `w` has * or ?), flag unlisted_under_directory_write;
  *  2. supporting: under a supporting entry, kind `file` (never a symlink, deletion or submodule), not a manifest or
- *     lockfile, and under a `docs` entry not an executable-source extension (else material, flag docs_executable);
+ *     lockfile, not git mode 100755 (flag executable_mode), not starting with `#!` (flag shebang), and under a `docs`
+ *     entry only a documentation or asset extension (md, mdx, markdown, txt, rst, adoc, png, jpg, jpeg, gif, svg,
+ *     webp, ico, pdf, csv; anything else, json/yaml/toml and extensionless files included, flag docs_not_allowlisted).
+ *     Under a tests-class entry any other plain file is supporting by the owner-approved design (D1): production code
+ *     placed in a tests-named directory is classified supporting and listed for the reviewer;
  *  3. material: anything else.
  * Advisory flags never change the exit code: case_alias, symlink, symlink_target_outside_contract, submodule,
- * deleted, dependency_manifest, unlisted_under_directory_write, broad_planned, line_terminator, docs_executable,
- * under_exclusion_file. A planned path always matches the engine's Design Contract (designContract + security-plan.mjs
- * globRe), pinned by the property test; supporting paths are outside the DAG writes by design and are listed in the
- * record and the PR body for review.
+ * deleted, dependency_manifest, unlisted_under_directory_write, broad_planned, line_terminator, executable_mode,
+ * shebang, docs_not_allowlisted, under_exclusion_file. A planned path always matches the engine's Design Contract
+ * (designContract + security-plan.mjs globRe), pinned by the property test. Supporting paths are OUTSIDE the Design
+ * Contract: CLEAN alone does not establish that every candidate path is inside it. They are listed in the record and
+ * the PR body for the reviewer; on an engine policy-2 run the engine's reassess flags them as out-of-plan-path
+ * (REAPPROVAL), so engine-run authors put test directories that will change into the DAG writes. Supporting is most
+ * useful in manual mode. The record carries the approved contract line (`contract`) for the reviewer.
  *
  * What it proves: the candidate's path set (the set the candidate ID hashes) against the approved contract. What it
  * does not prove: behaviour inside a planned file (a new route inside page.tsx is reassess's new-route signal).
@@ -66,10 +80,10 @@
  * **Exit 0 is never a commit or freeze permission.**
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readlinkSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { readFileSync, readlinkSync, realpathSync, existsSync, lstatSync, openSync, readSync, closeSync } from 'node:fs';
 import { resolve, dirname, basename, isAbsolute, join, relative, sep, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { under, overlap, validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
+import { validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
 import { parseRunState, malformedReason } from './run-state.mjs';
 import { gitPath, writeStateAtomic } from './lib/durable-io.mjs';
 import { isEntrypoint } from './harness.mjs';
@@ -84,7 +98,8 @@ const KEYS = 'v,mode,dag,planned,supporting';
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 export const SUPPORTING_SEGMENTS = Object.freeze(['tests', 'test', '__tests__', 'spec', 'e2e', 'fixtures', '__fixtures__', 'docs']);
 const FORBIDDEN_SEGMENTS = ['.github', '.git', '.claude', '.ship-ticket', '.specs', 'node_modules'];
-const DOCS_EXECUTABLE = /\.(js|mjs|cjs|ts|tsx|jsx|py|rb|php|go|java|cs|sh|sql)$/i;
+/** Files a `docs` supporting entry may hold as supporting: documentation and static assets only (closed allowlist). */
+const DOCS_ALLOWED = /\.(md|mdx|markdown|txt|rst|adoc|png|jpg|jpeg|gif|svg|webp|ico|pdf|csv)$/i;
 const USAGE = 'Usage: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]\n'
   + '       check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...';
 
@@ -120,6 +135,30 @@ function engineMatcher(entries) {
 }
 const literalMatcher = (entries) => (p) => entries.find(w => p === w || p.startsWith(w + '/'));
 const hasGlob = (w) => /[*?]/.test(w);
+/** A planned entry is broad when it has one segment or a wildcard-only first segment (advisory; the DAG is the engine's breadth authority). */
+const isBroad = (w) => !w.includes('/') || /^\*+$/.test(w.split('/')[0]);
+
+/**
+ * Whether planned entry `p` (literal or engine glob) and supporting entry `s` (literal) can cover a common path:
+ * segment-wise unification, `**` (or any segment containing it, an over-approximation) matching zero or more
+ * segments and every other segment matched by the engine's globRe. True when p covers `s` or an ancestor of it
+ * (p exhausted first: p/** covers the rest) or when p's leading segments unify with all of `s` (s exhausted first:
+ * some descendant of s satisfies the remaining segments). Pinned against brute-force enumeration by a property test.
+ */
+export function globOverlaps(p, s) {
+  const P = p.split('/'), T = s.split('/');
+  const seg = P.map(x => (x.includes('**') ? null : globRe(x)));
+  const memo = new Map();
+  const m = (i, j) => {
+    if (i === P.length || j === T.length) return true;
+    const k = i * 1024 + j;
+    if (memo.has(k)) return memo.get(k);
+    const r = seg[i] === null ? m(i + 1, j) || m(i, j + 1) : seg[i].test(T[j]) && m(i + 1, j + 1);
+    memo.set(k, r);
+    return r;
+  };
+  return m(0, 0);
+}
 
 const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
   'bun.lock', 'bun.lockb', '.npmrc', '.yarnrc', '.yarnrc.yml', 'deno.json', 'deno.jsonc', 'deno.lock', 'Cargo.toml', 'Cargo.lock',
@@ -144,46 +183,74 @@ export function validateContract(c) {
   if (c.v !== 1) invalid('v must be 1');
   if (c.mode !== 'engine' && c.mode !== 'manual') invalid('mode must be "engine" or "manual"');
   if (c.mode === 'engine' ? !(typeof c.dag === 'string' && DIGEST.test(c.dag)) : c.dag !== null) invalid('dag must be sha256:<64 hex> in engine mode and null in manual mode');
-  const list = (name, max) => {
+  const engine = c.mode === 'engine';
+  const list = (name, max, len) => {
     const v = c[name];
     if (!Array.isArray(v) || v.length > max || !v.every(e => typeof e === 'string')) invalid(`${name} must be an array of at most ${max} strings`);
     if (new Set(v).size !== v.length) invalid(`${name} holds a duplicate entry`);
     for (const e of v) {
-      if (e.length > 256 || CONTROL.test(e) || !normalRel(e)) invalid(`${name} entry ${JSON.stringify(e)} is not a normalized repository path (no trailing slash, no . or .., no backslash, no control character)`);
+      if (e.length > len || CONTROL.test(e) || !normalRel(e)) invalid(`${name} entry ${JSON.stringify(e)} is not a normalized repository path (no trailing slash, no . or .., no backslash, no control character)`);
     }
     return v;
   };
-  const planned = list('planned', 64), supporting = list('supporting', 16);
-  if (c.mode === 'manual' && !planned.length) invalid('a manual-mode contract plans at least one path');
+  const planned = engine ? list('planned', 256, 512) : list('planned', 64, 256), supporting = list('supporting', 16, 256);
+  if (!engine && !planned.length) invalid('a manual-mode contract plans at least one path');
   for (const p of planned) {
-    if (c.mode === 'manual' && /[*?[\]{}]/.test(p)) invalid(`manual-mode planned entry ${JSON.stringify(p)} carries glob syntax (literal paths only)`);
-    if (/^\*+$/.test(p.split('/')[0])) invalid(`planned entry ${JSON.stringify(p)} has a wildcard-only first segment`);
+    if (!engine && hasGlob(p)) invalid(`manual-mode planned entry ${JSON.stringify(p)} carries * or ? (literal paths only; brackets and braces are literal)`);
   }
   for (const s of supporting) {
     const segs = s.split('/');
-    if (/[*?[\]{}]/.test(s)) invalid(`supporting entry ${JSON.stringify(s)} carries glob syntax`);
+    if (hasGlob(s)) invalid(`supporting entry ${JSON.stringify(s)} carries * or ?`);
     if (!SUPPORTING_SEGMENTS.includes(segs.at(-1))) invalid(`supporting entry ${JSON.stringify(s)} must end in one of ${SUPPORTING_SEGMENTS.join(', ')}`);
     if (segs.some(x => FORBIDDEN_SEGMENTS.includes(x))) invalid(`supporting entry ${JSON.stringify(s)} lies under ${FORBIDDEN_SEGMENTS.join(', ')}`);
     if (isManifest(s)) invalid(`supporting entry ${JSON.stringify(s)} is a manifest`);
-    const match = c.mode === 'engine' ? engineMatcher(planned) : literalMatcher(planned);
     for (const p of planned) {
-      const segsP = p.split('/'), firstGlob = segsP.findIndex(hasGlob);
-      const prefix = firstGlob < 0 ? p : segsP.slice(0, firstGlob).join('/');
-      if (overlap(s, p) || (prefix && overlap(s, prefix)) || match(s)) refuse('supporting_overlaps_planned', `supporting entry ${JSON.stringify(s)} overlaps planned entry ${JSON.stringify(p)}`);
+      if (globOverlaps(p, s)) refuse('supporting_overlaps_planned', `supporting entry ${JSON.stringify(s)} overlaps planned entry ${JSON.stringify(p)}`);
     }
   }
   return c;
 }
 
+/**
+ * Refuse `scope_contract_hidden` when the rendered plan may not show the contract line at index `at` (fail closed, no
+ * Markdown renderer): (a) a raw `<!--` before it with no `-->` after that opener and before the line; (b) the line is
+ * inside a fence under EITHER a CommonMark-style tracker (opener of >= 3 backticks or tildes after <= 3 spaces, a
+ * backtick info string without a backtick; closer of the same character, at least as long, nothing but whitespace)
+ * OR a naive tracker where every line starting (after any indentation) with ``` or ~~~ toggles. Either saying
+ * in-fence, or the two disagreeing, refuses. Only the contract line's own position matters.
+ */
+function hiddenCheck(lines, at) {
+  const before = lines.slice(0, at).join('\n');
+  const open = before.lastIndexOf('<!--');
+  if (open >= 0 && before.indexOf('-->', open + 4) < 0) refuse('scope_contract_hidden', 'the scope-contract line lies inside (or after an unterminated) <!-- comment; the approver would not see it');
+  let fence = null, naive = false;
+  for (const l of lines.slice(0, at)) {
+    if (/^\s*(```|~~~)/.test(l)) naive = !naive;
+    if (fence) {
+      const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(l);
+      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
+      continue;
+    }
+    const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
+    if (o && !(o[1][0] === '`' && o[2].includes('`'))) fence = { ch: o[1][0], len: o[1].length };
+  }
+  if (fence || naive) refuse('scope_contract_hidden', `the scope-contract line may lie inside a code fence (${fence ? 'open fence' : 'fence lines do not pair'}); move it outside every fence`);
+}
+
 /** The plan's one `scope-contract:` line, parsed, canonical and validated; refuses (exit 2) otherwise. */
 export function parseContract(text) {
-  const lines = narrativeOf(text).split('\n');
+  // One trailing CR is stripped only where it precedes LF (CRLF line ends); a lone CR anywhere else stays and refuses.
+  const raw = narrativeOf(text).split('\n');
+  const lines = raw.map((l, i) => (i < raw.length - 1 && l.endsWith('\r') ? l.slice(0, -1) : l));
   const found = lines.filter(l => l.startsWith(KEY));
   const mentions = lines.filter(l => !l.startsWith(KEY) && /scope-contract/i.test(l));
   if (mentions.length || found.length > 1) refuse('scope_contract_ambiguous', `the plan must hold exactly one scope-contract line and mention the key nowhere else (${found.length} line(s), ${mentions.length} other mention(s))`);
   if (!found.length) refuse('scope_contract_missing', 'the plan has no `scope-contract: {...}` line');
   const line = found[0];
-  if (Buffer.byteLength(line) > 8192) refuse('scope_contract_noncanonical', 'the scope-contract line exceeds 8 KiB');
+  hiddenCheck(lines, lines.indexOf(line));
+  if (Buffer.byteLength(line) > 65536 || (!line.startsWith(KEY + '{"v":1,"mode":"engine"') && Buffer.byteLength(line) > 8192)) {
+    refuse('scope_contract_noncanonical', 'the scope-contract line exceeds 8 KiB (64 KiB in engine mode)');
+  }
   const json = line.slice(KEY.length);
   let c;
   try { c = JSON.parse(json); } catch { refuse('scope_contract_noncanonical', 'the scope-contract value is not JSON'); }
@@ -192,6 +259,9 @@ export function parseContract(text) {
   }
   return validateContract(c);
 }
+
+/** The contract's own canonical line (as approved, arrays in their approved order), printed in the record for the reviewer. */
+const contractText = (c) => KEY + JSON.stringify({ v: c.v, mode: c.mode, dag: c.dag, planned: c.planned, supporting: c.supporting });
 
 /** The canonical contract line for `c` (keys in order, arrays sorted), validated. */
 export function contractLine(c) {
@@ -214,11 +284,12 @@ function linkTarget(p, target) {
  * Classify candidate entries [{ path, kind }] against a contract's mode, planned and supporting entries (see the
  * header for the rules). `readlink(path)` returns a symlink's link text. Returns [{ path, kind, class, via, flags }].
  */
-export function classify(entries, { mode, planned, supporting, readlink }) {
+export function classify(entries, { mode, planned, supporting, readlink, readHead = () => '' }) {
   const make = mode === 'engine' ? engineMatcher : literalMatcher;
   const match = make(planned), lower = make(planned.map(p => p.toLowerCase()));
   const supportMatch = literalMatcher(supporting);
-  return entries.map(({ path, kind }) => {
+  const self = mode === 'engine' ? planned.map(w => [w, globRe(w)]) : [];
+  return entries.map(({ path, kind, mode: gitMode }) => {
     const flags = [];
     if (kind === 'symlink') {
       flags.push('symlink');
@@ -237,12 +308,17 @@ export function classify(entries, { mode, planned, supporting, readlink }) {
     else if (root === path) { cls = 'planned'; via = 'exact'; }
     else if (root !== undefined) {
       cls = 'planned'; via = mode === 'engine' && hasGlob(root) ? 'glob' : 'directory';
-      flags.push('unlisted_under_directory_write');
-      if (!root.includes('/')) flags.push('broad_planned');
+      // a glob entry that matches the path itself lists it; only coverage from below is unlisted
+      if (!(via === 'glob' && self.some(([w, re]) => w === root && re.test(path)))) flags.push('unlisted_under_directory_write');
+      if (isBroad(root)) flags.push('broad_planned');
     } else if (support !== undefined) {
       if (kind === 'file' && !manifest) {
-        if (support.split('/').at(-1) === 'docs' && DOCS_EXECUTABLE.test(path)) flags.push('docs_executable');
-        else { cls = 'supporting'; via = 'supporting'; }
+        if (gitMode === '100755') flags.push('executable_mode');
+        let head = '';
+        try { head = String(readHead(path) ?? ''); } catch { head = '#!'; /* unreadable: fail closed */ }
+        if (head.startsWith('#!')) flags.push('shebang');
+        if (support.split('/').at(-1) === 'docs' && !DOCS_ALLOWED.test(path)) flags.push('docs_not_allowlisted');
+        if (!flags.some(x => ['executable_mode', 'shebang', 'docs_not_allowlisted'].includes(x))) { cls = 'supporting'; via = 'supporting'; }
       }
     } else if (lower(path.toLowerCase())) flags.push('case_alias');
     return { path, kind, class: cls, via, flags };
@@ -336,7 +412,8 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   let cand;
   try { cand = JSON.parse(r.stdout); } catch { gitFail('candidate_id_failed', 'candidate-id printed no JSON'); }
   const top = git(repo, ['rev-parse', '--show-toplevel']);
-  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind })), { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: (p) => readlinkSync(join(top, p)) });
+  const readHead = (p) => { const fd = openSync(join(top, p), 'r'); try { const b = Buffer.alloc(2); return b.subarray(0, readSync(fd, b, 0, 2, 0)).toString('latin1'); } finally { closeSync(fd); } };
+  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind, mode: p.mode })), { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: (p) => readlinkSync(join(top, p)), readHead });
   // candidate-id excludes by prefix, so a path below an exclusion FILE (session-log.md/x, the plan path used as a
   // directory) is missing from its set; enumerate the same way (tracked diff + untracked, non-ignored) and flag it.
   const changed = [...gitZ(top, ['diff', '--name-only', '-z', '--no-renames', cand.merge_base, '--']),
@@ -349,7 +426,7 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   const counts = { planned: count('planned'), supporting: count('supporting'), material: count('material'), total: files.length };
   const record = { schema: SCHEMA, ticket, run_id: runId, base, merge_base: cand.merge_base, candidate_id: cand.candidate_id,
     approved_plan_digest: approved.digest, mode: c.mode, dag_digest: c.dag, roots: [...c.planned].sort(), supporting: [...c.supporting].sort(),
-    broad_planned: c.planned.filter(p => !p.includes('/')).sort(), exclusions, files, counts, outcome: counts.material ? 'MATERIAL' : 'CLEAN' };
+    broad_planned: c.planned.filter(isBroad).sort(), contract: contractText(c), exclusions, files, counts, outcome: counts.material ? 'MATERIAL' : 'CLEAN' };
   return { exit: counts.material ? 1 : 0, record, text: JSON.stringify(record, null, 1) + '\n' };
 }
 

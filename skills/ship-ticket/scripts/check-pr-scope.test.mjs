@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, symlinkSync, lstatSync, unlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, symlinkSync, lstatSync, unlinkSync, realpathSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { planNarrativeDigest, under, validateEngineDag, sha } from './engine-dag.mjs';
 import { designContract } from './engine-gates.mjs';
 import * as S from './check-pr-scope.mjs';
+import { WORKER_FAILURE_BOUND_MS } from './test-wait.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'check-pr-scope.mjs');
@@ -66,7 +67,7 @@ function planText(narrativeBody, { events = [], startOver = {} } = {}) {
 }
 function writePlan(r, body, opts) { r.write(PLAN_REL, planText(body, opts)); return join(r.dir, PLAN_REL); }
 
-const DAG = (writes) => ({ schema: 'ship-ticket-engine-dag-v1', config: { provider: 'claude', timeoutMs: 1000 },
+const DAG = (writes) => ({ schema: 'ship-ticket-engine-dag-v1', config: { provider: 'claude', timeoutMs: WORKER_FAILURE_BOUND_MS },
   nodes: writes.map((w, i) => ({ id: `n${i}`, promptFile: '/p', writes: w })) });
 /** A DAG file in the git dir; returns { file, raw, digest }. */
 function dagFile(r, writes, name = 'run.dag.json') {
@@ -223,8 +224,27 @@ test('supporting is per file: a manifest under tests and an executable under doc
   assert.deepEqual(f['tests/fixtures/app/package-lock.json'], { path: 'tests/fixtures/app/package-lock.json', kind: 'file', class: 'material', via: null, flags: ['dependency_manifest'] });
   assert.equal(f['tests/fixtures/app/data.json'].class, 'supporting');
   assert.equal(f['docs/guide.md'].class, 'supporting');
-  assert.deepEqual(f['docs/tool.mjs'], { path: 'docs/tool.mjs', kind: 'file', class: 'material', via: null, flags: ['docs_executable'] });
+  assert.deepEqual(f['docs/tool.mjs'], { path: 'docs/tool.mjs', kind: 'file', class: 'material', via: null, flags: ['docs_not_allowlisted'] });
   assert.equal(f['src/api/route.ts'].class, 'material');
+});
+
+test('supporting laundering: docs is a closed allowlist; exec mode or a shebang is material under any supporting entry', (t) => {
+  const r = repo(t);
+  writePlan(r, contract({ planned: ['src/checkout'], supporting: ['tests', 'docs'] }));
+  for (const p of ['docs/build.mts', 'docs/x.ps1', 'docs/x.html', 'docs/widget.vue', 'docs/config.json', 'docs/c.yaml', 'docs/run']) r.write(p);
+  r.write('docs/deploy', '#!/bin/sh\necho hi\n');
+  r.write('docs/guide.md'); r.write('docs/img.png'); r.write('docs/data.csv');
+  r.write('tests/helper.ts'); r.write('tests/run.sh', 'echo\n'); r.write('tests/tool.py', '#!/usr/bin/env python3\nprint(1)\n');
+  chmodSync(join(r.dir, 'tests/run.sh'), 0o755);
+  const f = byPath(run(r).json);
+  for (const p of ['docs/build.mts', 'docs/x.ps1', 'docs/x.html', 'docs/widget.vue', 'docs/config.json', 'docs/c.yaml', 'docs/run', 'docs/deploy']) {
+    assert.equal(f[p].class, 'material', p);
+    assert.ok(f[p].flags.includes('docs_not_allowlisted'), p);
+  }
+  assert.ok(f['docs/deploy'].flags.includes('shebang'));
+  for (const p of ['docs/guide.md', 'docs/img.png', 'docs/data.csv', 'tests/helper.ts']) assert.equal(f[p].class, 'supporting', p);
+  assert.deepEqual([f['tests/tool.py'].class, f['tests/tool.py'].flags], ['material', ['shebang']]);
+  if (statSync(join(r.dir, 'tests/run.sh')).mode & 0o111) assert.deepEqual([f['tests/run.sh'].class, f['tests/run.sh'].flags], ['material', ['executable_mode']]);
 });
 
 test('the classifier: planned before supporting; a line terminator fails closed to material', () => {
@@ -254,7 +274,7 @@ test('engine mode: planned equals the DAG writes, glob writes are classified as 
   const out = run(r, ['--dag', d.file]);
   assert.equal(out.status, 1, out.stderr + out.stdout);
   const f = byPath(out.json);
-  assert.deepEqual(f['apps/api/src/x/y.ts'], { path: 'apps/api/src/x/y.ts', kind: 'file', class: 'planned', via: 'glob', flags: ['unlisted_under_directory_write'] });
+  assert.deepEqual(f['apps/api/src/x/y.ts'], { path: 'apps/api/src/x/y.ts', kind: 'file', class: 'planned', via: 'glob', flags: [] }); // listed by the glob itself
   assert.equal(f['apps/api/src/y.ts'].class, 'planned');
   assert.deepEqual(f['apps/api/src/x/y.js'], { path: 'apps/api/src/x/y.js', kind: 'file', class: 'material', via: null, flags: [] });
   assert.equal(f['apps/web/a.ts'].via, 'directory');
@@ -412,18 +432,22 @@ for (const [name, body, code] of [
   ['a supporting glob', contract({ planned: ['src/a.ts'], supporting: ['*/tests'] }), 'scope_contract_invalid'],
   ['supporting inside planned', contract({ planned: ['src'], supporting: ['src/tests'] }), 'supporting_overlaps_planned'],
   ['planned inside supporting', contract({ planned: ['tests/helpers.ts'], supporting: ['tests'] }), 'supporting_overlaps_planned'],
-  ['a wildcard-only first segment (engine)', null, 'scope_contract_invalid'],
+  // review repair: a contract line the rendered plan may hide (raw comment span, fence under either tracker)
+  ['a contract inside a comment span (Codex)', `${TABLE}\n\n<!--\n${contract(good)}\n-->`, 'scope_contract_hidden'],
+  ['a contract after an unterminated comment', `<!-- note\n\n${contract(good)}`, 'scope_contract_hidden'],
+  ['a contract after a comment opened mid-line', `text <!-- hidden\n${contract(good)}\nend -->`, 'scope_contract_hidden'],
+  ['a contract inside a backtick fence', `\`\`\`\n${contract(good)}\n\`\`\``, 'scope_contract_hidden'],
+  ['a contract inside a tilde fence', `~~~\n${contract(good)}\n~~~`, 'scope_contract_hidden'],
+  ['a 4-backtick fence closed by 3 backticks (trackers disagree)', `\`\`\`\`\n\`\`\`\n${contract(good)}\n\`\`\`\``, 'scope_contract_hidden'],
+  ['a list-contained fence', `- step\n  \`\`\`\n${contract(good)}\n  \`\`\``, 'scope_contract_hidden'],
+  ['a deeply indented list fence (naive tracker only)', `- step\n    - sub\n        \`\`\`\n${contract(good)}\n        \`\`\``, 'scope_contract_hidden'],
+  ['an unterminated fence before the contract', `\`\`\`js\ncode\n\n${contract(good)}`, 'scope_contract_hidden'],
 ]) {
   test(`refused, exit 2, no record: ${name}`, (t) => {
     const r = repo(t);
-    let extra = [];
-    if (body === null) {
-      const d = dagFile(r, [['**/x.ts']]);
-      writePlan(r, contract({ mode: 'engine', dag: d.digest, planned: ['**/x.ts'] }));
-      extra = ['--dag', d.file];
-    } else writePlan(r, body);
+    writePlan(r, body);
     r.write('src/a.ts');
-    const out = run(r, extra);
+    const out = run(r);
     assert.equal(out.status, 2, out.stdout + out.stderr);
     assert.match(out.stderr, new RegExp(code));
     assert.equal(existsSync(defaultOut(r)), false);
@@ -437,12 +461,80 @@ test('overlap with an engine glob: a supporting entry matched by a planned glob 
   assert.throws(eng(['apps/**/x.ts'], ['apps/tests']), overlaps, 'under the literal prefix of the planned glob');
   assert.throws(eng(['apps/web'], ['apps/web/tests']), overlaps, 'literal');
   assert.doesNotThrow(eng(['apps/api/src/**/*.ts', 'apps/web'], ['tests', 'docs']));
+  // review repair corpus: segment-wise unification (Codex M3 first)
+  for (const [planned, supporting] of [['a*/tests/x.ts', 'ab/tests'], ['**/x.ts', 'tests'], ['src/*/tests', 'src/a/tests'], ['apps/**', 'apps/web/tests'],
+    ['**', 'docs'], ['?b/tests', 'ab/tests'], ['a*', 'ab/tests'], ['src/**/x', 'src/a/b/tests'], ['*/*/q.ts', 'a/tests']]) {
+    assert.throws(eng([planned], [supporting]), overlaps, `${planned} vs ${supporting}`);
+  }
+  for (const [planned, supporting] of [['src/*.ts', 'tests'], ['apps/**/x.ts', 'tests'], ['a*/x', 'b/tests'], ['src/?/q', 'src/ab/tests'], ['x/**/y', 'z/tests']]) {
+    assert.doesNotThrow(eng([planned], [supporting]), `${planned} vs ${supporting}`);
+  }
 });
 
-test('CRLF, a lone CR or a NUL never produce an accepted declaration', () => {
+test('property: glob disjointness agrees with brute-force enumeration over a small path alphabet', () => {
+  const real = engineGlobRe();
+  const rand = rng(99);
+  const SEG = ['a', 'b', 'ab', 'tests', 'x.ts'];
+  const PSEG = [...SEG, '*', 'a*', '?b', '**', '*.ts'];
+  const pick = (xs) => xs[Math.floor(rand() * xs.length)];
+  const ext = (n) => n === 0 ? [[]] : ext(n - 1).flatMap((e) => [[], ...SEG.map((x) => [...e, x])]);
+  const EXT = [...new Set(ext(3).map((e) => e.join('/')))].map((e) => (e ? e.split('/') : []));
+  let both = 0, neither = 0;
+  for (let i = 0; i < 1500; i++) {
+    const p = Array.from({ length: 1 + Math.floor(rand() * 3) }, () => pick(PSEG)).join('/');
+    const s = [...Array.from({ length: Math.floor(rand() * 2) }, () => pick(SEG)), 'tests'].join('/');
+    const match = (q) => real(p).test(q) || real(`${p}/**`).test(q);
+    const brute = EXT.some((e) => match([s, ...e].join('/')));
+    const unified = S.globOverlaps(p, s);
+    assert.equal(unified, brute, `${p} vs ${s}`);
+    if (brute) both++; else neither++;
+  }
+  assert.ok(both > 200 && neither > 200, `overlapping ${both}, disjoint ${neither}`);
+});
+
+test('engine breadth is advisory: a wildcard-only first segment is accepted and flagged; engine caps are wider than manual', (t) => {
+  const r = repo(t);
+  const d = dagFile(r, [['**/x.test.ts']]);
+  writePlan(r, contract({ mode: 'engine', dag: d.digest, planned: ['**/x.test.ts'] }));
+  r.write('src/a/x.test.ts');
+  const out = run(r, ['--dag', d.file]);
+  assert.equal(out.status, 0, out.stderr + out.stdout);
+  assert.deepEqual(byPath(out.json)['src/a/x.test.ts'].flags, ['broad_planned']);
+  assert.deepEqual(out.json.broad_planned, ['**/x.test.ts']);
+  const v = (mode, planned) => () => S.validateContract({ v: 1, mode, dag: mode === 'engine' ? sha('d') : null, planned, supporting: [] });
+  const many = (n) => Array.from({ length: n }, (_, i) => `src/p${i}`);
+  assert.doesNotThrow(v('engine', many(256)));
+  assert.throws(v('engine', many(257)), (e) => e.code === 'scope_contract_invalid');
+  assert.throws(v('manual', many(65)), (e) => e.code === 'scope_contract_invalid');
+  assert.doesNotThrow(v('engine', [`src/${'a'.repeat(500)}`]));
+  assert.throws(v('engine', [`src/${'a'.repeat(510)}`]), (e) => e.code === 'scope_contract_invalid');
+  assert.throws(v('manual', [`src/${'a'.repeat(300)}`]), (e) => e.code === 'scope_contract_invalid');
+  assert.doesNotThrow(() => S.parseContract(planText(contract({ mode: 'engine', dag: sha('d'), planned: many(256).map((p) => `${p}/${'q'.repeat(40)}`) }))), 'a 64 KiB engine line');
+});
+
+test('manual mode matches brackets and braces literally; * and ? stay refused', (t) => {
+  const r = repo(t);
+  writePlan(r, contract({ planned: ['app/[id]/page.tsx', 'app/{x}'] }));
+  r.write('app/[id]/page.tsx');
+  r.write('app/{x}/a.ts');
+  r.write('app/i/page.tsx');
+  const f = byPath(run(r).json);
+  assert.equal(f['app/[id]/page.tsx'].via, 'exact');
+  assert.equal(f['app/{x}/a.ts'].class, 'planned');
+  assert.equal(f['app/i/page.tsx'].class, 'material');
+  for (const g of ['src/*.ts', 'src/a?.ts']) assert.throws(() => S.validateContract({ v: 1, mode: 'manual', dag: null, planned: [g], supporting: [] }), (e) => e.code === 'scope_contract_invalid', g);
+});
+
+test('benign plans stay valid: closed fences and comments elsewhere, CRLF line ends', () => {
+  const body = `<!-- a note -->\n\`\`\`js\nconst x = 1;\n\`\`\`\n\n\`\`\`\`md\n\`\`\`\ninner\n\`\`\`\n\`\`\`\`\n~~~\nt\n~~~\n\n${contract(good)}\n\n\`\`\`\nafter\n\`\`\``;
+  assert.doesNotThrow(() => S.parseContract(planText(body)));
+  assert.doesNotThrow(() => S.parseContract(planText(contract(good)).replace(/\n/g, '\r\n')), 'CRLF: one trailing CR before LF is stripped');
+});
+
+test('a lone CR or a NUL never produce an accepted declaration (CRLF line ends are accepted)', () => {
   const ok = planText(contract(good));
   assert.doesNotThrow(() => S.parseContract(ok));
-  for (const bad of [ok.replace(/\n/g, '\r\n'), ok.replace(contract(good), `\r${contract(good)}`), ok.replace('"v":1', `"v":1${NUL}`)]) {
+  for (const bad of [ok.replace(contract(good), `\r${contract(good)}`), ok.replace(contract(good), `${contract(good).replace('"v":1,', '"v":1,\r')}`), ok.replace(`${contract(good)}\n`, `${contract(good)}\r\r\n`), ok.replace('"v":1', `"v":1${NUL}`)]) {
     assert.throws(() => S.parseContract(bad), (e) => e.exit === 2);
   }
 });
@@ -676,6 +768,9 @@ test('S6 and F11 wording pins', () => {
   assert.ok(ship.includes('`scope: {outcome, material[], record_sha}`'));
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
   assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
+  assert.ok(ship.includes('`CLEAN` alone does not establish this line'));
+  assert.ok(review.includes('The reviewer reads the raw contract line in the plan and the `contract` field the record prints'));
+  assert.ok(plan.includes('Supporting paths are outside the Design Contract'));
   assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
   for (const t of [plan, review, ship]) assert.ok(!/\bspecialists?\b/i.test(t));
 });
