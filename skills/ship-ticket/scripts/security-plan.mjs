@@ -396,6 +396,8 @@ export function citationProblem(e) {
  * At plan time (init, preflight) a cited path under one of `pending` (the DAG nodes' writes: a file the change will
  * create) is deferred; gate review checks it with no pending set. An unreadable root, a missing or non-file path, or a
  * missing symbol -> citation_missing (fail closed). A format-2 block has no surface facts: nothing to check.
+ * X1 (closes L1): the path of every surface that LOWERS a fact must also be one exact repository file in `root`
+ * (surfaceFileProblem); at plan time a missing one under a `pending` write is deferred, at the gates nothing is.
  */
 export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = {}) {
   return asResult(() => {
@@ -433,6 +435,12 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
       if (sym !== null && !hasIdentifier(text, sym)) { bad.push(`${c}: ${path} does not contain the identifier ${JSON.stringify(sym)}`); continue; }
       checked.push(c);
     }
+    for (const s of block.surfaces.filter((x) => isObj(x.facts))) {
+      const p = normPath(s.path), rule = surfacePathRule(p);
+      const why = rule ? `is not one repository file path (${rule})` : surfaceFileProblem(gitBin, root, p);
+      if (why === MISSING && under(p)) continue; // plan time only: a file a DAG node will create (the gates pass no pending)
+      if (why !== null) bad.push(`surface ${s.boundary_id} path ${p}: ${why === MISSING ? `does not exist in ${root}` : why}`);
+    }
     if (bad.length) refuse('citation_missing', ...bad);
     return { ok: true, code: 'citations_verified', reasons: [], checked };
   });
@@ -445,13 +453,63 @@ export function verifyCitations(block, { root, pending = [], gitBin = 'git' } = 
  * Every inherited GIT_* variable is dropped first, so GIT_DIR / GIT_WORK_TREE never redirect it.
  */
 function ignoredState(gitBin, root, path) {
-  // R5 L1: inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE, ...) would point git at another repository: drop them all.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+  const env = gitEnv();
   const r = spawnSync(gitBin, ['check-ignore', '-q', '--', path], { cwd: root, env, stdio: 'ignore', timeout: 15000 });
   if (r.status === 0) return 'ignored';
   if (r.status === 1) return 'not-ignored';
   if (r.status === 128 && !insideRepository(root)) return 'not-ignored';
   return 'unknown';
+}
+
+/** R5 L1: the environment of every git call here: inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE, ...) would point git at another repository, so all are dropped. */
+const gitEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+
+/**
+ * X1: `path` in the repository at `root`, each answer an exact entry of `git ls-files -z`: 'tracked' (--cached), 'untracked'
+ * (--others), 'unlisted' (neither: the index holds it under another spelling on a case-insensitive file system, or it sits
+ * in a nested repository), or 'unknown' (no repository, no git, a timeout, any failure).
+ */
+function trackedState(gitBin, root, path) {
+  const list = (which) => {
+    const r = spawnSync(gitBin, ['ls-files', '-z', which, '--', `:(literal)${path}`], { cwd: root, env: gitEnv(), encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 });
+    return r.error || r.status !== 0 ? null : r.stdout.split('\0');
+  };
+  const cached = list('--cached'), others = cached && !cached.includes(path) ? list('--others') : [];
+  if (cached === null || others === null) return 'unknown';
+  return cached.includes(path) ? 'tracked' : others.includes(path) ? 'untracked' : 'unlisted';
+}
+
+/** X1: the syntactic rule for the path of a surface that lowers a fact: the citation path rule (citationProblem) with no `:symbol`. Null when it holds. */
+const surfacePathRule = (p) => (String(p).includes(':') ? 'a path:symbol string, not a file path' : citationProblem(String(p)));
+
+const MISSING = Symbol('missing');
+/**
+ * X1 (closes L1): whether `path` names one exact repository file in `root`. Null when every segment exists with exactly
+ * that case (exactCase), no component below `root` is a symlink (lstat of each), the leaf is a regular file, and it is
+ * tracked or untracked as git lists it (trackedState) and, untracked, not ignored (ignoredState). MISSING when no entry has that exact spelling (the
+ * caller defers it under a DAG write at plan time only; a case alias or a dangling link is never missing). Else the
+ * reason: no repository, no git or a git failure is one (fail closed). Every git call drops the GIT_* variables.
+ */
+function surfaceFileProblem(gitBin, root, path) {
+  const segs = path.split('/');
+  let dir = root;
+  try {
+    for (let i = 0; i < segs.length; i++) {
+      const at = segs.slice(0, i + 1).join('/');
+      if (!exactCase(dir, segs[i])) return readdirSync(dir).some((n) => n.toLowerCase() === segs[i].toLowerCase()) ? `${at} differs only in letter case from the entry in the tree (a case alias)` : MISSING;
+      dir = join(dir, segs[i]);
+      const st = lstatSync(dir);
+      if (st.isSymbolicLink()) return `${at} is a symlink (no symlink may sit on a lowering surface's path)`;
+      if (i < segs.length - 1 && !st.isDirectory()) return `${at} is not a directory`;
+      if (i === segs.length - 1 && !st.isFile()) return 'is not a regular file';
+    }
+  } catch (e) { return `cannot be read in ${root} (${e.code ?? e.message}): fail closed`; }
+  const tracked = trackedState(gitBin, root, path);
+  if (tracked === 'tracked') return null;
+  if (tracked === 'unlisted') return 'is listed by git neither as tracked nor as untracked here (the index spells it otherwise, or it is inside a nested repository): fail closed';
+  if (tracked !== 'untracked') return 'cannot be checked against git (no repository, no git, or git failed): fail closed';
+  const state = ignoredState(gitBin, root, path);
+  return state === 'not-ignored' ? null : state === 'ignored' ? 'is ignored by git, not part of the candidate' : 'git cannot say whether it is ignored (fail closed)';
 }
 
 /** Whether a filesystem entry exists at `p` without following a symlink (a dangling link is an entry). */
@@ -488,8 +546,9 @@ const gatedFactsOf = (gates, kind) => new Set([...gates.values()].flatMap((m) =>
  * of kind `unknown`), only a fact some catalog gate for its kind names (surface_fact_ungated), with a
  * machine-checkable citation (fact_uncited), and never on every surface: the change-level fact is the OR of
  * its surfaces, so all of them lowering it contradicts the change fact (surface_fact_reinflates).
- * Not checked (known limitation L1, security-risk.md section 13): that the lowering surface's own path is one exact
- * tracked repository file (a symlink, gitignored file, case alias, directory or `path:symbol` string can bind).
+ * X1 (closes S1 limitation L1): a lowering surface's own path must name one repository file, by the citation path rule
+ * with no `:symbol` (surface_fact_not_lowerable); verifyCitations checks that file in the tree (exact case, no symlink,
+ * a regular file, tracked or not ignored).
  */
 function lowerings({ catalog, gates }, facts, surfaces) {
   const vocab = catalog.fact_vocabulary;
@@ -514,6 +573,10 @@ function lowerings({ catalog, gates }, facts, surfaces) {
   }
   for (const f of uniqSorted([...lower.values()].flatMap((m) => [...m.keys()]))) {
     if (surfaces.every((s) => lower.get(s.boundary_id)?.has(f))) refuse('surface_fact_reinflates', `every surface lowers ${f}, so the change-level ${f}=true has no surface (the change fact is the OR of its surfaces)`);
+  }
+  for (const s of surfaces) {
+    const why = s.facts ? surfacePathRule(s.path) : null;
+    if (why) refuse('surface_fact_not_lowerable', `surface ${s.boundary_id}: its path ${JSON.stringify(s.path)} must name one exact repository file (${why})`);
   }
   return lower;
 }
