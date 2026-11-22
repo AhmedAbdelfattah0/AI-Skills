@@ -28,9 +28,16 @@ log. Those files are now a READ-ONLY ARCHIVE. They are never written, moved, cop
 deleted, or merged into any figure. In the main checkout the old path IS the common dir,
 so its pre-S5 history already is the shared log and stays fully visible.
 
-Normal commands touch a linked worktree's archive in one way only: `legacy_present`. That
-is an `lstat` of THIS worktree's own `<TICKET>.jsonl`, and, when it is a regular file, a
-newline count over at most its first MiB. It reports `{files, lines | 'unavailable',
+Three commands read a linked worktree's archive, always THIS worktree's own, never another
+worktree's, and always through one safe bounded read: an lstat first, a regular file only,
+`O_NOFOLLOW|O_NONBLOCK`.
+- Every normal command reads it only for `legacy_present`: a newline count over at most the
+  first MiB.
+- `abandon` reads at most 64 MiB to find a valid legacy start row of the run.
+- `run-log.mjs legacy` reads at most 64 MiB for the audit.
+
+None of these reads produces a figure. For `legacy_present`, the read is that lstat of
+`<TICKET>.jsonl` and, when it is a regular file, the 1 MiB newline count. It reports `{files, lines | 'unavailable',
 errno?, truncated?}`, and anything that is not a regular file is
 `lines: 'unavailable', errno: 'not_regular'`. No command opens another worktree's
 archive. The carrier's REPAIR read is unchanged (see below).
@@ -50,7 +57,11 @@ not in the shared log, so this version cannot end its intervals.
   an archive the text stays `event a has no start in run R`.
 - `run-log.mjs abandon --repo <wt> --ticket T --run-id R [--reason
   old_build_unavailable|superseded|unknown]` is allowed only when that worktree has an
-  archive of T. It reads nothing from the archive, and it is idempotent.
+  archive of T. It is idempotent. It reads only this worktree's own archive of T, through
+  the safe bounded read (at most 64 MiB), to find a valid legacy START row of run R for
+  ticket T; that read produces no figure. Normal commands read the own archive only for
+  `legacy_present` (an lstat plus at most 1 MiB, newlines counted), and only
+  `run-log.mjs legacy` reads it in full (at most 64 MiB) for audit.
   - It writes one reserved ACTIVITY pair to the shared log: name `legacy_abandoned`,
     event id `legacy-abandoned.<12 hex>`, outcome `abandoned`. It is not a workflow
     interval, so the recorded run outcome is not rewritten.
@@ -61,11 +72,15 @@ not in the shared log, so this version cannot end its intervals.
 - The name `legacy_abandoned` and event ids starting `legacy-abandoned` are reserved
   (AC15, case-insensitive). Every other writer refuses them: `start`, `end`, `batch`,
   `event` and `close`.
-- `abandon` refuses in two cases. First, when run R does not OCCUR in this worktree's own
-  archive: a run_id membership scan through the same safe read, which produces no figures;
-  a missing, unreadable or non-regular archive (for example a directory named
-  `<T>.jsonl`) refuses too. Second, when the shared log already holds a workflow interval
-  of R that ended `complete`: a completed run is never abandoned.
+- `abandon` refuses in two cases.
+  - First, when the own archive holds no well-formed legacy START row of run R for ticket
+    T. Each line is parsed whole, with an exact `run_id` field (not a substring, not a
+    metric), the run-log schema, `event: start` and the ticket of the file. A missing,
+    unreadable or non-regular archive (for example a directory named `<T>.jsonl`) refuses
+    too.
+  - Second, when the shared log holds a workflow interval of R that ended `complete`. This
+    is checked again inside the lock that writes the abandon rows, so a completion
+    committed meanwhile also refuses: a completed run is never abandoned.
 - The S5 continuation of such a run (new intervals after the upgrade) IS in the shared
   log. Its figures are partial and labelled `partial_legacy: 'possible'`.
 
@@ -83,19 +98,41 @@ That JSON is a READABLE COMPANION only. It does not preserve the history:
 - invalid or torn lines are dropped;
 - a file over the limit is truncated.
 
-**Before `git worktree remove`, copy the RAW files and verify the copy:**
+**Before `git worktree remove`, copy the RAW files and verify the copy.** Set `WT` (the
+linked worktree), `NAME` (a label for the copy) and `SKILL` (the directory holding this
+skill's `SKILL.md`), then run the block with bash. It stops at the first problem, and it
+refuses before copying anything when:
+- `WT` is not a git worktree;
+- `WT` is the main checkout (its old path IS the shared log);
+- the source is not a directory;
+- source and destination overlap;
+- the destination already exists;
+- there is no file to copy;
+- `find` or `shasum` fails.
 
+<!-- s5-retention-runbook:begin -->
 ```bash
-WT=<WORKTREE>; NAME=<worktree-name>
+set -eu
+: "${WT:?set WT}" "${NAME:?set NAME}" "${SKILL:?set SKILL}"
 SRC="$(git -C "$WT" rev-parse --path-format=absolute --git-path ai-skills/ship-ticket)"
-DST="$(git rev-parse --path-format=absolute --git-common-dir)/ai-skills/ship-ticket/archive-legacy/$NAME"
+COMMON="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)/ai-skills/ship-ticket"
+DST="$COMMON/archive-legacy/$NAME"
+[ -n "$SRC" ] && [ -d "$SRC" ] || { echo "refusing: no per-worktree log directory for $WT" >&2; exit 1; }
+[ "$SRC" != "$COMMON" ] || { echo "refusing: $WT is the main checkout; its log is the shared log" >&2; exit 1; }
+case "$DST/" in "$SRC/"*) echo "refusing: destination inside source" >&2; exit 1;; esac
+case "$SRC/" in "$DST/"*) echo "refusing: source inside destination" >&2; exit 1;; esac
+[ ! -e "$DST" ] && [ ! -e "$DST.SHA256SUMS" ] || { echo "refusing: $DST already exists" >&2; exit 1; }
+mkdir -p "$COMMON/archive-legacy"
+(cd "$SRC" && find . -type f -exec shasum -a 256 {} +) > "$DST.SHA256SUMS.tmp"   # fails on any find/shasum error
+[ -s "$DST.SHA256SUMS.tmp" ] || { rm -f "$DST.SHA256SUMS.tmp"; echo "refusing: nothing to copy in $SRC" >&2; exit 1; }
+mv "$DST.SHA256SUMS.tmp" "$DST.SHA256SUMS"
 mkdir -p "$DST"
 cp -Rp "$SRC/." "$DST/"   # every file: <T>.jsonl, <T>.jsonl.lost-*.json sidecars, torn bytes, engine files
-(cd "$SRC" && find . -type f -exec shasum -a 256 {} + | sort -k2) > "$DST.SHA256SUMS"
-(cd "$DST" && shasum -a 256 -c "$DST.SHA256SUMS")   # every line must say OK; stop if any does not
-node <SHIP_TICKET_SKILL>/scripts/run-log.mjs legacy --repo "$WT" > "$DST.readable.json"   # companion only
-git worktree remove "$WT"
+(cd "$DST" && shasum -a 256 -c "$DST.SHA256SUMS")   # every line must say OK, else set -e stops here
+node "$SKILL/scripts/run-log.mjs" legacy --repo "$WT" > "$DST.readable.json"   # companion only
+git -C "$COMMON" worktree remove "$WT"
 ```
+<!-- s5-retention-runbook:end -->
 
 - Remove the worktree only after every checksum line says `OK`.
 - The copy is inert. No run-log command reads `archive-legacy/`: tickets are only the
@@ -348,7 +385,13 @@ not computed inside run-log-io.
   `eval.mjs report` read the shared log only, so their figures are the same from every
   worktree. The abandoned and partial-legacy labels come from one rule
   (`lib/run-log-paths.mjs` `labelLegacyRun`). Only the per-line parsing differs: eval's
-  legacy figures read lines leniently, as before S5.
+  legacy figures read lines leniently, as before S5. Only ENOENT means "no log". A shared
+  directory or file that cannot be read for any other reason (EACCES, ...) is reported with
+  its errno and never shows up as an empty result:
+  - `summary` and `check` refuse;
+  - `eval.mjs report` adds `degraded: shared_log_unavailable` and computes no figures;
+  - the integrity line says `unavailable`;
+  - `lostSignal` sets `log_unreadable`.
 - Known limits:
   - Pre-S5 history of LINKED worktrees is in no figure. It is visible only through
     `run-log.mjs legacy` while the worktree exists, or through its export (the runbook

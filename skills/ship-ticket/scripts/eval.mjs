@@ -41,7 +41,7 @@
  *
  * Exactly three suggestion rules exist; they are printed, never applied.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -402,8 +402,10 @@ export function lostSignal(dir, ticket, { stateDir } = {}) {
   const statePath = join(stateDir ?? dirs[0], `${ticket}.state.json`);
   const lost = {};
   for (const d of dirs) {
-    const log = join(d, `${ticket}.jsonl`);
-    if (existsSync(log)) for (const [k, n] of Object.entries(readEvents(readFileSync(log)).lost)) lost[k] = (lost[k] ?? 0) + n;
+    let bytes;
+    // Only ENOENT is "no log"; any other error is reported as log_unreadable (its errno), never zero counters (repair 7).
+    try { bytes = readFileSync(join(d, `${ticket}.jsonl`)); } catch (e) { if (e?.code !== 'ENOENT') lost.log_unreadable = e?.code ?? String(e); continue; }
+    for (const [k, n] of Object.entries(readEvents(bytes).lost)) lost[k] = (lost[k] ?? 0) + n;
   }
   if (!Object.keys(lost).length) Object.assign(lost, readEvents(Buffer.alloc(0)).lost);
   let stateUnreadable = false;
@@ -431,17 +433,27 @@ function report(options) {
   } else {
     // `<ticket>.engine.jsonl` is the run engine's event file, not a timing log.
     // A run whose timing log failed (telemetry degraded) is still found through its engine state.
-    const names = (d, timing) => (existsSync(d) ? readdirSync(d).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') && !n.endsWith('.review-auth.jsonl') ? [n.slice(0, -6)]
+    const list = (d, timing) => {
+      try { return readdirSync(d); } catch (e) {
+        if (e?.code === 'ENOENT') return [];
+        if (timing) { degraded.push({ code: 'shared_log_unavailable', errno: e?.code ?? String(e), reason: `${d} cannot be listed`, figures: 'unknown' }); logDir = null; }
+        return [];
+      }
+    };
+    const names = (d, timing) => (d ? list(d, timing).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') && !n.endsWith('.review-auth.jsonl') ? [n.slice(0, -6)]
       : !timing && n.endsWith('.state.json') ? [n.slice(0, -11)] : [])) : []);
-    tickets = [...new Set([...(logDir ? names(logDir, true) : []), ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
+    const timingNames = logDir ? names(logDir, true) : [];
+    tickets = [...new Set([...timingNames, ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
   }
   const runs = [];
   const states = {};
   for (const ticket of tickets) {
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
-    const log = logDir ? join(logDir, `${ticket}.jsonl`) : null;
-    for (const row of log && existsSync(log) ? legacyRows(readJsonl(log)) : []) {
+    let log = logDir ? join(logDir, `${ticket}.jsonl`) : null;
+    // Only ENOENT is "no log"; any other error degrades this ticket's figures to unknown, never empty (repair 7).
+    if (log) { try { statSync(log); } catch (e) { if (e?.code !== 'ENOENT') degraded.push({ code: 'shared_log_unavailable', ticket, errno: e?.code ?? String(e), figures: 'unknown' }); log = null; } }
+    for (const row of log ? legacyRows(readJsonl(log)) : []) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);

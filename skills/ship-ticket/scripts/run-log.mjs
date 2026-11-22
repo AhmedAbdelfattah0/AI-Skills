@@ -818,7 +818,8 @@ function ticketsIn(dirs) {
   const names = new Set();
   for (const dir of dirs) {
     let entries = [];
-    try { entries = readdirSync(dir); } catch { continue; }
+    // Only ENOENT is "no tickets"; an unlistable shared directory is reported, never an empty listing (repair 7).
+    try { entries = readdirSync(dir); } catch (e) { if (e?.code === 'ENOENT') continue; fail(`the shared log directory ${dir} cannot be listed (${e?.code ?? e}): figures unavailable`); }
     for (const name of entries) {
       // <ticket>.engine.jsonl is the run engine's own event file, not a timing log.
       // <ticket>.review-auth.jsonl is a per-worktree REVIEW authority copy, not a second ticket.
@@ -831,8 +832,12 @@ function ticketsIn(dirs) {
 /** The reporting view of one ticket: the shared log only, every byte read (as summary always did). */
 function reportRows(directory, ticket) {
   const path = logPath(directory, ticket);
-  if (!existsSync(path)) return { rows: [], warnings: [], bytes: null };
-  const bytes = readFileSync(path);
+  let bytes;
+  // Only ENOENT is "no log"; any other error (EACCES on the shared directory, ...) is reported, never an empty result.
+  try { bytes = readFileSync(path); } catch (e) {
+    if (e?.code === 'ENOENT') return { rows: [], warnings: [], bytes: null };
+    return fail(`the shared log ${path} cannot be read (${e?.code ?? e}): figures unavailable`);
+  }
   return { ...rowsFromText(bytes.toString('utf8'), path), bytes };
 }
 
@@ -886,13 +891,15 @@ function ownLegacyAll(loc) {
   const per = listed.tickets.map((t) => legacyPresent(loc.legacy, t));
   return { files: per.reduce((n, p) => n + p.files, 0), ...(per.some((p) => p.lines === 'unavailable') ? { lines: 'unavailable' } : {}) };
 }
-/** Whether any committed line of `bytes` is a JSON row of run `runId` (membership only; nothing is aggregated). */
-function runInArchive(bytes, runId) {
-  for (const line of bytes.subarray(0, committedLength(bytes)).toString('utf8').split('\n')) {
-    if (!line.includes(runId)) continue;
-    try { if (JSON.parse(line)?.run_id === runId) return true; } catch { /* not a row */ }
-  }
-  return false;
+/**
+ * Whether the archive holds a well-formed legacy START row of exactly run `runId` for `ticket` (membership only; nothing
+ * is aggregated). Every committed line is parsed whole by the legacy row rules (rowsFromText: schema, fields, the
+ * file's ticket); the match is on the `run_id` FIELD, never a substring or a metric.
+ */
+function startInArchive(archive, ticket, runId) {
+  if (ticketOfPath(archive.path) !== ticket) return false;
+  const text = archive.bytes.subarray(0, committedLength(archive.bytes)).toString('utf8');
+  return rowsFromText(text, archive.path).rows.some((r) => r.event === 'start' && r.run_id === runId && r.ticket === ticket);
 }
 
 /**
@@ -1062,7 +1069,8 @@ async function batchCommand(options) {
 
 /**
  * `abandon` (cutover, AC2-C): record in the SHARED log that a run started in THIS worktree's pre-S5 log was abandoned.
- * Allowed only when this worktree has a pre-S5 log of the ticket (legacy_present > 0); that log is not read. It writes one
+ * Allowed only when this worktree's own pre-S5 log of the ticket holds a valid legacy START row of the run (read through the
+ * safe bounded read; no figure is produced from it). It writes one
  * reserved ACTIVITY pair (never a workflow interval, so no recorded run outcome is rewritten): name `legacy_abandoned`,
  * event id `legacy-abandoned.<12 hex of sha256(own legacy path, run id)>`, outcome `abandoned`. Every reader then shows
  * the run as `abandoned`, never complete. Idempotent: an existing record is returned as it is.
@@ -1075,27 +1083,31 @@ async function abandonCommand(options) {
   const runId = validateId('run id', requireOption(options, 'run-id'));
   const reason = options.reason ?? 'unknown';
   if (!ABANDON_REASONS.includes(reason)) fail(`--reason must be one of: ${ABANDON_REASONS.join(', ')}`);
-  // Scope (repair 6): run R must OCCUR in THIS worktree's own archive. A streamed run_id membership scan over the safe
-  // bounded read; it never produces a figure. A missing, non-regular or unreadable archive refuses.
+  // Scope (repairs 6-7): run R must have a valid legacy START row in THIS worktree's own archive, read through the safe
+  // bounded read (the only place abandon reads the archive); it never produces a figure. A missing, non-regular or
+  // unreadable archive refuses.
   const archive = loc.legacy ? readArchive(loc.legacy, ticket, LEGACY_READ_MAX) : { status: 'absent' };
   if (archive.status === 'absent') fail(`this worktree has no pre-S5 log of ${ticket}: abandon applies only to runs started in one (nothing written)`);
   if (archive.status === 'unavailable') fail(`this worktree's pre-S5 log ${archive.path} cannot be read (${archive.errno}): abandon needs to find run ${runId} in it (nothing written)`);
-  if (!runInArchive(archive.bytes, runId)) {
-    fail(`run ${runId} does not occur in this worktree's pre-S5 log ${archive.path}${archive.truncated ? ` (only its first ${LEGACY_READ_MAX} bytes were scanned)` : ''}: abandon applies only to runs started there (nothing written)`);
+  if (!startInArchive(archive, ticket, runId)) {
+    fail(`run ${runId} does not occur in this worktree's pre-S5 log ${archive.path} (no valid legacy start row of that run for ${ticket}${archive.truncated ? `; only its first ${LEGACY_READ_MAX} bytes were scanned` : ''}): abandon applies only to runs started there (nothing written)`);
   }
   const eventId = `legacy-abandoned.${createHash('sha256').update(`${archive.path}\0${runId}`).digest('hex').slice(0, 12)}`;
   const row = await appendStamped(() => {
     const view = writerRows(loc, ticket);
-    if (view.rows.some((r) => r.run_id === runId && r.event === 'end' && r.kind === 'workflow' && r.outcome === 'complete')) {
-      fail(`run ${runId} completed in the shared log (a workflow interval ended "complete"); a completed run is never abandoned (nothing written)`);
-    }
+    const completed = (rows) => rows.some((r) => r.run_id === runId && r.event === 'end' && r.kind === 'workflow' && r.outcome === 'complete');
+    const refuseCompleted = () => fail(`run ${runId} completed in the shared log (a workflow interval ended "complete"); a completed run is never abandoned (nothing written)`);
+    if (completed(view.rows)) refuseCompleted();
     const existing = view.rows.filter((r) => r.run_id === runId && r.event_id === eventId);
     if (existing.length) return { directory: loc.directory, ticket, records: [], guard: undefined, after: () => existing.at(-1) };
     const stamp = stampFor(view, runId, undefined, '--at');
     const base = { schema: SCHEMA, ticket, run_id: runId, event_id: eventId, kind: 'activity', name: ABANDON_NAME, timestamp: stamp.at.toISOString(),
       metrics: { legacy_run: true, legacy_worktree: true, reason } };
     const endRow = { ...base, event: 'end', duration_ms: 0, outcome: 'abandoned' };
-    return { directory: loc.directory, ticket, records: [{ ...base, event: 'start' }, endRow], guard: stamp.guard, after: () => endRow };
+    // Checked again INSIDE the lock, against the exact bytes the abandon rows follow (repair 7): a completion committed
+    // while this command waited refuses it, whatever its timestamp.
+    const guard = (before) => { if (completed(lockedRows(before, view.path))) refuseCompleted(); stamp.guard(before); };
+    return { directory: loc.directory, ticket, records: [{ ...base, event: 'start' }, endRow], guard, after: () => endRow };
   });
   process.stdout.write(`${JSON.stringify(row)}\n`);
 }

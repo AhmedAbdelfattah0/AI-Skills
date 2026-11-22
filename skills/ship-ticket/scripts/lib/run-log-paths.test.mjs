@@ -369,3 +369,137 @@ test('repair 6 (6) AC15 also binds event and close: a legacy-abandoned event id 
   }
   assert.equal(existsSync(join(fx.common, 'T1.jsonl')), false);
 });
+
+// ======================================================================= review repair 7
+const spawnRunLog = (repo, ...args) => new Promise((done) => {
+  const child = spawnAsync(process.execPath, [RUN_LOG, ...args, '--repo', repo]);
+  let out = '', err = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { err += d; });
+  child.on('close', (status) => done({ status, out, err }));
+});
+const RUNBOOK = (() => {
+  const doc = readFileSync(fileURLToPath(new URL('../../references/observability.md', import.meta.url)), 'utf8');
+  const block = doc.slice(doc.indexOf('<!-- s5-retention-runbook:begin -->'), doc.indexOf('<!-- s5-retention-runbook:end -->'));
+  return block.slice(block.indexOf('```bash\n') + 8, block.lastIndexOf('```'));
+})();
+const haveShasum = spawnSync('sh', ['-c', 'command -v shasum && command -v bash'], { encoding: 'utf8' }).status === 0;
+test('repair 7 (1) the retention runbook, run literally: guards refuse before copying; a good run copies raw bytes and verifies them', { skip: (process.platform === 'win32' || !haveShasum) && 'needs bash and shasum' }, (t) => {
+  const base = real(mkdtempSync(join(tmpdir(), 's5 runbook ')));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const main = join(base, 'main repo'), wt = join(base, 'wt two');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'commit', '-q', '--allow-empty', '-m', 'init');
+  git(main, 'worktree', 'add', '-q', '-b', 'wt2', wt);
+  const common = join(main, '.git', 'ai-skills', 'ship-ticket');
+  const legacy = git(wt, 'rev-parse', '--path-format=absolute', '--git-path', 'ai-skills/ship-ticket');
+  const run = (WT, NAME = 'wt2') => spawnSync('bash', ['-c', RUNBOOK], { encoding: 'utf8', env: { ...process.env, WT, NAME, SKILL: fileURLToPath(new URL('../..', import.meta.url)) } });
+  const nothingCopied = (why) => assert.equal(existsSync(join(common, 'archive-legacy', 'wt2')), false, why);
+  const bad = run(join(base, 'no such worktree'));
+  assert.notEqual(bad.status, 0, 'a wrong WT path exits non-zero');
+  nothingCopied('wrong WT: nothing copied');
+  mkdirSync(common, { recursive: true });
+  writeFileSync(join(common, 'T1.jsonl'), 'shared\n');
+  const m = run(main);
+  assert.notEqual(m.status, 0);
+  assert.match(m.stderr, /main checkout/);
+  nothingCopied('WT = main: refused');
+  const empty = run(wt);
+  assert.notEqual(empty.status, 0, 'no per-worktree log directory: refused');
+  nothingCopied('no source');
+  mkdirSync(legacy, { recursive: true });
+  const files = { 'T1.jsonl': '{"a":1}\n{"torn"', 'T1.jsonl.lost-0-abc.json': '{"x":1}\n', 'sub dir/f': 'y' };
+  mkdirSync(join(legacy, 'sub dir'));
+  for (const [f, c] of Object.entries(files)) writeFileSync(join(legacy, f), c);
+  const ok = run(wt);
+  assert.equal(ok.status, 0, ok.stderr);
+  for (const [f, c] of Object.entries(files)) assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2', f), 'utf8'), c, `${f} copied raw`);
+  assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2.SHA256SUMS'), 'utf8').trim().split('\n').length, 3);
+  assert.match(ok.stdout, /OK/);
+  assert.equal(existsSync(wt), false, 'the worktree was removed only after verification');
+  git(main, 'worktree', 'add', '-q', wt, 'wt2');
+  mkdirSync(legacy, { recursive: true });
+  writeFileSync(join(legacy, 'T1.jsonl'), 'z\n');
+  const again = run(wt);
+  assert.notEqual(again.status, 0, 'an existing destination is refused');
+  assert.equal(readFileSync(join(common, 'archive-legacy', 'wt2', 'T1.jsonl'), 'utf8'), files['T1.jsonl'], 'the earlier copy is untouched');
+});
+
+const sharedStart = (fx, repo, run, outcome) => {
+  for (const [cmd, o] of [['start'], ['end', outcome]]) {
+    if (cmd === 'end' && !outcome) break;
+    assert.equal(fx.cli(repo, cmd, '--ticket', 'T1', '--run-id', run, '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf', ...(o ? ['--outcome', o] : [])).status, 0);
+  }
+};
+test('repair 7 (3)(4)(6) abandon needs a VALID legacy START row of exactly run R for this ticket', (t) => {
+  const fx = three(t);
+  sharedStart(fx, fx.main, 'live');
+  const before = () => readFileSync(join(fx.common, 'T1.jsonl'));
+  const b = before();
+  const tryWith = (lines) => { seed(fx.wt3Legacy, []); writeFileSync(join(fx.wt3Legacy, 'T1.jsonl'), lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n'); return fx.cli(fx.wt3, 'abandon', '--ticket', 'T1', '--run-id', 'live'); };
+  const start = { ...legacyRow('start', 'p', '2026-01-01T00:00:00.000Z'), run_id: 'live' };
+  for (const [why, lines] of [
+    ['a bare run_id object', [{ run_id: 'live' }]],
+    ['a T2 row misplaced in T1', [{ ...start, ticket: 'T2' }]],
+    ['an end row only', [{ ...legacyRow('end', 'p', '2026-01-01T00:00:01.000Z'), run_id: 'live' }]],
+    ['another schema', [{ ...start, schema: 'other-v9' }]],
+    ['run id only in a metric', [{ ...start, run_id: 'x', metrics: { run_id: 'live', note: 'live' } }]],
+    ['a longer id sharing the substring', [{ ...start, run_id: 'live2' }]],
+    ['a shorter id', [{ ...start, run_id: 'liv' }]],
+  ]) {
+    const r = tryWith(lines);
+    assert.equal(r.status, 1, `${why}: refused`);
+    assert.deepEqual(before(), b, `${why}: nothing written`);
+  }
+  const spaced = tryWith(['{ "schema" : "ship-ticket-run-log-v1", "ticket": "T1", "run_id" :"live", "event": "start", "event_id": "p", "kind": "phase", "name": "Pp", "timestamp": "2026-01-01T00:00:00.000Z", "metrics": {} }']);
+  assert.equal(spaced.status, 0, `a valid start whose JSON spacing defeats a substring prefilter is found: ${spaced.stderr}`);
+});
+
+test('repair 7 (2) a completion committed while abandon waits for the lock refuses the abandon (checked inside the lock)', async (t) => {
+  const fx = three(t);
+  sharedStart(fx, fx.main, 'live');
+  seed(fx.wt3Legacy, [{ ...legacyRow('start', 'p', '2026-01-01T00:00:00.000Z'), run_id: 'live' }]);
+  const log = join(fx.common, 'T1.jsonl');
+  writeFileSync(`${log}.lock`, JSON.stringify({ pid: process.pid, process_start_time: null, host: (await import('node:os')).hostname(), run_id: 'x', nonce: 'held' }));
+  t.after(() => rmSync(`${log}.lock`, { force: true }));
+  const waiting = spawnRunLog(fx.wt3, 'abandon', '--ticket', 'T1', '--run-id', 'live');
+  await new Promise((r) => setTimeout(r, 800)); // abandon passed its pre-lock checks and waits for the lock
+  const startRow = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse).find((r) => r.run_id === 'live' && r.event === 'start');
+  // the completion is stamped BEFORE abandon's own stamp (Codex's interleaving: the timestamp guard alone would accept it)
+  const at = new Date(Date.parse(startRow.timestamp) + 1).toISOString();
+  writeFileSync(log, readFileSync(log, 'utf8') + JSON.stringify({ ...startRow, event: 'end', timestamp: at, duration_ms: Date.parse(at) - Date.parse(startRow.timestamp), outcome: 'complete' }) + '\n');
+  rmSync(`${log}.lock`, { force: true });
+  const r = await waiting;
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.err, /completed in the shared log/);
+  assert.equal(readFileSync(log, 'utf8').includes('legacy_abandoned'), false, 'nothing written');
+  assert.equal(summary(fx, fx.main).runs[0].outcome, 'complete');
+});
+
+test('repair 7 (5) an inaccessible shared directory is unavailable with errno in every reader, never an empty result', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, async (t) => {
+  const fx = three(t);
+  sharedStart(fx, fx.main, 'live', 'complete');
+  chmodSync(fx.common, 0o000);
+  t.after(() => { try { chmodSync(fx.common, 0o700); } catch { /* gone */ } });
+  const one = fx.cli(fx.main, 'summary', '--ticket', 'T1');
+  const all = fx.cli(fx.main, 'summary', '--all');
+  const ev = spawnSync(process.execPath, [EVAL, 'report', '--repo', fx.main, '--ticket', 'T1'], { encoding: 'utf8' });
+  const evAll = spawnSync(process.execPath, [EVAL, 'report', '--repo', fx.main, '--all'], { encoding: 'utf8' });
+  const { integritySummary } = await import('../run-log.mjs');
+  const integ = integritySummary(fx.main, 'T1');
+  const { lostSignal } = await import('../eval.mjs');
+  const lost = lostSignal(fx.common, 'T1');
+  chmodSync(fx.common, 0o700);
+  for (const [what, r] of [['summary --ticket', one], ['summary --all', all]]) {
+    assert.equal(r.status, 1, `${what}: ${r.stdout}`);
+    assert.match(r.stderr, /EACCES/);
+  }
+  for (const [what, r] of [['eval --ticket', ev], ['eval --all', evAll]]) {
+    const out = JSON.parse(r.stdout);
+    assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable' && d.errno === 'EACCES'), `${what}: ${JSON.stringify(out.degraded)}`);
+    assert.deepEqual(out.runs, []);
+  }
+  assert.match(integ.unavailable ?? '', /EACCES/);
+  assert.equal(lost.log_unreadable, 'EACCES');
+});
