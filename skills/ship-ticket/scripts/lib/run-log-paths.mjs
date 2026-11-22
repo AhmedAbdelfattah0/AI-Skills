@@ -12,7 +12,7 @@
  * Engine files (.state.json, .engine.jsonl, .usage.jsonl, .attempts) are not run logs and stay per-worktree.
  */
 import { spawnSync } from 'node:child_process';
-import { accessSync, closeSync, constants as fsConstants, lstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const LOG_SUBDIR = join('ai-skills', 'ship-ticket');
@@ -85,27 +85,50 @@ export function legacyLogDirs(repo) {
 
 /** Lines counted by `legacyPresent` at most from the first MiB of a legacy log. */
 export const LEGACY_PRESENT_BYTES = 1024 * 1024;
+/** The most bytes the explicit audit and `abandon`'s membership scan read from one archive (the shared log's own cap). */
+export const LEGACY_READ_MAX = 64 * 1024 * 1024;
 /**
- * `legacy_present` (cutover): whether `<dir>/<ticket>.jsonl` exists, counted with an lstat plus a BOUNDED read (at most
- * 1 MiB, newlines counted, nothing parsed). Only a REGULAR file is read: anything else (directory, symlink, fifo, socket)
- * is `{ files: 1, lines: 'unavailable', errno: 'not_regular' }`. ENOENT is `{ files: 0 }`; any other error is
- * `{ files: 1, lines: 'unavailable', errno }`. Readers report it; it never feeds a figure.
+ * THE safe read of an archive file `<dir>/<ticket>.jsonl` (cutover), shared by `legacyPresent`, `run-log.mjs legacy` and
+ * `abandon`: lstat first; only a REGULAR file is opened (never a symlink, directory, FIFO or socket), with O_NOFOLLOW and
+ * O_NONBLOCK; at most `limit` bytes are read. Returns `{ status: 'absent' }` (ENOENT), `{ status: 'unavailable', path,
+ * errno }` (`not_regular` or any other error: never an empty result), or `{ status: 'present', path, size, bytes,
+ * truncated }`.
  */
-export function legacyPresent(dir, ticket) {
+export function readArchive(dir, ticket, limit) {
   const path = join(dir, `${ticket}.jsonl`);
   let st;
-  try { st = lstatSync(path); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? { files: 0 } : { files: 1, path, lines: 'unavailable', errno: e?.code ?? String(e) }; }
-  if (!st.isFile()) return { files: 1, path, lines: 'unavailable', errno: 'not_regular' };
+  try { st = lstatSync(path); } catch (e) { return e?.code === 'ENOENT' ? { status: 'absent' } : { status: 'unavailable', path, errno: e?.code ?? String(e) }; }
+  if (!st.isFile()) return { status: 'unavailable', path, errno: 'not_regular' };
   let fd;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-    const buf = Buffer.alloc(Math.min(LEGACY_PRESENT_BYTES, st.size));
+    const buf = Buffer.alloc(Math.min(limit, st.size));
     const n = buf.length ? readSync(fd, buf, 0, buf.length, 0) : 0;
-    let lines = 0;
-    for (let i = 0; i < n; i += 1) if (buf[i] === 0x0a) lines += 1;
-    return { files: 1, path, lines, ...(st.size > LEGACY_PRESENT_BYTES ? { truncated: true } : {}) };
-  } catch (e) { return { files: 1, path, lines: 'unavailable', errno: e?.code ?? String(e) }; }
+    return { status: 'present', path, size: st.size, bytes: buf.subarray(0, n), truncated: st.size > limit };
+  } catch (e) { return { status: 'unavailable', path, errno: e?.code ?? String(e) }; }
   finally { if (fd !== undefined) closeSync(fd); }
+}
+/**
+ * `legacy_present` (cutover): whether this worktree's `<dir>/<ticket>.jsonl` exists, counted through `readArchive` with a
+ * 1 MiB bound (newlines counted, nothing parsed). `{ files: 0 }` only for ENOENT; anything else that is not a readable
+ * regular file is `{ files: 1, lines: 'unavailable', errno }`. Readers report it; it never feeds a figure.
+ */
+export function legacyPresent(dir, ticket) {
+  const r = readArchive(dir, ticket, LEGACY_PRESENT_BYTES);
+  if (r.status === 'absent') return { files: 0 };
+  if (r.status === 'unavailable') return { files: 1, path: r.path, lines: 'unavailable', errno: r.errno };
+  let lines = 0;
+  for (const b of r.bytes) if (b === 0x0a) lines += 1;
+  return { files: 1, path: r.path, lines, ...(r.truncated ? { truncated: true } : {}) };
+}
+/**
+ * The timing-log tickets of one archive dir (not engine, usage or authority files). `{ tickets }`, or `{ errno }` when the
+ * directory cannot be listed for any reason other than ENOENT (never an empty listing in its place).
+ */
+export function archiveTickets(dir) {
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return e?.code === 'ENOENT' ? { tickets: [] } : { tickets: [], errno: e?.code ?? String(e) }; }
+  return { tickets: names.filter((n) => n.endsWith('.jsonl') && !/\.(engine|usage|review-auth)\.jsonl$/.test(n) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(n.slice(0, -6))).map((n) => n.slice(0, -6)).sort() };
 }
 
 /** Reserved by `abandon` (AC15): no other writer may use this name or an event id with this prefix (case-insensitive). */

@@ -59,25 +59,49 @@ not in the shared log, so this version cannot end its intervals.
     `completed_runs`. The eval report never treats it as an accepted ticket, and the
     integrity line prints ` abandoned=<n>`. **Abandonment never means success.**
 - The name `legacy_abandoned` and event ids starting `legacy-abandoned` are reserved
-  (AC15, case-insensitive): every other writer refuses them.
+  (AC15, case-insensitive). Every other writer refuses them: `start`, `end`, `batch`,
+  `event` and `close`.
+- `abandon` refuses in two cases. First, when run R does not OCCUR in this worktree's own
+  archive: a run_id membership scan through the same safe read, which produces no figures;
+  a missing, unreadable or non-regular archive (for example a directory named
+  `<T>.jsonl`) refuses too. Second, when the shared log already holds a workflow interval
+  of R that ended `complete`: a completed run is never abandoned.
 - The S5 continuation of such a run (new intervals after the upgrade) IS in the shared
   log. Its figures are partial and labelled `partial_legacy: 'possible'`.
 
 **Audit and retention of an archive.** `run-log.mjs legacy --repo <worktree> [--ticket T]`
 prints that worktree's archive read-only: its rows, its warnings, and a summary computed
 over that file alone, labelled `scope: 'legacy-archive'`. It is never combined with the
-shared log. Before `git worktree remove`, keep the archive:
+shared log. It uses the same safe read as `legacy_present`:
+- lstat first, a regular file only, never following a symbolic link, never blocking on a
+  FIFO;
+- at most 64 MiB; a larger file is reported `truncated: true, bytes_read`;
+- an unlistable directory is `status: 'unavailable'` with its errno, never an empty listing.
+
+That JSON is a READABLE COMPANION only. It does not preserve the history:
+- S-04 measurement rows export as zero rows;
+- invalid or torn lines are dropped;
+- a file over the limit is truncated.
+
+**Before `git worktree remove`, copy the RAW files and verify the copy:**
 
 ```bash
-mkdir -p "$(git rev-parse --git-common-dir)/ai-skills/ship-ticket/archive-legacy"
-node <SHIP_TICKET_SKILL>/scripts/run-log.mjs legacy --repo <WORKTREE> \
-  > "$(git rev-parse --git-common-dir)/ai-skills/ship-ticket/archive-legacy/<worktree-name>.json"
-node <SHIP_TICKET_SKILL>/scripts/run-log.mjs check --repo <WORKTREE>   # legacy_present tells what was there
-git worktree remove <WORKTREE>
+WT=<WORKTREE>; NAME=<worktree-name>
+SRC="$(git -C "$WT" rev-parse --path-format=absolute --git-path ai-skills/ship-ticket)"
+DST="$(git rev-parse --path-format=absolute --git-common-dir)/ai-skills/ship-ticket/archive-legacy/$NAME"
+mkdir -p "$DST"
+cp -Rp "$SRC/." "$DST/"   # every file: <T>.jsonl, <T>.jsonl.lost-*.json sidecars, torn bytes, engine files
+(cd "$SRC" && find . -type f -exec shasum -a 256 {} + | sort -k2) > "$DST.SHA256SUMS"
+(cd "$DST" && shasum -a 256 -c "$DST.SHA256SUMS")   # every line must say OK; stop if any does not
+node <SHIP_TICKET_SKILL>/scripts/run-log.mjs legacy --repo "$WT" > "$DST.readable.json"   # companion only
+git worktree remove "$WT"
 ```
 
-The exported file is an inert JSON document. No run-log command reads it, and any other
-location works as well. Without the export, removing the worktree deletes that history.
+- Remove the worktree only after every checksum line says `OK`.
+- The copy is inert. No run-log command reads `archive-legacy/`: tickets are only the
+  files directly in the log directory, and REPAIR authority is read only from a
+  worktree's own `review-auth/`. Any other location works as well.
+- Without the raw copy, removing the worktree deletes that history.
 
 **REPAIR authority stays per worktree.** The common log is telemetry and never authorises
 a carrier REPAIR: every worktree writes it. A REVIEW phase start also writes a copy of its
@@ -329,7 +353,10 @@ not computed inside run-log-io.
   - Pre-S5 history of LINKED worktrees is in no figure. It is visible only through
     `run-log.mjs legacy` while the worktree exists, or through its export (the runbook
     above).
-  - A run spanning the upgrade is split and labelled `partial_legacy`.
+  - A run spanning the upgrade is split. It is labelled `partial_legacy` only when some of
+    its S5 rows were written in the worktree that holds the archive. Rows written from the
+    main checkout, or from any worktree without an archive of the ticket, carry no
+    `legacy_worktree` mark, so such a run shows no label.
   - A pre-S5 build still running in a linked worktree writes invisibly to its archive.
   - `legacy_worktree` is not added to S-04 `event`/`close` rows (their schema is closed),
     so `partial_legacy` is judged from `start`/`end` rows.

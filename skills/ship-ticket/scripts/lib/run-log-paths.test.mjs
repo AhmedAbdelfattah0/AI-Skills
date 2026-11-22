@@ -167,21 +167,22 @@ test('cutover abandon: only with own legacy_present > 0; idempotent; NEVER count
   const fx = three(t);
   assert.match(fx.cli(fx.main, 'abandon', '--ticket', 'T1', '--run-id', 'run-1').stderr, /no pre-S5 log/, 'refused without a legacy log');
   legacyOf(fx, [legacyRow('start', 'old', '2026-01-01T00:00:00.000Z')]);
-  // an S5 continuation of the same run in wt2, including a workflow interval that ends "complete"
+  // an S5 continuation of the same run in wt2, including a workflow interval that ends "fail" (a COMPLETE one refuses abandon)
   for (const a of [['start', '--ticket', 'T1', '--run-id', 'run-1', '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf'],
-    ['end', '--ticket', 'T1', '--run-id', 'run-1', '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf', '--outcome', 'complete']]) assert.equal(fx.cli(fx.wt2, ...a).status, 0);
+    ['end', '--ticket', 'T1', '--run-id', 'run-1', '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf', '--outcome', 'fail']]) assert.equal(fx.cli(fx.wt2, ...a).status, 0);
   const a1 = fx.cli(fx.wt2, 'abandon', '--ticket', 'T1', '--run-id', 'run-1', '--reason', 'old_build_unavailable');
   assert.equal(a1.status, 0, a1.stderr);
-  const a2 = fx.cli(fx.wt2, 'abandon', '--ticket', 'T1', '--run-id', 'run-1');
+  const a2 = fx.cli(fx.wt2, 'abandon', '--ticket', 'T1', '--run-id', 'run-1', '--reason', 'superseded');
   assert.equal(a2.status, 0);
-  assert.deepEqual(JSON.parse(a2.stdout), JSON.parse(a1.stdout), 'idempotent: the existing record is returned');
+  assert.deepEqual(JSON.parse(a2.stdout), JSON.parse(a1.stdout), 'idempotent: a second abandon (another reason) returns the first record');
+  assert.equal(JSON.parse(a2.stdout).metrics.reason, 'old_build_unavailable');
   const rows = readFileSync(join(fx.common, 'T1.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((r) => r.name === 'legacy_abandoned');
   assert.equal(rows.length, 2, 'one start/end pair');
   assert.ok(rows.every((r) => r.kind === 'activity' && /^legacy-abandoned\.[0-9a-f]{12}$/.test(r.event_id)), 'a NON-workflow reserved activity');
   for (const repo of [fx.main, fx.wt2, fx.wt3]) {
     const s = summary(fx, repo);
     assert.equal(s.runs[0].outcome, 'abandoned', `summary from ${repo}`);
-    assert.equal(s.runs[0].recorded_outcome, 'complete', 'the recorded workflow outcome is kept, not rewritten');
+    assert.equal(s.runs[0].recorded_outcome, 'fail', 'the recorded workflow outcome is kept, not rewritten');
     assert.equal(s.aggregate.completed_runs, 0, 'never counted complete');
     assert.equal(s.aggregate.abandoned_runs, 1);
     const e = evalOf(repo);
@@ -240,9 +241,17 @@ test('cutover AC9-C (fs spy): no normal command opens a sibling legacy path; the
     ['summary', '--ticket', 'T1'], ['summary', '--all'], ['check', '--ticket', 'T1'], ['quarantine', '--ticket', 'T1']];
   for (const [name, repo] of [['main', fx.main], ['wt2', fx.wt2], ['wt3', fx.wt3]]) {
     writeFileSync(spy, '');
-    for (const [i, op] of ops.entries()) run(repo, RUN_LOG, ...op.map((a) => (a === 'q' || a === 's' ? `${a}${name}${i}` : a)), '--repo', repo);
-    run(repo, EVAL, 'report', '--repo', repo, '--ticket', 'T1');
-    const touched = readFileSync(spy, 'utf8').split('\n').filter((l) => l.includes(`${join('.git', 'worktrees')}`));
+    for (const op of ops) {
+      const r = run(repo, RUN_LOG, ...op.map((a) => (a === 'q' || a === 's' ? `${a}${name}` : a)), '--repo', repo);
+      assert.equal(r.status, 0, `${name} ${op[0]}: the spied command must succeed: ${r.stderr}`);
+    }
+    const ev = run(repo, EVAL, 'report', '--repo', repo, '--ticket', 'T1');
+    assert.equal(ev.status, 0, ev.stderr);
+    const trace = readFileSync(spy, 'utf8');
+    assert.ok(trace.split('\n').filter(Boolean).length > 20, `${name}: the spy recorded the commands' fs calls`);
+    assert.match(trace, new RegExp(`(openSync|readFileSync) .*${join('ai-skills', 'ship-ticket', 'T1.jsonl').replaceAll('/', '\\/')}`), `${name}: the shared log was read`);
+    if (name !== 'main') assert.match(trace, new RegExp(`lstatSync .*${join('.git', 'worktrees', name, 'ai-skills', 'ship-ticket', 'T1.jsonl').replaceAll('/', '\\/')}`), `${name}: legacy_present lstat seen`);
+    const touched = trace.split('\n').filter((l) => l.includes(`${join('.git', 'worktrees')}`));
     for (const line of touched) {
       const [op, path] = [line.slice(0, line.indexOf(' ')), line.slice(line.indexOf(' ') + 1)];
       assert.ok(path.includes(join('.git', 'worktrees', name)), `${name} touched a sibling path: ${line}`);
@@ -262,4 +271,101 @@ test('cutover: an unreadable (chmod 000) sibling legacy log or directory changes
   t.after(() => { try { chmodSync(fx.wt3Legacy, 0o700); chmodSync(join(fx.wt3Legacy, 'T1.jsonl'), 0o600); } catch { /* gone */ } });
   assert.deepEqual(outcome(), base);
   chmodSync(fx.wt3Legacy, 0o700);
+});
+
+// ======================================================================= review repair 6
+test('repair 6 (1) abandon needs run R IN the own archive and refuses a run that completed in the shared log', (t) => {
+  const fx = three(t);
+  seed(fx.wt3Legacy, [{ ...legacyRow('start', 'o', '2026-01-01T00:00:00.000Z'), run_id: 'other' }]);
+  for (const [cmd, outcome] of [['start'], ['end', 'complete']]) {
+    assert.equal(fx.cli(fx.main, cmd, '--ticket', 'T1', '--run-id', 'live', '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf', ...(outcome ? ['--outcome', outcome] : [])).status, 0);
+  }
+  for (const [cmd, outcome] of [['start'], ['end', 'fail']]) {
+    assert.equal(fx.cli(fx.main, cmd, '--ticket', 'T1', '--run-id', 'A', '--kind', 'workflow', '--name', 'ship_ticket', '--event-id', 'wf', ...(outcome ? ['--outcome', outcome] : [])).status, 0);
+  }
+  const before = readFileSync(join(fx.common, 'T1.jsonl'));
+  const notMine = fx.cli(fx.wt3, 'abandon', '--ticket', 'T1', '--run-id', 'live');
+  assert.equal(notMine.status, 1);
+  assert.match(notMine.stderr, /does not occur in this worktree's pre-S5 log/);
+  assert.equal(fx.cli(fx.wt3, 'abandon', '--ticket', 'T1', '--run-id', 'A').status, 1, "A's failed run cannot be relabelled from an unrelated archive");
+  assert.deepEqual(readFileSync(join(fx.common, 'T1.jsonl')), before, 'nothing written');
+  // even with the run in the own archive, a run that COMPLETED in the shared log is never abandoned
+  seed(fx.wt2Legacy, [{ ...legacyRow('start', 'p', '2026-01-01T00:00:00.000Z'), run_id: 'live' }]);
+  const done = fx.cli(fx.wt2, 'abandon', '--ticket', 'T1', '--run-id', 'live');
+  assert.equal(done.status, 1);
+  assert.match(done.stderr, /completed in the shared log/);
+  // a directory named T1.jsonl never authorises abandon
+  rmSync(join(fx.wt3Legacy, 'T1.jsonl'));
+  mkdirSync(join(fx.wt3Legacy, 'T1.jsonl'));
+  assert.match(fx.cli(fx.wt3, 'abandon', '--ticket', 'T1', '--run-id', 'other').stderr, /not_regular|no pre-S5 log|not a regular/);
+  assert.deepEqual(readFileSync(join(fx.common, 'T1.jsonl')), before);
+  const s = summary(fx, fx.main);
+  assert.deepEqual(s.runs.map((r) => [r.run_id, r.outcome]).sort(), [['A', 'fail'], ['live', 'complete']]);
+});
+
+test('repair 6 (3) no reader falls back to the per-worktree log when the shared directory cannot be resolved (fault-injected git)', { skip: process.platform === 'win32' && 'POSIX shim' }, (t) => {
+  const fx = three(t);
+  seed(fx.wt2Legacy, [legacyRow('start', 'old', '2026-01-01T00:00:00.000Z'), legacyRow('end', 'old', '2026-01-01T00:00:01.000Z')]);
+  const shim = join(fx.base, 'shim');
+  mkdirSync(shim);
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(join(shim, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = "--git-common-dir" ] && { echo "fatal: injected" >&2; exit 128; }; done\nexec "${realGit}" "$@"\n`);
+  chmodSync(join(shim, 'git'), 0o755);
+  const env = { ...process.env, PATH: `${shim}:${process.env.PATH}` };
+  const ev = spawnSync(process.execPath, [EVAL, 'report', '--repo', fx.wt2, '--ticket', 'T1'], { encoding: 'utf8', env });
+  assert.equal(ev.status, 0, ev.stderr);
+  const out = JSON.parse(ev.stdout);
+  assert.deepEqual(out.runs, [], 'no legacy row becomes a figure');
+  assert.ok((out.degraded ?? []).some((d) => d.code === 'shared_log_unavailable'), JSON.stringify(out.degraded));
+  for (const args of [['summary', '--ticket', 'T1'], ['check', '--ticket', 'T1']]) {
+    const r = spawnSync(process.execPath, [RUN_LOG, ...args, '--repo', fx.wt2], { encoding: 'utf8', env });
+    assert.equal(r.status, 1, `${args[0]} refuses instead of reading the archive: ${r.stdout}`);
+    assert.doesNotMatch(r.stdout, /"old"/);
+  }
+  const integ = spawnSync(process.execPath, ['--input-type=module', '-e', `import { integritySummary } from ${JSON.stringify(new URL('../run-log.mjs', import.meta.url).href)}; process.stdout.write(JSON.stringify(integritySummary(${JSON.stringify(fx.wt2)}, 'T1')));`], { encoding: 'utf8', env });
+  assert.ok(JSON.parse(integ.stdout).unavailable, integ.stdout);
+});
+
+test('repair 6 (4) an unreadable archive directory is reported unavailable (with errno), never an empty listing', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'root or win32' }, (t) => {
+  const fx = three(t);
+  seed(fx.wt2Legacy, [legacyRow('start', 'old', '2026-01-01T00:00:00.000Z')]);
+  chmodSync(fx.wt2Legacy, 0o000);
+  t.after(() => { try { chmodSync(fx.wt2Legacy, 0o700); } catch { /* gone */ } });
+  const all = JSON.parse(fx.cli(fx.wt2, 'summary', '--all').stdout);
+  const one = JSON.parse(fx.cli(fx.wt2, 'summary', '--ticket', 'T1').stdout);
+  const audit = JSON.parse(fx.cli(fx.wt2, 'legacy').stdout);
+  chmodSync(fx.wt2Legacy, 0o700);
+  assert.deepEqual([all.legacy_present?.lines, all.legacy_present?.errno], ['unavailable', 'EACCES'], JSON.stringify(all.legacy_present));
+  assert.deepEqual([one.legacy_present?.lines, one.legacy_present?.errno], ['unavailable', 'EACCES']);
+  assert.deepEqual([audit.status, audit.errno], ['unavailable', 'EACCES'], JSON.stringify(audit));
+});
+
+test('repair 6 (5) the legacy audit uses the safe read: no symlink follow, no FIFO block, a bounded size reported as truncated', { skip: process.platform === 'win32' && 'POSIX file types' }, (t) => {
+  const fx = three(t);
+  const p = join(fx.wt2Legacy, 'T1.jsonl');
+  mkdirSync(fx.wt2Legacy, { recursive: true });
+  writeFileSync(join(fx.base, 'target.jsonl'), JSON.stringify(legacyRow('start', 'x', '2026-01-01T00:00:00.000Z')) + '\n');
+  symlinkSync(join(fx.base, 'target.jsonl'), p);
+  const sym = JSON.parse(fx.cli(fx.wt2, 'legacy', '--ticket', 'T1').stdout).tickets[0];
+  assert.deepEqual([sym.status, sym.errno, sym.rows], ['unavailable', 'not_regular', undefined], 'a symlink is never followed');
+  rmSync(p);
+  spawnSync('mkfifo', [p]);
+  const fifo = spawnSync(process.execPath, [RUN_LOG, 'legacy', '--ticket', 'T1', '--repo', fx.wt2], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(fifo.error, undefined, 'never blocks on a FIFO');
+  assert.equal(JSON.parse(fifo.stdout).tickets[0].errno, 'not_regular');
+  rmSync(p);
+  writeFileSync(p, Buffer.alloc(65 * 1024 * 1024, 0x61)); // one 65 MiB line: over the limit, and the printed output stays small
+  const big = JSON.parse(fx.cli(fx.wt2, 'legacy', '--ticket', 'T1').stdout).tickets[0];
+  assert.equal(big.truncated, true, 'over the limit: reported, not silently read');
+  assert.equal(big.bytes_read, 64 * 1024 * 1024);
+});
+
+test('repair 6 (6) AC15 also binds event and close: a legacy-abandoned event id is refused in any case', (t) => {
+  const fx = three(t);
+  for (const id of ['legacy-abandoned.0123456789ab', 'LEGACY-ABANDONED.0123456789AB', 'Legacy-Abandoned']) {
+    const r = fx.cli(fx.main, 'event', '--ticket', 'T1', '--run-id', 'run-1', '--name', 'host_sleep', '--event-id', id, '--metric', 'label=measured');
+    assert.equal(r.status, 1, id);
+    assert.match(r.stderr, /reserved/);
+  }
+  assert.equal(existsSync(join(fx.common, 'T1.jsonl')), false);
 });

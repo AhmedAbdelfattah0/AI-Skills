@@ -419,8 +419,11 @@ function report(options) {
   // ran); the run log is read from the shared dir only. A linked worktree's pre-S5 log is an archive, never read here.
   const raw = git(options.repo, ['rev-parse', '--git-path', 'ai-skills/ship-ticket']);
   const dir = isAbsolute(raw) ? raw : resolve(options.repo, raw);
-  let logDir = dir;
-  try { logDir = commonLogDir(options.repo); } catch { /* no common dir: the own dir */ }
+  // Never fall back to the per-worktree dir (repair 6): in a linked worktree that is the pre-S5 ARCHIVE. If the shared dir
+  // cannot be resolved, no timing log is read: figures are unknown and `degraded` says so.
+  let logDir = null;
+  const degraded = [];
+  try { logDir = commonLogDir(options.repo); } catch (e) { degraded.push({ code: 'shared_log_unavailable', reason: String(e?.message ?? e).split('\n')[0], figures: 'unknown' }); }
   let tickets;
   if (options.ticket) {
     if (!SAFE_ID.test(options.ticket)) fail('invalid ticket');
@@ -430,15 +433,15 @@ function report(options) {
     // A run whose timing log failed (telemetry degraded) is still found through its engine state.
     const names = (d, timing) => (existsSync(d) ? readdirSync(d).flatMap((n) => (timing && n.endsWith('.jsonl') && !n.endsWith('.engine.jsonl') && !n.endsWith('.review-auth.jsonl') ? [n.slice(0, -6)]
       : !timing && n.endsWith('.state.json') ? [n.slice(0, -11)] : [])) : []);
-    tickets = [...new Set([...names(logDir, true), ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
+    tickets = [...new Set([...(logDir ? names(logDir, true) : []), ...names(dir, false)])].filter((n) => SAFE_ID.test(n)).sort();
   }
   const runs = [];
   const states = {};
   for (const ticket of tickets) {
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
-    const log = join(logDir, `${ticket}.jsonl`);
-    for (const row of existsSync(log) ? legacyRows(readJsonl(log)) : []) {
+    const log = logDir ? join(logDir, `${ticket}.jsonl`) : null;
+    for (const row of log && existsSync(log) ? legacyRows(readJsonl(log)) : []) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
@@ -450,7 +453,7 @@ function report(options) {
     // S-27-min: a run this install cannot interpret refuses the whole report (fail closed, like every engine command).
     if (states[ticket] !== undefined) { try { runPolicy(states[ticket]); } catch (e) { fail(`${ticket}: ${e.message}`); } }
     const stateRun = states[ticket]?.run_id;
-    if (typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
+    if (logDir && typeof stateRun === 'string' && SAFE_ID.test(stateRun) && !byRun.has(stateRun)) runs.push(buildRun(ticket, stateRun, []));
   }
   const skipped = { lines: 0 };
   const records = dedupeUsage(options.usage.flatMap((f) => readUsage(f, skipped)));
@@ -458,7 +461,8 @@ function report(options) {
   const result = evaluate({ runs, states, records, repoRoot: root });
   result.runs = result.runs.map((m, i) => ({ ...m, ...(runs[i]?.abandoned ? { abandoned: true, recorded_outcome: runs[i].recorded_outcome } : {}),
     ...(runs[i]?.partial_legacy ? { partial_legacy: runs[i].partial_legacy } : {}) }));
-  process.stdout.write(`${JSON.stringify(skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result, null, 2)}\n`);
+  const out = skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result;
+  process.stdout.write(`${JSON.stringify(degraded.length ? { ...out, degraded } : out, null, 2)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -17,7 +17,7 @@ import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRI
 import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents, readLog } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
 import { AUTH_SUBDIR, appendPreflight, commonLogDir, dirPreflight, isReservedTicket, labelLegacyRun, legacyLogDirs, legacyPresent, ownLogDir,
-  ABANDON_NAME, isReservedInterval } from './lib/run-log-paths.mjs';
+  ABANDON_NAME, LEGACY_READ_MAX, archiveTickets, isReservedInterval, readArchive } from './lib/run-log-paths.mjs';
 import { processInfo } from './engine-quiesce.mjs';
 import { hostname } from 'node:os';
 import { isTimestamp } from './lib/shape.mjs';
@@ -688,6 +688,8 @@ async function writeEvent(options, name, metrics, detail) {
   const supplied = ['started-at', 'ended-at'].filter((flag) => options[flag] !== undefined);
   for (const flag of supplied) inWindow(Date.parse(options[flag]), `--${flag}`, Date.parse(now));
   const id = JSON.parse(encoded.text.slice(0, encoded.text.indexOf('\n'))).event_id;
+  // AC15 (repair 6): the abandon event id prefix is reserved for every writer, event and close included (case-insensitive).
+  if (isReservedInterval('', options['event-id'] ?? '') || isReservedInterval('', id)) fail(`${options['event-id'] ?? id} is reserved (legacy-abandoned*; case-insensitive): use run-log.mjs abandon`);
   await failOnError(appendRows(directory, ticket, [encoded], (rows) => {
     if (rows.some((row) => row.run_id === runId && row.event_id === id)) throw new Error(`event ${id} already exists in run ${runId}`);
   }, { guard: () => { for (const flag of supplied) inWindow(Date.parse(options[flag]), `--${flag}`); } }));
@@ -878,14 +880,19 @@ function summary(options) {
 /** `legacy_present` over every ticket of this worktree's legacy dir (summary --all): own worktree only. */
 function ownLegacyAll(loc) {
   if (!loc.legacy) return { files: 0 };
-  const per = legacyTickets(loc.legacy).map((t) => legacyPresent(loc.legacy, t));
+  const listed = archiveTickets(loc.legacy);
+  // An archive directory that cannot be listed is unavailable, never an empty listing (repair 6).
+  if (listed.errno) return { files: 'unavailable', lines: 'unavailable', errno: listed.errno };
+  const per = listed.tickets.map((t) => legacyPresent(loc.legacy, t));
   return { files: per.reduce((n, p) => n + p.files, 0), ...(per.some((p) => p.lines === 'unavailable') ? { lines: 'unavailable' } : {}) };
 }
-/** Ticket names of timing logs in one legacy dir (not engine, usage or authority files). */
-function legacyTickets(dir) {
-  let names = [];
-  try { names = readdirSync(dir); } catch { return []; }
-  return names.filter((n) => n.endsWith('.jsonl') && !/\.(engine|usage|review-auth)\.jsonl$/.test(n) && SAFE_ID.test(n.slice(0, -6))).map((n) => n.slice(0, -6)).sort();
+/** Whether any committed line of `bytes` is a JSON row of run `runId` (membership only; nothing is aggregated). */
+function runInArchive(bytes, runId) {
+  for (const line of bytes.subarray(0, committedLength(bytes)).toString('utf8').split('\n')) {
+    if (!line.includes(runId)) continue;
+    try { if (JSON.parse(line)?.run_id === runId) return true; } catch { /* not a row */ }
+  }
+  return false;
 }
 
 /**
@@ -1068,11 +1075,20 @@ async function abandonCommand(options) {
   const runId = validateId('run id', requireOption(options, 'run-id'));
   const reason = options.reason ?? 'unknown';
   if (!ABANDON_REASONS.includes(reason)) fail(`--reason must be one of: ${ABANDON_REASONS.join(', ')}`);
-  const legacy = ownLegacy(loc, ticket);
-  if (!legacy.files) fail(`this worktree has no pre-S5 log of ${ticket}: abandon applies only to runs started in one (nothing written)`);
-  const eventId = `legacy-abandoned.${createHash('sha256').update(`${legacy.path}\0${runId}`).digest('hex').slice(0, 12)}`;
+  // Scope (repair 6): run R must OCCUR in THIS worktree's own archive. A streamed run_id membership scan over the safe
+  // bounded read; it never produces a figure. A missing, non-regular or unreadable archive refuses.
+  const archive = loc.legacy ? readArchive(loc.legacy, ticket, LEGACY_READ_MAX) : { status: 'absent' };
+  if (archive.status === 'absent') fail(`this worktree has no pre-S5 log of ${ticket}: abandon applies only to runs started in one (nothing written)`);
+  if (archive.status === 'unavailable') fail(`this worktree's pre-S5 log ${archive.path} cannot be read (${archive.errno}): abandon needs to find run ${runId} in it (nothing written)`);
+  if (!runInArchive(archive.bytes, runId)) {
+    fail(`run ${runId} does not occur in this worktree's pre-S5 log ${archive.path}${archive.truncated ? ` (only its first ${LEGACY_READ_MAX} bytes were scanned)` : ''}: abandon applies only to runs started there (nothing written)`);
+  }
+  const eventId = `legacy-abandoned.${createHash('sha256').update(`${archive.path}\0${runId}`).digest('hex').slice(0, 12)}`;
   const row = await appendStamped(() => {
     const view = writerRows(loc, ticket);
+    if (view.rows.some((r) => r.run_id === runId && r.event === 'end' && r.kind === 'workflow' && r.outcome === 'complete')) {
+      fail(`run ${runId} completed in the shared log (a workflow interval ended "complete"); a completed run is never abandoned (nothing written)`);
+    }
     const existing = view.rows.filter((r) => r.run_id === runId && r.event_id === eventId);
     if (existing.length) return { directory: loc.directory, ticket, records: [], guard: undefined, after: () => existing.at(-1) };
     const stamp = stampFor(view, runId, undefined, '--at');
@@ -1094,14 +1110,20 @@ function legacyCommand(options) {
   const loc = locations(requireOption(options, 'repo'));
   const out = { scope: 'legacy-archive', worktree_log_dir: loc.legacy, tickets: [] };
   if (loc.legacy) {
-    const tickets = options.ticket !== undefined ? [validateId('ticket', options.ticket)] : legacyTickets(loc.legacy);
+    let tickets;
+    if (options.ticket !== undefined) tickets = [validateId('ticket', options.ticket)];
+    else {
+      const listed = archiveTickets(loc.legacy);
+      if (listed.errno) Object.assign(out, { status: 'unavailable', errno: listed.errno });
+      tickets = listed.tickets;
+    }
     for (const ticket of tickets) {
-      const path = logPath(loc.legacy, ticket);
-      let text;
-      try { text = readFileSync(path, 'utf8'); }
-      catch (error) { out.tickets.push({ ticket, path, status: error?.code === 'ENOENT' ? 'absent' : 'unreadable', ...(error?.code === 'ENOENT' ? {} : { errno: error?.code ?? String(error) }) }); continue; }
-      const { rows, warnings } = rowsFromText(text, path);
-      out.tickets.push({ ticket, path, status: 'present', rows, warnings, summary: { runs: runsOf(ticket, rows, warnings) } });
+      // The same safe read as legacy_present: lstat, regular file only, O_NOFOLLOW|O_NONBLOCK, bounded (repair 6).
+      const r = readArchive(loc.legacy, ticket, LEGACY_READ_MAX);
+      if (r.status !== 'present') { out.tickets.push({ ticket, path: r.path ?? logPath(loc.legacy, ticket), status: r.status, ...(r.errno ? { errno: r.errno } : {}) }); continue; }
+      const { rows, warnings } = rowsFromText(r.bytes.toString('utf8'), r.path);
+      out.tickets.push({ ticket, path: r.path, status: 'present', size: r.size, ...(r.truncated ? { truncated: true, bytes_read: r.bytes.length } : {}),
+        rows, warnings, summary: { runs: runsOf(ticket, rows, warnings) } });
     }
   }
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
