@@ -216,7 +216,7 @@ and rule-catalogue work:
 - under security policy 2, return one primary `rule_row` per effective pair,
   `subject_id` `<boundary>:<control>`, with the pair's spec evidence, and one per
   dropped pair of a block format 3: `NOT_APPLICABLE` citing its evidence path when
-  the cited fact holds, `FAIL` to dispute it. A counterpart that disputes a drop
+  the cited fact holds (and the surface's exact file is where the boundary's code lives, not a decoy), `FAIL` to dispute it. A counterpart that disputes a drop
   gives its finding `subject_id: '<boundary>:<control>'`, which, on an original
   review, records the same run-wide dispute (see
   [security-risk.md](security-risk.md) section 9). No file is exempted by its
