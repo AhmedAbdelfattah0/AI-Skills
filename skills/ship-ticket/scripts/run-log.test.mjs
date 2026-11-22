@@ -9,7 +9,7 @@ import { hostname as hostnameOf } from 'node:os';
 import { buildRun } from './run-summary.mjs';
 import { verifyReviewExecution } from './carrier.mjs';
 import { REVIEW_ROLE_OF, IDENTITY_ACTIVITIES, GAP_REASONS, CEILING_METRICS, STRING_METRICS } from './review-intervals.mjs';
-import { readFileSync as readText, readdirSync, realpathSync, existsSync, chmodSync } from 'node:fs';
+import { readFileSync as readText, readdirSync, realpathSync, existsSync, chmodSync, symlinkSync } from 'node:fs';
 const readdirSyncSafe = (d) => { try { return readdirSync(d).sort(); } catch { return []; } };
 const realpathSyncSafe = (p) => realpathSync.native(p);
 const existsSyncSafe = existsSync;
@@ -915,7 +915,9 @@ test('S5 repair 3 (B) batch refuses the WHOLE batch, zero rows, when a REVIEW op
 
 test('S5 repair 3 (B) a residual authority-copy failure is reported truthfully: committed shared rows counted, no retry of the shared row', (t) => {
   const f = fixture(t);
-  mkdirSync(join(dirname(f.path), 'review-auth', 'T1.jsonl'), { recursive: true }); // writable path, but appending to it fails (a directory)
+  // A residual failure the preflight cannot foresee: a live holder keeps the authority file's lock past the 10 s wait.
+  mkdirSync(join(dirname(f.path), 'review-auth'));
+  writeFileSync(join(dirname(f.path), 'review-auth', 'T1.jsonl.lock'), JSON.stringify({ pid: process.pid, process_start_time: null, host: hostnameOf(), run_id: 'x', nonce: 'held' }));
   const r = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r'), { op: 'start', kind: 'phase', name: 'C', event_id: 'c' }]);
   assert.equal(r.status, 1);
   const out = JSON.parse(r.stdout.trim());
@@ -926,6 +928,50 @@ test('S5 repair 3 (B) a residual authority-copy failure is reported truthfully: 
   const single = f.cli(...phaseArgs('start', 'x').map((a) => (a === 'Px' ? 'REVIEW' : a)), '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-x');
   assert.equal(single.status, 1);
   assert.match(single.stderr, /committed_shared=true/, 'the single start path says the shared row committed');
+  rmSync(join(dirname(f.path), 'review-auth', 'T1.jsonl.lock'), { force: true });
   const notCommitted = runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }]);
   assert.deepEqual(JSON.parse(notCommitted.stdout.trim()).failed.committed_shared, false, 'a refused op did not commit');
 });
+
+// ------------------------------------------------------------------ S5 review repair 4 (3): the authority-copy preflight mirrors the copy
+// Every state of review-auth/ and its file: `check` says ok exactly when a REVIEW start writes BOTH rows; otherwise the
+// REVIEW start (single or batched) writes ZERO rows, before any shared row exists.
+const posix = process.platform !== 'win32' && process.getuid?.() !== 0;
+const AUTH_STATES = [
+  ['absent', () => {}, true, true],
+  ['dir 0700', (a) => mkdirSync(a), true, true],
+  ['dir 0700 with the file 0600', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); }, true, true],
+  ['dir 0500 with the file 0600', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); chmodSync(a, 0o500); }, false, posix],
+  ['dir 0500, no file', (a) => { mkdirSync(a); chmodSync(a, 0o500); }, false, posix],
+  ['dir 0300 (not readable: the directory fsync opens it)', (a) => { mkdirSync(a); chmodSync(a, 0o300); }, false, posix],
+  ['dir 0600 (not searchable)', (a) => { mkdirSync(a); chmodSync(a, 0o600); }, false, posix],
+  ['dir 0500 inside a missing parent? no: parent 0500, review-auth absent', (a) => chmodSync(dirname(a), 0o500), false, posix],
+  ['a regular file named review-auth', (a) => writeFileSync(a, 'x'), false, true],
+  ['a symlink to a directory', (a) => { mkdirSync(`${a}-target`); symlinkSync(`${a}-target`, a); }, true, process.platform !== 'win32'],
+  ['a dangling symlink', (a) => symlinkSync(`${a}-missing`, a), false, process.platform !== 'win32'],
+  ['the file is a directory', (a) => { mkdirSync(join(a, 'T1.jsonl'), { recursive: true }); }, false, true],
+  ['the file is 0400', (a) => { mkdirSync(a); writeFileSync(join(a, 'T1.jsonl'), ''); chmodSync(join(a, 'T1.jsonl'), 0o400); }, false, posix],
+];
+for (const [state, make, ok, runs] of AUTH_STATES) {
+  test(`S5 repair 4 (3) authority dir state "${state}": check, single start and batch agree with what the copy can do`, { skip: !runs && 'needs POSIX permissions/symlinks as non-root' }, (t) => {
+    for (const mode of ['single', 'batch']) {
+      const f = fixture(t);
+      const auth = join(dirname(f.path), 'review-auth');
+      make(auth);
+      t.after(() => { for (const p of [dirname(auth), auth, join(auth, 'T1.jsonl')]) chmodSyncSafe(p, 0o700); });
+      const c = spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' });
+      assert.equal(c.status === 0, ok, `${state}: check ${c.stdout}`);
+      const r = mode === 'single'
+        ? f.cli('start', '--run-id', 'run-1', '--kind', 'phase', '--name', 'REVIEW', '--event-id', 'r', '--metric', 'candidate_id=sha-1', '--metric', 'review_execution=review-r')
+        : runBatch(f, [{ op: 'start', kind: 'phase', name: 'BUILD', event_id: 'b' }, reviewOp('r')]);
+      for (const p of [dirname(auth), auth, join(auth, 'T1.jsonl')]) chmodSyncSafe(p, 0o700);
+      if (ok) {
+        assert.equal(r.status, 0, `${state} ${mode}: ${r.stderr}${r.stdout}`);
+        assert.ok(rowsOf(f).some((x) => x.name === 'REVIEW'), 'the shared row');
+      } else {
+        assert.equal(r.status, 1, `${state} ${mode}`);
+        assert.equal(bytesOf(f), '', `${state} ${mode}: zero rows, nothing committed before the refusal (${r.stdout}${r.stderr})`);
+      }
+    }
+  });
+}

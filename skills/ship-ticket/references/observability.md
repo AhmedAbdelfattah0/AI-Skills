@@ -22,13 +22,30 @@ is not pushed.
 **Old per-worktree logs (before S5).** Earlier versions wrote to
 `git rev-parse --git-path ai-skills/ship-ticket`, which in a linked worktree is
 `<git-common-dir>/worktrees/<name>/ai-skills/ship-ticket`. Those files are read,
-never written or deleted. `start`, `end` and `event` read the common log together with
-this worktree's own old log (never a sibling worktree's), so a start recorded there can
-still be ended and a duplicate is still refused. When `end` pairs with a start found only
+never written or deleted. `start`, `end` and `event` find, end and migrate starts only
+in the common log and this worktree's own old log, so a start recorded there can still be
+ended and a duplicate is still refused. To judge pairing they read every worktree's old
+log, so the verdict does not depend on which worktree writes. An S5 `start` of an event id
+that any old log already holds is therefore refused (`duplicate_start`). When `end` pairs with a start found only
 in the own old log, the same append first copies that start row verbatim into the common
 log, then the end (end-time migration), so the common log never holds an end without its
-start. Readers that merge several files count a row that is identical to a row of another
-file once. `summary` and `eval.mjs report` also read sibling worktrees' old logs, for
+start.
+
+**Duplicate accounting rule (one rule, every reader).** Rows are compared by their JSON
+text, so a verbatim copy is the same text. For each distinct row, let C be its
+occurrences in the common log and L its occurrences over ALL old logs together, after each
+old log's recorded exclusions. The joined view holds max(C, L) of it. Each common copy
+excuses exactly one old-log occurrence: the one it was migrated from. Every further
+occurrence is a genuine duplicate. It stays in the view, so every reader reports it
+(`duplicate_start`, `invalid_pair`) the same way. The result depends only on the set of
+(file, row) pairs: not on file order, and not on which worktree reads. The common log does
+not record which worktree migrated a copy (that would turn a shared row into a claim about
+a worktree), so the excused occurrence is counted, not named. The trade-off: when two old
+logs hold the same row and one of them was migrated, the view reports one duplicate
+without saying which old log it came from. With rows from several files the view is
+ordered by (timestamp, start before end, row text); a single file keeps its order. This is
+implemented once (`lib/run-log-paths.mjs` `joinRows`/`unionLogRows`) and used by
+`summary`, `check`, the writers, `migrate`, the integrity line and `eval.mjs report`. `summary` and `eval.mjs report` also read sibling worktrees' old logs, for
 reporting only. `quarantine` changes the common log only. Engine files (`.state.json`,
 `.engine.jsonl`, `.usage.jsonl`, `.attempts`) are not run logs and stay per worktree.
 
@@ -42,7 +59,20 @@ rows keep their original timestamps, so for them file order is not time order. W
 to copy is decided from the shared log as read and checked again under the lock against
 the exact bytes the copy follows; a concurrent `migrate` or end-time migration makes the
 later one re-select, so each legacy row has exactly one copy. One shared copy accounts for
-one legacy row: a row written twice to the shared log is still reported as a duplicate.
+one legacy row (the rule above): a row written twice to the shared log is still reported
+as a duplicate.
+
+**Unreadable exclusion data.** Only a missing `excluded/<TICKET>.jsonl` means "no
+exclusions". Any other read failure (EACCES, EISDIR, ...) and any unparsable line (with its
+line number: `invalid_json`, `not_a_row`, `incomplete_tail`) is a named degradation:
+`excluded_unreadable` with the path and errno. `summary` lists it as an integrity warning,
+so every run is `unknown_due_to_integrity`. `eval.mjs report` adds
+`degraded: [{code, path, errno, line?, figures: "unreliable"}]`. The integrity line adds
+`degraded=excluded_unreadable(n) figures_unreliable`, `lostSignal` counts
+`excluded_unreadable`, and `check` exits 1. Every writer (`start`, `end`, `event`,
+`close`, `migrate`, `quarantine`) refuses, because it would otherwise write against an
+unknown exclusion set. The figures are then computed without that file's exclusions, and
+they are labelled unreliable, never presented as normal.
 Without it,
 removing the worktree loses that history (closed intervals and open starts), but never
 breaks the common log.
@@ -186,14 +216,24 @@ node <SHIP_TICKET_SKILL>/scripts/run-log.mjs check --repo <TARGET_REPO> --ticket
 
 It writes nothing (no probe file, no directory, no lock) and prints one JSON line
 `{ok, resolved_dir, legacy_logs, degraded?, reason?}`. Exit 0: telemetry can be
-written to `resolved_dir`. Exit 1, with `reason`: not a Git repository; a file the
-next append needs is not writable (the existing `<TICKET>.jsonl` itself, else its
-nearest existing directory, where `<TICKET>.jsonl.lock` is also created, and this
-worktree's `review-auth/<TICKET>.jsonl` or its directory); the lock file is
+written to `resolved_dir`. Exit 1, with `reason`: not a Git repository; an append to the
+shared `<TICKET>.jsonl` or to this worktree's `review-auth/<TICKET>.jsonl` could not
+succeed; exclusion data is unreadable; the lock file is
 unreadable, malformed, held by another host (`lock_foreign_host`), or stale with an
 existing `<lock>.recovery` marker. These follow the same decision the next append's lock
 takes, using the same process probe; check mirrors it read-only, because the lock module
-has no read-only form. Exit 1 also when the existing log would refuse writes (for example a torn tail,
+has no read-only form. "Could succeed" is judged by `appendPreflight`, which mirrors the
+exact operations of an append, one function for `check`, `batch` prevalidation, a single
+REVIEW `start` and the authority copy itself:
+- the directory, or its nearest existing ancestor when `mkdir -p` would create it, is a
+  directory (not a regular file, not a dangling symbolic link) that is writable and
+  searchable;
+- an existing target directory is also readable, because it is opened to fsync a newly
+  created file;
+- the target, when present, is a regular file that is writable (not a directory);
+- `<file>.lock` would be accepted as above.
+
+Exit 1 also when the existing log would refuse writes (for example a torn tail,
 `incomplete_tail`; the next write or `quarantine` moves it aside). An exit 1 is a
 declared degradation of the run's telemetry: record it (`harness degraded`) and
 continue. It never blocks the ticket. `degraded` lists notes that do not stop
@@ -222,9 +262,9 @@ a key containing `=` is refused, never re-split. A numeric value must be finite 
 400-digit number is refused, never stored as Infinity). Every op is validated before the
 first write; the ops then run in order and the first failure stops the batch. A
 batch is not atomic: ops already applied stay. A REVIEW start also needs its
-per-worktree authority copy: if that file (or its nearest existing directory) is not
-writable, the whole batch is refused before the first write, by the same decision
-`check` uses. stdout is one JSON line, `{"applied": n}` or `{"applied": n, "failed":
+per-worktree authority copy: if `appendPreflight` says it could not succeed, the whole
+batch is refused before the first write, by the same decision `check` uses. A single
+REVIEW `start` is refused the same way, with zero rows. stdout is one JSON line, `{"applied": n}` or `{"applied": n, "failed":
 {"index": i, "reason": "...", "committed_shared": true|false, "authority_copy"?:
 "failed"|"pending"}}` (exit 1). `applied` counts every op whose row committed to the
 shared log, including a REVIEW start whose authority copy then failed
@@ -289,7 +329,11 @@ not computed inside run-log-io.
   (`lib/run-log-paths.mjs` `unionLogRows`). Exclusions, verbatim copies and time order are
   therefore the same everywhere. Only the per-line parsing differs: eval's legacy figures
   read lines leniently, as before S5.
-- Known limits: a writer reads only this worktree's own old log, so a start recorded
+- Known limits: an unreadable exclusion file in ANY worktree's old log stops every writer
+  of that ticket until it is repaired (fail closed, by design). A residual failure no
+  read-only preflight can foresee (the lock still held after 10 s, the filesystem changing
+  between the check and the write) is reported truthfully (`committed_shared`) and is not
+  undone. A writer finds and ends starts only in this worktree's own old log, so a start recorded
   by a pre-S5 version in another worktree can be ended only from that worktree. The
   duplicate legacy start of the upgrade window needs the explicit
   `migrate --resolve-duplicates` from the affected worktree. A REVIEW start whose authority

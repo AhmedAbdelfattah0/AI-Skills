@@ -3,7 +3,7 @@
 // realpathSync.native, git identities are passed per command, and nothing here needs a POSIX shell.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -260,9 +260,11 @@ test('S5 repair 2 (2) a verbatim row written TWICE to the shared log is a duplic
 test("S5 repair 2 (5) N1: a legacy start colliding with another worktree's start of the same id is recoverable from the affected worktree, keeping all evidence", (t) => {
   const fx = worktrees(t);
   const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+  assert.equal(fx.cli(fx.main, ...iv('start', 'a', ['--started-at', ago(30)])).status, 0, 'run-1/a started from the main checkout with S5');
+  // S5 writers now refuse to start an id that a legacy log already holds (repair 4: they judge pairing over every legacy log),
+  // so the collision arises only the other way round: a pre-S5 version in wt2 writes the same id during the upgrade window.
   seed(fx.wt2Legacy, [legacyRow('start', 'a', ago(60))]);
   const legacyBytes = readFileSync(join(fx.wt2Legacy, 'T1.jsonl'));
-  assert.equal(fx.cli(fx.main, ...iv('start', 'a')).status, 0, 'the same run and event id started from the main checkout after the upgrade');
   const locked = fx.cli(fx.wt2, ...iv('start', 'z'));
   assert.equal(locked.status, 1, 'wt2 is locked out by duplicate_start');
   const plain = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1');
@@ -284,8 +286,8 @@ test("S5 repair 2 (5) N1: a legacy start colliding with another worktree's start
 test('S5 repair 3 (A) reader parity: summary, check, writer view, eval, the integrity line and lostSignal agree after --resolve-duplicates', async (t) => {
   const fx = worktrees(t);
   const T = Date.now() - 10000;
-  seed(fx.wt2Legacy, [legacyRow('start', 'a', new Date(T - 60000).toISOString())]);
   assert.equal(fx.cli(fx.main, ...iv('start', 'a', ['--started-at', new Date(T).toISOString()])).status, 0);
+  seed(fx.wt2Legacy, [legacyRow('start', 'a', new Date(T - 60000).toISOString())]); // a pre-S5 writer in wt2, after the S5 start
   const r = fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates');
   assert.equal(JSON.parse(r.stdout.trim()).excluded, 1, r.stderr);
   const e = fx.cli(fx.wt2, ...iv('end', 'a', ['--ended-at', new Date(T + 1000).toISOString()]));
@@ -308,4 +310,137 @@ test('S5 repair 3 (A) reader parity: summary, check, writer view, eval, the inte
   const { lostSignal } = await import('../eval.mjs');
   const lost = lostSignal([commonLogDir(fx.wt2), legacyLogDirs(fx.wt2).own], 'T1');
   assert.equal(lost.invalid_events + lost.malformed_lines + lost.torn_bytes, 0, 'lostSignal sees no damage either');
+});
+
+// ---- S5 review repair 4 (1): ONE explicit, order-independent duplicate accounting rule for every reader.
+// Rule: per distinct row text, C = occurrences in the common log, L = occurrences over ALL legacy sources; the join holds
+// max(C, L): each common copy excuses exactly one legacy occurrence, every further occurrence is a genuine duplicate.
+const rowsOfUnion = (out) => (Array.isArray(out) ? out : out.rows);
+test('S5 repair 4 (1) accounting rule: max(C, L) per row, a pure function of the (source, row) multiset (exhaustive small cases + seeded property)', async () => {
+  const { unionLogRows } = await import('./run-log-paths.mjs');
+  const base = mkdtempSync(join(tmpdir(), 's5-acct-'));
+  try {
+    const dirs = ['common', 'A', 'B', 'D'].map((n) => { const d = join(base, n); mkdirSync(d); return d; });
+    const s = legacyRow('start', 'a', '2026-01-01T00:00:00.000Z'), e = legacyRow('end', 'a', '2026-01-01T00:00:01.000Z');
+    let seed = 0x5a5a;
+    const rand = (n) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+    const shuffle = (xs) => { const a = [...xs]; for (let i = a.length - 1; i > 0; i -= 1) { const j = rand(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+    for (let round = 0; round < 200; round += 1) {
+      const counts = dirs.map(() => rand(3)); // 0..2 copies of [s, e] per source
+      const sources = dirs.map((dir, i) => ({ dir, rows: Array.from({ length: counts[i] }, () => [s, e]).flat() }));
+      const C = counts[0], L = counts.slice(1).reduce((a, b) => a + b, 0);
+      const want = Math.max(C, L);
+      const results = [0, 1, 2].map(() => rowsOfUnion(unionLogRows(shuffle(sources), 'T1', dirs[0])).map((r) => JSON.stringify(r)));
+      for (const r of results) {
+        assert.equal(r.filter((x) => x === JSON.stringify(s)).length, want, `round ${round}: C=${C} L=${L} counts=${counts}`);
+        assert.deepEqual(r, results[0], `round ${round}: order-independent`);
+      }
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("S5 repair 4 (1) Codex's fixture (identical [start,end] in two legacy logs and the common log): every reader, from every worktree, reports the same", async (t) => {
+  const fx = worktrees(t);
+  git(fx.main, 'worktree', 'add', '-q', join(fx.base, 'wt3'));
+  const wt3 = join(fx.base, 'wt3'), wt3Legacy = join(fx.main, '.git', 'worktrees', 'wt3', 'ai-skills', 'ship-ticket');
+  const T = Date.now() - 20000;
+  const pair = [legacyRow('start', 'a', new Date(T).toISOString()), { ...legacyRow('end', 'a', new Date(T + 1000).toISOString()), duration_ms: 1000 }];
+  for (const d of [fx.wt2Legacy, wt3Legacy, fx.common]) seed(d, pair);
+  const { integritySummary } = await import('../run-log.mjs');
+  const seen = [];
+  for (const repo of [fx.main, fx.wt2, wt3]) {
+    const s = summary(fx, repo);
+    const ev = spawnSync(process.execPath, [fileURLToPath(new URL('../eval.mjs', import.meta.url)), 'report', '--repo', repo, '--ticket', 'T1'], { encoding: 'utf8' });
+    const integ = integritySummary(repo, 'T1');
+    seen.push(JSON.stringify({
+      intervals: s.runs.flatMap((r) => r.intervals.map((i) => [i.event_id, i.duration_ms])),
+      warnings: s.integrity_warnings.map((w) => w.code).sort(),
+      eval: JSON.parse(ev.stdout).runs.map((r) => r.wall_ms_by_phase),
+      integrity: [integ.events, integ.warnings],
+      check: fx.cli(repo, 'check', '--ticket', 'T1').status,
+    }));
+  }
+  // The writers' verdict, after every read (a write changes the log the next reader sees).
+  for (const [i, repo] of [fx.main, fx.wt2, wt3].entries()) assert.equal(fx.cli(repo, ...iv('start', `z-${i}`)).status, 0, `writer view from ${repo}: the pre-existing duplicate is not this write's`);
+  assert.equal(new Set(seen).size, 1, `every reader agrees:\n${seen.join('\n')}`);
+  const one = JSON.parse(seen[0]);
+  assert.deepEqual(one.intervals, [['a', 1000]]);
+  assert.deepEqual(one.warnings, ['duplicate_start', 'invalid_pair'], 'the second legacy copy is a genuine duplicate, reported');
+  assert.deepEqual(one.integrity, [4, 2]);
+});
+
+// ---- S5 review repair 4 (2): unreadable or malformed exclusion data is a named degradation, never "no exclusions".
+function resolvedDuplicate(t) {
+  const fx = worktrees(t);
+  const T = Date.now() - 10000;
+  assert.equal(fx.cli(fx.main, ...iv('start', 'a', ['--started-at', new Date(T).toISOString()])).status, 0);
+  seed(fx.wt2Legacy, [legacyRow('start', 'a', new Date(T - 60000).toISOString())]);
+  assert.equal(JSON.parse(fx.cli(fx.wt2, 'migrate', '--ticket', 'T1', '--resolve-duplicates').stdout.trim()).excluded, 1);
+  assert.equal(fx.cli(fx.wt2, ...iv('end', 'a', ['--ended-at', new Date(T + 1000).toISOString()])).status, 0);
+  return { fx, excluded: join(fx.wt2Legacy, 'excluded', 'T1.jsonl') };
+}
+const DAMAGE = [
+  ['mode 000', (p) => chmodSync(p, 0o000), (p) => { try { chmodSync(p, 0o600); } catch { /* already removed */ } }, process.platform === 'win32' || process.getuid?.() === 0],
+  ['a directory in place of the file', (p) => { rmSync(p); mkdirSync(p); }, () => {}, false],
+  ['a garbled line', (p) => writeFileSync(p, readFileSync(p, 'utf8') + 'not json\n'), () => {}, false],
+  ['a torn tail', (p) => writeFileSync(p, readFileSync(p, 'utf8') + '{"schema":'), () => {}, false],
+];
+for (const [kind, damage, undo, skip] of DAMAGE) {
+  test(`S5 repair 4 (2) excluded/ ${kind}: every reader reports excluded_unreadable, writers refuse, nothing computed silently`, { skip: skip && 'root or win32' }, async (t) => {
+    const { fx, excluded } = resolvedDuplicate(t);
+    damage(excluded);
+    t.after(() => undo(excluded));
+    const { integritySummary } = await import('../run-log.mjs');
+    for (const repo of [fx.main, fx.wt2]) {
+      const s = summary(fx, repo);
+      assert.ok(s.integrity_warnings.some((w) => w.code === 'excluded_unreadable'), `summary from ${repo}: ${JSON.stringify(s.integrity_warnings)}`);
+      assert.ok(s.runs.every((r) => r.open_state === 'unknown_due_to_integrity'), 'figures are marked unreliable');
+      const ev = JSON.parse(spawnSync(process.execPath, [fileURLToPath(new URL('../eval.mjs', import.meta.url)), 'report', '--repo', repo, '--ticket', 'T1'], { encoding: 'utf8' }).stdout);
+      assert.ok((ev.degraded ?? []).some((d) => d.code === 'excluded_unreadable'), `eval from ${repo} says its figures are unreliable`);
+      assert.ok(integritySummary(repo, 'T1').excluded_unreadable >= 1, 'integrity line');
+      const c = fx.cli(repo, 'check', '--ticket', 'T1');
+      assert.equal(c.status, 1, `check from ${repo}: ${c.stdout}`);
+      assert.match(JSON.parse(c.stdout).reason, /excluded_unreadable/);
+    }
+    const { lostSignal } = await import('../eval.mjs');
+    assert.equal(lostSignal([commonLogDir(fx.wt2), legacyLogDirs(fx.wt2).own], 'T1').excluded_unreadable, 1, 'lostSignal counts it');
+    for (const repo of [fx.wt2, fx.main]) {
+      const w = fx.cli(repo, ...iv('start', 'z'));
+      assert.equal(w.status, 1, `${repo} refuses to write against an unknown exclusion set`);
+      assert.match(w.stderr, /excluded_unreadable/);
+    }
+    const w = fx.cli(fx.wt2, ...iv('start', 'z'));
+    assert.equal(w.status, 1, 'the affected worktree refuses to write against an unknown exclusion set');
+    assert.match(w.stderr, /excluded_unreadable/);
+  });
+}
+
+test('S5 repair 4 an S5 writer refuses to start an event id that a legacy log (own or sibling) already holds: no new N1 collision', (t) => {
+  const fx = worktrees(t);
+  seed(fx.wt2Legacy, [legacyRow('start', 'a', new Date(Date.now() - 60000).toISOString())]);
+  const r = fx.cli(fx.main, ...iv('start', 'a'));
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /duplicate_start/);
+  assert.equal(existsSync(join(fx.common, 'T1.jsonl')) ? readFileSync(join(fx.common, 'T1.jsonl'), 'utf8') : '', '', 'nothing written');
+});
+
+test('S5 repair 4 (2) excludedRows: only ENOENT means no exclusions; every other kind of read or parse failure is a located problem', async () => {
+  const { excludedRows } = await import('./run-log-paths.mjs');
+  const d = mkdtempSync(join(tmpdir(), 's5-excl-'));
+  try {
+    const f = join(d, 'excluded', 'T1.jsonl');
+    assert.deepEqual(excludedRows(d, 'T1'), { rows: [] }, 'ENOENT');
+    mkdirSync(join(d, 'excluded'));
+    const row = JSON.stringify(legacyRow('start', 'a', '2026-01-01T00:00:00.000Z'));
+    for (const [text, want] of [['', null], [`${row}\n`, null], [`${row}\n\n`, null], ['x\n', { line: 1, errno: 'invalid_json' }], [`${row}\n[1]\n`, { line: 2, errno: 'not_a_row' }],
+      [`${row}\nnull\n`, { line: 2, errno: 'not_a_row' }], [`${row}\n{"a":`, { line: 2, errno: 'incomplete_tail' }]]) {
+      writeFileSync(f, text);
+      const out = excludedRows(d, 'T1');
+      if (want === null) assert.equal(out.problem, undefined, JSON.stringify(text));
+      else assert.deepEqual({ line: out.problem?.line, errno: out.problem?.errno, code: out.problem?.code }, { ...want, code: 'excluded_unreadable' }, JSON.stringify(text));
+    }
+    rmSync(f);
+    mkdirSync(f);
+    assert.equal(excludedRows(d, 'T1').problem?.errno, 'EISDIR');
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

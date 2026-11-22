@@ -15,8 +15,8 @@
  * Engine files (.state.json, .engine.jsonl, .usage.jsonl, .attempts) are not run logs and stay per-worktree.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const LOG_SUBDIR = join('ai-skills', 'ship-ticket');
 /** Per-worktree subdirectory of REVIEW authority records (`<git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl`). No
@@ -125,22 +125,41 @@ export function readLogRows(dirs, ticket, parse = (bytes) => bytes) {
 }
 
 /**
- * THE union reading of one ticket's run-log rows over several files (S5 repair 3): run-log (summary, check, writers, the
- * integrity line) and eval.mjs all call these, so every reader sees the same rows.
- * - `excludedRows(dir, ticket)`: the rows `migrate --resolve-duplicates` recorded in `<dir>/excluded/<ticket>.jsonl`.
- * - `subtractRows(rows, minus)`: `rows` without one verbatim occurrence per row of `minus`.
- * - `excuseCopies(lists)`: rows of `lists` in order, a later list's row dropped once per verbatim occurrence kept in an
- *   earlier list (a migrated copy is one row; a row written twice to the shared log stays a duplicate).
- * - `mergeLogRows(lists)`: excuseCopies, then a stable sort by timestamp when more than one list has rows.
- * - `unionLogRows(sources, ticket, commonDir)`: `sources` = `[{ dir, rows }]` (readLogRows order); every source that is not
- *   the common dir loses its excluded rows; legacy sources first, the common log last, merged.
- * Rows are compared by their JSON text (same key order: a verbatim copy is the same text). Parsing stays with the caller.
+ * THE join of one ticket's run-log rows over several files (S5 repairs 3-4). run-log (summary, check, the writers, migrate,
+ * the integrity line) and eval.mjs all call it, so every reader sees the same rows.
+ *
+ * ACCOUNTING RULE (repair 4). Rows are compared by their JSON text (a verbatim copy is the same text). For each distinct row
+ * text, let C = its occurrences in the common (shared) log and L = its occurrences over ALL legacy sources together (after
+ * each source's recorded exclusions). The join holds max(C, L) occurrences: every common occurrence, and each common copy
+ * excuses exactly ONE legacy occurrence (the migrated one); every further occurrence is a genuine duplicate and stays, so
+ * buildRun reports it (duplicate_start, invalid_pair) in every reader. The shared log does not record which worktree
+ * migrated a copy (recording it would make a shared row an authority-like claim), so the excused occurrence is counted, not
+ * named; the counts are the same whichever it is. The result is a pure function of the multiset of (source, row) pairs:
+ * independent of the order of the sources and of which worktree reads. With rows from more than one source the rows are
+ * ordered by (timestamp, start before end, row text); a single source keeps its file order (pre-S5 behaviour).
+ *
+ * EXCLUSIONS (repair 4). `excludedRows(dir, ticket)` returns `{ rows, problem }`. Only ENOENT means "no exclusions"; every
+ * other read error (EACCES, EISDIR, ...) and every unparsable line is a `problem` ({ code: 'excluded_unreadable', path,
+ * errno | line }), never an empty set. Readers report it as a degradation; writers refuse.
  */
 const keyOf = (row) => JSON.stringify(row);
 export function excludedRows(dir, ticket) {
+  const path = join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`);
   let text;
-  try { text = readFileSync(join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`), 'utf8'); } catch { return []; }
-  return text.split('\n').flatMap((line) => { if (!line.trim()) return []; try { return [JSON.parse(line)]; } catch { return []; } });
+  try { text = readFileSync(path, 'utf8'); }
+  catch (e) { return e?.code === 'ENOENT' ? { rows: [] } : { rows: [], problem: { code: 'excluded_unreadable', path, errno: e?.code ?? String(e) } }; }
+  const rows = [];
+  const lines = text.split('\n');
+  const torn = lines.pop(); // '' when the text ends with a newline
+  for (const [i, line] of lines.entries()) {
+    if (!line.trim()) continue;
+    let row;
+    try { row = JSON.parse(line); } catch { return { rows, problem: { code: 'excluded_unreadable', path, line: i + 1, errno: 'invalid_json' } }; }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return { rows, problem: { code: 'excluded_unreadable', path, line: i + 1, errno: 'not_a_row' } };
+    rows.push(row);
+  }
+  if (torn) return { rows, problem: { code: 'excluded_unreadable', path, line: lines.length + 1, errno: 'incomplete_tail' } };
+  return { rows };
 }
 export function subtractRows(rows, minus) {
   if (!minus.length) return rows;
@@ -148,23 +167,81 @@ export function subtractRows(rows, minus) {
   for (const row of minus) debt.set(keyOf(row), (debt.get(keyOf(row)) ?? 0) + 1);
   return rows.filter((row) => { const n = debt.get(keyOf(row)) ?? 0; if (n > 0) { debt.set(keyOf(row), n - 1); return false; } return true; });
 }
-export function excuseCopies(lists) {
-  const credit = new Map();
-  return lists.flatMap((list) => {
-    const kept = list.filter((row) => { const n = credit.get(keyOf(row)) ?? 0; if (n > 0) { credit.set(keyOf(row), n - 1); return false; } return true; });
-    for (const row of kept) credit.set(keyOf(row), (credit.get(keyOf(row)) ?? 0) + 1);
-    return kept;
-  });
+const EVENT_ORDER = { start: 0, end: 1 };
+/** The accounting rule: the common rows, plus the legacy rows beyond what the common copies excuse (see above). */
+export function joinRows(commonRows, legacyLists) {
+  const sources = [commonRows, ...legacyLists].filter((l) => l.length);
+  if (sources.length <= 1) return sources[0] ?? [];
+  const excuse = new Map();
+  for (const row of commonRows) excuse.set(keyOf(row), (excuse.get(keyOf(row)) ?? 0) + 1);
+  const legacy = [];
+  for (const list of legacyLists) for (const row of list) {
+    const n = excuse.get(keyOf(row)) ?? 0;
+    if (n > 0) excuse.set(keyOf(row), n - 1); else legacy.push(row);
+  }
+  return [...legacy, ...commonRows].map((row) => [row, keyOf(row)]).sort(([a, ka], [b, kb]) => {
+    const t = Date.parse(a.timestamp) - Date.parse(b.timestamp);
+    if (t) return t;
+    const e = (EVENT_ORDER[a.event] ?? 2) - (EVENT_ORDER[b.event] ?? 2);
+    return e || (ka < kb ? -1 : ka > kb ? 1 : 0);
+  }).map(([row]) => row);
 }
-export function mergeLogRows(lists) {
-  const nonEmpty = lists.filter((l) => l.length);
-  if (nonEmpty.length <= 1) return nonEmpty[0] ?? [];
-  return excuseCopies(nonEmpty).map((row, i) => [row, i])
-    .sort(([a, i], [b, j]) => (Date.parse(a.timestamp) - Date.parse(b.timestamp)) || i - j).map(([row]) => row);
-}
+/**
+ * `sources` = `[{ dir, rows }]`; the one whose dir is `commonDir` is the common log, every other is a legacy source that
+ * loses its recorded exclusions. Returns `{ rows, problems }`; with a problem the rows of that source are joined WITHOUT
+ * exclusions and the caller must report (reader) or refuse (writer): never a silent "no exclusions".
+ */
 export function unionLogRows(sources, ticket, commonDir) {
   const isCommon = (s) => commonDir !== undefined && samePath(s.dir, commonDir);
-  const legacy = sources.filter((s) => !isCommon(s)).map((s) => subtractRows(s.rows, excludedRows(s.dir, ticket)));
-  const common = sources.filter(isCommon).map((s) => s.rows);
-  return mergeLogRows([...legacy, ...common]);
+  const problems = [];
+  const legacy = sources.filter((s) => !isCommon(s)).map((s) => {
+    const { rows, problem } = excludedRows(s.dir, ticket);
+    if (problem) problems.push(problem);
+    return subtractRows(s.rows, rows);
+  });
+  const common = sources.filter(isCommon).flatMap((s) => s.rows);
+  return { rows: joinRows(common, legacy), problems };
+}
+
+/**
+ * The exact filesystem operations an append to `file` performs (appendRows: mkdir -p of its directory, `<file>.lock`
+ * created in it, `<file>` opened for append), checked read-only. Shared by `check`, batch prevalidation and the REVIEW
+ * authority copy itself. Returns null when every operation can succeed, else the reason.
+ */
+const fsKind = (p) => {
+  let l;
+  try { l = lstatSync(p); } catch (e) { if (e?.code === 'ENOENT') return 'absent'; throw e; }
+  if (!l.isSymbolicLink()) return l.isDirectory() ? 'dir' : 'file';
+  try { return statSync(p).isDirectory() ? 'dir' : 'file'; } catch (e) { if (e?.code === 'ENOENT') return 'dangling'; throw e; }
+};
+const fsAccess = (p, mode, what) => { try { accessSync(p, mode); return null; } catch { return `${p} is not writable (${what})`; } };
+/** `mkdir -p dir` plus creating files in it: the nearest existing ancestor (or `dir`) is a directory, writable and searchable;
+ *  an existing `dir` is also readable (the append opens it to fsync a newly created file). */
+export function dirPreflight(dir) {
+  let probe = dir;
+  try {
+    for (;;) {
+      const k = fsKind(probe);
+      if (k === 'dangling') return `${probe} is a dangling symbolic link (mkdir would fail)`;
+      if (k === 'file') return `${probe} is not a directory (mkdir would fail)`;
+      if (k === 'dir') break;
+      const up = dirname(probe);
+      if (up === probe) return `${probe} has no existing parent directory`;
+      probe = up;
+    }
+    // An existing target directory is also opened for reading (the directory fsync after a file is created there, POSIX).
+    const read = probe === dir && process.platform !== 'win32' ? fsConstants.R_OK : 0;
+    return fsAccess(probe, fsConstants.W_OK | fsConstants.X_OK | read, probe === dir ? 'files and their .lock are created there, and it is opened for fsync' : 'the directory is created there');
+  } catch (e) { return `${probe}: ${e?.code ?? e}`; }
+}
+export function appendPreflight(file) {
+  const dirProblem = dirPreflight(dirname(file));
+  if (dirProblem) return dirProblem;
+  try {
+    const f = fsKind(file);
+    if (f === 'dangling') return `${file} is a dangling symbolic link`;
+    if (f === 'dir') return `${file} is a directory, not a log file`;
+    if (f === 'file') return fsAccess(file, fsConstants.W_OK, 'it is opened for append');
+    return null;
+  } catch (e) { return `${file}: ${e?.code ?? e}`; }
 }

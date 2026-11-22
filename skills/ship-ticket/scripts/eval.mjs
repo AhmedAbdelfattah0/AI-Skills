@@ -51,7 +51,7 @@ import { withReviews } from './engine-unit-review.mjs';
 import { CEILING_METRICS, GAP_REASONS, REVIEW_ROLE_OF, expectedReviewRoles } from './review-intervals.mjs';
 import { runPolicy } from './engine-policy.mjs';
 import { legacyRows, readEvents } from './measure/events.mjs';
-import { readLogRows, reportLogDirs, unionLogRows } from './lib/run-log-paths.mjs';
+import { excludedRows, readLogRows, reportLogDirs, unionLogRows } from './lib/run-log-paths.mjs';
 
 export const EVAL_SCHEMA = 'ship-ticket-eval-v1';
 const UNKNOWN = 'unknown';
@@ -403,6 +403,9 @@ export function lostSignal(dir, ticket, { stateDir } = {}) {
   const lost = {};
   for (const { bytes } of readLogRows(dirs, ticket)) for (const [k, n] of Object.entries(readEvents(bytes).lost)) lost[k] = (lost[k] ?? 0) + n;
   if (!Object.keys(lost).length) Object.assign(lost, readEvents(Buffer.alloc(0)).lost);
+  // Unreadable exclusion data of any legacy directory (the first is the common log): a counted degradation, key present only then.
+  const unreadable = dirs.slice(1).filter((d) => d && excludedRows(d, ticket).problem).length;
+  if (unreadable) lost.excluded_unreadable = unreadable;
   let stateUnreadable = false;
   if (existsSync(statePath)) { try { JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(statePath))); } catch { stateUnreadable = true; } }
   return { ...lost, state_unreadable: stateUnreadable };
@@ -431,13 +434,17 @@ function report(options) {
   }
   const runs = [];
   const states = {};
+  const degraded = [];
   for (const ticket of tickets) {
     const byRun = new Map();
     // Legacy figures read the legacy row set only (S-04 event rows removed BEFORE grouping, so no events-only run appears).
     // S5: the rows of several files are joined by lib/run-log-paths unionLogRows, the SAME reading run-log uses: exclusions
     // recorded by `migrate --resolve-duplicates` are honoured, a verbatim migrated copy is one row, rows are in time order.
     const sources = readLogRows(logDirs, ticket).map(({ dir: from, path: log }) => ({ dir: from, rows: legacyRows(readJsonl(log)) }));
-    for (const row of unionLogRows(sources, ticket, logDirs[0])) {
+    const joined = unionLogRows(sources, ticket, logDirs[0]);
+    // Unreadable exclusion data: reported, and this ticket's figures are marked unreliable (never "no exclusions" silently).
+    for (const p of joined.problems) degraded.push({ ticket, code: p.code, path: p.path, errno: p.errno, ...(p.line ? { line: p.line } : {}), figures: 'unreliable' });
+    for (const row of joined.rows) {
       // buildRun reads row.metrics: a parseable row without them is not a timing row.
       if (typeof row?.run_id !== 'string' || !row.metrics || typeof row.metrics !== 'object' || Array.isArray(row.metrics)) continue;
       byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
@@ -454,7 +461,8 @@ function report(options) {
   const records = dedupeUsage(options.usage.flatMap((f) => readUsage(f, skipped)));
   if (skipped.lines) process.stderr.write(`eval: skipped ${skipped.lines} malformed usage line(s); usage shares and costs exclude them\n`);
   const result = evaluate({ runs, states, records, repoRoot: root });
-  process.stdout.write(`${JSON.stringify(skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result, null, 2)}\n`);
+  const out = skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result;
+  process.stdout.write(`${JSON.stringify(degraded.length ? { ...out, degraded } : out, null, 2)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
