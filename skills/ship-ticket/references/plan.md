@@ -184,8 +184,8 @@ no producer/consumer boundary changes.>
 | frontend | frontend worker | Build consumer and consumer tests | `<real path>`, `<real dir/>` | contract | <output dir/none> |
 | integration | orchestrator | Join and verify the real integration | `<real path>` | backend, frontend | local app + datastore |
 
-scope-envelope: <optional: comma-separated directories under a Files touched directory (or a DAG write) where unlisted test, fixture and docs files count as supporting, e.g. scope-envelope: tests/checkout/, docs/checkout/ (no backticks); omit the line for none>
-<Files touched cells: backticked repository paths only, separated by commas, spaces or <br> (a trailing / marks a directory), or — / none; no prose. `check-pr-scope.mjs` reads this one table in the manual flow and refuses anything else.>
+<Files touched: explanation for the approver only; the contract line below is the scope.>
+scope-contract: {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]}
 
 **Decomposition:** <ONE unit (no unit fields) / SPLIT into N units: names> ·
 rationale: <independent boundaries · shared contracts · acceptance criteria per
@@ -554,3 +554,26 @@ repair cycle.
 A file the contract needs but the plan lacks means the plan was wrong. That is a
 **material divergence**: it goes back through plan mode for re-approval and
 updates the artifact. Do not silently build past the plan the user approved.
+
+**The scope contract.** The Files touched column is explanation for the approver and is read by no script; the `scope-contract:` line is the authoritative scope.
+Write exactly one such line at column 0 of the narrative and mention its key
+nowhere else in the plan (`check-pr-scope.mjs` refuses a second line or any other
+mention). Generate it rather than typing it: `node scripts/check-pr-scope.mjs
+contract --mode engine --dag <dag.json> --supporting tests` (planned is the DAG
+write set) or `node scripts/check-pr-scope.mjs contract --mode manual --planned
+src/checkout --supporting tests`. Examples:
+
+```
+scope-contract: {"v":1,"mode":"engine","dag":"sha256:<64 hex>","planned":["apps/api/src/**/*.ts","apps/web"],"supporting":["docs","tests"]}
+scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/checkout","src/checkout/page.tsx"],"supporting":["tests"]}
+```
+
+Every entry is a repository path with no trailing slash that covers itself and
+everything below it. `planned` is the DAG write set in engine mode (globs as the
+DAG carries them) and literal paths in manual mode. `supporting` entries end in
+`tests`, `test`, `__tests__`, `spec`, `e2e`, `fixtures`, `__fixtures__` or `docs`
+and never overlap a planned entry; a file under one counts as supporting only when
+it is a plain file, not a manifest or lockfile, and under `docs` not executable
+source. The mode is part of the approved text: a run whose engine init failed
+stays engine mode until a new plan version with `"mode":"manual"` is re-approved
+through `ExitPlanMode`.

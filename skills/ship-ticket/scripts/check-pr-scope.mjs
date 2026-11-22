@@ -1,51 +1,60 @@
 #!/usr/bin/env node
 /**
- * PR scope check (S6, F07): classifies every path of the candidate against the approved plan as
- * planned, supporting or material, and writes a `ship-ticket-scope-v1` record. The orchestrator runs it
- * before announcing REVIEW and again on the frozen candidate at SHIP (manual flow included). No gate,
- * engine step or ship-ready check reads it, and the engine never imports it: it adds no authority.
+ * PR scope check (S6, F07; Option B): classifies every path of the candidate as planned, supporting or material
+ * against the ONE `scope-contract:` line of the approved plan, and writes a `ship-ticket-scope-v1` record. The
+ * orchestrator runs it before announcing REVIEW and again on the frozen candidate at SHIP (manual flow included).
+ * No gate, engine step or ship-ready check reads it, and the engine never imports it: it adds no authority.
+ * No Markdown is parsed: the Files touched table is explanation for the approver and is read by no script.
  * Dependency-free Node >= 18; git and candidate-id.mjs through spawnSync with an argument list, no shell.
  *
  * CLI: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]
+ *      check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...
+ *      (prints the canonical contract line through the same validator; engine mode takes planned from the DAG writes)
  *
- * Steps, in order; any refusal exits 2 and writes no record:
- *  (a) the plan narrative digest equals approved_plan_digest of this run's last START (`approval_mismatch`);
- *  (b) with --dag: validateEngineDag passes (`dag_invalid`) and the DAG sha is listed in the plan narrative or
- *      equals exactly one DAG_BOUND of this run (`dag_unbound`); roots = every node's writes;
- *  (c) without --dag (manual flow only): `dag_required` when this run has a DAG_BOUND, the narrative names a DAG
- *      digest, or an engine state file exists for the ticket (an engine run must pass --dag). Roots = the paths of
- *      exactly ONE visible `Files touched` table (CommonMark fences, HTML comments, indented code and RUN-STATE are
- *      invisible; an unterminated fence or comment, or invisible text holding a `Files touched` header, fails
- *      closed; header row starts with `ID`; each cell holds only backticked paths with no backtick inside, separated
- *      by commas, whitespace or <br>, or `—`/`none`); a placeholder, prose, adjacent backticks, zero or two tables,
- *      a bad path or zero paths is `plan_list_unparsable` (fail closed).
- *      With --dag, a parseable table that differs from the DAG writes is the advisory `plan_table_drift`;
- *  (d) the envelope: at most ONE narrative line `scope-envelope: a/, b/` (written by the plan author, approved in
- *      ExitPlanMode, bound by the plan digest; never a flag); every entry normalized and equal to or under a root
- *      (`envelope_outside_contract`); a second line is `envelope_duplicate`; no line means an empty envelope;
- *  (e) exclusions: exactly the pinned pair `.specs/plans/<T>.md` and `session-log.md` (no flag widens it);
- *  (f) the path set and candidate_id come from candidate-id.mjs --base <ref> with those exclusions: the tracked
- *      diff against the merge base (no renames: a rename is a deleted source plus an added destination) plus
- *      untracked, non-ignored files. A git-ignored file is invisible to this check exactly as to the candidate
- *      ID; an edit of .gitignore is itself a changed path. A dirty submodule fails candidate-id. candidate-id
- *      excludes by prefix, so a changed path strictly below an exclusion file (`session-log.md/x`) is added here
- *      as material with flag `under_exclusion_file` (it is not in the candidate-id set; engine follow-up).
+ * The contract, one raw narrative line inside the plan digest bound by START:
+ *   scope-contract: {"v":1,"mode":"engine","dag":"sha256:<64 hex>","planned":["apps/web","apps/api/src/**\/*.ts"],"supporting":["tests"]}
+ *   scope-contract: {"v":1,"mode":"manual","dag":null,"planned":["src/checkout/page.tsx","src/checkout"],"supporting":["tests"]}
+ * Extraction: the narrative (RUN-STATE excluded) split on \n; exactly ONE line starts at column 0 with
+ * `scope-contract: `; any OTHER line containing `scope-contract` in any case is `scope_contract_ambiguous` (prose,
+ * fence, comment, backticks, list item, indentation, BOM, CR); none is `scope_contract_missing`. The JSON must equal its
+ * own canonical form with keys v, mode, dag, planned, supporting in that order (`scope_contract_noncanonical`); line
+ * <= 8 KiB, planned <= 64, supporting <= 16, entry <= 256 chars. Field rules (`scope_contract_invalid`):
+ *  - every entry is a path with no trailing slash covering itself and everything below (the DAG write syntax): the
+ *    engine-dag normalRel rule, no control character or line terminator, no duplicate;
+ *  - planned: manual mode literal paths only (no * ? [ ] { }) and at least one; engine mode may carry the DAG's
+ *    globs; never a wildcard-only first segment; a single-segment entry is allowed and flagged `broad_planned`;
+ *  - supporting: literal, last segment in the closed set tests, test, __tests__, spec, e2e, fixtures, __fixtures__,
+ *    docs; no segment .github, .git, .claude, .ship-ticket, .specs or node_modules; disjoint from planned
+ *    (`supporting_overlaps_planned`: no entry equals, contains or lies under a planned entry or its literal prefix).
+ * Mode binding (the approved contract is the authority; the tripwires below only refuse):
+ *  - engine: --dag required (`dag_required`, also after a failed engine init); sha of the --dag file equals `dag`
+ *    and, when the run has any DAG_BOUND, exactly one DAG_BOUND equal to it (`dag_unbound`); validateEngineDag passes
+ *    (`dag_invalid`); planned equals the DAG write set (`contract_dag_mismatch`);
+ *  - manual: no --dag (`contract_mode_mismatch`); no DAG_BOUND of the run, no <T>.state.json, no <T>.engine.jsonl
+ *    (`manual_with_engine_evidence`). Falling back from engine to manual is a new plan version re-approved through
+ *    ExitPlanMode (the digest changes). The script cannot prove a ticket is ELEVATED or that the owner understood the
+ *    mode; that is the S3c human step.
+ * Steps (any refusal exits 2 and writes no record): approval (the narrative digest equals the last START of the run,
+ * `approval_mismatch`), the contract, the mode, then the path set from candidate-id.mjs --base <ref> with exactly the
+ * pinned exclusions `.specs/plans/<T>.md` and `session-log.md` (tracked diff against the merge base, no renames, plus
+ * untracked non-ignored files; a git-ignored file is invisible to this check exactly as to the candidate ID; a dirty
+ * submodule fails candidate-id). candidate-id excludes by prefix, so a changed path strictly below an exclusion file
+ * (`session-log.md/x`) is added here as material with flag `under_exclusion_file` (engine follow-up).
  *
- * Classes (case-sensitive, via engine-dag.mjs `under`), first match wins:
- *  1. planned, via exact: the path equals a root;
- *  2. supporting, via envelope: under an envelope entry and a root, kind `file`, basename not a dependency manifest or lockfile;
- *  3. planned, via directory: under a root (flag unlisted_under_directory_write);
- *  4. material: anything else. A path holding a line terminator (\n, \r, U+2028, U+2029) is material whatever its
- *     roots, because the engine's contract matcher does not match it under a directory (fail closed).
- * Advisory flags never change the exit code: case_alias (a root matches only case-insensitively; still material),
- * symlink, symlink_target_outside_contract (a symlink is never supporting), submodule, deleted, dependency_manifest,
- * unlisted_under_directory_write, line_terminator. The envelope lies inside the roots, so supporting is a subset of
- * under-roots and the order only moves labels. With --dag (source `dag`), exit 0 implies every path is inside the
- * engine's Design Contract (designContract + security-plan.mjs globRe), pinned by the property test in
- * check-pr-scope.test.mjs; in the manual flow (source `plan-table`) exit 0 means inside the approved table only.
+ * Classes, first match wins (a path holding a line terminator is always material):
+ *  1. planned: equals an entry (via exact) or lies under one (via directory; engine mode matches every entry `w` as
+ *     the engine does, globRe(w) or globRe(w/**), via glob when `w` has * or ?), flag unlisted_under_directory_write;
+ *  2. supporting: under a supporting entry, kind `file` (never a symlink, deletion or submodule), not a manifest or
+ *     lockfile, and under a `docs` entry not an executable-source extension (else material, flag docs_executable);
+ *  3. material: anything else.
+ * Advisory flags never change the exit code: case_alias, symlink, symlink_target_outside_contract, submodule,
+ * deleted, dependency_manifest, unlisted_under_directory_write, broad_planned, line_terminator, docs_executable,
+ * under_exclusion_file. A planned path always matches the engine's Design Contract (designContract + security-plan.mjs
+ * globRe), pinned by the property test; supporting paths are outside the DAG writes by design and are listed in the
+ * record and the PR body for review.
  *
- * What it proves: the candidate's path set (the same set the candidate ID hashes) against the approved roots.
- * What it does not prove: behaviour inside a planned file (a new route inside page.tsx is reassess's new-route signal).
+ * What it proves: the candidate's path set (the set the candidate ID hashes) against the approved contract. What it
+ * does not prove: behaviour inside a planned file (a new route inside page.tsx is reassess's new-route signal).
  * A forged record is moot: SHIP recomputes it on the frozen candidate and never trusts a stored one. By design a
  * refusal leaves an earlier record at the default path untouched, and START/DAG_BOUND are read as the engine reads
  * them before init (the last START of the run, no quiescence rule): a stored record is never evidence.
@@ -60,7 +69,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, readlinkSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, isAbsolute, join, relative, sep, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { under, validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
+import { under, overlap, validateEngineDag, planNarrativeDigest, runStateEvents, sha, normDigest, BEGIN, END } from './engine-dag.mjs';
 import { parseRunState, malformedReason } from './run-state.mjs';
 import { gitPath, writeStateAtomic } from './lib/durable-io.mjs';
 import { isEntrypoint } from './harness.mjs';
@@ -69,7 +78,15 @@ export const SCHEMA = 'ship-ticket-scope-v1';
 const CANDIDATE_CLI = fileURLToPath(new URL('./candidate-id.mjs', import.meta.url));
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
-const USAGE = 'Usage: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]';
+const CONTROL = /[\u0000-\u001f\u007f\u0085\u2028\u2029]/;
+const KEY = 'scope-contract: ';
+const KEYS = 'v,mode,dag,planned,supporting';
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+export const SUPPORTING_SEGMENTS = Object.freeze(['tests', 'test', '__tests__', 'spec', 'e2e', 'fixtures', '__fixtures__', 'docs']);
+const FORBIDDEN_SEGMENTS = ['.github', '.git', '.claude', '.ship-ticket', '.specs', 'node_modules'];
+const DOCS_EXECUTABLE = /\.(js|mjs|cjs|ts|tsx|jsx|py|rb|php|go|java|cs|sh|sql)$/i;
+const USAGE = 'Usage: check-pr-scope.mjs check --repo <path> --ticket <T> --run-id <id> --base <ref> --plan <plan.md> [--dag <dag.json>] [--out <file>]\n'
+  + '       check-pr-scope.mjs contract --mode engine|manual [--dag <dag.json>] [--planned <p>]... [--supporting <s>]...';
 
 class Refusal extends Error {
   constructor(exit, code, message) { super(`${code}: ${message}`); this.exit = exit; this.code = code; }
@@ -80,8 +97,29 @@ const gitFail = (code, message) => { throw new Refusal(3, code, message); };
 /** engine-dag.mjs normalRel (not exported there), kept local; parity with validateEngineDag is pinned by a test. */
 export const normalRel = (p) => typeof p === 'string' && p.length > 0 && !isAbsolute(p) && !/^[A-Za-z]:/.test(p) && !p.includes('\\')
   && !p.split('/').some(x => x === '..' || x === '.' || !x);
-/** Exactly one trailing slash marks a directory in a plan cell or envelope entry; the rest must be normalRel. */
-const dirToken = (t) => (t.endsWith('/') ? t.slice(0, -1) : t);
+
+/** security-plan.mjs normPath + globRe (not exported there; a protected file), kept local; a parity test extracts the real source. */
+const normPath = (p) => String(p).replace(/^(\.\/)+/, '');
+export function globRe(glob) {
+  let g = normPath(glob);
+  if (g.endsWith('/')) g += '**';
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const ch = g[i];
+    if (ch === '*' && g[i + 1] === '*') { i++; if (g[i + 1] === '/') { i++; re += '(?:.*/)?'; } else re += '.*'; }
+    else if (ch === '*') re += '[^/]*';
+    else if (ch === '?') re += '[^/]';
+    else re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$');
+}
+/** The engine's Design Contract match of one write `w`: `w` or `w/**` (engine-gates.mjs designContract). */
+function engineMatcher(entries) {
+  const res = entries.map(w => [w, globRe(w), globRe(`${w}/**`)]);
+  return (p) => res.find(([, a, b]) => a.test(p) || b.test(p))?.[0];
+}
+const literalMatcher = (entries) => (p) => entries.find(w => p === w || p.startsWith(w + '/'));
+const hasGlob = (w) => /[*?]/.test(w);
 
 const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
   'bun.lock', 'bun.lockb', '.npmrc', '.yarnrc', '.yarnrc.yml', 'deno.json', 'deno.jsonc', 'deno.lock', 'Cargo.toml', 'Cargo.lock',
@@ -92,97 +130,77 @@ const MANIFESTS = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
 /** A dependency manifest or lockfile, by basename. */
 export const isManifest = (p) => { const b = posix.basename(p); return MANIFESTS.has(b) || /\.(csproj|fsproj|vbproj)$/.test(b) || /^requirements.*\.txt$/.test(b); };
 
-const FILES_TOUCHED_HEADER = /(?:^|\|)\s*Files touched\s*(?:\||$)/;
-const plainUnparsable = (why) => refuse('plan_list_unparsable', why);
+// ---------------------------------------------------------------------------------------------------- the contract
 
-/**
- * The plan narrative (RUN-STATE block removed) as one visible string per source line, CommonMark style:
- * a fenced block opens with >= 3 backticks or tildes after at most 3 spaces (a backtick fence's info string has no
- * backtick) and closes only on the same character, at least as long, with nothing but trailing whitespace; an HTML
- * comment `<!-- ... -->` outside a fence is removed (it may span lines); a line indented 4+ columns is an indented
- * code block. Fenced, commented and indented text is invisible (an empty string keeps the line numbering).
- * Fails closed (`plan_list_unparsable`): an unterminated fence or comment, or invisible text holding a
- * `Files touched` header, so an example table can never be confused with the real one.
- */
-export function visibleLines(text) {
+/** The narrative of `text` with the RUN-STATE block (markers included) removed. */
+function narrativeOf(text) {
   const b = text.indexOf(BEGIN), e = text.indexOf(END);
-  const narrative = b >= 0 && e > b ? text.slice(0, b) + text.slice(e + END.length) : text;
-  const out = [], hidden = [];
-  let fence = null, comment = false;
-  for (const line of narrative.split(/\r?\n/)) {
-    if (fence) {
-      const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
-      if (c && c[1][0] === fence.ch && c[1].length >= fence.len) fence = null;
-      else hidden.push(line);
-      out.push('');
-      continue;
-    }
-    if (!comment) {
-      const o = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-      if (o && !(o[1][0] === '`' && o[2].includes('`'))) { fence = { ch: o[1][0], len: o[1].length }; out.push(''); continue; }
-    }
-    let rest = line, vis = '';
-    while (rest.length) {
-      if (comment) {
-        const i = rest.indexOf('-->');
-        if (i < 0) { hidden.push(rest); rest = ''; break; }
-        hidden.push(rest.slice(0, i)); rest = rest.slice(i + 3); comment = false;
-      } else {
-        const i = rest.indexOf('<!--');
-        if (i < 0) { vis += rest; rest = ''; break; }
-        vis += rest.slice(0, i); rest = rest.slice(i + 4); comment = true;
-      }
-    }
-    if (/^(?: {4}|\t| {0,3}\t)/.test(vis)) { hidden.push(vis); vis = ''; }
-    out.push(vis);
-  }
-  if (fence) plainUnparsable(`the plan has an unterminated ${fence.ch.repeat(fence.len)} fenced block`);
-  if (comment) plainUnparsable('the plan has an unterminated <!-- comment');
-  if (hidden.some(h => FILES_TOUCHED_HEADER.test(h))) plainUnparsable('a fenced, commented or indented block holds a Files touched header; only the one visible table may name it');
-  return out;
+  return b >= 0 && e > b ? text.slice(0, b) + text.slice(e + END.length) : text;
 }
 
-const cells = (line) => { const t = line.trim(); return t.slice(1, t.endsWith('|') ? -1 : undefined).split('|').map(c => c.trim()); };
-/** Backticked tokens (no backtick inside) separated by commas, whitespace or <br>; nothing else. */
-const CELL = /^`[^`]+`(?:(?:\s|,|<br\s*\/?>)+`[^`]+`)*$/i;
-
-/** Paths (sorted, unique, trailing slash dropped) of the plan's one `Files touched` table; refuses `plan_list_unparsable`. */
-export function parseFilesTable(text) {
-  const unparsable = (why) => refuse('plan_list_unparsable', why);
-  const lines = visibleLines(text);
-  const heads = [];
-  lines.forEach((l, i) => { if (l.trim().startsWith('|')) { const c = cells(l); if (c[0] === 'ID' && c.includes('Files touched')) heads.push(i); } });
-  if (heads.length !== 1) unparsable(`expected exactly one table whose header starts with ID and has a Files touched cell, found ${heads.length}`);
-  const head = cells(lines[heads[0]]), col = head.indexOf('Files touched');
-  if (!/^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[heads[0] + 1] ?? '')) unparsable('the Files touched table has no separator row');
-  const paths = [];
-  for (let i = heads[0] + 2; i < lines.length && lines[i].trim().startsWith('|'); i++) {
-    const row = cells(lines[i]);
-    if (row.length !== head.length) unparsable(`row ${JSON.stringify(lines[i].trim())} has ${row.length} cells, the header ${head.length}`);
-    const cell = row[col];
-    if (cell === '—' || cell === 'none') continue;
-    if (/``/.test(cell) || !CELL.test(cell)) unparsable(`Files touched cell ${JSON.stringify(cell)} is not a list of backticked paths (or — / none)`);
-    for (const [, tok] of cell.matchAll(/`([^`]+)`/g)) {
-      const p = dirToken(tok);
-      if (/[<>]/.test(tok) || !normalRel(p)) unparsable(`Files touched path ${JSON.stringify(tok)} is a placeholder or not a normalized repository-relative path`);
-      paths.push(p);
+/** Validate a contract object's fields; refuses scope_contract_invalid / supporting_overlaps_planned. Returns it. */
+export function validateContract(c) {
+  const invalid = (why) => refuse('scope_contract_invalid', why);
+  if (c.v !== 1) invalid('v must be 1');
+  if (c.mode !== 'engine' && c.mode !== 'manual') invalid('mode must be "engine" or "manual"');
+  if (c.mode === 'engine' ? !(typeof c.dag === 'string' && DIGEST.test(c.dag)) : c.dag !== null) invalid('dag must be sha256:<64 hex> in engine mode and null in manual mode');
+  const list = (name, max) => {
+    const v = c[name];
+    if (!Array.isArray(v) || v.length > max || !v.every(e => typeof e === 'string')) invalid(`${name} must be an array of at most ${max} strings`);
+    if (new Set(v).size !== v.length) invalid(`${name} holds a duplicate entry`);
+    for (const e of v) {
+      if (e.length > 256 || CONTROL.test(e) || !normalRel(e)) invalid(`${name} entry ${JSON.stringify(e)} is not a normalized repository path (no trailing slash, no . or .., no backslash, no control character)`);
+    }
+    return v;
+  };
+  const planned = list('planned', 64), supporting = list('supporting', 16);
+  if (c.mode === 'manual' && !planned.length) invalid('a manual-mode contract plans at least one path');
+  for (const p of planned) {
+    if (c.mode === 'manual' && /[*?[\]{}]/.test(p)) invalid(`manual-mode planned entry ${JSON.stringify(p)} carries glob syntax (literal paths only)`);
+    if (/^\*+$/.test(p.split('/')[0])) invalid(`planned entry ${JSON.stringify(p)} has a wildcard-only first segment`);
+  }
+  for (const s of supporting) {
+    const segs = s.split('/');
+    if (/[*?[\]{}]/.test(s)) invalid(`supporting entry ${JSON.stringify(s)} carries glob syntax`);
+    if (!SUPPORTING_SEGMENTS.includes(segs.at(-1))) invalid(`supporting entry ${JSON.stringify(s)} must end in one of ${SUPPORTING_SEGMENTS.join(', ')}`);
+    if (segs.some(x => FORBIDDEN_SEGMENTS.includes(x))) invalid(`supporting entry ${JSON.stringify(s)} lies under ${FORBIDDEN_SEGMENTS.join(', ')}`);
+    if (isManifest(s)) invalid(`supporting entry ${JSON.stringify(s)} is a manifest`);
+    const match = c.mode === 'engine' ? engineMatcher(planned) : literalMatcher(planned);
+    for (const p of planned) {
+      const segsP = p.split('/'), firstGlob = segsP.findIndex(hasGlob);
+      const prefix = firstGlob < 0 ? p : segsP.slice(0, firstGlob).join('/');
+      if (overlap(s, p) || (prefix && overlap(s, prefix)) || match(s)) refuse('supporting_overlaps_planned', `supporting entry ${JSON.stringify(s)} overlaps planned entry ${JSON.stringify(p)}`);
     }
   }
-  if (!paths.length) unparsable('the Files touched table lists no path');
-  return [...new Set(paths)].sort();
+  return c;
 }
 
-/** Entries of the plan's at most one `scope-envelope:` narrative line ([] without one); refuses a bad entry or a second line. */
-export function parseEnvelope(text) {
-  const found = visibleLines(text).map(l => l.trimStart()).filter(l => l.startsWith('scope-envelope:'));
-  if (found.length > 1) refuse('envelope_duplicate', `the plan has ${found.length} scope-envelope lines; at most one`);
-  if (!found.length) return [];
-  const entries = found[0].slice('scope-envelope:'.length).split(',').map(s => s.trim());
-  for (const e of entries) {
-    if (!e || /[\s<>`]/.test(e) || !normalRel(dirToken(e))) refuse('envelope_outside_contract', `scope-envelope entry ${JSON.stringify(e)} is not a normalized repository-relative path`);
+/** The plan's one `scope-contract:` line, parsed, canonical and validated; refuses (exit 2) otherwise. */
+export function parseContract(text) {
+  const lines = narrativeOf(text).split('\n');
+  const found = lines.filter(l => l.startsWith(KEY));
+  const mentions = lines.filter(l => !l.startsWith(KEY) && /scope-contract/i.test(l));
+  if (mentions.length || found.length > 1) refuse('scope_contract_ambiguous', `the plan must hold exactly one scope-contract line and mention the key nowhere else (${found.length} line(s), ${mentions.length} other mention(s))`);
+  if (!found.length) refuse('scope_contract_missing', 'the plan has no `scope-contract: {...}` line');
+  const line = found[0];
+  if (Buffer.byteLength(line) > 8192) refuse('scope_contract_noncanonical', 'the scope-contract line exceeds 8 KiB');
+  const json = line.slice(KEY.length);
+  let c;
+  try { c = JSON.parse(json); } catch { refuse('scope_contract_noncanonical', 'the scope-contract value is not JSON'); }
+  if (c === null || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).join(',') !== KEYS || JSON.stringify(c) !== json) {
+    refuse('scope_contract_noncanonical', `the scope-contract value must be canonical JSON with keys ${KEYS} in that order (no whitespace, escapes or extra keys)`);
   }
-  return [...new Set(entries.map(dirToken))].sort();
+  return validateContract(c);
 }
+
+/** The canonical contract line for `c` (keys in order, arrays sorted), validated. */
+export function contractLine(c) {
+  const line = KEY + JSON.stringify({ v: 1, mode: c.mode, dag: c.dag, planned: [...c.planned].sort(), supporting: [...c.supporting].sort() });
+  parseContract(line);
+  return line;
+}
+
+// ---------------------------------------------------------------------------------------------------- classification
 
 /** Where a symlink at repo path `p` with link text `target` points, repo-relative, or null when outside the repository. */
 function linkTarget(p, target) {
@@ -193,39 +211,51 @@ function linkTarget(p, target) {
 }
 
 /**
- * Classify candidate entries [{ path, kind }] against `roots` and `envelope` (see the header for the rules).
- * `readlink(path)` returns a symlink's link text. Returns [{ path, kind, class, via, flags }] in input order.
+ * Classify candidate entries [{ path, kind }] against a contract's mode, planned and supporting entries (see the
+ * header for the rules). `readlink(path)` returns a symlink's link text. Returns [{ path, kind, class, via, flags }].
  */
-export function classify(entries, { roots, envelope, readlink }) {
-  const lower = roots.map(r => r.toLowerCase());
+export function classify(entries, { mode, planned, supporting, readlink }) {
+  const make = mode === 'engine' ? engineMatcher : literalMatcher;
+  const match = make(planned), lower = make(planned.map(p => p.toLowerCase()));
+  const supportMatch = literalMatcher(supporting);
   return entries.map(({ path, kind }) => {
     const flags = [];
     if (kind === 'symlink') {
       flags.push('symlink');
       let target = null;
       try { target = linkTarget(path, readlink(path)); } catch { /* unreadable: outside */ }
-      if (target === null || !under(target, roots)) flags.push('symlink_target_outside_contract');
+      if (target === null || LINE_TERMINATOR.test(target) || !(match(target) || supportMatch(target))) flags.push('symlink_target_outside_contract');
     }
     if (kind === 'submodule') flags.push('submodule');
     if (kind === 'deleted') flags.push('deleted');
     const manifest = isManifest(path);
     if (manifest) flags.push('dependency_manifest');
     let cls = 'material', via = null;
+    const root = LINE_TERMINATOR.test(path) ? undefined : planned.includes(path) ? path : match(path);
+    const support = root === undefined && !LINE_TERMINATOR.test(path) ? supportMatch(path) : undefined;
     if (LINE_TERMINATOR.test(path)) flags.push('line_terminator');
-    else if (roots.includes(path)) { cls = 'planned'; via = 'exact'; }
-    else if (kind === 'file' && !manifest && under(path, envelope) && under(path, roots)) { cls = 'supporting'; via = 'envelope'; }
-    else if (under(path, roots)) { cls = 'planned'; via = 'directory'; flags.push('unlisted_under_directory_write'); }
-    else if (under(path.toLowerCase(), lower)) flags.push('case_alias');
+    else if (root === path) { cls = 'planned'; via = 'exact'; }
+    else if (root !== undefined) {
+      cls = 'planned'; via = mode === 'engine' && hasGlob(root) ? 'glob' : 'directory';
+      flags.push('unlisted_under_directory_write');
+      if (!root.includes('/')) flags.push('broad_planned');
+    } else if (support !== undefined) {
+      if (kind === 'file' && !manifest) {
+        if (support.split('/').at(-1) === 'docs' && DOCS_EXECUTABLE.test(path)) flags.push('docs_executable');
+        else { cls = 'supporting'; via = 'supporting'; }
+      }
+    } else if (lower(path.toLowerCase())) flags.push('case_alias');
     return { path, kind, class: cls, via, flags };
   });
 }
+
+// ---------------------------------------------------------------------------------------------------- git and files
 
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) gitFail('git_failed', `git ${args.join(' ')}: ${(r.stderr || r.error?.message || '').trim()}`);
   return r.stdout.trim();
 }
-
 /** NUL-separated git output, split (no trim: a path may start or end with a space). */
 function gitZ(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
@@ -236,7 +266,6 @@ function gitZ(cwd, args) {
 function kindOf(abs) {
   try { const st = lstatSync(abs); return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'submodule' : 'file'; } catch { return 'deleted'; }
 }
-
 /** realpath of `p`, or of its nearest existing ancestor joined with the rest (the file may not exist yet). */
 function realish(p) {
   const abs = resolve(p);
@@ -261,22 +290,36 @@ function approvedPlan(planFile, runId) {
   return { text, digest, events };
 }
 
-/** The bound DAG's digest and write roots; refuses dag_invalid / dag_unbound (the run-engine.mjs init rule). */
-function boundDag(dagFile, { text, events }, ticket, runId) {
+/** A DAG file's digest and validated document; refuses dag_invalid. */
+function readDag(dagFile, ticket) {
   let raw, doc;
   try { raw = readFileSync(dagFile); } catch (e) { refuse('dag_invalid', `${dagFile}: ${e.code ?? e.message}`); }
   try { doc = JSON.parse(raw); } catch { refuse('dag_invalid', 'the DAG is not JSON'); }
   let dag;
-  try { dag = validateEngineDag(doc, { ticket }); } catch (e) { refuse('dag_invalid', e.message); }
-  const digest = sha(raw);
-  const narrative = text.slice(0, text.indexOf(BEGIN)) + text.slice(text.indexOf(END));
-  const listed = narrative.includes(digest) || narrative.includes(digest.replace(/^sha256:/, 'sha256-'));
-  const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === runId);
-  if (!listed && !(bound.length === 1 && normDigest(bound[0].dag_digest) === digest)) {
-    refuse('dag_unbound', 'the DAG digest is neither in the approved plan nor in exactly one DAG_BOUND of this run');
-  }
-  return { digest, roots: [...new Set(dag.nodes.flatMap(n => n.writes))].sort() };
+  try { dag = validateEngineDag(doc, ticket ? { ticket } : {}); } catch (e) { refuse('dag_invalid', e.message); }
+  return { digest: sha(raw), writes: [...new Set(dag.nodes.flatMap(n => n.writes))].sort() };
 }
+
+/** The mode checks of the contract `c` (see the header); refuses dag_required, dag_unbound, contract_* or manual_with_engine_evidence. */
+function bindMode(c, { repo, ticket, runId, events, dag }) {
+  const bound = events.filter(e => e.event === 'DAG_BOUND' && e.run_id === runId);
+  if (c.mode === 'manual') {
+    if (dag !== undefined) refuse('contract_mode_mismatch', 'the approved contract is manual mode; --dag is for an engine-mode contract');
+    const base = `ai-skills/ship-ticket/${ticket}`;
+    const evidence = bound.length ? 'a DAG_BOUND of this run' : existsSync(gitPath(repo, `${base}.state.json`)) ? `${base}.state.json`
+      : existsSync(gitPath(repo, `${base}.engine.jsonl`)) ? `${base}.engine.jsonl` : null;
+    if (evidence) refuse('manual_with_engine_evidence', `the contract is manual mode but ${evidence} exists; an engine run needs an engine-mode contract (re-approve through ExitPlanMode)`);
+    return;
+  }
+  if (dag === undefined) refuse('dag_required', 'the approved contract is engine mode: pass the bound DAG with --dag (a failed engine init does not make a run manual)');
+  const d = readDag(dag, ticket);
+  if (d.digest !== c.dag) refuse('dag_unbound', `the --dag file is ${d.digest}, the approved contract names ${c.dag}`);
+  if (bound.length && !(bound.length === 1 && normDigest(bound[0].dag_digest) === d.digest)) refuse('dag_unbound', 'the run has DAG_BOUND events but not exactly one naming this DAG');
+  const planned = [...new Set(c.planned)].sort();
+  if (planned.join('\0') !== d.writes.join('\0')) refuse('contract_dag_mismatch', `planned ${JSON.stringify(planned)} differs from the DAG writes ${JSON.stringify(d.writes)}`);
+}
+
+// ---------------------------------------------------------------------------------------------------- the check
 
 /** Run the check; returns { exit, record, text } or throws a Refusal (exit 2 or 3). Writes nothing itself. */
 export function checkScope({ repo, ticket, runId, base, plan, dag }) {
@@ -284,28 +327,8 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   if (!SAFE_ID.test(runId ?? '')) refuse('bad_input', `unsafe --run-id ${JSON.stringify(runId)}`);
   if (typeof base !== 'string' || !base || base.startsWith('-')) refuse('bad_input', `refused ref: ${base}`);
   const approved = approvedPlan(plan, runId);
-  let roots, source, dagDigest = null, drift = null;
-  if (dag !== undefined) {
-    ({ digest: dagDigest, roots } = boundDag(dag, approved, ticket, runId));
-    source = 'dag';
-    try {
-      const t = parseFilesTable(approved.text);
-      const onlyDag = roots.filter(r => !t.includes(r)), onlyTable = t.filter(p => !roots.includes(p));
-      drift = onlyDag.length || onlyTable.length ? { only_in_dag: onlyDag, only_in_table: onlyTable } : null;
-    } catch (e) { if (!(e instanceof Refusal)) throw e; drift = { table: 'unparsable', reason: e.message }; }
-  } else {
-    // Engine runs must pass --dag: a DAG_BOUND of this run, a DAG digest named in the narrative, or an engine state file.
-    const narrative = approved.text.slice(0, approved.text.indexOf(BEGIN)) + approved.text.slice(approved.text.indexOf(END));
-    const why = approved.events.some(e => e.event === 'DAG_BOUND' && e.run_id === runId) ? 'this run has a DAG_BOUND event'
-      : /\bDAG\b.*sha256[:-][0-9a-f]{64}/i.test(narrative) ? 'the plan narrative names a DAG digest'
-        : existsSync(gitPath(repo, `ai-skills/ship-ticket/${ticket}.state.json`)) ? 'an engine state file exists for this ticket' : null;
-    if (why) refuse('dag_required', `${why}; check an engine run with --dag (the Files touched table is the manual flow's contract only)`);
-    roots = parseFilesTable(approved.text);
-    source = 'plan-table';
-  }
-  const envelope = parseEnvelope(approved.text);
-  const outside = envelope.filter(e => !under(e, roots));
-  if (outside.length) refuse('envelope_outside_contract', `scope-envelope ${outside.join(', ')} is not under a ${source === 'dag' ? 'DAG write' : 'Files touched path'}`);
+  const c = parseContract(approved.text);
+  bindMode(c, { repo, ticket, runId, events: approved.events, dag });
   const exclusions = [`.specs/plans/${ticket}.md`, 'session-log.md'];
   const r = spawnSync(process.execPath, [CANDIDATE_CLI, '--repo', repo, '--base', base, ...exclusions.flatMap(x => ['--exclude', x])],
     { encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
@@ -313,21 +336,20 @@ export function checkScope({ repo, ticket, runId, base, plan, dag }) {
   let cand;
   try { cand = JSON.parse(r.stdout); } catch { gitFail('candidate_id_failed', 'candidate-id printed no JSON'); }
   const top = git(repo, ['rev-parse', '--show-toplevel']);
-  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind })), { roots, envelope, readlink: (p) => readlinkSync(join(top, p)) });
+  const files = classify(cand.paths.map(p => ({ path: p.path, kind: p.kind })), { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: (p) => readlinkSync(join(top, p)) });
   // candidate-id excludes by prefix, so a path below an exclusion FILE (session-log.md/x, the plan path used as a
   // directory) is missing from its set; enumerate the same way (tracked diff + untracked, non-ignored) and flag it.
   const changed = [...gitZ(top, ['diff', '--name-only', '-z', '--no-renames', cand.merge_base, '--']),
     ...gitZ(top, ['ls-files', '--others', '--exclude-standard', '-z', '--'])];
-  const hiddenUnder = [...new Set(changed.filter(p => exclusions.some(x => p.startsWith(x + '/'))))].sort();
-  for (const path of hiddenUnder) {
+  for (const path of [...new Set(changed.filter(p => exclusions.some(x => p.startsWith(x + '/'))))].sort()) {
     const kind = kindOf(join(top, path));
     files.push({ path, kind, class: 'material', via: null, flags: ['under_exclusion_file', ...(kind === 'file' ? [] : [kind])] });
   }
-  const count = (c) => files.filter(f => f.class === c).length;
+  const count = (k) => files.filter(f => f.class === k).length;
   const counts = { planned: count('planned'), supporting: count('supporting'), material: count('material'), total: files.length };
   const record = { schema: SCHEMA, ticket, run_id: runId, base, merge_base: cand.merge_base, candidate_id: cand.candidate_id,
-    approved_plan_digest: approved.digest, dag_digest: dagDigest, source, roots, envelope, exclusions, files, counts,
-    outcome: counts.material ? 'MATERIAL' : 'CLEAN', plan_table_drift: drift };
+    approved_plan_digest: approved.digest, mode: c.mode, dag_digest: c.dag, roots: [...c.planned].sort(), supporting: [...c.supporting].sort(),
+    broad_planned: c.planned.filter(p => !p.includes('/')).sort(), exclusions, files, counts, outcome: counts.material ? 'MATERIAL' : 'CLEAN' };
   return { exit: counts.material ? 1 : 0, record, text: JSON.stringify(record, null, 1) + '\n' };
 }
 
@@ -341,19 +363,33 @@ function outPath(repo, ticket, out) {
   return target;
 }
 
-const FLAGS = ['repo', 'ticket', 'run-id', 'base', 'plan', 'dag', 'out'];
+/** Parse `--flag value` pairs; `repeat` names flags that may repeat (collected into arrays). Returns null on a bad argument. */
+function flags(rest, allowed, repeat = []) {
+  const f = {};
+  for (let i = 0; i < rest.length; i += 2) {
+    const k = rest[i]?.startsWith('--') ? rest[i].slice(2) : null;
+    if (!allowed.includes(k) || rest[i + 1] === undefined) return null;
+    if (repeat.includes(k)) (f[k] ??= []).push(rest[i + 1]);
+    else if (Object.hasOwn(f, k)) return null;
+    else f[k] = rest[i + 1];
+  }
+  return f;
+}
+
+function contractCommand(rest) {
+  const f = flags(rest, ['mode', 'dag', 'planned', 'supporting'], ['planned', 'supporting']);
+  if (!f || !['engine', 'manual'].includes(f.mode) || (f.mode === 'engine') !== (f.dag !== undefined)) { process.stderr.write(USAGE + '\n'); return 2; }
+  const d = f.dag === undefined ? null : readDag(resolve(f.dag));
+  process.stdout.write(contractLine({ mode: f.mode, dag: d?.digest ?? null, planned: f.planned ?? d?.writes ?? [], supporting: f.supporting ?? [] }) + '\n');
+  return 0;
+}
 
 export async function main(argv) {
   const [cmd, ...rest] = argv;
-  const f = {};
-  let bad = cmd !== 'check';
-  for (let i = 0; i < rest.length && !bad; i += 2) {
-    const k = rest[i]?.startsWith('--') ? rest[i].slice(2) : null;
-    if (!FLAGS.includes(k) || rest[i + 1] === undefined || Object.hasOwn(f, k)) bad = true;
-    else f[k] = rest[i + 1];
-  }
-  if (bad || !f.repo || !f.ticket || !f['run-id'] || !f.base || !f.plan) { process.stderr.write(USAGE + '\n'); return 2; }
   try {
+    if (cmd === 'contract') return contractCommand(rest);
+    const f = cmd === 'check' ? flags(rest, ['repo', 'ticket', 'run-id', 'base', 'plan', 'dag', 'out']) : null;
+    if (!f || !f.repo || !f.ticket || !f['run-id'] || !f.base || !f.plan) { process.stderr.write(USAGE + '\n'); return 2; }
     const repo = resolve(f.repo);
     // Check the --base and identity inputs before touching git, then the output location before any work.
     if (String(f.base).startsWith('-')) refuse('bad_input', `refused ref: ${f.base}`);

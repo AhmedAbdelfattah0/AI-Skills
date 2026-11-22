@@ -1,5 +1,6 @@
-// S6 (F07, F11): check-pr-scope.mjs classifies every candidate path as planned, supporting or material against the
-// approved plan, and the F11 3b old-consumers row. Fixtures are temp git repos under os.tmpdir() with an approved START.
+// S6 (F07, F11; Option B): check-pr-scope.mjs classifies every candidate path as planned, supporting or material
+// against the ONE digest-bound `scope-contract:` line of the approved plan (no Markdown is parsed), and the F11 3b row.
+// Fixtures are temp git repos under os.tmpdir() with an approved START.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -10,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { planNarrativeDigest, under, validateEngineDag, sha } from './engine-dag.mjs';
 import { designContract } from './engine-gates.mjs';
-import { SCHEMA, normalRel, parseFilesTable, parseEnvelope, classify } from './check-pr-scope.mjs';
+import * as S from './check-pr-scope.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'check-pr-scope.mjs');
@@ -22,6 +23,8 @@ const PLAN_REL = `.specs/plans/${TICKET}.md`;
 const load = (p) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const ref = (name) => load(join(HERE, '..', 'references', name));
 const flat = (s) => s.replace(/\s+/g, ' ');
+const LS = String.fromCharCode(0x2028), PS = String.fromCharCode(0x2029), BOM = String.fromCharCode(0xfeff), NUL = String.fromCharCode(0);
+const CYR_E = String.fromCharCode(0x0435), CYR_O = String.fromCharCode(0x043e);
 
 // ------------------------------------------------------------------ fixtures
 
@@ -31,7 +34,7 @@ function git(cwd, args, opts = {}) {
   return r.stdout;
 }
 
-/** A temp repo: `base` files committed on main, then branch `work`. Returns helpers. */
+/** A temp repo: `base` files committed on main, then branch `work`. */
 function repo(t, baseFiles = { 'README.md': 'base\n' }) {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 's6-scope-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -48,9 +51,11 @@ function repo(t, baseFiles = { 'README.md': 'base\n' }) {
   return { dir, write, git: (args) => git(dir, args), rm: (rel) => rmSync(join(dir, rel), { recursive: true, force: true }) };
 }
 
-const TABLE_HEAD = '| ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |\n|---|---|---|---|---|---|';
-const row = (cell, id = 'web') => `| ${id} | worker | Build the checkout page | ${cell} | — | none |`;
-const table = (...cells) => [TABLE_HEAD, ...cells.map((c, i) => row(c, `n${i}`))].join('\n');
+/** The canonical contract line (fixed key order v, mode, dag, planned, supporting). */
+const contract = ({ mode = 'manual', dag = null, planned, supporting = [] }) =>
+  `scope-contract: ${JSON.stringify({ v: 1, mode, dag, planned, supporting })}`;
+/** The explanatory table a real plan keeps; no script reads it. */
+const TABLE = '| ID | Owner | Step (plain words) | Files touched | Depends on | Exclusive resources |\n|---|---|---|---|---|---|\n| web | worker | Build checkout | `src/checkout/page.tsx` | — | none |';
 
 /** Plan text: narrative + RUN-STATE with an approved START over exactly that narrative (plus `events` after it). */
 function planText(narrativeBody, { events = [], startOver = {} } = {}) {
@@ -59,11 +64,17 @@ function planText(narrativeBody, { events = [], startOver = {} } = {}) {
   const start = { run_id: RUN, event: 'START', approved_plan_digest: planNarrativeDigest(empty), approved_at: '2026-11-20T10:00:00.000Z', approved_by: 'owner', ...startOver };
   return `${narrative}${B}\n${[start, ...events].map((e) => JSON.stringify(e)).join('\n')}\n${E}\n`;
 }
-
 function writePlan(r, body, opts) { r.write(PLAN_REL, planText(body, opts)); return join(r.dir, PLAN_REL); }
 
 const DAG = (writes) => ({ schema: 'ship-ticket-engine-dag-v1', config: { provider: 'claude', timeoutMs: 1000 },
   nodes: writes.map((w, i) => ({ id: `n${i}`, promptFile: '/p', writes: w })) });
+/** A DAG file in the git dir; returns { file, raw, digest }. */
+function dagFile(r, writes, name = 'run.dag.json') {
+  const raw = JSON.stringify(DAG(writes));
+  const file = join(r.dir, '.git', name);
+  writeFileSync(file, raw);
+  return { file, raw, digest: sha(raw) };
+}
 
 function run(r, extra = [], { plan = join(r.dir, PLAN_REL), base = 'main' } = {}) {
   const args = [SCRIPT, 'check', '--repo', r.dir, '--ticket', TICKET, '--run-id', RUN, '--base', base, '--plan', plan, ...extra];
@@ -75,12 +86,12 @@ function run(r, extra = [], { plan = join(r.dir, PLAN_REL), base = 'main' } = {}
 const byPath = (json) => Object.fromEntries(json.files.map((f) => [f.path, f]));
 const defaultOut = (r) => join(r.dir, '.git', 'ai-skills', 'ship-ticket', `${TICKET}.scope.json`);
 
-/** The common checkout-page fixture: plan says the checkout page, its directory, and a tests envelope. */
-const CHECKOUT_PLAN = `${table('`src/checkout/page.tsx`', '`src/checkout/`, `tests/checkout/`')}\n\nscope-envelope: tests/checkout/`;
+const CHECKOUT = contract({ planned: ['src/checkout/page.tsx', 'src/checkout'], supporting: ['tests'] });
+const CHECKOUT_PLAN = `${TABLE}\n\n${CHECKOUT}`;
 
 // ------------------------------------------------------------------ class rules
 
-test('planned exact, planned directory, supporting envelope and material (the checkout page vs the orders route)', (t) => {
+test('planned exact, planned directory, supporting (independent of planned) and material (the checkout page vs the orders route)', (t) => {
   const r = repo(t);
   writePlan(r, CHECKOUT_PLAN);
   r.write('src/checkout/page.tsx');
@@ -92,31 +103,28 @@ test('planned exact, planned directory, supporting envelope and material (the ch
   const f = byPath(out.json);
   assert.deepEqual(f['src/checkout/page.tsx'], { path: 'src/checkout/page.tsx', kind: 'file', class: 'planned', via: 'exact', flags: [] });
   assert.deepEqual(f['src/checkout/util.ts'], { path: 'src/checkout/util.ts', kind: 'file', class: 'planned', via: 'directory', flags: ['unlisted_under_directory_write'] });
-  assert.deepEqual(f['tests/checkout/page.test.tsx'], { path: 'tests/checkout/page.test.tsx', kind: 'file', class: 'supporting', via: 'envelope', flags: [] });
+  assert.deepEqual(f['tests/checkout/page.test.tsx'], { path: 'tests/checkout/page.test.tsx', kind: 'file', class: 'supporting', via: 'supporting', flags: [] });
   assert.deepEqual(f['src/api/orders/route.ts'], { path: 'src/api/orders/route.ts', kind: 'file', class: 'material', via: null, flags: [] });
-  assert.equal(out.json.schema, SCHEMA);
+  assert.equal(out.json.schema, S.SCHEMA);
   assert.equal(out.json.outcome, 'MATERIAL');
-  assert.equal(out.json.source, 'plan-table');
-  assert.deepEqual(out.json.roots, ['src/checkout', 'src/checkout/page.tsx', 'tests/checkout']);
-  assert.deepEqual(out.json.envelope, ['tests/checkout']);
+  assert.equal(out.json.mode, 'manual');
+  assert.deepEqual(out.json.roots, ['src/checkout', 'src/checkout/page.tsx']);
+  assert.deepEqual(out.json.supporting, ['tests']);
   assert.deepEqual(out.json.counts, { planned: 2, supporting: 1, material: 1, total: 4 });
   assert.equal(out.json.dag_digest, null);
-  assert.equal(out.json.ticket, TICKET);
-  assert.equal(out.json.run_id, RUN);
-  assert.match(out.stdout, /src\/api\/orders\/route\.ts/);
-  // the plan file and session-log.md are the pinned exclusions; never in the path set
+  assert.equal('plan_table_drift' in out.json, false);
+  assert.match(out.stderr, /src\/api\/orders\/route\.ts/);
   r.write('session-log.md');
   const again = run(r);
   assert.ok(!again.json.files.some((x) => x.path === PLAN_REL || x.path === 'session-log.md'));
-  // the record on disk is the stdout bytes, in the git dir
   assert.equal(readFileSync(defaultOut(r), 'utf8'), again.stdout);
 });
 
-test('a candidate entirely inside the plan exits 0 CLEAN and records the candidate-id of the same base', (t) => {
+test('a candidate entirely inside the contract exits 0 CLEAN and records the candidate-id of the same base', (t) => {
   const r = repo(t);
   writePlan(r, CHECKOUT_PLAN);
   r.write('src/checkout/page.tsx');
-  r.write('tests/checkout/a.test.tsx');
+  r.write('tests/a.test.tsx');
   const out = run(r);
   assert.equal(out.status, 0, out.stderr + out.stdout);
   assert.equal(out.json.outcome, 'CLEAN');
@@ -137,9 +145,7 @@ test('a rename into and out of the plan is a deleted source plus an added destin
   const out = run(r);
   assert.equal(out.status, 1, out.stderr);
   const f = byPath(out.json);
-  assert.equal(f['src/legacy/x.ts'].class, 'material');
-  assert.deepEqual(f['src/legacy/x.ts'].flags, ['deleted']);
-  assert.equal(f['src/legacy/x.ts'].kind, 'deleted');
+  assert.deepEqual([f['src/legacy/x.ts'].class, f['src/legacy/x.ts'].kind, f['src/legacy/x.ts'].flags], ['material', 'deleted', ['deleted']]);
   assert.equal(f['src/checkout/x.ts'].class, 'planned');
   assert.equal(f['src/checkout/y.ts'].class, 'planned');
   assert.ok(f['src/checkout/y.ts'].flags.includes('deleted'));
@@ -151,25 +157,24 @@ test('a symlink is never supporting and an outside target is flagged', (t) => {
   writePlan(r, CHECKOUT_PLAN);
   r.write('outside/secret.txt');
   mkdirSync(join(r.dir, 'tests/checkout'), { recursive: true });
+  mkdirSync(join(r.dir, 'src/checkout'), { recursive: true });
   try {
     symlinkSync('../../outside/secret.txt', join(r.dir, 'tests/checkout/link'));
-    symlinkSync('page.tsx', join(r.dir, 'tests/checkout/inner'));
+    symlinkSync('page.tsx', join(r.dir, 'src/checkout/inner'));
+    symlinkSync('../../outside/secret.txt', join(r.dir, 'src/checkout/out'));
   } catch (e) { t.skip(`no symlinks here: ${e.code}`); return; }
   // Windows without symlink rights may create something else; skip on what lstat sees, not on the platform name.
   if (!lstatSync(join(r.dir, 'tests/checkout/link')).isSymbolicLink()) { t.skip('symlink not created as a link'); return; }
-  const out = run(r);
-  const f = byPath(out.json);
-  assert.equal(f['tests/checkout/link'].kind, 'symlink');
-  assert.notEqual(f['tests/checkout/link'].class, 'supporting');
-  assert.equal(f['tests/checkout/link'].class, 'planned');
-  assert.deepEqual(f['tests/checkout/link'].flags, ['symlink', 'symlink_target_outside_contract', 'unlisted_under_directory_write']);
-  assert.deepEqual(f['tests/checkout/inner'].flags, ['symlink', 'unlisted_under_directory_write']);
+  const f = byPath(run(r).json);
+  assert.deepEqual(f['tests/checkout/link'], { path: 'tests/checkout/link', kind: 'symlink', class: 'material', via: null, flags: ['symlink', 'symlink_target_outside_contract'] });
+  assert.deepEqual(f['src/checkout/inner'].flags, ['symlink', 'unlisted_under_directory_write']);
+  assert.deepEqual(f['src/checkout/out'].flags, ['symlink', 'symlink_target_outside_contract', 'unlisted_under_directory_write']);
   assert.equal(f['outside/secret.txt'].class, 'material');
 });
 
-test('a case alias of a root stays material and is flagged', (t) => {
+test('a case alias of a planned entry stays material and is flagged', (t) => {
   const r = repo(t);
-  writePlan(r, table('`src/Checkout/`'));
+  writePlan(r, contract({ planned: ['src/Checkout'] }));
   r.write('src/checkout/page.tsx');
   const out = run(r);
   assert.equal(out.status, 1, out.stderr);
@@ -194,176 +199,266 @@ test('untracked files are in the path set; gitignored files are invisible, and a
   assert.equal(byPath(run(r).json)['src/new/untracked.ts'].class, 'material');
 });
 
-test('a deleted file outside the plan is material and flagged deleted', (t) => {
-  const r = repo(t, { 'docs/old.md': 'old\n' });
+test('a deleted file outside the plan is material and flagged deleted; a deleted test is not supporting', (t) => {
+  const r = repo(t, { 'docs/old.md': 'old\n', 'tests/old.test.ts': 'x\n' });
   writePlan(r, CHECKOUT_PLAN);
   r.rm('docs/old.md');
-  const out = run(r);
-  assert.equal(out.status, 1);
-  assert.deepEqual(byPath(out.json)['docs/old.md'], { path: 'docs/old.md', kind: 'deleted', class: 'material', via: null, flags: ['deleted'] });
+  r.rm('tests/old.test.ts');
+  const f = byPath(run(r).json);
+  assert.deepEqual(f['docs/old.md'], { path: 'docs/old.md', kind: 'deleted', class: 'material', via: null, flags: ['deleted'] });
+  assert.equal(f['tests/old.test.ts'].class, 'material');
 });
 
-test('a lockfile is never supporting: material at the root, planned with a flag under a fixtures directory write', (t) => {
+test('supporting is per file: a manifest under tests and an executable under docs are material', (t) => {
   const r = repo(t);
-  writePlan(r, `${table('`tests/`')}\n\nscope-envelope: tests/fixtures/`);
+  writePlan(r, contract({ planned: ['src/checkout'], supporting: ['tests', 'docs'] }));
   r.write('package-lock.json', '{}\n');
   r.write('tests/fixtures/app/package-lock.json', '{}\n');
   r.write('tests/fixtures/app/data.json', '{}\n');
+  r.write('docs/guide.md');
+  r.write('docs/tool.mjs');
+  r.write('src/api/route.ts');
   const f = byPath(run(r).json);
   assert.deepEqual(f['package-lock.json'], { path: 'package-lock.json', kind: 'file', class: 'material', via: null, flags: ['dependency_manifest'] });
-  assert.deepEqual(f['tests/fixtures/app/package-lock.json'], { path: 'tests/fixtures/app/package-lock.json', kind: 'file', class: 'planned', via: 'directory', flags: ['dependency_manifest', 'unlisted_under_directory_write'] });
+  assert.deepEqual(f['tests/fixtures/app/package-lock.json'], { path: 'tests/fixtures/app/package-lock.json', kind: 'file', class: 'material', via: null, flags: ['dependency_manifest'] });
   assert.equal(f['tests/fixtures/app/data.json'].class, 'supporting');
+  assert.equal(f['docs/guide.md'].class, 'supporting');
+  assert.deepEqual(f['docs/tool.mjs'], { path: 'docs/tool.mjs', kind: 'file', class: 'material', via: null, flags: ['docs_executable'] });
+  assert.equal(f['src/api/route.ts'].class, 'material');
 });
 
-test('the classifier: exact before envelope before directory; a line terminator fails closed to material', () => {
-  const files = classify([
-    { path: 'a/b', kind: 'file' }, { path: 'a/env/x', kind: 'file' }, { path: 'a/env/x', kind: 'submodule' },
-    { path: 'a/c', kind: 'file' }, { path: 'a/n\nx', kind: 'file' }, { path: 'z', kind: 'file' },
-  ], { roots: ['a', 'a/b'], envelope: ['a/env'], readlink: () => 'x' });
-  assert.deepEqual(files.map((f) => [f.class, f.via]), [['planned', 'exact'], ['supporting', 'envelope'], ['planned', 'directory'],
-    ['planned', 'directory'], ['material', null], ['material', null]]);
-  assert.deepEqual(files[2].flags, ['submodule', 'unlisted_under_directory_write']);
-  assert.deepEqual(files[4].flags, ['line_terminator']);
+test('the classifier: planned before supporting; a line terminator fails closed to material', () => {
+  const files = S.classify([
+    { path: 'a/b', kind: 'file' }, { path: 'tests/x', kind: 'file' }, { path: 'a/c', kind: 'submodule' },
+    { path: 'a/n\nx', kind: 'file' }, { path: 'z', kind: 'file' }, { path: 'tests/l', kind: 'symlink' },
+  ], { mode: 'manual', planned: ['a', 'a/b'], supporting: ['tests'], readlink: () => 'x' });
+  assert.deepEqual(files.map((f) => [f.class, f.via]), [['planned', 'exact'], ['supporting', 'supporting'], ['planned', 'directory'],
+    ['material', null], ['material', null], ['material', null]]);
+  assert.deepEqual(files[0].flags, []);
+  assert.deepEqual(files[2].flags, ['submodule', 'unlisted_under_directory_write', 'broad_planned']);
+  assert.deepEqual(files[3].flags, ['line_terminator']);
 });
 
-// ------------------------------------------------------------------ DAG source
+// ------------------------------------------------------------------ engine mode
 
-test('with a DAG listed in the plan: roots are the node writes, a zero-writes node adds nothing, and drift is advisory', (t) => {
+test('engine mode: planned equals the DAG writes, glob writes are classified as the engine matches them, broad entries are flagged', (t) => {
   const r = repo(t);
-  const dag = DAG([['src/checkout', 'tests/checkout'], []]);
-  const raw = JSON.stringify(dag);
-  const dagFile = join(r.dir, '.git', 'listed.dag.json');
-  writeFileSync(dagFile, raw);
-  writePlan(r, `${CHECKOUT_PLAN}\n\nDAG digest: ${sha(raw)}`);
-  r.write('src/checkout/page.tsx');
-  const out = run(r, ['--dag', dagFile]);
-  assert.equal(out.status, 0, out.stderr + out.stdout);
-  assert.equal(out.json.source, 'dag');
-  assert.equal(out.json.dag_digest, sha(raw));
-  assert.deepEqual(out.json.roots, ['src/checkout', 'tests/checkout']);
-  assert.deepEqual(out.json.plan_table_drift, { only_in_dag: [], only_in_table: ['src/checkout/page.tsx'] });
+  const d = dagFile(r, [['apps/web', 'apps/api/src/**/*.ts'], ['src']]);
+  writePlan(r, contract({ mode: 'engine', dag: d.digest, planned: ['apps/api/src/**/*.ts', 'apps/web', 'src'], supporting: ['tests'] }));
+  r.write('apps/web/a.ts');
+  r.write('apps/api/src/x/y.ts');
+  r.write('apps/api/src/y.ts');
+  r.write('apps/api/src/x/y.js');
+  r.write('src/b.ts');
+  r.write('tests/a.test.ts');
+  const out = run(r, ['--dag', d.file]);
+  assert.equal(out.status, 1, out.stderr + out.stdout);
+  const f = byPath(out.json);
+  assert.deepEqual(f['apps/api/src/x/y.ts'], { path: 'apps/api/src/x/y.ts', kind: 'file', class: 'planned', via: 'glob', flags: ['unlisted_under_directory_write'] });
+  assert.equal(f['apps/api/src/y.ts'].class, 'planned');
+  assert.deepEqual(f['apps/api/src/x/y.js'], { path: 'apps/api/src/x/y.js', kind: 'file', class: 'material', via: null, flags: [] });
+  assert.equal(f['apps/web/a.ts'].via, 'directory');
+  assert.deepEqual(f['src/b.ts'].flags, ['unlisted_under_directory_write', 'broad_planned']);
+  assert.equal(f['tests/a.test.ts'].class, 'supporting');
+  assert.equal(out.json.mode, 'engine');
+  assert.equal(out.json.dag_digest, d.digest);
+  assert.deepEqual(out.json.broad_planned, ['src']);
 });
 
-test('a DAG with no writes at all makes every path material', (t) => {
+test('engine mode: a DAG with no writes and an empty planned list makes every path material', (t) => {
   const r = repo(t);
-  const raw = JSON.stringify(DAG([[]]));
-  const dagFile = join(r.dir, '.git', 'zero.dag.json');
-  writeFileSync(dagFile, raw);
-  writePlan(r, `${table('`src/a.ts`')}\n\nDAG ${sha(raw)}`);
+  const d = dagFile(r, [[]]);
+  writePlan(r, contract({ mode: 'engine', dag: d.digest, planned: [] }));
   r.write('src/a.ts');
-  const out = run(r, ['--dag', dagFile]);
+  const out = run(r, ['--dag', d.file]);
   assert.equal(out.status, 1, out.stderr);
   assert.deepEqual(out.json.roots, []);
   assert.equal(byPath(out.json)['src/a.ts'].class, 'material');
 });
 
-test('a DAG bound by exactly one DAG_BOUND of this run passes; an unlisted, unbound DAG exits 2 dag_unbound', (t) => {
+test('engine binding: dag sha, exactly one matching DAG_BOUND when any exist, planned == writes, a valid DAG', (t) => {
   const r = repo(t);
-  const raw = JSON.stringify(DAG([['src/checkout', 'tests/checkout']]));
-  const dagFile = join(r.dir, '.git', 'bound.dag.json');
-  writeFileSync(dagFile, raw);
-  writePlan(r, CHECKOUT_PLAN);
+  const d = dagFile(r, [['src/checkout']]);
+  const body = contract({ mode: 'engine', dag: d.digest, planned: ['src/checkout'] });
+  writePlan(r, body);
   r.write('src/checkout/page.tsx');
-  const unbound = run(r, ['--dag', dagFile]);
+  assert.equal(run(r, ['--dag', d.file]).status, 0, 'no DAG_BOUND: the contract digest binds');
+  writePlan(r, body, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: d.digest }] });
+  assert.equal(run(r, ['--dag', d.file]).status, 0);
+  writePlan(r, body, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: d.digest }, { event: 'DAG_BOUND', run_id: RUN, dag_digest: d.digest }] });
+  assert.match(run(r, ['--dag', d.file]).stderr, /dag_unbound/, 'two DAG_BOUND events are not exactly one');
+  writePlan(r, body, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: sha('other') }] });
+  assert.match(run(r, ['--dag', d.file]).stderr, /dag_unbound/, 'a DAG_BOUND naming another DAG');
+  writePlan(r, body);
+  const other = dagFile(r, [['src/checkout', 'src/api']], 'other.dag.json');
+  rmSync(defaultOut(r), { force: true }); // the passing runs above wrote one; a refusal must not
+  const unbound = run(r, ['--dag', other.file]);
   assert.equal(unbound.status, 2);
-  assert.match(unbound.stderr, /dag_unbound/);
+  assert.match(unbound.stderr, /dag_unbound/, 'a DAG whose sha differs from the contract');
   assert.equal(existsSync(defaultOut(r)), false);
-  writePlan(r, CHECKOUT_PLAN, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: sha(raw) }] });
-  const ok = run(r, ['--dag', dagFile]);
-  assert.equal(ok.status, 0, ok.stderr);
-  assert.equal(ok.json.plan_table_drift.only_in_table[0], 'src/checkout/page.tsx');
-  writeFileSync(dagFile, JSON.stringify(DAG([['src/checkout']])));
-  assert.match(run(r, ['--dag', dagFile]).stderr, /dag_unbound/, 'a different DAG is not the bound one');
-  writeFileSync(dagFile, raw);
-  writePlan(r, CHECKOUT_PLAN, { events: [{ event: 'DAG_BOUND', run_id: 'other', dag_digest: sha(raw) }] });
-  assert.match(run(r, ['--dag', dagFile]).stderr, /dag_unbound/, 'a DAG_BOUND of another run does not bind this one');
-  writePlan(r, CHECKOUT_PLAN, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: sha(raw) }, { event: 'DAG_BOUND', run_id: RUN, dag_digest: sha(raw) }] });
-  assert.equal(run(r, ['--dag', dagFile]).status, 2, 'two DAG_BOUND events are not exactly one');
-  writeFileSync(dagFile, JSON.stringify({ schema: 'nope' }));
-  const bad = run(r, ['--dag', dagFile]);
-  assert.equal(bad.status, 2);
-  assert.match(bad.stderr, /dag_invalid/);
+  writePlan(r, contract({ mode: 'engine', dag: other.digest, planned: ['src/checkout'] }));
+  assert.match(run(r, ['--dag', other.file]).stderr, /contract_dag_mismatch/);
+  writeFileSync(other.file, JSON.stringify({ schema: 'nope' }));
+  writePlan(r, contract({ mode: 'engine', dag: sha(JSON.stringify({ schema: 'nope' })), planned: ['src/checkout'] }));
+  assert.match(run(r, ['--dag', other.file]).stderr, /dag_invalid/);
 });
 
-// ------------------------------------------------------------------ refusals (exit 2), never a record
+// ------------------------------------------------------------------ mode binding (no downgrade by absence of evidence)
 
-/** Codex counterexample: a four-backtick fence whose content holds a three-backtick line and an example table. */
-const CODEX_FENCE = ['````md', '```', TABLE_HEAD, row('`src/`', 'example'), '````', '', table('`src/checkout/page.tsx`')].join('\n');
+test('mode downgrade: engine needs --dag even with no state; editing to manual is an approval mismatch; manual with engine evidence is refused', (t) => {
+  const r = repo(t);
+  const d = dagFile(r, [['src/a.ts']]);
+  const engine = contract({ mode: 'engine', dag: d.digest, planned: ['src/a.ts'] });
+  const plan = writePlan(r, engine);
+  r.write('src/a.ts');
+  r.write('src/b.ts');
+  const noDag = run(r);
+  assert.equal(noDag.status, 2);
+  assert.match(noDag.stderr, /dag_required/, 'a failed engine init leaves no state, and the run is still engine');
+  writeFileSync(plan, readFileSync(plan, 'utf8').replace(engine, contract({ planned: ['src'] })));
+  assert.match(run(r).stderr, /approval_mismatch/);
+  const manual = contract({ planned: ['src'] });
+  writePlan(r, manual, { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: d.digest }] });
+  assert.match(run(r).stderr, /manual_with_engine_evidence/);
+  writePlan(r, manual);
+  assert.equal(run(r).status, 0, 'manual, no engine evidence');
+  assert.match(run(r, ['--dag', d.file]).stderr, /contract_mode_mismatch/);
+  const base = join(r.dir, '.git', 'ai-skills', 'ship-ticket');
+  mkdirSync(base, { recursive: true });
+  for (const name of [`${TICKET}.state.json`, `${TICKET}.engine.jsonl`]) {
+    writeFileSync(join(base, name), '{}\n');
+    const out = run(r);
+    assert.equal(out.status, 2, name);
+    assert.match(out.stderr, /manual_with_engine_evidence/, name);
+    unlinkSync(join(base, name));
+  }
+});
 
+// ------------------------------------------------------------------ the three Codex findings (46f49b3) as regressions
+
+test('Codex 1: a table cell hiding a comment inside backticks is ignored; the contract decides and src/evil.mjs is material', (t) => {
+  const r = repo(t);
+  const table = TABLE.replace('`src/checkout/page.tsx`', '`src<!-- -->/`');
+  writePlan(r, `${table}\n\n${contract({ planned: ['src/checkout/page.tsx'] })}`);
+  r.write('src/checkout/page.tsx');
+  r.write('src/evil.mjs');
+  const out = run(r);
+  assert.equal(out.status, 1, out.stderr + out.stdout);
+  assert.equal(byPath(out.json)['src/evil.mjs'].class, 'material');
+});
+
+test('Codex 2: a list-contained fence cannot hide or add a declaration', (t) => {
+  const r = repo(t);
+  const fence = `- step one\n  \`\`\`\n${TABLE.split('\n').map((l) => `  ${l}`).join('\n')}\n  \`\`\`\n`;
+  writePlan(r, fence);
+  r.write('src/a.ts');
+  assert.match(run(r).stderr, /scope_contract_missing/);
+  const fencedLine = `- step one\n  \`\`\`\n  ${contract({ planned: ['src'] })}\n  \`\`\`\n`;
+  writePlan(r, `${fencedLine}\n${contract({ planned: ['src/a.ts'] })}`);
+  assert.match(run(r).stderr, /scope_contract_ambiguous/);
+});
+
+test('Codex 3: a DAG digest on lines of its own is irrelevant to binding; the contract mode decides', (t) => {
+  const r = repo(t);
+  const d = dagFile(r, [['src/a.ts']]);
+  writePlan(r, `DAG digest:\n${d.digest}\n\n${contract({ planned: ['src/a.ts'] })}`);
+  r.write('src/a.ts');
+  assert.equal(run(r).status, 0, 'manual contract, no engine evidence: the digest text binds nothing');
+  assert.match(run(r, ['--dag', d.file]).stderr, /contract_mode_mismatch/);
+  writePlan(r, `DAG digest:\n${d.digest}\n\n${contract({ mode: 'engine', dag: d.digest, planned: ['src/a.ts'] })}`);
+  assert.match(run(r).stderr, /dag_required/);
+  const other = dagFile(r, [['src/a.ts', 'src/b.ts']], 'other.dag.json');
+  assert.match(run(r, ['--dag', other.file]).stderr, /dag_unbound/);
+});
+
+// ------------------------------------------------------------------ declaration refusals (exit 2, never a record)
+
+const good = { planned: ['src/a.ts'], supporting: ['tests'] };
+const raw = (json) => `scope-contract: ${json}`;
 for (const [name, body, code] of [
-  ['a placeholder cell', table('<real paths>'), 'plan_list_unparsable'],
-  ['a backticked placeholder', table('`<real path>`'), 'plan_list_unparsable'],
-  ['bare prose in a cell', table('the checkout page'), 'plan_list_unparsable'],
-  ['two Files touched tables', `${table('`src/a.ts`')}\n\n${table('`src/b.ts`')}`, 'plan_list_unparsable'],
-  ['no Files touched header', '| ID | Owner | Step |\n|---|---|---|\n| a | w | `src/a.ts` |', 'plan_list_unparsable'],
-  ['zero paths', table('—', 'none'), 'plan_list_unparsable'],
-  ['a dot-dot cell', table('`src/../api/x.ts`'), 'plan_list_unparsable'],
-  ['a dot cell', table('`./src/a.ts`'), 'plan_list_unparsable'],
-  ['an absolute cell', table('`/etc/passwd`'), 'plan_list_unparsable'],
-  ['an envelope outside the contract', `${table('`src/a.ts`')}\n\nscope-envelope: tests/`, 'envelope_outside_contract'],
-  ['a dot-dot envelope', `${table('`tests/`')}\n\nscope-envelope: tests/../src`, 'envelope_outside_contract'],
-  ['a placeholder envelope', `${table('`tests/`')}\n\nscope-envelope: <dirs>`, 'envelope_outside_contract'],
-  ['a second envelope line', `${table('`tests/`')}\n\nscope-envelope: tests/a/\nscope-envelope: tests/b/`, 'envelope_duplicate'],
-  // review repair: m4, Codex-2, M2 (fences and comments)
-  ['a mixed prose cell', table('`src/a.ts` plus the orders API'), 'plan_list_unparsable'],
-  ['adjacent backticks (one code span, two tokens)', table('`src/``other`'), 'plan_list_unparsable'],
-  ['two tokens with no separator', table('`src/a.ts``src/b.ts`'), 'plan_list_unparsable'],
-  ['an unmatched backtick', table('`src/a.ts` `src/b.ts'), 'plan_list_unparsable'],
-  ['a four-backtick fence holding a three-backtick line', CODEX_FENCE, 'plan_list_unparsable'],
-  ['the only Files touched table inside an HTML comment', `<!--\n${table('`src/`')}\n-->`, 'plan_list_unparsable'],
-  ['a commented Files touched table beside the real one', `<!-- ${TABLE_HEAD.split('\n')[0]} -->\n\n${table('`src/a.ts`')}`, 'plan_list_unparsable'],
-  ['an unterminated HTML comment', `${table('`src/a.ts`')}\n\n<!-- note`, 'plan_list_unparsable'],
-  ['an unterminated fence', `${table('`src/a.ts`')}\n\n\`\`\`\ncode`, 'plan_list_unparsable'],
-  ['an indented (code block) Files touched table', table('`src/`').split('\n').map((l) => `    ${l}`).join('\n'), 'plan_list_unparsable'],
+  ['no contract line', TABLE, 'scope_contract_missing'],
+  ['a second contract line', `${contract(good)}\n${contract(good)}`, 'scope_contract_ambiguous'],
+  ['the key mentioned in prose', `${contract(good)}\nThe scope-contract above is binding.`, 'scope_contract_ambiguous'],
+  ['the key in another case', `${contract(good)}\n<!-- Scope-Contract: x -->`, 'scope_contract_ambiguous'],
+  ['an indented contract line only', `  ${contract(good)}`, 'scope_contract_ambiguous'],
+  ['a contract in backticks only', `\`${contract(good)}\``, 'scope_contract_ambiguous'],
+  ['a list item contract only', `- ${contract(good)}`, 'scope_contract_ambiguous'],
+  ['a BOM before the key', `${BOM}${contract(good)}`, 'scope_contract_ambiguous'],
+  ['a space after the colon', contract(good).replace('{', ' {'), 'scope_contract_noncanonical'],
+  ['whitespace inside the JSON', contract(good).replace('"v":1', '"v": 1'), 'scope_contract_noncanonical'],
+  ['keys out of order', raw('{"mode":"manual","v":1,"dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
+  ['an extra key', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[],"x":1}'), 'scope_contract_noncanonical'],
+  ['a missing key', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"]}'), 'scope_contract_noncanonical'],
+  ['a duplicate key', raw('{"v":1,"v":1,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
+  ['a unicode escape', raw('{"v":1,"mode":"manual","dag":null,"planned":["src/\\u0061.ts"],"supporting":[]}'), 'scope_contract_noncanonical'],
+  ['trailing whitespace', `${contract(good)} `, 'scope_contract_noncanonical'],
+  ['not JSON', raw('{v:1}'), 'scope_contract_noncanonical'],
+  ['version 2', raw('{"v":2,"mode":"manual","dag":null,"planned":["src/a.ts"],"supporting":[]}'), 'scope_contract_invalid'],
+  ['an unknown mode', contract({ ...good, mode: 'auto' }), 'scope_contract_invalid'],
+  ['manual with a dag', contract({ ...good, dag: sha('x') }), 'scope_contract_invalid'],
+  ['engine without a dag', contract({ ...good, mode: 'engine' }), 'scope_contract_invalid'],
+  ['a dot-dot planned entry', contract({ planned: ['src/../api/x.ts'] }), 'scope_contract_invalid'],
+  ['a dot planned entry', contract({ planned: ['./src/a.ts'] }), 'scope_contract_invalid'],
+  ['an absolute planned entry', contract({ planned: ['/etc/passwd'] }), 'scope_contract_invalid'],
+  ['a trailing slash', contract({ planned: ['src/'] }), 'scope_contract_invalid'],
+  ['a backslash', contract({ planned: ['src\\a.ts'] }), 'scope_contract_invalid'],
+  ['a glob in manual mode', contract({ planned: ['src/*.ts'] }), 'scope_contract_invalid'],
+  ['an empty manual planned list', contract({ planned: [] }), 'scope_contract_invalid'],
+  ['a duplicate planned entry', contract({ planned: ['src/a.ts', 'src/a.ts'] }), 'scope_contract_invalid'],
+  ['a supporting entry outside the closed class', contract({ planned: ['src/a.ts'], supporting: ['tests2'] }), 'scope_contract_invalid'],
+  ['a supporting entry with production code in its name', contract({ planned: ['src/a.ts'], supporting: ['src/api'] }), 'scope_contract_invalid'],
+  ['a supporting entry under a forbidden directory', contract({ planned: ['src/a.ts'], supporting: ['.github/tests'] }), 'scope_contract_invalid'],
+  ['a supporting entry under node_modules', contract({ planned: ['src/a.ts'], supporting: ['node_modules/x/tests'] }), 'scope_contract_invalid'],
+  ['a supporting glob', contract({ planned: ['src/a.ts'], supporting: ['*/tests'] }), 'scope_contract_invalid'],
+  ['supporting inside planned', contract({ planned: ['src'], supporting: ['src/tests'] }), 'supporting_overlaps_planned'],
+  ['planned inside supporting', contract({ planned: ['tests/helpers.ts'], supporting: ['tests'] }), 'supporting_overlaps_planned'],
+  ['a wildcard-only first segment (engine)', null, 'scope_contract_invalid'],
 ]) {
   test(`refused, exit 2, no record: ${name}`, (t) => {
     const r = repo(t);
-    writePlan(r, body);
+    let extra = [];
+    if (body === null) {
+      const d = dagFile(r, [['**/x.ts']]);
+      writePlan(r, contract({ mode: 'engine', dag: d.digest, planned: ['**/x.ts'] }));
+      extra = ['--dag', d.file];
+    } else writePlan(r, body);
     r.write('src/a.ts');
-    const out = run(r);
+    const out = run(r, extra);
     assert.equal(out.status, 2, out.stdout + out.stderr);
     assert.match(out.stderr, new RegExp(code));
     assert.equal(existsSync(defaultOut(r)), false);
-    assert.equal(out.json?.outcome, undefined);
   });
 }
 
-test('a Files touched table inside a fenced block or the RUN-STATE block is not read', () => {
-  // a fenced or commented block without a Files touched header is invisible; one WITH a header fails closed (refusal list)
-  const fenced = '````markdown\n```\n| a | b |\n```\n````\n<!-- a comment\nspanning lines -->\n~~~\n| x |\n~~~~\n' + table('`src/a.ts`');
-  assert.deepEqual(parseFilesTable(planText(fenced)), ['src/a.ts']);
-  assert.deepEqual(parseFilesTable(planText(table('`src/a.ts`,`src/b/`<br>`src/c.ts` `src/d.ts`'))), ['src/a.ts', 'src/b', 'src/c.ts', 'src/d.ts']);
-  // a shorter fence line inside a longer fence does not close it (only the same character, at least as long)
-  assert.deepEqual(parseEnvelope(planText('````md\n```\nscope-envelope: src/x/\n```\n````\n~~~~\n~~~\nscope-envelope: src/y/\n~~~\n~~~~')), []);
-  assert.deepEqual(parseEnvelope(planText(`scope-envelope: src/\n\`\`\`\nscope-envelope: x/\n\`\`\``)), ['src']);
-  assert.deepEqual(parseEnvelope(planText('no envelope here')), []);
+test('overlap with an engine glob: a supporting entry matched by a planned glob or under its literal prefix is refused', () => {
+  const eng = (planned, supporting) => () => S.validateContract({ v: 1, mode: 'engine', dag: sha('d'), planned, supporting });
+  const overlaps = (e) => e.code === 'supporting_overlaps_planned';
+  assert.throws(eng(['a*/x'], ['ab/x/tests']), overlaps, 'matched by the planned glob');
+  assert.throws(eng(['apps/**/x.ts'], ['apps/tests']), overlaps, 'under the literal prefix of the planned glob');
+  assert.throws(eng(['apps/web'], ['apps/web/tests']), overlaps, 'literal');
+  assert.doesNotThrow(eng(['apps/api/src/**/*.ts', 'apps/web'], ['tests', 'docs']));
 });
 
-test('an envelope edited after START is an approval mismatch (exit 2, no record)', (t) => {
-  const r = repo(t);
-  const plan = writePlan(r, `${table('`tests/`', '`src/a.ts`')}\n\nscope-envelope: tests/a/`);
-  writeFileSync(plan, readFileSync(plan, 'utf8').replace('scope-envelope: tests/a/', 'scope-envelope: tests/'));
-  r.write('src/a.ts');
-  const out = run(r);
-  assert.equal(out.status, 2);
-  assert.match(out.stderr, /approval_mismatch/);
-  assert.equal(existsSync(defaultOut(r)), false);
-  // a START of another run does not approve this one
-  writePlan(r, table('`src/a.ts`'), { startOver: { run_id: 'other' } });
-  assert.match(run(r).stderr, /approval_mismatch/);
+test('CRLF, a lone CR or a NUL never produce an accepted declaration', () => {
+  const ok = planText(contract(good));
+  assert.doesNotThrow(() => S.parseContract(ok));
+  for (const bad of [ok.replace(/\n/g, '\r\n'), ok.replace(contract(good), `\r${contract(good)}`), ok.replace('"v":1', `"v":1${NUL}`)]) {
+    assert.throws(() => S.parseContract(bad), (e) => e.exit === 2);
+  }
 });
+
+// ------------------------------------------------------------------ inputs and git failures
 
 test('input refusals: --base starting with -, unsafe ticket, unknown flag, --out inside the work tree', (t) => {
   const r = repo(t);
-  writePlan(r, table('`src/a.ts`'));
+  writePlan(r, contract({ planned: ['src/a.ts'] }));
   r.write('src/a.ts');
   const dash = run(r, [], { base: '-x' });
   assert.equal(dash.status, 2);
   assert.match(dash.stderr, /refused ref/);
   const p = spawnSync(process.execPath, [SCRIPT, 'check', '--repo', r.dir, '--ticket', '../x', '--run-id', RUN, '--base', 'main', '--plan', join(r.dir, PLAN_REL)], { encoding: 'utf8' });
   assert.equal(p.status, 2);
-  assert.equal(run(r, ['--exclude', 'src/a.ts']).status, 2, 'there is no --exclude flag');
-  assert.equal(run(r, ['--envelope', 'src/']).status, 2, 'there is no --envelope flag');
+  for (const flag of ['--exclude', '--envelope', '--planned', '--mode']) assert.equal(run(r, [flag, 'src']).status, 2, `there is no ${flag} flag on check`);
   const inside = run(r, ['--out', join(r.dir, 'scope.json')]);
   assert.equal(inside.status, 2);
   assert.match(inside.stderr, /out_in_work_tree/);
@@ -374,9 +469,22 @@ test('input refusals: --base starting with -, unsafe ticket, unknown flag, --out
   assert.equal(JSON.parse(readFileSync(outside, 'utf8')).outcome, 'CLEAN');
 });
 
+test('an approval mismatch or a START of another run exits 2 with no record', (t) => {
+  const r = repo(t);
+  const plan = writePlan(r, contract({ planned: ['src/a.ts'] }));
+  writeFileSync(plan, readFileSync(plan, 'utf8').replace('"src/a.ts"', '"src"'));
+  r.write('src/a.ts');
+  const out = run(r);
+  assert.equal(out.status, 2);
+  assert.match(out.stderr, /approval_mismatch/);
+  assert.equal(existsSync(defaultOut(r)), false);
+  writePlan(r, contract({ planned: ['src/a.ts'] }), { startOver: { run_id: 'other' } });
+  assert.match(run(r).stderr, /approval_mismatch/);
+});
+
 test('git or candidate-id failure exits 3: an unknown base and a dirty submodule', (t) => {
   const r = repo(t);
-  writePlan(r, table('`src/a.ts`', '`vendor/sub`'));
+  writePlan(r, contract({ planned: ['src/a.ts', 'vendor/sub'] }));
   assert.equal(run(r, [], { base: 'no-such-ref' }).status, 3);
   const sub = repo(t);
   sub.write('lib.txt');
@@ -389,7 +497,42 @@ test('git or candidate-id failure exits 3: an unknown base and a dirty submodule
   assert.equal(existsSync(defaultOut(r)), false);
 });
 
-// ------------------------------------------------------------------ no-downgrade proof (exit 0 implies the engine contract)
+test('a path strictly under an exclusion FILE entry is material (under_exclusion_file), outside the candidate-id set', (t) => {
+  const r = repo(t);
+  const plan = join(r.dir, '.git', 'plan-elsewhere.md');
+  writeFileSync(plan, planText(contract({ planned: ['src/a.ts'] })));
+  r.write('src/a.ts');
+  r.write('session-log.md/evil.mjs');
+  r.write(`${PLAN_REL}/x.mjs`);
+  const out = run(r, [], { plan });
+  assert.equal(out.status, 1, out.stdout + out.stderr);
+  const f = byPath(out.json);
+  assert.deepEqual(f['session-log.md/evil.mjs'], { path: 'session-log.md/evil.mjs', kind: 'file', class: 'material', via: null, flags: ['under_exclusion_file'] });
+  assert.deepEqual(f[`${PLAN_REL}/x.mjs`].flags, ['under_exclusion_file']);
+  r.git(['add', '-A']); r.git(['commit', '-q', '-m', 'hide']);
+  assert.equal(run(r, [], { plan }).status, 1);
+  const ok = repo(t);
+  writePlan(ok, contract({ planned: ['src/a.ts'] }));
+  ok.write('src/a.ts'); ok.write('session-log.md');
+  assert.equal(run(ok).status, 0);
+});
+
+test('the contract helper prints the canonical line that check accepts', (t) => {
+  const r = repo(t);
+  const d = dagFile(r, [['src/b', 'src/a']]);
+  const p = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'engine', '--dag', d.file, '--supporting', 'tests', '--supporting', 'docs'], { encoding: 'utf8' });
+  assert.equal(p.status, 0, p.stderr);
+  assert.equal(p.stdout, `${contract({ mode: 'engine', dag: d.digest, planned: ['src/a', 'src/b'], supporting: ['docs', 'tests'] })}\n`);
+  const m = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/x', '--planned', 'src/a'], { encoding: 'utf8' });
+  assert.equal(m.stdout, `${contract({ planned: ['src/a', 'src/x'] })}\n`);
+  const bad = spawnSync(process.execPath, [SCRIPT, 'contract', '--mode', 'manual', '--planned', 'src/*.ts'], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  writePlan(r, p.stdout.trim());
+  r.write('src/a/x.ts');
+  assert.equal(run(r, ['--dag', d.file]).status, 0);
+});
+
+// ------------------------------------------------------------------ engine matcher parity and the no-downgrade proof
 
 /** security-plan.mjs globRe and normPath, extracted from the real file (not copied), so the proof runs against the engine's matcher. */
 function engineGlobRe() {
@@ -400,89 +543,146 @@ function engineGlobRe() {
   assert.ok(norm && start > 0 && end > start, 'extracted normPath and globRe from security-plan.mjs');
   return new Function(`${norm}\n${src.slice(start, end + 2)}\nreturn globRe;`)();
 }
-
 function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; }; }
+const ALPHA = ['a', 'b', 'A', '.', '*', '**', '?', '[', ']', '(', '+', '$', '\\', '-', ' ', '\n', '\r', LS, PS, 'é'];
 
-test('property: a non-material path always matches the engine Design Contract (designContract + security-plan globRe)', () => {
+test('local matcher parity: globRe equals the security-plan.mjs globRe on a corpus with *, **, **/, ?, dots, plus and brackets', () => {
+  const real = engineGlobRe();
+  const rand = rng(7);
+  const seg = () => Array.from({ length: 1 + Math.floor(rand() * 3) }, () => ALPHA[Math.floor(rand() * ALPHA.length)]).join('');
+  const rel = () => Array.from({ length: 1 + Math.floor(rand() * 4) }, seg).join('/');
+  const globs = ['apps/api/src/**/*.ts', '**/x', 'a/**', 'a?b', 'v1.2+x/[a]', '**', 'a/**/b/*.mjs', './src/a', 'src/'];
+  for (let i = 0; i < 400; i++) globs.push(rel());
+  let n = 0;
+  for (const g of globs) {
+    const mine = S.globRe(g), theirs = real(g);
+    assert.equal(mine.source, theirs.source, g);
+    for (let j = 0; j < 10; j++) { const p = rand() < 0.5 ? rel() : `${g.replace(/\*+/g, 'q')}/${rel()}`; assert.equal(mine.test(p), theirs.test(p), `${g} ~ ${p}`); n++; }
+  }
+  assert.ok(n >= 4000, `compared ${n}`);
+});
+
+test('property: a planned path always matches the engine Design Contract (designContract + security-plan globRe), engine mode with globs', () => {
   const globRe = engineGlobRe();
   const rand = rng(20261122);
-  const ALPHA = ['a', 'b', 'A', '.', '*', '?', '[', ']', '(', '$', '\\', '-', ' ', '\n', '\r', '\u2028', '\u2029', 'é'];
   const seg = () => Array.from({ length: 1 + Math.floor(rand() * 3) }, () => ALPHA[Math.floor(rand() * ALPHA.length)]).join('');
   const rel = () => Array.from({ length: 1 + Math.floor(rand() * 3) }, seg).join('/');
-  let checked = 0, nonMaterial = 0;
+  let checked = 0, planned = 0;
   for (let i = 0; i < 4000; i++) {
-    const writes = Array.from({ length: Math.floor(rand() * 4) }, rel).filter((w) => normalRel(w));
-    const roots = [...new Set(writes)].sort();
-    // nested in a root, or anywhere (classify must stay sound even for an envelope the CLI would refuse)
-    const envelope = (roots.length && rand() < 0.5 ? [roots[0] + (rand() < 0.5 ? '' : '/' + seg())] : rand() < 0.5 ? [rel()] : []).filter((e) => normalRel(e));
-    const contract = designContract([{ writes }]).map(globRe);
+    const writes = [...new Set(Array.from({ length: Math.floor(rand() * 4) }, rel).filter((w) => S.normalRel(w)))].sort();
+    const contractRes = designContract([{ writes }]).map(globRe);
     for (let j = 0; j < 6; j++) {
-      const pick = roots.length && rand() < 0.7 ? roots[Math.floor(rand() * roots.length)] : rel();
+      const pick = writes.length && rand() < 0.7 ? writes[Math.floor(rand() * writes.length)].replace(/\*+/g, () => seg().replace(/[*/]/g, 'x')) : rel();
       const path = rand() < 0.5 ? pick : `${pick}/${rel()}`;
       const kind = ['file', 'symlink', 'deleted', 'submodule'][Math.floor(rand() * 4)];
-      const [f] = classify([{ path, kind }], { roots, envelope, readlink: () => '../x' });
+      const [f] = S.classify([{ path, kind }], { mode: 'engine', planned: writes, supporting: [], readlink: () => '../x' });
       checked++;
-      if (f.class === 'material') continue;
-      nonMaterial++;
-      assert.ok(contract.some((re) => re.test(path)), `non-material ${JSON.stringify(path)} outside the engine contract of ${JSON.stringify(writes)}`);
+      if (f.class !== 'planned') continue;
+      planned++;
+      assert.ok(contractRes.some((re) => re.test(path)), `planned ${JSON.stringify(path)} outside the engine contract of ${JSON.stringify(writes)}`);
     }
   }
-  assert.ok(checked === 24000 && nonMaterial > 2500, `checked ${checked}, non-material ${nonMaterial}`);
+  assert.ok(checked === 24000 && planned > 2500, `checked ${checked}, planned ${planned}`);
 });
 
 test('raw under() alone does not imply the engine contract for a path with a line terminator (why the classifier fails closed)', () => {
   const globRe = engineGlobRe();
-  for (const c of ['\n', '\r', '\u2028', '\u2029']) {
+  for (const c of ['\n', '\r', LS, PS]) {
     const p = `src/a${c}b`;
     assert.equal(under(p, ['src']), true);
     assert.equal(designContract([{ writes: ['src'] }]).map(globRe).some((re) => re.test(p)), false, JSON.stringify(c));
-    assert.equal(classify([{ path: p, kind: 'file' }], { roots: ['src'], envelope: [], readlink: () => '' })[0].class, 'material');
+    for (const mode of ['manual', 'engine']) assert.equal(S.classify([{ path: p, kind: 'file' }], { mode, planned: ['src'], supporting: [], readlink: () => '' })[0].class, 'material');
   }
 });
 
-test('normalRel parity: the local copy accepts exactly the writes validateEngineDag accepts', () => {
-  for (const w of ['src/a.ts', 'src', 'a b/c', 'src/', './src', 'src/../x', '/abs', 'a//b', 'a\\b', '.', '..', 'src/.', '']) {
+test('normalRel parity: the local copy accepts exactly the writes validateEngineDag accepts (plain, nested, glob, dotted)', () => {
+  for (const w of ['src/a.ts', 'src', 'a b/c', 'apps/api/src/**/*.ts', '**/x.ts', 'a?b', 'v1.2/x.min.js', '.github/w.yml', 'src/', './src', 'src/../x', '/abs', 'a//b', 'a\\b', '.', '..', 'src/.', '', 'C:x']) {
     let engine = true;
     try { validateEngineDag(DAG([[w]]), { ticket: TICKET }); } catch { engine = false; }
-    assert.equal(normalRel(w), engine, JSON.stringify(w));
+    assert.equal(S.normalRel(w), engine, JSON.stringify(w));
   }
 });
 
-test('no engine, gate or ship-ready script imports check-pr-scope.mjs', () => {
-  const hits = readdirSync(HERE).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== 'check-pr-scope.mjs')
-    .concat(readdirSync(join(HERE, 'lib')).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs')).map((f) => `lib/${f}`))
-    .filter((f) => /check-pr-scope/.test(readFileSync(join(HERE, f), 'utf8')));
-  assert.deepEqual(hits, []);
+// ------------------------------------------------------------------ malformed-declaration property (>= 5000)
+
+test('property: a mutated declaration is refused or classifies exactly as the canonical contract (never CLEAN where it says MATERIAL)', (t) => {
+  const C = { v: 1, mode: 'manual', dag: null, planned: ['src/checkout/page.tsx', 'src/checkout'], supporting: ['tests', 'docs'] };
+  const line = `scope-contract: ${JSON.stringify(C)}`;
+  const files = ['src/checkout/page.tsx', 'src/checkout/x.ts', 'tests/a.test.ts', 'docs/g.md', 'docs/x.mjs', 'src/api/route.ts', 'package.json', 'tests/l']
+    .map((path) => ({ path, kind: path === 'tests/l' ? 'symlink' : 'file' }));
+  const classes = (c) => S.classify(files, { mode: c.mode, planned: c.planned, supporting: c.supporting, readlink: () => '../x' }).map((f) => [f.path, f.class]);
+  const reference = classes(S.parseContract(planText(line)));
+  assert.ok(reference.some(([, c]) => c === 'material'));
+  const M = [
+    (s) => s.replace('{', ' {'), (s) => s.replace('"v":1', '"v": 1'), (s) => s.replace('{"v":1,', '{"v":1,"v":1,'),
+    (s) => s.replace(/}$/, ',"x":1}'), (s) => s.replace(/,"supporting":\[[^\]]*\]/, ''), (s) => s.replace('"v":1', '"v":"1"'),
+    (s) => s.replace('"dag":null', '"dag":0'), (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":"src"'),
+    (s) => s.replace('{"v":1,"mode":"manual",', '{"mode":"manual","v":1,'), (s) => s.replace('tests', '\\u0074ests'),
+    (s) => s.replace('tests', `t${CYR_E}sts`), (s) => s.replace('"mode"', `"m${CYR_O}de"`), (s) => s.replace('src/checkout"', 'src/../checkout"'),
+    (s) => s.replace('src/checkout"', 'src/./checkout"'), (s) => s.replace('"src/checkout"', '"/src/checkout"'), (s) => s.replace('src/checkout"', 'src\\\\checkout"'),
+    (s) => s.replace('src/checkout"', 'src/checkout/*"'), (s) => s.replace('src/checkout"', 'src/?heckout"'), (s) => s.replace('"src/checkout"', '""'),
+    (s) => s.replace('"docs"', `"${'d'.repeat(300)}"`), (s) => s.replace(/"planned":\[/, `"planned":[${Array.from({ length: 70 }, (_, i) => `"p${i}"`).join(',')},`),
+    (s) => s.replace('"tests"', '"src/checkout/tests"'), (s) => s.replace('"docs"', '"documentation"'), (s) => s.replace('"tests"', '"tests/"'),
+    (s) => s.replace('"manual"', '"engine"'), (s) => s.replace('"dag":null', `"dag":"${sha('x')}"`),
+    (s) => `${s} `, (s) => `${s}\t`, (s) => s.replace('"v":1', `"v":1${NUL}`), (s) => `${BOM}${s}`, (s) => ` ${s}`, (s) => s.replace('scope-contract:', 'Scope-contract:'),
+    (s) => s.replace('scope-contract: ', 'scope-contract:'), (s) => s.replace('scope-contract: ', 'scope-contract:  '), (s) => `${s}\r`,
+    (s) => `${s}\n${s}`, (s) => `${s}\nsee the scope-contract above`, (s) => `${s}\n\`\`\`\n${s}\n\`\`\``, (s) => `${s}\n<!-- ${s} -->`,
+    (s) => `${s}\n- ${s}`, (s) => `${s}\n\`scope-contract\``, (s) => `\r${s}`, (s) => s.replace(/"planned":\[[^\]]*\]/, '"planned":[]'),
+    (s) => s.replace('"src/checkout/page.tsx","src/checkout"', '"src/checkout","src/checkout/page.tsx"'), // valid: order is not semantic
+    (s) => s.replace('"tests","docs"', '"docs","tests"'), (s) => s.split('"').join("'"), (s) => s.replace('{', '{\n'), (s) => s.slice(0, -1),
+    (s) => s.replace('"planned"', '"Planned"'), (s) => s.replace(/"supporting":\[[^\]]*\]/, '"supporting":null'), (s) => s.replace('"v":1', '"v":1.0'),
+    (s) => s.replace('"v":1', '"v":true'), (s) => s.replace('page.tsx', 'page.tsx\\n'), (s) => s.replace('page.tsx', `page.tsx${LS}`),
+    (s) => s.replace('"src/checkout"', '"src/checkout","src/checkout"'), (s) => s.replace('"tests"', '"node_modules/tests"'),
+    (s) => s.replace('"tests"', '"package.json"'), (s) => s.replace('"tests"', '"src/checkout/page.tsx/tests"'),
+  ];
+  const rand = rng(424242);
+  let refused = 0, same = 0;
+  for (let i = 0; i < 6000; i++) {
+    let body = line;
+    const k = 1 + Math.floor(rand() * 3);
+    for (let j = 0; j < k; j++) body = M[Math.floor(rand() * M.length)](body);
+    const text = planText(rand() < 0.1 ? body.replace(/\n/g, '\r\n') : body);
+    let c;
+    try { c = S.parseContract(text); } catch (e) { assert.equal(e.exit, 2, String(e.stack)); refused++; continue; }
+    assert.deepEqual(classes(c), reference, JSON.stringify(body));
+    same++;
+  }
+  t.diagnostic(`refused ${refused}, same ${same}`);
+  assert.ok(refused + same >= 5000 && refused > 3000 && same > 50, `refused ${refused}, same ${same}`);
+});
+
+// ------------------------------------------------------------------ separation and wording pins
+
+test('no engine, gate or ship-ready script imports check-pr-scope.mjs, and nothing reads plan_table_drift', () => {
+  const runtime = readdirSync(HERE).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== 'check-pr-scope.mjs')
+    .concat(readdirSync(join(HERE, 'lib')).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs')).map((f) => `lib/${f}`));
+  assert.deepEqual(runtime.filter((f) => /check-pr-scope|plan_table_drift|scope-contract/.test(readFileSync(join(HERE, f), 'utf8'))), []);
+  assert.equal(/plan_table_drift|parseFilesTable|visibleLines|FILES_TOUCHED_HEADER|parseEnvelope/.test(readFileSync(SCRIPT, 'utf8')), false, 'the Markdown table parser is gone');
   for (const f of ['run-engine.mjs', 'engine-gates.mjs', 'gate.mjs', 'ship-ready-check.mjs']) assert.ok(existsSync(join(HERE, f)), f);
 });
 
-// ------------------------------------------------------------------ wording pins (S6, F11): sentences added, none reworded
-
 test('S6 and F11 wording pins', () => {
   const plan = flat(ref('plan.md')), review = flat(ref('review.md')), ship = flat(ref('ship.md'));
-  assert.ok(plan.includes('scope-envelope: <optional: comma-separated directories under a Files touched directory'));
+  assert.ok(plan.includes('scope-contract: {"v":1,"mode":"<engine|manual>","dag":"<sha256 of the DAG file, or null in manual mode>","planned":[<the DAG writes, or literal paths in manual mode>],"supporting":[<test or docs directories, e.g. "tests">]}'));
+  assert.ok(plan.includes('The Files touched column is explanation for the approver and is read by no script; the `scope-contract:` line is the authoritative scope.'));
+  assert.ok(!plan.includes('scope-envelope:'));
   assert.ok(plan.includes('| <old consumers · cached clients · deploy order of the changed shared contract> | <regression · data-integrity: a deployed or cached client still sends/expects the previous shape> | <`contract-consumer` test kind against the previous shape (`shared-contract` tag); Integration Contract frontend compatibility> | <PROVE> | <the contract shape or deploy order changes> | <planned> |'));
   assert.ok(plan.includes('When the change touches a shared contract (the Integration Contract is triggered, or the `shared-contract` risk label or test-trigger tag applies), section 3b has a row for old consumers, cached clients and deploy order, or lists it under `Not applicable:` with the reason.'));
   assert.ok(review.includes('run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]` on the candidate'));
   assert.ok(review.includes('Exit 1 (a material path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.'));
-  assert.ok(review.includes('An engine run must pass `--dag`'));
-  assert.ok(review.includes('the remedy is re-approval through `ExitPlanMode`, since an edited plan changes the digest and gives `approval_mismatch`'));
-  assert.ok(ship.includes('Use the run\'s base as `--base` and, on an engine run, the bound DAG as `--dag`.'));
-  assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
-  assert.ok(plan.includes('| contract | orchestrator | Materialize the approved contract artifact | `<real path>` |'));
-  assert.ok(plan.includes('e.g. scope-envelope: tests/checkout/, docs/checkout/ (no backticks)'));
-  assert.ok(plan.includes('<Files touched cells: backticked repository paths only'));
+  assert.ok(review.includes('A contract or mode change is a plan change: re-approval through `ExitPlanMode`.'));
+  assert.ok(review.includes('An engine-mode contract always needs `--dag`'));
   assert.ok(ship.includes('Rerun `check-pr-scope.mjs check` on the frozen candidate: its `candidate_id` must equal the reviewed ID and its outcome must be `CLEAN`; a stored record is never trusted.'));
   assert.ok(ship.includes('`scope: {outcome, material[], record_sha}`'));
   assert.ok(ship.includes('**Exit 0 is never a commit or freeze permission.**'));
-  // the pinned 3b header row stays as it was
+  assert.ok(ship.includes('At SHIP, exit 1 is **WAIT_FOR_USER**'));
   assert.ok(plan.includes('| Component / flow / dependency touched | Risk (technical · security · business · data-integrity · regression) | Check that covers it (test type, security control id, review skill or gate) | Runs when | Re-runs when | Status |'));
   for (const t of [plan, review, ship]) assert.ok(!/\bspecialists?\b/i.test(t));
 });
 
 test('the record hash: stdout bytes equal the written record', (t) => {
   const r = repo(t);
-  writePlan(r, table('`src/a.ts`'));
+  writePlan(r, contract({ planned: ['src/a.ts'] }));
   r.write('src/a.ts');
   const out = run(r);
   assert.equal(out.status, 0, out.stderr);
@@ -490,55 +690,3 @@ test('the record hash: stdout bytes equal the written record', (t) => {
   assert.equal(h(readFileSync(defaultOut(r))), h(out.stdout));
   unlinkSync(defaultOut(r));
 });
-
-// ------------------------------------------------------------------ review repair: dag_required (M1), under-exclusion paths (M3)
-
-test('a run bound to a DAG cannot be checked against the plan table alone: dag_required (exit 2)', (t) => {
-  const r = repo(t);
-  const raw = JSON.stringify(DAG([['src/a.ts']]));
-  const dagFile = join(r.dir, '.git', 'm1.dag.json');
-  writeFileSync(dagFile, raw);
-  writePlan(r, table('`src/`'), { events: [{ event: 'DAG_BOUND', run_id: RUN, dag_digest: sha(raw) }] });
-  r.write('src/a.ts');
-  r.write('src/b.ts');
-  const without = run(r);
-  assert.equal(without.status, 2, without.stdout + without.stderr);
-  assert.match(without.stderr, /dag_required/);
-  assert.equal(existsSync(defaultOut(r)), false);
-  const withDag = run(r, ['--dag', dagFile]);
-  assert.equal(withDag.status, 1, withDag.stderr);
-  assert.equal(byPath(withDag.json)['src/b.ts'].class, 'material');
-  // a DAG digest listed in the narrative also requires --dag
-  writePlan(r, `${table('`src/`')}\n\nDAG digest: ${sha(raw)}`);
-  assert.match(run(r).stderr, /dag_required/);
-  // so does an engine state file for the ticket
-  writePlan(r, table('`src/`'));
-  assert.equal(run(r).status, 0, 'manual flow: no DAG_BOUND, no listed DAG, no engine state');
-  mkdirSync(dirname(join(r.dir, '.git', 'ai-skills', 'ship-ticket', `${TICKET}.state.json`)), { recursive: true });
-  writeFileSync(join(r.dir, '.git', 'ai-skills', 'ship-ticket', `${TICKET}.state.json`), '{}\n');
-  assert.match(run(r).stderr, /dag_required/);
-});
-
-test('a path strictly under an exclusion FILE entry is material (under_exclusion_file), outside the candidate-id set', (t) => {
-  const r = repo(t);
-  const plan = join(r.dir, '.git', 'plan-elsewhere.md');
-  writeFileSync(plan, planText(table('`src/a.ts`')));
-  r.write('src/a.ts');
-  r.write('session-log.md/evil.mjs');
-  r.write(`${PLAN_REL}/x.mjs`);
-  const out = run(r, [], { plan });
-  assert.equal(out.status, 1, out.stdout + out.stderr);
-  const f = byPath(out.json);
-  assert.deepEqual(f['session-log.md/evil.mjs'], { path: 'session-log.md/evil.mjs', kind: 'file', class: 'material', via: null, flags: ['under_exclusion_file'] });
-  assert.equal(f[`${PLAN_REL}/x.mjs`].class, 'material');
-  assert.deepEqual(f[`${PLAN_REL}/x.mjs`].flags, ['under_exclusion_file']);
-  // committed on the branch too, not only untracked
-  r.git(['add', '-A']); r.git(['commit', '-q', '-m', 'hide']);
-  assert.equal(run(r, [], { plan }).status, 1);
-  // the exact exclusion files themselves stay excluded
-  const ok = repo(t);
-  writePlan(ok, table('`src/a.ts`'));
-  ok.write('src/a.ts'); ok.write('session-log.md');
-  assert.equal(run(ok).status, 0);
-});
-

@@ -35,18 +35,18 @@ Finish these checks before announcing REVIEW or appending its start event:
 
 - the approved plan and Design Contract still match the intended change;
   run `node scripts/check-pr-scope.mjs check --repo <repo> --ticket <ticket> --run-id <id> --base <base> --plan <plan> [--dag <dag>]`
-  on the candidate before announcing REVIEW (manual flow too: without `--dag` it
-  reads the plan's one `Files touched` table and its `scope-envelope:` line) and
-  give the scope record to the primary reviewer. It classifies every candidate
-  path as planned, supporting or material. Exit 1 (a material path) is a Design
-  Contract expansion: **WAIT_FOR_USER** and re-approve through `ExitPlanMode`.
-  An engine run must pass `--dag` (the script refuses `dag_required` without it
-  when the run has a DAG_BOUND, the plan names a DAG digest or an engine state
-  file exists); the Files touched table is the manual flow's contract only.
-  Exit 2 or 3 is never a pass. When the plan text itself must change (an
-  unparsable Files touched list, a bad `scope-envelope:` line), the remedy is
-  re-approval through `ExitPlanMode`, since an edited plan changes the digest and
-  gives `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
+  on the candidate before announcing REVIEW (manual flow too) and give the scope
+  record to the primary reviewer. It reads only the plan's one `scope-contract:`
+  line (see [plan.md](plan.md)), never the Files touched table, and classifies
+  every candidate path as planned, supporting or material. Exit 1 (a material
+  path) is a Design Contract expansion: **WAIT_FOR_USER** and re-approve through
+  `ExitPlanMode`. An engine-mode contract always needs `--dag` (`dag_required`),
+  also after a failed engine init; a manual-mode contract refuses `--dag` and any
+  engine evidence of the run. A contract or mode change is a plan change: re-approval through `ExitPlanMode`.
+  Exit 2 or 3 is never a pass. When the plan text itself must change (a missing,
+  ambiguous, noncanonical or invalid contract line), the remedy is re-approval
+  through `ExitPlanMode`, since an edited plan changes the digest and gives
+  `approval_mismatch`; fix and rerun only a wrong flag, path or git state.
   Exit 0 proves only the path set, not the behaviour inside a planned file;
 - the Integration Contract digest, generated outputs, provider conformance and
   consumer conformance pass when a producer/consumer seam changed;
