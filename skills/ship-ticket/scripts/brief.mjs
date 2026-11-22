@@ -252,6 +252,21 @@ function debatePolicy(narr) {
   return { value: found.length === 1 ? found[0] : null, count: found.length };
 }
 
+/**
+ * Whether line `at` sits inside a fenced block: a run of three or more backticks or tildes (any indent or quote prefix)
+ * opens one, and a run of the same character at least as long with nothing after it closes it.
+ */
+function insideFence(lines, at) {
+  let open = null;
+  for (let i = 0; i < at; i += 1) {
+    const m = /^[ \t>]*(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    if (!open) open = { ch: m[1][0], len: m[1].length };
+    else if (m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) open = null;
+  }
+  return open !== null;
+}
+
 /** Section 7 of the narrative (from `## 7.` to the next `## ` heading), or ''. */
 function sectionSeven(narr) {
   const lines = normalise(narr).split('\n');
@@ -388,17 +403,27 @@ const evidencePaths = (att) => asList(att?.rounds).flatMap((r) => Object.values(
 
 const realOr = (p) => { try { return realpathSync.native(String(p)); } catch { return resolve(String(p)); } };
 /** Trimmed stdout of `git -C dir ...`, or null. Read-only git queries only. */
+/**
+ * The child environment for every git query of the debate checks and the probe: the caller's environment with every
+ * GIT_* variable removed (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_CEILING_DIRECTORIES, GIT_CONFIG*,
+ * ...), so an inherited override can never make another directory look like the repository. Built per call.
+ */
+const gitEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
 function gitOut(dir, args) {
-  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: gitEnv() });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 /** The absolute git common dir of `dir`, or null. */
-const commonDirOf = (dir) => { const c = gitOut(dir, ['rev-parse', '--git-common-dir']); return c === null ? null : realOr(resolve(dir, c)); };
+/** Whether `wd` is a worktree the repository at `top` has registered (`git worktree list --porcelain`). */
+const registered = (top, wd) => (gitOut(top, ['worktree', 'list', '--porcelain']) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).some((l) => realOr(l.slice('worktree '.length)) === realOr(wd));
 
 /**
  * Bind the relay workdir to the target repository (`repo`, named by the caller; never assumed). One mechanically
  * checkable binding: the workdir exists now, is the top level of a Git work tree, and is either the repository's own top
- * level or a linked worktree of the same git common dir. A snapshot copy, a subdirectory, another repository with
+ * level or a worktree the repository has registered (`git worktree list --porcelain`; a hand-made gitdir whose commondir
+ * points at the repository is not registered). Every git query runs with GIT_* overrides scrubbed. Residual: the binding
+ * is to the repository, not to a commit: a registered worktree on another branch, or a dirty work tree, still binds, and
+ * the relay result does not record HEAD. A snapshot copy, a subdirectory, another repository with
  * identical content and a directory that no longer exists are all refused. The read-only sandbox keeps the counterpart
  * from changing that work tree.
  */
@@ -411,7 +436,7 @@ function bindWorkdir(att, repo, add) {
   if (!existsSync(wd)) { unbound(`the relay workdir ${wd} does not exist: the binding is checked against the work tree itself`); return; }
   const wdTop = gitOut(wd, ['rev-parse', '--show-toplevel']);
   if (!wdTop || realOr(wdTop) !== realOr(wd)) { unbound(`the relay workdir ${wd} is not the top level of a Git work tree`); return; }
-  if (realOr(wd) !== realOr(top) && commonDirOf(wd) !== commonDirOf(top)) unbound(`the relay workdir ${wd} is neither the repository ${realOr(top)} nor a linked worktree of it`);
+  if (realOr(wd) !== realOr(top) && !registered(top, wd)) unbound(`the relay workdir ${wd} is neither the repository ${realOr(top)} nor a worktree the repository has registered (git worktree list)`);
 }
 
 /**
@@ -468,6 +493,10 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   const sec7 = sectionSeven(narr);
   const sec = carrierSection(sec7);
   const rows = dispositionRows(sec7);
+  const narrLines = normalise(narr).split('\n');
+  const s7 = narrLines.flatMap((l, i) => (/^## 7\./.test(l) ? [i] : []));
+  if (s7.length !== 1) add('debate_attestation_invalid', `the plan must hold exactly one \`## 7.\` heading (found ${s7.length})`);
+  else if (insideFence(narrLines, s7[0])) add('debate_attestation_invalid', 'section 7 sits inside a fenced block opened earlier in the plan: its machine-read lines must be outside every fence');
   if (FENCE_RUN.test(sec7)) add('debate_attestation_invalid', 'section 7 holds a code fence: its machine-read lines (Result, Attestation, carrier section, disposition table) must be fence-free');
   for (const [what, re] of [['Attestation:', /^\s*Attestation:/], ['### Debate carrier and exceptions requested', /^\s*#+\s*Debate carrier and exceptions requested/], ['disposition table header', /^\s*\|\s*Finding\s*\|\s*Disposition\s*\|/]]) {
     if (sec7.split('\n').filter((l) => re.test(l)).length > 1) add('debate_attestation_invalid', `section 7 holds more than one ${what} line`);
@@ -594,6 +623,40 @@ function verifyDebate(planText, { bundleDir, repo = null }) {
   return done({ attestation: att, line: got.line, byId, sec, rounds });
 }
 
+const PROVIDER_RE = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i;
+const RESOURCE_RE = /\b(EPERM|EACCES|ENOMEM|ENOSPC|EMFILE|out of memory|killed|timed? ?out)\b/i;
+/**
+ * The class of one whole diagnostic entry: a structured dispatch class when there is one, otherwise read from the entry's
+ * full text: provider when only provider/quota/rate-limit words occur, resource when only permission/resource/kill/
+ * timeout words occur, ambiguous when both or neither do (an ambiguous entry supports no limit kind).
+ */
+function entryClass(text, dispatchClass = null) {
+  if (dispatchClass) return dispatchClass === 'provider' ? 'provider' : ['permission_denied', 'resource'].includes(dispatchClass) ? 'resource' : 'ambiguous';
+  const p = PROVIDER_RE.test(text), r = RESOURCE_RE.test(text);
+  return p && !r ? 'provider' : r && !p ? 'resource' : 'ambiguous';
+}
+/**
+ * The diagnostic entries of a relay result: its `error` text and the error events of events.jsonl (`type: error`,
+ * `turn.failed`, an item of type `error`). Counterpart output (agent messages, reasoning, the final message) never counts.
+ */
+function diagnosticEntries(res, eventsText) {
+  const out = [];
+  const push = (t) => { if (typeof t === 'string' && t.trim()) out.push({ text: t, cls: entryClass(t) }); };
+  push(res.error);
+  for (const l of normalise(eventsText).split('\n')) {
+    let e;
+    try { e = JSON.parse(l); } catch { continue; }
+    if (!isObject(e)) continue;
+    const item = isObject(e.item) ? e.item : null;
+    const isError = e.type === 'error' || e.type === 'turn.failed' || item?.type === 'error';
+    if (!isError) continue;
+    push(e.message);
+    push(typeof e.error === 'string' ? e.error : e.error?.message);
+    push(item?.message ?? item?.text);
+  }
+  return out;
+}
+
 /**
  * The limit record: kind and kind-specific evidence. configured_budget names the configured value it reached; a
  * provider or resource limit quotes text that occurs in the last attempt's RETAINED diagnostics (relay result, events
@@ -612,12 +675,14 @@ function checkLimit(att, last, lastDiag, add) {
   } else if (!last || last.status === 'completed') add('debate_limit_invalid', `${L.kind} needs a last attempt with its actual status (failed, timeout, aborted or unavailable) and diagnostics`);
   else {
     const ev = L.evidence.trim();
-    if (!asList(lastDiag).some((entry) => entry.includes(ev))) add('debate_limit_invalid', 'the limit evidence is not quoted from one retained diagnostic entry of the last attempt (its relay error, an events line or the dispatch error; never the counterpart\'s own message)');
-    const fromDispatch = (cls) => last.dispatch_error?.class === cls && String(last.dispatch_error.text).includes(ev);
-    const providerish = /\b(429|quota|rate.?limit\w*|usage limit\w*)\b/i.test(ev) || fromDispatch('provider');
-    const resourceish = /\b(EPERM|EACCES|ENOMEM|ENOSPC|EMFILE|out of memory|killed|timed? ?out)\b/i.test(ev) || ['timeout', 'aborted'].includes(last.status) || fromDispatch('permission_denied') || fromDispatch('resource');
-    if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid', 'provider_limit needs provider, quota or rate-limit diagnostics; EPERM or EACCES is a permission or resource limit');
-    if (L.kind === 'resource_limit' && !resourceish) add('debate_limit_invalid', 'resource_limit needs permission, resource, kill or timeout diagnostics');
+    const hits = asList(lastDiag).filter((e) => e.text.includes(ev));
+    const providerish = hits.some((e) => e.cls === 'provider');
+    const resourceish = hits.some((e) => e.cls === 'resource');
+    if (!hits.length) add('debate_limit_invalid', 'the limit evidence is not quoted from one retained diagnostic entry of the last attempt (the relay error, an error event or the dispatch error; never a counterpart message)');
+    else {
+      if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid', 'provider_limit needs a diagnostic entry of the provider class (quota or rate limit only); EPERM or EACCES is a permission or resource limit, and an entry naming both is ambiguous');
+      if (L.kind === 'resource_limit' && !resourceish) add('debate_limit_invalid', 'resource_limit needs a diagnostic entry of the resource class (permission, resource, kill or timeout only); an entry naming both is ambiguous');
+    }
   }
 }
 
@@ -650,13 +715,13 @@ function verifyRound(r, att, bundleDir, add) {
   if (r.status !== 'completed' && !files.result && !files.message) {
     const e = r.dispatch_error;
     if (!(isObject(e) && nonEmpty(e.class) && nonEmpty(e.text))) add('debate_evidence_missing', `round ${r.n} (${r.status}) has neither a result file nor dispatch-failure evidence {class, text}`);
-    else out.diag = [e.text];
+    else out.diag = [{ text: e.text, cls: entryClass(e.text, e.class) }];
   }
   let text = null;
   if (got.result) {
     let res;
     try { res = JSON.parse(got.result.toString('utf8')); } catch { add('debate_evidence_mismatch', `round ${r.n}: result.json is not JSON`); return out; }
-    out.diag = [res.error, ...(got.events ? normalise(got.events.toString('utf8')).split('\n') : [])].filter((x) => typeof x === 'string' && x.trim());
+    out.diag = diagnosticEntries(res, got.events ? got.events.toString('utf8') : '');
     const status = /_unavailable$/.test(String(res.status)) ? 'unavailable' : res.status;
     if (status !== r.status) add('debate_evidence_mismatch', `round ${r.n} records ${r.status}, but the relay result says ${res.status}`);
     if (res.exitCode !== r.exit_code) add('debate_evidence_mismatch', `round ${r.n} records exit ${r.exit_code}, the relay result says ${res.exitCode}`);
@@ -801,7 +866,7 @@ export function retainBundle(planText, { from, to, root = null, repo = null }) {
 
 /** `<git-common-dir>` of `repo` as an absolute path, or null. */
 function gitCommonDir(repo) {
-  const r = spawnSync('git', ['-C', repo, 'rev-parse', '--git-common-dir'], { encoding: 'utf8' });
+  const r = spawnSync('git', ['-C', repo, 'rev-parse', '--git-common-dir'], { encoding: 'utf8', env: gitEnv() });
   return r.status === 0 && r.stdout.trim() ? resolve(repo, r.stdout.trim()) : null;
 }
 /** The retained bundle directory (and its git common dir root) for the plan's attestation under `repo`, or null. */
@@ -854,6 +919,7 @@ export function classifyProbe(o) {
   else if (d.spawn_error) dispatch = no(spawnClass(d.spawn_error), `the relay could not be started (${d.spawn_error})`);
   else if (!d.result) dispatch = no('relay', 'the relay wrote no readable result.json');
   else if (d.result.status !== 'completed') dispatch = no(resultClass(d.result), `the no-op read-only dispatch ended ${d.result.status}`);
+  else if (cli && Object.hasOwn(cli, 'version') && !nonEmpty(cli.version)) dispatch = no('provider', `${cli.path ?? bin} --version printed no version: an unknown CLI fails closed`);
   else if (nonEmpty(cli?.version) && String(d.result[claude ? 'claudeVersion' : 'codexVersion'] ?? '').trim() !== cli.version) {
     dispatch = no('relay', `the relay ran ${bin} ${d.result[claude ? 'claudeVersion' : 'codexVersion'] ?? '(no version reported)'}, not the probed ${cli.path ?? bin} (${cli.version})`);
   } else dispatch = pass('read-only no-op dispatch from the repository root completed with the probed CLI');
@@ -889,9 +955,9 @@ export function classifyProbe(o) {
 
 /** Candidate identity (the repository's own candidate-id.mjs) plus the `git status --porcelain --ignored` listing hash. */
 function coverageSnapshot(repo) {
-  const cid = spawnSync(process.execPath, [fileURLToPath(new URL('./candidate-id.mjs', import.meta.url)), '--repo', repo, '--base', 'HEAD'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const cid = spawnSync(process.execPath, [fileURLToPath(new URL('./candidate-id.mjs', import.meta.url)), '--repo', repo, '--base', 'HEAD'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
   if (cid.status !== 0) return { error: `candidate-id.mjs failed: ${String(cid.stderr).trim()}` };
-  const st = spawnSync('git', ['-C', repo, 'status', '--porcelain', '--ignored', '-z'], { maxBuffer: 64 * 1024 * 1024 });
+  const st = spawnSync('git', ['-C', repo, 'status', '--porcelain', '--ignored', '-z'], { maxBuffer: 64 * 1024 * 1024, env: gitEnv() });
   if (st.status !== 0) return { error: 'git status --porcelain --ignored failed' };
   try { return { candidate: JSON.parse(cid.stdout).candidate_id, ignored: sha256Of(st.stdout) }; } catch { return { error: 'candidate-id.mjs printed no candidate_id' }; }
 }

@@ -291,7 +291,7 @@ relay out-dir as provenance only, bundle-relative `files` with their `sha256`
 (`brief.txt`, `result.json`, `events.jsonl` for a relay; the returned message for a
 native session), or `dispatch_error: {class, text}` when no result exists. Keep the
 relay out-dirs under one scratch bundle root (`--out-dir <bundle root>/r<n>`), and run
-every relay with `--cd` set to the repository itself or a linked worktree of it (a
+every relay with `--cd` set to the repository itself or a registered worktree of it (a
 worktree of the base created for the debate is fine; the sandbox is read-only, so the
 counterpart cannot change it). A snapshot copy never qualifies.
 
@@ -307,10 +307,15 @@ and degradation acknowledgements. Section 7 must be fence-free, and its machine-
 lines (`**Result:**`, `Attestation:`, the carrier bullets, the disposition table)
 start at column 1. It binds the relay workdir to `--repo`, never to a path the
 attestation merely names: the workdir must exist when checked, be the top level of
-a Git work tree, and be either the repository's own top level or a linked worktree
-of the same git common dir. There is one binding and no snapshot kind: a snapshot
-copy, a subdirectory, a missing directory or another repository with identical
-content is `debate_workdir_unbound`. It prints `outcome`, `debate_qualified`, `outstanding`, `pending`,
+a Git work tree, and be either the repository's own top level or a worktree the
+repository has registered (`git worktree list --porcelain`). Every git query of the
+checks and the probe runs with all `GIT_*` overrides removed from its environment.
+There is one binding and no snapshot kind: a snapshot copy, a subdirectory, a
+missing directory, another repository with identical content, or a hand-made gitdir
+whose `commondir` points at the repository is `debate_workdir_unbound`. Residual
+(owner-chosen binding): the binding is to the repository, not to a commit or its
+content; a registered worktree on another branch, or a dirty work tree, still binds,
+because the relay result does not record HEAD. It prints `outcome`, `debate_qualified`, `outstanding`, `pending`,
 `carrier`, `diversity` (PLAN-side evidence, same_provider or cross_provider from
 `provider:model`; the separate gateReview diversity field, item G, was withdrawn
 by owner decision D-15 as optional telemetry outside closure), `attestation_sha256`
@@ -347,7 +352,11 @@ again (`debate_reconfirm_required`). A finding the attestation records as closed
 the owner goes through the same disposition validation. Populated names or timestamps are
 never proof of authorization. Documented limit: this detects inconsistency, replay
 and stale or unrelated results; it cannot authenticate against a host able to
-fabricate every input. Host-trust residual, the same property as
+fabricate every input. A provider or resource limit quotes one whole diagnostic entry
+of the last attempt (the relay `error`, an error event, or the dispatch error; never
+a counterpart message or event), and that entry's class must match the limit kind:
+an entry naming both provider and permission words is ambiguous and supports
+neither. Host-trust residual, the same property as
 `SECURITY_POLICY_CUTOFF` in engine-dag.mjs: a new plan without `debate_policy`
 whose START `approved_at` is backdated before `DEBATE_POLICY_CUTOFF` passes as
 legacy, because the host writes `approved_at`; no new mechanism closes that. Engine

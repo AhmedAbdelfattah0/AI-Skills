@@ -736,8 +736,11 @@ const MUTANTS = [
     (t) => ({ x: unresolved(t, { findings: [FIND()] }), code: 'debate_outcome_invalid' })],
   ['canonical attestation bytes', 'if (again !== line) return bad(', 'if (false) return bad(',
     (t) => { const x = converged(t); return { x, text: planText(x.narr, [x.line.replace('{"', '{ "')]), code: 'debate_attestation_invalid' }; }],
-  ['workdir is the repository or a linked worktree', 'if (realOr(wd) !== realOr(top) && commonDirOf(wd) !== commonDirOf(top)) unbound(', 'if (false) unbound(',
+  ['workdir is the repository or a registered worktree', 'if (realOr(wd) !== realOr(top) && !registered(top, wd)) unbound(', 'if (false) unbound(',
     (t) => { const o = gitRepo('debate-other-'); t.after(() => rmSync(o, { recursive: true, force: true })); return { x: converged(t, { over: { workdir: o }, r1: { workdir: o }, r2: { workdir: o } }), code: 'debate_workdir_unbound' }; }],
+  ['registered worktree, not any gitdir pointing at the repository', "realOr(l.slice('worktree '.length)) === realOr(wd))", "true)",
+    (t) => { const wd = tmp(t, 'debate-fakewt-'); const fake = tmp(t, 'debate-fakegit-'); writeFileSync(join(fake, 'HEAD'), 'ref: refs/heads/main\n'); writeFileSync(join(fake, 'commondir'), `${join(REPO, '.git')}\n`); writeFileSync(join(fake, 'gitdir'), `${join(wd, '.git')}\n`); writeFileSync(join(wd, '.git'), `gitdir: ${fake}\n`);
+      return { x: converged(t, { over: { workdir: wd }, r1: { workdir: wd }, r2: { workdir: wd } }), code: 'debate_workdir_unbound' }; }],
   ['snapshot workdir kind refused', "if (att.workdir_kind !== undefined && att.workdir_kind !== 'repo') { unbound(", 'if (false) { unbound(',
     (t) => ({ x: converged(t, { over: { workdir_kind: 'snapshot', snapshot: { base: headOf(REPO), entries: lsTree(REPO) } } }), code: 'debate_workdir_unbound' })],
   ['aliases never launder a concession', 'Boolean(conceded?.has(f.id))', 'names.some((n) => conceded?.has(n))',
@@ -748,8 +751,12 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { narr: narrative({ rows: [['P1', 'accept_risk', 'The owner accepts the residual for this ticket.', 'no']], fenceRows: true }), over: { findings: [FIND({ closed_by: 'owner', closed_round: undefined, evidence: undefined })] } }), code: 'debate_attestation_invalid' })],
   ['exactly one Result line', "if (resultLines.length !== 1) add('debate_outcome_invalid'", "if (false) add('debate_outcome_invalid'",
     (t) => ({ x: converged(t, { narr: withResult(narrative(), 'CONVERGED').replace('## 8.', '**Result:** UNRESOLVED: again\n\n## 8.') }), code: 'debate_outcome_invalid' })],
-  ['limit class read from the quoted evidence', '/\\b(429|quota|rate.?limit\\w*|usage limit\\w*)\\b/i.test(ev)', '/\\b(429|quota|rate.?limit\\w*|usage limit\\w*)\\b/i.test(asList(lastDiag).join(\' \'))',
-    (t) => ({ x: limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted. No quota problem.' }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }), code: 'debate_limit_invalid' })],
+  ['limit class from the whole entry, not the quoted words', "const providerish = hits.some((e) => e.cls === 'provider');", 'const providerish = PROVIDER_RE.test(ev);',
+    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn EPERM. No quota problem.' }, over: { limit: { kind: 'provider_limit', evidence: 'No quota problem.' } } }), code: 'debate_limit_invalid' })],
+  ['counterpart message events never count', 'if (!isError) continue;', 'if (false) continue;',
+    (t) => ({ x: limited(t, { roundOpts: { result_error: 'spawn failed', events: '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }), code: 'debate_limit_invalid' })],
+  ['section 7 outside any enclosing fence', 'else if (insideFence(narrLines, s7[0])) add(', 'else if (false) add(',
+    (t) => ({ x: converged(t, { narr: withResult(narrative(), 'CONVERGED').replace('## 7. Cross-model planning debate', '~~~text\n## 7. Cross-model planning debate').replace('## 8. Proof and review routing\n', '## 8. Proof and review routing\n~~~\n') }), code: 'debate_attestation_invalid' })],
   ['completed round exit code 0', "if (r.status === 'completed' && (r.exit_code !== 0 || res.exitCode !== 0)) add('debate_evidence_mismatch'", "if (false) add('debate_evidence_mismatch'",
     (t) => ({ x: converged(t, { r2: { exit_code: 7 } }), code: 'debate_evidence_mismatch' })],
   ['completed round session id', "if (r.status === 'completed' && !nonEmpty(r.session_id)) add('debate_carrier_invalid'", "if (false) add('debate_carrier_invalid'",
@@ -762,7 +769,7 @@ const MUTANTS = [
     (t) => ({ x: converged(t, { r2: { concede: [] } }), code: 'debate_attestation_invalid' })],
   ['no symlink inside a bundle', "if (lstatSync(p).isSymbolicLink()) return { code: 'debate_evidence_mismatch'", "if (false) return { code: 'debate_evidence_mismatch'",
     (t) => { const x = converged(t); spawnSync('mv', [join(x.bundle, 'r2'), join(x.bundle, 'r2real')]); symlinkSync('r2real', join(x.bundle, 'r2')); return { x, code: 'debate_evidence_mismatch' }; }],
-  ['limit evidence quoted from one diagnostic entry', "if (!asList(lastDiag).some((entry) => entry.includes(ev))) add('debate_limit_invalid'", "if (false) add('debate_limit_invalid'",
+  ['limit evidence quoted from one diagnostic entry', "if (!hits.length) add('debate_limit_invalid'", "if (!hits.length) void ('debate_limit_invalid'",
     (t) => ({ x: limited(t, { over: { limit: { kind: 'provider_limit', evidence: 'quota exhausted at 3am' } } }), code: 'debate_limit_invalid' })],
   ['provider limit needs provider diagnostics', "if (L.kind === 'provider_limit' && !providerish) add('debate_limit_invalid'", "if (false) add('debate_limit_invalid'",
     (t) => ({ x: limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted' }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }), code: 'debate_limit_invalid' })],
@@ -777,6 +784,20 @@ const PROBE_OK = { relay_present: true, codex_version: { status: 0, version: 'co
   dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: 'codex-cli 1.0.0', finalMessage: 'probe-ok n' } },
   resume: { result: { status: 'completed', threadId: 't', sandbox: 'read-only' } }, cancel: { child_seen: true, result: { status: 'timeout' }, survivors: [] }, coverage: { before: 'c', after: 'c', ignored_before: 'i', ignored_after: 'i' } };
 const OTHER_MUTANTS = [
+  ['git overrides scrubbed', "const gitEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));", 'const gitEnv = () => process.env;',
+    (mod, t) => {
+      const plain = tmp(t, 'debate-plain-');
+      const x = converged(t, { over: { workdir: plain }, r1: { workdir: plain }, r2: { workdir: plain } });
+      const saved = [process.env.GIT_DIR, process.env.GIT_WORK_TREE];
+      process.env.GIT_DIR = join(REPO, '.git');
+      process.env.GIT_WORK_TREE = plain;
+      try { return codes(mod.debateCheck(x.text, { bundleDir: x.bundle, repo: REPO })).includes('debate_workdir_unbound'); } finally {
+        if (saved[0] === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved[0];
+        if (saved[1] === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved[1];
+      }
+    }],
+  ['probe: an empty CLI version fails closed', "else if (cli && Object.hasOwn(cli, 'version') && !nonEmpty(cli.version)) dispatch = no('provider'", "else if (false) dispatch = no('provider'",
+    (mod) => mod.classifyProbe({ ...PROBE_OK, codex_version: { status: 0, version: '', path: '/usr/bin/true' }, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: '' } } }).dispatch.result === 'fail'],
   ['probe: the relay runs the probed CLI', 'else if (nonEmpty(cli?.version) && String(', 'else if (false && String(',
     (mod) => mod.classifyProbe({ ...PROBE_OK, dispatch: { result: { ...PROBE_OK.dispatch.result, codexVersion: 'codex-cli 9.9.9' } } }).dispatch.result === 'fail'],
   ['probe: the resumed session stays read-only', ": !readOnly(rs.result) ? no('relay', 'the resumed session is not read-only')", ": false ? no('relay', 'the resumed session is not read-only')",
@@ -827,6 +848,9 @@ const START_MUTANTS = [
   ['reconfirmation under a version no older digest used', 'every((r) => r.plan_version !== lc.plan_version', 'every((r) => true || r.plan_version !== lc.plan_version',
     (t) => { const narr = withResult(narrative({ rows: [['P3', 'decided', 'Adopt B.', 'yes']] }), 'UNRESOLVED'); const D = digestOf(narr);
       return { x: unresolved(t, { narr, r2: { plan_version: 'v1', plan_digest: 'sha256:' + 'c'.repeat(64), verdict: 'CHANGES_REQUESTED' }, r3: { plan_version: 'v1', plan_digest: D, verdict: 'AGREE', request_id: 'req-3' } }), code: 'debate_reconfirm_required' }; }],
+  ['reconfirmation version is numerically newer', 'num(lc.plan_version) > num(r.plan_version)', 'true',
+    (t) => { const narr = withResult(narrative({ rows: [['P3', 'decided', 'Adopt B.', 'yes']] }), 'UNRESOLVED'); const D = digestOf(narr);
+      return { x: unresolved(t, { narr, r2: { plan_version: 'v3', plan_digest: 'sha256:' + 'c'.repeat(64), verdict: 'CHANGES_REQUESTED' }, r3: { plan_version: 'v2', plan_digest: D, verdict: 'AGREE', request_id: 'req-3' } }), code: 'debate_reconfirm_required' }; }],
   ['START needs the attestation hash', "if (!nonEmpty(start.debate_attestation_sha256)) { put('debate_attestation_missing'", "if (false) { put('debate_attestation_missing'",
     (t) => { const x = converged(t); return { x, startOver: { debate_attestation_sha256: undefined }, code: 'debate_attestation_missing' }; }],
 ];
@@ -1086,7 +1110,7 @@ test('[rr2-b] a new version may take several exchanges: v1 CR -> v2 CR -> v2 AGR
 test('[rr2-c] the limit class is read from the quoted evidence itself, inside one diagnostic entry', (t) => {
   const mixed = 'EPERM: operation not permitted. No quota problem.';
   assert.ok(codes(pre(limited(t, { roundOpts: { result_error: mixed }, over: { limit: { kind: 'provider_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'));
-  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: mixed }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } })).errors, []);
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: mixed }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'), 'repair 3: an ambiguous entry fails closed for both kinds');
   const split = limited(t, { roundOpts: { result_error: 'usage limit', events: '{"type":"error","message":"reached (429)"}\n' }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } });
   assert.ok(codes(pre(split)).includes('debate_limit_invalid'), 'evidence stitched across two diagnostic entries');
 });
@@ -1146,4 +1170,52 @@ test('[rr2-hist] the historical S4 debate evidence (snapshot cd) stays NON-quali
   assert.ok(codes(r).includes('debate_workdir_unbound'), JSON.stringify(r.errors));
   assert.ok(codes(r).includes('debate_echo_invalid'), 'its earlier-shape echo (`sha256:` instead of `plan_digest:`) is not the v1 grammar either');
   assert.equal(r.debate_qualified, false);
+});
+
+// ================================================================== review repair 3 (PR #105 at f9be1af): localized defects
+test('[rr3-B1] section 7 inside an enclosing fence (opened before ## 7., closed after ## 8.) is refused', (t) => {
+  const narr = withResult(narrative(), 'CONVERGED').replace('## 7. Cross-model planning debate', '~~~text\n## 7. Cross-model planning debate').replace('## 8. Proof and review routing\n', '## 8. Proof and review routing\n~~~\n');
+  const x = converged(t, { narr });
+  assert.ok(codes(pre(x)).includes('debate_attestation_invalid'), JSON.stringify(pre(x).errors));
+  const balanced = converged(t, { narr: withResult(narrative({ body: 'Do the thing.\n\n```js\nconst a = 1;\n```' }), 'CONVERGED') });
+  assert.deepEqual(pre(balanced).errors, [], 'a balanced code block elsewhere in the plan is fine');
+});
+
+test('[rr3-B2] inherited GIT_* overrides are scrubbed and the workdir must be a registered worktree of the repository', (t) => {
+  const plain = tmp(t, 'debate-plain-');
+  const saved = [process.env.GIT_DIR, process.env.GIT_WORK_TREE];
+  process.env.GIT_DIR = join(REPO, '.git');
+  try {
+    assert.ok(codes(pre(converged(t, { over: { workdir: plain }, r1: { workdir: plain }, r2: { workdir: plain } }))).includes('debate_workdir_unbound'), 'GIT_DIR=<target common dir> with an unrelated workdir');
+    process.env.GIT_WORK_TREE = plain;
+    assert.ok(codes(pre(converged(t, { over: { workdir: plain }, r1: { workdir: plain }, r2: { workdir: plain } }))).includes('debate_workdir_unbound'), 'GIT_DIR plus GIT_WORK_TREE=<the unrelated workdir>');
+  } finally {
+    if (saved[0] === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved[0];
+    if (saved[1] === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved[1];
+  }
+  const wd = tmp(t, 'debate-fakewt-');
+  const fake = tmp(t, 'debate-fakegit-');
+  writeFileSync(join(fake, 'HEAD'), 'ref: refs/heads/main\n');
+  writeFileSync(join(fake, 'commondir'), `${join(REPO, '.git')}\n`);
+  writeFileSync(join(fake, 'gitdir'), `${join(wd, '.git')}\n`);
+  writeFileSync(join(wd, '.git'), `gitdir: ${fake}\n`);
+  assert.ok(codes(pre(converged(t, { over: { workdir: wd }, r1: { workdir: wd }, r2: { workdir: wd } }))).includes('debate_workdir_unbound'), 'a hand-made gitdir whose commondir points at the repository is not a registered worktree');
+});
+
+test('[rr3-B3] limit evidence: counterpart message events never count; an ambiguous diagnostic entry matches no limit class', (t) => {
+  const msg = '{"type":"item.completed","item":{"type":"agent_message","text":"usage limit reached (429)"}}\n';
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: msg }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } }))).includes('debate_limit_invalid'), 'quoted from an agent_message event');
+  const err = '{"type":"error","message":"usage limit reached (429)"}\n';
+  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: 'spawn failed', events: err }, over: { limit: { kind: 'provider_limit', evidence: 'usage limit reached (429)' } } })).errors, [], 'an error event counts');
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'spawn EPERM. No quota problem.' }, over: { limit: { kind: 'provider_limit', evidence: 'No quota problem.' } } }))).includes('debate_limit_invalid'), 'the entry is a permission error, whatever the quoted words say');
+  assert.ok(codes(pre(limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted. No quota problem.' }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } }))).includes('debate_limit_invalid'), 'an ambiguous entry fails closed');
+  assert.deepEqual(pre(limited(t, { roundOpts: { result_error: 'EPERM: operation not permitted' }, over: { limit: { kind: 'resource_limit', evidence: 'EPERM: operation not permitted' } } })).errors, []);
+});
+
+test('[rr3-B4] the pinned CLI must report a non-empty version that the relay reports too', { skip: POSIX_ONLY }, (t) => {
+  const f = probeFixture(t);
+  const out = JSON.parse(probe({ ...f, codex: '/usr/bin/true' }, 'ok').stdout);
+  assert.equal(out.codex_route.dispatch.result, 'fail', JSON.stringify(out.codex_route.dispatch));
+  assert.equal(B.classifyProbe({ relay_present: true, codex_version: { status: 0, version: '', path: '/usr/bin/true' }, login: { status: 0 }, nonce: 'n',
+    dispatch: { result: { status: 'completed', threadId: 't', sandbox: 'read-only', codexVersion: '', finalMessage: 'probe-ok n' } } }).dispatch.result, 'fail', 'an empty version fails closed');
 });
