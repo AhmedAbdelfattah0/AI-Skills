@@ -288,8 +288,8 @@ START. Digests are written `sha256:<hex>` (the skill's form); the legacy
 mutates nothing.
 
 **Policy version (S-27 minimum).** `init` records two more state fields. `policy_version` is
-the engine's semantics version; today it is `1`, which means the engine as it was before the field
-existed. `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
+the run's semantics version: `1` for the engine as it was before the field existed, `2` with
+test kinds, `3` with a format-3 security block (security obligations), `4` with both. `skill_commit` is the git HEAD of the checkout that tracks the running `run-engine.mjs`. It
 is the literal `unknown` for a copy install, for a copy nested untracked in another repository, and
 when git fails. It names HEAD only, not uncommitted edits to the installed scripts. The repository
 is found from the script's own directory: inherited `GIT_*` variables such as `GIT_DIR` are not
@@ -328,8 +328,10 @@ nothing of version 2 resume a version 2 run. Never revert a version table that i
 Limits:
 - A same-user edit of `policy_version` in `state.json` is neither detected nor prevented. The state
   file is the trust anchor, and any process of the user can rewrite it.
-- The resolved semantics (`E.policy`) have no consumer yet. Today's tests prove that the version is
-  recorded, preserved and enforced, not that a command behaves differently by version. The first
+- The resolved semantics (`E.policy`) are consumed by the test-kind activation (`testKinds`) and by
+  the check that a run's §3a block format matches `securityObligations`. Tests cover recording,
+  preservation and enforcement, including commands that refuse when the recorded version's
+  capability flags disagree with the run's state. The first
   slice that adds version 2 must add the test that a version 1 run still takes the version 1 path.
 - The R0-S candidate (`ais-p0` `a890b0d`) will conflict with this change mechanically: three hunks
   in `run-engine.mjs` and one in `run-engine-record.test.mjs`. Resolve each by keeping both sides.
@@ -533,12 +535,13 @@ and the flags, plus `phase_unknown` (`{records, tokens}`) when imported usage ca
   second opinion must differ (`reviewers_not_distinct`, also when they share
   `<provider>:<model>` and differ only in a suffix). It tracks the original →
   repair → confirmation chain by `review_execution`. Counts or a route name alone
-  are never accepted. An accepted FAIL returns the finding-bound `repair` write set.
+  are never accepted. An accepted non-overflow FAIL with at least one finding to fix returns the
+  finding-bound `repair` write set; any other accepted FAIL returns none.
   Through `run-engine.mjs gate review`, the reviewed candidate is the frozen one: a
   new original review after any earlier original (a FAIL or the freeze) needs a
   RUN-STATE `{event: "RETRY", run_id, review_execution, predecessor, authorized_by}`
   naming the previous execution and trusted by the engine (`retry_unauthorized`
-  otherwise; a fresh id alone is refused; a matching but untrusted line is a judgment point), and an accepted FAIL needs `repair_prompt_file` (`repair_prompt_missing`).
+  otherwise; a fresh id alone is refused; a matching but untrusted line is a judgment point), and an accepted FAIL that opens a repair needs `repair_prompt_file` (`repair_prompt_missing`).
   `repair_ownership` must be a list of paths (a usage error otherwise). A targeted confirmation
   may carry a `second_opinion` confirmation (`{route, reviewer_identity, candidate_id,
   checked_findings, outcome, evidence}`): when supplied it is validated and counted (the record is

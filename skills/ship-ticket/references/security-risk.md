@@ -40,11 +40,13 @@ Facts are the input to selection. Each fact in the catalog's `fact_vocabulary`:
   `false`; an unknown fact keeps its controls selected;
 - uses only vocabulary values (`fact_out_of_vocabulary` otherwise).
 
-A surface path is a file; a directory path matches no signal. Paths use forward
+A surface path should name a file. S1 does not check its filesystem type (L1), and a
+directory string such as `src/auth/` can still match a path signal. Paths use forward
 slashes: a backslash in a surface path or a changed path is refused `bad_input`.
 
 **Surface-level facts (block format 3).** A change-level fact is the OR of its
-surfaces, so one `true` fact makes every gated pair of every surface applicable. A
+surfaces, so one `true` fact is applied to every surface; each pair still follows its
+own control's predicate, unless a surface lowers that fact as below. A
 surface may carry its own `facts` and `evidence` to say that a fact is false **for that
 surface**, under five rules, each refused when broken:
 
@@ -69,10 +71,11 @@ surface**, under five rules, each refused when broken:
   it resolves to: a target that is docs-only, inside `.git/` or `node_modules/`, or
   gitignored is refused. A citation with a `.` or `..` segment, or with a leading
   `./`, is refused `fact_uncited`. In a format-3 run, a surface or changed path with
-  a `.` or `..` segment is refused `bad_input`; a leading `./` is normalized. A
-  format-2 run takes such paths as it did before F12a. Every format-3 entry refuses
-  them: select, reassess, the block parse and its replay (so `init`, `preflight`,
-  the gates and the `obligations` CLI). Where each check runs:
+  a `.` or `..` segment given directly (select, reassess, a block object replayed) is
+  refused `bad_input`; a leading `./` is normalized. In a plan's block it makes the
+  parse fail, so it is `plan_block_invalid` in the helper and the `obligations` CLI and
+  `security_pairs_mismatch` at `init`, `preflight` and the gates. A format-2 run takes
+  such paths as it did before F12a. Where each check runs:
   - at `init` and `preflight`, in the repository working tree (the plan's base);
     a path under a DAG node's `writes` (a file the change creates) is deferred;
   - at `gate review`, both original and confirmation, in the candidate work tree,
@@ -99,7 +102,8 @@ surface**, under five rules, each refused when broken:
   A surface that keeps the fact but whose kind cannot pair the control is no keeper;
 
 - never for a pair whose control is in the signal class of the surface's own path
-  (`surface_fact_not_lowerable`), because every reassessment would reopen it.
+  (`surface_fact_not_lowerable`), because a reassessment of any change at that exact
+  surface path would reopen it.
 
 The evaluator decides each pair separately: a pair is dropped only when its own
 control's gate for that kind names the lowered fact(s) and the control, evaluated
@@ -205,31 +209,38 @@ by cited facts or both, closes a `new-route`, `auth-or-middleware-change` or
 add a boundary): it closes only through an input surface at that path whose pairs cover
 the signal's control class. On a path that is an approved surface a classification can
 close such a signal. That is intended: the owner approved that file as a surface in the
-plan, a mechanical signal can be a false alarm, and the classification is recorded and
-reviewed. An approved surface counts only at exactly the signal's path. Input `surfaces` are
+plan and a mechanical signal can be a false alarm. The engine does not store the
+classification's facts, reason or evidence (the reassess output lists only the ids in
+`classifications_used`; the recorded reassessment keeps the tuple and outcome):
+keeping them for review is the orchestrator's responsibility. An approved surface counts only at exactly the signal's path. Input `surfaces` are
 not stored: every later `gate reassess` call must supply them again, or the signal
 reopens (it fails closed). A surface outside the Design Contract is a REAPPROVAL basis
 (re-approval re-enters Plan Mode and presents the revised plan with `ExitPlanMode`).
 
-**Proving a pair spec (attribution rule).** Under TAP, a passing test carries no file
-location, so a pair spec counts as passed only when the formatted command runs exactly
-that one spec file: one non-option argument, a relative path with forward slashes, and
-only these options: `--test`, `--test-reporter=tap`, `--test-reporter-destination=stdout`,
+**Proving a pair spec (attribution rule).** A located result (a TAP `location`, its own
+or inherited from an ancestor test, or a jest/vitest file) is matched to the spec by
+file: the same path, or a path ending in `/<spec path>`. Node's TAP does not locate a
+pass, so an UNLOCATED pass counts only when the formatted command runs exactly that one
+spec file: one non-option argument, a relative path with forward slashes, and only these
+options: `--test`, `--test-reporter=tap`, `--test-reporter-destination=stdout`,
 `--test-name-pattern=`, `--test-concurrency=`, `--test-timeout=`, `--no-warnings`. Any
-other option (`--import=`, `--require=`, `--loader=`, another reporter, an unknown flag)
-proves nothing for TAP, and neither does a whole-suite command, a glob, a directory or an
-absolute path. A jest or vitest result that carries its file is attributed by it; one
+other option (`--import=`, `--require=`, `--loader=`, another reporter, an unknown flag),
+a whole-suite command, a glob, a directory or an absolute path cannot attribute an
+unlocated pass. A jest or vitest result that carries its file is attributed by it; one
 without a file is attributed only under the same rule (exactly one file, only the
 options listed above), which a `--json` or `--reporter=json` command does not meet.
 Name one
-spec file per formatted command in the plan. A same-named test in another file never
-discharges a pair. Not covered: a preload set through `NODE_OPTIONS` in the engine's own
+spec file per formatted command in the plan. A same-named test in another file does not
+discharge a pair, unless its located file ends in `/<spec path>` (exact-or-suffix
+matching). Not covered: a preload set through `NODE_OPTIONS` in the engine's own
 environment, which a worker cannot set.
 
 Reassessment runs when the orchestrator calls `gate reassess`, not automatically on
 every engine run: at the start of PROVE, after every PROVE or REVIEW repair that
 touches mapped files, and fresh before review and before ship-ready. The freshness
-check (section 8) makes review and ship-ready fail closed if a call was skipped.
+check (section 8) makes review and ship-ready refuse a missing reassessment or one of
+another tuple; a call skipped while the tuple did not change is not detected (nothing
+it would see changed).
 Mechanical signals (a match creates
 a signal, never a control): `new-dependency`, `migration-or-rls-change`,
 `infra-or-ci-config`, `env-or-secret-reference`, `auth-or-middleware-change`,
@@ -278,7 +289,8 @@ things reopen it:
 
 Input `surfaces` keep exactly four keys. A surface-level fact is never accepted after
 approval, so the orchestrator cannot lower a fact mid-run (`bad_input`). An approved
-format-3 block is replayed under the installed catalog at every reassessment. A
+format-3 block is replayed under the installed catalog at a reassessment whose catalog
+digest matches the block's (a changed digest is a `REAPPROVAL` basis instead). A
 lowering that no longer follows from it is `plan_block_invalid`.
 
 **Test files and workspace folders (C5, block format 3 only).** A format-2 run keeps
@@ -290,8 +302,9 @@ digest the file records.
 format-3 run uses the format-2 detector, the same signal kinds and the same closure
 rule, for every path and line signal. A `new-route`, `auth-or-middleware-change` or
 `migration-or-rls-change` signal on a path that is not an approved surface closes only
-through a surface at that path, which leads to `ADD_CONTROLS` and then an owner
-`SECURITY_ADDENDUM`. A reason never closes it, in either format. There is exactly one
+through a surface at that path whose pairs cover its control class; pairs of it not
+already effective (approved or added by a trusted addendum) give `ADD_CONTROLS` and
+need an owner `SECURITY_ADDENDUM`, and if none remain the outcome is `UNCHANGED`. A reason never closes it, in either format. There is exactly one
 difference, and it only adds signals:
 
 - **Additive route lines.** Format 3 also raises `new-route` on the `ROUTE_LINE_V3`
@@ -325,9 +338,10 @@ are a superset of the format-2 signals for every kind, path-only they are equal,
 only extras are `new-route` route lines, and the inventory check (`inventoryGaps`, fed
 lines at reassess and path-only DAG writes at `init` and `preflight`) never omits a
 format-2 surface signal of what it is given, for a path with no listed surface. Anything format 2 leaves closable only by a surface cannot
-reach `reassessed` in format 3 through reason-only classifications. Mutants that
-re-add a narrowing (per signal kind, in the lowering guard, in the reopen pass) are
-killed by it.
+reach `reassessed` in format 3 through reason-only classifications. The property test
+kills mutants that re-add a detector or inventory narrowing (per signal kind); the
+separately tagged tests `[S104]` and `[S105]` kill the lowering-guard and reopen-pass
+narrowings.
 
 **Accepted friction.** A path with an `api/` segment matches `ROUTE_DIR`, so a file
 there, test-named or not, raises `new-route` and needs a surface, as on format 2
@@ -363,7 +377,7 @@ it (`catalog_unavailable`). Re-select and re-approve it.
 **Windows coverage.** The engine end-to-end tests in `security-obligations.test.mjs`
 (init, preflight, review, confirmation and ship-ready through the real engine) skip
 on Windows. POSIX process groups are needed for quiescence (known limit N7). On
-Windows, CI runs every pure test of the file:
+Windows, CI runs every test of the file not marked `WIN_SKIP` (the pure tests):
 
 - selection, block format 3, replay and digests;
 - the C5 detector and its superset property test;
@@ -382,25 +396,30 @@ The end-to-end paths are covered by the ubuntu and macOS harness legs.
   pending an owner decision. It is not authorized for implementation, and it may never
   be a filename exemption.
 
-- The legacy golden embeds the catalog digest. A legitimate catalog change fails
-  `[S59]`, whose message explains how to regenerate from be63aea's
-  `security-plan.mjs` under the new catalog (see the capture helper).
+- The legacy golden embeds the catalog digest. A legitimate catalog change
+  invalidates it: the separate catalog-digest test ("R2 N3") fails with a message
+  pointing at the regeneration recipe in
+  `security-plan-legacy.capture.test-helper.mjs` (regenerate from be63aea's
+  `security-plan.mjs` under the new catalog); `[S59]` itself fails as a plain
+  equality assertion.
 - The lowering-surface path check, the confirmation dispute handling and the
   second-opinion `subject_id` rule are known limitations of this slice (section 13,
   L1 to L3).
 
 **What reopening does not cover (residuals, documented).**
 
-- A dropped pair reopens only through a signal at **its surface's own path**, or
-  through a classification that raises its fact. A change in another file the
+- A dropped pair reopens mechanically only through a signal at **its surface's own
+  path**, or through a used classification that raises its fact (an owner
+  `SECURITY_ADDENDUM` can also make it effective). A change in another file the
   surface imports reopens nothing by itself.
 - Six gated controls have **no signal tripwire**. `VAPT-API-04` (mass assignment),
   `VAPT-WEB-04` (CSRF), `VAPT-ABUSE-01` and `VAPT-ABUSE-06`: no signal class names
   them. `VAPT-CFG-04` and `VAPT-ABUSE-08`: their only signal class is the path-only
   `auth-or-middleware-change` signal, and the own-path guard refuses to drop them on a
   surface whose path raises it, so no signal at a dropping surface's path can name
-  them. A later write that makes the dropped fact true again is caught only by the
-  mandatory review row of the dropped pair (section 9), on the frozen candidate.
+  them. Unless a used classification raises the lowered fact (which reopens every pair
+  it dropped), a later write that makes the dropped fact true again is caught only by
+  the mandatory review row of the dropped pair (section 9), on the frozen candidate.
 - A surface the candidate adds after approval gets only its effective pairs in the
   matrix (`extra` cells): its other controls have no cell. Its pairs are delta pairs
   and need an addendum, so nothing is dropped, but the matrix is complete only for
@@ -411,12 +430,18 @@ The end-to-end paths are covered by the ubuntu and macOS harness legs.
 ## 8. Freshness
 
 The recorded reassessment must match the tuple **candidate_id + approved plan
-digest + catalog digest + effective addendum set**. If any part moved, review and
-ship-ready refuse `reassess_stale`; a review made under an older catalog or
-addendum set refuses `security_review_stale`. `gate ship-ready` makes these checks
-twice: before the local proof and again after it, before it records ship-ready, so
-a proof command that changes the installed catalog is refused `reassess_stale`. A
-proof command that moves `config.base` leaves its pairs unproven (`control_unproven`).
+digest + catalog digest + effective addendum set**. When the check is reached and any
+part moved, review and ship-ready refuse `reassess_stale`; refusals checked earlier
+(an approval or DAG binding mismatch, `catalog_unavailable`, addendum and waiver
+problems) take precedence. Ship-ready separately refuses a review made under an older
+catalog or addendum set with `security_review_stale`. `gate ship-ready` runs its
+security checks before the local proof and, when that point is reached, again after
+it, before it records ship-ready: a proof command that replaces the catalog with
+another valid one is then refused `reassess_stale`, an unreadable or invalid one
+`catalog_unavailable`, and an earlier post-proof check (binding drift, stale unit
+evidence, a changed work tree) returns its own refusal first. A proof command that
+moves `config.base` invalidates the RED binding of the affected unwaived pairs; once
+the local proof otherwise holds, those pairs give `control_unproven`.
 
 Recovery differs by code:
 
@@ -428,8 +453,9 @@ Recovery differs by code:
   cleared, and a new START digest yields `approval_mismatch`. Recovery is a new run
   (re-init) with a new plan.
 
-Any change to the bytes of `controls.json` gives a new catalog digest, which makes
-in-flight policy-2 runs stale or `REAPPROVAL` by design. Where the skills auto-update
+Any change to the bytes of a valid `controls.json` gives a new catalog digest, which
+makes in-flight policy-2 runs stale or `REAPPROVAL` by design; a missing, unreadable or
+invalid replacement is `catalog_unavailable` instead. Where the skills auto-update
 is installed, an update that carries a catalog change does this mid-run.
 
 ## 9. Review coverage
@@ -448,10 +474,13 @@ is installed, an update that carries a catalog change does this mid-run.
     `subject_id: '<boundary>:<control>'` of a dropped pair disputes it the same
     way: reconciliation cannot dismiss it.
   - Never `PASS`: no spec proves a dropped pair (`security_row_escape`).
-- With every pair dropped or waived, `NOT_TRIGGERED` is accepted, unless a dropped
-  pair is disputed (`security_outcome_escape`).
-- A **disputed** dropped pair is a hard stop for the whole run. Repair and
-  confirmation never clear it, and neither does a later `RETRY` review: the dispute is
+- With every effective pair waived, `NOT_TRIGGERED` is accepted, unless a current
+  primary row of a dropped pair is `FAIL` (`security_outcome_escape`). A second-opinion
+  dispute or an earlier recorded one is not part of this check; it blocks
+  confirmation and ship-ready instead (next item).
+- A **disputed** dropped pair blocks confirmation and ship-ready until the pair is
+  effective again; it does not itself block a repair dispatch or another authorized
+  original review (section 7). Repair and confirmation never clear it, and neither does a later `RETRY` review: the dispute is
   recorded run-wide. Confirmation and `gate ship-ready` refuse it with
   `security_na_disputed` until the pair is effective again. Such disputes come from
   ORIGINAL reviews only (a primary row `FAIL`, or a second-opinion finding with the
@@ -462,8 +491,10 @@ is installed, an update that carries a catalog change does this mid-run.
     pair;
   - re-approval of the plan, which starts a new run.
 - Both `[NN]` and `[D]` pairs need a passing spec or a waiver.
-- A **skipped spec is not a pass**; `gate ship-ready` adds `control_unproven` per
-  pair lacking an accepted RED, an unrewritten spec and a named pass in the proof.
+- A **skipped spec is not a pass**. Once the local proof otherwise holds, `gate
+  ship-ready` adds one `control_unproven` reason, and lists in `missing` each
+  effective, unwaived pair lacking an accepted RED, an unrewritten spec and a named
+  pass in the proof.
 - The effective set is a floor for the primary, not a ceiling for the counterpart:
   it receives the security plan and returns findings only.
 - A repair that touches a pair's spec file makes the second opinion required.
@@ -498,14 +529,18 @@ from the block and the catalog independently and gets exactly one of `proven`,
 `waived`, `dropped-by-fact` (with the facts and citations), `dropped-by-kind` or
 `excluded-by-change-fact` (section 5). The matrix fails closed:
 
-- a cell the block both pairs and drops is `disposition_duplicate`;
-- a cell the catalog pairs but the block neither pairs nor drops is
-  `disposition_missing`;
+- a cell the block both pairs and drops is refused; for a format-3 block this normally
+  happens earlier, at the block parse or its replay (`plan_block_invalid`), before the
+  matrix's `disposition_duplicate` check;
+- a cell the catalog pairs but the block neither pairs nor drops is refused; for a
+  format-3 block the replay normally reports `plan_block_invalid` first, before the
+  matrix's `disposition_missing` check;
 - a cell with a value outside the vocabulary is `disposition_unknown`.
 
 There is no `accept_risk` or `structural` disposition. A format-3 `gate ship-ready`
-refuses an incomplete matrix and prints the matrix (counts, digest, cells) with its
-decision.
+refuses an incomplete matrix. The matrix (counts, digest, cells) is printed with the
+decision on its final return; an earlier refusal, including the matrix refusal itself,
+may omit it.
 
 ## 13. Known limitations of S1 (tracked separately)
 
@@ -541,7 +576,8 @@ and the engine comments are written not to claim otherwise.
     `REAPPROVAL` and skips the inventory check for that reassessment;
   - an untracked file larger than 1 MiB (`MAX_ADDED_BYTES`, 1024 * 1024 bytes, in
     `engine-gates.mjs` `changedFiles`) contributes no added lines (pre-existing, both
-    formats).
+    formats); when the `git diff` itself fails (a timeout or an exceeded buffer), every
+    changed file is read that way, so the same cap applies to each of them.
 
 Known detector blind spots inherited from format 2 (not a regression of S1). The detector (`RULES`, `ROUTE_DIR`, `ROUTE_LINE_V3` in `scripts/security-plan.mjs`) and its property tests are the specification; the examples below are illustrative, not exhaustive. Probed, each raising no signal in either format: a Laravel
 `Route::get('/x', ...)` in `app/Services/x.php`, a Rails `get '/x', to: 'a#b'` in
@@ -550,5 +586,6 @@ Known detector blind spots inherited from format 2 (not a regression of S1). The
 `@router.get` line; `app/routers/routes.py` raises `new-route` path-only through
 `ROUTE_DIR`). This matters if a later catalog change gates `VAPT-API-0x` controls.
 Inherited from both formats, not a regression: a changed path that is not in the
-`git diff` from the base (an untracked file) and is larger than 1 MiB contributes no
-added lines at reassess, so none of its line signals fire.
+`git diff` from the base (an untracked file, or every changed file when the `git
+diff` itself fails: a timeout or an exceeded buffer) and is larger than 1 MiB
+contributes no added lines at reassess, so none of its line signals fire.

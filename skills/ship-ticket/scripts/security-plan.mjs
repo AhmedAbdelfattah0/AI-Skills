@@ -237,7 +237,7 @@ function validateSurfaces(surfaces, vocab, { allowFacts = false } = {}) {
 }
 
 const DERIVED = ['boundaries', 'principals'];
-/** A known value cites a path; an unknown one says `unknown: <why>`. Only the keys in `keys` are checked. */
+/** A known value needs non-empty single-line evidence not labelled unknown; an unknown one says `unknown: <why>`. Path syntax is not checked here (surface-level citations check it separately). Only the keys in `keys` are checked. */
 function checkCitations(ev, facts, evidence, vocab, keys) {
   for (const k of Object.keys(evidence)) if (!vocab[k]) refuse('fact_out_of_vocabulary', `evidence for unknown fact '${k}'`);
   for (const k of keys) {
@@ -667,7 +667,8 @@ const BLOCK3_KEYS = ['catalog_digest', 'controls', 'facts', 'na_pairs', 'pairs',
  * path each; `na_pairs` sorted and unique, disjoint from `pairs`, each on a listed surface with the facts it names
  * lowered there and the same citations; every control of `controls` has an effective pair; the v3 selection
  * digest recomputes; every pairs line equals the one of the EFFECTIVE pairs. Whether the drops follow from the
- * catalog is checked where the catalog is loaded (reassess, obligationMatrix). Else null.
+ * catalog is checked where the catalog is loaded: reassess replays when the catalog digests match, obligationMatrix
+ * requires that match before replaying. Else null.
  */
 function parseFormat3(b, planText) {
   if (canon(Object.keys(b).sort()) !== canon(BLOCK3_KEYS) || typeof b.catalog_digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(b.catalog_digest)) return null;
@@ -730,8 +731,9 @@ export function effectiveSet(approvedBlock, addenda = []) {
 export const DISPOSITIONS = ['proven', 'waived', 'dropped-by-fact', 'dropped-by-kind', 'excluded-by-change-fact'];
 
 /**
- * Check a matrix: exactly one cell per (surface, catalog control) and per extra effective pair, each with a
- * disposition of DISPOSITIONS; a dropped-by-fact cell names its facts and their citations. Refusals:
+ * Check a matrix: every cell has a disposition of DISPOSITIONS (a dropped-by-fact cell names its facts and their
+ * citations), no (boundary, control) appears twice, and every supplied (surface, control) has a cell; surplus unique
+ * cells are not refused (obligationMatrix builds the extra effective-pair cells). Refusals:
  * disposition_unknown, disposition_duplicate, disposition_missing (in that order). -> { ok:true } | refusal.
  */
 export function verifyMatrix(matrix, { surfaces = [], controls = [] } = {}) {
@@ -818,15 +820,16 @@ const DEP_FILES = new Set(['package.json', 'package-lock.json', 'npm-shrinkwrap.
  * C5 (F12a; S1 review repair, owner Option 2: NO filename-based exemption). A format-2 run keeps origin/main's
  * detector byte for byte (pinned by security-plan-legacy.golden.json). A format-3 run uses the SAME detector, the same
  * signal kinds and the same closure rule (a new-route, auth or migration signal off every approved surface closes only
- * through a surface, then ADD_CONTROLS and an owner addendum), plus one ADDITIVE difference: ROUTE_LINE_V3 (fastify /
+ * through surface coverage at its path; its pairs not yet effective give ADD_CONTROLS and need an owner addendum, already
+ * effective ones permit UNCHANGED), plus one ADDITIVE difference: ROUTE_LINE_V3 (fastify /
  * hono / elysia verbs, one-line tRPC procedures) raises new-route on more lines. Nothing is narrowed anywhere: no test
  * name, workspace folder or other path rule removes a signal, in any consumer (reassess signals, the plan-time inventory
  * check at init and preflight, path-only over file-shaped DAG writes (L4), the own-path lowering guard, the reopen keep set). Invariant, property-tested
- * ([S103]): for every input, with lines and path-only, the format-3 signals are a superset of the format-2 signals, and
- * path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
+ * ([S103]): for normalized path inputs accepted by both formats (format 3 refuses '.'/'..' segments), with lines and
+ * path-only, the format-3 signals are a superset of the format-2 signals, and path-only they are equal. A test file that registers a route or sits on an auth path is therefore listed as a surface,
  * like any other file (a route line is first seen at reassess, L4): a test file raises exactly the signals its path and
- * lines would raise in any file (a describe/it/expect-only file raises none; a describe title that matches a RULES line
- * pattern, such as 'row level security', raises that signal).
+ * lines would raise in any file (describe/it/expect lines add none unless their text matches a RULES line pattern, such
+ * as 'row level security'; the file's path can raise signals independently, e.g. src/auth.test.ts).
  */
 const ROUTE_DIR = /(^|\/)(routes?|api|controllers?|handlers?|endpoints?|webhooks?)(\/|\.)/;
 const ROUTE_FILE = /^(route|\+server|\+page\.server)\.[cm]?[jt]sx?$/;
@@ -1080,7 +1083,8 @@ export function reassess(input = {}) {
       }
     }
     // The pairs the inventory's surfaces select under the approved facts (classifications only add to these):
-    // a new surface at a signal's path closes the signal, and its pairs not yet effective become delta_pairs.
+    // surfaces at a signal's path close it only when their pairs together cover its whole control class (catalog
+    // controls), and their pairs not yet effective become delta_pairs.
     const surfaceFacts = (base) => normFacts(ev, { ...base, boundaries: uniqSorted(surfaces.map((s) => s.kind)),
       ...(vocab.principals ? { principals: ev.unknownish(base.principals) ? 'unknown' : uniqSorted([...(base.principals ?? []), ...surfaces.flatMap((s) => s.principals)]) } : {}) }, vocab);
     const inventoryPairs = compute(r, surfaceFacts(block.facts), surfaces, { lower: lowerApproved, keep }).pairs.map((p) => p.pair_id);

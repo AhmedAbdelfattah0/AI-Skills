@@ -153,8 +153,8 @@ const CONFIRM_SECOND_OPINION = ['concurrency', 'security'];
 
 /**
  * The second-opinion policy of a final-review confirmation of `rx`: 'required' when its repair's
- * write set overlaps a node labelled concurrency or security, else 'optional' (a supplied second
- * opinion is validated and counted, never ignored).
+ * write set overlaps the reads or writes of a node labelled concurrency or security, or (policy 2) an
+ * effective pair's spec file; else 'optional' (a supplied second opinion is validated and counted, never ignored).
  */
 function confirmationPolicy(S, rx) {
   const ws = S.review_chain.findLast(r => r.review_execution === rx && r.kind === 'repair')?.write_set ?? [];
@@ -168,7 +168,8 @@ function confirmationPolicy(S, rx) {
 /**
  * Review: the frozen candidate is the stored one (set by the first original review, a repair, or an
  * authorized retry). A new original after any earlier original needs a RETRY linked to its
- * predecessor. An accepted FAIL enqueues the finding-bound repair from its write set.
+ * predecessor. An accepted non-overflow FAIL with at least one finding to fix enqueues the finding-bound repair from
+ * its write set; any other accepted FAIL enqueues none.
  */
 async function reviewGate(E, input, candidate) {
   const S = E.S;
@@ -368,7 +369,8 @@ async function shipReadyGate(E, input, candidate) {
       return gateNo('candidate_mismatch', [`local proof changed the work tree: ${candidate} -> ${after.candidate_id ?? after.reason}`]);
     }
     // ...and the security decision must still hold: a proof command can rewrite the installed catalog or append
-    // RUN-STATE lines, so the pre-proof context is re-derived and its three refusals rerun before anything binds.
+    // RUN-STATE lines, so the security context is re-derived and shipSecurityRefusal plus the obligation-matrix check
+    // rerun before anything binds.
     if (sec) {
       sec = await securityContext(E, candidate); // post-proof security context
       const again = shipObligations(sec);
@@ -543,7 +545,7 @@ async function runEvidence(E, M, d, point) {
 // ---- security policy 2 (AIS-HARNESS-4 Wave B) ----------------------------------------------------
 
 let securityPlanModule = null;
-/** security-plan.mjs, loaded only by policy-2 paths (a legacy run never touches the catalog machinery). */
+/** security-plan.mjs for the policy-2 security-gate paths (a legacy init can still load the module through test-kinds.mjs). */
 export const securityPlan = async () => (securityPlanModule ??= await import('./security-plan.mjs'));
 /** loadCatalog options: the installed catalog, or ctx.catalogFile (an in-process test seam; no CLI flag). */
 export const catalogOptions = (ctx) => (ctx.catalogFile ? { catalogPath: ctx.catalogFile } : {});
@@ -570,7 +572,7 @@ const coverageOf = (sec) => ({ catalog_digest: sec.tuple.catalog_digest, addendu
 const sameTuple = (a, b) => Boolean(a) && ['candidate_id', 'plan_digest', 'catalog_digest'].every(k => a[k] === b[k])
   && JSON.stringify(a.addendum_set) === JSON.stringify(b.addendum_set);
 
-/** F12a: the approved dropped pairs no trusted addendum has made effective (a reopened pair needs a proof, not a NOT_APPLICABLE row). */
+/** F12a: the approved dropped pairs no trusted addendum has made effective (a reopened pair needs a proof or a trusted waiver, not a dropped-pair NOT_APPLICABLE row). */
 export function pendingNa(block, events) {
   if (block?.policy !== 3) return [];
   const effective = new Set(events.pairs.map(pairKey));
@@ -633,7 +635,8 @@ export function securityRowsRefusal(p, sec) {
  * F12a accountability: every dropped (not applicable) pair still needs exactly one primary rule_row. NOT_APPLICABLE
  * agrees with its cited fact and its evidence must name a cited path; FAIL disputes the drop (recorded run-wide,
  * see disputedRefusal); PASS is refused (security_row_escape): a dropped pair has no spec, so nothing proves it.
- * security_outcome NOT_TRIGGERED is accepted with every pair dropped (or waived), never with a disputed one.
+ * security_outcome NOT_TRIGGERED (every effective pair waived) is refused here only for a current primary dropped-pair FAIL
+ * row; second-opinion and earlier recorded disputes block confirmation and ship-ready instead (disputedRefusal).
  */
 function naRowsRefusal(p, sec) {
   const na = sec.na ?? [], rows = p.rule_rows;
