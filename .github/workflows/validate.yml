@@ -126,6 +126,7 @@ jobs:
           skills/ship-ticket/scripts/lib/git-capability.test.mjs
           skills/ship-ticket/scripts/lib/git-exec.test.mjs
           skills/ship-ticket/scripts/ci-snapshot.test.mjs
+          skills/ship-ticket/scripts/ci-classify.test.mjs
           skills/ship-ticket/scripts/lib/shape.test.mjs
           skills/ship-ticket/scripts/lib/mutation-harness.test.mjs
           skills/ship-ticket/scripts/measure/events.test.mjs
