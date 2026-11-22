@@ -1,28 +1,25 @@
 /**
- * Where ship-ticket run logs (`<ticket>.jsonl`) live (S5, F05). Dependency-free ESM: node built-ins only.
+ * Where ship-ticket run logs (`<ticket>.jsonl`) live (S5, F05, cutover). Dependency-free ESM: node built-ins only.
  *
  * One place per repository: `<git-common-dir>/ai-skills/ship-ticket/`, shared by the main checkout and every linked
- * worktree, so a run whose phases are logged from two worktrees is one file and no event is split or lost.
+ * worktree: the ONLY runtime telemetry source of every reader and writer.
  * Before S5 the log lived at `git rev-parse --git-path ai-skills/ship-ticket`, which in a linked worktree is the
- * per-worktree gitdir (`<common>/worktrees/<name>/ai-skills/ship-ticket`). Those old files are LEGACY: read, never
- * written, moved, copied or deleted. In the main checkout the old path IS the common dir.
- *
- * Readers choose their scope:
- * - writers (run-log start/end/event, carrier REPAIR authorisation): common, then the OWN legacy dir;
- * - reporting (run-log summary): additionally every sibling worktree's legacy dir, never used for an
- *   authorisation decision.
+ * per-worktree gitdir (`<common>/worktrees/<name>/ai-skills/ship-ticket`). Those old files are a read-only ARCHIVE:
+ * never written, moved, copied, deleted or merged into a figure. Normal commands only count the own worktree's one
+ * (`legacyPresent`); `run-log.mjs legacy` prints it for audit; the carrier's REPAIR read is unchanged. In the main
+ * checkout the old path IS the common dir, so its pre-S5 history is the shared log.
  *
  * Engine files (.state.json, .engine.jsonl, .usage.jsonl, .attempts) are not run logs and stay per-worktree.
  */
 import { spawnSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, closeSync, constants as fsConstants, lstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const LOG_SUBDIR = join('ai-skills', 'ship-ticket');
 /** Per-worktree subdirectory of REVIEW authority records (`<git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl`). No
  *  ticket name can address it: a ticket id has no `/`, so every shared write is a FILE directly in the log directory. */
 export const AUTH_SUBDIR = 'review-auth';
-/** Per-worktree subdirectory recording legacy rows excluded by `migrate --resolve-duplicates` (verbatim copies). */
+/** Reserved ticket name kept so isReservedTicket stays byte-identical (the `excluded/` mechanism was removed). */
 export const EXCLUDED_SUBDIR = 'excluded';
 /**
  * Ticket ids that are refused, compared case-insensitively (APFS and NTFS fold case): a `.engine` or `.review-auth` suffix
@@ -78,136 +75,61 @@ export function ownLogDir(repo) {
 }
 
 /**
- * Legacy (read-only) directories. `own`: this worktree's old directory, or null when it is the common dir (the main
- * checkout). `siblings`, only with `{ siblings: true }` (reporting only): every other linked worktree's old directory
- * that exists, sorted, found by listing `<common>/worktrees/*` read-only.
+ * This worktree's pre-S5 directory: `own`, or null when it is the common dir (the main checkout). No other worktree's
+ * directory is ever resolved (cutover: no sibling dependency).
  */
-export function legacyLogDirs(repo, { siblings = false } = {}) {
-  const common = commonLogDir(repo);
+export function legacyLogDirs(repo) {
   const ownRaw = ownLogDir(repo);
-  const own = samePath(ownRaw, common) ? null : ownRaw;
-  if (!siblings) return { own, siblings: [] };
-  const worktrees = join(gitDirPath(repo, ['--git-common-dir']), 'worktrees');
-  let names = [];
-  try { names = readdirSync(worktrees).sort(); } catch { /* no linked worktree */ }
-  const found = names.map((n) => join(worktrees, n, LOG_SUBDIR))
-    .filter((d) => existsSync(d) && !samePath(d, common) && !(own && samePath(d, own)));
-  return { own, siblings: found };
+  return { own: samePath(ownRaw, commonLogDir(repo)) ? null : ownRaw };
 }
 
-/** The directories a writer (and an authorisation) reads, in order: common, then the own legacy dir when separate. */
-export function writerLogDirs(repo) {
-  const { own } = legacyLogDirs(repo);
-  return [commonLogDir(repo), ...(own ? [own] : [])];
-}
-
-/** The directories a report reads: the writer's, then every sibling worktree's legacy dir. */
-export function reportLogDirs(repo) {
-  const { own, siblings } = legacyLogDirs(repo, { siblings: true });
-  return [commonLogDir(repo), ...(own ? [own] : []), ...siblings];
-}
-
+/** Lines counted by `legacyPresent` at most from the first MiB of a legacy log. */
+export const LEGACY_PRESENT_BYTES = 1024 * 1024;
 /**
- * The `<ticket>.jsonl` of each directory that has one, in the order given, parsed by the caller's
- * `parse(bytes, path)` (run-log's rowsFromText, measure/events readEvents, ...): this module never interprets a row.
- * Returns `[{ dir, path, bytes, parsed }]`; a directory listed twice is read once.
+ * `legacy_present` (cutover): whether `<dir>/<ticket>.jsonl` exists, counted with an lstat plus a BOUNDED read (at most
+ * 1 MiB, newlines counted, nothing parsed). Only a REGULAR file is read: anything else (directory, symlink, fifo, socket)
+ * is `{ files: 1, lines: 'unavailable', errno: 'not_regular' }`. ENOENT is `{ files: 0 }`; any other error is
+ * `{ files: 1, lines: 'unavailable', errno }`. Readers report it; it never feeds a figure.
  */
-export function readLogRows(dirs, ticket, parse = (bytes) => bytes) {
-  const out = [];
-  for (const dir of dirs) {
-    if (!dir || out.some((s) => samePath(s.dir, dir))) continue;
-    const path = join(dir, `${ticket}.jsonl`);
-    let bytes;
-    try { bytes = readFileSync(path); } catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') continue; throw e; }
-    out.push({ dir, path, bytes, parsed: parse(bytes, path) });
-  }
-  return out;
+export function legacyPresent(dir, ticket) {
+  const path = join(dir, `${ticket}.jsonl`);
+  let st;
+  try { st = lstatSync(path); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? { files: 0 } : { files: 1, path, lines: 'unavailable', errno: e?.code ?? String(e) }; }
+  if (!st.isFile()) return { files: 1, path, lines: 'unavailable', errno: 'not_regular' };
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    const buf = Buffer.alloc(Math.min(LEGACY_PRESENT_BYTES, st.size));
+    const n = buf.length ? readSync(fd, buf, 0, buf.length, 0) : 0;
+    let lines = 0;
+    for (let i = 0; i < n; i += 1) if (buf[i] === 0x0a) lines += 1;
+    return { files: 1, path, lines, ...(st.size > LEGACY_PRESENT_BYTES ? { truncated: true } : {}) };
+  } catch (e) { return { files: 1, path, lines: 'unavailable', errno: e?.code ?? String(e) }; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
+/** Reserved by `abandon` (AC15): no other writer may use this name or an event id with this prefix (case-insensitive). */
+export const ABANDON_NAME = 'legacy_abandoned';
+export const ABANDON_ID_PREFIX = 'legacy-abandoned';
+export function isReservedInterval(name, eventId) {
+  return String(name).toLowerCase() === ABANDON_NAME || String(eventId).toLowerCase().startsWith(ABANDON_ID_PREFIX);
+}
+/** The validated abandon record (exactly what `abandon` writes); a look-alike is ordinary history. */
+const isAbandonRow = (r) => r?.kind === 'activity' && r.name === ABANDON_NAME && /^legacy-abandoned\.[0-9a-f]{12}$/.test(r.event_id ?? '')
+  && r.metrics?.legacy_run === true && (r.event === 'start' || (r.event === 'end' && r.outcome === 'abandoned'));
 /**
- * THE join of one ticket's run-log rows over several files (S5 repairs 3-4). run-log (summary, check, the writers, migrate,
- * the integrity line) and eval.mjs all call it, so every reader sees the same rows.
- *
- * ACCOUNTING RULE (repair 4). Rows are compared by their JSON text (a verbatim copy is the same text). For each distinct row
- * text, let C = its occurrences in the common (shared) log and L = its occurrences over ALL legacy sources together (after
- * each source's recorded exclusions). The join holds max(C, L) occurrences: every common occurrence, and each common copy
- * excuses exactly ONE legacy occurrence (the migrated one); every further occurrence is a genuine duplicate and stays, so
- * buildRun reports it (duplicate_start, invalid_pair) in every reader. The shared log does not record which worktree
- * migrated a copy (recording it would make a shared row an authority-like claim), so the excused occurrence is counted, not
- * named; the counts are the same whichever it is. The result is a pure function of the multiset of (source, row) pairs:
- * independent of the order of the sources and of which worktree reads. With rows from more than one source the rows are
- * ordered by (timestamp, start before end, row text); a single source keeps its file order (pre-S5 behaviour).
- *
- * EXCLUSIONS (repair 4). `excludedRows(dir, ticket)` returns `{ rows, problem }`. Only ENOENT means "no exclusions"; every
- * other read error (EACCES, EISDIR, ...) and every unparsable line is a `problem` ({ code: 'excluded_unreadable', path,
- * errno | line }), never an empty set. Readers report it as a degradation; writers refuse.
+ * The one labelling rule every reader applies to a run (summary, eval, the integrity line): an `abandon` record makes the
+ * run's outcome `abandoned` (the recorded workflow outcome is kept as `recorded_outcome`): never 'complete', so no reader
+ * counts it as completed or accepted. A run with any row marked `legacy_worktree: true` gets `partial_legacy: 'possible'`:
+ * part of it may live in a pre-S5 archive that no figure includes.
  */
-const keyOf = (row) => JSON.stringify(row);
-export function excludedRows(dir, ticket) {
-  const path = join(dir, EXCLUDED_SUBDIR, `${ticket}.jsonl`);
-  let text;
-  try { text = readFileSync(path, 'utf8'); }
-  catch (e) { return e?.code === 'ENOENT' ? { rows: [] } : { rows: [], problem: { code: 'excluded_unreadable', path, errno: e?.code ?? String(e) } }; }
-  const rows = [];
-  const lines = text.split('\n');
-  const torn = lines.pop(); // '' when the text ends with a newline
-  for (const [i, line] of lines.entries()) {
-    if (!line.trim()) continue;
-    let row;
-    try { row = JSON.parse(line); } catch { return { rows, problem: { code: 'excluded_unreadable', path, line: i + 1, errno: 'invalid_json' } }; }
-    if (!row || typeof row !== 'object' || Array.isArray(row)) return { rows, problem: { code: 'excluded_unreadable', path, line: i + 1, errno: 'not_a_row' } };
-    rows.push(row);
-  }
-  if (torn) return { rows, problem: { code: 'excluded_unreadable', path, line: lines.length + 1, errno: 'incomplete_tail' } };
-  return { rows };
-}
-export function subtractRows(rows, minus) {
-  if (!minus.length) return rows;
-  const debt = new Map();
-  for (const row of minus) debt.set(keyOf(row), (debt.get(keyOf(row)) ?? 0) + 1);
-  return rows.filter((row) => { const n = debt.get(keyOf(row)) ?? 0; if (n > 0) { debt.set(keyOf(row), n - 1); return false; } return true; });
-}
-const EVENT_ORDER = { start: 0, end: 1 };
-/** The accounting rule: the common rows, plus the legacy rows beyond what the common copies excuse (see above). */
-export function joinRows(commonRows, legacyLists) {
-  const sources = [commonRows, ...legacyLists].filter((l) => l.length);
-  if (sources.length <= 1) return sources[0] ?? [];
-  const excuse = new Map();
-  for (const row of commonRows) excuse.set(keyOf(row), (excuse.get(keyOf(row)) ?? 0) + 1);
-  const legacy = [];
-  for (const list of legacyLists) for (const row of list) {
-    const n = excuse.get(keyOf(row)) ?? 0;
-    if (n > 0) excuse.set(keyOf(row), n - 1); else legacy.push(row);
-  }
-  return [...legacy, ...commonRows].map((row) => [row, keyOf(row)]).sort(([a, ka], [b, kb]) => {
-    const t = Date.parse(a.timestamp) - Date.parse(b.timestamp);
-    if (t) return t;
-    const e = (EVENT_ORDER[a.event] ?? 2) - (EVENT_ORDER[b.event] ?? 2);
-    return e || (ka < kb ? -1 : ka > kb ? 1 : 0);
-  }).map(([row]) => row);
-}
-/**
- * `sources` = `[{ dir, rows }]`; the one whose dir is `commonDir` is the common log, every other is a legacy source that
- * loses its recorded exclusions. Returns `{ rows, problems }`; with a problem the rows of that source are joined WITHOUT
- * exclusions and the caller must report (reader) or refuse (writer): never a silent "no exclusions".
- */
-export function unionLogRows(sources, ticket, commonDir) {
-  const isCommon = (s) => commonDir !== undefined && samePath(s.dir, commonDir);
-  const problems = [];
-  const legacy = sources.filter((s) => !isCommon(s)).map((s) => {
-    const { rows, problem } = excludedRows(s.dir, ticket);
-    if (problem) problems.push(problem);
-    return subtractRows(s.rows, rows);
-  });
-  const common = sources.filter(isCommon).flatMap((s) => s.rows);
-  return { rows: joinRows(common, legacy), problems };
+export function labelLegacyRun(run, rows) {
+  const abandoned = rows.some((r) => r.event === 'end' && isAbandonRow(r));
+  const partial = rows.some((r) => r?.metrics?.legacy_worktree === true);
+  if (!abandoned && !partial) return run;
+  return { ...run, ...(abandoned ? { outcome: 'abandoned', recorded_outcome: run.outcome, abandoned: true } : {}), ...(partial ? { partial_legacy: 'possible' } : {}) };
 }
 
-/**
- * The exact filesystem operations an append to `file` performs (appendRows: mkdir -p of its directory, `<file>.lock`
- * created in it, `<file>` opened for append), checked read-only. Shared by `check`, batch prevalidation and the REVIEW
- * authority copy itself. Returns null when every operation can succeed, else the reason.
- */
 const fsKind = (p) => {
   let l;
   try { l = lstatSync(p); } catch (e) { if (e?.code === 'ENOENT') return 'absent'; throw e; }

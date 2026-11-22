@@ -975,3 +975,50 @@ for (const [state, make, ok, runs] of AUTH_STATES) {
     }
   });
 }
+
+// ------------------------------------------------------------------ S5 cutover: AC12 quarantine to a fixed point, AC15 reserved names
+const L = (o) => JSON.stringify({ schema, ticket: 'T1', run_id: 'run-1', event: 'start', event_id: 'x', kind: 'phase', name: 'P', timestamp: iso(0), metrics: {}, ...o }) + '\n';
+const LE = (o) => L({ event: 'end', duration_ms: 0, outcome: 'pass', ...o });
+const REFUSALS = [
+  ['invalid json line', '{"schema": broken\n'],
+  ['unsupported schema', L({ schema: 'other-v9' })],
+  ['invalid record', L({ kind: 'nope' })],
+  ['ticket mismatch', L({ ticket: 'T2' })],
+  ['orphan end', LE({ event_id: 'orph' })],
+  ['duplicate start', L({ event_id: 'd' }) + L({ event_id: 'd', timestamp: iso(5) })],
+  ['end before its start', L({ event_id: 'e', timestamp: iso(10) }) + LE({ event_id: 'e', timestamp: iso(5) })],
+  ['duration mismatch', L({ event_id: 'm' }) + LE({ event_id: 'm', timestamp: iso(10), duration_ms: 3 })],
+  ['identity mismatch', L({ event_id: 'i', metrics: { candidate_id: 'a' } }) + LE({ event_id: 'i', timestamp: iso(1), duration_ms: 1, metrics: { candidate_id: 'b' } })],
+  ['undecodable bytes', Buffer.concat([Buffer.from('{"schema":"'), Buffer.from([0xff]), Buffer.from('"}\n')]).toString('latin1')],
+  ['a cascade (two starts, two ends of one id, one orphan)', L({ event_id: 'c' }) + L({ event_id: 'c', timestamp: iso(2) }) + LE({ event_id: 'c', timestamp: iso(3), duration_ms: 3 }) + LE({ event_id: 'c', timestamp: iso(4), duration_ms: 4 }) + LE({ event_id: 'z' })],
+];
+for (const [kind, bad] of REFUSALS) {
+  test(`AC12 quarantine clears "${kind}" to a fixed point: writers refuse before, write after; the loss is recorded`, (t) => {
+    const f = fixture(t);
+    const good = L({ event_id: 'good', timestamp: iso(0) });
+    writeFileSync(f.path, Buffer.concat([Buffer.from(good), Buffer.from(bad, 'latin1')]));
+    assert.equal(f.cli(...phaseArgs('start', 'n')).status, 1, `${kind}: refused before`);
+    const q = f.cli('quarantine');
+    assert.equal(q.status, 0, q.stderr);
+    assert.ok(JSON.parse(q.stdout).quarantined, 'something was moved to a sidecar');
+    const w = f.cli(...phaseArgs('start', 'n'));
+    assert.equal(w.status, 0, `${kind}: writes resume: ${w.stderr}`);
+    assert.ok(readText(f.path, 'utf8').startsWith(good), 'valid lines are kept');
+    assert.ok(readText(f.path, 'utf8').includes('"log_loss"'), 'a log_loss record');
+    assert.equal(spawnSync(process.execPath, [script, 'check', '--repo', f.repo, '--ticket', 'T1'], { encoding: 'utf8' }).status, 0, 'check ok');
+    assert.deepEqual(JSON.parse(f.cli('quarantine').stdout), { quarantined: null }, 'a fixed point: nothing left to move');
+  });
+}
+
+test('AC15 reserved abandon names and ids are refused by every writer, case-insensitively', (t) => {
+  const f = fixture(t);
+  for (const [name, id] of [['legacy_abandoned', 'a'], ['LEGACY_ABANDONED', 'b'], ['Legacy_Abandoned', 'c'], ['P', 'legacy-abandoned.0123456789ab'], ['P', 'LEGACY-ABANDONED.x'], ['P', 'legacy-abandoned']]) {
+    const r = f.cli('start', '--run-id', 'run-1', '--kind', 'activity', '--name', name, '--event-id', id);
+    assert.equal(r.status, 1, `${name} ${id}`);
+    assert.match(r.stderr, /reserved/);
+    const b = spawnSync(process.execPath, [script, 'batch', '--repo', f.repo, '--ticket', 'T1', '--run-id', 'run-1', '--ops-file', '-'],
+      { encoding: 'utf8', input: JSON.stringify([{ op: 'start', kind: 'activity', name, event_id: id }]) });
+    assert.equal(b.status, 1, `batch ${name} ${id}`);
+  }
+  assert.equal(bytesOf(f), '');
+});

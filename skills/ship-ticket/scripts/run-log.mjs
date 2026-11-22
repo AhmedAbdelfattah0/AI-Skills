@@ -14,10 +14,10 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { aggregate, buildRun, SUMMARY_SCHEMA } from './run-summary.mjs';
 import { CEILING_METRICS, GAP_REASONS, IDENTITY_ACTIVITIES, SKILL_REVISION, STRING_METRICS, expectedReviewRoles } from './review-intervals.mjs';
-import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents } from './measure/events.mjs';
+import { CLI_EVENT_NAMES, CLOSABLE, RUN_LOG_SCHEMA as SCHEMA, committedLength, encodeEvent, encodeLoss, encodeRecords, fieldType, isEventName, readEvents, readLog } from './measure/events.mjs';
 import { appendLocked, quarantineLocked, sidecarPath } from './run-log-io.mjs';
-import { AUTH_SUBDIR, EXCLUDED_SUBDIR, appendPreflight, commonLogDir, dirPreflight, excludedRows, isReservedTicket, joinRows, legacyLogDirs, ownLogDir, readLogRows,
-  reportLogDirs, subtractRows, unionLogRows } from './lib/run-log-paths.mjs';
+import { AUTH_SUBDIR, appendPreflight, commonLogDir, dirPreflight, isReservedTicket, labelLegacyRun, legacyLogDirs, legacyPresent, ownLogDir,
+  ABANDON_NAME, isReservedInterval } from './lib/run-log-paths.mjs';
 import { processInfo } from './engine-quiesce.mjs';
 import { hostname } from 'node:os';
 import { isTimestamp } from './lib/shape.mjs';
@@ -48,20 +48,21 @@ function usage() {
   run-log.mjs end   --repo <path> --ticket <key> --run-id <id> --kind <kind> --name <name> --event-id <id> [--outcome <value>] [--metric key=value ...] [--metrics-from <carrier-result.json>] [--ended-at <iso>]
   run-log.mjs batch --repo <path> --ticket <key> --run-id <id> --ops-file <path|->
   run-log.mjs check --repo <path> [--ticket <key>]
-  run-log.mjs migrate --repo <path> [--ticket <key>] [--resolve-duplicates]
+  run-log.mjs abandon --repo <path> --ticket <key> --run-id <id> [--reason old_build_unavailable|superseded|unknown]
+  run-log.mjs legacy --repo <path> [--ticket <key>]
   run-log.mjs event --repo <path> --ticket <key> --run-id <id> --name <event> [--event-id <id>] [--metric key=value ...] [--detail <json>] [--started-at <iso> --ended-at <iso>]
   run-log.mjs close --repo <path> --ticket <key> --run-id <id> --through <iso> --final true|false --count-source orchestrator_tally|posthoc --count <kind>=<n> ...
   run-log.mjs quarantine --repo <path> --ticket <key>
   run-log.mjs summary --repo <path> (--ticket <key> | --all)
 
 Kinds: workflow, phase, activity, wait
-Location (S5): <git-common-dir>/ai-skills/ship-ticket/<ticket>.jsonl, one file for every worktree of the repository. A pre-S5
-per-worktree log (git rev-parse --git-path ai-skills/ship-ticket) is read, never written; summary also reads sibling worktrees' old logs.
+Location (S5): <git-common-dir>/ai-skills/ship-ticket/<ticket>.jsonl, one file for every worktree of the repository: the ONLY
+runtime telemetry source. A linked worktree's pre-S5 log (git rev-parse --git-path ai-skills/ship-ticket) is a read-only archive:
+no reader merges it; its presence is counted (legacy_present, own worktree only) and the legacy command prints it for audit.
+abandon: record in the shared log that a run started in this worktree's pre-S5 log was abandoned (never a success).
 batch: JSON ops [{op:"start"|"end", kind, name, event_id, outcome?, metrics?:{k:v}}], validated first, applied in order, not atomic.
 check: read-only preflight, one JSON line {ok, resolved_dir, legacy_logs, degraded?, reason?}; exit 1 is a declared degradation.
-migrate: copy this worktree's pre-S5 log into the shared log (run it before git worktree remove); end does it per interval.
 A REVIEW phase start is also written to <git-path>/ai-skills/ship-ticket/review-auth/<ticket>.jsonl (REPAIR authority, per worktree).
-migrate --resolve-duplicates: record this worktree's legacy rows that collide with a different shared start in excluded/<ticket>.jsonl.
 --started-at/--ended-at on start/end: strict UTC ISO, within now+5s..now-24h, never earlier than a recorded row of the run;
 the row is labelled timestamp_source=supplied, label=estimated. event --started-at/--ended-at take the same now-window bounds.
 Measurement events (S-04c-design 1.2; validated, closed vocabularies, label=measured|estimated required): ${CLI_EVENT_NAMES.join(', ')}.
@@ -69,7 +70,8 @@ start/end refuse these names. event writes one start/end pair in one append; eve
 A fallback or recovery run is recorded by hand: event --name run_mode --metric mode=fallback|recovery --metric label=measured.
 Every write takes <log>.lock (waits up to 10 s) and validates the whole resulting log; an invalid log refuses every write.
 A torn tail (bytes after the last newline) is moved to <log>.lost-<offset>-<sha>[-<layout>].json and a log_loss record is written in its place.
-quarantine moves undecodable, malformed and invalid measurement lines (and a torn tail) the same way, so writes can resume.
+quarantine moves every line that makes writers refuse (undecodable, malformed or invalid lines, ticket mismatches, orphan ends,
+duplicate starts, invalid pairs; and a torn tail) the same way, to a fixed point, so writes can resume.
 close records an orchestrator closure (label estimated) with explicit counts: <kind> in ${CLOSABLE.filter((k) => k !== 'usage').join(', ')}, or usage.<provider>.
 Review timing: the start of a review activity or of the REVIEW phase requires candidate_id and
 review_execution (refused without them). A REVIEW phase start also takes skill_revision and four *_ceiling_ms
@@ -93,10 +95,6 @@ function parseArgs(argv) {
     const token = argv[index];
     if (token === '--all') {
       options.all = true;
-      continue;
-    }
-    if (token === '--resolve-duplicates') {
-      options.resolveDuplicates = true;
       continue;
     }
     if (!token.startsWith('--')) fail(`unexpected argument: ${token}`);
@@ -208,16 +206,16 @@ function git(repo, args) {
 }
 
 /**
- * S5 (F05): `directory` is the ONE shared log directory of the repository (`<git-common-dir>/ai-skills/ship-ticket`), the
- * only place this script writes. `legacy` is this worktree's pre-S5 directory (`--git-path`), read but never written, or
- * null where it is the common dir (the main checkout). Both are absolute, also for a --repo inside a subdirectory.
+ * S5 (F05, cutover): `directory` is the ONE shared log directory of the repository (`<git-common-dir>/ai-skills/ship-ticket`),
+ * the only place this script reads and writes telemetry. `legacy` is this worktree's pre-S5 directory (`--git-path`), or null
+ * where it is the common dir (the main checkout). Normal commands only COUNT its log (legacy_present, lstat plus a bounded
+ * read); `legacy` prints it for audit. No sibling worktree's directory is ever resolved here.
  */
 function locations(repo) {
   const root = git(repo, ['rev-parse', '--show-toplevel']);
   try {
     const directory = commonLogDir(repo);
-    const { own, siblings } = legacyLogDirs(repo, { siblings: true });
-    return { root, directory, legacy: own, siblings, authDir: ownLogDir(repo) };
+    return { root, directory, legacy: legacyLogDirs(repo).own, authDir: ownLogDir(repo) };
   } catch (error) { return fail(error.message); }
 }
 
@@ -258,58 +256,24 @@ function pairWarnings(rows) {
   return warnings;
 }
 
-/** Writers refuse to write against an exclusion set they cannot read (repair 4): never "no exclusions" by accident. */
-function refuseProblems(problems) {
-  const p = problems[0];
-  if (p) fail(`excluded_unreadable: ${p.path}${p.line ? ` line ${p.line}` : ''} (${p.errno}); repair or restore that file, nothing written`);
-}
-
-/** Pairing warnings of `merged` that the read-only `context` rows did not already have: what a write would introduce. */
-function newPairWarnings(context, merged) {
-  const key = (w) => JSON.stringify([w.code, w.run_id, w.event_id]);
-  const known = new Set(pairWarnings(context).map(key));
-  return pairWarnings(merged).filter((w) => !known.has(key(w)));
-}
-
+/** This worktree's pre-S5 log of `ticket`: counted only (lib/run-log-paths legacyPresent), never read into a figure. */
+const ownLegacy = (loc, ticket) => (loc.legacy ? legacyPresent(loc.legacy, ticket) : { files: 0 });
 /**
- * Read-only legacy context of a ticket (repair 4). `context`: the OWN legacy log's committed rows minus its recorded
- * exclusions (start lookup, duplicates, time order; empty in the main checkout). `legacyLists`: those and every sibling
- * worktree's legacy rows (minus their exclusions), used ONLY to judge pairing with the same join every reader uses
- * (lib/run-log-paths joinRows), so a writer's verdict does not depend on which worktree it runs in. A start is found,
- * ended or migrated only from the own legacy log; no legacy row ever authorises anything. `problems`: unreadable exclusion
- * data (writers refuse on it).
+ * Rows written in a worktree that still has a pre-S5 log of the ticket carry `legacy_worktree: true`: such a run may have
+ * history in that archive that no figure includes (readers label it `partial_legacy: possible`).
  */
-function legacyContext(loc, ticket) {
-  const problems = [];
-  const read = (dir) => {
-    const path = logPath(dir, ticket);
-    const buf = existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
-    const all = buf.length ? rowsFromText(buf.subarray(0, committedLength(buf)).toString('utf8'), path).rows : [];
-    const { rows: minus, problem } = excludedRows(dir, ticket);
-    if (problem) problems.push(problem);
-    return { buf, rows: subtractRows(all, minus) };
-  };
-  const own = loc.legacy ? read(loc.legacy) : { buf: Buffer.alloc(0), rows: [] };
-  const siblings = (loc.siblings ?? []).map((d) => read(d).rows);
-  return { context: own.rows, legacyLists: [own.rows, ...siblings], legacyBuf: own.buf, problems };
+function markLegacyWorktree(loc, ticket, metrics) {
+  if (ownLegacy(loc, ticket).files) metrics.legacy_worktree = true;
 }
 
 /**
- * The writer's view of a ticket (S5): the rows of the common log, which must be clean line by line as before. `rows` (for
- * lookups) joins them with the OWN legacy rows; pairing is judged over every legacy source, and only an ambiguity this
- * write would ADD refuses. `legacyEnds` are the own legacy file's S-04 events.
+ * The writer's view of a ticket: the shared log only, which must be clean (line by line and paired) exactly as a single
+ * pre-S5 log had to be. `eventRows` are its S-04 rows (for the never-backdate rule).
  */
 function writerRows(loc, ticket) {
   const path = logPath(loc.directory, ticket);
-  const own = readRows(path, false, { pairing: false });
-  const { context, legacyLists, legacyBuf, problems } = legacyContext(loc, ticket);
-  refuseProblems(problems);
-  const rows = joinRows(own.rows, [context]);
-  const fresh = newPairWarnings(joinRows([], legacyLists), joinRows(own.rows, legacyLists));
-  if (fresh.length) fail(`${path}: unsafe log history (${fresh[0].code}); left unchanged`);
-  const legacyEvents = legacyBuf.length ? readEvents(legacyBuf).events : [];
-  const events = [...legacyEvents, ...readEvents(own.buf).events];
-  return { path, rows, sharedRows: own.rows, context, legacyLists, legacyEnds: legacyEvents.map((e) => e.end), eventRows: events.flatMap((e) => [e.start, e.end]) };
+  const own = readRows(path);
+  return { path, rows: own.rows, eventRows: readEvents(own.buf).events.flatMap((e) => [e.start, e.end]) };
 }
 
 /** The legacy row set of a log text and its warnings. S-04 event rows are not legacy rows: measure/events.mjs readEvents checks them. */
@@ -402,35 +366,28 @@ const unsafe = (path, why) => Object.assign(new Error(`${path}: ${why}; left unc
  * I1/I3: the whole log as it will be after a write must be clean: strict UTF-8, every legacy row valid under the legacy rules,
  * every S-04 record a valid pair, no malformed line and no torn tail. Throws a typed `unsafe_history` error.
  */
-function assertCleanLog(bytes, path, context = []) {
+function assertCleanLog(bytes, path) {
   let text;
   try { text = strictUtf8.decode(bytes); } catch { throw unsafe(path, 'the log is not valid UTF-8 (recovery: run-log.mjs quarantine)'); }
-  // S5: with legacy rows as read-only context (a start in the old per-worktree log), pairing is judged on the union;
-  // only an ambiguity the union adds counts. Every line of THIS file is still judged on its own.
-  const { warnings } = context.some((list) => list.length) ? unionCheck(text, path, context) : rowsFromText(text, path);
+  const { warnings } = rowsFromText(text, path);
   if (warnings.length) throw unsafe(path, `unsafe log history (${warnings[0].code})`);
   const { lost } = readEvents(bytes);
   const bad = Object.entries(lost).filter(([k, n]) => n && !['loss_records', 'recovered_bytes'].includes(k));
   if (bad.length) throw unsafe(path, `unsafe measurement history (${bad.map(([k, n]) => `${k}=${n}`).join(', ')}; recovery: run-log.mjs quarantine)`);
-}
-/** `context` = the legacy row lists (every legacy source); pairing judged with the readers' join (joinRows). */
-function unionCheck(text, path, context) {
-  const own = rowsFromText(text, path);
-  return { warnings: [...own.warnings.filter((w) => w.run_id === undefined), ...newPairWarnings(joinRows([], context), joinRows(own.rows, context))] };
 }
 /**
  * The single write path of <ticket>.jsonl: records pass the encodeRecords choke point (an S-04 row only from encodeEvent),
  * then one locked append whose WHOLE resulting file passes assertCleanLog (I1). A torn tail from an interrupted earlier write
  * is moved to a sidecar with a `log_loss` record in the same write (I2). `check(eventEndRows)` sees the committed S-04 events.
  */
-async function appendRows(directory, ticket, records, check, { context = [], legacyEnds = [], guard, suffix = '.jsonl' } = {}) {
+async function appendRows(directory, ticket, records, check, { guard, suffix = '.jsonl' } = {}) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, `${ticket}${suffix}`), now = new Date().toISOString();
   const { lost } = await appendLocked(path, encodeRecords(records), { marker: (info) => encodeRecords([encodeLoss(ticket, info, now)]),
-    // The guard (stamp, window, migration selection) runs first, so a decision overtaken by a concurrent writer re-selects
-    // instead of surfacing as the duplicate it would create; then the whole resulting file is validated.
-    check: (after, before) => { if (guard) guard(before); assertCleanLog(after, path, context);
-      if (check) check([...legacyEnds, ...readEvents(before).events.map((e) => e.end)]);
+    // The guard (stamp, window) runs first, so a stamp overtaken by a concurrent writer is re-stamped; then the whole
+    // resulting file is validated.
+    check: (after, before) => { if (guard) guard(before); assertCleanLog(after, path);
+      if (check) check(readEvents(before).events.map((e) => e.end));
     } });
   if (lost) process.stderr.write(`run-log: moved ${lost.bytes} byte(s) of a torn tail to ${sidecarPath(path, lost)} and recorded log_loss\n`);
 }
@@ -444,6 +401,7 @@ function intervalOptions(options) {
   const name = validateId('name', requireOption(options, 'name'));
   if (isEventName(name)) fail(`${name} is a measurement event: use run-log.mjs event`);
   const eventId = validateId('event id', requireOption(options, 'event-id'));
+  if (isReservedInterval(name, eventId)) fail(`${name}/${eventId} is reserved (legacy_abandoned, legacy-abandoned*; case-insensitive): use run-log.mjs abandon`);
   return { ticket, runId, kind, name, eventId };
 }
 
@@ -555,7 +513,7 @@ function stampFor(view, runId, raw, flag, floor = -Infinity) {
   const guard = (before) => {
     const at = Date.now();
     if (supplied) inWindow(ms, flag, at);
-    const latest = Math.max(recordedOf(runId, at, lockedRows(before, view.path), view.context, view.eventRows), floor);
+    const latest = Math.max(recordedOf(runId, at, lockedRows(before, view.path)), floor);
     if (ms >= latest) return;
     if (supplied) throw new Error(`${flag} ${raw} is earlier than a row recorded for run ${runId} meanwhile; nothing written`);
     throw Object.assign(new Error(`a row of run ${runId} was recorded while this one waited; re-stamping`), { code: RESTAMP });
@@ -567,9 +525,9 @@ const suppliedKeys = (stamp) => (stamp.supplied ? { timestamp_source: 'supplied'
 /** Append `records` with `stamp.guard` in the lock; a `restamp` refusal re-runs `attempt` (re-read, re-stamp) up to 5 times. */
 async function appendStamped(attempt) {
   for (let n = 1; ; n += 1) {
-    const { directory, ticket, records, context, guard, after } = attempt();
+    const { directory, ticket, records, guard, after } = attempt();
     if (!records.length) return after();
-    try { await appendRows(directory, ticket, records, undefined, { context, guard }); }
+    try { await appendRows(directory, ticket, records, undefined, { guard }); }
     catch (error) {
       if (error?.code === RESTAMP && n < STAMP_ATTEMPTS) continue;
       fail(error.message);
@@ -619,6 +577,7 @@ async function start(options, { print = true, loc: given } = {}) {
   const interval = intervalOptions(options);
   const metrics = parseMetrics(options.metric);
   validateReviewStart(interval, metrics);
+  markLegacyWorktree(loc, interval.ticket, metrics);
   const binding = carrierBinding(options, metrics);
   if (interval.kind === 'phase' && interval.name === 'REVIEW') preflightAuthority(loc, interval.ticket);
   const row = await appendStamped(() => {
@@ -641,7 +600,7 @@ async function start(options, { print = true, loc: given } = {}) {
       metrics,
       ...(binding ? { carrier_binding: binding } : {}),
     };
-    return { directory, ticket: interval.ticket, records: [next], context: view.legacyLists, guard: stamp.guard, after: () => next };
+    return { directory, ticket: interval.ticket, records: [next], guard: stamp.guard, after: () => next };
   });
   await writeAuthority(loc, row);
   if (print) process.stdout.write(`${JSON.stringify(row)}\n`);
@@ -661,7 +620,12 @@ async function end(options, { print = true, loc: given } = {}) {
       (r) => r.run_id === interval.runId && r.event_id === interval.eventId,
     );
     const started = matching.find((r) => r.event === 'start');
-    if (!started) fail(`event ${interval.eventId} has no start in run ${interval.runId}`);
+    if (!started) {
+      const legacy = ownLegacy(loc, interval.ticket);
+      // Cutover (AC2-C): a run started in this worktree's pre-S5 log is not in the shared log and is never merged into it.
+      if (legacy.files) fail(`event ${interval.eventId} has no start in the shared log; this worktree has a pre-S5 log (${legacy.path}, ${legacy.lines} lines). A run started there cannot be ended by this version: close it with the build that started it, or record that it was abandoned with "run-log.mjs abandon --repo ${repo} --ticket ${interval.ticket} --run-id ${interval.runId}"`);
+      fail(`event ${interval.eventId} has no start in run ${interval.runId}`);
+    }
     if (started.kind !== interval.kind || started.name !== interval.name) {
       fail(`event ${interval.eventId} must end with its original kind and name`);
     }
@@ -679,11 +643,12 @@ async function end(options, { print = true, loc: given } = {}) {
         && (options.outcome === undefined || options.outcome === previous.outcome)
         && options.metric.length === 0) {
         replay = previous;
-        return { directory, ticket: interval.ticket, records: [], context: view.legacyLists, guard: undefined, after: () => previous };
+        return { directory, ticket: interval.ticket, records: [], guard: undefined, after: () => previous };
       }
       fail(`event ${interval.eventId} already ended in run ${interval.runId}`);
     }
     const metrics = parseMetrics(options.metric, { lenientGap: true });
+    markLegacyWorktree(loc, interval.ticket, metrics);
     for (const key of ['candidate_id', 'review_execution']) {
       if (metrics[key] !== undefined && metrics[key] !== started.metrics[key]) fail(`${key} cannot change within an interval`);
     }
@@ -702,17 +667,7 @@ async function end(options, { print = true, loc: given } = {}) {
       metrics,
       ...(timing ? { carrier_timing: timing } : {}),
     };
-    // S5 repair, end-time migration: a start found only in this worktree's legacy log is copied verbatim into the shared
-    // log in the same append, before its end, so removing the worktree never leaves an end without its start.
-    const inShared = view.sharedRows.some((r) => r.event === 'start' && r.run_id === interval.runId && r.event_id === interval.eventId);
-    // Decided again UNDER the lock: a concurrent `migrate` may have copied the start meanwhile; then re-select (retry).
-    const guard = inShared ? stamp.guard : (before) => {
-      if (lockedRows(before, view.path).some((r) => r.event === 'start' && r.run_id === interval.runId && r.event_id === interval.eventId)) {
-        throw Object.assign(new Error(`the start of ${interval.eventId} was migrated meanwhile; re-selecting`), { code: RESTAMP });
-      }
-      stamp.guard(before);
-    };
-    return { directory, ticket: interval.ticket, records: inShared ? [next] : [started, next], context: view.legacyLists, guard, after: () => next };
+    return { directory, ticket: interval.ticket, records: [next], guard: stamp.guard, after: () => next };
   });
   if (print) process.stdout.write(`${JSON.stringify(replay ?? row)}\n`);
   return replay ?? row;
@@ -732,14 +687,10 @@ async function writeEvent(options, name, metrics, detail) {
   // never-backdate rule of start/end does not apply here.
   const supplied = ['started-at', 'ended-at'].filter((flag) => options[flag] !== undefined);
   for (const flag of supplied) inWindow(Date.parse(options[flag]), `--${flag}`, Date.parse(now));
-  // Read-only legacy context only: the common log itself is judged whole, inside the lock, by assertCleanLog (as before S5).
-  const { legacyLists: context, legacyBuf, problems } = legacyContext(loc, ticket);
-  refuseProblems(problems);
-  const legacyEnds = legacyBuf.length ? readEvents(legacyBuf).events.map((e) => e.end) : [];
   const id = JSON.parse(encoded.text.slice(0, encoded.text.indexOf('\n'))).event_id;
   await failOnError(appendRows(directory, ticket, [encoded], (rows) => {
     if (rows.some((row) => row.run_id === runId && row.event_id === id)) throw new Error(`event ${id} already exists in run ${runId}`);
-  }, { context, legacyEnds, guard: () => { for (const flag of supplied) inWindow(Date.parse(options[flag]), `--${flag}`); } }));
+  }, { guard: () => { for (const flag of supplied) inWindow(Date.parse(options[flag]), `--${flag}`); } }));
   process.stdout.write(encoded.text);
 }
 
@@ -787,17 +738,69 @@ async function closeCommand(options) {
     emitter: 'orchestrator', count_source: requireOption(options, 'count-source') }, { counts });
 }
 
+/**
+ * AC12: what `quarantine` moves: every line that makes a writer refuse, computed to a FIXED POINT. That is readEvents' bad
+ * ranges (undecodable, malformed or invalid S-04 lines, a torn tail), plus every legacy line that fails the per-row rules
+ * (schema, record, ticket), plus, repeatedly until none is left, the row that breaks pairing: a second start of an id, an
+ * end without a matching earlier start (orphan, other kind/name, earlier timestamp), an end whose duration, identity or
+ * carrier binding disagrees with its start. Returns sorted, disjoint [from, to) byte ranges.
+ */
+function quarantineRanges(buf, path) {
+  const ranges = readEvents(buf).bad.map(([a, b]) => [a, b]);
+  const inBad = (l) => ranges.some(([a, b]) => l.from >= a && l.to < b);
+  const lines = readLog(buf).lines.filter((l) => !inBad(l));
+  let active = lines;
+  for (let pass = 0; pass <= lines.length; pass += 1) {
+    const drop = pairingBreakers(active, path);
+    if (!drop.size) break;
+    active = active.filter((l) => !drop.has(l));
+  }
+  const kept = new Set(active);
+  for (const l of lines) if (!kept.has(l)) ranges.push([l.from, l.to + 1]);
+  ranges.sort((x, y) => x[0] - y[0]);
+  const merged = [];
+  for (const r of ranges) { const last = merged.at(-1); if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]); else merged.push([...r]); }
+  return merged;
+}
+/** One pass: the legacy lines (of `lines`, in order) that a writer's whole-file check refuses, as buildRun judges pairs. */
+function pairingBreakers(lines, path) {
+  const drop = new Set();
+  const runs = new Map();
+  for (const l of lines) {
+    if (l.text === null) { drop.add(l); continue; }
+    if (!l.text.trim()) continue;
+    let row;
+    try { row = JSON.parse(l.text); } catch { drop.add(l); continue; }
+    if (isEventName(row?.name)) continue;
+    if (rowsFromText(`${l.text}\n`, path).warnings.some((w) => w.line !== undefined)) { drop.add(l); continue; }
+    const run = runs.get(row.run_id) ?? { starts: new Map(), seen: new Set() };
+    runs.set(row.run_id, run);
+    if (row.event === 'start') {
+      if (run.seen.has(row.event_id)) { drop.add(l); continue; }
+      run.seen.add(row.event_id);
+      run.starts.set(row.event_id, row);
+      continue;
+    }
+    const start = run.starts.get(row.event_id);
+    const bad = !start || start.kind !== row.kind || start.name !== row.name || Date.parse(row.timestamp) < Date.parse(start.timestamp)
+      || row.duration_ms !== Date.parse(row.timestamp) - Date.parse(start.timestamp)
+      || ['candidate_id', 'review_execution'].some((k) => row.metrics?.[k] !== undefined && row.metrics[k] !== start.metrics?.[k])
+      || (row.carrier_timing && (Date.parse(row.carrier_timing.started_at) < Date.parse(start.timestamp)
+        || row.carrier_timing.candidate_id !== start.metrics?.candidate_id || row.carrier_timing.review_execution !== start.metrics?.review_execution));
+    if (bad) { drop.add(l); continue; }
+    run.starts.delete(row.event_id);
+  }
+  return drop;
+}
+
 /** I4: move every undecodable, malformed or invalid S-04 line and a torn tail to a sidecar, with a `log_loss` record. */
 async function quarantineCommand(options) {
-  const loc = locations(requireOption(options, 'repo'));
-  const { directory } = loc;
+  const { directory } = locations(requireOption(options, 'repo'));
   const ticket = validateId('ticket', requireOption(options, 'ticket'));
   const path = logPath(directory, ticket), now = new Date().toISOString();
-  if (!existsSync(path)) fail(`${path} does not exist (quarantine works on the common log only; a legacy per-worktree log is never changed)`);
-  const { legacyLists: context, problems } = legacyContext(loc, ticket);
-  refuseProblems(problems);
-  const info = await failOnError(quarantineLocked(path, { select: (buf) => readEvents(buf).bad,
-    marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path, context) }));
+  if (!existsSync(path)) fail(`${path} does not exist (quarantine works on the shared log only; a legacy per-worktree log is never changed)`);
+  const info = await failOnError(quarantineLocked(path, { select: (buf) => quarantineRanges(buf, path),
+    marker: (i) => encodeRecords([encodeLoss(ticket, i, now)]), check: (after) => assertCleanLog(after, path) }));
   process.stdout.write(`${JSON.stringify(info ? { quarantined: info, sidecar: sidecarPath(path, info) } : { quarantined: null })}\n`);
 }
 
@@ -823,61 +826,70 @@ function ticketsIn(dirs) {
   return [...names].sort();
 }
 
-/**
- * The reporting view of one ticket over `dirs` (common, own legacy, sibling legacy): every byte read, as summary always
- * did. Line warnings stay per file; pairing is judged on the merged row set, so an interval split across files is one
- * interval. With one file this is exactly the old single-file result.
- */
-function reportRows(dirs, ticket) {
-  const sources = readLogRows(dirs, ticket, (bytes, path) => rowsFromText(bytes.toString('utf8'), path));
-  const { rows, problems } = unionLogRows(sources.map((source) => ({ dir: source.dir, rows: source.parsed.rows })), ticket, dirs[0]);
-  // Unreadable exclusion data is a named degradation (a warning without run_id: every run is marked unreliable).
-  const degraded = problems.map((p) => ({ code: p.code, path: p.path, errno: p.errno, ...(p.line ? { line: p.line } : {}) }));
-  const multi = sources.length > 1 || sources.some((source) => excludedRows(source.dir, ticket).rows.length);
-  if (!multi && !degraded.length) return { ...(sources[0]?.parsed ?? { rows: [], warnings: [] }), sources, problems };
-  const warnings = [...degraded, ...sources.flatMap((source) => source.parsed.warnings.filter((w) => w.run_id === undefined)), ...pairWarnings(rows)];
-  return { rows, warnings, sources, problems };
+/** The reporting view of one ticket: the shared log only, every byte read (as summary always did). */
+function reportRows(directory, ticket) {
+  const path = logPath(directory, ticket);
+  if (!existsSync(path)) return { rows: [], warnings: [], bytes: null };
+  const bytes = readFileSync(path);
+  return { ...rowsFromText(bytes.toString('utf8'), path), bytes };
 }
 
-function reportDirsOf(repo) {
-  locations(repo);
-  try { return reportLogDirs(repo); } catch (error) { return fail(error.message); }
+/** Runs of one ticket's rows, labelled (abandoned, partial_legacy) by the one shared rule (lib/run-log-paths labelLegacyRun). */
+function runsOf(ticket, rows, warnings) {
+  const byRun = new Map();
+  for (const row of rows) {
+    const runRows = byRun.get(row.run_id) ?? [];
+    runRows.push(row);
+    byRun.set(row.run_id, runRows);
+  }
+  return [...byRun].map(([runId, runRows]) => {
+    const runWarnings = warnings.filter((warning) => warning.run_id === undefined || warning.run_id === runId);
+    const run = labelLegacyRun(buildRun(ticket, runId, runRows, runWarnings), runRows);
+    return { ...run, missing_review_intervals: missingReviewIntervals(run) };
+  });
 }
 
 function summary(options) {
   const repo = requireOption(options, 'repo');
-  const dirs = reportDirsOf(repo);
+  const loc = locations(repo);
   if (Boolean(options.all) === Boolean(options.ticket)) {
     fail('summary requires exactly one of --ticket or --all');
   }
 
-  const tickets = options.ticket ? [validateId('ticket', options.ticket)] : ticketsIn(dirs);
+  const tickets = options.ticket ? [validateId('ticket', options.ticket)] : ticketsIn([loc.directory]);
   const runs = [];
   const integrityWarnings = [];
   for (const ticket of tickets) {
-    const { rows, warnings } = reportRows(dirs, ticket);
+    const { rows, warnings } = reportRows(loc.directory, ticket);
     integrityWarnings.push(...warnings.map((warning) => ({ ticket, ...warning })));
-    const byRun = new Map();
-    for (const row of rows) {
-      const runRows = byRun.get(row.run_id) ?? [];
-      runRows.push(row);
-      byRun.set(row.run_id, runRows);
-    }
-    for (const [runId, runRows] of byRun) {
-      const runWarnings = warnings.filter((warning) => warning.run_id === undefined || warning.run_id === runId);
-      const run = buildRun(ticket, runId, runRows, runWarnings);
-      runs.push({ ...run, missing_review_intervals: missingReviewIntervals(run) });
-    }
+    runs.push(...runsOf(ticket, rows, warnings));
   }
 
   const counted = runs.map((r) => r.missing_review_intervals.count).filter(Number.isInteger);
+  // Cutover keys appear only when they say something, so a log without them reads byte-identically to before S5.
+  const abandoned = runs.filter((r) => r.abandoned).length, partial = runs.filter((r) => r.partial_legacy).length;
+  const legacy = options.ticket ? ownLegacy(loc, tickets[0]) : ownLegacyAll(loc);
   const result = { schema: SUMMARY_SCHEMA, event_schema: SCHEMA, integrity_warnings: integrityWarnings,
-    aggregate: { ...aggregate(runs), ...missingTotal(counted, runs.length) }, runs };
+    aggregate: { ...aggregate(runs), ...(abandoned ? { abandoned_runs: abandoned } : {}), ...(partial ? { partial_legacy_runs: partial } : {}),
+      ...missingTotal(counted, runs.length) },
+    ...(legacy.files ? { legacy_present: legacy } : {}), runs };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+/** `legacy_present` over every ticket of this worktree's legacy dir (summary --all): own worktree only. */
+function ownLegacyAll(loc) {
+  if (!loc.legacy) return { files: 0 };
+  const per = legacyTickets(loc.legacy).map((t) => legacyPresent(loc.legacy, t));
+  return { files: per.reduce((n, p) => n + p.files, 0), ...(per.some((p) => p.lines === 'unavailable') ? { lines: 'unavailable' } : {}) };
+}
+/** Ticket names of timing logs in one legacy dir (not engine, usage or authority files). */
+function legacyTickets(dir) {
+  let names = [];
+  try { names = readdirSync(dir); } catch { return []; }
+  return names.filter((n) => n.endsWith('.jsonl') && !/\.(engine|usage|review-auth)\.jsonl$/.test(n) && SAFE_ID.test(n.slice(0, -6))).map((n) => n.slice(0, -6)).sort();
 }
 
 /**
- * Run-log integrity of one ticket for ship-ready-check (S5). Pure read over the reporting directories. It claims only what
+ * Run-log integrity of one ticket for ship-ready-check (S5). Pure read of the shared log. It claims only what
  * was parsed, counted and paired: `events` (legacy rows plus S-04 events, log_loss records excluded), `runs`, `open_phases`
  * (phase starts without an end), `warnings` (line and pairing warnings plus undecodable, malformed or invalid S-04 lines),
  * `loss_records`. Never completeness or authenticity. `{ unavailable: <why> }` when no log exists or git cannot answer:
@@ -886,22 +898,18 @@ function summary(options) {
 export function integritySummary(repo, ticket) {
   try {
     if (typeof ticket !== 'string' || !SAFE_ID.test(ticket)) return { unavailable: 'invalid ticket' };
-    const dirs = reportLogDirs(repo);
-    const { rows, warnings, sources, problems } = reportRows(dirs, ticket);
-    if (!sources.length) return { unavailable: `no run log for ${ticket}` };
-    let events = 0, loss = 0, badS04 = 0;
-    for (const { bytes } of sources) {
-      const read = readEvents(bytes);
-      events += read.events.length;
-      loss += read.lost.loss_records;
-      badS04 += read.lost.undecodable_lines + read.lost.malformed_lines + read.lost.invalid_events;
-    }
-    const byRun = new Map();
-    for (const row of rows) byRun.set(row.run_id, [...(byRun.get(row.run_id) ?? []), row]);
-    const openPhases = [...byRun].reduce((n, [runId, runRows]) => n + buildRun(ticket, runId, runRows).open_intervals.filter((i) => i.kind === 'phase').length, 0);
+    const loc = locations(repo);
+    const { rows, warnings, bytes } = reportRows(loc.directory, ticket);
+    const legacy = ownLegacy(loc, ticket);
+    if (bytes === null) return { unavailable: `no run log for ${ticket}`, legacy_present: legacy };
+    const read = readEvents(bytes);
+    const badS04 = read.lost.undecodable_lines + read.lost.malformed_lines + read.lost.invalid_events;
+    const runs = runsOf(ticket, rows, warnings);
+    const openPhases = runs.reduce((n, run) => n + run.open_intervals.filter((i) => i.kind === 'phase').length, 0);
     // `events` counts legacy start/end ROWS plus S-04 events (each a start/end PAIR); log_loss records are counted apart.
-    return { events: rows.length + events, runs: byRun.size, open_phases: openPhases, warnings: warnings.length + badS04, loss_records: loss,
-      future_history: futureRuns([rows]), excluded_unreadable: problems.length };
+    return { events: rows.length + read.events.length, runs: runs.length, open_phases: openPhases, warnings: warnings.length + badS04,
+      loss_records: read.lost.loss_records, future_history: futureRuns([rows]),
+      abandoned_runs: runs.filter((r) => r.abandoned).length, partial_legacy_runs: runs.filter((r) => r.partial_legacy).length, legacy_present: legacy };
   } catch (error) { return { unavailable: error.message.split('\n')[0] }; }
 }
 
@@ -934,10 +942,10 @@ function lockHealth(lockFile) {
 }
 
 function checkCommand(options) {
-  const out = { ok: false, resolved_dir: null, legacy_logs: 0 };
+  const out = { ok: false, append_ready: false, resolved_dir: null, legacy_present: { files: 0 } };
   const degraded = [];
   const finish = (reason) => {
-    if (reason) out.reason = reason; else out.ok = true;
+    if (reason) out.reason = reason; else { out.ok = true; out.append_ready = true; }
     if (degraded.length) out.degraded = degraded;
     process.stdout.write(`${JSON.stringify(out)}\n`);
     if (!out.ok) process.exit(1);
@@ -952,28 +960,22 @@ function checkCommand(options) {
   /** The next append needs: the file itself when it exists (it is opened for writing), else its nearest existing directory. */
   const dirProblem = dirPreflight(loc.directory);
   if (dirProblem) return finish(dirProblem);
-  let legacyDirs = [];
-  try { const l = legacyLogDirs(repo, { siblings: true }); legacyDirs = [l.own, ...l.siblings].filter(Boolean); } catch { /* counted as none */ }
+  // legacy_present: this worktree only (lstat plus a bounded read); reported, never a reason to refuse.
+  out.legacy_present = ticket !== undefined ? ownLegacy(loc, ticket) : ownLegacyAll(loc);
+  if (out.legacy_present.files) degraded.push('legacy_present');
   if (ticket !== undefined) {
-    out.legacy_logs = legacyDirs.filter((d) => existsSync(logPath(d, ticket))).length;
     const path = logPath(loc.directory, ticket);
     // The shared log, the directory its <log>.lock is created in, and this worktree's REVIEW authority file.
     for (const target of [path, authorityPath(loc, ticket)]) { const why = writableTarget(target); if (why) return finish(why); }
-    const { problems } = legacyContext(loc, ticket);
-    if (problems.length) return finish(`excluded_unreadable: ${problems[0].path}${problems[0].line ? ` line ${problems[0].line}` : ''} (${problems[0].errno})`);
     const lock = lockHealth(`${path}.lock`);
     if (lock.refuse) return finish(lock.refuse);
     if (lock.degraded) degraded.push(lock.degraded);
     if (existsSync(path)) {
-      const { legacyLists } = legacyContext(loc, ticket);
-      try { assertCleanLog(readFileSync(path), path, legacyLists); } catch (error) { return finish(error.message); }
+      try { assertCleanLog(readFileSync(path), path); } catch (error) { return finish(error.message); }
     }
     const { rows } = existsSync(path) ? readRows(path, true) : { rows: [] };
-    if (futureRuns([rows, legacyContext(loc, ticket).context])) degraded.push('future_history');
-  } else {
-    out.legacy_logs = legacyDirs.reduce((n, d) => n + ticketsIn([d]).length, 0);
+    if (futureRuns([rows])) degraded.push('future_history');
   }
-  if (out.legacy_logs) degraded.push('legacy_logs_read_only');
   return finish();
 }
 
@@ -1052,75 +1054,57 @@ async function batchCommand(options) {
 }
 
 /**
- * `migrate` (S5 repair): copy this worktree's pre-S5 log into the shared log before `git worktree remove` deletes it.
- * Every legacy start/end row of the own legacy log that the shared log does not already hold is appended verbatim, in file
- * order, in one locked append (the whole resulting shared log is validated as on every write). S-04 measurement rows are
- * not copied (counted as skipped_events). Idempotent; never writes or deletes the legacy log. Read-write, unlike `check`.
- * One JSON line `{ migrated, skipped_events }`.
+ * `abandon` (cutover, AC2-C): record in the SHARED log that a run started in THIS worktree's pre-S5 log was abandoned.
+ * Allowed only when this worktree has a pre-S5 log of the ticket (legacy_present > 0); that log is not read. It writes one
+ * reserved ACTIVITY pair (never a workflow interval, so no recorded run outcome is rewritten): name `legacy_abandoned`,
+ * event id `legacy-abandoned.<12 hex of sha256(own legacy path, run id)>`, outcome `abandoned`. Every reader then shows
+ * the run as `abandoned`, never complete. Idempotent: an existing record is returned as it is.
  */
-async function migrateCommand(options) {
-  const loc = locations(requireOption(options, 'repo'));
-  const out = { migrated: 0, skipped_events: 0, ...(options.resolveDuplicates ? { excluded: 0 } : {}) };
-  if (loc.legacy) {
-    const tickets = options.ticket !== undefined ? [validateId('ticket', options.ticket)] : ticketsIn([loc.legacy]);
-    for (const ticket of tickets) {
-      if (options.resolveDuplicates) out.excluded += await excludeConflicts(loc, ticket);
-      const { context, legacyLists, legacyBuf, problems } = legacyContext(loc, ticket);
-      refuseProblems(problems);
-      if (!legacyBuf.length) continue;
-      out.skipped_events += readEvents(legacyBuf).events.length;
-      const path = logPath(loc.directory, ticket);
-      // Selection is made from the shared log as read and checked again UNDER the lock against the exact bytes the copy is
-      // appended after: a concurrent migrate or end-time migration that copied a row meanwhile makes this one re-select.
-      let migrated = 0;
-      for (let attempt = 1; ; attempt += 1) {
-        const shared = readRows(path, false, { pairing: false }).rows;
-        const records = notYetCopied(context, shared);
-        if (!records.length) break;
-        try {
-          await appendRows(loc.directory, ticket, records, undefined, { context: legacyLists, guard: (before) => {
-            if (notYetCopied(context, lockedRows(before, path)).length !== records.length) {
-              throw Object.assign(new Error('the shared log changed meanwhile; re-selecting'), { code: RESTAMP });
-            }
-          } });
-          migrated = records.length;
-          break;
-        } catch (error) {
-          if (error?.code === RESTAMP && attempt < STAMP_ATTEMPTS) continue;
-          fail(`${error.message}${/duplicate_start/.test(error.message) ? ' (a legacy start collides with a different start of the same id: run-log.mjs migrate --resolve-duplicates)' : ''}`);
-        }
-      }
-      out.migrated += migrated;
-    }
-  }
-  process.stdout.write(`${JSON.stringify(out)}\n`);
-}
-
-/** The legacy rows (in order) with no verbatim copy in `shared`: one shared copy accounts for one legacy occurrence. */
-function notYetCopied(legacy, shared) {
-  const have = new Map();
-  for (const row of shared) { const k = JSON.stringify(row); have.set(k, (have.get(k) ?? 0) + 1); }
-  return legacy.filter((row) => { const k = JSON.stringify(row); const n = have.get(k) ?? 0; if (n > 0) { have.set(k, n - 1); return false; } return true; });
+const ABANDON_REASONS = ['old_build_unavailable', 'superseded', 'unknown'];
+async function abandonCommand(options) {
+  const repo = requireOption(options, 'repo');
+  const loc = locations(repo);
+  const ticket = validateId('ticket', requireOption(options, 'ticket'));
+  const runId = validateId('run id', requireOption(options, 'run-id'));
+  const reason = options.reason ?? 'unknown';
+  if (!ABANDON_REASONS.includes(reason)) fail(`--reason must be one of: ${ABANDON_REASONS.join(', ')}`);
+  const legacy = ownLegacy(loc, ticket);
+  if (!legacy.files) fail(`this worktree has no pre-S5 log of ${ticket}: abandon applies only to runs started in one (nothing written)`);
+  const eventId = `legacy-abandoned.${createHash('sha256').update(`${legacy.path}\0${runId}`).digest('hex').slice(0, 12)}`;
+  const row = await appendStamped(() => {
+    const view = writerRows(loc, ticket);
+    const existing = view.rows.filter((r) => r.run_id === runId && r.event_id === eventId);
+    if (existing.length) return { directory: loc.directory, ticket, records: [], guard: undefined, after: () => existing.at(-1) };
+    const stamp = stampFor(view, runId, undefined, '--at');
+    const base = { schema: SCHEMA, ticket, run_id: runId, event_id: eventId, kind: 'activity', name: ABANDON_NAME, timestamp: stamp.at.toISOString(),
+      metrics: { legacy_run: true, legacy_worktree: true, reason } };
+    const endRow = { ...base, event: 'end', duration_ms: 0, outcome: 'abandoned' };
+    return { directory: loc.directory, ticket, records: [{ ...base, event: 'start' }, endRow], guard: stamp.guard, after: () => endRow };
+  });
+  process.stdout.write(`${JSON.stringify(row)}\n`);
 }
 
 /**
- * `migrate --resolve-duplicates` (S5 repair 2, N1). During the upgrade window the same run and event id may be started in
- * this worktree's pre-S5 log AND (by another worktree) in the shared log; the union then has duplicate_start and every
- * write from this worktree is refused. This records the conflicting legacy rows of THIS worktree's own old log (that start,
- * and its end if the old log has one), verbatim, in `<own legacy dir>/excluded/<ticket>.jsonl`; readers then leave exactly
- * those rows out. The old log itself is not changed and nothing is deleted. No sibling log is read. Returns the count.
+ * `legacy` (cutover): the explicit READ-ONLY audit of the pre-S5 log(s) of the worktree named by `--repo` (an operator
+ * names it; no command enumerates worktrees). It prints the rows and a summary computed over THAT file alone, labelled
+ * `scope: 'legacy-archive'`; nothing is ever merged into a shared-log figure. In the main checkout there is no archive
+ * (its pre-S5 log is the shared log). ENOENT is `absent`; any other read error is reported with its errno.
  */
-async function excludeConflicts(loc, ticket) {
-  const { context, problems } = legacyContext(loc, ticket);
-  refuseProblems(problems);
-  const shared = readRows(logPath(loc.directory, ticket), false, { pairing: false }).rows;
-  const sharedKeys = new Set(shared.map((r) => JSON.stringify(r)));
-  const clash = new Set(context.filter((r) => r.event === 'start' && !sharedKeys.has(JSON.stringify(r))
-    && shared.some((x) => x.event === 'start' && x.run_id === r.run_id && x.event_id === r.event_id)).map((r) => JSON.stringify([r.run_id, r.event_id])));
-  const rows = context.filter((r) => clash.has(JSON.stringify([r.run_id, r.event_id])));
-  if (!rows.length) return 0;
-  await failOnError(appendRows(join(loc.legacy, EXCLUDED_SUBDIR), ticket, rows));
-  return rows.length;
+function legacyCommand(options) {
+  const loc = locations(requireOption(options, 'repo'));
+  const out = { scope: 'legacy-archive', worktree_log_dir: loc.legacy, tickets: [] };
+  if (loc.legacy) {
+    const tickets = options.ticket !== undefined ? [validateId('ticket', options.ticket)] : legacyTickets(loc.legacy);
+    for (const ticket of tickets) {
+      const path = logPath(loc.legacy, ticket);
+      let text;
+      try { text = readFileSync(path, 'utf8'); }
+      catch (error) { out.tickets.push({ ticket, path, status: error?.code === 'ENOENT' ? 'absent' : 'unreadable', ...(error?.code === 'ENOENT' ? {} : { errno: error?.code ?? String(error) }) }); continue; }
+      const { rows, warnings } = rowsFromText(text, path);
+      out.tickets.push({ ticket, path, status: 'present', rows, warnings, summary: { runs: runsOf(ticket, rows, warnings) } });
+    }
+  }
+  process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
 }
 
 async function main(argv) {
@@ -1134,7 +1118,8 @@ async function main(argv) {
   else if (command === 'summary') summary(options);
   else if (command === 'batch') await batchCommand(options);
   else if (command === 'check') checkCommand(options);
-  else if (command === 'migrate') await migrateCommand(options);
+  else if (command === 'abandon') await abandonCommand(options);
+  else if (command === 'legacy') legacyCommand(options);
   else fail(`unknown command: ${command}`);
 }
 

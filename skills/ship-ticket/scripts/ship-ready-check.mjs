@@ -66,7 +66,10 @@ export async function integrityLine(repo, ticket) {
     if (r.unavailable !== undefined) return `run-log integrity: unavailable (${r.unavailable})`;
     return `run-log integrity: events=${r.events} runs=${r.runs} open_phases=${r.open_phases} warnings=${r.warnings} loss_records=${r.loss_records}`
       + (r.future_history ? ` degraded=future_history(${r.future_history})` : '')
-      + (r.excluded_unreadable ? ` degraded=excluded_unreadable(${r.excluded_unreadable}) figures_unreliable` : '');
+      // Abandoned runs are never complete; partial_legacy runs may have history only in a pre-S5 archive (S5 cutover).
+      + (r.abandoned_runs ? ` abandoned=${r.abandoned_runs}` : '')
+      + (r.partial_legacy_runs ? ` partial_legacy=${r.partial_legacy_runs}` : '')
+      + (r.legacy_present?.files ? ` legacy_present=${r.legacy_present.lines === 'unavailable' ? 'unavailable' : r.legacy_present.lines}` : '');
   } catch (e) { return `run-log integrity: unavailable (${String(e?.message ?? e).split('\n')[0]})`; }
 }
 

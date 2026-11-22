@@ -607,7 +607,7 @@ test('S5: report from a linked worktree (and its subdirectory) pairs a start in 
   mkdirSync(legacy, { recursive: true });
   mkdirSync(common, { recursive: true });
   writeFileSync(join(legacy, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z'));
-  // The start also migrated verbatim into the common log (S5 end-time migration): it is one row, not a duplicate.
+  // Cutover: the pre-S5 start in the legacy log is never read; only the shared log (here holding the full pair) counts.
   writeFileSync(join(common, 'T1.jsonl'), row('start', '2026-01-01T00:00:00.000Z') + row('end', '2026-01-01T00:00:05.000Z', { duration_ms: 5000, outcome: 'pass' }));
   for (const repo of [wt2, join(wt2, 'sub')]) {
     for (const sel of [['--ticket', 'T1'], ['--all']]) {
