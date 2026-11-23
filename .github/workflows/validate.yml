@@ -42,6 +42,8 @@ jobs:
         run: node --test skills/vapt/effectiveness.test.mjs
       - name: Test vendored security-audit validators
         run: node --test skills/security-audit/validate-findings.test.cjs skills/security-audit/validate-coverage-ledger.test.cjs
+      - name: Test and check review-rounds ledgers
+        run: node --test scripts/review-rounds.test.mjs && node scripts/review-rounds.mjs check
 
   # The library CLI links (symlinks, or junctions on Windows), copies and updates skill directories,
   # so it is tested on every OS and on the minimum Node. Each test runs a temp copy of the CLI
