@@ -352,12 +352,18 @@ function providerCount(pe) {
   return null;
 }
 function validHistory(h) {
-  if (h === undefined || h === null) return { ...HELD_HISTORY, state: 'open' };
+  // Missing history is a conservative COLD START: held, so admission needs two clean samples.
+  if (h === undefined || h === null) return { ...HELD_HISTORY };
   if (!isPlain(h) || Object.keys(h).some(k => !HISTORY_KEYS.includes(k))) return null;
-  const x = { state: h.state ?? 'open', clean_streak: h.clean_streak ?? 0, last_admit_t_ms: h.last_admit_t_ms ?? null, last_sample_t_ms: h.last_sample_t_ms ?? null };
+  const x = { state: h.state ?? 'held', clean_streak: h.clean_streak ?? 0, last_admit_t_ms: h.last_admit_t_ms ?? null, last_sample_t_ms: h.last_sample_t_ms ?? null };
   if (x.state !== 'open' && x.state !== 'held') return null;
   if (!isInt(x.clean_streak) || (x.state === 'held' && x.clean_streak >= HOST_POLICY.clean_samples_to_resume)) return null;
   for (const k of ['last_admit_t_ms', 'last_sample_t_ms']) if (x[k] !== null && !isInt(x[k])) return null;
+  // Consistency with how the history can have been issued: a streak or an open state exists only after a counted sample,
+  // and an admit can only be at or before the last counted sample.
+  if ((x.clean_streak >= 1 || x.state === 'open') && x.last_sample_t_ms === null) return null;
+  if (x.state === 'open' && x.clean_streak < 1) return null;
+  if (x.last_admit_t_ms !== null && (x.last_sample_t_ms === null || x.last_admit_t_ms > x.last_sample_t_ms)) return null;
   return x;
 }
 function validSample(x) {
@@ -372,42 +378,44 @@ function validSample(x) {
  *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
  *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
  * Returns { admit, reason, reasons, signals, history, terminate: [] }. A wrong-shaped call HOLDS with `invalid_args`.
- * A sample whose t_ms is not newer than history.last_sample_t_ms is a replay: held_resample, history unchanged.
+ * There is NO fallback admit: any invalid snapshot field, history or argument holds. Non-darwin holds unless a valid snapshot is injected
+ * (E0/CI inject one). Missing history = cold start (held; two clean samples needed). A sample counts only if >= 15 s after
+ * history.last_sample_t_ms; closer or older samples are held_resample with history unchanged.
  */
 export function admitHost(snapshot, cls, running, history) {
-  const hold = (reason, h, extra = {}) => ({ admit: false, reason, reasons: [reason], signals: { available: false, ...extra }, history: h, terminate: [] });
+  const result = (admit, reasons, signals, h) => ({ admit, reason: admit ? 'admitted' : reasons[0], reasons, signals, history: h, terminate: [] });
   const hist = validHistory(history);
   const run = running === undefined ? { total: 0, heavy: 0 } : running;
   if ((cls !== 'HEAVY' && cls !== 'LIGHT') || !isPlain(run) || !isInt(run.total) || !isInt(run.heavy) || run.heavy > run.total
-    || hist === null || !isPlain(snapshot)) return hold('invalid_args', { ...HELD_HISTORY });
+    || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
   const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
   const providers = providerCount(snapshot.provider_errors);
   const heavyKnown = isInt(snapshot.heavy_processes);
   const cores = snapshot.cores;
-  const last = samples[samples.length - 1];
+  const recovering = { ...hist, state: 'held', clean_streak: 0 };
+  // Unusable timestamps are a hard hold: samples cannot be ordered or aged.
+  if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
+    return result(false, ['held_resample'], { available: false, timestamps_ok: false }, recovering);
+  // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
   const fieldsOk = snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
     && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
-  // Unusable timestamps are a hard hold (never the LIGHT fallback): the sample cannot be ordered or aged.
-  if (snapshot.platform === 'darwin' && samples.some(x => !isPlain(x) || !isInt(x.t_ms))) return hold('held_resample', { ...hist, state: 'held', clean_streak: 0 }, { available: false, timestamps_ok: false });
   if (!fieldsOk) {
-    // Fail-safe fallback: at most ONE LIGHT task and only when no stop signal is known. Never HEAVY, never while anything runs.
     const stop = [];
-    const knownPressure = samples.filter(x => isPlain(x) && HOST_POLICY.pressure_levels.includes(x.pressure_level)).map(x => x.pressure_level);
-    if (knownPressure.some(p => p >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
+    if (samples.some(x => HOST_POLICY.pressure_levels.includes(x.pressure_level) && x.pressure_level >= HOST_POLICY.pressure_hold_level)) stop.push('held_pressure');
     if (providers !== null && providers > 0) stop.push('held_provider');
-    const admit = stop.length === 0 && cls === 'LIGHT' && run.total === 0;
-    const reasons = admit ? ['snapshot_unavailable'] : [...stop, 'snapshot_unavailable'];
-    return { admit, reason: reasons[0], reasons, signals: { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 },
-      history: { ...hist, state: 'held', clean_streak: 0, last_admit_t_ms: admit && isInt(last?.t_ms) ? last.t_ms : hist.last_admit_t_ms }, terminate: [] };
+    return result(false, [...stop, 'snapshot_unavailable'], { platform: snapshot.platform ?? null, available: false, heavy_slots: 1 }, recovering);
   }
-  const latest = last;
-  const glitch = { ...hist, state: 'held', clean_streak: 0 };
-  // Replay of an already-counted sample: one sample, never two. History is returned unchanged.
-  if (hist.last_sample_t_ms !== null && latest.t_ms <= hist.last_sample_t_ms) return hold('held_resample', hist, { available: true, replay: true });
+  const latest = samples[samples.length - 1];
+  // History timestamps must not be in the future relative to the snapshot clock.
+  if ((hist.last_sample_t_ms !== null && hist.last_sample_t_ms > snapshot.now_ms) || (hist.last_admit_t_ms !== null && hist.last_admit_t_ms > snapshot.now_ms))
+    return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
+  // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample, history unchanged.
+  if (hist.last_sample_t_ms !== null && latest.t_ms - hist.last_sample_t_ms < HOST_POLICY.sample_gap_min_ms)
+    return result(false, ['held_resample'], { available: true, replay: true }, hist);
   const gapsOk = samples.every((x, i) => i === 0 || (x.t_ms - samples[i - 1].t_ms >= HOST_POLICY.sample_gap_min_ms && x.t_ms - samples[i - 1].t_ms <= HOST_POLICY.sample_gap_max_ms));
   const age = snapshot.now_ms - latest.t_ms;
-  const fresh = Number.isFinite(snapshot.now_ms) && age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
-  if (!fresh || (samples.length > 1 && !gapsOk)) return hold('held_resample', glitch, { available: true, fresh, gaps_ok: gapsOk });
+  const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
+  if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, ['held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
   const holds = [];
   if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
   let swap = 'flat';
@@ -430,10 +438,9 @@ export function admitHost(snapshot, cls, running, history) {
   // Unknown heavy count is conservative: a HEAVY request is held, never counted as 0.
   if (cls === 'HEAVY' && (!heavyKnown || heavyNow >= heavy_slots)) reasons.push('held_heavy');
   const admit = reasons.length === 0;
-  return { admit, reason: admit ? 'admitted' : reasons[0], reasons,
-    signals: { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
-      clean, clean_streak, healthy, heavy_slots, heavy_running: heavyNow, heavy_known: heavyKnown },
-    history: { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms }, terminate: [] };
+  return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
+    clean, clean_streak, healthy, heavy_slots, heavy_running: heavyNow, heavy_known: heavyKnown },
+  { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }
 
 const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat', ps: '/bin/ps' });
@@ -461,7 +468,7 @@ export async function hostSnapshot(probe = {}) {
   const sleep = probe.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
   const count = probe.samples ?? 2;
   const intervalMs = probe.intervalMs ?? 20000;
-  const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 16 * 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
+  const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
   const loadavg = probe.loadavg ?? loadavgOs;
   const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, now_ms: null, samples: [], heavy_processes: null, provider_errors: probe.providerErrors ?? [] };
   if (platform !== 'darwin') return base;
@@ -473,7 +480,9 @@ export async function hostSnapshot(probe = {}) {
     base.samples.push({ t_ms: now(), pressure_level: p ? Number(p[0]) : null, swapouts: m ? Number(m[1]) : null, load1: l1, load5: l5, load15: l15 });
   }
   const ps = run(BIN.ps, ['-axo', 'pid=,ppid=,command=']);
-  base.heavy_processes = ps === null || ps === undefined ? null : countHeavyRoots(ps);
+  // ps failed, was over the 1 MB bound, or is garbled (any non-blank line not `pid ppid command`) => UNKNOWN, never 0.
+  const psLines = typeof ps === 'string' ? ps.split('\n').filter(l => l.trim() !== '') : [];
+  base.heavy_processes = psLines.length > 0 && psLines.every(l => /^\s*\d+\s+\d+\s+\S/.test(l)) ? countHeavyRoots(ps) : null;
   base.now_ms = now();
   return base;
 }

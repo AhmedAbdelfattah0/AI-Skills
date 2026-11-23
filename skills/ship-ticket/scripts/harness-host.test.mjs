@@ -9,8 +9,10 @@ const snap = (o = {}) => ({ platform: 'darwin', cores: 10, now_ms: T0 + 21000, s
 const withLatest = (o) => snap({ samples: [S(), S({ t_ms: T0 + 20000, ...o })] });
 // The n-th later snapshot (distinct, strictly increasing timestamps).
 const NEXT = (n, o = {}) => snap({ now_ms: T0 + 21000 + n * 20000, samples: [S({ t_ms: T0 + n * 20000 }), S({ t_ms: T0 + 20000 + n * 20000, ...o })] });
-const LIGHT = (s, running, history) => admitHost(s, 'LIGHT', running, history);
-const HEAVY = (s, running, history) => admitHost(s, 'HEAVY', running, history);
+// H0: a host that has already resumed (open) at an earlier counted sample. history `null`/omitted-to-admitHost = cold start (held).
+const H0 = { state: 'open', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 };
+const LIGHT = (s, running, history = H0) => admitHost(s, 'LIGHT', running, history);
+const HEAVY = (s, running, history = H0) => admitHost(s, 'HEAVY', running, history);
 const R = (total, heavy = 0) => ({ total, heavy });
 
 test('healthy host admits one LIGHT task with reason admitted', () => {
@@ -19,8 +21,21 @@ test('healthy host admits one LIGHT task with reason admitted', () => {
   assert.equal(r.reason, 'admitted');
   assert.deepEqual(r.reasons, []);
   assert.equal(r.signals.healthy, true);
-  assert.deepEqual(r.history, { state: 'open', clean_streak: 1, last_admit_t_ms: T0 + 20000, last_sample_t_ms: T0 + 20000 });
+  assert.deepEqual(r.history, { state: 'open', clean_streak: 2, last_admit_t_ms: T0 + 20000, last_sample_t_ms: T0 + 20000 });
   assert.deepEqual(r.terminate, []);
+});
+
+test('cold start (missing history) is HELD: admit only after two clean, >= 15 s apart samples', () => {
+  for (const h of [null, undefined]) {
+    const c1 = admitHost(snap(), 'LIGHT', R(0), h);
+    assert.equal(c1.admit, false);
+    assert.deepEqual(c1.reasons, ['held_hysteresis']);
+    const near = LIGHT(snap({ now_ms: T0 + 21001, samples: [S({ t_ms: T0 + 1 }), S({ t_ms: T0 + 20001 })] }), R(0), c1.history);
+    assert.deepEqual(near.reasons, ['held_resample']);
+    assert.deepEqual(near.history, c1.history);
+    const c2 = LIGHT(NEXT(1), R(0), c1.history);
+    assert.equal(c2.admit, true);
+  }
 });
 
 test('admit ONE then re-sample: the same sample cannot admit twice; a newer sample can', () => {
@@ -60,7 +75,7 @@ test('a falling, wrapped or reset swap counter is never flat: held_swap (regress
   const fall = LIGHT(snap({ samples: [S({ swapouts: 500 }), S({ t_ms: T0 + 20000, swapouts: 100 })] }), R(0));
   assert.deepEqual(fall.reasons, ['held_swap']);
   assert.equal(fall.signals.swap, 'regressed');
-  const neg = LIGHT(snap({ samples: [S({ swapouts: -5 }), S({ t_ms: T0 + 20000, swapouts: -5 })] }), R(1));
+  const neg = LIGHT(snap({ samples: [S({ swapouts: -5 }), S({ t_ms: T0 + 20000, swapouts: -5 })] }), R(0));
   assert.equal(neg.admit, false);
   assert.equal(neg.reason, 'snapshot_unavailable');
 });
@@ -102,7 +117,7 @@ test('provider errors (429, quota, timeout) hold with held_provider; a numeric c
   assert.deepEqual(LIGHT(snap({ provider_errors: 3 }), R(0)).reasons, ['held_provider']);
   assert.equal(LIGHT(snap({ provider_errors: 0 }), R(0)).admit, true);
   for (const bad of ['429', -1, 1.5, [{ kind: 'weird', t_ms: 1 }], ['x'], null, {}, undefined]) {
-    const r = LIGHT(snap({ provider_errors: bad }), R(1));
+    const r = LIGHT(snap({ provider_errors: bad }), R(0));
     assert.equal(r.admit, false, JSON.stringify(bad));
     assert.equal(r.reason, 'snapshot_unavailable', JSON.stringify(bad));
   }
@@ -143,8 +158,10 @@ test('hysteresis: REPLAYING the same clean snapshot never counts as a second cle
     assert.deepEqual(replay.reasons, ['held_resample']);
     assert.deepEqual(replay.history, clean1.history);
   }
-  // An OLDER snapshot is a replay too.
-  assert.deepEqual(LIGHT(NEXT(0), R(0), clean1.history).reasons, ['held_resample']);
+  // An OLDER snapshot never counts: its history is in that snapshot's future, so it is refused.
+  const older = LIGHT(NEXT(0), R(0), clean1.history);
+  assert.equal(older.admit, false);
+  assert.equal(older.reason, 'invalid_args');
 });
 
 test('hysteresis: a bad sample between two clean ones resets the streak', () => {
@@ -201,7 +218,7 @@ test('countHeavyRoots counts suite roots, not processes: one suite with children
 test('never kills: input is not mutated, terminate is always empty, even when unhealthy', () => {
   const s = withLatest({ pressure_level: 4, swapouts: 9999 });
   const running = { total: 5, heavy: 3 };
-  const history = { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: null };
+  const history = { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 };
   const before = JSON.stringify([s, running, history]);
   const r = admitHost(s, 'HEAVY', running, history);
   assert.equal(JSON.stringify([s, running, history]), before);
@@ -209,47 +226,67 @@ test('never kills: input is not mutated, terminate is always empty, even when un
   assert.deepEqual(Object.keys(r).sort(), ['admit', 'history', 'reason', 'reasons', 'signals', 'terminate']);
 });
 
-test('fallback (non-darwin): admits ONE LIGHT task only when no stop signal; never HEAVY, never while anything runs', () => {
+test('no fallback: non-darwin or any invalid snapshot HOLDS, even LIGHT with nothing running; HEAVY too', () => {
   const linux = { platform: 'linux', cores: 64, samples: [], heavy_processes: null, provider_errors: [] };
-  const first = LIGHT(linux, R(0));
-  assert.equal(first.admit, true);
-  assert.equal(first.reason, 'snapshot_unavailable');
-  assert.equal(first.signals.heavy_slots, 1);
-  assert.equal(LIGHT(linux, R(1)).admit, false);
-  assert.equal(HEAVY(linux, R(0)).admit, false);
-  assert.equal(HEAVY(linux, R(0)).reason, 'snapshot_unavailable');
+  for (const h of [null, H0]) {
+    for (const call of [LIGHT, HEAVY]) {
+      const r = call(linux, R(0), h);
+      assert.equal(r.admit, false);
+      assert.deepEqual(r.reasons, ['snapshot_unavailable']);
+    }
+  }
 });
 
-test('fallback never ignores a known stop signal: Linux + 429, darwin pressure 4 with load1 null, HEAVY with heavy > total', () => {
+test('stop signals still get their specific reason first: Linux + 429, darwin pressure 4 with load1 null', () => {
   const l429 = LIGHT({ platform: 'linux', cores: 4, samples: [], provider_errors: [{ kind: '429', t_ms: 1 }] }, R(0));
   assert.equal(l429.admit, false);
   assert.deepEqual(l429.reasons, ['held_provider', 'snapshot_unavailable']);
   const p4 = LIGHT(withLatest({ pressure_level: 4, load1: null }), R(0));
   assert.equal(p4.admit, false);
   assert.deepEqual(p4.reasons, ['held_pressure', 'snapshot_unavailable']);
-  assert.equal(admitHost(snap(), 'HEAVY', { total: 0, heavy: 3 }).reason, 'invalid_args');
+  assert.equal(admitHost(snap(), 'HEAVY', { total: 0, heavy: 3 }, H0).reason, 'invalid_args');
 });
 
-test('darwin with unreadable pressure/load/empty samples is snapshot_unavailable, not healthy', () => {
-  assert.equal(LIGHT(withLatest({ pressure_level: null }), R(1)).reason, 'snapshot_unavailable');
-  assert.equal(LIGHT(withLatest({ load5: undefined }), R(1)).reason, 'snapshot_unavailable');
-  assert.equal(LIGHT(snap({ samples: [] }), R(1)).reason, 'snapshot_unavailable');
+test('a VALID darwin snapshot with ONE bad field holds for every bad-field class (cold and open history), never admits', () => {
+  const many = Array.from({ length: 17 }, (_, i) => S({ t_ms: T0 + i * 20000 }));
+  const bads = {
+    provider_kind_500: snap({ provider_errors: [{ kind: '500', t_ms: 1 }] }), cores_5000: snap({ cores: 5000 }), cores_0: snap({ cores: 0 }),
+    load15_neg0_01: withLatest({ load15: -0.01 }), samples_17: snap({ samples: many, now_ms: T0 + 16 * 20000 + 1000 }), pressure_3: withLatest({ pressure_level: 3 }),
+    swap_neg: withLatest({ swapouts: -1 }), platform_linux: snap({ platform: 'linux' }), load_string: withLatest({ load1: '1' }),
+    swap_growth_load_50_and_bad_cores: withLatest({ swapouts: 999, load1: 50 }),
+  };
+  bads.swap_growth_load_50_and_bad_cores.cores = 5000;
+  for (const [name, s] of Object.entries(bads)) for (const h of [null, H0]) for (const call of [LIGHT, HEAVY]) {
+    const r = call(s, R(0), h);
+    assert.equal(r.admit, false, name);
+    assert.ok(r.reasons.includes('snapshot_unavailable') || r.reasons.includes('held_resample'), name + JSON.stringify(r.reasons));
+  }
+});
+
+test('history in the future (last_admit_t_ms / last_sample_t_ms > now_ms) or inconsistent with its streak is invalid_args', () => {
+  const futureAdmit = { state: 'open', clean_streak: 1, last_admit_t_ms: T0 + 10_000_000, last_sample_t_ms: T0 + 10_000_000 };
+  assert.equal(LIGHT(snap(), R(0), futureAdmit).reason, 'invalid_args');
+  assert.equal(LIGHT(snap(), R(0), { ...H0, last_sample_t_ms: T0 + 99_999_999 }).reason, 'invalid_args');
+  assert.equal(LIGHT(snap(), R(0), { state: 'held', clean_streak: 0, last_admit_t_ms: T0 + 99_999_999, last_sample_t_ms: T0 + 99_999_999 }).reason, 'invalid_args');
 });
 
 test('history validation: every malformed history HOLDS with invalid_args and never admits', () => {
-  const ok = { state: 'open', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null };
+  const ok = { state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null };
   const bad = [
     { ...ok, clean_streak: Infinity }, { ...ok, clean_streak: '1' }, { ...ok, clean_streak: 1.5 }, { ...ok, clean_streak: -1 }, { ...ok, clean_streak: NaN },
     { ...ok, state: 'HELD' }, { ...ok, state: 'resumed' }, { state: 'held', clean_streak: 5, last_admit_t_ms: null, last_sample_t_ms: null },
     { ...ok, last_admit_t_ms: NaN }, { ...ok, last_admit_t_ms: 'x' }, { ...ok, last_sample_t_ms: Infinity }, { ...ok, extra: 1 }, 'open', 7, [],
+    { state: 'open', clean_streak: 5, last_admit_t_ms: null, last_sample_t_ms: null }, { state: 'open', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: T0 - 20000 },
+    { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: null }, { ...H0, last_admit_t_ms: T0 },
   ];
   for (const h of bad) {
     const r = LIGHT(snap(), R(0), h);
     assert.equal(r.admit, false, JSON.stringify(h));
     assert.equal(r.reason, 'invalid_args', JSON.stringify(h));
   }
-  assert.equal(LIGHT(snap(), R(0), undefined).admit, true);
-  assert.equal(LIGHT(snap(), R(0), null).admit, true);
+  assert.deepEqual(admitHost(snap(), 'LIGHT', R(0), undefined).reasons, ['held_hysteresis']);
+  assert.equal(LIGHT(snap(), R(0), ok).admit, false);
+  assert.equal(LIGHT(snap(), R(0), H0).admit, true);
 });
 
 test('positional contract: wrong shapes hold with invalid_args (an options object in position 2 is NOT accepted)', () => {
@@ -269,10 +306,10 @@ test('positional contract: wrong shapes hold with invalid_args (an options objec
 });
 
 test('range validation: pressure outside {1,2,4}, bad loads, bad cores, bad swap values never read as healthy', () => {
-  for (const level of [0, -3, 3, 5, 1.5, '1']) assert.equal(LIGHT(withLatest({ pressure_level: level }), R(1)).reason, 'snapshot_unavailable', 'p' + level);
-  for (const v of [-1, NaN, Infinity, '1']) for (const k of ['load1', 'load5', 'load15']) assert.equal(LIGHT(withLatest({ [k]: v }), R(1)).reason, 'snapshot_unavailable', k + v);
-  for (const cores of [0, -2, 1e9, 4.5, '8', NaN, undefined]) assert.equal(LIGHT(snap({ cores }), R(1)).reason, 'snapshot_unavailable', 'c' + cores);
-  for (const swapouts of [-1, 1.5, '3', NaN, Infinity]) assert.equal(LIGHT(withLatest({ swapouts }), R(1)).reason, 'snapshot_unavailable', 's' + swapouts);
+  for (const level of [0, -3, 3, 5, 1.5, '1']) assert.equal(LIGHT(withLatest({ pressure_level: level }), R(0)).reason, 'snapshot_unavailable', 'p' + level);
+  for (const v of [-1, NaN, Infinity, '1']) for (const k of ['load1', 'load5', 'load15']) assert.equal(LIGHT(withLatest({ [k]: v }), R(0)).reason, 'snapshot_unavailable', k + v);
+  for (const cores of [0, -2, 1e9, 4.5, '8', NaN, undefined]) assert.equal(LIGHT(snap({ cores }), R(0)).reason, 'snapshot_unavailable', 'c' + cores);
+  for (const swapouts of [-1, 1.5, '3', NaN, Infinity]) assert.equal(LIGHT(withLatest({ swapouts }), R(0)).reason, 'snapshot_unavailable', 's' + swapouts);
 });
 
 test('reason codes are the documented set', () => {
@@ -301,26 +338,29 @@ test('hostSnapshot uses ABSOLUTE tool paths, injected clock/sleep, counts suite 
   assert.deepEqual(s.samples.map(x => [x.t_ms, x.pressure_level, x.swapouts, x.load1, x.load5, x.load15]), [[25000, 1, 10, 1, 2, 3], [45000, 1, 11, 1, 2, 3]]);
   assert.equal(s.heavy_processes, 2);
   assert.equal(s.now_ms, 65000);
-  assert.deepEqual(LIGHT(s, R(0)).reasons, ['held_swap', 'held_provider']);
+  assert.deepEqual(LIGHT(s, R(0), null).reasons, ['held_swap', 'held_provider']);
 });
 
 test('hostSnapshot parses strictly: garbled sysctl, vm_stat or ps output becomes null fields, which hold', async () => {
   const mk = (o) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], o), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
   const g1 = await mk({ pressure: '1garbage\n' });
   assert.equal(g1.samples[0].pressure_level, null);
-  assert.equal(LIGHT(g1, R(1)).reason, 'snapshot_unavailable');
+  assert.equal(LIGHT(g1, R(0)).reason, 'snapshot_unavailable');
   const g2 = await mk({ vm: () => 'Swapouts:   100garbage.\n' });
   assert.equal(g2.samples[0].swapouts, null);
-  assert.equal(LIGHT(g2, R(1)).reason, 'snapshot_unavailable');
+  assert.equal(LIGHT(g2, R(0)).reason, 'snapshot_unavailable');
   const g3 = await mk({ vm: () => 'xSwapouts: 5.\n' });
   assert.equal(g3.samples[0].swapouts, null);
-  const none = await mk({ ps: null });
-  assert.equal(none.heavy_processes, null);
-  assert.deepEqual(HEAVY(none, R(0)).reasons.slice(-1), ['held_heavy']);
+  for (const ps of [null, '', 'garbage\n', ' 1 0 launchd\nnot a row\n']) {
+    const none = await mk({ ps });
+    assert.equal(none.heavy_processes, null, JSON.stringify(ps));
+    assert.deepEqual(HEAVY(none, R(0), null).reasons.slice(-1), ['held_heavy']);
+    assert.equal(LIGHT(none, R(0), null).signals.heavy_known, false);
+  }
 });
 
 test('hostSnapshot on non-darwin does no reading and the result is the fail-safe fallback', async () => {
   const none = await hostSnapshot({ platform: 'linux', exec: () => { throw new Error('must not read'); }, cpus: () => new Array(2) });
   assert.deepEqual(none.samples, []);
-  assert.equal(LIGHT(none, R(1)).reason, 'snapshot_unavailable');
+  assert.equal(LIGHT(none, R(0)).reason, 'snapshot_unavailable');
 });
