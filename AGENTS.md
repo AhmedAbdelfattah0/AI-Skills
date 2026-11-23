@@ -148,7 +148,7 @@ node scripts/cli.mjs autoupdate --remove  # take both back out
   ubuntu. Keep `cli.mjs`'s validator and `validate.sh` in sync if you touch validation logic; the Node
   one is authoritative.
 - **The CLI has its own tests,** `scripts/cli.test.mjs`, run by CI on ubuntu, macOS and Windows
-  on Node 22 (the supported floor; the matrix still carries an older-Node cell until it is removed). Every test runs a temp copy of `cli.mjs` and `autoupdate.mjs` against a temp home
+  on Node 22, the supported floor. Every test runs a temp copy of `cli.mjs` and `autoupdate.mjs` against a temp home
   directory, so no test can reach a real skills directory, a scheduler or this checkout (`update`
   would otherwise `git pull` it). Keep it that way: never point a test at the real CLI's `install`,
   `update` or `autoupdate`.
