@@ -892,7 +892,8 @@ const NAME_API = /^(?:realpath|readdir|readlink|mkdtemp|opendir)(?:Sync)?$/;
 const READ_API = /^readFile(?:Sync)?$/;
 const CP_API = /^(?:spawnSync|execFileSync|execSync|spawn|execFile|exec|fork)$/;
 // A Map, so an inherited name (`import 'constructor'`) is never a watched builtin.
-const MODULES = new Map(Object.entries({ fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/promises': 'fsp', child_process: 'cp', 'node:child_process': 'cp', path: 'path', 'node:path': 'path' }));
+const MODULES = new Map(Object.entries({ fs: 'fs', 'node:fs': 'fs', 'fs/promises': 'fsp', 'node:fs/promises': 'fsp', child_process: 'cp', 'node:child_process': 'cp', path: 'path', 'node:path': 'path',
+  crypto: 'crypto', 'node:crypto': 'crypto' }));
 // fs names that return no text: anything not here, not checked and not `promises` is unclassifiable. mkdir(Sync)
 // is NOT here: with `recursive` it returns the first directory created as a string (MEASURED, Node 18 and 22).
 const FS_SAFE = new Set(['statSync', 'lstatSync', 'fstatSync', 'stat', 'lstat', 'accessSync', 'access', 'existsSync', 'constants',
@@ -900,12 +901,13 @@ const FS_SAFE = new Set(['statSync', 'lstatSync', 'fstatSync', 'stat', 'lstat', 
   'copyFileSync', 'openSync', 'closeSync', 'writeSync', 'readSync', 'fsyncSync', 'symlinkSync', 'linkSync', 'truncateSync', 'utimesSync']);
 // The git-output path of the lib: the modules T4a scans. Every other non-test module under lib/ is named here with
 // the reason it is outside the git-output path (the partition test fails on an unnamed one).
-const SCANNED = ['git-capability.mjs', 'git-exec.mjs'];
+const SCANNED = ['git-capability.mjs', 'git-exec.mjs', 'git-hardened.mjs'];
 /** lib modules neither scanned nor named out of scope (must be empty). */
 const unpartitioned = (files) => files.filter((f) => !SCANNED.includes(f) && !Object.hasOwn(OUT_OF_SCOPE, f));
 const OUT_OF_SCOPE = {
   'durable-io.mjs': 'S-30a durable state/lock I/O. FINDING (reported, not adopted): gitPath() spawns `git rev-parse --git-path` with encoding utf8, a lossy git-output decode; no S-30c row adopts it yet (asserted below, so a fix updates this entry)',
   'run-log-paths.mjs': 'S5 run-log location for run-log.mjs and eval.mjs, and for carrier.mjs REPAIR authority (ownDirIsShared decides whether the own --git-path log is the shared log). FINDING (reported, not adopted): spawns `git rev-parse --git-dir`/`--git-common-dir`/`--git-path` with encoding utf8, the same lossy git-output decode as durable-io gitPath',
+  'git-hardened.test-helper.mjs': 'S-02a0c test tooling (imported only by tests): fixture repositories through the real git, and the qualification-bootstrap copy of lib/ with the current cell added',
   'mutation.test-helper.mjs': 'shared mutation harness (test tooling, imported only by tests); spawns node --test, never git, and decodes TAP output only',
   'shape.mjs': 'S-30b closed-schema validator; no fs, child_process or git output (uses Reflect for own-key reads, which T4a would refuse)',
 };
@@ -934,6 +936,10 @@ function resolveSpecifier(spec, file, scanned) {
 /** 'name' | 'read' | 'cp' | 'safe' | {ns} | null (unclassified) for a member of a watched module. */
 function apiKind(mod, name) {
   if (mod === 'path') return 'safe';
+  // S-02a0c: crypto yields hashes (Buffers), never decoded text; only createHash is classified.
+  if (mod === 'crypto') return name === 'createHash' ? 'safe' : null;
+  // mkdirSync returns a path STRING when recursive (MEASURED): every call is a site pinned in ALLOWED_SITES (non-recursive only).
+  if (mod === 'fs' && name === 'mkdirSync') return 'pinned';
   if (mod === 'cp') return CP_API.test(name) ? 'cp' : null;
   if (mod === 'fs' && name === 'promises') return { ns: 'fsp' };
   if (NAME_API.test(name) && (mod === 'fs' || !name.endsWith('Sync'))) return 'name';
@@ -1172,6 +1178,7 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
     const kind = apiKind(mod, name);
     if (!kind) return hit(n, 'unclassifiable', `${mod}.${name} is not classified`);
     if (kind === 'safe') return undefined;
+    if (kind === 'pinned') return isCallee(i) ? hit(n, 'mkdir-site') : hit(n, 'unclassifiable', `${name} used other than as a direct call`);
     if (isCallee(i)) return callRule(kind, name, p, n);
     if (/^realpath/.test(name) && member === 'native' && isCallee(i - 1)) return callRule(kind, name, anc[i - 1].node, n);
     return hit(n, 'unclassifiable', `${name} used other than as a direct call`);
@@ -1250,7 +1257,8 @@ function decodeSites(file, src, scanned = FIXTURE_SET, rules = NODE_RULES) {
         }
         if (v === 'String') return ['fromCharCode', 'fromCodePoint'].includes(member) ? undefined : hit(n, 'string-coercion');
         if (v === 'process') {
-          if (member === 'env' || member === 'platform') return undefined;
+          if (member === 'env' || member === 'platform' || member === 'arch' || member === 'versions') return undefined;
+          if (member === 'getuid') return isCallee(a.length - 2) ? undefined : hit(p, 'unclassifiable', 'process.getuid used as a value');
           if (member === 'cwd') return isCallee(a.length - 2) ? hit(p, 'cwd') : hit(p, 'unclassifiable', 'process.cwd used as a value');
           return REFLECT_NAME.test(member ?? '') ? undefined : hit(n, 'unclassifiable', member === null ? 'process used as a value' : `process.${member} is not classified`);
         }
@@ -1291,7 +1299,7 @@ const GRAMMAR_TYPES = new Set(['ArrayExpression', 'ArrayPattern', 'ArrowFunction
 /** Operators admitted, per expression type. Assignment is `=` only and update is `++` only. */
 const GRAMMAR_OPS = new Map([
   ['UnaryExpression', new Set(['!', 'typeof', '+'])],
-  ['BinaryExpression', new Set(['*', '+', '>>', '&', '<', '<=', '>', '>=', '===', '!==', 'instanceof'])],
+  ['BinaryExpression', new Set(['*', '+', '-', '>>', '&', '|', '<', '<=', '>', '>=', '===', '!==', 'instanceof'])],
   ['LogicalExpression', new Set(['&&', '||', '??'])],
   ['AssignmentExpression', new Set(['='])],
   ['UpdateExpression', new Set(['++'])],
@@ -1305,14 +1313,15 @@ const GRAMMAR_OPS = new Map([
 const GRAMMAR_GLOBALS = new Map([
   ['Object', { members: new Map([['keys', 'call'], ['entries', 'call'], ['fromEntries', 'call'], ['hasOwn', 'call'], ['freeze', 'any'],
     ['getOwnPropertyDescriptor', 'ownValue'], ['defineProperty', 'defineThis']]) }],
-  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call']]) }],
+  ['Buffer', { members: new Map([['from', 'call'], ['isBuffer', 'call'], ['concat', 'call'], ['alloc', 'call']]) }],
   ['Array', { members: new Map([['isArray', 'call']]) }],
   ['Number', { members: new Map([['isSafeInteger', 'call']]) }],
   ['Symbol', { members: new Map([['for', 'methodKey']]) }],
   ['String', { call: true, members: new Map([['fromCharCode', 'call']]) }],
-  ['process', { members: new Map([['env', 'any'], ['platform', 'any'], ['cwd', 'call']]) }],
+  ['process', { members: new Map([['env', 'any'], ['platform', 'any'], ['cwd', 'call'], ['arch', 'any'], ['versions', 'any'], ['getuid', 'call']]) }],
+  ['Date', { members: new Map([['now', 'call']]) }],
   ['TextDecoder', { newSrc: "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })" }],
-  ['Map', { new: true }], ['Set', { new: true }], ['WeakMap', { new: true }], ['TypeError', { new: true }],
+  ['Map', { new: true }], ['Set', { new: true }], ['WeakMap', { new: true }], ['WeakSet', { new: true }], ['TypeError', { new: true }],
   ['Error', { extends: true }], ['Uint8Array', { instanceof: true }], ['Boolean', { value: true }], ['Infinity', { value: true }], ['undefined', { value: true }],
 ]);
 /**
@@ -1326,6 +1335,14 @@ const GRAMMAR_IMPORTS = new Map([
     ['node:child_process', new Map([['spawnSync', 'spawnSync']])],
     ['node:fs', new Map([['statSync', 'call']])],
     ['./git-capability.mjs', new Map([['probeGit', 'call']])],
+  ])],
+  ['git-hardened.mjs', new Map([
+    ['node:fs', new Map([['chmodSync', 'call'], ['closeSync', 'call'], ['constants', 'value'], ['copyFileSync', 'call'], ['fstatSync', 'call'], ['lstatSync', 'call'],
+      ['mkdirSync', 'call'], ['mkdtempSync', 'call'], ['openSync', 'call'], ['opendirSync', 'call'], ['readSync', 'call'], ['readlinkSync', 'call'],
+      ['realpathSync', 'callMember:native'], ['renameSync', 'call'], ['rmdirSync', 'call'], ['unlinkSync', 'call'], ['writeFileSync', 'call']])],
+    ['node:crypto', new Map([['createHash', 'call']])],
+    ['./git-exec.mjs', new Map([['GitError', 'value'], ['composeEnv', 'call'], ['decodeStrict', 'call'], ['gitRunner', 'call'], ['hermeticPolicy', 'call'], ['zSplit', 'call']])],
+    ['./git-capability.mjs', new Map([['GitCapabilityError', 'value']])],
   ])],
   ['git-capability.mjs', new Map([
     ['node:child_process', new Map([['spawnSync', 'spawnSync']])],
@@ -1342,14 +1359,21 @@ const GRAMMAR_IMPORTS = new Map([
  * of Buffers) is the documented NOT CHECKED class.
  */
 const GRAMMAR_MEMBERS = new Set([
-  'PATH', 'add', 'ambient', 'args', 'buffer', 'byteOffset', 'bytes', 'code', 'cwd', 'delete', 'deletes',
-  'dirname', 'endsWith', 'env', 'envLimit', 'envTooLarge', 'equals', 'error', 'every', 'exclude', 'exec', 'filter',
-  'find', 'flatMap', 'forEach', 'fs', 'get', 'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'includes',
-  'isAbsolute', 'isDirectory', 'isExecutableFile', 'isFile', 'join', 'keys', 'lastIndexOf', 'length', 'map',
-  'maxBuffer', 'name', 'neutralisation', 'noLazyFetch', 'op', 'pairs', 'partialClone', 'path', 'platform', 'policy',
-  'posix', 'prerelease', 'push', 'reduce', 'relative', 'replace', 'resolve', 'selection', 'sep', 'set', 'signal',
-  'slice', 'some', 'sort', 'split', 'startsWith', 'status', 'stderr', 'stdin', 'stdout', 'subarray', 'test', 'timeoutMs',
-  'toLowerCase', 'toUpperCase', 'total', 'trimEnd', 'value', 'version', 'win32'
+  'add', 'ambient', 'arch', 'args', 'argv', 'buffer', 'byteOffset', 'bytes', 'checks', 'closeSync', 'code', 'common',
+  'COPYFILE_EXCL', 'ctx', 'cwd', 'deadline', 'delete', 'deletes', 'dev', 'diff', 'digest', 'dir', 'dirname', 'dirs',
+  'endsWith', 'entry', 'env', 'envLimit', 'envTooLarge', 'equals', 'error', 'every', 'exclude', 'excludeCopy',
+  'excludeSha256', 'exclusions', 'exec', 'files', 'filter', 'find', 'flatMap', 'forEach', 'fs', 'get', 'git',
+  'gitInfo', 'globalConfig', 'has', 'home', 'hooksDir', 'id', 'ignored', 'includes', 'indexOf', 'info', 'ino',
+  'isAbsolute', 'isBlockDevice', 'isCharacterDevice', 'isDirectory', 'isExecutableFile', 'isFIFO', 'isFile',
+  'isSocket', 'isSymbolicLink', 'join', 'keys', 'kind', 'lastIndexOf', 'length', 'map', 'maxBuffer', 'maxBytes',
+  'maxFiles', 'maxObjectBytes', 'maxTotalObjectBytes', 'message', 'mode', 'name', 'neutralisation', 'node',
+  'noLazyFetch', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY', 'objects', 'oid', 'oids', 'op', 'os', 'outcome', 'pairs',
+  'partialClone', 'PATH', 'path', 'platform', 'policy', 'posix', 'prerelease', 'push', 'raw', 'readSync', 'reduce',
+  'relative', 'removeEntries', 'replace', 'resolve', 'reverse', 'root', 'rootPath', 'rootStat', 'run', 'runner',
+  'selection', 'sep', 'set', 'shift', 'signal', 'size', 'slice', 'some', 'sort', 'source', 'spendBytes', 'split',
+  'startsWith', 'stat', 'status', 'stderr', 'stdin', 'stdout', 'store', 'storeDir', 'storePath', 'subarray', 'test',
+  'timeoutMs', 'TMPDIR', 'toLowerCase', 'top', 'toplevel', 'total', 'toUpperCase', 'trimEnd', 'uid', 'untracked',
+  'update', 'value', 'version', 'win32', 'workTree'
 ]);
 /** Destructuring keys that are data fields here but name a decoder method elsewhere (`decode`): readable ONLY as a
  * destructuring key, never as a member expression (round 7). */
@@ -1372,7 +1396,7 @@ const GRAMMAR_DECODER = Object.freeze({ binding: 'DECODER', call: 'DECODER.decod
  */
 const GRAMMAR_PINNED_NAMES = new Map([
   ['DECODER', { file: 'git-exec.mjs', kind: 'const', init: (i, text) => i?.type === 'NewExpression' && text(i) === GRAMMAR_GLOBALS.get('TextDecoder').newSrc }],
-  ['decodeStrict', { file: 'git-exec.mjs', kind: 'function' }],
+  ['decodeStrict', { file: 'git-exec.mjs', kind: 'function', importable: true }],
   ['ownValue', { file: 'git-exec.mjs', kind: 'const', init: (i, text) => !!i && text(i) === OWN_VALUE_SRC }],
   ['own', { file: 'git-exec.mjs', kind: 'const', init: (i) => i?.type === 'ArrowFunctionExpression' }],
   ['realFs', { file: 'git-capability.mjs', kind: 'const', init: (i) => i?.type === 'ObjectExpression' }],
@@ -1392,6 +1416,7 @@ const GRAMMAR_BYTE_MEMBER_AUDIT = new Map([
   ['slice', 'a Buffer view (ArrayBuffer#slice: an ArrayBuffer)'], ['subarray', 'a Buffer view'], ['sort', 'TypedArray#sort is numeric'],
   ['join', 'TypedArray#join joins the NUMBERS (`97,98`), never decodes text'],
   ['includes', 'encodes a string needle (string to bytes); returns a boolean'], ['lastIndexOf', 'encodes a string needle; returns a number'],
+  ['indexOf', 'encodes a string needle; returns a number'], ['reverse', 'reverses numbers in place (git-hardened uses it on an Array)'],
 ]);
 /** Member names that ARE decode-capable: admitted by the grammar only as a CALLEE, and only because every use is a
  * legacy-rule hit that must match an ALLOWED_SITES entry (positive control: the layer-link test). */
@@ -1452,12 +1477,27 @@ function grammarSites(file, src) {
   };
   for (const [name, pin] of GRAMMAR_PINNED_NAMES) {
     const ids = decl.get(name) ?? [];
-    if (pin.file !== file) { for (const id of ids) refuse(id, `pinned name ${name} declared outside ${pin.file}`); continue; }
+    // S-02a0c: an exported pinned function may be IMPORTED by its own name from its own file (the binding is the pin).
+    if (pin.file !== file) {
+      for (const id of ids) {
+        if (pin.importable && importsPin(id, name, pin)) { used.add(`pinned-import:${file}:${name}`); continue; }
+        refuse(id, `pinned name ${name} declared outside ${pin.file}`);
+      }
+      continue;
+    }
     if (ids.length > 1) { for (const id of ids) refuse(id, `pinned name ${name} declared ${ids.length} times`); continue; }
     if (ids.length === 1 && !pinnedDecl(ids[0], pin)) { refuse(ids[0], `pinned name ${name} declared other than as its pinned top-level ${pin.kind}`); continue; }
     if (ids.length === 1) used.add(`pinned-name:${name}`);
   }
   const isLocal = (name) => decl.has(name);
+
+  /** `id` is the local of `import { <name> } from './<pin.file>'` (same name, a top-level import declaration). */
+  function importsPin(id, name, pin) {
+    const sp = parent.get(id);
+    const d = sp && parent.get(sp.node);
+    return sp.node.type === 'ImportSpecifier' && sp.key === 'local' && (sp.node.imported.name ?? sp.node.imported.value) === name
+      && d.node.type === 'ImportDeclaration' && d.node.source.value === `./${pin.file}`;
+  }
 
   // Imports: local name -> use.
   const imports = new Map();
@@ -1783,6 +1823,8 @@ function libModules(dir = here, rel = '') {
 const ALLOWED_SITES = [
   ['git-exec.mjs', '<module>', 'decoder-api', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'the one strict decoder (fatal and ignoreBOM true; decoder-lossy fires otherwise)'],
   ['git-exec.mjs', '<module>', 'encoding-literal', 0, "new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })", "const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", 'its label'],
+  ['git-hardened.mjs', 'hexKey', 'decoder-api', 0, "b.toString('hex')", "const hexKey = (b) => b.toString('hex');", 'a lossless hex Map key for path bytes (hex is not a text decode); never displayed or compared with text (S-02a0c)'],
+  ['git-hardened.mjs', 'mkdir0700', 'mkdir-site', 0, 'mkdirSync(p, 0o700)', 'const mkdir0700 = (p) => mkdirSync(p, 0o700);', 'the lib\'s one directory create: non-recursive (returns undefined, never a path string), mode 0700, exclusive (EEXIST throws) (S-02a0c)'],
   ['git-capability.mjs', 'realFs.realpath', 'name-api-no-buffer', 0, 'realpathSync.native(p)', 'return realpathSync.native(p);', 'resolves PATH entries (already strings) to the spawn executable; never compared with git output (S-02a0a, owned there)'],
   ['git-capability.mjs', 'resolveGitBinary', 'cwd', 0, 'process.cwd()', 'cwd = process.cwd()', 'default cwd used only to ban PATH dirs inside it; never compared with git output (S-02a0a, owned there)'],
   ['git-capability.mjs', 'resolveGitBinary', 'name-api-no-buffer', 0, 'fs.realpath(d)', 'const banned = [cwd, ...exclude].flatMap((d) => [P.resolve(d), fs.realpath(d)]).filter(Boolean);', 'the resolver seam: realpath of caller-supplied string dirs, compared only with other PATH strings (S-02a0a)'],
@@ -1911,7 +1953,7 @@ const ESCAPES = [
   ["new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
   ["new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });", ['decoder-api', 'encoding-literal']],
   ["spawnSync(b, [], { [k]: 'utf8' });", ['encoding-literal', 'unclassifiable']], ["readdirSync(d, { [k]: 'x', encoding: 'buffer' });", U],
-  ["import * as os from 'node:os';", U], ["import { mkdirSync } from 'node:fs';", U], ["import * as fs from 'node:fs';\nfs.mkdir(d, cb);", U],
+  ["import * as os from 'node:os';", U], ["import { mkdirSync } from 'node:fs';\nmkdirSync(d, 0o700);", ['mkdir-site']], ["import { mkdirSync } from 'node:fs';\nconst f = mkdirSync;", U], ["import * as fs from 'node:fs';\nfs.mkdirSync(d, { recursive: true });", ['mkdir-site']], ["import * as fs from 'node:fs';\nfs.mkdir(d, cb);", U],
   ["new TextDecoder(...['utf-8', {}], { fatal: true, ignoreBOM: true });", ['decoder-api', 'decoder-lossy', 'encoding-literal']],
   ['const { constructor: F } = () => {};', U],
   // one literal case per deny-list member (deleting a member must turn one red)
@@ -2104,6 +2146,10 @@ function grammarEntries() {
   for (const k of GRAMMAR_DATA_KEYS) e.add(`key:${k}`);
   e.add('pin:decoder-call').add('pin:decoder-binding');
   for (const n of GRAMMAR_PINNED_NAMES.keys()) e.add(`pinned-name:${n}`);
+  for (const [n, pin] of GRAMMAR_PINNED_NAMES) {
+    if (!pin.importable) continue;
+    for (const [file, specs] of GRAMMAR_IMPORTS) if (specs.get(`./${pin.file}`)?.has(n)) e.add(`pinned-import:${file}:${n}`);
+  }
   for (const k of GRAMMAR_METHOD_KEYS) e.add(`method:${k}`);
   return e;
 }
@@ -2177,7 +2223,7 @@ const GRAMMAR_REFUSED = [
   ['const a = 1;\nexport { a };', /an export other than/], ["export * from './git-capability.mjs';", /ExportAllDeclaration/], ['export default 1;', /ExportDefaultDeclaration/],
   // globals in a form they do not allow
   ['foo;', /free identifier foo/], ['const O = Object;', /global Object used as value/], ['const o = {};\nObject.getPrototypeOf(o);', /Object.getPrototypeOf is not allowlisted/],
-  ['Object.assign({}, {});', /Object.assign is not allowlisted/], ['Buffer.alloc(1);', /Buffer.alloc is not allowlisted/], ["process.binding('fs');", /process.binding is not allowlisted/],
+  ['Object.assign({}, {});', /Object.assign is not allowlisted/], ['Buffer.allocUnsafe(1);', /Buffer.allocUnsafe is not allowlisted/], ["process.binding('fs');", /process.binding is not allowlisted/],
   ['process.mainModule;', /process.mainModule is not allowlisted/], ['const k = Object.keys;', /Object.keys used as value/], ['const c = process.cwd;', /process.cwd used as value/],
   ['String.raw;', /String.raw is not allowlisted/], ["const s = new String('x');", /global String used as new/], ['Map();', /global Map used as callee/],
   ['const o = {};\no instanceof Object;', /global Object used as instanceof/], ['class A extends Object { }', /global Object used as extends/],
@@ -2206,7 +2252,7 @@ const GRAMMAR_REFUSED = [
   ['const x = { y: 1 };\nx.y++;', /an update of something other than a local name/], ['let i = 0;\ni--;', /operator --/], ['Infinity++;', /an update of something other than a local name/],
   // operators outside the list
   ['void 0;', /operator void/], ['let x = 1;\nx = -x;', /operator -/], ['let x = 1;\nx = ~x;', /operator ~/], ["const o = {};\n'a' in o;", /operator in/],
-  ['let a = 1;\na == 1;', /operator ==/], ['let a = 1;\na = a - 1;', /operator -/],
+  ['let a = 1;\na == 1;', /operator ==/], ['let a = 1;\na = a % 1;', /operator %/],
   // calls and new
   ['const f = () => 0;\n(0, f)();', /SequenceExpression/], ['const f = () => 0;\nconst g = f;\n(f || g)();', /a call of a LogicalExpression/], ['const o = { C: class {} };\nnew o.C();', /new through a MemberExpression|ClassExpression/],
   ['function f() { super.x(); }', /super member|'super' keyword/],
@@ -2370,6 +2416,16 @@ const PINNED_NAME_ESCAPES = [
   ['git-exec.mjs', 'decodeStrict updated', 'export function decodeStrict(bytes) { return bytes; }\nfunction f() { decodeStrict++; }'],
   ['git-exec.mjs', 'ownValue declared twice (top level and a parameter)', `const own = (o, k) => Object.hasOwn(o, k);\nconst ownValue = ${OWN_VALUE_SRC};\nfunction f(ownValue) { return ownValue; }`],
 ];
+test('T4a grammar (S-02a0c): an importable pin binds only as its own-named import from its own file; other pins never bind elsewhere', () => {
+  const ok = "import { decodeStrict } from './git-exec.mjs';\ndecodeStrict(Buffer.from('x'));";
+  assert.deepEqual(grammarSites('git-hardened.mjs', ok).hits.map((h) => h.why), []);
+  for (const [src, why] of [
+    ["import { decodeStrict } from './git-capability.mjs';", /pinned name decodeStrict declared outside git-exec\.mjs/],
+    ["import { decodeStrict } from './git-exec.mjs';\nconst f = (decodeStrict) => decodeStrict;", /pinned name decodeStrict declared outside git-exec\.mjs/],
+    ["import { ownValue } from './git-exec.mjs';", /pinned name ownValue declared outside git-exec\.mjs/],
+    ['function decodeStrict() {}', /pinned name decodeStrict declared outside git-exec\.mjs/],
+  ]) assert.ok(grammarSites('git-hardened.mjs', src).hits.some((h) => why.test(h.why)), src);
+});
 test('T4a grammar (round 8): every pinned name resolves to its one pinned top-level declaration, in the file that pins it', () => {
   const cap = readFileSync(join(here, 'git-capability.mjs'), 'utf8');
   for (const [file, what, src] of PINNED_NAME_ESCAPES) {
@@ -2407,7 +2463,7 @@ const GRAMMAR_INJECT = [
   ["{ const o__ = {}; const k__ = 'C'; const c__ = new o__[k__](); }", /new through a MemberExpression/], ['{ const Object = 1; }', /declaration of Object/],
   ["{ const x__ = {}; const c__ = x__.constructor; }", /member \.constructor/], ['{ let a__ = 1; a__ += 1; }', /operator \+=/],
   ["{ const t__ = new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }); }", /new TextDecoder other than exactly/],
-  ["import 'constructor';", /not an allowlisted specifier/, true], ["import { execSync } from 'node:child_process';", /not allowlisted/, true],
+  ["import 'constructor';", /not an allowlisted specifier/, true], ["import { execSync } from 'node:child_process';", /not (?:an )?allowlisted/, true],
   ["export * from './git-capability.mjs';", /ExportAllDeclaration/, true],
 ];
 test('T4a grammar property: each counterexample injected at seeded random statement boundaries of the guarded sources is refused in place', () => {

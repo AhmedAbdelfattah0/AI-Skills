@@ -1,0 +1,317 @@
+{
+  "note": "S-02a0c closed OPS table and qualified cells (v3.1 R9). Regenerate only through a reviewed PR; T1 in git-hardened.test.mjs requires exact equality.",
+  "ops": [
+    {
+      "id": "blob.read",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "cat-file",
+        "blob",
+        "--end-of-options",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "tree.list",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        "--end-of-options",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "tree.diff",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "diff-tree",
+        "-z",
+        "-r",
+        "--raw",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--end-of-options",
+        "<oid>",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "commit.resolve",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        "<oid>^{commit}"
+      ],
+      "status": {
+        "0": "ok",
+        "1": "absent"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "commit.tree",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        "<oid>^{tree}"
+      ],
+      "status": {
+        "0": "ok",
+        "1": "absent"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "merge.base",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "merge-base",
+        "--all",
+        "--end-of-options",
+        "<oid>",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok",
+        "1": "none"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "object.exists",
+      "policy": "raw-object",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "cat-file",
+        "-e",
+        "--end-of-options",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok",
+        "1": "absent"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "store.init",
+      "policy": "internal",
+      "dir": "none",
+      "write": "creates",
+      "argv": [
+        "init",
+        "--bare",
+        "--quiet",
+        "--initial-branch=pin",
+        "--object-format=sha1",
+        "--template=<path>",
+        "--end-of-options",
+        "<path>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "store.walk",
+      "policy": "internal",
+      "dir": "view",
+      "write": "ro",
+      "argv": [
+        "rev-list",
+        "--objects",
+        "--no-object-names",
+        "--end-of-options",
+        "<oid>",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "store.sizes",
+      "policy": "internal",
+      "dir": "view",
+      "write": "ro",
+      "argv": [
+        "cat-file",
+        "--batch-check=%(objectsize) %(objectsize:disk)"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": "oid-lines",
+      "callers": []
+    },
+    {
+      "id": "store.pack",
+      "policy": "internal",
+      "dir": "view",
+      "write": "writes-r",
+      "argv": [
+        "pack-objects",
+        "--revs",
+        "--quiet",
+        "<path>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": "oid-lines",
+      "callers": []
+    },
+    {
+      "id": "store.index",
+      "policy": "internal",
+      "dir": "store",
+      "write": "writes",
+      "argv": [
+        "index-pack",
+        "--max-input-size=<n>",
+        "<path>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "store.connect",
+      "policy": "internal",
+      "dir": "store",
+      "write": "ro",
+      "argv": [
+        "rev-list",
+        "--objects",
+        "--quiet",
+        "--end-of-options",
+        "<oid>",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "store.pin",
+      "policy": "internal",
+      "dir": "store",
+      "write": "writes",
+      "argv": [
+        "update-ref",
+        "refs/pin/<name>",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "worktree.read",
+      "policy": "internal",
+      "dir": "index",
+      "write": "writes-i",
+      "argv": [
+        "read-tree",
+        "--end-of-options",
+        "<oid>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "worktree.others",
+      "policy": "internal",
+      "dir": "index",
+      "write": "ro",
+      "argv": [
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-per-directory=.gitignore",
+        "--exclude-from=<path>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    },
+    {
+      "id": "worktree.ignored",
+      "policy": "internal",
+      "dir": "index",
+      "write": "ro",
+      "argv": [
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--directory",
+        "--exclude-per-directory=.gitignore",
+        "--exclude-from=<path>"
+      ],
+      "status": {
+        "0": "ok"
+      },
+      "stdin": null,
+      "callers": []
+    }
+  ],
+  "cells": []
+}
