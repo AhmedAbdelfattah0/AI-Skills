@@ -265,7 +265,10 @@ const statusMap = (m) => {
  */
 const STDIN_MAX_OIDS = 99;
 const STDIN_OID = /^[0-9a-f]{40}$/;
-const oidLines = (s) => {
+// A throwing getter or a revoked Proxy anywhere in the option is a typed refusal (null -> git_op_invalid), never a raw error.
+// Only `kind` and `oids` are read (own data); a symbol or non-enumerable extra key is never read.
+const oidLines = (s) => { try { return readOidLines(s); } catch { return null; } };
+const readOidLines = (s) => {
   if (!s || typeof s !== 'object' || Object.keys(s).length !== 2 || ownValue(s, 'kind') !== 'oid-lines') return null;
   const list = ownValue(s, 'oids');
   if (!Array.isArray(list)) return null;

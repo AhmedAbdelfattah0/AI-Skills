@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { Dir, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { probeGit } from './git-capability.mjs';
@@ -808,7 +810,7 @@ test('[M33] verify: a FIFO .gitignore hangs ls-files, the deadline kills it (git
   assert.ok(Date.now() - t0 < 1500 + 3000);
   assert.deepEqual(procs(top), [], 'no process naming the worktree survived');
 });
-test('[M34][M35] verify budgets: maxFiles, maxBytes and the deadline refuse worktree_budget_exceeded', { skip: POSIX }, (t) => {
+test('[M34][M35] verify budgets: maxFiles and maxBytes refuse worktree_budget_exceeded (deadlines: [M55], [M57], [M62])', { skip: POSIX }, (t) => {
   const files = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`d/${i}`, 'x'.repeat(1000)]));
   assert.throws(() => verify(t, files, null, { ctx: { maxFiles: 40 } }), code('worktree_budget_exceeded'), 'files');
   assert.throws(() => verify(t, files, null, { ctx: { maxBytes: 30_000 } }), code('worktree_budget_exceeded'), 'bytes');
@@ -963,6 +965,10 @@ test('[M55] the deadline is checked on every enumerated entry, not only between 
   const { store, source } = storeOf(t, ctx, top, [head]);
   assert.equal(H.verifyWorktree(ctx, { source, store, oid: head }).equal, true, 'control on the real clock: clean');
   fakeClock(10, () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('worktree_budget_exceeded'), '400 entries x 10 ms > 1500 ms'));
+  // The enumeration itself stops at the deadline: with 10 ms per directory read, the wide dir is not read to its end.
+  let reads = 0;
+  slowFs({ dirRead: (clock) => { reads++; clock.tick(10); } }, () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('worktree_budget_exceeded')));
+  assert.ok(reads < 300, `refused after ${reads} directory reads (10 ms each, 1500 ms deadline), inside the 400-entry enumeration`);
 });
 test('[M56] removal failures are typed: dispose of an R holding an immutable file is lane_remove_failed, never a raw EPERM', { skip: POSIX || (process.platform !== 'darwin' && 'chflags uchg is darwin-only (Linux needs root for chattr)') }, (t) => {
   const flagged = [];
@@ -977,6 +983,124 @@ test('[M56] removal failures are typed: dispose of an R holding an immutable fil
     flagged.push(f);
     assert.throws(() => c.dispose(), code('lane_remove_failed'));
   });
+});
+
+// ------------------------------------------------------------------ attempt 2, Round 1 repair (test-first)
+
+/**
+ * An injected clock that advances only when the lib touches the filesystem: `wraps(clock)` maps node:fs export names to
+ * wrappers (installed with syncBuiltinESMExports, so the lib's own named imports see them); `dirRead(clock, dir)` runs on
+ * every Dir#readSync. Date.now returns the fake time. Everything is restored afterwards.
+ */
+function slowFs({ wraps = () => ({}), dirRead = null }, fn) {
+  const realNow = Date.now;
+  let now = realNow();
+  const clock = { tick: (ms) => { now += ms; } };
+  const saved = {};
+  for (const [name, wrap] of Object.entries(wraps(clock))) { saved[name] = fs[name]; fs[name] = wrap(saved[name]); }
+  const readSync = Dir.prototype.readSync;
+  if (dirRead) Dir.prototype.readSync = function slowRead(...a) { dirRead(clock, this); return readSync.apply(this, a); };
+  syncBuiltinESMExports();
+  Date.now = () => now;
+  try { return fn(clock); } finally { Date.now = realNow; Object.assign(fs, saved); Dir.prototype.readSync = readSync; syncBuiltinESMExports(); }
+}
+test('[M57] the deadline covers every per-entry lstat (untracked at the root, in a tracked dir, in an ignored dir): slow lstat stops early', { skip: POSIX }, (t) => {
+  for (const [shape, files, extra] of [['root', (i) => `u${i}`, {}], ['tracked dir', (i) => `d/u${i}`, {}], ['ignored dir', (i) => `wide/u${i}`, { '.gitignore': 'wide/\n' }]]) {
+    const { top, head } = makeRepo(t, { 'a.txt': 'a', 'd/b': 'b', ...extra });
+    mkdirSync(join(top, 'wide'), { recursive: true });
+    for (let i = 0; i < 2000; i++) writeFileSync(join(top, files(i)), '');
+    const ctx = ctxOf(t, { timeoutMs: 1500 });
+    const { store, source } = storeOf(t, ctx, top, [head]);
+    let calls = 0;
+    slowFs({ wraps: (c) => ({ lstatSync: (real) => (...a) => { calls++; c.tick(5); return real(...a); } }) }, () => {
+      assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('worktree_budget_exceeded'), shape);
+    });
+    assert.ok(calls < 400, `${shape}: refused after ${calls} lstat calls (5 ms each, 1500 ms deadline), not after every entry`);
+  }
+});
+test('[M58] removal stops at its deadline while enumerating (slow directory reads), and the refusal is lane_remove_failed', { skip: POSIX }, (t) => {
+  const tmpRoot = tmp(t, 'gh-rm-');
+  withEnv({ TMPDIR: tmpRoot }, () => {
+    const c = H.createContext({ timeoutMs: 1500 });
+    const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
+    for (let i = 0; i < 2000; i++) writeFileSync(join(R, 'home', `f${i}`), '');
+    let reads = 0;
+    slowFs({ dirRead: (clock) => { reads++; clock.tick(5); } }, () => assert.throws(() => c.dispose(), code('lane_remove_failed')));
+    assert.ok(reads < 400, `refused after ${reads} directory reads, not after enumerating all 2000`);
+  });
+});
+test('[M64] a directory that cannot be opened during cleanup is lane_remove_failed (the mandatory removal code), not a walk code', { skip: POSIX }, (t) => {
+  const tmpRoot = tmp(t, 'gh-rmio-');
+  withEnv({ TMPDIR: tmpRoot }, () => {
+    const c = H.createContext();
+    const [R] = readdirSync(tmpRoot).map((n) => join(tmpRoot, n));
+    slowFs({ wraps: () => ({ opendirSync: (real) => (p, ...a) => { if (Buffer.from(p).toString('latin1').endsWith('/home')) throw Object.assign(new Error('EIO'), { code: 'EIO' }); return real(p, ...a); } }) },
+      () => assert.throws(() => c.dispose(), code('lane_remove_failed')));
+    assert.ok(existsSync(R));
+  });
+});
+test('[M59] op() refuses every internal row even with VALID operands; nothing is written to the store', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  writeTree(top, { b: 'b' });
+  const h1 = commitAll(top);
+  const ctx = ctxOf(t);
+  const { store, dir } = storeOf(t, ctx, top, [h1, head]);
+  const pinBefore = out(dir, ['--git-dir', dir, 'rev-parse', 'refs/pin/head']);
+  const valid = {
+    'store.init': [join(tmp(t), 'tpl'), join(tmp(t), 'x')], 'store.walk': [head, head], 'store.sizes': [], 'store.pack': [join(tmp(t), 'p')],
+    'store.index': [10, join(dir, 'objects', 'pack', 'nope.pack')], 'store.connect': [head, head], 'store.pin': ['head', head], 'worktree.read': [head],
+    'worktree.others': [join(dir, 'config')], 'worktree.ignored': [join(dir, 'config')], 'tree.raw': [],
+  };
+  assert.deepEqual(Object.keys(valid).sort(), H.OPS_TABLE.filter((r) => r.policy !== 'raw-object').map((r) => r.id).sort(), 'every internal row is tried');
+  for (const [id, operands] of Object.entries(valid)) assert.throws(() => H.op(store, id, operands), code('git_op_invalid'), id);
+  assert.equal(out(dir, ['--git-dir', dir, 'rev-parse', 'refs/pin/head']), pinBefore, 'refs/pin/head unchanged');
+  assert.equal(existsSync(join(dir, 'index')), false, 'no index written into the store');
+});
+test('[M60] verifyWorktree binds each handle to the context on its own: a store or a source from another context is git_op_invalid', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { a: 'a' });
+  const ctxA = ctxOf(t);
+  const ctxB = ctxOf(t);
+  const a = storeOf(t, ctxA, top, [head]);
+  const b = storeOf(t, ctxB, top, [head]);
+  assert.throws(() => H.verifyWorktree(ctxA, { source: a.source, store: b.store, oid: head }), code('git_op_invalid'), 'store from B, source from A');
+  assert.throws(() => H.verifyWorktree(ctxA, { source: b.source, store: a.store, oid: head }), code('git_op_invalid'), 'source from B, store from A');
+  assert.equal(H.verifyWorktree(ctxA, { source: a.source, store: a.store, oid: head }).equal, true, 'control');
+});
+test('[M61] the gitlink read is charged and deadline-checked: a slow first read of a populated gitlink refuses (one read, never an enumeration)', { skip: POSIX }, (t) => {
+  const { head: subHead } = makeRepo(t, { s: 's' });
+  const { top, head } = makeRepo(t, { a: 'a' });
+  sh(top, ['update-index', '--add', '--cacheinfo', `160000,${subHead},vendor/sub`]);
+  sh(top, ['commit', '-q', '-m', 'gitlink']);
+  const withLink = out(top, ['rev-parse', 'HEAD']);
+  mkdirSync(join(top, 'vendor', 'sub'), { recursive: true });
+  writeFileSync(join(top, 'vendor', 'sub', 'f'), '');
+  const ctx = ctxOf(t, { timeoutMs: 1500 });
+  const { store, source } = storeOf(t, ctx, top, [withLink, head]);
+  let subReads = 0;
+  slowFs({ dirRead: (clock, d) => { if (Buffer.from(d.path).toString('latin1').endsWith('/vendor/sub')) { subReads++; clock.tick(3000); } } },
+    () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: withLink }), code('worktree_budget_exceeded')));
+  assert.equal(subReads, 1, 'exactly one read of the gitlink dir');
+});
+test('[M62] byte hashing is deadline-checked per chunk: slow reads of a large tracked file refuse', { skip: POSIX }, (t) => {
+  const { top, head } = makeRepo(t, { 'big.bin': Buffer.alloc(20 << 20) });
+  const ctx = ctxOf(t, { timeoutMs: 1500 });
+  const { store, source } = storeOf(t, ctx, top, [head]);
+  let chunks = 0;
+  slowFs({ wraps: (c) => ({ readSync: (real) => (...a) => { chunks++; c.tick(200); return real(...a); } }) },
+    () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: head }), code('worktree_budget_exceeded')));
+  assert.ok(chunks < 15, `stopped after ${chunks} reads of 1 MiB, not after all 20`);
+});
+test('[M63] R2: the produced pack is capped on its own (incompressible data: pack bytes exceed inflated bytes)', { skip: POSIX }, (t) => {
+  // 1 MiB of hash output: incompressible, so zlib's stored blocks make the pack larger than the inflated object.
+  const noise = Buffer.concat(Array.from({ length: 16384 }, (_, i) => createHash('sha512').update(`r${i}`).digest()));
+  const { top, head } = makeRepo(t, { 'r.bin': noise });
+  const sizes = out(top, ['rev-list', '--objects', '--no-object-names', head]).split('\n');
+  const inflated = out(top, ['cat-file', '--batch-check=%(objectsize)'], { input: Buffer.from(`${sizes.join('\n')}\n`) }).split('\n').reduce((n, x) => n + +x, 0);
+  const ctx = ctxOf(t, { maxTotalObjectBytes: inflated + 64 });
+  const source = H.openSource(ctx, { toplevel: top });
+  const parent = tmp(t);
+  assert.throws(() => H.initStore(ctx, { dir: join(parent, 'store'), source, oids: [head] }), code('object_too_large'), `inflated ${inflated} + 64 admits the sizes, the pack is larger`);
+  assert.equal(existsSync(join(parent, 'store')), false);
 });
 
 // ------------------------------------------------------------------ the canary matrix (C1): hostile builder config never runs

@@ -708,6 +708,29 @@ test('[S3] R3: non-strings, wrong lengths, upper case, option or rev syntax, hol
     ['an extra key', { kind: 'oid-lines', oids: [OID()], encoding: 'utf8' }], ['an accessor oids', Object.defineProperty({ kind: 'oid-lines' }, 'oids', { enumerable: true, get: () => [OID()] })],
     ['null', null], ['a string', 'x']]) assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
 });
+test('[S7] R3: a revoked Proxy or a throwing getter is a typed refusal (git_op_invalid), never a raw error; extra symbol or non-enumerable keys are never read', (t) => {
+  const g = gitRunner();
+  const cwd = tmp(t);
+  const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
+  const { proxy: revokedArr, revoke: r1 } = Proxy.revocable([OID()], {});
+  r1();
+  const { proxy: revokedOpt, revoke: r2 } = Proxy.revocable({ kind: 'oid-lines', oids: [OID()] }, {});
+  r2();
+  const throwing = [];
+  Object.defineProperty(throwing, 0, { get: () => { throw new Error('boom'); }, enumerable: true });
+  const throwingLen = new Proxy([OID()], { get: (o, k) => { if (k === 'length') throw new Error('boom'); return Reflect.get(o, k); } });
+  for (const [what, stdin] of [['revoked oids', { kind: 'oid-lines', oids: revokedArr }], ['revoked option object', revokedOpt],
+    ['throwing element getter', { kind: 'oid-lines', oids: throwing }], ['throwing length', { kind: 'oid-lines', oids: throwingLen }]]) {
+    assert.throws(() => g.run({ ...ok, stdin }), code('git_op_invalid'), what);
+  }
+  // Only `kind` and `oids` are ever read (own data); a symbol or non-enumerable extra key is inert by construction.
+  let touched = 0;
+  const extra = { kind: 'oid-lines', oids: [OID()] };
+  Object.defineProperty(extra, 'hidden', { enumerable: false, get: () => { touched++; return 'x'; } });
+  Object.defineProperty(extra, Symbol('s'), { enumerable: false, get: () => { touched++; return 'x'; } });
+  assert.doesNotThrow(() => g.run({ ...ok, args: ['hash-object', '--stdin'], stdin: extra }));
+  assert.equal(touched, 0, 'never read');
+});
 test('[S4] R3: stdin on an undeclared call (no {kind: oid-lines} declaration, another kind, or `input`) is refused', (t) => {
   const g = gitRunner();
   const cwd = tmp(t);

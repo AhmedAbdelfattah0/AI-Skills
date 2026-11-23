@@ -130,6 +130,8 @@ const writeNew = (p, data) => writeFileSync(p, data, { flag: 'wx', mode: 0o600 }
 const tempDir = (parent, prefix) => mkdtempSync(`${str(parent)}/${prefix}`, { encoding: 'buffer' });
 
 /** A counter that throws `code` once its total passes `cap` or the clock passes `deadline`: every charge checks both. */
+/** The deadline check of a per-entry loop (each iteration does filesystem work: lstat, open, read). */
+const due = (deadline, code, op) => { if (Date.now() > deadline) throw fail(code, op); };
 const meter = (cap, code, op, deadline = Infinity) => { let n = 0; return (k) => { n = n + k; if (n > cap || Date.now() > deadline) throw fail(code, op); return n; }; };
 
 /** Positive safe integers only; the caller may lower any default. */
@@ -183,7 +185,7 @@ function disposeContext(ctx) {
   DISPOSED.add(ctx);
   // Only the R this context created is removed: a replaced R (another inode) is left alone and reported.
   if (!sameNode(lstatOrNull(st.root), st.rootStat)) throw fail('context_tampered', 'context.dispose');
-  removeTree(st.root, st.rootStat.dev, meter(st.removeEntries, 'lane_remove_failed', 'context.dispose'), Date.now() + st.timeoutMs);
+  removeTree(st.root, st.rootStat.dev, st.removeEntries, Date.now() + st.timeoutMs);
 }
 /** An existing directory whose realpath is itself (no symlink anywhere in its chain). */
 function canonicalDir(p) {
@@ -397,7 +399,7 @@ function ingest(st, s, D, dst, dir, head, base, deadline) {
   corruptOnFail(() => git(st, 'store.connect', dir, [head, base], { deadline }), 'store.connect');
   git(st, 'store.pin', dir, ['head', head], { deadline });
   git(st, 'store.pin', dir, ['base', base], { deadline });
-  removeTree(V, st.rootStat.dev, meter(st.removeEntries, 'lane_remove_failed', 'store.init'), deadline);
+  removeTree(V, st.rootStat.dev, st.removeEntries, deadline);
   recheckSource(s, 'store.init');
   if (!sameNode(lstatOrNull(D), dst)) throw fail('context_tampered', 'store.init');
   checkStore(D, 'store.init');
@@ -416,7 +418,7 @@ function discard(st, D, created, parent, deadline) {
     const slot = tempDir(q, 'store-');
     const moved = join(slot, B('store'));
     renameSync(D, moved);
-    removeTree(slot, lstatSync(slot).dev, meter(st.removeEntries, 'lane_remove_failed', 'store.init'), deadline + st.timeoutMs);
+    removeTree(slot, lstatSync(slot).dev, st.removeEntries, deadline + st.timeoutMs);
   } catch { throw fail('lane_remove_failed', 'store.init'); }
 }
 
@@ -684,6 +686,7 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
     // Untracked (or ignored) directories here are scanned for a nested .git below (R5: tracked dir or not).
     const tracked = new Set([...node.dirs, ...node.files.map((f) => f.name)].map(hexKey));
     for (const n of names) {
+      due(deadline, 'worktree_budget_exceeded', op);
       if (tracked.has(hexKey(n)) || isDotGit(n) || excluded(childRel(n))) continue;
       const us = lstatOrNull(absOf(childRel(n)));
       if (us && us.isDirectory() && !us.isSymbolicLink()) untrackedDirs.push(childRel(n));
@@ -696,6 +699,7 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
       return false;
     };
     for (const name of node.dirs) {
+      due(deadline, 'worktree_budget_exceeded', op);
       if (!here(name)) continue;
       const crel = childRel(name);
       const cs = lstatOrNull(absOf(crel));
@@ -704,6 +708,7 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
       queue.push(crel);
     }
     for (const { name, entry } of node.files) {
+      due(deadline, 'worktree_budget_exceeded', op);
       if (!here(name, entry.mode === '160000')) continue;
       checkEntry(st, h, entry, absOf(entry.path), { diff, spendFiles, spendBytes, deadline, op });
     }
@@ -712,6 +717,7 @@ export function verifyWorktree(ctx, { source, dir, store, oid, exclusions = [], 
     const rel = queue.shift();
     if (Date.now() > deadline) throw fail('worktree_budget_exceeded', op);
     for (const n of listDir(absOf(rel), spendFiles)) {
+      due(deadline, 'worktree_budget_exceeded', op);
       if (isDotGit(n)) throw fail('worktree_entry_unsupported', op);
       const crel = Buffer.concat([rel, SLASH, n]);
       const cs = lstatOrNull(absOf(crel));
@@ -778,7 +784,7 @@ function untrackedLists(st, h, top, s, oid, deadline) {
   const list = (id) => zSplit(git(st, id, Is, [excludeFrom], { workTree: tops, deadline }).stdout).map((p) => Buffer.from(p));
   const untracked = list('worktree.others').map((p) => (p.lastIndexOf(0x2f) === p.length - 1 ? p.subarray(0, p.length - 1) : p));
   const ignored = list('worktree.ignored');
-  removeTree(I, st.rootStat.dev, meter(st.removeEntries, 'lane_remove_failed', 'worktree.verify'), deadline + st.timeoutMs);
+  removeTree(I, st.rootStat.dev, st.removeEntries, deadline + st.timeoutMs);
   return { untracked, ignored };
 }
 
@@ -789,8 +795,11 @@ function untrackedLists(st, h, top, s, oid, deadline) {
  * directories on the root's device, unlinks entries one at a time and removes directories bottom-up. `spend` (an
  * entry budget) and `deadline` bound the work; exhaustion or any failure throws (the caller quarantines).
  */
-function removeTree(root, dev, spend, deadline) {
-  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError) throw e; throw fail('lane_remove_failed', 'remove'); }
+function removeTree(root, dev, budget, deadline) {
+  // Every charge (each enumerated entry, each unlink, each rmdir) checks the entry budget AND the deadline; any failure,
+  // a typed one from listDir included, is the mandatory removal code.
+  const spend = meter(budget, 'lane_remove_failed', 'remove', deadline);
+  try { removeTreeRaw(root, dev, spend, deadline); } catch (e) { if (e instanceof GitError && e.code === 'lane_remove_failed') throw e; throw fail('lane_remove_failed', 'remove'); }
 }
 function removeTreeRaw(root, dev, spend, deadline) {
   const order = [];
