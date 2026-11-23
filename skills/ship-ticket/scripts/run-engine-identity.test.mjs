@@ -555,7 +555,12 @@ test('R15 flag off, byte replay: v1 and v5 (pinned, GitHub origin) runs give the
       step(gate('review', confirmReview('rx-1', fx.candidate())));
       step(gate('ship-ready', {}));
       step(run('status'));
-      return { outs: normal(outs, fx.root), state: normal(fx.readState(), fx.root), log: normal(readFileSync(fx.engineLog(), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)), fx.root) };
+      // the committed plan names the DAG digest, which hashes temp paths, so each fixture's commit SHAs differ: each commit is
+      // replaced by its position in the fixture's own history (every SHA slot is still compared, as that commit)
+      const commits = o.git('rev-list', '--all', '--topo-order', '--reverse').split('\n').filter(Boolean);
+      const label = (v) => commits.reduce((x, c, i) => x.split(c).join(`<commit-${i}>`), v);
+      const N = (v) => JSON.parse(label(JSON.stringify(normal(v, fx.root))));
+      return { outs: N(outs), state: N(fx.readState()), log: N(readFileSync(fx.engineLog(), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))) };
     };
     const before = scenario(mainCli), after = scenario(join(SCRIPTS, 'run-engine.mjs'));
     assert.equal(after.outs.at(-2).code, 'ship_ready', `the replay reaches SHIP_READY (pinned ${pinned})`);
