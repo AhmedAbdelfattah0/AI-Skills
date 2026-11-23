@@ -2,7 +2,7 @@
 /**
  * Read-only evaluation of ship-ticket runs (P2-6).
  *
- *   eval.mjs report --repo <path> (--ticket <key> | --all) [--usage <jsonl>...]
+ *   eval.mjs report --repo <path> (--ticket <key> | --all) [--usage <jsonl>...] [--cycles]
  *
  * Inputs, all read-only: the run log `<ticket>.jsonl`, the optional engine
  * state `<ticket>.state.json` (under `git rev-parse --git-path ai-skills/ship-ticket`; the run log since S5 under
@@ -36,6 +36,12 @@
  * overlap / the shorter of the two) and the `unaccounted_gap_ms` of the round with its `gap_reason`. `unknown`
  * without a recorded review_execution. `cross_run.review_round_wall_ms`: P50 only from 5 rounds, P95 only
  * from 20, else `insufficient_n` (a round is one observation; rounds of one ticket may be correlated).
+ *
+ * `review_cycles` (FR-4b, only with `--cycles`, so the default report stays byte-identical): per implementation attempt (attempt 1, then one per `kind:'retry'` chain record) the review cycles
+ * (`original` = cycle 1, each `confirmation` a further cycle; more than 2 is flagged `cycle_limit_exceeded`), repair batches,
+ * confirmations, the terminal reason, the RETRY `authorized_by`, the time between cycles/attempts where the run log has intervals,
+ * and finding classes (severity + path set) repeated across attempts. Read-only, from existing records; `unknown` when a source is
+ * missing, and `not_derivable` names what no record carries.
  *
  * Run-log marker: any interval with the metric `ui_ticket=true` marks a UI ticket.
  *
@@ -197,6 +203,98 @@ function reviewRounds(run) {
   });
 }
 
+const CYCLE_LIMIT = 2;
+const CYCLE_KINDS = new Set(['original', 'confirmation']);
+const gapOf = (a, b) => (Number.isFinite(a) && Number.isFinite(b) && b >= a ? b - a : UNKNOWN);
+
+/**
+ * FR-4b: review cycles per implementation attempt, read-only from records that already exist (no new event, state key or schema).
+ * Attempt 1 is the first `original` review; each `kind:'retry'` review_chain record (written by the gate only for a trusted RETRY)
+ * starts the next attempt. Cycle 1 is the attempt's `original` review, each later `confirmation` a further cycle: a cycle is the
+ * independent review(s) of one head (a record already carries primary and second opinion), so more than two cycles is flagged
+ * (`cycle_limit_exceeded`). A value the records do not carry is `unknown`, never zero; `not_derivable` lists what no record holds.
+ * `rounds` is the run log's `reviewRounds(run)` (timestamps), `unknown` without one.
+ */
+function reviewCycles(state, chain, rounds) {
+  if (!chain) return { source: 'unknown', attempts: UNKNOWN, note: 'no engine review_chain for this run (legacy or no engine state): cycles are not derivable' };
+  const attempts = [];
+  let cur = null, pendingRetry = null, unreadable = 0;
+  const open = (retry) => { cur = { attempt: attempts.length + 1, review_executions: [], retry: retry ?? null, records: [] }; attempts.push(cur); };
+  for (const r of chain) {
+    if (!r || typeof r !== 'object' || typeof r.kind !== 'string') { unreadable += 1; continue; }
+    if (r.kind === 'retry') { pendingRetry = r; continue; }
+    if (!CYCLE_KINDS.has(r.kind) && r.kind !== 'repair') { unreadable += 1; continue; }
+    if (r.kind === 'original') {
+      open(pendingRetry ? { authorized_by: r.authorized_by ?? pendingRetry.authorized_by ?? UNKNOWN, predecessor: pendingRetry.predecessor ?? UNKNOWN } : (attempts.length ? { authorized_by: UNKNOWN, predecessor: UNKNOWN, record: 'missing' } : null));
+      pendingRetry = null;
+    } else if (!cur) open(null); // a repair or confirmation with no original before it: kept, flagged
+    if (typeof r.review_execution === 'string' && !cur.review_executions.includes(r.review_execution)) cur.review_executions.push(r.review_execution);
+    cur.records.push(r);
+  }
+  const judgments = Array.isArray(state?.judgments) ? state.judgments : [];
+  const stateRepairs = Array.isArray(state?.repairs) ? state.repairs : [];
+  const intervalsOf = (a) => (Array.isArray(rounds) ? rounds.filter((x) => a.review_executions.includes(x.review_execution)).flatMap((x) => x.intervals) : []);
+  const out = attempts.map((a) => {
+    const cycles = a.records.filter((r) => CYCLE_KINDS.has(r.kind)).map((r, i) => ({ cycle: i + 1, kind: r.kind, review_execution: r.review_execution ?? UNKNOWN,
+      head: r.candidate_id ?? UNKNOWN, outcome: r.outcome === 'PASS' || r.outcome === 'FAIL' ? r.outcome : UNKNOWN,
+      ...(r.kind === 'original' ? { overflow: typeof r.overflow === 'boolean' ? r.overflow : UNKNOWN,
+        findings: Array.isArray(r.findings) ? r.findings.length : UNKNOWN } : {}) }));
+    const repairRecords = a.records.filter((r) => r.kind === 'repair').length;
+    const unrecorded = stateRepairs.filter((r) => r?.kind === 'review' && r.state === 'done' && a.review_executions.includes(r.review_execution)
+      && !a.records.some((x) => x.kind === 'repair' && x.review_execution === r.review_execution)).length;
+    const lastRecord = a.records.at(-1);
+    const lastCycle = cycles.at(-1);
+    const rx = lastRecord?.review_execution;
+    const failedRepair = stateRepairs.some((r) => r?.kind === 'review' && r.review_execution === rx && r.state === 'failed') || judgments.some((j) => j?.code === 'repair_failed' && j.node === `repair-${rx}`);
+    let terminal = UNKNOWN;
+    if (!lastRecord) terminal = UNKNOWN;
+    else if (lastRecord.kind === 'repair') terminal = judgments.some((j) => j?.code === 'round_limit' && j.node === `repair-${rx}`) ? 'round_limit' : 'awaiting_confirmation';
+    else if (lastCycle?.outcome === 'PASS') terminal = 'pass';
+    else if (lastCycle?.outcome === 'FAIL') {
+      if (lastCycle.kind === 'confirmation') terminal = 'confirmation_fail';
+      else if (lastCycle.overflow === true) terminal = 'overflow';
+      else if (judgments.some((j) => j?.code === 'round_limit' && j.node === `repair-${rx}`)) terminal = 'round_limit';
+      else if (failedRepair) terminal = 'repair_failed';
+      else if (stateRepairs.some((r) => r?.kind === 'review' && r.review_execution === rx && ['pending', 'running', 'intent'].includes(r.state))) terminal = 'repair_open';
+      else terminal = Array.isArray(lastRecord.fix_findings) && lastRecord.fix_findings.length === 0 ? 'fail_no_repair' : UNKNOWN;
+    }
+    // Time between cycles, only where the run log carries closed round intervals (never invented).
+    const iv = intervalsOf(a).map((x) => ({ ...x, s: ms(x.started_at), e: ms(x.ended_at) }));
+    const ofRole = (...roles) => iv.filter((x) => roles.includes(x.role)).sort((p, q) => p.s - q.s);
+    const confirmations = ofRole('confirmation');
+    const first = ofRole('primary', 'second_opinion', 'reconcile').map((x) => x.e);
+    let prevEnd = first.length && first.every(Number.isFinite) ? Math.max(...first) : NaN;
+    const between = cycles.slice(1).map((_, i) => { const c = confirmations[i]; const g = gapOf(prevEnd, c?.s); prevEnd = c ? c.e : NaN; return g; });
+    const all = iv.filter((x) => Number.isFinite(x.s) && Number.isFinite(x.e));
+    return { attempt: a.attempt, review_executions: a.review_executions, retry: a.retry ?? 'none', cycle_count: cycles.length, cycles,
+      repair_batches: repairRecords + unrecorded, confirmations: cycles.filter((c) => c.kind === 'confirmation').length,
+      ...(cycles.length > CYCLE_LIMIT ? { flag: 'cycle_limit_exceeded' } : {}), terminal,
+      between_cycles_ms: between.length ? between : [], _first: all.length ? Math.min(...all.map((x) => x.s)) : NaN, _last: all.length ? Math.max(...all.map((x) => x.e)) : NaN,
+      _findings: a.records.find((r) => r.kind === 'original' && Array.isArray(r.findings))?.findings };
+  });
+  // Time between attempts: last recorded interval end of attempt n to first interval start of attempt n+1 (includes the owner wait).
+  const result = out.map((o, i) => ({ ...o, since_previous_attempt_ms: i === 0 ? 'none' : gapOf(out[i - 1]._last, o._first) }));
+  // Repeated finding classes across attempts: the same severity and path set in two attempts (no finding fingerprint is recorded anywhere).
+  const classes = new Map();
+  for (const a of result) {
+    for (const f of a._findings ?? []) {
+      if (!Array.isArray(f?.paths) || !f.paths.length || typeof f.severity !== 'string') continue;
+      const key = `${f.severity}\u0000${[...f.paths].sort().join('\u0000')}`;
+      const hit = classes.get(key) ?? { severity: f.severity, paths: [...f.paths].sort(), attempts: new Set() };
+      hit.attempts.add(a.attempt);
+      classes.set(key, hit);
+    }
+  }
+  const repeated = [...classes.values()].filter((c) => c.attempts.size >= 2).map((c) => ({ severity: c.severity, paths: c.paths, attempts: [...c.attempts] }));
+  const noFindings = result.filter((a) => !a._findings).map((a) => a.attempt);
+  const attemptsOut = result.map(({ _first, _last, _findings, ...rest }) => rest);
+  return { source: 'review_chain', attempt_count: attemptsOut.length, cycle_limit: CYCLE_LIMIT,
+    flagged_attempts: attemptsOut.filter((a) => a.flag).map((a) => a.attempt), attempts: attemptsOut,
+    repeated_findings: repeated, attempts_without_findings: noFindings, ...(unreadable ? { unreadable_records: unreadable } : {}),
+    not_derivable: ['second-opinion cycle outcome of a confirmation when the record lacks it', 'findings of a confirmation cycle (records hold only checked ids)',
+      'finding fingerprints (no record carries one)', 'assessment citation (not recorded before FR-4c)'] };
+}
+
 /** Nearest-rank percentile of `values`, or `insufficient_n` below `minimum` observations (never a guess). */
 function percentile(values, q, minimum) {
   if (values.length < minimum) return 'insufficient_n';
@@ -210,7 +308,7 @@ function percentile(values, q, minimum) {
  * @param {object} run
  * @param {{state?: object}} [sources]
  */
-export function evaluateRun(run, { state, repoRoot = null, records = [] } = {}) {
+export function evaluateRun(run, { state, repoRoot = null, records = [], cycles = false } = {}) {
   const mine = (Array.isArray(records) ? records : []).filter((r) => r && r.run_id === run.run_id);
   const matched = state && state.run_id === run.run_id ? state : null;
   const chain = Array.isArray(matched?.review_chain) ? matched.review_chain : null;
@@ -219,6 +317,7 @@ export function evaluateRun(run, { state, repoRoot = null, records = [] } = {}) 
   const wall = {};
   for (const i of run.intervals.filter((x) => x.kind === 'phase')) wall[i.name] = (wall[i.name] ?? 0) + i.duration_ms;
   const { build_ms: buildMs, review_ms: reviewMs } = run.durations;
+  const rounds = reviewRounds(run);
   return {
     ticket: run.ticket, run_id: run.run_id, outcome: run.outcome,
     tokens_by_role: run.usage?.tokens_by_role ?? UNKNOWN,
@@ -243,7 +342,8 @@ export function evaluateRun(run, { state, repoRoot = null, records = [] } = {}) 
     unattributed_share_pct: unattributedShare(mine),
     attempt_timing: attemptTiming(matched, mine),
     proof_wall_ms: proofWall(matched),
-    review_rounds: reviewRounds(run),
+    review_rounds: rounds,
+    ...(cycles ? { review_cycles: reviewCycles(matched, chain, rounds) } : {}),
     ui_ticket: run.intervals.some((i) => i.metrics?.ui_ticket === true),
     review_to_build_ratio: known(reviewMs) && known(buildMs) && buildMs > 0 ? Math.round(reviewMs / buildMs * 1000) / 1000 : UNKNOWN,
     ...(matched?.unit_checks ? { units: withReviews(matched, unitProjection(matched, repoRoot), repoRoot ? unitStates(matched, repoRoot) : null) } : {}),
@@ -309,10 +409,10 @@ const median = (values) => {
  * @param {{runs: object[], states?: Record<string, object>, records?: object[]}} input
  *   `runs` are `buildRun` results; `states` maps ticket → engine state.
  */
-export function evaluate({ runs, states = {}, records = [], repoRoot = null }) {
+export function evaluate({ runs, states = {}, records = [], repoRoot = null, cycles = false }) {
   const joined = runs.map((r) => attachUsage(r, records));
   const metrics = joined.map((r) => {
-    const m = evaluateRun(r, { state: states[r.ticket], repoRoot, records });
+    const m = evaluateRun(r, { state: states[r.ticket], repoRoot, records, cycles });
     return { ...m, suggestions: suggest(m, rawValues(r)) };
   });
   const fired = {};
@@ -343,6 +443,7 @@ function parseArgs(argv) {
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i];
     if (token === '--all') { options.all = true; continue; }
+    if (token === '--cycles') { options.cycles = true; continue; }
     if (token === '--usage') {
       while (rest[i + 1] !== undefined && !rest[i + 1].startsWith('--')) options.usage.push(rest[++i]);
       if (!options.usage.length) fail('--usage requires at least one file');
@@ -475,7 +576,7 @@ function report(options) {
   const skipped = { lines: 0 };
   const records = dedupeUsage(options.usage.flatMap((f) => readUsage(f, skipped)));
   if (skipped.lines) process.stderr.write(`eval: skipped ${skipped.lines} malformed usage line(s); usage shares and costs exclude them\n`);
-  const result = evaluate({ runs, states, records, repoRoot: root });
+  const result = evaluate({ runs, states, records, repoRoot: root, cycles: options.cycles === true });
   result.runs = result.runs.map((m, i) => ({ ...m, ...(runs[i]?.abandoned ? { abandoned: true, recorded_outcome: runs[i].recorded_outcome } : {}),
     ...(runs[i]?.partial_legacy ? { partial_legacy: runs[i].partial_legacy } : {}) }));
   const out = skipped.lines ? { ...result, skipped_usage_lines: skipped.lines } : result;
