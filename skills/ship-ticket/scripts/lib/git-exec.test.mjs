@@ -693,7 +693,10 @@ test('[S3] R3: non-strings, wrong lengths, upper case, option or rev syntax, hol
   const g = gitRunner();
   const cwd = tmp(t);
   const ok = { args: ['--version'], cwd, env: env0({ ambient: process.env, gitInfo: g.info }), op: 'test.stdin' };
-  assert.match(decodeStrict(g.run({ ...ok, stdin: { kind: 'oid-lines', oids: [OID(), OID('b')] } }).stdout), /^git version /, 'control: a valid stdin runs');
+  // The control must READ its stdin: `git --version` exits without reading, and on Linux the write then fails with EPIPE
+  // (CI d1c1c37: git_launch_failed). `hash-object --stdin` consumes it, as every production stdin row does.
+  const hashed = decodeStrict(g.run({ ...ok, args: ['hash-object', '--stdin'], stdin: { kind: 'oid-lines', oids: [OID(), OID('b')] } }).stdout);
+  assert.equal(hashed, `${createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${LINES([OID(), OID('b')]).length}\0`), LINES([OID(), OID('b')])])).digest('hex')}\n`, 'control: a valid stdin runs and git read exactly the built lines');
   const bad = [
     ['100 oids', Array.from({ length: 100 }, () => OID())], ['empty', []], ['a String object', [new String(OID())]], ['a number', [1]],
     ['a Buffer', [Buffer.from(OID())]], ['39 hex', [OID().slice(1)]], ['41 hex', [`${OID()}0`]], ['upper case', [OID('A')]],
