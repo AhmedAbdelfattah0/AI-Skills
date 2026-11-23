@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { admitHost, hostSnapshot, parsePressure, parseSwapouts, HOST_SNAPSHOT_SCHEMA, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
+import { admitHost, hostSnapshot, parsePressure, parseSwapUsedMb, HOST_SNAPSHOT_SCHEMA, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
 
 // Injected clock: samples are 20 s apart (inside the accepted 15..30 s window); now_ms is 1 s after the latest.
 const T0 = 1_000_000;
-const S = (o = {}) => ({ t_ms: T0, pressure_level: 1, swapouts: 100, load1: 1, load5: 1, load15: 1, ...o });
+const S = (o = {}) => ({ t_ms: T0, pressure_level: 1, swap_used_mb: 100, load1: 1, load5: 1, load15: 1, ...o });
 const snap = (o = {}) => ({ schema: HOST_SNAPSHOT_SCHEMA, platform: 'darwin', cores: 10, now_ms: T0 + 21000, samples: [S(), S({ t_ms: T0 + 20000 })], provider_errors: [], ...o });
 const withLatest = (o) => snap({ samples: [S(), S({ t_ms: T0 + 20000, ...o })] });
 // The n-th later snapshot (distinct, strictly increasing timestamps).
@@ -57,25 +57,31 @@ test('pressure 2 and 4 hold with held_pressure; pressure 1 is healthy; an EARLIE
   assert.deepEqual(early.reasons, ['held_pressure']);
 });
 
-test('swapouts growth holds with held_swap; flat swap admits even when the absolute value is huge', () => {
-  const grow = LIGHT(withLatest({ swapouts: 101 }), R(0));
+test('swap USED growth above the 2 MB tolerance holds with held_swap; flat, falling and tiny jitter admit; huge absolute swap alone never blocks', () => {
+  const grow = LIGHT(withLatest({ swap_used_mb: 110 }), R(0));
   assert.deepEqual(grow.reasons, ['held_swap']);
   assert.equal(grow.signals.swap, 'growing');
-  const flat = LIGHT(snap({ samples: [S({ swapouts: 9_000_000 }), S({ t_ms: T0 + 20000, swapouts: 9_000_000 })] }), R(0));
+  assert.deepEqual(LIGHT(withLatest({ swap_used_mb: 102.01 }), R(0)).reasons, ['held_swap']);   // just above tolerance
+  assert.equal(LIGHT(withLatest({ swap_used_mb: 102 }), R(0)).admit, true);                      // exactly the tolerance: not growth
+  assert.equal(LIGHT(withLatest({ swap_used_mb: 100.5 }), R(0)).signals.swap, 'flat');
+  const flat = LIGHT(snap({ samples: [S({ swap_used_mb: 9_000_000 }), S({ t_ms: T0 + 20000, swap_used_mb: 9_000_000 })] }), R(0));
   assert.equal(flat.admit, true);
   assert.equal(flat.signals.swap, 'flat');
+  const fall = LIGHT(snap({ samples: [S({ swap_used_mb: 500 }), S({ t_ms: T0 + 20000, swap_used_mb: 100 })] }), R(0));
+  assert.equal(fall.admit, true);
+  assert.equal(fall.signals.swap, 'flat');
 });
 
-test('swap growth in a MIDDLE pair is still growth', () => {
-  const s = snap({ samples: [S({ swapouts: 5 }), S({ t_ms: T0 + 20000, swapouts: 9 }), S({ t_ms: T0 + 40000, swapouts: 9 })], now_ms: T0 + 41000 });
-  assert.deepEqual(LIGHT(s, R(0)).reasons, ['held_swap']);
-});
-
-test('a falling, wrapped or reset swap counter is never flat: held_swap (regressed); negatives are unavailable', () => {
-  const fall = LIGHT(snap({ samples: [S({ swapouts: 500 }), S({ t_ms: T0 + 20000, swapouts: 100 })] }), R(0));
-  assert.deepEqual(fall.reasons, ['held_swap']);
-  assert.equal(fall.signals.swap, 'regressed');
-  const neg = LIGHT(snap({ samples: [S({ swapouts: -5 }), S({ t_ms: T0 + 20000, swapouts: -5 })] }), R(0));
+test('swap growth LATER in a 3-sample window, or after an earlier dip, still holds (not the latest pair only)', () => {
+  const later = snap({ samples: [S({ swap_used_mb: 5 }), S({ t_ms: T0 + 20000, swap_used_mb: 5 }), S({ t_ms: T0 + 40000, swap_used_mb: 20 })], now_ms: T0 + 41000 });
+  assert.deepEqual(LIGHT(later, R(0)).reasons, ['held_swap']);
+  const early = snap({ samples: [S({ swap_used_mb: 5 }), S({ t_ms: T0 + 20000, swap_used_mb: 50 }), S({ t_ms: T0 + 40000, swap_used_mb: 50 })], now_ms: T0 + 41000 });
+  assert.deepEqual(LIGHT(early, R(0)).reasons, ['held_swap']);
+  const dip = snap({ samples: [S({ swap_used_mb: 50 }), S({ t_ms: T0 + 20000, swap_used_mb: 10 }), S({ t_ms: T0 + 40000, swap_used_mb: 30 })], now_ms: T0 + 41000 });
+  assert.deepEqual(LIGHT(dip, R(0)).reasons, ['held_swap']);                                      // 10 -> 30 is growth after the dip
+  const slow = snap({ samples: [S({ swap_used_mb: 10 }), S({ t_ms: T0 + 20000, swap_used_mb: 11.5 }), S({ t_ms: T0 + 40000, swap_used_mb: 13 })], now_ms: T0 + 41000 });
+  assert.deepEqual(LIGHT(slow, R(0)).reasons, ['held_swap']);                                     // creeping growth accumulates over the window
+  const neg = LIGHT(snap({ samples: [S({ swap_used_mb: -5 }), S({ t_ms: T0 + 20000, swap_used_mb: -5 })] }), R(0));
   assert.equal(neg.admit, false);
   assert.equal(neg.reason, 'snapshot_unavailable');
 });
@@ -124,7 +130,7 @@ test('provider errors (429, quota, timeout) hold with held_provider; a numeric c
 });
 
 test('every signal combination reports all its reasons in a fixed order', () => {
-  const sigs = { held_pressure: { pressure_level: 2 }, held_swap: { swapouts: 999 }, held_load: { load5: 9 } };
+  const sigs = { held_pressure: { pressure_level: 2 }, held_swap: { swap_used_mb: 999 }, held_load: { load5: 9 } };
   const names = Object.keys(sigs);
   for (let mask = 0; mask < 16; mask++) {
     const latest = {}; const expected = [];
@@ -165,7 +171,7 @@ test('hysteresis: REPLAYING the same clean snapshot never counts as a second cle
 });
 
 test('hysteresis: a bad sample between two clean ones resets the streak', () => {
-  const bad = LIGHT(withLatest({ swapouts: 500 }), R(0));
+  const bad = LIGHT(withLatest({ swap_used_mb: 500 }), R(0));
   const c1 = LIGHT(NEXT(1), R(0), bad.history);
   const bad2 = LIGHT(NEXT(2, { load1: 9 }), R(0), c1.history);
   assert.equal(bad2.history.clean_streak, 0);
@@ -219,7 +225,7 @@ test('HEAVY admission depends ONLY on running.heavy and host health: the snapsho
 test('stop signals are evaluated BEFORE replay handling: clean -> bad at +1 ms -> clean never preserves the streak', () => {
   const cold = admitHost(snap(), 'LIGHT', R(0), null);          // streak 1, last_sample T0+20000
   const near = (o, n = 1) => snap({ now_ms: T0 + 21000 + n, samples: [S({ t_ms: T0 + n }), S({ t_ms: T0 + 20000 + n, ...o })] });
-  const bads = [{ pressure_level: 4 }, { load5: 50 }, { swapouts: 101 }];
+  const bads = [{ pressure_level: 4 }, { load5: 50 }, { swap_used_mb: 110 }];
   for (const bad of bads) {
     const hit = admitHost(near(bad), 'LIGHT', R(0), cold.history);
     assert.equal(hit.admit, false);
@@ -304,11 +310,11 @@ test('known stop signals keep precedence when other fields are malformed (bad ti
 test('unknown snapshot / sample properties are REJECTED (stricter): snapshot_unavailable', () => {
   assert.equal(LIGHT({ ...snap(), extra: 1 }, R(0)).reason, 'snapshot_unavailable');
   assert.equal(LIGHT(withLatest({ bonus: 1 }), R(0)).reason, 'snapshot_unavailable');
-  assert.equal(LIGHT({ ...snap(), schema: 'ship-ticket-host-snapshot-v1' }, R(0)).admit, true);
+  assert.equal(LIGHT({ ...snap(), schema: 'ship-ticket-host-snapshot-v2' }, R(0)).admit, true);
 });
 
 test('never kills: input is not mutated, terminate is always empty, even when unhealthy', () => {
-  const s = withLatest({ pressure_level: 4, swapouts: 9999 });
+  const s = withLatest({ pressure_level: 4, swap_used_mb: 9999 });
   const running = { total: 5, heavy: 3 };
   const history = { state: 'held', clean_streak: 1, last_admit_t_ms: null, last_sample_t_ms: T0 };
   const before = JSON.stringify([s, running, history]);
@@ -344,8 +350,8 @@ test('a VALID darwin snapshot with ONE bad field holds for every bad-field class
   const bads = {
     provider_kind_500: snap({ provider_errors: [{ kind: '500', t_ms: 1 }] }), cores_5000: snap({ cores: 5000 }), cores_0: snap({ cores: 0 }),
     load15_neg0_01: withLatest({ load15: -0.01 }), samples_17: snap({ samples: many, now_ms: T0 + 16 * 20000 + 1000 }), pressure_3: withLatest({ pressure_level: 3 }),
-    swap_neg: withLatest({ swapouts: -1 }), platform_linux: snap({ platform: 'linux' }), load_string: withLatest({ load1: '1' }),
-    swap_growth_load_50_and_bad_cores: withLatest({ swapouts: 999, load1: 50 }),
+    swap_neg: withLatest({ swap_used_mb: -1 }), platform_linux: snap({ platform: 'linux' }), load_string: withLatest({ load1: '1' }),
+    swap_growth_load_50_and_bad_cores: withLatest({ swap_used_mb: 999, load1: 50 }),
   };
   bads.swap_growth_load_50_and_bad_cores.cores = 5000;
   for (const [name, s] of Object.entries(bads)) for (const h of [null, H0]) for (const call of [LIGHT, HEAVY]) {
@@ -401,7 +407,8 @@ test('range validation: pressure outside {1,2,4}, bad loads, bad cores, bad swap
   for (const level of [0, -3, 3, 5, 1.5, '1']) assert.equal(LIGHT(withLatest({ pressure_level: level }), R(0)).reason, 'snapshot_unavailable', 'p' + level);
   for (const v of [-1, NaN, Infinity, '1']) for (const k of ['load1', 'load5', 'load15']) assert.equal(LIGHT(withLatest({ [k]: v }), R(0)).reason, 'snapshot_unavailable', k + v);
   for (const cores of [0, -2, 1e9, 4.5, '8', NaN, undefined]) assert.equal(LIGHT(snap({ cores }), R(0)).reason, 'snapshot_unavailable', 'c' + cores);
-  for (const swapouts of [-1, 1.5, '3', NaN, Infinity]) assert.equal(LIGHT(withLatest({ swapouts }), R(0)).reason, 'snapshot_unavailable', 's' + swapouts);
+  for (const swap_used_mb of [-1, '3', NaN, Infinity, 1e10, null, undefined]) assert.equal(LIGHT(withLatest({ swap_used_mb }), R(0)).reason, 'snapshot_unavailable', 's' + swap_used_mb);
+  assert.equal(LIGHT(withLatest({ swapouts: 100, swap_used_mb: undefined }), R(0)).reason, 'snapshot_unavailable');   // the old field is gone (unknown key)
 });
 
 test('EARLIER high load in the window is not forgotten: 6.01 then 5.99 (10 cores) holds even after a stale open history', () => {
@@ -419,8 +426,8 @@ test('EARLIER high load in the window is not forgotten: 6.01 then 5.99 (10 cores
 });
 
 test('schema is REQUIRED and EXACT: missing, null, {}, garbage, unknown versions and wrong types are snapshot_unavailable', () => {
-  assert.equal(HOST_SNAPSHOT_SCHEMA, 'ship-ticket-host-snapshot-v1');
-  for (const schema of [undefined, null, {}, [], 'garbage', 'ship-ticket-host-snapshot-v2', 'SHIP-TICKET-HOST-SNAPSHOT-V1', 1, '']) for (const call of [LIGHT, HEAVY]) {
+  assert.equal(HOST_SNAPSHOT_SCHEMA, 'ship-ticket-host-snapshot-v2');
+  for (const schema of [undefined, null, {}, [], 'garbage', 'ship-ticket-host-snapshot-v1', 'ship-ticket-host-snapshot-v3', 'SHIP-TICKET-HOST-SNAPSHOT-V2', 1, '']) for (const call of [LIGHT, HEAVY]) {
     const r = call({ ...snap(), schema }, R(0));
     assert.equal(r.admit, false, String(schema));
     assert.deepEqual(r.reasons, ['snapshot_unavailable'], String(schema));
@@ -430,35 +437,48 @@ test('schema is REQUIRED and EXACT: missing, null, {}, garbage, unknown versions
   assert.equal(LIGHT(snap(), R(0)).admit, true);
 });
 
-const VM_OK = 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               5.\nSwapins:                                  1.\nSwapouts:                                 7.\n';
-test('parser table (parseSwapouts): exactly ONE strict whole-line record; duplicated, missing, extra, reordered-case, CR, unit-suffixed and oversize outputs are null', () => {
-  assert.equal(parseSwapouts(VM_OK), 7);
-  assert.equal(parseSwapouts('Swapouts: 0.\n'), 0);
-  assert.equal(parseSwapouts('Pages free: 1.\nSwapouts:    12.'), 12);                 // no trailing newline is fine
-  assert.equal(parseSwapouts('Swapouts: 5.\nSwapins: 9.\nPages free: 2.\n'), 5);      // reordered unrelated records are fine
+const SW = 'total = 7168.00M  used = 6743.31M  free = 424.69M  (encrypted)\n';
+test('parser table (parseSwapUsedMb): ONE whole-output grammar; every extra/duplicated/reordered/multi-line/CR/NUL/unicode/huge/negative output is null', () => {
+  assert.equal(parseSwapUsedMb(SW), 6743.31);                                                      // the real output on this host
+  assert.equal(parseSwapUsedMb(SW.slice(0, -1)), 6743.31);                                         // no trailing newline
+  assert.equal(parseSwapUsedMb('total = 7168.00M  used = 6743.31M  free = 424.69M\n'), 6743.31);   // (encrypted) is the ONLY optional part
+  assert.equal(parseSwapUsedMb('total = 0.00M  used = 0.00M  free = 0.00M\n'), 0);
+  assert.equal(parseSwapUsedMb('total = 2.00G  used = 512.00M  free = 1536.00M\n'), 512);
+  assert.equal(parseSwapUsedMb('total = 2048.00K  used = 1024.00K  free = 1024.00K\n'), 1);
+  assert.equal(parseSwapUsedMb('total = 1.00G  used = 1.00G  free = 0.00M\n'), 1024);
   const bad = {
-    constant_then_growing: 'Swapouts: 5.\nSwapouts: 900.\n', identical_twice: 'Swapouts: 5.\nSwapouts: 5.\n', growing_then_constant: 'Swapouts: 900.\nSwapouts: 5.\n',
-    missing: 'Pages free: 1.\n', empty: '', garbage_suffix: 'Swapouts: 5garbage.\n', trailing_text: 'Swapouts: 5. extra\n', no_dot: 'Swapouts: 5\n',
-    leading_garbage: 'xSwapouts: 5.\n', lowercase_record: 'swapouts: 5.\n', cr: 'Swapouts: 5.\r\n', negative: 'Swapouts: -5.\n', fraction: 'Swapouts: 5.5.\n',
-    leading_zero: 'Swapouts: 05.\n', tab: 'Swapouts:\t5.\n', indented: '  Swapouts: 5.\n', unsafe: 'Swapouts: 99999999999999999999.\n',
-    valid_plus_malformed_second: 'Swapouts: 5.\nSwapouts: bad.\n',
-    valid_plus_lowercase_second: 'Swapouts: 5.\nswapouts: 900.\n', valid_plus_indented_second: 'Swapouts: 5.\n  Swapouts: 900.\n', valid_plus_cr_second: 'Swapouts: 5.\nSwapouts: 900.\r\n', valid_plus_nodot_second: 'Swapouts: 5.\nSwapouts 900\n', oversize: 'Pages free: 1.\n'.repeat(2000) + 'Swapouts: 5.\n',
+    empty: '', newline_only: '\n', two_lines: SW + SW, trailing_record: SW + 'extra\n', leading_record: 'x\n' + SW, blank_line_after: SW + '\n', blank_line_before: '\n' + SW,
+    second_valid_hidden_growth: 'total = 7168.00M  used = 100.00M  free = 7068.00M  (encrypted)\ntotal = 7168.00M  used = 900.00M  free = 6268.00M  (encrypted)\n',
+    cr_inside: 'total = 7168.00M  used = 6743.31M\r  free = 424.69M  (encrypted)\n', cr_at_end: SW.slice(0, -1) + '\r\n', cr_between_records: 'total = 7168.00M  used = 6743.31M  free = 424.69M  (encrypted)\r' + SW,
+    nul: 'total = 7168.00M  used = 6743.31M  free = 424.69M\0\n', nul_prefix: '\0' + SW, unicode_digit: 'total = ٧168.00M  used = 6743.31M  free = 424.69M\n', unicode_space: 'total = 7168.00M  used = 6743.31M  free = 424.69M\n',
+    negative: 'total = 7168.00M  used = -6743.31M  free = 424.69M\n', huge: 'total = 99999999999.00M  used = 6743.31M  free = 424.69M\n', oversize: SW.repeat(100),
+    single_spaces: 'total = 7168.00M used = 6743.31M free = 424.69M\n',
+    single_space_before_used: 'total = 7168.00M used = 6743.31M  free = 424.69M\n', single_space_before_free: 'total = 7168.00M  used = 6743.31M free = 424.69M\n', three_spaces: 'total = 7168.00M   used = 6743.31M  free = 424.69M\n', single_space_before_encrypted: 'total = 7168.00M  used = 6743.31M  free = 424.69M (encrypted)\n', three_spaces_before_encrypted: 'total = 7168.00M  used = 6743.31M  free = 424.69M   (encrypted)\n', tab: 'total = 7168.00M\tused = 6743.31M  free = 424.69M\n', leading_space: ' ' + SW, trailing_space: SW.slice(0, -1) + ' \n',
+    bad_unit: 'total = 7168.00T  used = 6743.31M  free = 424.69M\n', lower_unit: 'total = 7168.00m  used = 6743.31M  free = 424.69M\n', no_unit: 'total = 7168.00  used = 6743.31  free = 424.69\n',
+    one_decimal: 'total = 7168.0M  used = 6743.3M  free = 424.6M\n', three_decimals: 'total = 7168.000M  used = 6743.310M  free = 424.690M\n', no_decimals: 'total = 7168M  used = 6743M  free = 424M\n',
+    exponent: 'total = 7.1e3M  used = 6743.31M  free = 424.69M\n', leading_zero: 'total = 07168.00M  used = 6743.31M  free = 424.69M\n', comma_decimal: 'total = 7168,00M  used = 6743,31M  free = 424,69M\n',
+    used_gt_total: 'total = 100.00M  used = 200.00M  free = 0.00M\n', reordered: 'used = 6743.31M  total = 7168.00M  free = 424.69M\n', missing_free: 'total = 7168.00M  used = 6743.31M\n',
+    missing_used: 'total = 7168.00M  free = 424.69M\n', extra_field: 'total = 7168.00M  used = 6743.31M  free = 424.69M  extra = 1.00M\n', other_suffix: 'total = 7168.00M  used = 6743.31M  free = 424.69M  (decrypted)\n',
+    suffix_twice: 'total = 7168.00M  used = 6743.31M  free = 424.69M  (encrypted)  (encrypted)\n', prefix_garbage: 'xtotal = 7168.00M  used = 6743.31M  free = 424.69M\n', suffix_garbage: SW.slice(0, -1) + 'x\n',
+    two_newlines: SW + '\n\n', case_diff: 'Total = 7168.00M  used = 6743.31M  free = 424.69M\n', fullwidth: 'total = ７１６８.00M  used = 6743.31M  free = 424.69M\n',
   };
-  for (const [name, out] of Object.entries(bad)) assert.equal(parseSwapouts(out), null, name);
-  for (const nonString of [null, undefined, 5, {}, []]) assert.equal(parseSwapouts(nonString), null);
+  for (const [name, out] of Object.entries(bad)) assert.equal(parseSwapUsedMb(out), null, name);
+  for (const nonString of [null, undefined, 5, {}, [], Buffer.from(SW)]) assert.equal(parseSwapUsedMb(nonString), null);
 });
 
-test('parser table (parsePressure): one bare integer with at most one trailing newline; everything else is null', () => {
-  for (const [out, v] of [['1\n', 1], ['2', 2], ['4\n', 4], ['0\n', 0]]) assert.equal(parsePressure(out), v, JSON.stringify(out));
-  for (const out of ['', '\n', '1\n1\n', '1\n\n', ' 1', '1 ', '1garbage', '1\r\n', '01', '-1', '1.0', '١', '1\n2', 'x\n1', '9'.repeat(40), '99999999999999999999\n', null, undefined, 1])
-    assert.equal(parsePressure(out), null, JSON.stringify(out));
+test('parser table (parsePressure): ONE whole-output grammar /^[124]\\n?$/; everything else (0, 3, 5, multi-line, CR, NUL, unicode, huge, negative) is null', () => {
+  for (const [out, v] of [['1\n', 1], ['2', 2], ['4\n', 4], ['1', 1]]) assert.equal(parsePressure(out), v, JSON.stringify(out));
+  const bad = ['', '\n', '0\n', '3\n', '5', '8', '-1', '1\n1\n', '1\n\n', '1\n2', '2\n1\n4\n', ' 1', '1 ', '1garbage', '1\r\n', '1\r', '\r1', '01', '1.0', '١', '１', '1\0', '\0 1\n', 'x\n1', '9'.repeat(40), '99999999999999999999\n', '1\n'.repeat(1000), '12', '14\n', '1e0', '+1', '1​', 'a1', '1a', '\n1'];
+  for (const out of bad) assert.equal(parsePressure(out), null, JSON.stringify(out));
+  for (const nonString of [null, undefined, 1, {}, [], Buffer.from('1\n')]) assert.equal(parsePressure(nonString), null);
 });
 
-test('hostSnapshot wires the strict parsers: duplicated Swapouts or multi-line sysctl output yields null fields that hold', async () => {
+test('hostSnapshot wires the strict parsers: a second swap record or multi-line sysctl output yields null fields that hold', async () => {
   const mk = (o) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], o), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
-  const dup = await mk({ vm: () => 'Swapouts: 5.\nSwapouts: 900.\n' });
-  assert.deepEqual(dup.samples.map(x => x.swapouts), [null, null]);
+  const dup = await mk({ swap: () => 'total = 7168.00M  used = 100.00M  free = 7068.00M\ntotal = 7168.00M  used = 900.00M  free = 6268.00M\n' });
+  assert.deepEqual(dup.samples.map(x => x.swap_used_mb), [null, null]);
   assert.equal(LIGHT(dup, R(0), null).reason, 'snapshot_unavailable');
+  assert.equal(HEAVY(dup, R(0), null).admit, false);
   const multi = await mk({ pressure: '1\n4\n' });
   assert.equal(multi.samples[0].pressure_level, null);
   assert.equal(HEAVY(multi, R(0), null).admit, false);
@@ -466,6 +486,7 @@ test('hostSnapshot wires the strict parsers: duplicated Swapouts or multi-line s
   assert.equal(badLoad.samples[0].load1, null);
   assert.equal(LIGHT(badLoad, R(0), null).reason, 'snapshot_unavailable');
   assert.equal((await mk({})).schema, HOST_SNAPSHOT_SCHEMA);
+  assert.equal(HOST_SNAPSHOT_SCHEMA, 'ship-ticket-host-snapshot-v2');
 });
 
 test('reason codes are the documented set', () => {
@@ -473,12 +494,13 @@ test('reason codes are the documented set', () => {
   assert.equal(HOST_POLICY.clean_samples_to_resume, 2);
 });
 
-function fakeExec(log, { pressure = '1\n', vm = n => 'Pages free: 1.\nSwapouts:   ' + n + '.\n' } = {}) {
-  let swap = 10;
-  return (cmd) => {
-    log.push(cmd);
-    if (cmd === '/usr/sbin/sysctl') return pressure;
-    if (cmd === '/usr/bin/vm_stat') return vm(swap++);
+function fakeExec(log, { pressure = '1\n', swap = n => 'total = 7168.00M  used = ' + (10 + 5 * n).toFixed(2) + 'M  free = 7000.00M  (encrypted)\n' } = {}) {
+  let n = 0;
+  return (cmd, args) => {
+    log.push(cmd + ' ' + (args ?? []).join(' '));
+    if (cmd !== '/usr/sbin/sysctl' || args?.[0] !== '-n') return null;
+    if (args[1] === 'kern.memorystatus_vm_pressure_level') return pressure;
+    if (args[1] === 'vm.swapusage') return swap(n++);
     return null;
   };
 }
@@ -486,26 +508,26 @@ function fakeExec(log, { pressure = '1\n', vm = n => 'Pages free: 1.\nSwapouts: 
 test('hostSnapshot uses ABSOLUTE tool paths, injected clock/sleep, reads no process table, and feeds admitHost', async () => {
   const calls = []; const sleeps = []; let t = 5000;
   const s = await hostSnapshot({ platform: 'darwin', exec: fakeExec(calls), now: () => (t += 20000), sleep: async ms => { sleeps.push(ms); }, loadavg: () => [1, 2, 3], cpus: () => new Array(8), providerErrors: [{ kind: '429', t_ms: 1 }] });
-  assert.ok(calls.every(c => c.startsWith('/')), calls.join());
-  assert.deepEqual([...new Set(calls)].sort(), ['/usr/bin/vm_stat', '/usr/sbin/sysctl']);
+  assert.ok(calls.every(c => c.startsWith('/usr/sbin/sysctl -n ')), calls.join());
+  assert.deepEqual([...new Set(calls)].sort(), ['/usr/sbin/sysctl -n kern.memorystatus_vm_pressure_level', '/usr/sbin/sysctl -n vm.swapusage']);
   assert.deepEqual(sleeps, [20000]);
   assert.equal(s.cores, 8);
-  assert.deepEqual(s.samples.map(x => [x.t_ms, x.pressure_level, x.swapouts, x.load1, x.load5, x.load15]), [[25000, 1, 10, 1, 2, 3], [45000, 1, 11, 1, 2, 3]]);
+  assert.deepEqual(s.samples.map(x => [x.t_ms, x.pressure_level, x.swap_used_mb, x.load1, x.load5, x.load15]), [[25000, 1, 10, 1, 2, 3], [45000, 1, 15, 1, 2, 3]]);
   assert.equal(Object.hasOwn(s, 'heavy_processes'), false);
   assert.equal(s.now_ms, 65000);
   assert.deepEqual(LIGHT(s, R(0), null).reasons, ['held_swap', 'held_provider']);
 });
 
-test('hostSnapshot parses strictly: garbled sysctl or vm_stat output becomes null fields, which hold', async () => {
+test('hostSnapshot parses strictly: garbled sysctl output becomes null fields, which hold', async () => {
   const mk = (o) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], o), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
   const g1 = await mk({ pressure: '1garbage\n' });
   assert.equal(g1.samples[0].pressure_level, null);
   assert.equal(LIGHT(g1, R(0)).reason, 'snapshot_unavailable');
-  const g2 = await mk({ vm: () => 'Swapouts:   100garbage.\n' });
-  assert.equal(g2.samples[0].swapouts, null);
+  const g2 = await mk({ swap: () => 'total = 7168.00M  used = 100garbage  free = 1.00M\n' });
+  assert.equal(g2.samples[0].swap_used_mb, null);
   assert.equal(LIGHT(g2, R(0)).reason, 'snapshot_unavailable');
-  const g3 = await mk({ vm: () => 'xSwapouts: 5.\n' });
-  assert.equal(g3.samples[0].swapouts, null);
+  const g3 = await mk({ swap: () => 'xtotal = 7168.00M  used = 1.00M  free = 1.00M\n' });
+  assert.equal(g3.samples[0].swap_used_mb, null);
 });
 
 test('hostSnapshot on non-darwin does no reading and the result is the fail-safe fallback', async () => {

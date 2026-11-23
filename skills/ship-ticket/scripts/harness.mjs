@@ -333,6 +333,7 @@ export const HOST_POLICY = Object.freeze({
   sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
   sample_gap_max_ms: 30000,      // a larger gap is stale (held_resample)
   max_snapshot_age_ms: 30000,    // snapshot.now_ms - latest.t_ms must be 0..30 s (freshness bound)
+  swap_growth_tolerance_mb: 2,   // swap USED growth above this many MB across the window holds (held_swap); flat/falling is fine
   open_stale_ms: 180000,         // an 'open' history whose last counted sample is older than 3 min is a COLD START (held, two clean samples)
   max_samples: 16,
   max_cores: 4096,
@@ -340,7 +341,7 @@ export const HOST_POLICY = Object.freeze({
   heavy_slots_healthy: 2,
   heavy_slots_default: 1,
 });
-export const HOST_SNAPSHOT_SCHEMA = 'ship-ticket-host-snapshot-v1';
+export const HOST_SNAPSHOT_SCHEMA = 'ship-ticket-host-snapshot-v2';
 export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable', 'invalid_args']);
 const PROVIDER_KINDS = ['429', 'quota', 'timeout'];
 const HISTORY_KEYS = ['state', 'clean_streak', 'last_admit_t_ms', 'last_sample_t_ms'];
@@ -381,21 +382,22 @@ function validHistory(h) {
   return x;
 }
 const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'provider_errors'];
-const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swapouts', 'load1', 'load5', 'load15'];
+const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swap_used_mb', 'load1', 'load5', 'load15'];
 // Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
 const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
 function validSample(x) {
-  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && isInt(x.swapouts)
+  return isPlain(x) && onlyKeys(x, SAMPLE_KEYS) && isInt(x.t_ms) && HOST_POLICY.pressure_levels.includes(x.pressure_level) && Number.isFinite(x.swap_used_mb) && x.swap_used_mb >= 0 && x.swap_used_mb <= 1e9
     && ['load1', 'load5', 'load15'].every(k => typeof x[k] === 'number' && Number.isFinite(x[k]) && x[k] >= 0);
 }
 
 /**
  * admitHost(snapshot, cls, running, history)  -- the approved positional contract.
- *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swapouts, load1, load5, load15}] (oldest first),
+ *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swap_used_mb, load1, load5, load15}] (oldest first),
  *               provider_errors (count or [{kind,t_ms}]) }   (no process counting: unknown properties such as heavy_processes are rejected)
  *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
  *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
  * Returns { admit, reason, reasons, signals, history, terminate: [] }. A wrong-shaped call HOLDS with `invalid_args`.
+ * Swap signal: swap USED growth (MB) from the single-record `sysctl -n vm.swapusage`; see POLICY NOTE in the code below.
  * There is NO fallback admit: any invalid snapshot field, history or argument holds. Non-darwin holds unless a valid snapshot is injected
  * (E0/CI inject one). Missing history = cold start (held; two clean samples needed). A sample counts only if >= 15 s after
  * history.last_sample_t_ms; closer or older samples are held_resample with history unchanged.
@@ -428,8 +430,13 @@ export function admitHost(snapshot, cls, running, history) {
   if (samples.some(x => x.pressure_level >= HOST_POLICY.pressure_hold_level)) holds.push('held_pressure');
   let swap = 'flat';
   if (samples.length < 2) swap = 'unknown';
-  else if (samples.slice(1).some((x, i) => x.swapouts < samples[i].swapouts)) swap = 'regressed';
-  else if (samples.slice(1).some((x, i) => x.swapouts > samples[i].swapouts)) swap = 'growing';
+  else {
+    // Swap USED growth (MB) above the tolerance between ANY earlier and later sample of the window. Falling or flat is fine; high
+    // absolute swap alone never blocks (recorded policy). POLICY NOTE: the recorded policy says 'no swapout growth'; swap-used growth
+    // is the same intent from a single-record numeric source (vm.swapusage) instead of multi-line vm_stat text.
+    let min = samples[0].swap_used_mb;
+    for (const x of samples.slice(1)) { if (x.swap_used_mb - min > HOST_POLICY.swap_growth_tolerance_mb) swap = 'growing'; min = Math.min(min, x.swap_used_mb); }
+  }
   if (swap !== 'flat') holds.push('held_swap');
   const loadLimit = HOST_POLICY.load_fraction * cores;
   // The WHOLE window counts: an earlier high reading is not forgotten because the latest one dipped under the limit.
@@ -471,26 +478,35 @@ export function admitHost(snapshot, cls, running, history) {
 }
 
 /**
- * Kernel-output parsers: strict BY CONSTRUCTION. Bounded input, whole-line anchored, EXACTLY ONE matching record
- * (zero or several = null = snapshot_unavailable), no first-match semantics, no trimming of unexpected bytes.
- * AUDIT (every parser in the host path): parsePressure (sysctl), parseSwapouts (vm_stat); `Pages ...` lines of vm_stat are
- * NOT read; load averages come from the kernel call os.loadavg() (array of exactly 3, then range-checked in admitHost);
- * now()/cores are injected or os values range-checked in admitHost; provider_errors is a typed value validated in admitHost.
+ * Kernel-output parsers: ONE whole-output anchored grammar each. No splitting, no filtering, no line selection: the regex must
+ * consume the ENTIRE output string (including one optional trailing newline), so a second line, a trailing record, an embedded
+ * CR/NUL or any extra byte makes it null (= snapshot_unavailable).
+ * AUDIT (everything hostSnapshot/admitHost reads from outside):
+ *   1. sysctl -n kern.memorystatus_vm_pressure_level  -> parsePressure, grammar /^[124]\n?$/
+ *   2. sysctl -n vm.swapusage                        -> parseSwapUsedMb, grammar below (one record)
+ *   3. os.loadavg()                                  -> array of exactly 3, finite >= 0 (range-checked in admitHost)
+ *   4. injected now()/cpus()/providerErrors/platform -> range/type validated in admitHost
+ *   5. caller-supplied snapshot, cls, running, history -> validated in admitHost
+ *   No other external text is read or parsed (vm_stat and ps are NOT used by the host path).
  */
-const PARSE_MAX_CHARS = 16 * 1024;
 export function parsePressure(out) {
-  if (typeof out !== 'string' || out.length === 0 || out.length > 64) return null;
-  const m = /^(0|[1-9]\d*)\n?$/.exec(out);
-  return m && Number.isSafeInteger(Number(m[1])) ? Number(m[1]) : null;
+  if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (max 2 chars)
+  const m = /^([124])\n?$/.exec(out);
+  return m ? Number(m[1]) : null;
 }
-export function parseSwapouts(out) {
-  if (typeof out !== 'string' || out.length === 0 || out.length > PARSE_MAX_CHARS) return null;
-  const records = out.split('\n').filter(l => /^\s*swapouts\b/i.test(l));
-  if (records.length !== 1) return null;
-  const m = /^Swapouts: +(0|[1-9]\d*)\.$/.exec(records[0]);
-  return m && Number.isSafeInteger(Number(m[1])) ? Number(m[1]) : null;
+const SWAP_NUM = '(0|[1-9]\\d{0,8})\\.(\\d{2})';
+const SWAP_RE = new RegExp('^total = ' + SWAP_NUM + '([KMG])  used = ' + SWAP_NUM + '([KMG])  free = ' + SWAP_NUM + '([KMG])(  \\(encrypted\\))?\\n?$');
+const UNIT_MB = { K: 1 / 1024, M: 1, G: 1024 };
+/** Accepts exactly `total = N.NNu  used = N.NNu  free = N.NNu` with optional `  (encrypted)`, u in K|M|G, N up to 9 integer digits. */
+export function parseSwapUsedMb(out) {
+  if (typeof out !== 'string') return null;   // the grammar itself is length-bounded (< 120 chars)
+  const m = SWAP_RE.exec(out);
+  if (!m) return null;
+  const mb = (i, u) => Number(m[i] + '.' + m[i + 1]) * UNIT_MB[m[u]];
+  const total = mb(1, 3), used = mb(4, 6);
+  return Number.isFinite(used) && used <= total + 0.01 ? Math.round(used * 100) / 100 : null;
 }
-const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat' });
+const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl' });
 /**
  * The only I/O reader for admitHost. Every source is injectable. Takes `samples` readings `intervalMs`
  * apart (default 2 x 20 s, inside the accepted 15..30 s window). Strict parsing: garbled output yields
@@ -511,7 +527,7 @@ export async function hostSnapshot(probe = {}) {
     if (i > 0) await sleep(intervalMs);
     const la = loadavg();
     const [l1, l5, l15] = Array.isArray(la) && la.length === 3 ? la : [null, null, null];
-    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swapouts: parseSwapouts(run(BIN.vm_stat, [])), load1: l1, load5: l5, load15: l15 });
+    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swap_used_mb: parseSwapUsedMb(run(BIN.sysctl, ['-n', 'vm.swapusage'])), load1: l1, load5: l5, load15: l15 });
   }
   base.now_ms = now();
   return base;

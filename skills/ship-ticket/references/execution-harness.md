@@ -93,7 +93,7 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   never the plan. Neither command reserves memory.
 - `admitHost(snapshot, cls, running, history)` (library function in `harness.mjs`, pure, no I/O; the
   reader is `hostSnapshot()`) decides whether ONE more task may start from kernel-sourced health only
-  (macOS memory pressure, swapouts delta, load averages, injected provider errors) and the caller's
+  (macOS memory pressure, swap USED growth, load averages, injected provider errors) and the caller's
   `running` occupancy. It is fail-safe: any invalid snapshot, history or argument holds
   (`snapshot_unavailable` / `invalid_args`), including every non-darwin host without an injected valid
   snapshot; there is no fallback admit and it never terminates running work. HEAVY cap is 1, or 2 only
@@ -104,6 +104,13 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   least 15 s apart, and may be polled at up to 3 minutes between counted samples; a longer unobserved gap
   is treated as a cold start (two clean samples again). Unknown snapshot properties are rejected (fail-closed: a new snapshot field holds every call
   until `admitHost` learns it).
+  Swap signal (POLICY NOTE, flagged for the owner): the recorded policy says "swap flat (no swapout
+  growth)"; `admitHost` uses swap USED growth in MB (above a 2 MB tolerance, between any earlier and later
+  sample of the window) from the single-record `sysctl -n vm.swapusage`, the same intent from a numeric
+  one-line source instead of multi-line `vm_stat` text; high absolute swap alone never blocks. The snapshot
+  schema is `ship-ticket-host-snapshot-v2`. Every kernel input is matched by ONE whole-output grammar (no
+  splitting or line selection): pressure `/^[124]\n?$/`, swap `total = N.NNu  used = N.NNu  free = N.NNu`
+  with only `  (encrypted)` optional (`u` is K, M or G); any other shape is `snapshot_unavailable`.
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 
 ### Model tiers
