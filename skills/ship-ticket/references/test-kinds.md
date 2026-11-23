@@ -144,7 +144,7 @@ All of these go in the DAG and the plan, before approval (the DAG digest is boun
 
 Refusals at `init`: `test_kinds_policy_required` (the plan or declaration opts in but the DAG has no `config.testKinds`),
 `plan_tags_missing` (`config.testKinds` without an opt-in), `test_kinds_runner_missing` (no `evidence` entry),
-`multi_entry_unsupported_v0` (more than one; `scripts/run-engine.mjs:370-377`).
+`multi_entry_unsupported_v0` (more than one; `scripts/run-engine.mjs:380-387`).
 
 At a gate: when no stored record fits the current evidence identity, the engine runs the runner, stores the record and
 returns `evidence_refreshed` **without deciding**; re-issue the identical call and it decides on that record
