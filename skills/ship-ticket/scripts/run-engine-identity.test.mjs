@@ -22,7 +22,8 @@ import { POSIX, fixture, withOrigin, withGitShim, passReview, failReview, confir
 import * as SP from './security-plan.mjs';
 import { init, status, gate as gateCmd } from './run-engine.mjs';
 import { POLICY_SEMANTICS } from './engine-policy.mjs';
-import { verifyFrozenBase, readRepoIdentity } from './engine-identity.mjs';
+import * as EI from './engine-identity.mjs'; // a namespace: a RED run against an older engine fails per test, not at load
+const verifyFrozenBase = (...a) => EI.verifyFrozenBase(...a), readRepoIdentity = (...a) => EI.readRepoIdentity(...a);
 import { identityRecord, strictGithub } from './github-identity.mjs';
 import { pinnedBaseRefusal } from './engine-base-read.mjs';
 
