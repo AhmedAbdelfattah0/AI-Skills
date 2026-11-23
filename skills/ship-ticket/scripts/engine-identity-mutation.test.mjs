@@ -57,7 +57,7 @@ export const IDENTITY_MUTANTS = [
   { tag: 'I12', name: 'ship-ready: identity and base are not read again after the proof (a proof command re-points origin)',
     edits: [{ file: GATES, from: "    const idProof = idShip && identityStage(E, 'ship-ready');", to: '    const idProof = null;' }] },
   { tag: 'I13', name: 'the base read re-reads the configured URL instead of the snapshot',
-    edits: [{ file: ID, from: '    const v = verifyBase(root, { ref: B.ref, remote: record.url, recorded });', to: "    const v = verifyBase(root, { ref: B.ref, remote: authGit(root, ['config', '--get', `remote.${B.remote}.url`]).stdout.trim(), recorded });" }] },
+    edits: [{ file: ID, from: '    const v = verifyBase(root, { ref: B.ref, remote: snap.url, recorded });', to: "    const v = verifyBase(root, { ref: B.ref, remote: authGit(root, ['config', '--get', `remote.${B.remote}.url`]).stdout.trim(), recorded });" }] },
   { tag: 'I14', name: 'parser: another host passes (gitlab.com binds)', edits: [{ file: GH, from: "    if (host.toLowerCase() !== 'github.com') return null;\n", to: '' }] },
   { tag: 'I15', name: 'parser: a port passes (github.com:8443 is the same repository)',
     edits: [{ file: GH, from: HTTPS, to: "  { re: /^https:\\/\\/([^/@?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false }," },
@@ -69,13 +69,13 @@ export const IDENTITY_MUTANTS = [
     edits: [{ file: GATES, from: '  } else if (v.ok && idShip) S.ship_ready.base = idShip.base;', to: '  }' }] },
   { tag: 'I18', name: 'base check: a moved merge base (the branch merged the advanced base) is accepted',
     edits: [{ file: ID, from: '    if (v.base.merge_base !== B.merge_base) return moved(', to: '    if (false) return moved(' }] },
-  { tag: 'I19', name: 'verifyFrozenBase: no strict inputs (no freeze base or no valid snapshot skips the check)',
-    edits: [{ file: ID, from: "  if (!recordOk || !validIdentityRecord(record, B?.identity)) return no('base_unverified',", to: "  if (false) return no('base_unverified'," }] },
+  { tag: 'I19', name: 'verifyFrozenBase: no strict freeze-base input (a missing or copied freeze base skips the rewind check)',
+    edits: [{ file: ID, from: "  const recordOk = recorded === B ? wellFormedBase(B) && typeof B.identity === 'string' : wellFormedFreezeBase(recorded, B);", to: '  const recordOk = true;' }] },
   // ---- attempt 2
   { tag: 'I20', name: 'reassess (flag on): S-12\'s base check re-reads the remote instead of taking the snapshot',
     edits: [{ file: GATES, from: '  const baseNo = pinnedBaseRefusal(E, idNo?.record);', to: '  const baseNo = pinnedBaseRefusal(E);' }] },
   { tag: 'I21', name: 'init: pinBaseRecord re-reads the URL despite the snapshot (good->evil->good pins evil under acme)',
-    edits: [{ file: BASE, from: '    const u = record !== undefined ? { ok: true, url: record.url } : remoteUrl(root, remote);', to: '    const u = remoteUrl(root, remote);' }] },
+    edits: [{ file: BASE, from: '    const u = snap !== undefined ? { ok: true, url: snap.url } : remoteUrl(root, remote);', to: '    const u = remoteUrl(root, remote);' }] },
   { tag: 'I22', name: 'the push URL is parsed loosely (a port or another form passes when the slug matches)',
     edits: [{ file: GH, from: '  const a = strictGithub(url), b = push === null ? null : strictGithub(push);',
       to: "  const a = strictGithub(url), b = push === null ? null : (strictGithub(push) ?? { slug: String(push).toLowerCase().replace(/^ssh:\\/\\/[^@]*@/, '').replace(/:\\d+\\//, '/').replace(/\\.git$/, '') });" }] },
@@ -83,7 +83,7 @@ export const IDENTITY_MUTANTS = [
   { tag: 'I24', name: 'parser: an https userinfo part passes (evil.invalid#@github.com connects to evil.invalid)',
     edits: [{ file: GH, from: HTTPS, to: "  { re: /^https:\\/\\/(?:[^/]*@)?([^/@:?#\\s\\\\%]+)\\/([^?#\\s\\\\%]+)$/, user: false }," }] },
   { tag: 'I25', name: 'verifyFrozenBase: any object with a url is a snapshot (no frozen re-validated record of this run)',
-    edits: [{ file: ID, from: '!validIdentityRecord(record, B?.identity)) return no(', to: "!(typeof record?.url === 'string')) return no(" }] },
+    edits: [{ file: ID, from: '  const snap = recordOk ? validIdentityRecord(record, B?.identity) : null;', to: "  const snap = recordOk && typeof record?.url === 'string' ? record : null;" }] },
   { tag: 'I26', name: 'the snapshot read falls back to two --get-all processes (url, then pushurl)',
     edits: [{ file: ID, from: "    const r = authGit(root, ['config', '-z', '--get-regexp', `^remote\\\\.${reEscape(remote)}\\\\.(url|pushurl)$`]);",
       to: "    const a = authGit(root, ['config', '--get-all', `remote.${remote}.url`]), p = authGit(root, ['config', '--get-all', `remote.${remote}.pushurl`]);\n    const r = { status: a.status === 0 ? 0 : a.status, stdout: [...a.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.url\\n${v}`), ...p.stdout.split('\\n').filter(Boolean).map((v) => `remote.${remote}.pushurl\\n${v}`)].join('\\0') };" }] },
@@ -92,6 +92,13 @@ export const IDENTITY_MUTANTS = [
   { tag: 'I29', name: 'reassess (flag on): S-12\'s base check by the snapshot skips the rewind check against the pin',
     edits: [{ file: BASE, from: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: B });', to: '    const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: record !== undefined ? null : B });' }] },
   { tag: 'I30', name: 'the snapshot read takes a git failure for "no URL"', edits: [{ file: ID, from: '    if (r.error || (r.status !== 0 && r.status !== 1)) return fail(', to: '    if (false) return fail(' }] },
+  // ---- attempt 2, Round 1 repair
+  { tag: 'I31', name: 'a record is consumed as given: accessors, prototypes and hidden keys pass, and no copy is taken',
+    edits: [{ file: GH, from: '  if (proto !== Object.prototype && proto !== null) return null;\n', to: '' },
+      { file: GH, from: "  if (Reflect.ownKeys(v).map(String).sort().join() !== 'identity,push,url') return null;\n", to: "  if (Object.keys(v).sort().join() !== 'identity,push,url') return null;\n" },
+      { file: GH, from: "  const d = Object.getOwnPropertyDescriptors(v);\n  if (!['url', 'push', 'identity'].every((k) => Object.hasOwn(d[k], 'value') && !d[k].get && !d[k].set)) return null;\n  const copy = { url: d.url.value, push: d.push.value, identity: d.identity.value };\n",
+        to: '  const copy = v;\n' },
+      { file: GH, from: '  return Object.freeze(copy);\n}', to: '  return copy;\n}' }] },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

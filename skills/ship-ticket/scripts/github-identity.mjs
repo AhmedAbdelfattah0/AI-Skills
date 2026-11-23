@@ -40,7 +40,7 @@ export function strictGithub(url) {
 /**
  * The record a consumer receives: frozen { url, push, identity }, built only from values that parse strictly and name ONE
  * repository (the push URL, when configured, the same one). A consumer re-validates it (validIdentityRecord) and compares
- * its identity with the run's: no consumer reads a remote URL itself.
+ * its identity with the run's and reads only the validated copy: no consumer reads a remote URL itself.
  */
 export function identityRecord(url, push) {
   const a = strictGithub(url), b = push === null ? null : strictGithub(push);
@@ -48,9 +48,22 @@ export function identityRecord(url, push) {
   return Object.freeze({ url, push, identity: a.slug });
 }
 
-/** Whether `v` is exactly such a record (frozen, exact keys, re-parsed), naming `identity` when given. */
+/**
+ * `v` re-validated, as a fresh frozen COPY of its primitive values (what a consumer reads, never `v` itself), or null. Round 1 of
+ * attempt 2: only own DATA properties count (an accessor could answer validation and consumption differently), the prototype is
+ * Object.prototype or null (no inherited or class behaviour), and the own keys, enumerable or not, are exactly url, push,
+ * identity. The values re-parse to `identity`, which equals `identity` when given.
+ */
 export function validIdentityRecord(v, identity) {
-  return v !== null && typeof v === 'object' && Object.isFrozen(v) && Object.keys(v).sort().join() === 'identity,push,url'
-    && strictGithub(v.url)?.slug === v.identity && (v.push === null || strictGithub(v.push)?.slug === v.identity)
-    && (identity === undefined || v.identity === identity);
+  if (v === null || typeof v !== 'object' || !Object.isFrozen(v)) return null;
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return null;
+  if (Reflect.ownKeys(v).map(String).sort().join() !== 'identity,push,url') return null;
+  const d = Object.getOwnPropertyDescriptors(v);
+  if (!['url', 'push', 'identity'].every((k) => Object.hasOwn(d[k], 'value') && !d[k].get && !d[k].set)) return null;
+  const copy = { url: d.url.value, push: d.push.value, identity: d.identity.value };
+  if (typeof copy.url !== 'string' || (copy.push !== null && typeof copy.push !== 'string') || typeof copy.identity !== 'string') return null;
+  if (strictGithub(copy.url)?.slug !== copy.identity || (copy.push !== null && strictGithub(copy.push)?.slug !== copy.identity)) return null;
+  if (identity !== undefined && copy.identity !== identity) return null;
+  return Object.freeze(copy);
 }

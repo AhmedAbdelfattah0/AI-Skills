@@ -843,7 +843,7 @@ function v11Fx(t) {
   return { fx, o };
 }
 
-test('R11b every version 9-12 by a REAL init; an S-12 engine (rows 1-8) refuses each at init and on load', { skip: WIN_SKIP }, async (t) => {
+test('R11b every version 9-12 by a REAL init; an S-12 engine (rows 1-8) refuses each at init and on load (init and status only: no platform skip)', async (t) => {
   const s12 = { current: 1, semantics: Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8].map((v) => [v, POLICY_SEMANTICS[v]])) };
   for (const [v, make] of [[9, () => idFx(t)], [10, () => tkIdFx(t)], [11, () => v11Fx(t)], [12, () => tkIdFx(t, { format3: true })]]) {
     const { fx } = make();
@@ -857,4 +857,40 @@ test('R11b every version 9-12 by a REAL init; an S-12 engine (rows 1-8) refuses 
     await assert.rejects(status(fx.ctx({ policy: s12 })), (e) => e.code === 'policy_version_unsupported', `v${v}: the S-12 engine refuses on load`);
     await status(fx.ctx());
   }
+});
+
+// ================================================================== attempt 2, Round 1 repair
+
+test('[I31] A2-10 a snapshot is consumed only as a validated copy: an accessor url, a prototype-carrying or a non-plain record is base_unverified', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  ok(fx.cli('init', { dag: fx.dagFile }));
+  o.evil('evil/other');
+  const E = ctxOf(fx), acme = o.ghUrl('acme/app'), evil = o.ghUrl('evil/other');
+  let reads = 0;
+  const accessor = Object.freeze(Object.defineProperties({}, { url: { get: () => (++reads === 1 ? acme : evil), enumerable: true },
+    push: { value: null, enumerable: true }, identity: { value: 'github.com/acme/app', enumerable: true } }));
+  const viaProto = Object.freeze(Object.assign(Object.create({ inherited: true }), { url: acme, push: null, identity: 'github.com/acme/app' }));
+  class Rec { constructor() { Object.assign(this, { url: acme, push: null, identity: 'github.com/acme/app' }); Object.freeze(this); } }
+  const hidden = Object.freeze(Object.defineProperty({ url: acme, push: null, identity: 'github.com/acme/app' }, 'extra', { value: evil, enumerable: false }));
+  for (const [name, rec] of [['an accessor url', accessor], ['a prototype-carrying object', viaProto], ['a class instance', new Rec()], ['a non-enumerable extra key', hidden]]) {
+    for (const [where, call] of [['verifyFrozenBase', () => verifyFrozenBase(E, E.S.base, rec)], ['pinnedBaseRefusal', () => pinnedBaseRefusal(E, rec)]])
+      assert.equal(call()?.code, 'base_unverified', `${where}: ${name}`);
+  }
+  assert.equal(verifyFrozenBase(E, E.S.base, Object.freeze(Object.assign(Object.create(null), { url: acme, push: null, identity: 'github.com/acme/app' }))).ok, true,
+    'a null-prototype record of data properties is accepted');
+});
+
+test('A2-11 status is an advisory read (OD-10): on a re-pointed flag-on run it may contact the re-pointed URL, and it decides and writes nothing', { skip: WIN_SKIP }, (t) => {
+  const { fx, o } = idFx(t);
+  o.evil('evil/other');
+  started(fx);
+  o.git('remote', 'set-url', 'origin', o.ghUrl('evil/other'));
+  const shim = withGitShim(fx), before = readFileSync(fx.stateFile(), 'utf8');
+  const st = fx.cli('status');
+  ok(st, 'status');
+  assert.equal(st.out.base.identity, 'github.com/acme/app', 'the identity of record is reported as recorded');
+  assert.ok(shim.lsRemotes().some((l) => l.includes(o.ghUrl('evil/other'))), 'documented: status reads the configured URL (not the gates\' snapshot)');
+  assert.ok(!st.out.judgments.length, 'never a judgment');
+  assert.equal(readFileSync(fx.stateFile(), 'utf8'), before, 'status writes nothing');
+  refused(fx.gate('review', passReview('rx-1', candidate(fx))), 'identity_changed'); // the gates refuse
 });

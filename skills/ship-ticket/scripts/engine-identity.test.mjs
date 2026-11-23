@@ -102,9 +102,10 @@ test('github-identity: strictGithub is the one parser; repositoryOf (flag-off) i
   assert.equal(repositoryOf('https://gitlab.com/acme/app.git').slug, 'gitlab.com/acme/app', 'flag-off parsing is untouched');
   assert.equal(repositoryOf('https://github.com:8443/acme/app.git').slug, 'github.com/acme/app');
   const r = identityRecord('https://github.com/acme/app.git', null);
-  assert.equal(validIdentityRecord(r, 'github.com/acme/app'), true);
-  assert.equal(validIdentityRecord(r, 'github.com/evil/other'), false, 'identity equality at consumption');
-  assert.equal(validIdentityRecord({ ...r }, 'github.com/acme/app'), false, 'an unfrozen copy');
-  assert.equal(validIdentityRecord(Object.freeze({ ...r, identity: 'github.com/evil/other' })), false, 'an identity field that is not the URL\'s');
-  assert.equal(validIdentityRecord(Object.freeze({ ...r, extra: 1 })), false, 'an extra key');
+  const copy = validIdentityRecord(r, 'github.com/acme/app');
+  assert.deepEqual([copy, copy === r, Object.isFrozen(copy)], [{ ...r }, false, true], 'a fresh frozen copy, never the input');
+  assert.equal(validIdentityRecord(r, 'github.com/evil/other'), null, 'identity equality at consumption');
+  assert.equal(validIdentityRecord({ ...r }, 'github.com/acme/app'), null, 'an unfrozen copy');
+  assert.equal(validIdentityRecord(Object.freeze({ ...r, identity: 'github.com/evil/other' })), null, 'an identity field that is not the URL\'s');
+  assert.equal(validIdentityRecord(Object.freeze({ ...r, extra: 1 })), null, 'an extra key');
 });

@@ -458,7 +458,15 @@ S-28a limits:
   `ls-remote` answer is not attested.
 - `pushInsteadOf`, `branch.*.pushRemote` and `remote.pushDefault` are not bound. The engine never
   pushes; binding a push target is S-28b's publication binding.
-- `status` still reads the remote's URL for its advisory `base` block. It decides and writes nothing.
+- The "one snapshot, nothing is sent to a re-pointed URL" guarantee holds for the GATES (init,
+  reassess, review, confirmation, ship-ready). `status` is an advisory read (OD-10): its `base` block
+  still reads the configured URL. On a run whose origin was re-pointed, it can therefore contact the
+  re-pointed URL and report that remote's head as an advisory. It decides and writes nothing, and
+  the next gate refuses `identity_changed`. Binding `status` to the snapshot is left to S-14, which
+  derives the status advisory.
+- A proof command that adds `url.<other bare>.insteadOf <the run's URL>` still reaches SHIP_READY.
+  `ls-remote` is given the run's URL but is served by the other repository. `ship_ready.base` stays
+  the freeze sha, so the other repository's head is not adopted.
 - A same-user rewrite of `state.json` together with the URL is not caught.
 - Nothing is re-read between two gates, so a change made between gates is caught at the next one.
   Ship-ready, which no gate follows, reads both again after its proof.

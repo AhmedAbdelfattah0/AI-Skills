@@ -81,10 +81,11 @@ export function pinBaseRecord(root, config, record) {
   return underHardenedGit(() => {
     const remote = config.pinnedBase.remote;
     // S-28a: a repoIdentity run passes the ONE snapshot it bound (github-identity.mjs record); nothing is re-read from config
-    if (record !== undefined && !validIdentityRecord(record)) throw coded('base_unverified', 'the identity snapshot is not a valid record');
-    const id = record !== undefined ? { ok: true, identity: { slug: record.identity } } : remoteIdentity(root, remote);
+    const snap = record === undefined ? undefined : validIdentityRecord(record); // the validated COPY is what is read
+    if (snap === null) throw coded('base_unverified', 'the identity snapshot is not a valid record');
+    const id = snap !== undefined ? { ok: true, identity: { slug: snap.identity } } : remoteIdentity(root, remote);
     if (!id.ok) throw coded(id.code, id.reasons.join('; '));
-    const u = record !== undefined ? { ok: true, url: record.url } : remoteUrl(root, remote);
+    const u = snap !== undefined ? { ok: true, url: snap.url } : remoteUrl(root, remote);
     if (!u.ok) throw coded(u.code, u.reasons.join('; '));
     if (authGit(root, ['symbolic-ref', '-q', 'HEAD']).status !== 0)
       throw coded('base_unverified', 'HEAD is detached: a pinned base is recorded for a branch, so check out the ticket branch, then init');
@@ -123,11 +124,12 @@ export function pinnedBaseRefusal(E, record) {
   const B = E.S.base, root = E.ctx.repoRoot;
   if (!wellFormedBase(B)) return no('base_state_missing', ['the run pins its base but S.base is not a well-formed pin: a partial pin is never resumed']);
   // S-28a: a repoIdentity run passes the ONE snapshot whose identity it just checked (the run's own); nothing is re-read from config
-  if (record !== undefined && !validIdentityRecord(record, B.identity)) return no('base_unverified', ['the identity snapshot is not a valid record of this run']);
+  const snap = record === undefined ? undefined : validIdentityRecord(record, B.identity); // the validated COPY is what is read
+  if (snap === null) return no('base_unverified', ['the identity snapshot is not a valid record of this run']);
   return underHardenedGit(() => {
-    const id = record !== undefined ? { ok: true } : remoteIdentity(root, B.remote);
+    const id = snap !== undefined ? { ok: true } : remoteIdentity(root, B.remote);
     if (!id.ok) return no(id.code, id.reasons);
-    const u = record !== undefined ? { ok: true, url: record.url } : remoteUrl(root, B.remote);
+    const u = snap !== undefined ? { ok: true, url: snap.url } : remoteUrl(root, B.remote);
     if (!u.ok) return no(u.code, u.reasons);
     const v = verifyBase(root, { ref: B.ref, remote: u.url, recorded: B });
     if (!v.ok) return no(v.code, v.reasons);

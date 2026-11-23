@@ -25,7 +25,8 @@
  * (S-28b or never, OD-12). TODO(S-02a0c): authGit under underHardenedGit until the lib git runner covers these reads.
  * Residuals (documented, not closed): the endpoint behind the configured URL is unproven and the ls-remote answer unattested;
  * a same-user rewrite of state.json together with the URL; between two gates nothing is re-read (ship-ready reads again after
- * its proof).
+ * its proof); a proof adding url.<other>.insteadOf <the run's URL> still reaches SHIP_READY (served by the other repository, but
+ * ship_ready.base stays the freeze sha); `status` is an advisory read of the configured URL (OD-10), not the snapshot.
  */
 import { repoIdentityOn } from './engine-dag.mjs';
 import { underHardenedGit, wellFormedBase, localMergeBase } from './engine-base-read.mjs';
@@ -130,10 +131,11 @@ export function identityRefusal(E, stage) {
 export function verifyFrozenBase(E, recorded, record) {
   const S = E.S, B = S.base, root = E.ctx.repoRoot;
   const recordOk = recorded === B ? wellFormedBase(B) && typeof B.identity === 'string' : wellFormedFreezeBase(recorded, B);
-  if (!recordOk || !validIdentityRecord(record, B?.identity)) return no('base_unverified', [`no verified base record${recordOk ? '' : ' (no well-formed freeze base)'} or `
+  const snap = recordOk ? validIdentityRecord(record, B?.identity) : null; // the validated COPY is what is read below
+  if (!recordOk || !snap) return no('base_unverified', [`no verified base record${recordOk ? '' : ' (no well-formed freeze base)'} or `
     + 'no identity snapshot of this run to verify the remote base by: a review freeze without a base needs an owner RETRY (a new original review freezes one)']);
   return underHardenedGit(() => {
-    const v = verifyBase(root, { ref: B.ref, remote: record.url, recorded });
+    const v = verifyBase(root, { ref: B.ref, remote: snap.url, recorded });
     if (!v.ok) return no(v.code, v.reasons);
     const moved = (observed, reason) => no('base_moved_local', [reason], { expected: B.merge_base, observed });
     if (v.base.merge_base !== B.merge_base) return moved(v.base.merge_base, `merge-base(HEAD, ${B.remote}/${B.ref}) is ${v.base.merge_base}, not the pinned ${B.merge_base}: `
