@@ -180,16 +180,48 @@ export function refusal(code, reasons, { action = 'resolve', repeat = 1, detail 
   return human();
 }
 
-/** Class precedence among simultaneous judgments: a human-owned stop is never hidden behind an orchestrator- or engine-owned one. */
-const SEVERITY = ['SECURITY_GATE_FAILURE', 'APPROVAL_OR_OWNERSHIP_FAILURE', 'ENGINE_FAILURE', 'UNKNOWN_FAILURE'];
-const rank = (r) => (ACTIONS[r.action] === 'human' ? 0 : 1) * 10 + (SEVERITY.indexOf(r.failure_class) + 1 || SEVERITY.length + 1);
-/** Every judgment is evaluated; the most severe decides (list order breaks ties), and every reason is kept. */
-const judged = (list) => {
+/**
+ * ONE fixed total restrictiveness order (attempt 2): FAILED > SECURITY human > APPROVAL human > UNKNOWN/ENGINE human > any other
+ * human stop > engine/orchestrator BLOCKED > READY > RUNNING/WAITING > owner_publish (the end of the engine's work) > COMPLETED. Every signal of the
+ * run is folded by it, so a more restrictive signal is never hidden by a local rule; ties keep the earlier signal.
+ */
+export const LEVELS = Object.freeze(['FAILED', 'SECURITY_HUMAN', 'APPROVAL_HUMAN', 'UNKNOWN_HUMAN', 'HUMAN', 'BLOCKED', 'READY', 'MOVING', 'PUBLISH', 'COMPLETED']);
+export function level(r) {
+  if (r.disposition === 'FAILED') return 0;
+  if (r.disposition === 'COMPLETED') return 9;
+  if (r.action === 'owner_publish') return 8; // the end of the engine's work (A4): answered only when nothing else is owed
+  if (ACTIONS[r.action] === 'human') return r.failure_class === 'SECURITY_GATE_FAILURE' ? 1 : r.failure_class === 'APPROVAL_OR_OWNERSHIP_FAILURE' ? 2 : r.failure_class ? 3 : 4;
+  if (r.disposition === 'BLOCKED' || r.disposition === 'NEEDS_APPROVAL') return 5;
+  return r.disposition === 'READY' ? 6 : 7;
+}
+export const fold = (signals) => signals.reduce((best, r) => (level(r) < level(best) ? r : best));
+
+/** A spent quiescence_unknown (every attempt of its node retired and quiesced) is cleared by `resume` itself: the engine's, not a stop. */
+const spentQuiescence = (S, j) => j.code === 'quiescence_unknown' && j.node && (S.attempts ?? []).some(a => a.node === j.node)
+  && (S.attempts ?? []).filter(a => a.node === j.node).every(a => !LIVE.includes(a.status) && a.quiesced === true);
+/** One judgment as a signal. */
+const judgmentSignal = (S, j, reasons, detail) => (spentQuiescence(S, j)
+  ? res('READY', 'quiescence_spent', 'resume', { reasons: [`${j.node}: every attempt is retired and quiesced: resume clears the spent quiescence_unknown`], detail })
+  : refusal(j.code, reasons, { detail }));
+/** Every judgment is evaluated and folded; every reason is kept. */
+const judged = (list, S = {}) => {
   const reasons = list.map(j => `${j.node ? `${j.node}: ` : ''}${j.reason}`);
   const detail = { judgments: list.map(j => ({ code: j.code, ...(j.node ? { node: j.node } : {}) })) };
-  const all = list.map(j => refusal(j.code, reasons, { detail }));
-  return all.reduce((best, r) => (rank(r) < rank(best) ? r : best));
+  return fold(list.map(j => judgmentSignal(S, j, reasons, detail)));
 };
+
+/** Gate history (append-only, every row): the latest row of `gate` for candidate `c` (a candidate-less row applies to every candidate). */
+export const latestRow = (gates, gate, c) => (gates ?? []).filter(g => g.gate === gate && (g.candidate_id == null || g.candidate_id === c)).at(-1) ?? null;
+/** How many times in a row (for that gate and candidate) the latest refusal repeated. */
+export function repeatOf(gates, gate, c) {
+  const rows = (gates ?? []).filter(g => g.gate === gate && (g.candidate_id == null || g.candidate_id === c));
+  let n = 0;
+  for (const g of [...rows].reverse()) { if (g.ok || g.code !== rows.at(-1).code) break; n++; }
+  return Math.max(n, 1);
+}
+/** Consecutive latest gate rows (any gate) refused because the candidate was not computable. */
+const unavailableRepeat = (gates) => { let n = 0; for (const g of [...(gates ?? [])].reverse()) { if (g.code !== 'candidate_unavailable') break; n++; } return n + 1; };
+const unavailable = (f) => refusal('candidate_unavailable', [f.candidate?.reason ?? 'candidate not computable'], { repeat: unavailableRepeat(f.gates) });
 
 // ---- context derived once per call ----------------------------------------------------------------
 
@@ -204,7 +236,7 @@ export function dispatchKind(S, d) {
   return rec && d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';
 }
 /** Whether a chain record of the dispatch's review (execution, kind and candidate) consumed it. */
-const consumedBy = (chain, d, kind) => chain.some(r => r.review_execution === d.review_execution && r.kind === kind
+export const consumedBy = (chain, d, kind) => chain.some(r => r.review_execution === d.review_execution && r.kind === kind
   && (r.candidate_id === undefined || d.candidate_id === null || r.candidate_id === d.candidate_id));
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
 
@@ -244,7 +276,7 @@ function attemptRules(stage) {
   ];
 }
 
-const judgmentRule = (stage) => ({ id: `${stage.toLowerCase()}.judgment`, stage, when: (S, f, x) => x.judgments[stage].length > 0 && judged(x.judgments[stage]) });
+const judgmentRule = (stage) => ({ id: `${stage.toLowerCase()}.judgment`, stage, when: (S, f, x) => x.judgments[stage].length > 0 && judged(x.judgments[stage], S) });
 
 /**
  * Orchestrator-dispatched review rules (run-log activity starts, S5 binding) of `kind` for REVIEW or CONFIRMATION.
@@ -263,11 +295,15 @@ function reviewRules(stage, kind, want) {
       && (w.rx ? d.review_execution === w.rx : true));
     const of = (rx) => mine.filter(d => d.review_execution === rx);
     const rolesOf = (list) => [...w.roles, ...(w.optional ?? []).filter(r => list.some(d => d.role === r))];
-    // AC3: an execution whose every lane has its result outranks the work-tree candidate (gate review judges staleness);
-    // otherwise only dispatches of the current candidate count, so an instruction never mixes two candidates.
+    // A candidate-less (legacy) lane applies to the CURRENT candidate (pessimistic): never dropped.
+    const sameCand = (d) => d.candidate_id == null || d.candidate_id === w.candidate;
+    // The current candidate's execution comes first (an in-progress one is never hidden by an old complete one); else AC3:
+    // an execution whose every lane has its result outranks the work-tree candidate (gate review judges staleness).
     const done = [...new Set(mine.map(d => d.review_execution))].filter(rx => complete(rolesOf(of(rx)), of(rx)));
-    const rx = w.rx ?? done.at(-1) ?? mine.filter(d => d.candidate_id === w.candidate).at(-1)?.review_execution ?? null;
-    const list = w.rx || done.includes(rx) ? of(rx) : of(rx).filter(d => d.candidate_id === w.candidate);
+    const cur = mine.filter(sameCand).map(d => d.review_execution);
+    const curRx = done.filter(rx => cur.includes(rx)).at(-1) ?? cur.at(-1) ?? null;
+    const rx = w.rx ?? curRx ?? done.at(-1) ?? null;
+    const list = w.rx || rx !== curRx ? of(rx) : of(rx).filter(sameCand);
     const roles = rolesOf(list);
     return { ...w, rx, roles, mine: list.filter(d => roles.includes(d.role)) };
   };
@@ -276,10 +312,6 @@ function reviewRules(stage, kind, want) {
   const all = (w) => complete(w.roles, w.mine);
   return {
     results: [
-      { id: `${p}.gate_refused`, stage, when: (S, f, x) => { const w = rows(S, f, x), g = f.lastGate?.review;
-        return all(w) && g && !g.ok && w.mine.every(d => ready(d) && (d.result_ms ?? Infinity) <= g.at_ms)
-          && refusal(g.code, [`gate review refused (${g.code}) after these ${kind} results were submitted${g.repeat > 1 ? ` (${g.repeat} times in a row)` : ''}`],
-            { action: 'gate_review', repeat: g.repeat, detail: { kind, review_execution: w.rx } }); } },
       { id: `${p}.gate`, stage, when: (S, f, x) => { const w = rows(S, f, x);
         return all(w) && res('READY', 'results_ready', 'gate_review', { reasons: [`every ${kind} result of ${w.rx} is in: reconcile and run gate review with them (close each run-log interval with end --carrier-result; never re-dispatch)`],
           detail: { kind, review_execution: w.rx, results: w.mine.filter(ready).map(d => ({ role: d.role, event_id: d.event_id, result_path: d.marker })) } }); } },
@@ -306,7 +338,7 @@ const humanStop = (stage) => ({ id: `${stage.toLowerCase()}.owner`, stage, when:
 /** Ordered rules: per stage, the first that matches decides; a stage no rule decides is BLOCKED `underived` (fail closed). */
 export const RULES = Object.freeze([
   // APPROVAL
-  { id: 'approval.unbound', stage: 'APPROVAL', when: (S, f) => (f.unbound ?? []).length > 0 && judged(f.unbound) },
+  { id: 'approval.unbound', stage: 'APPROVAL', when: (S, f) => (f.unbound ?? []).length > 0 && judged(f.unbound, S) },
   { id: 'approval.bound', stage: 'APPROVAL', when: () => done('bound') },
   // BUILD
   ...attemptRules('BUILD'),
@@ -326,12 +358,12 @@ export const RULES = Object.freeze([
   { id: 'review.retry', stage: 'REVIEW', when: (S, f, x) => x.retry && retryReview(S, f, x) },
   { id: 'review.recorded', stage: 'REVIEW', when: (S, f, x) => x.O && done(x.O.outcome === 'PASS' ? 'review_passed' : 'review_failed', { review_execution: x.rx, candidate_id: x.O.candidate_id }) },
   ...originalReview.results,
-  { id: 'review.candidate', stage: 'REVIEW', when: (S, f) => !f.candidate?.id && refusal('candidate_unavailable', [f.candidate?.reason ?? 'candidate not computable']) },
+  { id: 'review.candidate', stage: 'REVIEW', when: (S, f) => !f.candidate?.id && unavailable(f) },
   ...originalReview.waiting,
   // RECONCILE
   { id: 'reconcile.not_needed', stage: 'RECONCILE', when: (S, f, x) => x.O?.outcome === 'PASS' && done('not_needed') },
   { id: 'reconcile.reconciled', stage: 'RECONCILE', when: (S, f, x) => x.repair && done('reconciled') },
-  { id: 'reconcile.terminal', stage: 'RECONCILE', when: (S, f, x) => res('NEEDS_APPROVAL', 'review_terminal', 'owner_retry',
+  { id: 'reconcile.terminal', stage: 'RECONCILE', when: (S, f, x) => x.O?.outcome === 'FAIL' && !x.repair && res('NEEDS_APPROVAL', 'review_terminal', 'owner_retry',
     { reasons: [`review ${x.rx} FAILED with no repair (overflow or nothing to fix): only an owner RETRY linked to it continues`] }) },
   // REPAIR
   { id: 'repair.not_needed', stage: 'REPAIR', when: (S, f, x) => (x.O?.outcome === 'PASS' || !x.repair) && done('not_needed') },
@@ -351,13 +383,8 @@ export const RULES = Object.freeze([
   ...confirmationReview.waiting,
   // SHIP_READY
   ...attemptRules('SHIP_READY'),
-  { id: 'ship_ready.drift', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && f.candidate?.id !== x.authorizing.candidate_id
-    && (f.candidate?.id ? refusal('post_freeze_drift', [`the work tree is ${f.candidate.id}, the accepted review covers ${x.authorizing.candidate_id}: revert the drift, or the owner appends a RETRY`])
-      : refusal('candidate_unavailable', [f.candidate?.reason ?? 'candidate not computable'])) },
-  { id: 'ship_ready.refused', stage: 'SHIP_READY', when: (S, f) => { const g = f.lastGate?.['ship-ready'], r = f.lastGate?.review;
-    return g && !g.ok && g.candidate_id === f.candidate?.id && (!r || g.at_ms >= r.at_ms)
-      && refusal(g.code, [`gate ship-ready refused (${g.code}) for this candidate${g.repeat > 1 ? ` (${g.repeat} times in a row)` : ''}`], { action: 'gate_ship_ready', repeat: g.repeat }); } },
   { id: 'ship_ready.recorded', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && S.ship_ready?.candidate_id === x.authorizing.candidate_id
+    && f.candidate?.id === x.authorizing.candidate_id && latestRow(f.gates, 'ship-ready', f.candidate.id)?.ok !== false
     && done('ship_ready', { candidate_id: S.ship_ready.candidate_id }) },
   { id: 'ship_ready.owed', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && res('READY', 'ship_ready_owed', 'gate_ship_ready',
     { reasons: [`the accepted review of ${x.authorizing.candidate_id} has no SHIP_READY`], detail: { candidate_id: x.authorizing.candidate_id } }) },
@@ -375,7 +402,6 @@ function retryReview(S, f, x) {
   return null;
 }
 
-export const LOOSE_JUDGMENT_RULE = 'judgment.loose';
 export const LOCK_RULE = 'lock';
 
 /** T2 (fail closed for any future rule): a human-owned action never moves on its own; the engine never invents approval. */
@@ -389,37 +415,75 @@ function shape(stage, r, S) {
     code: r.code, reasons: r.reasons ?? [], rule: r.rule, failure_class: r.failure_class ?? null, fallback, detail: r.detail ?? {} };
 }
 
+const attemptItem = (a) => ({ attempt_id: a.attempt_id, kind: a.kind, node: a.node, started_at: a.started_at ?? null, marker: a.envelope_file ?? null,
+  deadline: a.deadline ?? null, liveness: a.liveness?.state ?? 'unknown' });
+/** One live attempt as a signal, whatever its stage. */
+function attemptSignal(a, f) {
+  const detail = { item: attemptItem(a) };
+  if (a.envelope || a.status === 'intent') return res('READY', 'attempt_uncollected', 'resume', { reasons: [`attempt ${a.attempt_id} finished (or never launched) with no engine command to record it: run resume`], detail });
+  if (a.liveness?.state === 'dead') return res('BLOCKED', 'attempt_dead_unreconciled', 'resume', { reasons: [`attempt ${a.attempt_id} is LIVE in state but its process is gone (${a.liveness.reason}) with no envelope: run resume to settle it`], detail });
+  if (f.now > a.deadline_ms) return res('BLOCKED', 'attempt_overdue', 'recover_attempt', { reasons: [`attempt ${a.attempt_id} has no envelope past ${a.deadline}: confirm process group ${a.pgid ?? a.pid ?? '?'} is gone (stop it if not), then run resume`], detail });
+  return res('WAITING', 'attempt_in_flight', 'wait', { reasons: [`attempt ${a.attempt_id} has no envelope yet`], detail });
+}
+
 /**
- * Derive one disposition per stage and the next action. `omit` (rule ids) exists for the mutation test only:
- * deleting any rule must change a pinned derivation.
+ * Every signal of the run, flat and never filtered by stage: the current stage's own answer (its action label), every judgment,
+ * every live attempt, the latest gate refusals of the CURRENT candidate (candidate-less rows apply to it), drift from the accepted
+ * review's candidate, and the lock.
+ */
+export function signals(S, f, x, stageResult) {
+  const out = stageResult ? [stageResult] : [];
+  const cur = f.candidate?.id ?? null;
+  for (const j of [...(f.unbound ?? []), ...(f.blockers ?? [])]) out.push({ rule: 'signal.judgment', ...judgmentSignal(S, j, [`${j.node ? `${j.node}: ` : ''}${j.reason}`], { judgments: [{ code: j.code, ...(j.node ? { node: j.node } : {}) }] }) });
+  for (const a of f.attempts ?? []) out.push({ rule: 'signal.attempt', ...attemptSignal(a, f) });
+  const r = latestRow(f.gates, 'review', cur);
+  // a review refusal binds until a result of this candidate is written after it (the corrected input to submit again)
+  if (r && !r.ok && !(f.dispatches ?? []).some(d => (d.candidate_id == null || d.candidate_id === cur) && (d.result_ms ?? -Infinity) > r.at_ms))
+    out.push({ rule: 'signal.gate.review', ...refusal(r.code, [`gate review refused (${r.code}) for this candidate`], { action: 'gate_review', repeat: repeatOf(f.gates, 'review', cur) }) });
+  const g = latestRow(f.gates, 'ship-ready', cur);
+  if (g && !g.ok && g.at_ms >= (latestRow(f.gates, 'review', cur)?.at_ms ?? -Infinity))
+    out.push({ rule: 'signal.gate.ship_ready', ...refusal(g.code, [`gate ship-ready refused (${g.code}) for this candidate`], { action: 'gate_ship_ready', repeat: repeatOf(f.gates, 'ship-ready', cur) }) });
+  // an uncomputable candidate is a fact of every stage (nothing about the work tree can be verified): never left to one bucket
+  if (!cur) out.push({ rule: 'signal.candidate', ...unavailable(f) });
+  else if (x.authorizing && !x.retry && cur !== x.authorizing.candidate_id)
+    out.push({ rule: 'signal.drift', ...refusal('post_freeze_drift', [`the work tree is ${cur}, the accepted review covers ${x.authorizing.candidate_id}: revert the drift, or the owner appends a RETRY`]) });
+  if (['malformed', 'foreign'].includes(f.lock?.state))
+    out.push({ rule: LOCK_RULE, ...refusal(f.lock.state === 'malformed' ? 'lock_malformed' : 'lock_foreign_host', [f.lock.reason, 'recover the lock by hand (execution-harness.md), or authorize a fallback']) });
+  return out;
+}
+
+/**
+ * Derive one disposition per stage (the progress view and the action label) and ONE next action: the fold of every signal.
+ * `omit` (rule ids) exists for the mutation test only: deleting any rule must change a pinned derivation.
  */
 export function derive(S, f, { omit = [] } = {}) {
   const rules = RULES.filter(r => !omit.includes(r.id));
   const x = context(S, f);
   const stages = {};
-  let current = null;
+  let current = null, stageResult = null;
+  const later = []; // a human stop a later stage derives is a signal too: a stage bucket never hides it
   for (const st of STAGES) {
-    if (current) { stages[st] = { disposition: 'BLOCKED', code: 'prerequisite_open', blocked_by: current }; continue; }
     let r = null;
     for (const rule of rules) {
       if (rule.stage !== st) continue;
       const out = rule.when(S, f, x);
       if (out) { r = { rule: rule.id, ...out }; break; }
     }
+    if (current) {
+      stages[st] = { disposition: 'BLOCKED', code: 'prerequisite_open', blocked_by: current };
+      if (r && r.code !== 'underived' && level(r) <= LEVELS.indexOf('HUMAN')) later.push(r);
+      continue;
+    }
     r ??= { rule: `${st.toLowerCase()}.underived`, ...res('BLOCKED', 'underived', 'owner_decide', { reasons: [`no derivation rule decided ${st} (fail closed)`] }) };
-    if (!omit.includes(LOOSE_JUDGMENT_RULE) && ['READY', 'WAITING'].includes(r.disposition) && x.judgments.loose.length) r = { rule: LOOSE_JUDGMENT_RULE, ...judged(x.judgments.loose) };
-    if (!omit.includes(LOCK_RULE) && r.disposition === 'READY' && f.lock?.state === 'held')
-      r = { rule: LOCK_RULE, ...res('RUNNING', 'engine_running', 'wait', { reasons: [`an engine command holds the run lock; ${r.action} follows once it returns`], detail: { then: r.action } }) };
-    else if (!omit.includes(LOCK_RULE) && r.disposition === 'READY' && ['malformed', 'foreign'].includes(f.lock?.state))
-      r = { rule: LOCK_RULE, ...refusal(f.lock.state === 'malformed' ? 'lock_malformed' : 'lock_foreign_host', [f.lock.reason, 'recover the lock by hand (execution-harness.md), or authorize a fallback']) };
-    r = humanGuard(r);
     stages[st] = { disposition: r.disposition, code: r.code, rule: r.rule, owner: ACTIONS[r.action] };
-    if (r.disposition !== 'COMPLETED') { current = st; stages[st].result = r; }
+    if (r.disposition !== 'COMPLETED') { current = st; stageResult = r; }
   }
-  const next_action = current ? shape(current, stages[current].result, S)
-    : shape(null, { disposition: 'COMPLETED', code: 'completed', action: 'none', rule: 'completed' }, S);
-  if (current) delete stages[current].result;
-  return { next_action, stages };
+  let w = fold([...signals(S, f, x, stageResult ?? { rule: 'completed', disposition: 'COMPLETED', code: 'completed', action: 'none', reasons: ['every stage is complete'] }), ...later]);
+  if (!omit.includes(LOCK_RULE) && w.disposition === 'READY' && f.lock?.state === 'held')
+    w = { rule: LOCK_RULE, ...res('RUNNING', 'engine_running', 'wait', { reasons: [`an engine command holds the run lock; ${w.action} follows once it returns`], detail: { then: w.action } }) };
+  w = humanGuard(w);
+  if (current) stages[current] = { disposition: w.disposition, code: w.code, rule: w.rule, owner: ACTIONS[w.action] };
+  return { next_action: shape(current, w, S), stages };
 }
 
 /** The FAILED answer when the state cannot be loaded (never COMPLETE); `no_state` is READY `init`. */
@@ -490,18 +554,16 @@ function lockFacts(ctx, info) {
   return lockState(held, ctx.host ?? hostname(), info);
 }
 
-/** The last GATE row per gate kind of this run in the engine log ({ ok, code, candidate_id, at_ms, repeat }). */
-function lastGates(file, runId) {
+/** Every GATE row of this run in the engine log, in order ({ gate, ok, code, candidate_id, at_ms }): append-only, never collapsed. */
+export function gateRows(file, runId) {
   let text = '';
   try { text = io.readIfExists(file) ?? ''; } catch { /* a damaged sink never fails a derivation */ }
-  const out = {};
+  const out = [];
   for (const line of text.split('\n')) {
     let e;
     try { e = JSON.parse(line); } catch { continue; }
     if (e?.event !== 'GATE' || e.run_id !== runId) continue;
-    const p = out[e.gate];
-    const repeat = !e.ok && p && !p.ok && p.code === e.code && p.candidate_id === e.candidate_id ? p.repeat + 1 : 1;
-    out[e.gate] = { ok: e.ok, code: e.code, candidate_id: e.candidate_id, at_ms: ms(e.timestamp) ?? 0, repeat };
+    out.push({ gate: e.gate, ok: e.ok, code: e.code, candidate_id: e.candidate_id ?? null, at_ms: ms(e.timestamp) ?? 0 });
   }
   return out;
 }
@@ -539,7 +601,7 @@ export async function gather(E, ext) {
   for (const d of dispatches) if (!d.ended && !d.marker_exists) liveness.push({ subject: 'review', id: d.event_id, pid: null, method: 'claimed', state: 'unknown', reason: 'no_pid_recorded' });
   const f = { now, lock, attempts, dispatches, unbound: ext.unbound, blockers: ext.blockers, redPending: ext.redPending,
     unitReviewsPending: ext.unitReviewsPending ?? [], work: ext.work, budgetStop: ext.budgetStop, candidate: ext.candidate,
-    lastGate: lastGates(E.P.log, S.run_id) };
+    gates: gateRows(E.P.log, S.run_id) };
   const unconsumed = [
     ...attempts.filter(a => a.envelope).map(a => ({ kind: 'attempt_envelope', id: a.attempt_id, node: a.node, marker: a.envelope_file, action: 'resume' })),
     ...dispatches.filter(d => d.marker_exists && !consumedBy(S.review_chain ?? [], d, dispatchKind(S, d)))

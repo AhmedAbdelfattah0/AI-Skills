@@ -286,6 +286,15 @@ command reads it: the gates stay the enforcement, and a gate refusal always wins
   COMPLETED `freeze_at_review_gate` until the original `gate review` takes the freeze with its record,
   so the first review's dispatch and gate stay under REVIEW. PUBLISH to POST_MERGE belong to the owner:
   after SHIP_READY the answer is WAIT_FOR_USER `owner_publish`.
+- **One fold:** the stages give the progress view and the label of the current stage. The answer is
+  the most restrictive of EVERY signal of the run, in one fixed order: FAILED, then a human stop
+  (security, then approval or ownership, then unknown or engine, then any other), then an engine or
+  orchestrator BLOCKED, READY, RUNNING or WAITING, `owner_publish`, and COMPLETED. The signals are every
+  judgment, every live attempt, the human stops of every stage, the latest gate refusal of the
+  current candidate, drift from the accepted review's candidate, an uncomputable candidate, and the lock.
+  Gate history keeps every row, per gate and candidate. A record without a candidate applies to the
+  current one. A SHIP_READY counts only for the current candidate with no later refusal of it. A spent
+  `quiescence_unknown`, whose attempts are all retired, is the engine's `resume`.
 - **Dispositions:** READY, RUNNING, WAITING, BLOCKED, NEEDS_APPROVAL, COMPLETED, FAILED.
   `turn_end` is WAIT_FOR_USER for NEEDS_APPROVAL and for a BLOCKED the human owns, FAIL for FAILED,
   COMPLETE for COMPLETED, and CONTINUE otherwise. Progress never yields: an orchestrator- or

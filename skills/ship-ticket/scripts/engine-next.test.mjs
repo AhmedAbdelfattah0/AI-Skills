@@ -13,7 +13,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { derive, RULES, STAGES, DISPOSITIONS, TURN_ENDS, ACTIONS, NEXT_KEYS, NEXT_SCHEMA, FAILURE_CLASSES, WORK_OUTCOMES, HUMAN_CODES,
-  LOOSE_JUDGMENT_RULE, LOCK_RULE, classOf, refusal, turnEnd, failedNext, underivedNext, missingGuarantees, verify, humanGuard, readyWork } from './engine-next.mjs';
+  LOCK_RULE, classOf, refusal, turnEnd, failedNext, underivedNext, missingGuarantees, verify, humanGuard, readyWork } from './engine-next.mjs';
 import { processInfo } from './engine-quiesce.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +23,9 @@ const C1 = 'c'.repeat(64), C2 = 'd'.repeat(64);
 const S0 = (over = {}) => ({ run_id: 'run-1', ticket: 'T-1', policy_version: 1, config: {}, nodes: { a: { id: 'a', state: 'done', deps: [], redSpecs: [] } },
   review_chain: [], repairs: [], attempts: [], judgments: [], authority: { trusted: [], untrusted: [] }, freeze: null, ...over });
 const F0 = (over = {}) => ({ now: NOW, lock: { state: 'free' }, attempts: [], dispatches: [], unbound: [], blockers: [], redPending: [], unitReviewsPending: [],
-  work: false, budgetStop: false, candidate: { id: C1 }, lastGate: {}, ...over });
+  work: false, budgetStop: false, candidate: { id: C1 }, gates: [], ...over });
+/** Gate history rows (append-only); `n` repeats of the same refusal. */
+const row = (gate, ok, code, candidate_id, at_ms, n = 1) => Array.from({ length: n }, (_, i) => ({ gate, ok, code, candidate_id, at_ms: at_ms - (n - 1 - i) }));
 
 const att = (over = {}) => ({ attempt_id: 'att-1', kind: 'node', node: 'a', status: 'launched', pid: 4242, envelope: false, deadline: '2026-11-23T13:00:00.000Z',
   deadline_ms: NOW + 3600e3, liveness: { state: 'alive', reason: 'start_time_equal' }, ...over });
@@ -49,7 +51,7 @@ const SCENARIOS = [
   ['build unit review', S0(), F0({ unitReviewsPending: ['u1'] }), { stage: 'BUILD', action: 'unit_review', disposition: 'READY', code: 'unit_review_owed', rule: 'build.unit_review' }],
   ['build node judgment', S0({ nodes: { a: { id: 'a', state: 'failed', deps: [], redSpecs: [] } } }), F0({ blockers: [{ code: 'node_failed', node: 'a', reason: 'x' }] }), { stage: 'BUILD', action: 'resolve', disposition: 'BLOCKED', code: 'node_failed', rule: 'build.judgment' }],
   ['build not done, nothing owed', S0({ nodes: { a: { id: 'a', state: 'pending', deps: ['b'], redSpecs: [] }, b: { id: 'b', state: 'failed', deps: [], redSpecs: [] } } }), F0(), { stage: 'BUILD', action: 'owner_decide', disposition: 'BLOCKED', code: 'underived', rule: 'build.underived' }],
-  ['loose judgment stops a READY stage', S0(), F0({ blockers: [{ code: 'billing_unverified', node: null, reason: 'x' }] }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'NEEDS_APPROVAL', code: 'billing_unverified', rule: LOOSE_JUDGMENT_RULE }],
+  ['loose judgment stops a READY stage', S0(), F0({ blockers: [{ code: 'billing_unverified', node: null, reason: 'x' }] }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'NEEDS_APPROVAL', code: 'billing_unverified', rule: 'signal.judgment' }],
   ['lock held', S0(), F0({ lock: { state: 'held' } }), { stage: 'REVIEW', action: 'wait', disposition: 'RUNNING', code: 'engine_running', rule: LOCK_RULE }],
   ['lock malformed', S0(), F0({ lock: { state: 'malformed', reason: 'unreadable' } }), { stage: 'REVIEW', action: 'authorize_fallback', disposition: 'NEEDS_APPROVAL', code: 'lock_malformed', rule: LOCK_RULE }],
   ['review owed', S0(), F0(), { stage: 'REVIEW', action: 'dispatch_review', disposition: 'READY', code: 'review_owed', rule: 'review.owed' }],
@@ -58,9 +60,9 @@ const SCENARIOS = [
   ['review overdue', S0(), F0({ dispatches: [disp('primary', { deadline_ms: NOW - 1 }), disp('second_opinion')] }), { stage: 'REVIEW', action: 'resolve', disposition: 'BLOCKED', code: 'review_overdue', rule: 'review.overdue' }],
   ['review results ready', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion', { marker_exists: false, ended: true })] }), { stage: 'REVIEW', action: 'gate_review', disposition: 'READY', code: 'results_ready', rule: 'review.gate' }],
   ['review results ready on a moved tree (results outrank the candidate)', S0(), F0({ candidate: { id: C2 }, dispatches: [ready('primary'), ready('second_opinion')] }), { stage: 'REVIEW', action: 'gate_review', disposition: 'READY', code: 'results_ready', rule: 'review.gate' }],
-  ['review gate refused once (orchestrator corrects)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], lastGate: { review: { ok: false, code: 'missing_reconciliation', candidate_id: C1, at_ms: NOW, repeat: 1 } } }), { stage: 'REVIEW', action: 'gate_review', disposition: 'BLOCKED', code: 'missing_reconciliation', rule: 'review.gate_refused' }],
-  ['review gate refused twice (the human decides)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], lastGate: { review: { ok: false, code: 'missing_reconciliation', candidate_id: C1, at_ms: NOW, repeat: 2 } } }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'BLOCKED', code: 'missing_reconciliation', rule: 'review.gate_refused' }],
-  ['review gate refused (integrity: human at once)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], lastGate: { review: { ok: false, code: 'stale_candidate', candidate_id: C1, at_ms: NOW, repeat: 1 } } }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'BLOCKED', code: 'stale_candidate', rule: 'review.gate_refused' }],
+  ['review gate refused once (orchestrator corrects)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], gates: row('review', false, 'missing_reconciliation', C1, NOW, 1) }), { stage: 'REVIEW', action: 'gate_review', disposition: 'BLOCKED', code: 'missing_reconciliation', rule: 'signal.gate.review' }],
+  ['review gate refused twice (the human decides)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], gates: row('review', false, 'missing_reconciliation', C1, NOW, 2) }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'BLOCKED', code: 'missing_reconciliation', rule: 'signal.gate.review' }],
+  ['review gate refused (integrity: human at once)', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], gates: row('review', false, 'stale_candidate', C1, NOW, 1) }), { stage: 'REVIEW', action: 'owner_decide', disposition: 'BLOCKED', code: 'stale_candidate', rule: 'signal.gate.review' }],
   ['a later execution without results never outranks an owed result', S0(), F0({ dispatches: [ready('primary'), ready('second_opinion'), disp('primary', { event_id: 'ev-late', review_execution: 'review-2' })] }), { stage: 'REVIEW', action: 'gate_review', disposition: 'READY', code: 'results_ready', rule: 'review.gate' }],
   ['candidate unavailable', S0(), F0({ candidate: { id: null, reason: 'git failed' } }), { stage: 'REVIEW', action: 'resolve', disposition: 'BLOCKED', code: 'candidate_unavailable', rule: 'review.candidate' }],
   ['retry owed', retrying(), F0(), { stage: 'REVIEW', action: 'dispatch_review', disposition: 'READY', code: 'review_owed', rule: 'review.retry' }],
@@ -72,12 +74,12 @@ const SCENARIOS = [
   ['confirmation in flight', confirming(), F0({ candidate: { id: C2 }, dispatches: [disp('confirmation', { candidate_id: C2 })] }), { stage: 'CONFIRMATION', action: 'wait', disposition: 'WAITING', code: 'review_in_flight', rule: 'confirmation.waiting' }],
   ['confirmation overdue', confirming(), F0({ candidate: { id: C2 }, dispatches: [disp('confirmation', { candidate_id: C2, deadline_ms: NOW - 1 })] }), { stage: 'CONFIRMATION', action: 'resolve', disposition: 'BLOCKED', code: 'review_overdue', rule: 'confirmation.overdue' }],
   ['confirmation result ready (and a dispatched second opinion owed with it)', confirming(), F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 }), ready('second_opinion', { candidate_id: C2 })] }), { stage: 'CONFIRMATION', action: 'gate_review', disposition: 'READY', code: 'results_ready', rule: 'confirmation.gate' }],
-  ['confirmation gate refused', confirming(), F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 })], lastGate: { review: { ok: false, code: 'missing_second_opinion', candidate_id: C2, at_ms: NOW, repeat: 1 } } }), { stage: 'CONFIRMATION', action: 'gate_review', disposition: 'BLOCKED', code: 'missing_second_opinion', rule: 'confirmation.gate_refused' }],
+  ['confirmation gate refused', confirming(), F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 })], gates: row('review', false, 'missing_second_opinion', C2, NOW, 1) }), { stage: 'CONFIRMATION', action: 'gate_review', disposition: 'BLOCKED', code: 'missing_second_opinion', rule: 'signal.gate.review' }],
   ['confirmation FAIL', confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'FAIL', candidate_id: C2 }] }), F0({ candidate: { id: C2 } }), { stage: 'CONFIRMATION', action: 'owner_retry', disposition: 'FAILED', code: 'confirmation_failed', rule: 'confirmation.failed' }],
   ['ship-ready owed after a confirmation', confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'PASS', candidate_id: C2 }] }), F0({ candidate: { id: C2 } }), { stage: 'SHIP_READY', action: 'gate_ship_ready', disposition: 'READY', code: 'ship_ready_owed', rule: 'ship_ready.owed' }],
   ['ship-ready owed', reviewed(), F0(), { stage: 'SHIP_READY', action: 'gate_ship_ready', disposition: 'READY', code: 'ship_ready_owed', rule: 'ship_ready.owed' }],
-  ['ship-ready on a moved tree', reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0({ candidate: { id: C2 } }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'post_freeze_drift', rule: 'ship_ready.drift' }],
-  ['ship-ready refused', reviewed(), F0({ lastGate: { review: { ok: true, at_ms: NOW - 5 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C1, at_ms: NOW, repeat: 1 } } }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'evidence_run_failed', rule: 'ship_ready.refused' }],
+  ['ship-ready on a moved tree', reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0({ candidate: { id: C2 } }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'post_freeze_drift', rule: 'signal.drift' }],
+  ['ship-ready refused', reviewed(), F0({ gates: [...row('review', true, 'review_accepted', C1, NOW - 5), ...row('ship-ready', false, 'evidence_run_failed', C1, NOW)] }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'evidence_run_failed', rule: 'signal.gate.ship_ready' }],
   ['after SHIP_READY: the owner publishes', reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0(), { stage: 'PUBLISH', action: 'owner_publish', disposition: 'BLOCKED', code: 'publish_owner_owned', rule: 'publish.owner' }],
 ];
 // The four attempt rules of each attempt-bearing stage.
@@ -108,7 +110,7 @@ test('R1 [N1] every pinned scenario derives exactly one next_action, one disposi
 });
 
 test('R1 [N1] rule omission: every rule is load-bearing (omitting it changes a pinned derivation)', () => {
-  const ids = [...RULES.map(r => r.id), LOOSE_JUDGMENT_RULE, LOCK_RULE].filter(id => !UNREACHABLE.includes(id));
+  const ids = [...RULES.map(r => r.id), LOCK_RULE].filter(id => !UNREACHABLE.includes(id));
   const dead = ids.filter(id => !SCENARIOS.some(([, S, f]) => JSON.stringify(derive(S, f)) !== JSON.stringify(derive(S, f, { omit: [id] }))));
   assert.deepEqual(dead, [], 'each rule decides at least one pinned scenario');
   assert.deepEqual(UNREACHABLE.filter(id => !RULES.some(r => r.id === id)), [], 'the unreachable list names real rules');
@@ -311,12 +313,12 @@ test('R1r1 [N13] a recorded SHIP_READY completes only for the CURRENT candidate 
   assert.deepEqual([moved.stage, moved.code, moved.owner], ['SHIP_READY', 'post_freeze_drift', 'human'], 'a moved tree is never shipped as C1');
   const gone = derive(S, F0({ candidate: { id: null, reason: 'git failed' } })).next_action;
   assert.deepEqual([gone.stage, gone.code], ['SHIP_READY', 'candidate_unavailable']);
-  const later = derive(S, F0({ lastGate: { review: { ok: true, at_ms: NOW - 9 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
+  const later = derive(S, F0({ gates: [...row('review', true, 'review_accepted', C1, NOW - 9), ...row('ship-ready', false, 'evidence_run_failed', C1, NOW)] })).next_action;
   assert.deepEqual([later.stage, later.code], ['SHIP_READY', 'evidence_run_failed'], 'a later refusal outranks the cached SHIP_READY');
 });
 
 test('R1r1 [N18] a ship-ready refusal of ANOTHER candidate never blocks the current one', () => {
-  const a = derive(reviewed(), F0({ lastGate: { review: { ok: true, at_ms: NOW - 9 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C2, at_ms: NOW, repeat: 1 } } })).next_action;
+  const a = derive(reviewed(), F0({ gates: [...row('review', true, 'review_accepted', C1, NOW - 9), ...row('ship-ready', false, 'evidence_run_failed', C2, NOW)] })).next_action;
   assert.deepEqual([a.stage, a.action, a.code], ['SHIP_READY', 'gate_ship_ready', 'ship_ready_owed']);
 });
 
@@ -324,7 +326,7 @@ test('R1r1 [N14] every dispatched lane must have its result: a pending partition
   const lanes = [ready('primary', { event_id: 'fe', name: 'frontend_review' }), ready('second_opinion'), disp('primary', { event_id: 'be', name: 'backend_review' })];
   const a = derive(S0(), F0({ dispatches: lanes })).next_action;
   assert.deepEqual([a.action, a.disposition], ['wait', 'WAITING'], JSON.stringify(a));
-  const g = derive(S0(), F0({ dispatches: lanes, lastGate: { review: { ok: false, code: 'stale_candidate', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
+  const g = derive(S0(), F0({ dispatches: lanes, gates: row('review', false, 'stale_candidate', C1, NOW, 1) })).next_action;
   assert.notEqual(g.action, 'gate_review', 'a pending lane never yields gate_review');
 });
 
@@ -348,7 +350,7 @@ test('R1r1 [N16] a repeated ENGINE verification refusal escalates to the human (
   assert.equal(ACTIONS[refusal('candidate_unavailable', ['x']).action], 'orchestrator');
   const r = refusal('candidate_unavailable', ['x'], { repeat: 2 });
   assert.deepEqual([ACTIONS[r.action], turnEnd(r.disposition, ACTIONS[r.action])], ['human', 'WAIT_FOR_USER']);
-  const a = derive(S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], lastGate: { review: { ok: false, code: 'base_remote_unavailable', candidate_id: C1, at_ms: NOW, repeat: 2 } } })).next_action;
+  const a = derive(S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], gates: row('review', false, 'base_remote_unavailable', C1, NOW, 2) })).next_action;
   assert.deepEqual([a.owner, a.turn_end], ['human', 'WAIT_FOR_USER']);
 });
 
@@ -376,6 +378,141 @@ test('R1r1 [N21] a result is available when its file was written, not when its i
   assert.equal(NX.resultTime({ marker_exists: true, mtime: 1000, ended: true, ended_ms: 5000 }), 1000);
   assert.equal(NX.resultTime({ marker_exists: false, mtime: null, ended: true, ended_ms: 5000 }), 5000);
   const closedLater = ready('primary', { ended: true, result_ms: NX.resultTime({ marker_exists: true, mtime: NOW - 10, ended: true, ended_ms: NOW + 10 }) });
-  const a = derive(S0(), F0({ dispatches: [closedLater, ready('second_opinion')], lastGate: { review: { ok: false, code: 'missing_reconciliation', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
-  assert.equal(a.rule, 'review.gate_refused');
+  const a = derive(S0(), F0({ dispatches: [closedLater, ready('second_opinion')], gates: row('review', false, 'missing_reconciliation', C1, NOW, 1) })).next_action;
+  assert.equal(a.rule, 'signal.gate.review');
+});
+
+// ---- Attempt 2 (PR #125 round 2): one total fold over every signal; each test RED on cac50af ----------------------
+
+const AUTH = (code) => ({ code, node: null, reason: code });
+test('A2 Codex counterexample 1 [N22]: a loose human judgment beside a node-bound orchestrator judgment is the human\'s stop', () => {
+  const S = S0({ nodes: { a: { id: 'a', state: 'failed', deps: [], redSpecs: [] } } });
+  const a = derive(S, F0({ blockers: [{ code: 'ownership_unavailable', node: 'a', reason: 'git' }, AUTH('addendum_conflict')] })).next_action;
+  assert.deepEqual([a.code, a.owner, a.turn_end], ['addendum_conflict', 'human', 'WAIT_FOR_USER']);
+});
+
+test('A2 Codex counterexample 2 [N22]: a loose human judgment after a cached SHIP_READY outranks owner_publish', () => {
+  const a = derive(reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0({ blockers: [AUTH('addendum_conflict')] })).next_action;
+  assert.deepEqual([a.action, a.code], ['reapprove', 'addendum_conflict']);
+});
+
+test('A2 Codex counterexample 3 [N23]: a pending legacy partition (candidate_id null) keeps the review waiting', () => {
+  const lanes = [ready('primary', { event_id: 'fe', name: 'frontend_review' }), ready('second_opinion'), disp('primary', { event_id: 'be', name: 'backend_review', candidate_id: null })];
+  const a = derive(S0(), F0({ dispatches: lanes })).next_action;
+  assert.deepEqual([a.action, a.disposition], ['wait', 'WAITING'], JSON.stringify(a));
+});
+
+test('A2 Codex counterexample 4 [N24]: gate history is kept per gate AND candidate: C1 SHIP_READY, C1 refusal, C2 refusal, revert to C1 is never owner_publish', () => {
+  const gates = [...row('review', true, 'review_accepted', C1, NOW - 50), ...row('ship-ready', true, 'ship_ready', C1, NOW - 40),
+    ...row('ship-ready', false, 'catalog_unavailable', C1, NOW - 30), ...row('ship-ready', false, 'evidence_run_failed', C2, NOW - 20)];
+  const a = derive(reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0({ gates })).next_action;
+  assert.notEqual(a.action, 'owner_publish');
+  assert.deepEqual([a.code, a.owner], ['catalog_unavailable', 'human']);
+});
+
+test('A2 [N25] consumption binds the candidate: a result of another candidate is not consumed by the record', () => {
+  assert.equal(typeof NX.consumedBy, 'function', 'consumedBy is exported');
+  const chain = [PASS];
+  assert.equal(NX.consumedBy(chain, { review_execution: 'review-1', candidate_id: C1 }, 'original'), true);
+  assert.equal(NX.consumedBy(chain, { review_execution: 'review-1', candidate_id: C2 }, 'original'), false);
+  assert.equal(NX.consumedBy(chain, { review_execution: 'review-1', candidate_id: null }, 'original'), true, 'a candidate-less dispatch is bound by its execution');
+});
+
+test('A2 [N26] an unavailable candidate escalates to the human once repeated (ship-ready drift and review alike)', () => {
+  const unav = F0({ candidate: { id: null, reason: 'git failed' } });
+  const once = derive(reviewed({ ship_ready: { candidate_id: C1 } }), unav).next_action;
+  assert.deepEqual([once.code, once.owner], ['candidate_unavailable', 'orchestrator']);
+  const twice = derive(reviewed({ ship_ready: { candidate_id: C1 } }), { ...unav, gates: row('ship-ready', false, 'candidate_unavailable', null, NOW) }).next_action;
+  assert.deepEqual([twice.code, twice.owner, twice.turn_end], ['candidate_unavailable', 'human', 'WAIT_FOR_USER']);
+  const review = derive(S0(), { ...unav, gates: row('review', false, 'candidate_unavailable', null, NOW) }).next_action;
+  assert.deepEqual([review.code, review.owner], ['candidate_unavailable', 'human']);
+});
+
+test('A2 [N27] a spent quiescence_unknown is the engine\'s resume; a live one stays the owner\'s stop', () => {
+  const retired = S0({ attempts: [{ attempt_id: 'r1', node: 'a', status: 'abandoned', quiesced: true }] });
+  const spent = derive(retired, F0({ blockers: [{ code: 'quiescence_unknown', node: 'a', reason: 'x' }] })).next_action;
+  assert.deepEqual([spent.action, spent.owner, spent.turn_end], ['resume', 'engine', 'CONTINUE']);
+  const live = derive(S0({ attempts: [{ attempt_id: 'r1', node: 'a', status: 'unknown' }] }), F0({ blockers: [{ code: 'quiescence_unknown', node: 'a', reason: 'x' }] })).next_action;
+  assert.deepEqual([live.code, live.owner], ['quiescence_unknown', 'human']);
+});
+
+test('A2 an in-progress execution of the current candidate is never hidden by an old candidate\'s complete one', () => {
+  const a = derive(S0(), F0({ candidate: { id: C2 }, dispatches: [ready('primary'), ready('second_opinion'),
+    disp('primary', { event_id: 'p2', review_execution: 'review-2', candidate_id: C2 }), disp('second_opinion', { event_id: 's2', review_execution: 'review-2', candidate_id: C2 })] })).next_action;
+  assert.deepEqual([a.action, a.disposition], ['wait', 'WAITING'], JSON.stringify(a));
+  assert.equal(a.detail.item.review_execution, 'review-2');
+});
+
+// ---- invariant property test: a deterministic enumeration (>= 5,000 combinations) ------------------------------
+const BASES = {
+  build_pending: () => [S0({ nodes: { a: { id: 'a', state: 'pending', deps: [], redSpecs: [] } } }), { work: true }],
+  review_none: () => [S0(), {}],
+  review_partial: () => [S0(), { dispatches: [ready('primary')] }],
+  review_ready: () => [S0(), { dispatches: [ready('primary'), ready('second_opinion')] }],
+  reviewed_pass: () => [reviewed(), {}],
+  shipready_recorded: () => [reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), {}],
+  repairing: () => [repairing('pending'), {}],
+  confirming: () => [confirming(), {}],
+  confirmed_pass: () => [confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'PASS', candidate_id: C2 }] }), {}],
+};
+const JUDGMENTS = { none: [], node_failed: [{ code: 'node_failed', node: 'a', reason: 'x' }],
+  ownership_pair: [{ code: 'ownership_unavailable', node: 'a', reason: 'x' }, { code: 'ownership_violation', node: 'a', reason: 'y' }],
+  loose_approval: [AUTH('addendum_conflict')], loose_security: [AUTH('stale_candidate')], quiescence_spent: [{ code: 'quiescence_unknown', node: 'a', reason: 'x' }] };
+const CANDS = { C1, C2, none: null };
+const PARTITIONS = { none: [], legacy_pending: [disp('primary', { event_id: 'be', name: 'backend_review', candidate_id: null })], extra_done: [ready('primary', { event_id: 'cr', name: 'contract_review' })] };
+const HISTORY = { none: [], review_input: row('review', false, 'missing_reconciliation', C1, NOW - 5), review_security: row('review', false, 'stale_candidate', C1, NOW - 5),
+  ship_ok: [...row('review', true, 'review_accepted', C1, NOW - 60), ...row('ship-ready', true, 'ship_ready', C1, NOW - 50)],
+  ship_revert: [...row('review', true, 'review_accepted', C1, NOW - 60), ...row('ship-ready', true, 'ship_ready', C1, NOW - 50),
+    ...row('ship-ready', false, 'catalog_unavailable', C1, NOW - 40), ...row('ship-ready', false, 'evidence_run_failed', C2, NOW - 30)],
+  ship_refused_c2: row('ship-ready', false, 'evidence_run_failed', C2, NOW - 5) };
+const ATTEMPTS = { none: [], in_flight: [att()], overdue: [att({ deadline_ms: NOW - 1 })] };
+
+function* combinations() {
+  for (const [b, base] of Object.entries(BASES)) for (const [j, judgments] of Object.entries(JUDGMENTS)) for (const [c, cand] of Object.entries(CANDS))
+    for (const [p, parts] of Object.entries(PARTITIONS)) for (const [h, gates] of Object.entries(HISTORY)) for (const [t, attempts] of Object.entries(ATTEMPTS)) {
+      const [S, over] = base();
+      if (j === 'quiescence_spent') S.attempts = [{ attempt_id: 'r1', node: 'a', status: 'abandoned', quiesced: true }];
+      const dispatches = over.dispatches ? [...over.dispatches, ...parts] : [];
+      yield { name: `${b}/${j}/${c}/${p}/${h}/${t}`, S, f: F0({ ...over, dispatches, blockers: judgments, candidate: { id: cand, reason: cand ? undefined : 'git failed' }, gates, attempts }), j, t };
+    }
+}
+/** An output's restrictiveness, read from the answer alone (lower is more restrictive); READY, RUNNING and WAITING are one progress tier; owner_publish is the end tier. */
+const metric = (a) => (a.turn_end === 'FAIL' ? 0 : a.turn_end === 'COMPLETE' || a.action === 'owner_publish' ? 4 : a.turn_end === 'WAIT_FOR_USER' ? 1 : a.disposition === 'BLOCKED' ? 2 : 3);
+const authorizingOf = (S) => { const l = (S.review_chain ?? []).at(-1); return l && ['original', 'confirmation'].includes(l.kind) && l.outcome === 'PASS' ? l : null; };
+
+test('A2 invariants [N22] [N23] [N24] over >= 5,000 enumerated combinations: I1 human never CONTINUE, I2 publish only a valid current SHIP_READY, I3 no executor, I4 monotone, I5 no gate over a pending lane', () => {
+  let n = 0;
+  const fails = [];
+  for (const { name, S, f, j, t } of combinations()) {
+    n++;
+    const a = derive(S, f).next_action;
+    const cur = f.candidate.id;
+    // I1: a human-owned signal present (a judgment the owner resolves, or an overdue attempt) never continues silently
+    const human = f.blockers.some(x => j !== 'quiescence_spent' && ACTIONS[refusal(x.code, ['x']).action] === 'human') || t === 'overdue';
+    if (human && a.owner !== 'human' && a.turn_end === 'CONTINUE') fails.push(`I1 ${name}: ${a.action}/${a.turn_end}`);
+    // I2: owner_publish (or COMPLETE) only for the CURRENT candidate's SHIP_READY of the accepted review, with no later refusal of it
+    if (a.action === 'owner_publish' || a.turn_end === 'COMPLETE') {
+      const rows = f.gates.filter(g => g.gate === 'ship-ready' && (g.candidate_id == null || g.candidate_id === cur));
+      const lastOk = rows.map(g => g.ok).lastIndexOf(true);
+      const ok = cur && S.ship_ready?.candidate_id === cur && authorizingOf(S)?.candidate_id === cur && !rows.slice(lastOk + 1).some(g => !g.ok);
+      if (!ok) fails.push(`I2 ${name}`);
+    }
+    // I3: no model-owned action carries an executor; the owner is the action's
+    if (a.executor !== null || a.owner !== ACTIONS[a.action]) fails.push(`I3 ${name}`);
+    // I5: gate review is never offered while a dispatched lane of that execution (a legacy candidate-less one included) is pending
+    if (a.action === 'gate_review' && a.disposition === 'READY') {
+      const pending = f.dispatches.filter(d => d.review_execution === a.detail.review_execution && (d.candidate_id == null || a.detail.results.length) && !(d.ended || d.marker_exists));
+      if (pending.length) fails.push(`I5 ${name}`);
+    }
+    // I4: adding a signal (a judgment, an attempt) never makes the answer less restrictive
+    if (j === 'none' && t === 'none') {
+      for (const [jj, list] of Object.entries(JUDGMENTS)) for (const [tt, attempts] of Object.entries(ATTEMPTS)) {
+        if (jj === 'quiescence_spent') continue;
+        const more = derive(S, { ...f, blockers: list, attempts }).next_action;
+        if (metric(more) > metric(a)) fails.push(`I4 ${name} + ${jj}/${tt}: ${metric(a)} -> ${metric(more)}`);
+      }
+    }
+  }
+  assert.ok(n >= 5000, `enumerated ${n} combinations`);
+  assert.deepEqual(fails.slice(0, 15), [], `${fails.length} invariant violations`);
 });
