@@ -53,6 +53,8 @@ function storeOf(t, ctx, top, oids) {
     return { source, dir, store: H.initStore(ctx, { dir, source, oids }) };
   } catch (e) { return assert.fail(`openSource/initStore refused: ${e?.code ?? e}`); }
 }
+/** Outcome of fn under a trace: {code} for a GitError, 'ok' otherwise; anything else is rethrown (a raw error fails the test). */
+const outcome = (fn) => { try { fn(); return 'ok'; } catch (e) { if (e instanceof GitError) return e.code; throw e; } };
 const diffsOf = (v) => v.diffs.map((d) => [S(d.path), d.class]).sort();
 const names = (list) => list.map(S).sort();
 /** A loose object file written by hand (zlib of `<type> <len>\0<content>`); returns its oid. */
@@ -1080,6 +1082,9 @@ test('[M61] the gitlink read is charged and deadline-checked: a slow first read 
   slowFs({ dirRead: (clock, d) => { if (Buffer.from(d.path).toString('latin1').endsWith('/vendor/sub')) { subReads++; clock.tick(3000); } } },
     () => assert.throws(() => H.verifyWorktree(ctx, { source, store, oid: withLink }), code('worktree_budget_exceeded')));
   assert.equal(subReads, 1, 'exactly one read of the gitlink dir');
+  // The gitlink read is CHARGED: entries 2 (a, vendor/sub) + listings 4 (.git, a, vendor; sub) + the gitlink read 1 = 7.
+  const tight = (maxFiles) => { const c = ctxOf(t, { maxFiles }); const x = storeOf(t, c, top, [withLink, head]); return outcome(() => H.verifyWorktree(c, { source: x.source, store: x.store, oid: withLink })); };
+  assert.deepEqual([tight(7), tight(6)], ['ok', 'worktree_budget_exceeded'], 'the budget counts the gitlink read');
 });
 test('[M62] byte hashing is deadline-checked per chunk: slow reads of a large tracked file refuse', { skip: POSIX }, (t) => {
   const { top, head } = makeRepo(t, { 'big.bin': Buffer.alloc(20 << 20) });
@@ -1151,8 +1156,6 @@ function traced({ step = 0, slow = {} }, fn) {
   }
 }
 const EXEMPT = new Set(['closeSync', 'Dir#closeSync']);
-/** Outcome of fn under a trace: {code} for a GitError, 'ok' otherwise; anything else is rethrown (a raw error fails the test). */
-const outcome = (fn) => { try { fn(); return 'ok'; } catch (e) { if (e instanceof GitError) return e.code; throw e; } };
 /** The invariant on one traced run: no non-exempt fs call BEGINS after `bound`; descriptors and Dirs all closed. */
 function invariant(tr, bound, what) {
   const late = tr.log.filter((c) => !EXEMPT.has(c.k) && c.t > bound);
@@ -1270,14 +1273,14 @@ test('[M69] CPU: a depth-2,000 tree chain lists in linear time, within the deadl
   const deep = Array.from({ length: 2000 }, () => 'a').join('/');
   sh(top, ['fast-import', '--quiet'], { input: Buffer.from(`commit refs/heads/deep\ncommitter f <f@x> 0 +0000\ndata 0\nfrom ${head}\nM 100644 inline ${deep}/f\ndata 1\nx\n\n`) });
   const deepHead = out(top, ['rev-parse', 'refs/heads/deep']);
-  const ctx = ctxOf(t, { timeoutMs: 1500 });
+  const ctx = ctxOf(t, { timeoutMs: 3000 });
   const { store } = storeOf(t, ctx, top, [deepHead, head]);
   const t0 = Date.now();
   const got = outcome(() => H.op(store, 'tree.list', [deepHead]));
   const ms = Date.now() - t0;
   t.diagnostic(`depth-2,000 tree.list: ${got} in ${ms} ms`);
-  assert.ok(['ok', 'git_timeout'].includes(got), got);
-  assert.ok(ms < 1500 + 1000, `bounded by the deadline: ${ms} ms`);
+  // Linear: completes well inside 3 s (measured about 430 ms locally); the quadratic scan took 14.8 s.
+  assert.equal(got, 'ok', `linear time: completes within the deadline (${ms} ms)`);
 });
 test('[M69] CPU: the tree.list parse checks the clock every 1,024 records, and a terminal check refuses an expired success', { skip: POSIX }, (t) => {
   const files = Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`d${i % 7}/f${i}`, '']));
