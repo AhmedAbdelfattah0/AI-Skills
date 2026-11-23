@@ -51,6 +51,10 @@ export const BASE_MUTANTS = [
     from: 'if (push !== null && push !== url && !(id && sameRepository(repositoryOf(push), id)))', to: 'if (push !== null && push !== url && id && !sameRepository(repositoryOf(push), id))' },
   { tag: 'B12', name: 'init: a branch with no upstream is pinned', file: 'ship-ticket/scripts/engine-base-read.mjs',
     from: "    if (authGit(root, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']).status !== 0)\n", to: '    if (false)\n' },
+  { tag: 'B13', name: 'S.base: sha is not required to be a string (a coercible array or object passes the regexp)', file: 'ship-ticket/scripts/engine-base-read.mjs',
+    from: "typeof B.sha === 'string' && SHA.test(B.sha)", to: 'SHA.test(B.sha)' },
+  { tag: 'B14', name: 'S.base: merge_base is not required to be a string (a coercible array or object passes the regexp)', file: 'ship-ticket/scripts/engine-base-read.mjs',
+    from: "typeof B.merge_base === 'string' && SHA.test(B.merge_base)", to: 'SHA.test(B.merge_base)' },
 ];
 
 const tagged = (tag) => ['--test-name-pattern', `\\[${tag}\\]`];

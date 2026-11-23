@@ -380,3 +380,13 @@ test('fold expansion cannot exceed the matched-text budget (ﬃ expands 3x): pos
   assert.equal(RF.globMatches('ffi*', 'ﬃ'.repeat(1365)), true);
   assert.doesNotThrow(() => RF.compileGlob('ﬃ'.repeat(85)));
 });
+test('F-110-3 graft immunity: a .git/info/grafts file that makes an unrelated commit an ancestor of the head does not change the base ancestry check (base_mismatch)', () => {
+  const r = repo({ 'README.md': 'x' }); writeFileSync(join(r.dir, 'README.md'), 'y'); const h = commit(r.dir);
+  G(r.dir, 'checkout', '-q', '--orphan', 'side'); writeFileSync(join(r.dir, 'S.md'), 's'); const o = commit(r.dir, 'unrelated'); G(r.dir, 'checkout', '-q', 'main');
+  const rec = `risk_floor: risk-floor: floor=STANDARD; classes=none; claimed=STANDARD; ai=STANDARD; final=STANDARD; paths=1; matched=0; base=${o.slice(0, 12)}; head=planned; declaration=none`;
+  const asked = () => RF.reassess({ repo: r.dir, base: o, head: h, recordedLine: rec, claimed: 'STANDARD', ai: 'STANDARD' });
+  const before = asked(); assert.ok(before.errors.includes('base_mismatch'), 'no graft: the unrelated base is refused');
+  writeFileSync(join(r.dir, '.git', 'info', 'grafts'), `${h} ${o}\n`);
+  assert.equal(G(r.dir, '--no-replace-objects', 'merge-base', o, h), o, 'the graft really rewrites ancestry for an unhardened git (the fixture bites)');
+  const after = asked(); assert.ok(after.errors.includes('base_mismatch'), 'with a graft: still refused (GIT_GRAFT_FILE is the null device)'); assert.deepEqual(after, before);
+});
