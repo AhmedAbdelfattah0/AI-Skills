@@ -379,7 +379,7 @@ function validHistory(h) {
   if (x.last_admit_t_ms !== null && (x.last_sample_t_ms === null || x.last_admit_t_ms > x.last_sample_t_ms)) return null;
   return x;
 }
-const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'heavy_processes', 'provider_errors'];
+const SNAPSHOT_KEYS = ['schema', 'platform', 'cores', 'now_ms', 'samples', 'provider_errors'];
 const SAMPLE_KEYS = ['t_ms', 'pressure_level', 'swapouts', 'load1', 'load5', 'load15'];
 // Unknown properties are rejected (stricter): an unrecognised field could be a signal this version does not understand.
 const onlyKeys = (o, keys) => Object.keys(o).every(k => keys.includes(k));
@@ -391,7 +391,7 @@ function validSample(x) {
 /**
  * admitHost(snapshot, cls, running, history)  -- the approved positional contract.
  *   snapshot: { platform, cores, now_ms, samples: [{t_ms, pressure_level, swapouts, load1, load5, load15}] (oldest first),
- *               heavy_processes (count of distinct heavy suite roots, or null = unknown), provider_errors (count or [{kind,t_ms}]) }
+ *               provider_errors (count or [{kind,t_ms}]) }   (no process counting: unknown properties such as heavy_processes are rejected)
  *   cls: 'HEAVY'|'LIGHT'   running: {total, heavy} nonneg safe ints, heavy <= total
  *   history: undefined | {state:'open'|'held', clean_streak, last_admit_t_ms, last_sample_t_ms} as returned last time
  * Returns { admit, reason, reasons, signals, history, terminate: [] }. A wrong-shaped call HOLDS with `invalid_args`.
@@ -407,16 +407,13 @@ export function admitHost(snapshot, cls, running, history) {
     || hist === null || !isPlain(snapshot)) return result(false, ['invalid_args'], { available: false }, { ...HELD_HISTORY });
   const samples = Array.isArray(snapshot.samples) ? snapshot.samples : [];
   const providers = providerCount(snapshot.provider_errors);
-  const heavyKnown = isInt(snapshot.heavy_processes);
-  // heavy_processes: integer, or explicit null = hostSnapshot's own 'unknown' marker (HEAVY holds). Anything else is malformed.
-  const heavyOk = heavyKnown || snapshot.heavy_processes === null;
   const cores = snapshot.cores;
   const recovering = { ...hist, state: 'held', clean_streak: 0 };
   // Unusable timestamps are a hard hold: samples cannot be ordered or aged.
   if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
     return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, timestamps_ok: false }, recovering);
   // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
-  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && heavyOk && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
+  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
     && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
   if (!fieldsOk) {
     const stop = knownStops(samples, snapshot.provider_errors);
@@ -449,8 +446,11 @@ export function admitHost(snapshot, cls, running, history) {
   const age = snapshot.now_ms - latest.t_ms;
   const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
   if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, [...holds.filter(h => h !== 'held_swap'), 'held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
-  // More than 30 s since the last counted sample: the streak is not consecutive any more, restart it.
-  const base = sinceLast !== null && sinceLast > HOST_POLICY.sample_gap_max_ms ? { ...hist, state: 'held', clean_streak: 0 } : hist;
+  // RECOVERY ONLY: while 'held', more than 30 s since the last counted sample means the clean samples are not consecutive, so the
+  // streak restarts. An 'open' history is NOT restarted by a long gap: the current snapshot is itself a full fresh validated
+  // window (own swap delta, load, pressure, provider) and every stop signal still resets the streak, so a healthy poller at
+  // <= 60 s (or slower) keeps being admitted. Caller contract for a RECOVERING host: re-sample within 30 s after a held_hysteresis.
+  const base = sinceLast !== null && sinceLast > HOST_POLICY.sample_gap_max_ms && hist.state === 'held' ? { ...hist, state: 'held', clean_streak: 0 } : hist;
   const clean = holds.length === 0;
   const clean_streak = clean ? base.clean_streak + 1 : 0;
   const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
@@ -458,37 +458,15 @@ export function admitHost(snapshot, cls, running, history) {
   const heavy_slots = healthy ? HOST_POLICY.heavy_slots_healthy : HOST_POLICY.heavy_slots_default;
   const reasons = [...holds];
   if (clean && !resumed) reasons.push('held_hysteresis');
-  const heavyNow = Math.max(run.heavy, heavyKnown ? snapshot.heavy_processes : 0);
-  // Unknown heavy count is conservative: a HEAVY request is held, never counted as 0.
-  if (cls === 'HEAVY' && (!heavyKnown || heavyNow >= heavy_slots)) reasons.push('held_heavy');
+  // HEAVY occupancy comes only from the caller's `running.heavy` (wave journal); real suites are serialized at execution time by heavy.sh.
+  if (cls === 'HEAVY' && run.heavy >= heavy_slots) reasons.push('held_heavy');
   const admit = reasons.length === 0;
   return result(admit, reasons, { platform: 'darwin', available: true, pressure_level: latest.pressure_level, swap, load_high: loadHigh, load_limit: loadLimit, provider_errors: providers,
-    clean, clean_streak, healthy, heavy_slots, heavy_running: heavyNow, heavy_known: heavyKnown },
+    clean, clean_streak, healthy, heavy_slots, heavy_running: run.heavy },
   { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }
 
-const PS_MAX_CHARS = 1024 * 1024;
-const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat', ps: '/bin/ps' });
-/**
- * Count distinct heavy SUITE ROOTS: a matching process whose parent is not itself a matching process
- * (one `node --test` suite spawns many matching children). Input is `ps -axo pid=,ppid=,command=`.
- */
-export function countHeavyRoots(psOutput, patterns = HEAVY_PATTERNS) {
-  const all = String(psOutput).split('\n').map(l => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean)
-    .map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] }));
-  // Process-table consistency: duplicate pids, a self-parent (other than kernel pid 0) or a ppid cycle => UNKNOWN (null), never 0.
-  const parent = new Map();
-  for (const r of all) { if (parent.has(r.pid) || (r.pid === r.ppid && r.pid !== 0)) return null; parent.set(r.pid, r.ppid); }
-  for (const start of parent.keys()) {
-    const seen = new Set();
-    for (let p = start; p !== 0 && parent.has(p); p = parent.get(p)) { if (seen.has(p)) return null; seen.add(p); }
-  }
-  const rows = all.filter(r => patterns.some(re => re.test(r.cmd)));
-  const pids = new Set(rows.map(r => r.pid));
-  return rows.filter(r => !pids.has(r.ppid)).length;
-}
-const HEAVY_PATTERNS = [/--test\b/, /\.test\.mjs/, /\bjest\b/, /\bvitest\b/, /\bstryker\b/, /\bxcodebuild\b/, /\bdocker (build|compose)\b/];
-
+const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat' });
 /**
  * The only I/O reader for admitHost. Every source is injectable. Takes `samples` readings `intervalMs`
  * apart (default 2 x 20 s, inside the accepted 15..30 s window). Strict parsing: garbled output yields
@@ -503,7 +481,7 @@ export async function hostSnapshot(probe = {}) {
   const intervalMs = probe.intervalMs ?? 20000;
   const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
   const loadavg = probe.loadavg ?? loadavgOs;
-  const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, now_ms: null, samples: [], heavy_processes: null, provider_errors: probe.providerErrors ?? [] };
+  const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, now_ms: null, samples: [], provider_errors: probe.providerErrors ?? [] };
   if (platform !== 'darwin') return base;
   for (let i = 0; i < count; i++) {
     if (i > 0) await sleep(intervalMs);
@@ -512,10 +490,6 @@ export async function hostSnapshot(probe = {}) {
     const [l1, l5, l15] = loadavg();
     base.samples.push({ t_ms: now(), pressure_level: p ? Number(p[0]) : null, swapouts: m ? Number(m[1]) : null, load1: l1, load5: l5, load15: l15 });
   }
-  const ps = run(BIN.ps, ['-axo', 'pid=,ppid=,command=']);
-  // ps failed, was over the 1 MB bound, or is garbled (any non-blank line not `pid ppid command`) => UNKNOWN, never 0.
-  const psLines = typeof ps === 'string' && ps.length <= PS_MAX_CHARS ? ps.split('\n').filter(l => l.trim() !== '') : [];
-  base.heavy_processes = psLines.length > 0 && psLines.every(l => /^\s*\d+\s+\d+\s+\S/.test(l)) ? countHeavyRoots(ps) : null;
   base.now_ms = now();
   return base;
 }

@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { admitHost, hostSnapshot, countHeavyRoots, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
+import { admitHost, hostSnapshot, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
 
 // Injected clock: samples are 20 s apart (inside the accepted 15..30 s window); now_ms is 1 s after the latest.
 const T0 = 1_000_000;
 const S = (o = {}) => ({ t_ms: T0, pressure_level: 1, swapouts: 100, load1: 1, load5: 1, load15: 1, ...o });
-const snap = (o = {}) => ({ platform: 'darwin', cores: 10, now_ms: T0 + 21000, samples: [S(), S({ t_ms: T0 + 20000 })], heavy_processes: 0, provider_errors: [], ...o });
+const snap = (o = {}) => ({ platform: 'darwin', cores: 10, now_ms: T0 + 21000, samples: [S(), S({ t_ms: T0 + 20000 })], provider_errors: [], ...o });
 const withLatest = (o) => snap({ samples: [S(), S({ t_ms: T0 + 20000, ...o })] });
 // The n-th later snapshot (distinct, strictly increasing timestamps).
 const NEXT = (n, o = {}) => snap({ now_ms: T0 + 21000 + n * 20000, samples: [S({ t_ms: T0 + n * 20000 }), S({ t_ms: T0 + 20000 + n * 20000, ...o })] });
@@ -199,16 +199,21 @@ test('heavy: recovering hosts and unhealthy hosts have cap 1 and report held_hea
   assert.deepEqual(bad.reasons, ['held_pressure', 'held_heavy']);
 });
 
-test('heavy count: external processes count, LIGHT is not held; explicit null (hostSnapshot unknown marker) holds HEAVY and is never 0; MALFORMED values are snapshot_unavailable', () => {
-  assert.deepEqual(HEAVY(snap({ heavy_processes: 2 }), R(0)).reasons, ['held_heavy']);
-  assert.equal(LIGHT(snap({ heavy_processes: 2 }), R(0)).admit, true);
-  assert.deepEqual(HEAVY(snap({ heavy_processes: null }), R(0)).reasons, ['held_heavy']);
-  assert.equal(LIGHT(snap({ heavy_processes: null }), R(0)).admit, true);
-  for (const bad of [undefined, NaN, -1, 1.5, '0', 'garbage', [], {}, Infinity]) for (const call of [LIGHT, HEAVY]) {
-    const r = call(snap({ heavy_processes: bad }), R(0));
-    assert.equal(r.admit, false, String(bad));
-    assert.deepEqual(r.reasons, ['snapshot_unavailable'], String(bad));
+test('HEAVY admission depends ONLY on running.heavy and host health: the snapshot carries no process count and heavy_processes is REJECTED as an unknown key', () => {
+  for (const v of [0, 2, null, 'x']) for (const call of [LIGHT, HEAVY]) {
+    const r = call({ ...snap(), heavy_processes: v }, R(0));
+    assert.equal(r.admit, false, String(v));
+    assert.deepEqual(r.reasons, ['snapshot_unavailable'], String(v));
   }
+  assert.equal(HEAVY(snap(), R(0)).admit, true);                 // healthy, nothing running: admitted
+  assert.equal(HEAVY(snap(), R(1, 1)).admit, true);              // healthy: second HEAVY ok
+  assert.equal(HEAVY(snap(), R(5, 1)).admit, true);              // occupancy is running.heavy, not running.total
+  assert.deepEqual(HEAVY(snap(), R(2, 2)).reasons, ['held_heavy']);
+  assert.deepEqual(HEAVY(snap(), R(3, 1), { state: 'held', clean_streak: 0, last_admit_t_ms: null, last_sample_t_ms: null }).reasons, ['held_hysteresis', 'held_heavy']);
+  assert.equal(LIGHT(snap(), R(5, 5)).admit, true);              // LIGHT is never held by HEAVY occupancy
+  const r = HEAVY(snap(), R(1, 1));
+  assert.equal(Object.hasOwn(r.signals, 'heavy_known'), false);
+  assert.equal(r.signals.heavy_running, 1);
 });
 
 test('stop signals are evaluated BEFORE replay handling: clean -> bad at +1 ms -> clean never preserves the streak', () => {
@@ -239,10 +244,17 @@ test('a gap of more than 30 s since the last counted sample restarts the streak;
   assert.equal(gapped(30001).admit, false);                     // > 30 s: restart, only streak 1
   assert.equal(gapped(30001).history.clean_streak, 1);
   assert.deepEqual(gapped(30001).reasons, ['held_hysteresis']);
-  const open = LIGHT(snap(), R(0));                             // open history
-  const stale = admitHost(snap({ now_ms: T0 + 20000 + 30001 + 1000, samples: [S({ t_ms: T0 + 30001 }), S({ t_ms: T0 + 50001 })] }), 'LIGHT', R(0), open.history);
-  assert.equal(stale.admit, false);
-  assert.equal(stale.history.state, 'held');
+  // state 'open': a long gap is NOT a restart: a healthy poller at 31 s, 60 s or much slower still admits (both sides of 30 s)
+  const open = LIGHT(snap(), R(0));                             // open history, last_sample T0 + 20000
+  for (const g of [30000, 30001, 60000, 3_600_000]) {
+    const r = admitHost(snap({ now_ms: T0 + 20000 + g + 1000, samples: [S({ t_ms: T0 + g }), S({ t_ms: T0 + 20000 + g })] }), 'LIGHT', R(0), open.history);
+    assert.equal(r.admit, true, 'gap ' + g);
+    assert.equal(r.history.state, 'open');
+  }
+  // ... but a stop signal after a long gap still blocks and resets, and recovery then needs two consecutive samples again
+  const hit = admitHost(snap({ now_ms: T0 + 80000 + 1000, samples: [S({ t_ms: T0 + 60000 }), S({ t_ms: T0 + 80000, pressure_level: 2 })] }), 'LIGHT', R(0), open.history);
+  assert.equal(hit.admit, false);
+  assert.equal(hit.history.state, 'held');
 });
 
 test('liveness: a healthy host is admitted after a cold start plus one clean sample 15 s and 20 s later; 14999 ms is held', () => {
@@ -287,31 +299,6 @@ test('unknown snapshot / sample properties are REJECTED (stricter): snapshot_una
   assert.equal(LIGHT({ ...snap(), schema: 'ship-ticket-host-snapshot-v1' }, R(0)).admit, true);
 });
 
-test('countHeavyRoots: duplicate pids, self-parent, ppid cycles and oversize/garbled tables are UNKNOWN (null), never 0; kernel pid 0 self-parent is legal', () => {
-  assert.equal(countHeavyRoots(' 10 1 node --test a.test.mjs\n 10 1 node --test b.test.mjs\n'), null);
-  assert.equal(countHeavyRoots(' 10 10 node --test a.test.mjs\n'), null);
-  assert.equal(countHeavyRoots(' 10 11 node --test a.test.mjs\n 11 10 node --test b.test.mjs\n'), null);
-  assert.equal(countHeavyRoots(' 12 10 node a.test.mjs\n 10 11 node --test b.test.mjs\n 11 12 launchd\n'), null);
-  assert.equal(countHeavyRoots(' 0 0 kernel_task\n 1 0 launchd\n 10 1 node --test a.test.mjs\n'), 1);
-});
-
-test('hostSnapshot: over-1MB, cyclic, self-parent or duplicate ps tables give an UNKNOWN count so HEAVY holds', async () => {
-  const mk = (ps) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], { ps }), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
-  const big = Array.from({ length: 100000 }, (_, i) => ' ' + (i + 2) + ' 1 /usr/bin/x').join('\n') + '\n';   // > 1 MiB, a perfectly consistent table
-  assert.ok(big.length > 1024 * 1024);
-  for (const ps of [big, ' 10 10 node --test a.test.mjs\n', ' 10 11 node --test a\n 11 10 node --test b\n', ' 10 1 x\n 10 1 y\n']) {
-    const s = await mk(ps);
-    assert.equal(s.heavy_processes, null);
-    assert.deepEqual(HEAVY(s, R(0), null).reasons.slice(-1), ['held_heavy']);
-  }
-});
-
-test('countHeavyRoots counts suite roots, not processes: one suite with children = 1; two suites = 2', () => {
-  const ps = [' 10 1 node --test a.test.mjs', ' 11 10 node b.test.mjs', ' 12 11 node c.test.mjs', ' 20 1 /usr/bin/vim', ' 30 1 stryker run', ' 31 30 node x.test.mjs'].join('\n');
-  assert.equal(countHeavyRoots(ps), 2);
-  assert.equal(countHeavyRoots(' 20 1 /usr/bin/vim\n'), 0);
-});
-
 test('never kills: input is not mutated, terminate is always empty, even when unhealthy', () => {
   const s = withLatest({ pressure_level: 4, swapouts: 9999 });
   const running = { total: 5, heavy: 3 };
@@ -324,7 +311,7 @@ test('never kills: input is not mutated, terminate is always empty, even when un
 });
 
 test('no fallback: non-darwin or any invalid snapshot HOLDS, even LIGHT with nothing running; HEAVY too', () => {
-  const linux = { platform: 'linux', cores: 64, samples: [], heavy_processes: null, provider_errors: [] };
+  const linux = { platform: 'linux', cores: 64, samples: [], provider_errors: [] };
   for (const h of [null, H0]) {
     for (const call of [LIGHT, HEAVY]) {
       const r = call(linux, R(0), h);
@@ -414,31 +401,30 @@ test('reason codes are the documented set', () => {
   assert.equal(HOST_POLICY.clean_samples_to_resume, 2);
 });
 
-function fakeExec(log, { pressure = '1\n', vm = n => 'Pages free: 1.\nSwapouts:   ' + n + '.\n', ps = ' 10 1 node --test a.test.mjs\n 11 10 node b.test.mjs\n 20 1 /usr/bin/vim\n 30 1 stryker run\n' } = {}) {
+function fakeExec(log, { pressure = '1\n', vm = n => 'Pages free: 1.\nSwapouts:   ' + n + '.\n' } = {}) {
   let swap = 10;
   return (cmd) => {
     log.push(cmd);
     if (cmd === '/usr/sbin/sysctl') return pressure;
     if (cmd === '/usr/bin/vm_stat') return vm(swap++);
-    if (cmd === '/bin/ps') return ps;
     return null;
   };
 }
 
-test('hostSnapshot uses ABSOLUTE tool paths, injected clock/sleep, counts suite roots, and feeds admitHost', async () => {
+test('hostSnapshot uses ABSOLUTE tool paths, injected clock/sleep, reads no process table, and feeds admitHost', async () => {
   const calls = []; const sleeps = []; let t = 5000;
   const s = await hostSnapshot({ platform: 'darwin', exec: fakeExec(calls), now: () => (t += 20000), sleep: async ms => { sleeps.push(ms); }, loadavg: () => [1, 2, 3], cpus: () => new Array(8), providerErrors: [{ kind: '429', t_ms: 1 }] });
   assert.ok(calls.every(c => c.startsWith('/')), calls.join());
-  assert.deepEqual([...new Set(calls)].sort(), ['/bin/ps', '/usr/bin/vm_stat', '/usr/sbin/sysctl']);
+  assert.deepEqual([...new Set(calls)].sort(), ['/usr/bin/vm_stat', '/usr/sbin/sysctl']);
   assert.deepEqual(sleeps, [20000]);
   assert.equal(s.cores, 8);
   assert.deepEqual(s.samples.map(x => [x.t_ms, x.pressure_level, x.swapouts, x.load1, x.load5, x.load15]), [[25000, 1, 10, 1, 2, 3], [45000, 1, 11, 1, 2, 3]]);
-  assert.equal(s.heavy_processes, 2);
+  assert.equal(Object.hasOwn(s, 'heavy_processes'), false);
   assert.equal(s.now_ms, 65000);
   assert.deepEqual(LIGHT(s, R(0), null).reasons, ['held_swap', 'held_provider']);
 });
 
-test('hostSnapshot parses strictly: garbled sysctl, vm_stat or ps output becomes null fields, which hold', async () => {
+test('hostSnapshot parses strictly: garbled sysctl or vm_stat output becomes null fields, which hold', async () => {
   const mk = (o) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], o), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
   const g1 = await mk({ pressure: '1garbage\n' });
   assert.equal(g1.samples[0].pressure_level, null);
@@ -448,12 +434,6 @@ test('hostSnapshot parses strictly: garbled sysctl, vm_stat or ps output becomes
   assert.equal(LIGHT(g2, R(0)).reason, 'snapshot_unavailable');
   const g3 = await mk({ vm: () => 'xSwapouts: 5.\n' });
   assert.equal(g3.samples[0].swapouts, null);
-  for (const ps of [null, '', 'garbage\n', ' 1 0 launchd\nnot a row\n']) {
-    const none = await mk({ ps });
-    assert.equal(none.heavy_processes, null, JSON.stringify(ps));
-    assert.deepEqual(HEAVY(none, R(0), null).reasons.slice(-1), ['held_heavy']);
-    assert.equal(LIGHT(none, R(0), null).signals.heavy_known, false);
-  }
 });
 
 test('hostSnapshot on non-darwin does no reading and the result is the fail-safe fallback', async () => {
