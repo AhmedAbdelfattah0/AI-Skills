@@ -489,6 +489,101 @@ test('RED (Round 1, MAJOR 1): a shallow clone fails closed with E_BASE_UNRESOLVE
   assert.match(r.err, /E_BASE_UNRESOLVED: .*shallow/);
 });
 
+// --- commit-by-commit chain (rows added on the PR branch itself) ------------------------------
+function commitAll(root, msg) {
+  git(root, 'add', '-A');
+  git(root, 'commit', '-q', '--allow-empty', '-m', msg);
+  return git(root, 'rev-parse', 'HEAD');
+}
+test('RED (Round 1b): a later PR commit that rewrites rows an earlier PR commit added is refused (E_APPEND_ONLY)', () => {
+  const root = repo({});
+  git(root, 'checkout', '-q', '-b', 'pr');
+  addLedger(root, 'U1', twoCycles());
+  commitAll(root, 'two cycles');
+  writeFileSync(ledgerPath(root), lines([cycle({ head: C })]));
+  const bad = commitAll(root, 'rewrite to a fresh cycle 1');
+  refused(root, 'E_APPEND_ONLY', new RegExp(`${bad} is not an append`), ['--base', 'main']);
+});
+
+test('RED (Round 1b): the rewrite is also refused under a PR merge ref (first parent = base branch, as CI checks out)', () => {
+  const root = repo({});
+  const base = git(root, 'rev-parse', 'HEAD');
+  git(root, 'checkout', '-q', '-b', 'pr');
+  addLedger(root, 'U1', twoCycles());
+  commitAll(root, 'two cycles');
+  writeFileSync(ledgerPath(root), lines([cycle({ head: C })]));
+  const bad = commitAll(root, 'rewrite');
+  git(root, 'checkout', '-q', 'main');
+  git(root, 'merge', '-q', '--no-ff', '--no-edit', 'pr');
+  refused(root, 'E_APPEND_ONLY', new RegExp(`${bad} is not an append`), ['--base', base]);
+});
+
+test('RED (Round 1b): a merge commit that drops the ledger of its second parent is refused (every parent is compared)', () => {
+  const root = repo({});
+  const base = git(root, 'rev-parse', 'HEAD');
+  git(root, 'checkout', '-q', '-b', 'pr');
+  addLedger(root, 'U1', twoCycles());
+  const pr = commitAll(root, 'two cycles');
+  git(root, 'checkout', '-q', 'main');
+  git(root, 'merge', '-q', '-s', 'ours', '--no-edit', 'pr');
+  refused(root, 'E_LEDGER_DELETED', new RegExp(`exists at ${pr} but not at [0-9a-f]{40}`), ['--base', base]);
+});
+
+test('RED (Round 1b): an uncommitted rewrite of a row committed on the branch is refused (working tree vs HEAD)', () => {
+  const root = repo({});
+  git(root, 'checkout', '-q', '-b', 'pr');
+  addLedger(root, 'U1', twoCycles());
+  commitAll(root, 'two cycles');
+  writeFileSync(ledgerPath(root), lines([cycle({ head: C })]));
+  refused(root, 'E_APPEND_ONLY', /the working tree is not an append/, ['--base', 'main']);
+});
+
+test('RED (Round 1b): deleting a ledger at an intermediate commit is refused even if a later commit restores it', () => {
+  const root = repo({});
+  git(root, 'checkout', '-q', '-b', 'pr');
+  addLedger(root, 'U1', twoCycles());
+  commitAll(root, 'add');
+  rmSync(ledgerPath(root));
+  const gone = commitAll(root, 'delete');
+  addLedger(root, 'U1', twoCycles());
+  commitAll(root, 'restore');
+  refused(root, 'E_LEDGER_DELETED', new RegExp(`not at ${gone}`), ['--base', 'main']);
+});
+
+test('chain: a ledger first added at an intermediate commit and appended later passes; a merge of main is compared with both parents', () => {
+  const root = repo({});
+  git(root, 'checkout', '-q', '-b', 'pr');
+  commitAll(root, 'unrelated');
+  addLedger(root, 'U1', [cycle({ repair_commit: B, reviewers: [prim(1), second(1)] })]);
+  commitAll(root, 'cycle 1');
+  git(root, 'checkout', '-q', 'main');
+  addLedger(root, 'U2', [cycle({ unit: 'U2', pr: 8, head: D })]);
+  commitAll(root, 'main adds U2');
+  git(root, 'checkout', '-q', 'pr');
+  git(root, 'merge', '-q', '--no-edit', 'main');
+  appendFileSync(ledgerPath(root), lines([cycle({ cycle: 2, head: B })]));
+  commitAll(root, 'cycle 2');
+  const r = cli(root, 'check', ['--base', 'main']);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^review-rounds: 2 ledger\(s\) ok; append-only verified against base [0-9a-f]{40}\n$/);
+});
+
+test('RED (Round 1b): more than 1000 commits since the base fails closed with E_HISTORY_CAP', () => {
+  const root = repo({});
+  const head = git(root, 'rev-parse', 'HEAD');
+  let stream = '';
+  for (let i = 0; i < 1001; i += 1) {
+    stream += `commit refs/heads/main\ncommitter t <t@example.invalid> ${1700000000 + i} +0000\ndata 1\nx\n${i === 0 ? `from ${head}\n` : ''}\n`;
+  }
+  const fi = spawnSync('git', ['-C', root, 'fast-import', '--quiet'], { input: stream, encoding: 'utf8', env: GIT_ENV });
+  assert.equal(fi.status, 0, fi.stderr);
+  git(root, 'reset', '-q', '--hard', 'main');
+  const r = cli(root, 'check', ['--base', head]);
+  assert.equal(r.code, 3, r.err);
+  assert.match(r.err, /review-rounds: E_HISTORY_CAP: 1001 commits since the base/);
+  assert.equal(r.out, '');
+});
+
 // --- next: the pre-dispatch query ----------------------------------------------------------
 function next(rows, extra = ['--no-base'], files = {}) {
   const root = rows ? world(rows, { files }) : mkdtempSync(join(tmpdir(), 'rr-'));

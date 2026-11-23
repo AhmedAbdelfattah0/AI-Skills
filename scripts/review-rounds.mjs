@@ -14,9 +14,14 @@
 // JSON object per line; see "Row shapes"). Every ledger under .specs/reviews is read; zero is valid.
 // Symlinks are refused at .specs, .specs/reviews, each unit directory and each ledger.
 //
-// APPEND-ONLY (--base REV): the merge-base of REV and HEAD is the base. Every ledger the base tree
-// holds must still exist in the working tree, and its bytes must start with the base bytes (rows
-// may only be appended). Without a usable base (not a git repository, root is not the top level, a
+// APPEND-ONLY (--base REV): the merge-base of REV and HEAD is the base. Every commit of
+// `git rev-list <base>..HEAD` is compared with EVERY one of its parents (merge commits included: CI
+// checks out the PR merge ref, whose first parent is the base branch, so a first-parent walk would
+// skip the PR's own commits), and the working tree with HEAD and with the base. At each comparison
+// a ledger the older side holds must still exist and its bytes must be a prefix of the newer bytes
+// (rows may only be appended); a ledger may first appear at any commit. More than 1000 commits or 2000 ledger versions fails closed
+// (E_HISTORY_CAP). It sees only the pushed history: a force-push or other history rewrite made
+// before CI runs replaces the chain it walks and is NOT detected (residual; process control). Without a usable base (not a git repository, root is not the top level, a
 // shallow clone, REV or the merge-base unresolvable) the run fails closed with E_BASE_UNRESOLVED,
 // also when no ledger exists: a deleted ledger set looks exactly like an empty one. --no-base skips
 // the comparison and says so on the OK line ("append-only NOT verified"). The comparison only sees
@@ -34,7 +39,8 @@
 //   0  every ledger is valid (check, report) / next cycle allowed (next)
 //   1  at least one ledger violates a rule (typed code on stderr: "review-rounds: <file>:<line>: <CODE>: <detail>")
 //   2  usage error (bad command, unknown or repeated flag, missing value, neither or both base flags)
-//   3  environment: E_IO (unreadable), E_UNSAFE_PATH (symlink or non-regular entry), E_BASE_UNRESOLVED
+//   3  environment: E_IO (unreadable), E_UNSAFE_PATH (symlink or non-regular entry), E_BASE_UNRESOLVED,
+//      E_HISTORY_CAP (too much history to verify; fails closed)
 //   4  next: the next review cycle is not allowed for this unit
 //
 // VIOLATION CODES
@@ -66,8 +72,8 @@
 //                            engineering choice is never checked.
 //   E_CROSS_UNIT             one pr number, or one head sha, recorded under two units (a PR's budget
 //                            cannot be split across ledgers; pr:null rows are bound by head only)
-//   E_APPEND_ONLY            a ledger's bytes do not extend its base bytes (a row was changed or removed)
-//   E_LEDGER_DELETED         a ledger present at the base is absent (or its unit directory is gone)
+//   E_APPEND_ONLY            a ledger's bytes at some step do not extend the previous step (row changed or removed)
+//   E_LEDGER_DELETED         a ledger present at one step is absent at the next (or its unit directory is gone)
 //
 // Row shapes (closed: any other key is E_SCHEMA). Every row has kind, unit, at (UTC, YYYY-MM-DDTHH:MM:SSZ).
 //   cycle:      attempt, cycle (1|2), pr (int|null), head (40 hex), reviewers [primary, second_opinion],
@@ -97,6 +103,8 @@ export const LEDGER_NAME = 'review-rounds.jsonl';
 const MAX_LEDGER_BYTES = 1 << 20;
 const MAX_ASSESSMENT_BYTES = 4 << 20;
 const MAX_ROWS = 2000;
+const MAX_COMMITS = 1000; // commits walked since the base
+const MAX_VERSIONS = 2000; // distinct ledger blobs read along that chain
 const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const UNIT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -437,20 +445,50 @@ function loadBase(root, rev) {
     throw fail(`no merge-base between ${sha} and HEAD`, e);
   }
   if (!HEX40.test(mb)) throw fail(`unexpected merge-base ${JSON.stringify(mb)}`);
-  const ledgers = new Map();
+  // Every commit in <base>..HEAD is compared with EVERY parent (merge commits included): CI checks
+  // out the PR merge ref, whose first parent is the base branch, so a first-parent walk would skip
+  // the PR's own commits. A ledger only has to persist and extend where the parent had it.
+  let edges;
+  let head;
   try {
-    const listing = gitIn(root, ['ls-tree', '-r', '-z', mb, '--', '.specs/reviews']);
-    for (const ent of listing.split('\0').filter(Boolean)) {
-      const tab = ent.indexOf('\t');
-      const [, type, oid] = ent.slice(0, tab).split(' ');
-      const m = LEDGER_AT_BASE.exec(ent.slice(tab + 1));
-      if (!m || type !== 'blob') continue;
-      ledgers.set(m[1], gitIn(root, ['cat-file', 'blob', oid], 'buffer'));
-    }
+    head = gitIn(root, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+    edges = gitIn(root, ['rev-list', '--reverse', '--parents', `${mb}..HEAD`]).split('\n').filter(Boolean).map((l) => l.split(' '));
   } catch (e) {
-    throw fail(`cannot read the ledgers of base ${mb}`, e);
+    throw fail(`cannot list the commits ${mb}..HEAD`, e);
   }
-  return { sha: mb, ledgers };
+  if (edges.length > MAX_COMMITS) {
+    throw new EnvError('E_HISTORY_CAP', `${edges.length} commits since the base (cap ${MAX_COMMITS}); append-only cannot be verified; fails closed`);
+  }
+  const blobs = new Map(); // oid -> Buffer (each version read once)
+  const trees = new Map(); // commit -> Map(unit -> Buffer)
+  const treeOf = (commit) => {
+    if (trees.has(commit)) return trees.get(commit);
+    const ledgers = new Map();
+    try {
+      const listing = gitIn(root, ['ls-tree', '-r', '-z', commit, '--', '.specs/reviews']);
+      for (const ent of listing.split('\0').filter(Boolean)) {
+        const tab = ent.indexOf('\t');
+        const [, type, oid] = ent.slice(0, tab).split(' ');
+        const m = LEDGER_AT_BASE.exec(ent.slice(tab + 1));
+        if (!m || type !== 'blob') continue;
+        if (!blobs.has(oid)) {
+          if (blobs.size >= MAX_VERSIONS) throw new EnvError('E_HISTORY_CAP', `more than ${MAX_VERSIONS} distinct ledger versions since the base; append-only cannot be verified; fails closed`);
+          blobs.set(oid, gitIn(root, ['cat-file', 'blob', oid], 'buffer'));
+        }
+        ledgers.set(m[1], blobs.get(oid));
+      }
+    } catch (e) {
+      if (e instanceof EnvError) throw e;
+      throw fail(`cannot read the ledgers of commit ${commit}`, e);
+    }
+    trees.set(commit, ledgers);
+    return ledgers;
+  };
+  const pairs = [];
+  for (const [commit, ...parents] of edges) {
+    for (const parent of parents) pairs.push([parent, treeOf(parent), commit, treeOf(commit)]);
+  }
+  return { sha: mb, head, pairs, baseLedgers: treeOf(mb), headLedgers: treeOf(head) };
 }
 
 // --- report and next --------------------------------------------------------------------------
@@ -580,13 +618,22 @@ export function run(argv, io = { out: (s) => process.stdout.write(`${s}\n`), err
     }
   }
   if (base) {
-    for (const [unit, old] of base.ledgers) {
-      const path = join(root, '.specs', 'reviews', unit, LEDGER_NAME);
-      const now = bytes.get(unit);
-      if (now === undefined && !found.some((f) => f.unit === unit)) {
-        report(path, new Violation('E_LEDGER_DELETED', `.specs/reviews/${unit}/${LEDGER_NAME} exists at base ${base.sha} but not here`));
-      } else if (now !== undefined && (now.length < old.length || !now.subarray(0, old.length).equals(old))) {
-        report(path, new Violation('E_APPEND_ONLY', `not an append to the base ${base.sha} version (${old.length} bytes): rows may only be added at the end`));
+    // Each commit must extend each parent; the working tree must extend HEAD and the base.
+    const wt = 'the working tree';
+    const pairs = [...base.pairs, [base.head, base.headLedgers, wt, bytes], [base.sha, base.baseLedgers, wt, bytes]];
+    const flagged = new Set(); // first violation per ledger only
+    for (const [from, prev, to, next] of pairs) {
+      for (const [unit, old] of prev) {
+        if (flagged.has(unit)) continue;
+        const path = join(root, '.specs', 'reviews', unit, LEDGER_NAME);
+        const now = next.get(unit);
+        if (now === undefined && !(to === wt && found.some((f) => f.unit === unit))) {
+          flagged.add(unit);
+          report(path, new Violation('E_LEDGER_DELETED', `.specs/reviews/${unit}/${LEDGER_NAME} exists at ${from} but not at ${to}`));
+        } else if (now !== undefined && (now.length < old.length || !now.subarray(0, old.length).equals(old))) {
+          flagged.add(unit);
+          report(path, new Violation('E_APPEND_ONLY', `${to} is not an append to the ${from} version (${old.length} bytes): rows may only be added at the end`));
+        }
       }
     }
   }
