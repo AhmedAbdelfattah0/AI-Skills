@@ -76,6 +76,7 @@ const SCENARIOS = [
   ['confirmation FAIL', confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'FAIL', candidate_id: C2 }] }), F0({ candidate: { id: C2 } }), { stage: 'CONFIRMATION', action: 'owner_retry', disposition: 'FAILED', code: 'confirmation_failed', rule: 'confirmation.failed' }],
   ['ship-ready owed after a confirmation', confirming({ review_chain: [FAIL, REPAIR_REC, { review_execution: 'review-1', kind: 'confirmation', outcome: 'PASS', candidate_id: C2 }] }), F0({ candidate: { id: C2 } }), { stage: 'SHIP_READY', action: 'gate_ship_ready', disposition: 'READY', code: 'ship_ready_owed', rule: 'ship_ready.owed' }],
   ['ship-ready owed', reviewed(), F0(), { stage: 'SHIP_READY', action: 'gate_ship_ready', disposition: 'READY', code: 'ship_ready_owed', rule: 'ship_ready.owed' }],
+  ['ship-ready on a moved tree', reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0({ candidate: { id: C2 } }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'post_freeze_drift', rule: 'ship_ready.drift' }],
   ['ship-ready refused', reviewed(), F0({ lastGate: { review: { ok: true, at_ms: NOW - 5 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C1, at_ms: NOW, repeat: 1 } } }), { stage: 'SHIP_READY', action: 'owner_decide', disposition: 'BLOCKED', code: 'evidence_run_failed', rule: 'ship_ready.refused' }],
   ['after SHIP_READY: the owner publishes', reviewed({ ship_ready: { candidate_id: C1, seq: 9 } }), F0(), { stage: 'PUBLISH', action: 'owner_publish', disposition: 'BLOCKED', code: 'publish_owner_owned', rule: 'publish.owner' }],
 ];
@@ -290,4 +291,91 @@ test('R15 units: unit_reviews_pending yields unit_review; ready_work lists nodes
     { kind: 'node', id: 'a', action: 'drive', fits: true, admission: 'at_dispatch' }, { kind: 'node', id: 'b', action: 'drive', fits: false, admission: 'at_dispatch' },
     { kind: 'repair', id: 'r1', action: 'drive', admission: 'at_dispatch' }, { kind: 'red', id: 'c', action: 'gate_red' }, { kind: 'unit_review', id: 'u1', action: 'unit_review' }] });
   assert.deepEqual(readyWork(S, { ...ext, budgetStop: true }), { ready_work: [], ready_work_capacity: 'budget_stop' });
+});
+
+// ---- Round 1 repair (PR #125): each test is RED on b831918 and names its mutant -------------------------------
+import * as NX from './engine-next.mjs';
+
+test('R1r1 [N12] every judgment is evaluated: a human-owned one outranks an earlier orchestrator-owned one', () => {
+  const S = S0({ nodes: { a: { id: 'a', state: 'failed', deps: [], redSpecs: [] } } });
+  const a = derive(S, F0({ blockers: [{ code: 'ownership_unavailable', node: 'a', reason: 'git' }, { code: 'ownership_violation', node: 'a', reason: 'wrote x' }] })).next_action;
+  assert.deepEqual([a.code, a.owner, a.turn_end, a.failure_class], ['ownership_violation', 'human', 'WAIT_FOR_USER', 'APPROVAL_OR_OWNERSHIP_FAILURE']);
+  assert.equal(a.reasons.length, 2, 'every judgment stays in the reasons');
+  const loose = derive(S0(), F0({ blockers: [{ code: 'node_failed', node: null, reason: 'x' }, { code: 'stale_candidate', node: null, reason: 'y' }] })).next_action;
+  assert.deepEqual([loose.code, loose.owner], ['stale_candidate', 'human']);
+});
+
+test('R1r1 [N13] a recorded SHIP_READY completes only for the CURRENT candidate and with no later ship-ready refusal', () => {
+  const S = reviewed({ ship_ready: { candidate_id: C1, seq: 9 } });
+  const moved = derive(S, F0({ candidate: { id: C2 } })).next_action;
+  assert.deepEqual([moved.stage, moved.code, moved.owner], ['SHIP_READY', 'post_freeze_drift', 'human'], 'a moved tree is never shipped as C1');
+  const gone = derive(S, F0({ candidate: { id: null, reason: 'git failed' } })).next_action;
+  assert.deepEqual([gone.stage, gone.code], ['SHIP_READY', 'candidate_unavailable']);
+  const later = derive(S, F0({ lastGate: { review: { ok: true, at_ms: NOW - 9 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
+  assert.deepEqual([later.stage, later.code], ['SHIP_READY', 'evidence_run_failed'], 'a later refusal outranks the cached SHIP_READY');
+});
+
+test('R1r1 [N18] a ship-ready refusal of ANOTHER candidate never blocks the current one', () => {
+  const a = derive(reviewed(), F0({ lastGate: { review: { ok: true, at_ms: NOW - 9 }, 'ship-ready': { ok: false, code: 'evidence_run_failed', candidate_id: C2, at_ms: NOW, repeat: 1 } } })).next_action;
+  assert.deepEqual([a.stage, a.action, a.code], ['SHIP_READY', 'gate_ship_ready', 'ship_ready_owed']);
+});
+
+test('R1r1 [N14] every dispatched lane must have its result: a pending partition keeps the review waiting, and a refusal waits for it too', () => {
+  const lanes = [ready('primary', { event_id: 'fe', name: 'frontend_review' }), ready('second_opinion'), disp('primary', { event_id: 'be', name: 'backend_review' })];
+  const a = derive(S0(), F0({ dispatches: lanes })).next_action;
+  assert.deepEqual([a.action, a.disposition], ['wait', 'WAITING'], JSON.stringify(a));
+  const g = derive(S0(), F0({ dispatches: lanes, lastGate: { review: { ok: false, code: 'stale_candidate', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
+  assert.notEqual(g.action, 'gate_review', 'a pending lane never yields gate_review');
+});
+
+test('R1r1 [N15] a confirmation second opinion belongs to the confirmation (phase and candidate), never consumed by the original record', () => {
+  const S = confirming();
+  const pending = derive(S, F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 }), disp('second_opinion', { event_id: 'so2', candidate_id: C2 })] })).next_action;
+  assert.deepEqual([pending.stage, pending.action, pending.disposition], ['CONFIRMATION', 'wait', 'WAITING'], JSON.stringify(pending));
+  const both = derive(S, F0({ candidate: { id: C2 }, dispatches: [ready('confirmation', { candidate_id: C2 }), ready('second_opinion', { event_id: 'so2', candidate_id: C2 })] })).next_action;
+  assert.deepEqual(both.detail.results.map(r => r.role).sort(), ['confirmation', 'second_opinion']);
+  assert.equal(typeof NX.dispatchKind, 'function', 'dispatchKind is exported (gather uses it for unconsumed results)');
+  assert.equal(NX.dispatchKind(S, { role: 'second_opinion', review_execution: 'review-1', candidate_id: C2 }), 'confirmation');
+  assert.equal(NX.dispatchKind(S, { role: 'second_opinion', review_execution: 'review-1', candidate_id: C1 }), 'original');
+});
+
+test('R1r1 [N19] with no review execution chosen, an incomplete execution of another candidate never mixes into this one', () => {
+  const a = derive(S0(), F0({ candidate: { id: C2 }, dispatches: [ready('primary', { candidate_id: C1 })] })).next_action;
+  assert.deepEqual([a.action, a.detail.roles, a.detail.candidate_id, a.detail.review_execution], ['dispatch_review', ['primary', 'second_opinion'], C2, null]);
+});
+
+test('R1r1 [N16] a repeated ENGINE verification refusal escalates to the human (WAIT_FOR_USER)', () => {
+  assert.equal(ACTIONS[refusal('candidate_unavailable', ['x']).action], 'orchestrator');
+  const r = refusal('candidate_unavailable', ['x'], { repeat: 2 });
+  assert.deepEqual([ACTIONS[r.action], turnEnd(r.disposition, ACTIONS[r.action])], ['human', 'WAIT_FOR_USER']);
+  const a = derive(S0(), F0({ dispatches: [ready('primary'), ready('second_opinion')], lastGate: { review: { ok: false, code: 'base_remote_unavailable', candidate_id: C1, at_ms: NOW, repeat: 2 } } })).next_action;
+  assert.deepEqual([a.owner, a.turn_end], ['human', 'WAIT_FOR_USER']);
+});
+
+test('R1r1 [N17] a lock holder whose liveness is unknown is reported held (never free)', () => {
+  assert.equal(typeof NX.lockState, 'function', 'lockState is exported');
+  const held = { pid: 4242, host: 'h', process_start_time: 'T0' };
+  assert.equal(NX.lockState(held, 'h', () => ({ alive: true, startTime: null })).state, 'held');
+  assert.equal(NX.lockState(held, 'h', () => ({ alive: true, startTime: 'T0' })).state, 'held');
+  assert.equal(NX.lockState(held, 'h', () => ({ alive: false, startTime: null })).state, 'free');
+  assert.equal(NX.lockState(held, 'other', () => ({ alive: true, startTime: 'T0' })).state, 'foreign');
+});
+
+test('R1r1 [N20] attempt liveness probes the process group: a gone leader with live members is unknown, never dead or alive', () => {
+  assert.equal(typeof NX.verifyAttempt, 'function', 'verifyAttempt is exported');
+  const a = { status: 'launched', pid: 4242, pgid: 4242, leader_start: 'T0' };
+  const gone = () => ({ alive: false, startTime: null });
+  assert.deepEqual(NX.verifyAttempt(a, gone, () => true), { state: 'unknown', reason: 'leader_gone_group_alive' });
+  assert.deepEqual(NX.verifyAttempt(a, gone, () => null), { state: 'unknown', reason: 'group_unknown' });
+  assert.deepEqual(NX.verifyAttempt(a, gone, () => false), { state: 'dead', reason: 'no_process' });
+  assert.deepEqual(NX.verifyAttempt(a, () => ({ alive: true, startTime: 'T0' }), () => true), { state: 'alive', reason: 'start_time_equal' });
+});
+
+test('R1r1 [N21] a result is available when its file was written, not when its interval was closed (a refused gate stays the stop)', () => {
+  assert.equal(typeof NX.resultTime, 'function', 'resultTime is exported');
+  assert.equal(NX.resultTime({ marker_exists: true, mtime: 1000, ended: true, ended_ms: 5000 }), 1000);
+  assert.equal(NX.resultTime({ marker_exists: false, mtime: null, ended: true, ended_ms: 5000 }), 5000);
+  const closedLater = ready('primary', { ended: true, result_ms: NX.resultTime({ marker_exists: true, mtime: NOW - 10, ended: true, ended_ms: NOW + 10 }) });
+  const a = derive(S0(), F0({ dispatches: [closedLater, ready('second_opinion')], lastGate: { review: { ok: false, code: 'missing_reconciliation', candidate_id: C1, at_ms: NOW, repeat: 1 } } })).next_action;
+  assert.equal(a.rule, 'review.gate_refused');
 });

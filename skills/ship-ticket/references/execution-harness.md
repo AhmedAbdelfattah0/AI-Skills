@@ -296,13 +296,16 @@ command reads it: the gates stay the enforcement, and a gate refusal always wins
   prints `{schema, ticket, run_id, next_action}` on stdout.
 - **C1 facts:** `unconsumed_results` lists an attempt envelope on disk whose attempt is still live
   (action `resume`) and a review result bound at dispatch (`run-log.mjs start --carrier-result`) that is
-  on disk with no `review_chain` record of its execution and kind (action `gate_review`, with its path,
-  never a second dispatch). `unconsumed_complete` is false when the run log is unreadable, too large or
+  on disk with no `review_chain` record of its execution, kind and candidate (action `gate_review`, with
+  its path, never a second dispatch); a second opinion on the repaired candidate belongs to the
+  confirmation. A review is ready for its gate only when every dispatched lane, partitions included,
+  has its result. `unconsumed_complete` is false when the run log is unreadable, too large or
   damaged. `ready_work` lists the nodes `drive` could start (`fits: false` when a resource is held), pending
   repairs, `red_pending` and pending unit reviews; it is empty under a budget stop
   (`ready_work_capacity: budget_stop`). `liveness` is verified, never asserted: `alive` only when the
-  recorded pid answers with the recorded start time; a gone process or a different start time
-  (`pid_reused`) is `dead`. Anything unprovable is `unknown`, including an orchestrator-dispatched
+  recorded pid answers with the recorded start time; a gone process (and, for an attempt, its whole
+  process group) or a different start time (`pid_reused`) is `dead`; a gone leader whose group still
+  has members is `unknown`. Anything unprovable is `unknown`, including an orchestrator-dispatched
   reviewer (`no_pid_recorded`). An alive process may still be hung.
 
 **Failure classes (FR-1b).** A `next_action` caused by an engine-check refusal or judgment carries

@@ -180,12 +180,32 @@ export function refusal(code, reasons, { action = 'resolve', repeat = 1, detail 
   return human();
 }
 
-const judged = (list) => refusal(list[0].code, list.map(j => `${j.node ? `${j.node}: ` : ''}${j.reason}`),
-  { detail: { judgments: list.map(j => ({ code: j.code, ...(j.node ? { node: j.node } : {}) })) } });
+/** Class precedence among simultaneous judgments: a human-owned stop is never hidden behind an orchestrator- or engine-owned one. */
+const SEVERITY = ['SECURITY_GATE_FAILURE', 'APPROVAL_OR_OWNERSHIP_FAILURE', 'ENGINE_FAILURE', 'UNKNOWN_FAILURE'];
+const rank = (r) => (ACTIONS[r.action] === 'human' ? 0 : 1) * 10 + (SEVERITY.indexOf(r.failure_class) + 1 || SEVERITY.length + 1);
+/** Every judgment is evaluated; the most severe decides (list order breaks ties), and every reason is kept. */
+const judged = (list) => {
+  const reasons = list.map(j => `${j.node ? `${j.node}: ` : ''}${j.reason}`);
+  const detail = { judgments: list.map(j => ({ code: j.code, ...(j.node ? { node: j.node } : {}) })) };
+  const all = list.map(j => refusal(j.code, reasons, { detail }));
+  return all.reduce((best, r) => (rank(r) < rank(best) ? r : best));
+};
 
 // ---- context derived once per call ----------------------------------------------------------------
 
 const ROLE_KIND = { primary: 'original', second_opinion: 'original', confirmation: 'confirmation' };
+/**
+ * The review a dispatch belongs to, by phase AND candidate: a second opinion of the repaired review execution on the repaired
+ * candidate is the confirmation's (review.md targeted confirmation), never the original's.
+ */
+export function dispatchKind(S, d) {
+  if (d.role !== 'second_opinion') return ROLE_KIND[d.role];
+  const rec = (S.review_chain ?? []).find(r => r.kind === 'repair' && r.review_execution === d.review_execution);
+  return rec && d.candidate_id === rec.new_candidate ? 'confirmation' : 'original';
+}
+/** Whether a chain record of the dispatch's review (execution, kind and candidate) consumed it. */
+const consumedBy = (chain, d, kind) => chain.some(r => r.review_execution === d.review_execution && r.kind === kind
+  && (r.candidate_id === undefined || d.candidate_id === null || r.candidate_id === d.candidate_id));
 const RUNNER_STAGE = { repair: 'REPAIR', proof: 'SHIP_READY' };
 
 function context(S, f) {
@@ -194,7 +214,6 @@ function context(S, f) {
   const rx = O?.review_execution ?? null;
   const mine = (k) => (rx ? chain.find(r => r.review_execution === rx && r.kind === k) ?? null : null);
   const last = chain.at(-1);
-  const recorded = new Set(chain.map(r => `${r.review_execution}\u0000${r.kind}`));
   const retry = rx ? trustedEvents(S, 'RETRY').find(e => e.run_id === S.run_id && e.predecessor === rx && typeof e.authorized_by === 'string'
     && e.authorized_by.length > 0 && !chain.some(r => r.review_execution === e.review_execution)) ?? null : null;
   const stageOf = (j) => (j.node && (S.nodes?.[j.node] || S.unit_checks?.[j.node]) ? 'BUILD' : j.node && (S.repairs ?? []).some(r => r.id === j.node) ? 'REPAIR' : 'loose');
@@ -202,7 +221,7 @@ function context(S, f) {
   for (const j of f.blockers ?? []) judgments[stageOf(j)].push(j);
   const attempts = { BUILD: [], REPAIR: [], SHIP_READY: [] };
   for (const a of f.attempts ?? []) attempts[RUNNER_STAGE[a.kind] ?? 'BUILD'].push(a);
-  return { chain, O, rx, recorded, retry, repairRecord: mine('repair'), confirmation: mine('confirmation'),
+  return { S, chain, O, rx, retry, repairRecord: mine('repair'), confirmation: mine('confirmation'),
     repair: rx ? (S.repairs ?? []).find(r => r.kind === 'review' && r.review_execution === rx) ?? null : null,
     authorizing: last && ['original', 'confirmation'].includes(last.kind) && last.outcome === 'PASS' ? last : null, judgments, attempts };
 }
@@ -232,22 +251,29 @@ const judgmentRule = (stage) => ({ id: `${stage.toLowerCase()}.judgment`, stage,
  * `want(S, f, x)` -> { candidate, rx, roles }. Results outrank the work-tree candidate: a dispatch of the chosen
  * review execution whose result is on disk (or whose interval was closed) is owed to `gate review`, which judges staleness.
  */
+const ready = (d) => d.ended || d.marker_exists;
+/** Every role has a dispatch and EVERY dispatched lane (partition reviewers included) has its result. */
+const complete = (roles, list) => roles.every(r => list.some(d => d.role === r)) && list.length > 0 && list.every(ready);
+
 function reviewRules(stage, kind, want) {
   const p = stage.toLowerCase();
-  const ready = (d) => d.ended || d.marker_exists;
   const rows = (S, f, x) => {
     const w = want(S, f, x);
-    const mine = (f.dispatches ?? []).filter(d => ROLE_KIND[d.role] === kind && !x.recorded.has(`${d.review_execution}\u0000${kind}`)
+    const mine = (f.dispatches ?? []).filter(d => dispatchKind(S, d) === kind && !consumedBy(x.chain, d, kind)
       && (w.rx ? d.review_execution === w.rx : true));
-    // AC3: an execution with a result on disk outranks a later one without (never a second dispatch over an owed result)
-    const rx = w.rx ?? mine.filter(ready).at(-1)?.review_execution ?? mine.at(-1)?.review_execution ?? null;
-    const of = mine.filter(d => d.review_execution === rx);
-    const roles = [...w.roles, ...(w.optional ?? []).filter(r => of.some(d => d.role === r))];
-    return { ...w, rx, roles, mine: of.filter(d => roles.includes(d.role)) };
+    const of = (rx) => mine.filter(d => d.review_execution === rx);
+    const rolesOf = (list) => [...w.roles, ...(w.optional ?? []).filter(r => list.some(d => d.role === r))];
+    // AC3: an execution whose every lane has its result outranks the work-tree candidate (gate review judges staleness);
+    // otherwise only dispatches of the current candidate count, so an instruction never mixes two candidates.
+    const done = [...new Set(mine.map(d => d.review_execution))].filter(rx => complete(rolesOf(of(rx)), of(rx)));
+    const rx = w.rx ?? done.at(-1) ?? mine.filter(d => d.candidate_id === w.candidate).at(-1)?.review_execution ?? null;
+    const list = w.rx || done.includes(rx) ? of(rx) : of(rx).filter(d => d.candidate_id === w.candidate);
+    const roles = rolesOf(list);
+    return { ...w, rx, roles, mine: list.filter(d => roles.includes(d.role)) };
   };
   const item = (d) => ({ role: d.role, event_id: d.event_id, review_execution: d.review_execution, candidate_id: d.candidate_id,
     started_at: d.started_at, marker: d.marker, deadline: d.deadline });
-  const all = (w) => w.roles.every(r => w.mine.some(d => d.role === r && ready(d)));
+  const all = (w) => complete(w.roles, w.mine);
   return {
     results: [
       { id: `${p}.gate_refused`, stage, when: (S, f, x) => { const w = rows(S, f, x), g = f.lastGate?.review;
@@ -325,11 +351,14 @@ export const RULES = Object.freeze([
   ...confirmationReview.waiting,
   // SHIP_READY
   ...attemptRules('SHIP_READY'),
-  { id: 'ship_ready.recorded', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && S.ship_ready?.candidate_id === x.authorizing.candidate_id
-    && done('ship_ready', { candidate_id: S.ship_ready.candidate_id }) },
+  { id: 'ship_ready.drift', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && f.candidate?.id !== x.authorizing.candidate_id
+    && (f.candidate?.id ? refusal('post_freeze_drift', [`the work tree is ${f.candidate.id}, the accepted review covers ${x.authorizing.candidate_id}: revert the drift, or the owner appends a RETRY`])
+      : refusal('candidate_unavailable', [f.candidate?.reason ?? 'candidate not computable'])) },
   { id: 'ship_ready.refused', stage: 'SHIP_READY', when: (S, f) => { const g = f.lastGate?.['ship-ready'], r = f.lastGate?.review;
     return g && !g.ok && g.candidate_id === f.candidate?.id && (!r || g.at_ms >= r.at_ms)
       && refusal(g.code, [`gate ship-ready refused (${g.code}) for this candidate${g.repeat > 1 ? ` (${g.repeat} times in a row)` : ''}`], { action: 'gate_ship_ready', repeat: g.repeat }); } },
+  { id: 'ship_ready.recorded', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && S.ship_ready?.candidate_id === x.authorizing.candidate_id
+    && done('ship_ready', { candidate_id: S.ship_ready.candidate_id }) },
   { id: 'ship_ready.owed', stage: 'SHIP_READY', when: (S, f, x) => x.authorizing && res('READY', 'ship_ready_owed', 'gate_ship_ready',
     { reasons: [`the accepted review of ${x.authorizing.candidate_id} has no SHIP_READY`], detail: { candidate_id: x.authorizing.candidate_id } }) },
   // PUBLISH .. POST_MERGE: human-owned (A4)
@@ -427,6 +456,29 @@ export function verify(pid, recordedStart, info = processInfo) {
   return now.startTime === recordedStart ? { state: 'alive', reason: 'start_time_equal' } : { state: 'dead', reason: 'pid_reused' };
 }
 
+/**
+ * Verified liveness of a recorded attempt: the leader (pid + start time), then, when the leader is gone, its process group
+ * (`kill(-pgid, 0)`, as the engine's own quiescence does): live members are `unknown`, never `dead` and never `alive`.
+ */
+export function verifyAttempt(a, info = processInfo, group = (g) => io.groupAlive(g)) {
+  if (a.status === 'intent') return { state: 'unknown', reason: 'no_pid_recorded' };
+  const v = verify(a.pgid ?? a.pid, a.leader_start ?? null, info);
+  if (v.state !== 'dead' || v.reason !== 'no_process' || !a.pgid) return v;
+  const g = group(a.pgid);
+  return g === true ? { state: 'unknown', reason: 'leader_gone_group_alive' } : g === false ? v : { state: 'unknown', reason: 'group_unknown' };
+}
+
+/** When a review result became available: its file's write time, else (no bound file) the run-log interval's end. */
+export const resultTime = (d) => (d.marker_exists && Number.isFinite(d.mtime) ? d.mtime : d.ended ? d.ended_ms : null);
+
+/** A parsed lock record as status sees it: held (a live or unprovable holder), free (proven gone) or foreign. */
+export function lockState(held, host, info = processInfo) {
+  const base = { subject: 'lock', id: held.nonce ?? null, pid: held.pid, method: 'kill0+start_time' };
+  if (held.host !== host) return { state: 'foreign', reason: `held by host ${held.host}`, live: { ...base, state: 'unknown', reason: 'foreign_host' } };
+  const v = verify(held.pid, held.process_start_time ?? null, info);
+  return { state: v.state === 'dead' ? 'free' : 'held', reason: v.reason, live: { ...base, ...v } };
+}
+
 /** The run lock as status sees it, lock-free: free, held (a live or unprovable holder), malformed or foreign. */
 function lockFacts(ctx, info) {
   const file = io.gitPath(ctx.repoRoot, `ai-skills/ship-ticket/${ctx.ticket}.lock`);
@@ -435,10 +487,7 @@ function lockFacts(ctx, info) {
   let held;
   try { held = JSON.parse(raw); } catch { held = null; }
   if (!held || !Number.isInteger(held.pid) || held.pid <= 0 || typeof held.host !== 'string') return { state: 'malformed', reason: `${file} is unreadable`, live: null };
-  const base = { subject: 'lock', id: held.nonce ?? null, pid: held.pid, method: 'kill0+start_time' };
-  if (held.host !== (ctx.host ?? hostname())) return { state: 'foreign', reason: `${file} is held by host ${held.host}`, live: { ...base, state: 'unknown', reason: 'foreign_host' } };
-  const v = verify(held.pid, held.process_start_time ?? null, info);
-  return { state: v.state === 'dead' ? 'free' : 'held', reason: v.reason, live: { ...base, ...v } };
+  return lockState(held, ctx.host ?? hostname(), info);
 }
 
 /** The last GATE row per gate kind of this run in the engine log ({ ok, code, candidate_id, at_ms, repeat }). */
@@ -470,7 +519,7 @@ export async function gather(E, ext) {
   const liveness = [];
   const attempts = (S.attempts ?? []).filter(a => LIVE.includes(a.status)).map(a => {
     const deadline = (ms(a.started_at) ?? now) + timeout + ATTEMPT_GRACE_MS;
-    const v = a.status === 'intent' ? { state: 'unknown', reason: 'no_pid_recorded' } : verify(a.pgid ?? a.pid, a.leader_start ?? null, info);
+    const v = verifyAttempt(a, info, ctx.groupAlive ?? ((g) => io.groupAlive(g, ctx.platform ?? process.platform)));
     liveness.push({ subject: 'attempt', id: a.attempt_id, pid: a.pgid ?? a.pid ?? null, method: 'kill0+start_time', ...v });
     return { ...a, envelope: Boolean(a.envelope_file && existsSync(a.envelope_file)), deadline: iso(deadline), deadline_ms: deadline, liveness: v };
   });
@@ -484,16 +533,16 @@ export async function gather(E, ext) {
     let mtime = null;
     const marker_exists = Boolean(d.result_path && existsSync(d.result_path));
     if (marker_exists) try { mtime = statSync(d.result_path).mtimeMs; } catch { /* raced away */ }
-    return { ...d, marker: d.result_path, marker_exists, result_ms: d.ended ? ms(d.ended_at) : mtime, deadline: iso(deadline), deadline_ms: deadline ?? Infinity };
+    const row = { ...d, marker: d.result_path, marker_exists, mtime, ended_ms: ms(d.ended_at), deadline: iso(deadline), deadline_ms: deadline ?? Infinity };
+    return { ...row, result_ms: resultTime(row) };
   });
   for (const d of dispatches) if (!d.ended && !d.marker_exists) liveness.push({ subject: 'review', id: d.event_id, pid: null, method: 'claimed', state: 'unknown', reason: 'no_pid_recorded' });
   const f = { now, lock, attempts, dispatches, unbound: ext.unbound, blockers: ext.blockers, redPending: ext.redPending,
     unitReviewsPending: ext.unitReviewsPending ?? [], work: ext.work, budgetStop: ext.budgetStop, candidate: ext.candidate,
     lastGate: lastGates(E.P.log, S.run_id) };
-  const recorded = new Set((S.review_chain ?? []).map(r => `${r.review_execution}\u0000${r.kind}`));
   const unconsumed = [
     ...attempts.filter(a => a.envelope).map(a => ({ kind: 'attempt_envelope', id: a.attempt_id, node: a.node, marker: a.envelope_file, action: 'resume' })),
-    ...dispatches.filter(d => d.marker_exists && !recorded.has(`${d.review_execution}\u0000${ROLE_KIND[d.role]}`))
+    ...dispatches.filter(d => d.marker_exists && !consumedBy(S.review_chain ?? [], d, dispatchKind(S, d)))
       .map(d => ({ kind: 'review_result', review_execution: d.review_execution, role: d.role, event_id: d.event_id, marker: d.marker, action: 'gate_review' })),
   ];
   return { f, unconsumed_results: unconsumed, unconsumed_complete: log.complete, liveness };
