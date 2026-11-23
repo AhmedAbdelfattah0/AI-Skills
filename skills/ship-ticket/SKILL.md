@@ -81,7 +81,7 @@ and execution continues; measurement must never become a new blocker.
 | Phase | Outcome |
 |---|---|
 | **UNDERSTAND** | full tracker specification, startable ticket, detected stack and commands, pinned UI design, review capability preflight |
-| **PLAN** | one native-approved, complete plan (cross-model debated when security-sensitive) and Design Contract |
+| **PLAN** | one native-approved, complete plan (debated with the counterpart by default: the reciprocal Planning Debate) and Design Contract |
 | **BUILD** | implementation and tests on the ticket branch |
 | **PROVE** | green locally runnable CI commands, applicable static/runtime security evidence, truthful docs and UI evidence |
 | **REVIEW** | one bounded independent semantic review workflow, internally partitioned only for a material full-stack diff, plus one mandatory second opinion (Codex, else Fable); at most one repair and targeted confirmation |
@@ -377,7 +377,7 @@ critical.
 | vapt | run the family-appropriate reduced attacks from [references/prove.md](references/prove.md), commit them as tests, and name omitted families |
 | test-quality | inspect behavior assertions and mocks directly and declare degraded coverage |
 | docs-accuracy | run the repository-wide old-name/behavior search and declare the smaller coverage |
-| selected counterpart or its PLAN carrier, when the debate is required | bounded recovery, then debate with a fresh Fable session recorded `plan_debate.status: DEGRADED` (same provider, not cross-model agreement); if Fable also cannot run, **WAIT_FOR_USER** for restored access or an explicit solo-planning waiver |
+| selected counterpart or its PLAN carrier | the PLAN-start probe reports the failure class (`codex_route`); then debate with a fresh Fable session as the declared substitute, recorded `carrier.degraded: true` with the frozen acknowledgement (same provider, not cross-model agreement; a transport label that does not by itself resolve or waive any finding, and the same convergence checks apply); if Fable also cannot run, **WAIT_FOR_USER** for restored access or an explicit owner exception |
 | Codex during REVIEW (unavailable, failed, or usage limit reached) | run a fresh Fable session on the same candidate (`second_opinion: fable`; identity as [references/cross-model.md](references/cross-model.md) "Dispatching Fable" records it); if Fable also cannot produce a usable result, **WAIT_FOR_USER** — the second opinion is mandatory and never silently skipped. CodeRabbit is optional extra coverage, never a required route; because the engine requires a cross-provider second opinion for a risky unit, `config.unitReview` stays off when Codex is unavailable ([references/units.md](references/units.md)) |
 | independent primary reviewer | **WAIT_FOR_USER** before REVIEW starts; never let the builder self-approve |
 | review concurrency | run the primary review and the second opinion one after the other; both are still required |
@@ -430,8 +430,8 @@ tool is exposed, not silently take the headless path. Calling this phase PLAN is
 not a substitute for changing the host mode. Research subagents (Plan, Explore,
 Opus planning agents) work inside the orchestrator's Plan Mode and return
 findings; they never enter or exit it. Keep native Plan Mode active through
-research, drafting, deterministic prechecks, the bounded read-only debate when it
-is required, and reconciliation.
+research, drafting, deterministic prechecks, the read-only Planning Debate, and
+reconciliation.
 
 The orchestrator writes the complete plan (every template section filled, no
 stubs or placeholders) to the native plan file and presents it through the host's
@@ -439,8 +439,15 @@ native approval handoff: `ExitPlanMode` on Claude, the host-prescribed final pla
 format on Codex. A wave uses one `ExitPlanMode`. Hold `WAIT_FOR_USER` until
 answered. Chat text, an `AskUserQuestion` answer and a typed "approve" are not
 plan approval; `AskUserQuestion` may only resolve planning questions before
-`ExitPlanMode`. Do not exit Plan Mode before a required debate has been
-reconciled, and do not treat either model's agreement as human approval.
+`ExitPlanMode`. Every counterpart answer is exactly one counterpart-response-v1 JSON
+object, and free text is never approval evidence: a non-conforming answer fails the
+round, and the host re-asks with a new `request_id`. The owner-approved dispositions
+are one `debate-dispositions-v1:` narrative line, never section 7 Markdown. Do not exit
+Plan Mode before the debate has been reconciled and
+`brief.mjs debate-check` accepts the frozen plan (an `UNRESOLVED` plan is presented for the owner's disposition; see
+[references/cross-model.md](references/cross-model.md) "PLAN debate"); state the
+attestation line's sha256 in the text accompanying `ExitPlanMode`, and do not
+treat either model's agreement as human approval. Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.
 Before `ExitPlanMode` on a policy-2 plan with an execution DAG, run
 `scripts/run-engine.mjs preflight --repo <dir> --ticket <key> --dag <file> --plan <draft>`.
 It checks the plan and DAG as `init` will, with no START and no write. Fix any
@@ -463,7 +470,8 @@ After approval:
 
 - create or reuse the ticket branch from an up-to-date base;
 - save the approved plan under .specs/plans/<TICKET>.md;
-- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`; then run `brief.mjs start-check --plan <plan> --run-id <id>`);
+- copy the debate bundle to the retained locator with `brief.mjs debate-retain --plan <plan> --bundle <bundle root> --repo <repo>` before START (a failed copy is **WAIT_FOR_USER**, never a START without the retained evidence);
+- append a **START** event with the workflow run ID and approved-plan digest (compute it with `brief.mjs plan-digest`, never `shasum`), plus `debate_attestation_sha256` (the hash stated at `ExitPlanMode`) on a `debate_policy: 2` plan; then run `brief.mjs start-check --plan <plan> --run-id <id> --repo <repo>`;
 - invoke the routed quality skill and write one Design Contract derived from the
   approved execution DAG;
 - for full-stack work, materialize or generate the approved Integration Contract,
@@ -614,11 +622,11 @@ dependencies:
 
   Never let a subagent inherit the main model by default.
 - **Concurrency.** Run at most 2–3 agents at once.
-- **Survey and planning.** Use one survey agent. Use the cross-model plan debate
-  only for security-sensitive work (spine "Security sensitivity": auth,
-  multi-tenancy, billing, payments, money, secrets). For every other ticket,
-  including other ELEVATED ones, skip it and record `plan_debate.status: SKIPPED`
-  with the reason. The REVIEW second opinion is never skipped (see REVIEW).
+- **Survey and planning.** Use one survey agent. The reciprocal Planning Debate
+  is the default for every implementation plan, STANDARD and ELEVATED alike;
+  risk classification alone never skips it. `SKIPPED` needs an explicit owner
+  exception frozen in the plan ([references/cross-model.md](references/cross-model.md)
+  "PLAN debate"). The REVIEW second opinion is never skipped (see REVIEW).
 - **Owner budget.** A human request to save tokens overrides this skill's
   parallelism and redundancy defaults.
 - **Fresh orchestrator per ticket or wave.** Start each ticket or wave in a
@@ -738,8 +746,8 @@ these categories and still stops. Use **WAIT_FOR_USER** only for:
   operation. Never force-push without explicit owner authority;
 - **unresolved blockers after bounded recovery:** a required native host mode
   transition that has no agent-callable control, no independent primary
-  reviewer, no usable second opinion from Codex or Fable, a required PLAN debate
-  that neither Codex nor Fable could hold (unless the user waived it), an
+  reviewer, no usable second opinion from Codex or Fable, a PLAN debate
+  that neither Codex nor Fable could hold (unless the owner approved an exception), an
   uncommitted or missing UI design reference, or a refusal of a missing or
   invalid security catalog;
 - **explicit owner authority:** missing acceptance criteria or unresolved

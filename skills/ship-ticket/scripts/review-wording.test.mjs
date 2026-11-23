@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gateReview } from './gate.mjs';
+import { DEBATE_OUTCOMES } from './brief.mjs';
 
 // Windows runners check markdown out as CRLF; the multi-line assertions below match LF text.
 const load = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
@@ -213,6 +214,111 @@ test('S3c: manual-flow fallback stops at fallback time on ELEVATED runs, and an 
   assert.ok(resume.includes('(native approval, never typed; accepting it records the new START, which the orchestrator then appends) and record the evidence in the plan\'s RUN-STATE.'));
   assert.ok(resume.includes('Renewed approval of the substance is needed only if the pairs, DAG, surfaces or review profile change; even a deterministic completion goes through `ExitPlanMode`, and derived sections are never auto-approved.'));
   assert.ok(resume.includes('After `init`, any narrative change needs a new approved START/run'));
+});
+
+// S4: the restored reciprocal Planning Debate. The superseded scope and cap instructions are REPLACED, not appended to,
+// so a sentence that still makes the debate security-only, capped at three calls / 20 minutes, or skippable by default
+// fails here. Whitespace is flattened and matching is case-insensitive, so a phrase wrapped across lines still hits.
+const S4_FILES = () => {
+  const dir = fileURLToPath(new URL('../', import.meta.url));
+  const files = { 'SKILL.md': load(join(dir, 'SKILL.md')), 'AGENTS.md': load(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url))) };
+  for (const f of readdirSync(join(dir, 'references')).filter((n) => n.endsWith('.md'))) files[`references/${f}`] = load(join(dir, 'references', f));
+  return files;
+};
+const S4_SUPERSEDED = [
+  /security-sensitive work only/i, /only for security-sensitive/i, /three counterpart calls/i, /20 minutes total/i, /max_calls:\s*3/i,
+  /skip it and record/i, /plan_debate\.status: (DEGRADED|SKIPPED)/i, /debate runs only for security-sensitive/i, /bounded §7 debate runs only/i,
+  /remaining debate budget/i, /debate budget does not reset/i, /debate's (remaining|existing time)/i, /when the work is security-sensitive/i,
+  /total_timeout: 20m/i, /debate_responses=0\|1\|2\|3/i, /debate_status=converged\|unresolved\|degraded/i,
+  /debate the whole plan when it is security-sensitive/i, /counterpart when the work is security-sensitive/i,
+  // approved amendment 2026-11-23: the free-text header grammar and machine-read section 7 Markdown are gone
+  /response header/i, /finding <ID>: conceded/i, /probe-ok/i, /Section 7 must be fence-free/i, /machine-read lines \(`\*\*Result/i,
+  /Design change cell/i, /Debate carrier and exceptions requested/i, /predeclared `Attestation:/i,
+  // D-A10 (2026-11-23): provider and resource limits are no longer LIMIT_REACHED kinds; no relay text is classified
+  /provider_limit/i, /resource_limit/i, /provider or resource limit is reported as/i, /one whole diagnostic\s+source/i,
+  // D-A11 (2026-11-23): LIMIT_REACHED is reserved; no budget or limit record exists
+  /configured_budget/i, /max_rounds/i, /max_minutes/i, /recorded only for a configured budget/i, /configured budget lives in this line/i,
+  /consumption is derived from the retained evidence/i, /configured budget is reported as/i, /reaching a configured budget/i,
+  /LIMIT_REACHED` is reported truthfully/i, /UNRESOLVED` or `LIMIT_REACHED` plan/i,
+  // attempt C Round 1 repair (MINOR-4): the orphaned cap annotation and the lower-case limit_reached metric value
+  /null = no cap/i, /debate_outcome=[a-z_|]*limit_reached/,
+];
+test('S4: no superseded debate scope, cap or default-skip instruction survives in SKILL.md, AGENTS.md or any reference', () => {
+  const files = S4_FILES();
+  assert.ok(Object.keys(files).length > 12, 'read the instruction files');
+  const hits = [];
+  for (const [name, text] of Object.entries(files)) {
+    const flat = text.replace(/\s+/g, ' ');
+    for (const re of S4_SUPERSEDED) if (re.test(flat)) hits.push(`${name}: ${re}`);
+  }
+  assert.deepEqual(hits, []);
+});
+test('S4: the superseded-phrase scan bites on wrapped and capitalised text (positive control)', () => {
+  for (const sample of ['with at most three\ncounterpart calls and 20 minutes\ntotal', '<Security-sensitive work only; otherwise', 'max_calls: 3', 'rounds, calls, minutes}   null = no cap', '`debate_outcome=converged|unresolved|limit_reached|skipped`']) {
+    const flat = sample.replace(/\s+/g, ' ');
+    assert.ok(S4_SUPERSEDED.some((re) => re.test(flat)), sample);
+  }
+});
+test('S4: SKIPPED appears only beside the owner-exception rule', () => {
+  const bad = [];
+  for (const [name, text] of Object.entries(S4_FILES())) {
+    const flat = text.replace(/\s+/g, ' ');
+    for (const m of flat.matchAll(/SKIPPED/g)) {
+      const around = flat.slice(Math.max(0, m.index - 220), m.index + 220);
+      if (!/exception/i.test(around)) bad.push(`${name}: ...${flat.slice(Math.max(0, m.index - 60), m.index + 60)}...`);
+    }
+  }
+  assert.deepEqual(bad, []);
+});
+test('S4: the restored default, the stopping policy, the checker and the restoration/evolution statement are pinned where they execute', () => {
+  const flat = (text) => text.replace(/\s+/g, ' ');
+  const f = S4_FILES();
+  const skill = flat(f['SKILL.md']), x = flat(f['references/cross-model.md']), plan = flat(f['references/plan.md']), agents = flat(f['AGENTS.md']);
+  const obs = flat(f['references/observability.md']), codex = flat(f['references/codex-cli.md']);
+  assert.ok(skill.includes('The reciprocal Planning Debate is the default for every implementation plan, STANDARD and ELEVATED alike; risk classification alone never skips it.'));
+  assert.ok(x.includes('The PLAN debate is the default for every implementation plan (a plan with a Design Contract), STANDARD or ELEVATED.'));
+  assert.ok(x.includes('`SKIPPED` is valid only with an explicit owner-approved exception frozen in the plan'));
+  assert.ok(x.includes('There is no default call or minute cap.'));
+  assert.ok(x.includes('Two consecutive non-productive rounds on the same canonical finding are a diagnostic trigger, never a stop'));
+  assert.ok(x.includes('The 5-round / 45-minute checkpoint is a progress message and telemetry only: it never stops the debate and never asks for approval.'));
+  assert.ok(x.includes('`CONVERGED` requires the counterpart\'s confirmation of the exact final plan digest'));
+  assert.ok(x.includes('`LIMIT_REACHED` is reserved and unsupported until an authenticated telemetry source exists (follow-up F-105-1): `debate-check` refuses it as `debate_limit_unsupported`, and a debate that stopped for any reason is `UNRESOLVED`.'));
+  assert.ok(x.includes('passes one structural bounds gate before any processing'));
+  // attempt C Round 1 repair: the metric vocabulary IS the outcome vocabulary; the evidence caps, the reserved id and the residual
+  const metric = /`debate_outcome=([a-z_|]+)`/.exec(obs);
+  assert.ok(metric, 'observability.md names the debate_outcome metric values');
+  assert.deepEqual(metric[1].split('|'), DEBATE_OUTCOMES.map((o) => o.toLowerCase()), 'debate_outcome values are exactly the supported outcomes');
+  assert.ok(!/plan_debate: \{[^\n]*\}[^\n]*\bcap\b/.test(f['references/plan.md']), 'the plan_debate header line carries no cap annotation');
+  assert.ok(x.includes('A round references at most the four evidence files `brief`, `result`, `events` and `message`; each is at most 16 MiB and a debate bundle at most 64 MiB in total, checked from the file sizes before any read'));
+  assert.ok(x.includes('`LIMIT` is a reserved id: a counterpart finding named `LIMIT` is refused (`debate_response_invalid`), so one owner row never settles both a finding and the incomplete review.'));
+  assert.ok(x.includes('Host-trust residual (F-105-1): the host chooses which attempts it records, so a dropped failed attempt, or a failed attempt recorded before a completed one, is not detected'));
+  assert.ok(x.includes('`incomplete_review` is derived from the retained results'));
+  assert.ok(x.includes('A dispatch failure that left no `result.json` at all has no valid outcome except `SKIPPED` with the owner exception'));
+  assert.ok(x.includes('Restoration: the default scope (every implementation plan) and the read-only relay carrier inside native Plan Mode restore the debate as introduced in b2e015b.'));
+  assert.ok(x.includes('Evolution (owner-requested, 2026-11-22): evidence-driven stopping instead of the old call/minute cap, the checkpoint, the plan-resident attestation and digest cycle, the `debate-check` checker and the separate carrier field.'));
+  assert.ok(x.includes('`node scripts/brief.mjs debate-check --plan <frozen plan> --bundle <bundle root> --repo <repo>`'));
+  // review repair 1: the workdir binding, the degraded-carrier wording and the backdating residual are stated where they execute
+  assert.ok(x.includes('It binds the relay workdir to `--repo`, never to a path the attestation merely names'));
+  assert.ok(x.includes('the degraded carrier does not by itself resolve or waive any finding'));
+  assert.ok(x.includes('Host-trust residual, the same property as `SECURITY_POLICY_CUTOFF` in engine-dag.mjs'));
+  assert.ok(!/resolves no finding/.test(x + skill + plan), 'the stronger degraded-carrier claim is gone');
+  assert.ok(plan.includes('debate_policy: 2'));
+  assert.ok(plan.includes('the §7 Planning Debate runs for every implementation plan, whatever the review profile'));
+  // approved amendment 2026-11-23: Markdown in section 7 is human-readable only; the authority is one dispositions line
+  assert.ok(plan.includes('debate-dispositions-v1: <canonical JSON printed by debate-serialize --dispositions>'));
+  assert.ok(plan.includes('The Markdown below is the human-readable ledger only and is never authoritative.'));
+  // D-A9: the approval text quotes the line verbatim; only single-line comments; the rendered-view residual is stated
+  assert.ok(x.includes('The ExitPlanMode text also quotes the `debate-dispositions-v1:` line verbatim beside that hash, so the owner approves exactly the bytes the checker reads.'));
+  assert.ok(x.includes('every `<!--` outside the RUN-STATE body must close with `-->` on the same line (`debate_narrative_hidden_markup`)'));
+  assert.ok(x.includes('Residual: other ways to hide text in a rendered Markdown view (collapsed HTML, styling) are not scanned; the verbatim quote in the approval text and the host\'s native presentation are the control.'));
+  assert.ok(skill.includes('Quote the `debate-dispositions-v1:` line verbatim beside that hash in the ExitPlanMode text.'));
+  assert.ok(plan.includes('the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.'));
+  assert.ok(x.includes('A blocker/major is closed only when a verified counterpart response object lists its canonical id with status `conceded` or `confirmed`, or by an owner disposition in the frozen dispositions line; never silently, never from free text.'));
+  assert.ok(x.includes('instructs the counterpart to reply with exactly one counterpart-response-v1 JSON object and nothing else. The entire final relay message must be that object, or the round fails and the host re-asks with a new `request_id`. Free text is never approval evidence.'));
+  assert.ok(x.includes('the last counterpart response object is schema-valid and AGREE for the exact plan_version/plan_digest/request_id, verified from the retained relay evidence; the canonical ledger DERIVED from the response objects has no open blocker/major'));
+  assert.ok(agents.includes('The reciprocal PLAN debate is the default for every implementation plan, STANDARD or ELEVATED'));
+  assert.ok(obs.includes('Never invoke the logger per debate round while native Plan Mode is active.'));
+  assert.ok(codex.includes('Real-relay compatibility inside native Plan Mode is UNVERIFIED until this manual probe passes in a real Plan Mode session'));
 });
 
 test('P7m: test-kinds.md carries the verbatim L-ran claim, the declaration how-to and the limits, and no stale freeze-check claim', () => {

@@ -1,0 +1,27 @@
+{
+  "schema": "delegate-relay.result.v1",
+  "lane": null,
+  "laneSource": null,
+  "workdir": "@SCRATCH@/s4-debate/src",
+  "sandbox": "read-only",
+  "model": null,
+  "effort": "high",
+  "resumeLast": false,
+  "session": "01a203e5-728a-78e3-8b69-d2227aa9ce76",
+  "cleanEnv": false,
+  "keepEnv": [],
+  "codexVersion": "codex-cli 0.166.0",
+  "startedAt": "2026-11-22T16:47:01.667Z",
+  "finishedAt": "2026-11-22T16:47:51.672Z",
+  "briefPath": "@SCRATCH@/s4-debate/r5/brief.txt",
+  "eventsPath": "@SCRATCH@/s4-debate/r5/events.jsonl",
+  "finalPath": "@SCRATCH@/s4-debate/r5/final.txt",
+  "status": "completed",
+  "exitCode": 0,
+  "signal": null,
+  "threadId": "01a203e5-728a-78e3-8b69-d2227aa9ce76",
+  "finalMessage": "verdict: AGREE\nrequest_id: s4-final-r5-20261122\nplan_version: v5\nsha256: 0eb785698bd21c5da9afd2ba04dac3016cd028cf5818cc00e4708745f23afc73\ndigest_matches_supplied: true",
+  "touchedFiles": [
+    "?? S4-final-plan.md"
+  ]
+}

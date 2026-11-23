@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a204fc-85b6-7a01-a2ea-042feecf91aa"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"failed to parse plugin hooks config @HOME@/.codex/plugins/cache/plannotator/plannotator/0.27.25/hooks/hooks.json: unknown field `modules`, expected `description` or `hooks` at line 3 column 11"}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"clamping SessionEnd hook timeout to 3s in @HOME@/.codex/plugins/cache/openai-codex/codex/1.0.6/hooks/hooks.json"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"verdict: AGREE\nrequest_id: s4-auth-evidence-1\nplan_version: v1"}}
+{"type":"turn.completed","usage":{"input_tokens":36367,"cached_input_tokens":7168,"cache_write_input_tokens":0,"output_tokens":26,"reasoning_output_tokens":0}}

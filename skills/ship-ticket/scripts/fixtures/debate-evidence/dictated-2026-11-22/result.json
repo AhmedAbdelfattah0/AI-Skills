@@ -1,0 +1,27 @@
+{
+  "schema": "delegate-relay.result.v1",
+  "lane": null,
+  "laneSource": null,
+  "workdir": "@REPO@",
+  "sandbox": "read-only",
+  "model": null,
+  "effort": "low",
+  "resumeLast": false,
+  "session": null,
+  "cleanEnv": false,
+  "keepEnv": [],
+  "codexVersion": "codex-cli 0.166.0",
+  "startedAt": "2026-11-22T21:01:56.088Z",
+  "finishedAt": "2026-11-22T21:02:10.160Z",
+  "briefPath": "@SCRATCH@/s4-json-compliance/out/brief.txt",
+  "eventsPath": "@SCRATCH@/s4-json-compliance/out/events.jsonl",
+  "finalPath": "@SCRATCH@/s4-json-compliance/out/final.txt",
+  "status": "completed",
+  "exitCode": 0,
+  "signal": null,
+  "threadId": "01a20510-cb2a-7a33-acfe-97c0e499cff2",
+  "finalMessage": "{\"request_id\":\"s4-json-1\",\"plan_version\":\"v6\",\"plan_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"verdict\":\"AGREE\",\"findings\":[{\"id\":\"P1\",\"status\":\"conceded\"},{\"id\":\"P2\",\"status\":\"maintained\"}]}",
+  "touchedFiles": [
+    " M skills/ship-ticket/scripts/brief-debate.test.mjs"
+  ]
+}

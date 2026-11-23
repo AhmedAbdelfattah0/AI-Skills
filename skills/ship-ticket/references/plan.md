@@ -80,7 +80,7 @@ recommendation.
 draft every ticket's plan there (one section per ticket, each with its own
 scope, contract and risks), and present them in a single `ExitPlanMode` call.
 On approval, persist each ticket's plan to its own `.specs/plans/<KEY>.md` with
-its own START event and digest. A required debate runs inside the same Plan Mode
+its own START event and digest. Each ticket's debate runs inside the same Plan Mode
 before that one `ExitPlanMode`. A ticket whose plan cannot be completed yet (an
 unmerged dependency) is left out of this approval and becomes its own later wave;
 never start BUILD on a wave ticket whose plan was not in an approved
@@ -111,7 +111,7 @@ execution), or the user explicitly opted out of Plan Mode. An interactive Codex 
 not qualify. If native mode was explicitly requested and is genuinely unsupported,
 report that limitation and ask for a supported host or explicit fallback choice.
 Otherwise use the spine's headless fallback:
-keep research read-only, run the bounded debate when it is required, create the
+keep research read-only, run the Planning Debate, create the
 ticket branch before saving the pending artifact, and request human approval
 without implementing. Record `native_plan_mode: unavailable` and its reason in
 the plan metadata.
@@ -123,14 +123,16 @@ Use it exactly — same headings, same order, so every plan reads the same way.
 ````markdown
 # Plan — <TICKET>: <ticket title>
 
-<!-- the YAML header above this body carries:
+The YAML header above this body carries (plain text in this template; a debate_policy 2 narrative may hold only single-line HTML comments):
      run_id: <opaque ID created when workflow timing began>
      timing_telemetry: active|degraded
      native_plan_mode: active|already_active|unavailable
      plan_mode_carrier: codex|claude|headless
      host_agent: claude|codex|other|unknown
      counterpart_agent: codex|claude|fable|other|unavailable
-     plan_debate: {max_calls: 3, total_timeout: 20m, status: CONVERGED|UNRESOLVED|DEGRADED|SKIPPED}
+     debate_policy: 2                    every new implementation plan (START refuses a new plan without it)
+     plan_debate: {outcome: CONVERGED|UNRESOLVED|SKIPPED (LIMIT_REACHED is reserved and refused; SKIPPED only with an owner exception in the debate-dispositions-v1 line), carrier: {agent, kind, degraded}, rounds, calls, minutes}
+     codex_route: {dispatch, fresh_result, resume, cancellation, coverage}   PLAN carrier probe: each pass|fail with class permission_denied|auth|provider|relay
      worker_width: <available concurrent workers>
      parallelism_degradations: []
      approval_status: pending|approved   a human approval flips this, and only this
@@ -147,11 +149,11 @@ Use it exactly — same headings, same order, so every plan reads the same way.
          # when reference is null, also:
          #   reference_search: {at_sha, locations, method, result}
          #   carve_out_approved_by: <a named human>
-         #   carve_out_date: <YYYY-MM-DD>  -->
+         #   carve_out_date: <YYYY-MM-DD>
 
 **Shape:** <FE / BE / full-stack> · security-sensitive: <yes/no> · review:
 <STANDARD/ELEVATED>
-<The structural path floor (`risk-floor.mjs`, project paths from `.ship-ticket/risk-paths.json` at base) and your semantic assessment both apply: the review profile is the higher of the two and of the recorded claim. A floor of ELEVATED requires review ELEVATED; the bounded §7 debate runs only for security-sensitive work. A floor only raises, and an unmatched path is not evidence of low risk. Git-ignored untracked files are outside release scope (a force-added one appears in the index/HEAD diffs); release-gating `reassess` should use `--head <final commit sha>`, since WORKTREE is a snapshot. Advisory, not enforced until the driver wiring (S-23/S-24). Deferred: a plan-record check (exactly one strict floor-record header line, final >= floor and claim, review_profile >= final, debate-status allowlist, duplicate keys fail) and a measured text-matching corpus experiment (findings of the dropped keyword floor: lowerCamel, digit-adjacent, single-character separators, encodings, inflections).>
+<The structural path floor (`risk-floor.mjs`, project paths from `.ship-ticket/risk-paths.json` at base) and your semantic assessment both apply: the review profile is the higher of the two and of the recorded claim. A floor of ELEVATED requires review ELEVATED; the §7 Planning Debate runs for every implementation plan, whatever the review profile. A floor only raises, and an unmatched path is not evidence of low risk. Git-ignored untracked files are outside release scope (a force-added one appears in the index/HEAD diffs); release-gating `reassess` should use `--head <final commit sha>`, since WORKTREE is a snapshot. Advisory, not enforced until the driver wiring (S-23/S-24). Deferred: a plan-record check (exactly one strict floor-record header line, final >= floor and claim, review_profile >= final, debate-status allowlist, duplicate keys fail) and a measured text-matching corpus experiment (findings of the dropped keyword floor: lowerCamel, digit-adjacent, single-character separators, encodings, inflections).>
 <Security-sensitive selects ELEVATED and requires explicit attack and security
 outcomes. It does not change attack-class applicability.>
 
@@ -247,18 +249,22 @@ Not applicable: <check>: <one-line reason>, ...
 <one line: the other approach considered, and why not>
 
 ## 7. Cross-model planning debate
-<Security-sensitive work only; otherwise one line: `SKIPPED: <reason>`.>
+<Every implementation plan; the debate rules live in cross-model.md "PLAN debate". Freeze this section before the final confirmation request. The Markdown below is the human-readable ledger only and is never authoritative.>
 **Participants:** <host identity> ↔ <counterpart identity, CLI version, session ID>
-**Result:** <CONVERGED / UNRESOLVED / DEGRADED (Fable stood in for Codex: same provider, not cross-model agreement) and why>
+**Result:** <CONVERGED / UNRESOLVED / SKIPPED (only with the owner exception) and why, for the reader; the authoritative outcome is the one in the dispositions line below>
 **Draft:** <final version; last version actually checked by counterpart>
-**Timing:** <start/end UTC, calls attempted, responses received, total budget>
+**Timing and cost:** <start/end UTC, rounds, calls attempted, responses received, minutes, tokens when reported> (information only)
 
-| Finding ID / severity | Host response and evidence | Counterpart response | Final disposition |
+| Finding ID / severity | Host response and evidence | Counterpart response (from its response objects) | Final disposition |
 |---|---|---|---|
-| <P1 / major> | <changed design or evidence-backed challenge> | <conceded / defended, evidence> | <resolved / unresolved> |
+| <P1 / major> | <changed design or evidence-backed challenge> | <conceded / confirmed / maintained, with the note> | <resolved / unresolved> |
+
+<The owner-approved machine content is ONE line at column 1, printed by `brief.mjs debate-serialize --dispositions <json>`: debate_id; outcome (SKIPPED only with the owner exception); carrier_degraded and, when true, degradation_ack exactly "The owner accepts this degraded debate carrier for this ticket: it is a transport label, not cross-model agreement; it does not by itself resolve or waive any finding, and the same convergence checks apply."; exception null or {kind: SKIPPED with ack "The owner approves skipping the Planning Debate for this ticket only." | WAIVED with ack "The owner waives the listed debate findings for this ticket only.", reason, scope "this ticket"}; dispositions [{id (a canonical finding id, or LIMIT), kind accept_risk | decided | waived, resolution (the accepted-risk text, the actual decision, or the waiver), design_change true | false}]. A pending finding has no row. This is inspectable frozen content: approving the exact plan digest in `ExitPlanMode` is the owner's approval of it, and the ExitPlanMode text quotes this line verbatim beside the attestation hash. Only single-line HTML comments may appear in the narrative.>
+debate-dispositions-v1: <canonical JSON printed by debate-serialize --dispositions>
 
 **Outstanding decisions:** <remaining positions, recommendation and human choice
-needed; or none>. Model agreement is advice, not approval.
+needed; or none>. Model agreement is advice, not approval. A finding without a
+disposition row is pending and blocks START.
 
 ## 8. Proof and review routing
 | Work | Scope for this ticket | Execution |
@@ -291,6 +297,11 @@ with `shasum` and never over the whole file. A START carries `approved_plan_dige
 `approved_at` (not `at`) and `approved_by` (descriptive metadata only: it is presence-checked, not validated; the approval authority is native Plan Mode approval (ExitPlanMode) plus the approved-plan digest binding). Run `node scripts/brief.mjs start-check --plan <plan> --run-id <id>`
 before dispatching any worker (`--run-id` is required); it refuses a malformed
 RUN-STATE block, a stale or malformed digest, a missing approval time or a missing `approved_by`.
+On a `debate_policy: 2` plan the START also carries `debate_attestation_sha256` (the
+attestation line's hash stated at `ExitPlanMode`); pass `--repo <repo>` so start-check
+verifies the retained debate bundle (`debate_attestation_missing`,
+`debate_attestation_changed`, `debate_evidence_missing`, `debate_disposition_pending`,
+`debate_reconfirm_required`); a new plan without `debate_policy` is `debate_policy_missing`.
 Its `ok` is necessary but not sufficient: it cannot see the engine's trusted-START
 rule. Never edit the narrative after START: the digest no
 longer matches and the run is not executable. A CRLF plan and its LF twin have
@@ -364,10 +375,9 @@ whose contract surface changed. If the two sides still cannot accept one shape,
 record the disagreement in Risks and use `WAIT_FOR_USER` for the missing product
 decision. That answer is clarification, not approval of an unfinished plan.
 After resolving it, send the
-semantically complete plan to the selected counterpart for the broader debate
-when the work is security-sensitive.
+semantically complete plan to the selected counterpart for the broader debate.
 If that debate changes the contract, refresh affected compatibility checks before
-calling the revised plan converged; the debate budget does not reset.
+calling the revised plan converged.
 
 The approved plan digest binds the plan-form contract. After approval, the first
 candidate-writing node materializes or generates its source-of-truth artifact
