@@ -5,12 +5,12 @@
  * (lines 283-294), configAll, remoteIdentity and resolveBaseRef from a890b0d skills/ship-ticket/scripts/engine-identity.mjs
  * (lines 50-87 and 112-118). Changed by S-12 Round 1: a push URL is checked whatever the fetch URL is, remoteUrl is new, and
  * resolveBaseRef ends its options with `--` (it is given a URL). Callers run all of it under engine-base-read.mjs underHardenedGit. Left out on purpose: the release-identity tuple (publicationOf,
- * verifyReleaseBinding, identityRecord), which is S-28a's. S-28b b0 adds resolveTool and pinnedTool (a890b0d engine-ci.mjs 253-282, unchanged). This module lives beside the engine, not in lib/: lib/ holds the hardened git runner and its directory scans.
+ * verifyReleaseBinding, identityRecord), which is S-28a's. S-28b b0 adds resolveTool and pinnedTool (from a890b0d engine-ci.mjs 253-282; hardened in PR #121 Round 1, see their comments). This module lives beside the engine, not in lib/: lib/ holds the hardened git runner and its directory scans.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { accessSync, closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { isAbsolute, posix, win32 } from 'node:path';
 import { authGit } from './engine-base.mjs';
 
 const SAFE_REMOTE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -94,31 +94,80 @@ export function resolveBaseRef(S, repoRoot, remote) {
   return m ? { ok: true, ref: m[1] } : no('base_remote_unavailable', `remote ${remote} names no default branch (ls-remote --symref HEAD): bind config.base`);
 }
 
+const PIN_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const sha256Of = (bytes) => 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+
 /**
- * R0-S N4 (ported from a890b0d engine-ci.mjs:253-282, S-28b b0): the absolute path and sha256 of the first executable `name` on
- * PATH (realpath), or null. `enroll` (S-28b b1) pins `gh` this way and later runs exactly that file: a stub put earlier on PATH
- * changes nothing. The resolution at pin time itself trusts that moment's PATH (residual).
+ * The bytes of `path` iff it is a regular file, read through ONE descriptor opened without following a symlink and without
+ * blocking (a FIFO is refused by fstat, never read): { ok: true, bytes } | { ok: false, kind: 'missing' | 'symlink' |
+ * 'not_regular' | 'unreadable', detail }. O_NOFOLLOW/O_NONBLOCK are 0 where the platform lacks them (Windows).
  */
-export function resolveTool(name, env = process.env) {
-  const names = process.platform === 'win32' ? [`${name}.exe`, `${name}.cmd`, name] : [name];
-  for (const dir of String(env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean)) {
-    for (const n of names) {
-      try {
-        const p = join(dir, n);
-        if (!statSync(p).isFile()) continue;
-        const real = realpathSync(p);
-        return { path: real, sha256: 'sha256:' + createHash('sha256').update(readFileSync(real)).digest('hex') };
-      } catch { /* not here */ }
-    }
+function readRegular(path) {
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return { ok: false, kind: 'missing', detail: e.code };
+    if (e.code === 'ELOOP' || e.code === 'EMLINK') return { ok: false, kind: 'symlink', detail: e.code };
+    if (e.code === 'EISDIR') return { ok: false, kind: 'not_regular', detail: e.code };
+    return { ok: false, kind: 'unreadable', detail: e.code ?? String(e) };
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return { ok: false, kind: 'not_regular', detail: 'fstat' };
+    return { ok: true, bytes: readFileSync(fd) };
+  } catch (e) { return { ok: false, kind: 'unreadable', detail: e.code ?? String(e) }; } finally { closeSync(fd); }
+}
+
+/**
+ * The candidate paths for `name` on `env`'s PATH, in order, for `platform` (pure; exported for the Windows-branch test). Only
+ * ABSOLUTE PATH entries are used: a relative entry (or an empty one, which a shell reads as the cwd) would resolve against
+ * whatever directory the caller runs in. win32 tries `<name>.exe` then `<name>.cmd` in each entry and never the bare name,
+ * which Windows cannot execute; POSIX tries the bare name.
+ */
+export function toolCandidates(name, env = process.env, platform = process.platform) {
+  const P = platform === 'win32' ? win32 : posix;
+  const names = platform === 'win32' ? [`${name}.exe`, `${name}.cmd`] : [name];
+  return String(env.PATH ?? env.Path ?? '').split(P.delimiter).filter(d => d && P.isAbsolute(d)).flatMap(d => names.map(n => P.join(d, n)));
+}
+
+/**
+ * R0-S N4 (from a890b0d engine-ci.mjs:253-282, S-28b b0): the realpath and sha256 of the first EXECUTABLE `name` on PATH, or
+ * null. `enroll` (S-28b b1) pins `gh` this way and later runs exactly that file: a stub put earlier on PATH changes nothing.
+ * Round 1 hardening: `name` must be a plain file name (no path separator, not '.'/'..', no NUL: a TypeError otherwise, a caller
+ * bug); relative PATH entries are never used; on POSIX the file must be executable by this process (X_OK) and a regular file;
+ * the hashed bytes are read from the realpath through readRegular.
+ * Residuals (UNCLOSED): the resolution trusts PATH at pin time; and between this hash (or pinnedTool's) and the later exec the
+ * file can be swapped (hash-to-exec TOCTOU), since the caller execs by path, not by the verified descriptor.
+ */
+export function resolveTool(name, env = process.env, platform = process.platform) {
+  if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[/\\\0]/.test(name)) throw new TypeError(`resolveTool: ${JSON.stringify(name)} is not a plain tool name`);
+  for (const p of toolCandidates(name, env, platform)) {
+    try {
+      if (platform !== 'win32') accessSync(p, constants.X_OK);
+      const real = realpathSync(p);
+      const r = readRegular(real);
+      if (r.ok) return { path: real, sha256: sha256Of(r.bytes) };
+    } catch { /* not here, or not executable */ }
   }
   return null;
 }
 
-/** The pinned tool, verified: { ok: true, path } | { ok: false, code: '<name>_unpinned' | '<name>_drift', reason }. */
+/**
+ * The pinned tool, verified: { ok: true, path } | { ok: false, code, reason }. Codes: `<name>_unpinned` (no pin: null or
+ * undefined), `<name>_pin_invalid` (anything else that is not { path: string absolute on THIS platform, without NUL, sha256: 'sha256:<64 hex>' }),
+ * `<name>_drift` (the path is now missing, a symlink, not a regular file, or has other bytes) and `<name>_unreadable` (it exists
+ * but cannot be read). A failed read is never compared with the digest (Round 1 MAJOR B: a null digest matched a failed read).
+ */
 export function pinnedTool(pin, name = 'gh') {
-  if (!pin?.path) return { ok: false, code: `${name}_unpinned`, reason: `no ${name} was pinned at enroll (none on PATH then): start a new run with ${name} installed` };
-  let digest = null;
-  try { digest = 'sha256:' + createHash('sha256').update(readFileSync(pin.path)).digest('hex'); } catch { digest = null; }
-  if (digest !== pin.sha256) return { ok: false, code: `${name}_drift`, reason: `${pin.path} is not the ${name} this run pinned at enroll (${pin.sha256}, now ${digest ?? 'missing'}): restore it or start a new run` };
+  if (pin === null || pin === undefined) return { ok: false, code: `${name}_unpinned`, reason: `no ${name} was pinned at enroll (none on PATH then): start a new run with ${name} installed` };
+  const shapeOk = typeof pin === 'object' && !Array.isArray(pin) && typeof pin.path === 'string' && pin.path.length > 0 && !pin.path.includes('\0')
+    && isAbsolute(pin.path) && typeof pin.sha256 === 'string' && PIN_DIGEST.test(pin.sha256);
+  if (!shapeOk) return { ok: false, code: `${name}_pin_invalid`, reason: `the ${name} pin is malformed (want { path: <absolute path>, sha256: 'sha256:<64 hex>' }): start a new run` };
+  const r = readRegular(pin.path);
+  if (!r.ok) {
+    if (r.kind === 'unreadable') return { ok: false, code: `${name}_unreadable`, reason: `${pin.path}, the ${name} this run pinned at enroll, cannot be read (${r.detail}): fix its permissions or start a new run` };
+    const now = { missing: 'missing', symlink: 'a symbolic link', not_regular: 'not a regular file' }[r.kind];
+    return { ok: false, code: `${name}_drift`, reason: `${pin.path} is not the ${name} this run pinned at enroll (${pin.sha256}, now ${now}): restore it or start a new run` };
+  }
+  const digest = sha256Of(r.bytes);
+  if (digest !== pin.sha256) return { ok: false, code: `${name}_drift`, reason: `${pin.path} is not the ${name} this run pinned at enroll (${pin.sha256}, now ${digest}): restore it or start a new run` };
   return { ok: true, path: pin.path };
 }

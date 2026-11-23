@@ -5,12 +5,12 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, cpSync, mkdtempSync, mkdirSync, rmSync, unlinkSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, cpSync, mkdtempSync, mkdirSync, rmSync, unlinkSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SKILL_DIR, MANIFEST_REL, PHASE_REFS, buildManifest, manifestText, verifySkill, deliverPhase, sha256, gitReader } from './context-manifest.mjs';
+import { SKILL_DIR, MANIFEST_REL, PHASE_REFS, buildManifest, manifestText, verifySkill, deliverPhase, sha256, gitReader, fsReader } from './context-manifest.mjs';
 
 const CLI = fileURLToPath(new URL('./context-manifest.mjs', import.meta.url));
 
@@ -21,6 +21,11 @@ test('CI gate: the committed manifest verifies and is byte-identical to a rebuil
   const r = spawnSync(process.execPath, [CLI, 'verify'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^context-manifest: ok sha256:[0-9a-f]{64}$/m);
+  // the COMMITTED tree too (on a pull_request run, HEAD is the PR's merge ref): the blobs at HEAD verify against the manifest at HEAD
+  const g = gitReader();
+  assert.ok(g && !g.missing, 'the CI checkout is a git work tree');
+  const h = verifySkill(SKILL_DIR, g);
+  assert.equal(h.ok, true, `HEAD ${g.revision}: ${h.code}: ${h.reasons?.join('; ')} (commit the rebuilt manifest)`);
 });
 
 test('every phase lists only existing references, and each phase delivers exactly those bytes', () => {
@@ -115,10 +120,10 @@ test('gitReader delivers the blobs of the pinned commit: a work-tree edit change
   assert.ok(d.text.includes(committed.toString('utf8')), 'the committed bytes are delivered');
   assert.ok(!d.text.includes('edited in the work tree'), 'the work-tree edit is not');
   assert.match(d.text, new RegExp(`\\(skill commit ${head}\\)`));
-  assert.deepEqual(reader.list(), buildManifestPaths(skill, reader));
+  assert.deepEqual(reader.inventory().files, buildManifestPaths(skill, reader));
   assert.equal(gitReader(join(tmpdir(), 'no-such-dir-context-manifest')), null, 'not inside a git work tree: null (a copy install)');
   assert.equal(verifySkill(skill, gitReader(skill, '0'.repeat(40))).code, 'skill_revision_unavailable');
-  assert.ok(reader.list().includes('references/ship.md') && reader.list().length >= 12, 'the git reader lists the pinned references (skill below the repo root)');
+  assert.ok(reader.inventory().files.includes('references/ship.md') && reader.inventory().files.length >= 12, 'the git reader lists the pinned references (skill below the repo root)');
   // an extra reference committed later is seen by a reader pinned to that commit, not by one pinned to the old commit
   writeFileSync(join(skill, 'references', 'ship.md'), committed);
   writeFileSync(join(skill, 'references', 'extra.md'), 'x');
@@ -182,4 +187,117 @@ test('the repository pins LF for references/** so a Windows checkout matches the
   assert.equal(lines.length, 4);
   for (const l of lines.filter(x => /: text:/.test(x))) assert.match(l, /: text: set$/);
   for (const l of lines.filter(x => /: eol:/.test(x))) assert.match(l, /: eol: lf$/);
+});
+
+// ---- Round 1 repair (PR #121): one inventory for both readers; anything in references/ that is not a top-level regular file is
+// refused (MAJOR C); the manifest's file set must EQUAL the inventory; malformed or non-canonical manifests are refused, never thrown ----
+
+const win = process.platform === 'win32';
+const unsupported = (v) => { assert.equal(v.ok, false); assert.equal(v.code, 'reference_unsupported_entry', `${v.code}: ${v.reasons?.join('; ')}`); return v.reasons.join('; '); };
+
+test('fs reader: a nested file, an empty directory or a symlink in references/ is refused by verify AND by build', (t) => {
+  const dir = copy(t);
+  const refs = join(dir, 'references');
+  const build = () => spawnSync(process.execPath, [CLI, 'build', '--skill', dir], { encoding: 'utf8' });
+  mkdirSync(join(refs, 'subdir')); writeFileSync(join(refs, 'subdir', 'untracked.md'), 'x');
+  assert.match(unsupported(verifySkill(dir)), /references\/subdir \(directory\)/);
+  const before = readFileSync(join(dir, MANIFEST_REL));
+  let r = build();
+  assert.equal(r.status, 1, 'build refuses instead of skipping the entry');
+  assert.match(r.stderr, /reference_unsupported_entry: references\/subdir \(directory\)/);
+  assert.deepEqual(readFileSync(join(dir, MANIFEST_REL)), before, 'a refused build writes nothing');
+  assert.throws(() => buildManifest(dir), (e) => e.code === 'reference_unsupported_entry');
+  rmSync(join(refs, 'subdir', 'untracked.md'));
+  assert.match(unsupported(verifySkill(dir)), /references\/subdir \(directory\)/, 'an empty directory too');
+  rmSync(join(refs, 'subdir'), { recursive: true });
+  assert.equal(verifySkill(dir).ok, true);
+  if (!win) {
+    symlinkSync(join(refs, 'ship.md'), join(refs, 'alias.md'));
+    assert.match(unsupported(verifySkill(dir)), /references\/alias\.md \(symbolic link\)/);
+    r = build(); assert.equal(r.status, 1);
+    rmSync(join(refs, 'alias.md'));
+    // a LISTED reference replaced by a symlink to identical bytes is refused too (the digest alone would pass)
+    const ship = readFileSync(join(refs, 'ship.md'));
+    writeFileSync(join(dir, 'ship-copy.md'), ship); rmSync(join(refs, 'ship.md')); symlinkSync(join(dir, 'ship-copy.md'), join(refs, 'ship.md'));
+    assert.match(unsupported(verifySkill(dir)), /references\/ship\.md \(symbolic link\)/);
+    rmSync(join(refs, 'ship.md')); writeFileSync(join(refs, 'ship.md'), ship);
+    // references/ itself a symlink
+    const real = join(dir, 'real-refs');
+    cpSync(refs, real, { recursive: true }); rmSync(refs, { recursive: true }); symlinkSync(real, refs);
+    assert.match(unsupported(verifySkill(dir)), /references is not a directory \(symbolic link\)/);
+  }
+});
+
+test('git reader: a committed symlink, a nested file and a submodule entry in references/ are refused; both readers agree on a clean tree', (t) => {
+  const { root, skill, head } = skillRepo(t);
+  const clean = gitReader(skill, head).inventory();
+  assert.deepEqual(clean, fsReader(skill).inventory(), 'one inventory, whichever reader');
+  assert.deepEqual(clean.unsupported, []);
+  const commitWith = (mode, name) => {
+    const blob = spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: root, input: 'references/ship.md', encoding: 'utf8' }).stdout.trim();
+    git(root, 'update-index', '--add', '--cacheinfo', `${mode},${mode === '160000' ? head : blob},skills/ship-ticket/references/${name}`);
+    git(root, 'commit', '-q', '-m', name);
+    return git(root, 'rev-parse', 'HEAD');
+  };
+  assert.match(unsupported(verifySkill(skill, gitReader(skill, commitWith('120000', 'link.md')))), /references\/link\.md \(symbolic link\)/);
+  git(root, 'rm', '-q', '--cached', 'skills/ship-ticket/references/link.md'); git(root, 'commit', '-q', '-m', 'rm link');
+  assert.match(unsupported(verifySkill(skill, gitReader(skill, commitWith('160000', 'sm')))), /references\/sm \(submodule\)/);
+  git(root, 'rm', '-q', '--cached', 'skills/ship-ticket/references/sm'); git(root, 'commit', '-q', '-m', 'rm sm');
+  mkdirSync(join(skill, 'references', 'subdir')); writeFileSync(join(skill, 'references', 'subdir', 'nested.md'), 'x');
+  git(root, 'add', '-A'); git(root, 'commit', '-q', '-m', 'nested');
+  const nested = git(root, 'rev-parse', 'HEAD');
+  const g = unsupported(verifySkill(skill, gitReader(skill, nested)));
+  assert.match(g, /references\/subdir \(directory\)/);
+  assert.equal(unsupported(verifySkill(skill)), g, 'the fs reader refuses the same entry with the same reason');
+  assert.equal(verifySkill(skill, gitReader(skill, head)).ok, true, 'the pinned clean commit still verifies');
+});
+
+test('gitReader resolves the requested revision ONCE to a full commit sha; option-like or unresolvable input is refused', (t) => {
+  const { root, skill, head } = skillRepo(t);
+  const r = gitReader(skill, 'HEAD');
+  assert.equal(r.revision, head, 'a ref is resolved to the commit sha and recorded');
+  assert.match(r.revision, /^[0-9a-f]{40}$/);
+  const before = r.read('references/ship.md');
+  writeFileSync(join(skill, 'references', 'ship.md'), 'moved on'); git(root, 'commit', '-q', '-am', 'later');
+  assert.deepEqual(r.read('references/ship.md'), before, 'a later commit does not move a reader created from a ref');
+  assert.equal(gitReader(skill, head.slice(0, 12)).revision, head, 'an abbreviated sha resolves to the full sha');
+  for (const bad of ['--output=/tmp/x', '-h', '', 'no-such-ref', `${head}:skills`, 'HEAD\nHEAD', 5, {}]) {
+    const g = gitReader(skill, bad);
+    assert.equal(g.missing, true, String(bad));
+    assert.equal(g.revision, null, String(bad));
+    const v = verifySkill(skill, g);
+    assert.equal(v.code, 'skill_revision_unavailable', String(bad));
+  }
+});
+
+test('malformed, aliased and non-canonical manifests are refused with a structured verdict, never a throw', (t) => {
+  const dir = copy(t);
+  const path = join(dir, MANIFEST_REL), good = readFileSync(path, 'utf8');
+  const withM = (edit) => { const m = JSON.parse(good); edit(m); writeFileSync(path, manifestText(m)); return verifySkill(dir); };
+  for (const [name, edit, code] of [
+    ['phases.ship = 7', (m) => { m.phases.ship = 7; }, 'manifest_phases_changed'],
+    ['phases an array', (m) => { m.phases = []; }, 'manifest_invalid'],
+    ['a digest not a string', (m) => { m.files['references/ship.md'] = 7; }, 'manifest_invalid'],
+    ['a digest malformed', (m) => { m.files['references/ship.md'] = 'sha256:XYZ'; }, 'manifest_invalid'],
+    ['files an array', (m) => { m.files = []; }, 'manifest_invalid'],
+    ['an escaping key', (m) => { m.files['references/../SKILL.md'] = m.files['references/ship.md']; }, 'manifest_invalid'],
+    ['a nested key', (m) => { m.files['references/sub/x.md'] = m.files['references/ship.md']; }, 'manifest_invalid'],
+    ['a case alias key', (m) => { m.files['references/Ship.md'] = m.files['references/ship.md']; }, 'reference_missing'],
+    ['an extra top-level key', (m) => { m.extra = 1; }, 'manifest_invalid'],
+  ]) {
+    let v;
+    assert.doesNotThrow(() => { v = withM(edit); }, name);
+    assert.equal(v.ok, false, name);
+    assert.equal(v.code, code, `${name}: ${v.reasons?.join('; ')}`);
+  }
+  assert.equal(deliverPhase('ship', dir).ok, false, 'no phase is delivered from a malformed manifest');
+  // duplicate key: JSON.parse keeps the last one, so the bytes are not the canonical serialization of what was parsed
+  const ship = JSON.parse(good).files['references/ship.md'];
+  writeFileSync(path, good.replace(`"references/ship.md": "${ship}"`, `"references/ship.md": "${sha256(Buffer.from('other'))}",\n    "references/ship.md": "${ship}"`));
+  let v = verifySkill(dir);
+  assert.equal(v.code, 'manifest_noncanonical', `${v.code}: ${v.reasons?.join('; ')}`);
+  writeFileSync(path, good.replace(/\n/g, '\r\n'));
+  assert.equal(verifySkill(dir).code, 'manifest_noncanonical', 'CRLF manifest bytes');
+  writeFileSync(path, good);
+  assert.equal(verifySkill(dir).ok, true);
 });
