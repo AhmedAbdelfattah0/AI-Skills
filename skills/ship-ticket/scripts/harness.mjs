@@ -333,12 +333,14 @@ export const HOST_POLICY = Object.freeze({
   sample_gap_min_ms: 15000,      // consecutive samples must be 15..30 s apart; closer cannot show swap is flat
   sample_gap_max_ms: 30000,      // a larger gap is stale (held_resample)
   max_snapshot_age_ms: 30000,    // snapshot.now_ms - latest.t_ms must be 0..30 s (freshness bound)
+  open_stale_ms: 180000,         // an 'open' history whose last counted sample is older than 3 min is a COLD START (held, two clean samples)
   max_samples: 16,
   max_cores: 4096,
   clean_samples_to_resume: 2,    // hysteresis: two clean samples with distinct, strictly increasing t_ms
   heavy_slots_healthy: 2,
   heavy_slots_default: 1,
 });
+export const HOST_SNAPSHOT_SCHEMA = 'ship-ticket-host-snapshot-v1';
 export const HOST_HOLD_REASONS = Object.freeze(['held_pressure', 'held_swap', 'held_load', 'held_provider', 'held_heavy', 'held_hysteresis', 'held_resample', 'snapshot_unavailable', 'invalid_args']);
 const PROVIDER_KINDS = ['429', 'quota', 'timeout'];
 const HISTORY_KEYS = ['state', 'clean_streak', 'last_admit_t_ms', 'last_sample_t_ms'];
@@ -366,8 +368,7 @@ function validHistory(h) {
   // Missing history is a conservative COLD START: held, so admission needs two clean samples.
   if (h === undefined || h === null) return { ...HELD_HISTORY };
   if (!isPlain(h) || Object.keys(h).some(k => !HISTORY_KEYS.includes(k))) return null;
-  // Machine-issued history: all four keys must be present and exact; nothing is defaulted.
-  if (!HISTORY_KEYS.every(k => Object.hasOwn(h, k))) return null;
+  // Machine-issued history: nothing is defaulted (a missing key is undefined and fails the exact checks below).
   const x = { state: h.state, clean_streak: h.clean_streak, last_admit_t_ms: h.last_admit_t_ms, last_sample_t_ms: h.last_sample_t_ms };
   if (x.state !== 'open' && x.state !== 'held') return null;
   if (!isInt(x.clean_streak) || (x.state === 'held' && x.clean_streak >= HOST_POLICY.clean_samples_to_resume)) return null;
@@ -413,7 +414,7 @@ export function admitHost(snapshot, cls, running, history) {
   if (samples.some(x => !isPlain(x) || !isInt(x.t_ms)) || (samples.length > 0 && !isInt(snapshot.now_ms)))
     return result(false, [...knownStops(samples.filter(isPlain), snapshot.provider_errors), 'held_resample'], { available: false, timestamps_ok: false }, recovering);
   // ONE admit path. Any invalid field holds the whole call; valid stop signals still get their specific reason first.
-  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
+  const fieldsOk = onlyKeys(snapshot, SNAPSHOT_KEYS) && snapshot.schema === HOST_SNAPSHOT_SCHEMA && snapshot.platform === 'darwin' && Number.isInteger(cores) && cores >= 1 && cores <= HOST_POLICY.max_cores
     && samples.length >= 1 && samples.length <= HOST_POLICY.max_samples && samples.every(validSample) && providers !== null;
   if (!fieldsOk) {
     const stop = knownStops(samples, snapshot.provider_errors);
@@ -431,7 +432,8 @@ export function admitHost(snapshot, cls, running, history) {
   else if (samples.slice(1).some((x, i) => x.swapouts > samples[i].swapouts)) swap = 'growing';
   if (swap !== 'flat') holds.push('held_swap');
   const loadLimit = HOST_POLICY.load_fraction * cores;
-  const loadHigh = ['load1', 'load5', 'load15'].some(k => latest[k] >= loadLimit);
+  // The WHOLE window counts: an earlier high reading is not forgotten because the latest one dipped under the limit.
+  const loadHigh = samples.some(x => ['load1', 'load5', 'load15'].some(k => x[k] >= loadLimit));
   if (loadHigh) holds.push('held_load');
   if (providers > 0) holds.push('held_provider');
   // A sample counts only if it is >= 15 s after the last counted one; replays and near-duplicates are ONE sample.
@@ -446,11 +448,13 @@ export function admitHost(snapshot, cls, running, history) {
   const age = snapshot.now_ms - latest.t_ms;
   const fresh = age >= 0 && age <= HOST_POLICY.max_snapshot_age_ms;
   if (!fresh || (samples.length > 1 && !gapsOk)) return result(false, [...holds.filter(h => h !== 'held_swap'), 'held_resample'], { available: true, fresh, gaps_ok: gapsOk }, recovering);
-  // RECOVERY ONLY: while 'held', more than 30 s since the last counted sample means the clean samples are not consecutive, so the
-  // streak restarts. An 'open' history is NOT restarted by a long gap: the current snapshot is itself a full fresh validated
-  // window (own swap delta, load, pressure, provider) and every stop signal still resets the streak, so a healthy poller at
-  // <= 60 s (or slower) keeps being admitted. Caller contract for a RECOVERING host: re-sample within 30 s after a held_hysteresis.
-  const base = sinceLast !== null && sinceLast > HOST_POLICY.sample_gap_max_ms && hist.state === 'held' ? { ...hist, state: 'held', clean_streak: 0 } : hist;
+  // RECOVERY: while 'held', more than 30 s since the last counted sample means the clean samples are not consecutive: restart.
+  // An 'open' history is trusted across gaps up to open_stale_ms (3 min; the snapshot is itself a fresh validated window and
+  // every stop signal resets the streak); older than that it is an unobserved gap and counts as a COLD START (held, two clean
+  // samples). Caller contract for a RECOVERING host: re-sample within 30 s after a held_hysteresis.
+  const gap = sinceLast;
+  const restart = gap !== null && ((hist.state === 'held' && gap > HOST_POLICY.sample_gap_max_ms) || (hist.state === 'open' && gap > HOST_POLICY.open_stale_ms));
+  const base = restart ? { ...hist, state: 'held', clean_streak: 0 } : hist;
   const clean = holds.length === 0;
   const clean_streak = clean ? base.clean_streak + 1 : 0;
   const resumed = base.state !== 'held' || clean_streak >= HOST_POLICY.clean_samples_to_resume;
@@ -466,6 +470,26 @@ export function admitHost(snapshot, cls, running, history) {
   { state: clean && resumed ? 'open' : 'held', clean_streak, last_admit_t_ms: admit ? latest.t_ms : hist.last_admit_t_ms, last_sample_t_ms: latest.t_ms });
 }
 
+/**
+ * Kernel-output parsers: strict BY CONSTRUCTION. Bounded input, whole-line anchored, EXACTLY ONE matching record
+ * (zero or several = null = snapshot_unavailable), no first-match semantics, no trimming of unexpected bytes.
+ * AUDIT (every parser in the host path): parsePressure (sysctl), parseSwapouts (vm_stat); `Pages ...` lines of vm_stat are
+ * NOT read; load averages come from the kernel call os.loadavg() (array of exactly 3, then range-checked in admitHost);
+ * now()/cores are injected or os values range-checked in admitHost; provider_errors is a typed value validated in admitHost.
+ */
+const PARSE_MAX_CHARS = 16 * 1024;
+export function parsePressure(out) {
+  if (typeof out !== 'string' || out.length === 0 || out.length > 64) return null;
+  const m = /^(0|[1-9]\d*)\n?$/.exec(out);
+  return m && Number.isSafeInteger(Number(m[1])) ? Number(m[1]) : null;
+}
+export function parseSwapouts(out) {
+  if (typeof out !== 'string' || out.length === 0 || out.length > PARSE_MAX_CHARS) return null;
+  const records = out.split('\n').filter(l => /^\s*swapouts\b/i.test(l));
+  if (records.length !== 1) return null;
+  const m = /^Swapouts: +(0|[1-9]\d*)\.$/.exec(records[0]);
+  return m && Number.isSafeInteger(Number(m[1])) ? Number(m[1]) : null;
+}
 const BIN = Object.freeze({ sysctl: '/usr/sbin/sysctl', vm_stat: '/usr/bin/vm_stat' });
 /**
  * The only I/O reader for admitHost. Every source is injectable. Takes `samples` readings `intervalMs`
@@ -481,14 +505,13 @@ export async function hostSnapshot(probe = {}) {
   const intervalMs = probe.intervalMs ?? 20000;
   const run = probe.exec ?? ((cmd, args) => { const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }); return r.status === 0 ? r.stdout : null; });
   const loadavg = probe.loadavg ?? loadavgOs;
-  const base = { schema: 'ship-ticket-host-snapshot-v1', platform, cores, now_ms: null, samples: [], provider_errors: probe.providerErrors ?? [] };
+  const base = { schema: HOST_SNAPSHOT_SCHEMA, platform, cores, now_ms: null, samples: [], provider_errors: probe.providerErrors ?? [] };
   if (platform !== 'darwin') return base;
   for (let i = 0; i < count; i++) {
     if (i > 0) await sleep(intervalMs);
-    const p = /^\d+$/.exec(String(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level']) ?? '').trim());
-    const m = /^Swapouts:\s+(\d+)\.\s*$/m.exec(run(BIN.vm_stat, []) ?? '');
-    const [l1, l5, l15] = loadavg();
-    base.samples.push({ t_ms: now(), pressure_level: p ? Number(p[0]) : null, swapouts: m ? Number(m[1]) : null, load1: l1, load5: l5, load15: l15 });
+    const la = loadavg();
+    const [l1, l5, l15] = Array.isArray(la) && la.length === 3 ? la : [null, null, null];
+    base.samples.push({ t_ms: now(), pressure_level: parsePressure(run(BIN.sysctl, ['-n', 'kern.memorystatus_vm_pressure_level'])), swapouts: parseSwapouts(run(BIN.vm_stat, [])), load1: l1, load5: l5, load15: l15 });
   }
   base.now_ms = now();
   return base;

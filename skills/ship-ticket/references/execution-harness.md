@@ -100,8 +100,9 @@ node <SHIP_TICKET_SKILL>/scripts/harness.mjs admit /abs/admit-input.json   # exi
   when healthy. Hold reasons: `held_pressure`, `held_swap`, `held_load`, `held_provider`, `held_heavy`,
   `held_hysteresis`, `held_resample`. Caller contract: a host that is recovering (`held_hysteresis`)
   needs two clean samples, each at least 15 s after the previous counted one, and the next sample must
-  arrive within 30 s or the recovery streak restarts; an already-open host may be polled at any
-  interval. Unknown snapshot properties are rejected (fail-closed: a new snapshot field holds every call
+  arrive within 30 s or the recovery streak restarts. An already-open host also needs counted samples at
+  least 15 s apart, and may be polled at up to 3 minutes between counted samples; a longer unobserved gap
+  is treated as a cold start (two clean samples again). Unknown snapshot properties are rejected (fail-closed: a new snapshot field holds every call
   until `admitHost` learns it).
 - Default `maxConcurrency` is `min(3, cpu_count)`.
 

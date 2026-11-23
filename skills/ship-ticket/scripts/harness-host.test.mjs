@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { admitHost, hostSnapshot, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
+import { admitHost, hostSnapshot, parsePressure, parseSwapouts, HOST_SNAPSHOT_SCHEMA, HOST_POLICY, HOST_HOLD_REASONS } from './harness.mjs';
 
 // Injected clock: samples are 20 s apart (inside the accepted 15..30 s window); now_ms is 1 s after the latest.
 const T0 = 1_000_000;
 const S = (o = {}) => ({ t_ms: T0, pressure_level: 1, swapouts: 100, load1: 1, load5: 1, load15: 1, ...o });
-const snap = (o = {}) => ({ platform: 'darwin', cores: 10, now_ms: T0 + 21000, samples: [S(), S({ t_ms: T0 + 20000 })], provider_errors: [], ...o });
+const snap = (o = {}) => ({ schema: HOST_SNAPSHOT_SCHEMA, platform: 'darwin', cores: 10, now_ms: T0 + 21000, samples: [S(), S({ t_ms: T0 + 20000 })], provider_errors: [], ...o });
 const withLatest = (o) => snap({ samples: [S(), S({ t_ms: T0 + 20000, ...o })] });
 // The n-th later snapshot (distinct, strictly increasing timestamps).
 const NEXT = (n, o = {}) => snap({ now_ms: T0 + 21000 + n * 20000, samples: [S({ t_ms: T0 + n * 20000 }), S({ t_ms: T0 + 20000 + n * 20000, ...o })] });
@@ -244,14 +244,22 @@ test('a gap of more than 30 s since the last counted sample restarts the streak;
   assert.equal(gapped(30001).admit, false);                     // > 30 s: restart, only streak 1
   assert.equal(gapped(30001).history.clean_streak, 1);
   assert.deepEqual(gapped(30001).reasons, ['held_hysteresis']);
-  // state 'open': a long gap is NOT a restart: a healthy poller at 31 s, 60 s or much slower still admits (both sides of 30 s)
+  // state 'open': a gap up to 3 min is trusted (a healthy poller at 31 s, 60 s, 3 min still admits), beyond it is a COLD START
   const open = LIGHT(snap(), R(0));                             // open history, last_sample T0 + 20000
-  for (const g of [30000, 30001, 60000, 3_600_000]) {
-    const r = admitHost(snap({ now_ms: T0 + 20000 + g + 1000, samples: [S({ t_ms: T0 + g }), S({ t_ms: T0 + 20000 + g })] }), 'LIGHT', R(0), open.history);
-    assert.equal(r.admit, true, 'gap ' + g);
-    assert.equal(r.history.state, 'open');
+  const afterGap = (g) => admitHost(snap({ now_ms: T0 + 20000 + g + 1000, samples: [S({ t_ms: T0 + g }), S({ t_ms: T0 + 20000 + g })] }), 'LIGHT', R(0), open.history);
+  for (const g of [30000, 30001, 60000, 180000]) {
+    assert.equal(afterGap(g).admit, true, 'gap ' + g);
+    assert.equal(afterGap(g).history.state, 'open');
   }
-  // ... but a stop signal after a long gap still blocks and resets, and recovery then needs two consecutive samples again
+  for (const g of [180001, 3_600_000]) {
+    const r = afterGap(g);
+    assert.equal(r.admit, false, 'gap ' + g);
+    assert.deepEqual(r.reasons, ['held_hysteresis']);
+    assert.equal(r.history.state, 'held');
+    assert.equal(r.history.clean_streak, 1);
+    assert.equal(admitHost(snap({ now_ms: T0 + 40000 + g + 1000, samples: [S({ t_ms: T0 + 20000 + g }), S({ t_ms: T0 + 40000 + g })] }), 'LIGHT', R(0), r.history).admit, true);   // second clean sample resumes
+  }
+  // ... but a stop signal after a long gap still blocks and resets
   const hit = admitHost(snap({ now_ms: T0 + 80000 + 1000, samples: [S({ t_ms: T0 + 60000 }), S({ t_ms: T0 + 80000, pressure_level: 2 })] }), 'LIGHT', R(0), open.history);
   assert.equal(hit.admit, false);
   assert.equal(hit.history.state, 'held');
@@ -311,7 +319,7 @@ test('never kills: input is not mutated, terminate is always empty, even when un
 });
 
 test('no fallback: non-darwin or any invalid snapshot HOLDS, even LIGHT with nothing running; HEAVY too', () => {
-  const linux = { platform: 'linux', cores: 64, samples: [], provider_errors: [] };
+  const linux = { schema: HOST_SNAPSHOT_SCHEMA, platform: 'linux', cores: 64, samples: [], provider_errors: [] };
   for (const h of [null, H0]) {
     for (const call of [LIGHT, HEAVY]) {
       const r = call(linux, R(0), h);
@@ -322,7 +330,7 @@ test('no fallback: non-darwin or any invalid snapshot HOLDS, even LIGHT with not
 });
 
 test('stop signals still get their specific reason first: Linux + 429, darwin pressure 4 with load1 null', () => {
-  const l429 = LIGHT({ platform: 'linux', cores: 4, samples: [], provider_errors: [{ kind: '429', t_ms: 1 }] }, R(0));
+  const l429 = LIGHT({ schema: HOST_SNAPSHOT_SCHEMA, platform: 'linux', cores: 4, samples: [], provider_errors: [{ kind: '429', t_ms: 1 }] }, R(0));
   assert.equal(l429.admit, false);
   assert.deepEqual(l429.reasons, ['held_provider', 'snapshot_unavailable']);
   const p4 = LIGHT(withLatest({ pressure_level: 4, load1: null }), R(0));
@@ -394,6 +402,70 @@ test('range validation: pressure outside {1,2,4}, bad loads, bad cores, bad swap
   for (const v of [-1, NaN, Infinity, '1']) for (const k of ['load1', 'load5', 'load15']) assert.equal(LIGHT(withLatest({ [k]: v }), R(0)).reason, 'snapshot_unavailable', k + v);
   for (const cores of [0, -2, 1e9, 4.5, '8', NaN, undefined]) assert.equal(LIGHT(snap({ cores }), R(0)).reason, 'snapshot_unavailable', 'c' + cores);
   for (const swapouts of [-1, 1.5, '3', NaN, Infinity]) assert.equal(LIGHT(withLatest({ swapouts }), R(0)).reason, 'snapshot_unavailable', 's' + swapouts);
+});
+
+test('EARLIER high load in the window is not forgotten: 6.01 then 5.99 (10 cores) holds even after a stale open history', () => {
+  const stale = { state: 'open', clean_streak: 3, last_admit_t_ms: null, last_sample_t_ms: T0 - 900_000 };
+  const s = snap({ samples: [S({ load15: 6.01 }), S({ t_ms: T0 + 20000, load15: 5.99 })] });
+  for (const h of [stale, H0, null]) {
+    const r = LIGHT(s, R(0), h);
+    assert.equal(r.admit, false);
+    assert.deepEqual(r.reasons, ['held_load']);
+  }
+  for (const k of ['load1', 'load5', 'load15']) assert.deepEqual(LIGHT(snap({ samples: [S({ [k]: 6 }), S({ t_ms: T0 + 20000 })] }), R(0)).reasons, ['held_load'], k);
+  // after the stop, a stale-open host still needs TWO clean spaced samples (cold start), not one
+  const clean = snap({ samples: [S({ t_ms: T0 }), S({ t_ms: T0 + 20000 })] });
+  assert.deepEqual(LIGHT(clean, R(0), stale).reasons, ['held_hysteresis']);
+});
+
+test('schema is REQUIRED and EXACT: missing, null, {}, garbage, unknown versions and wrong types are snapshot_unavailable', () => {
+  assert.equal(HOST_SNAPSHOT_SCHEMA, 'ship-ticket-host-snapshot-v1');
+  for (const schema of [undefined, null, {}, [], 'garbage', 'ship-ticket-host-snapshot-v2', 'SHIP-TICKET-HOST-SNAPSHOT-V1', 1, '']) for (const call of [LIGHT, HEAVY]) {
+    const r = call({ ...snap(), schema }, R(0));
+    assert.equal(r.admit, false, String(schema));
+    assert.deepEqual(r.reasons, ['snapshot_unavailable'], String(schema));
+  }
+  const { schema, ...noSchema } = snap();
+  assert.deepEqual(LIGHT(noSchema, R(0)).reasons, ['snapshot_unavailable']);
+  assert.equal(LIGHT(snap(), R(0)).admit, true);
+});
+
+const VM_OK = 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               5.\nSwapins:                                  1.\nSwapouts:                                 7.\n';
+test('parser table (parseSwapouts): exactly ONE strict whole-line record; duplicated, missing, extra, reordered-case, CR, unit-suffixed and oversize outputs are null', () => {
+  assert.equal(parseSwapouts(VM_OK), 7);
+  assert.equal(parseSwapouts('Swapouts: 0.\n'), 0);
+  assert.equal(parseSwapouts('Pages free: 1.\nSwapouts:    12.'), 12);                 // no trailing newline is fine
+  assert.equal(parseSwapouts('Swapouts: 5.\nSwapins: 9.\nPages free: 2.\n'), 5);      // reordered unrelated records are fine
+  const bad = {
+    constant_then_growing: 'Swapouts: 5.\nSwapouts: 900.\n', identical_twice: 'Swapouts: 5.\nSwapouts: 5.\n', growing_then_constant: 'Swapouts: 900.\nSwapouts: 5.\n',
+    missing: 'Pages free: 1.\n', empty: '', garbage_suffix: 'Swapouts: 5garbage.\n', trailing_text: 'Swapouts: 5. extra\n', no_dot: 'Swapouts: 5\n',
+    leading_garbage: 'xSwapouts: 5.\n', lowercase_record: 'swapouts: 5.\n', cr: 'Swapouts: 5.\r\n', negative: 'Swapouts: -5.\n', fraction: 'Swapouts: 5.5.\n',
+    leading_zero: 'Swapouts: 05.\n', tab: 'Swapouts:\t5.\n', indented: '  Swapouts: 5.\n', unsafe: 'Swapouts: 99999999999999999999.\n',
+    valid_plus_malformed_second: 'Swapouts: 5.\nSwapouts: bad.\n',
+    valid_plus_lowercase_second: 'Swapouts: 5.\nswapouts: 900.\n', valid_plus_indented_second: 'Swapouts: 5.\n  Swapouts: 900.\n', valid_plus_cr_second: 'Swapouts: 5.\nSwapouts: 900.\r\n', valid_plus_nodot_second: 'Swapouts: 5.\nSwapouts 900\n', oversize: 'Pages free: 1.\n'.repeat(2000) + 'Swapouts: 5.\n',
+  };
+  for (const [name, out] of Object.entries(bad)) assert.equal(parseSwapouts(out), null, name);
+  for (const nonString of [null, undefined, 5, {}, []]) assert.equal(parseSwapouts(nonString), null);
+});
+
+test('parser table (parsePressure): one bare integer with at most one trailing newline; everything else is null', () => {
+  for (const [out, v] of [['1\n', 1], ['2', 2], ['4\n', 4], ['0\n', 0]]) assert.equal(parsePressure(out), v, JSON.stringify(out));
+  for (const out of ['', '\n', '1\n1\n', '1\n\n', ' 1', '1 ', '1garbage', '1\r\n', '01', '-1', '1.0', '١', '1\n2', 'x\n1', '9'.repeat(40), '99999999999999999999\n', null, undefined, 1])
+    assert.equal(parsePressure(out), null, JSON.stringify(out));
+});
+
+test('hostSnapshot wires the strict parsers: duplicated Swapouts or multi-line sysctl output yields null fields that hold', async () => {
+  const mk = (o) => hostSnapshot({ platform: 'darwin', exec: fakeExec([], o), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1, 1], cpus: () => new Array(4) });
+  const dup = await mk({ vm: () => 'Swapouts: 5.\nSwapouts: 900.\n' });
+  assert.deepEqual(dup.samples.map(x => x.swapouts), [null, null]);
+  assert.equal(LIGHT(dup, R(0), null).reason, 'snapshot_unavailable');
+  const multi = await mk({ pressure: '1\n4\n' });
+  assert.equal(multi.samples[0].pressure_level, null);
+  assert.equal(HEAVY(multi, R(0), null).admit, false);
+  const badLoad = await hostSnapshot({ platform: 'darwin', exec: fakeExec([]), now: (() => { let t = 0; return () => (t += 20000); })(), sleep: async () => {}, loadavg: () => [1, 1], cpus: () => new Array(4) });
+  assert.equal(badLoad.samples[0].load1, null);
+  assert.equal(LIGHT(badLoad, R(0), null).reason, 'snapshot_unavailable');
+  assert.equal((await mk({})).schema, HOST_SNAPSHOT_SCHEMA);
 });
 
 test('reason codes are the documented set', () => {
